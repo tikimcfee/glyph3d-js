@@ -9,13 +9,13 @@
     "",
     "KIND is the declared fact. CONTAINER is a per-layer realization of it.",
     "",
-    "  count / identity / bitfield   exact. MUST NOT ride a float carrier \u2014 and a",
+    "  count / identity / bitfield   exact. MUST NOT ride a float carrier — and a",
     "                                float ordered key IS a float carrier wearing a",
     "                                u32 costume, which is how totalRows hid.",
     "  measure                       a real quantity. f32 is correct and its",
     "                                rounding is load-bearing.",
     "",
-    "Layers may realize kinds differently and stay conformant \u2014 the engine uses two",
+    "Layers may realize kinds differently and stay conformant — the engine uses two",
     "buffers (where a value lives IS its kind, so it cannot be got wrong), while the",
     "TSL side uses one homogeneous atomic buffer where kind is per-lane. Neither is",
     "privileged. What each layer owes is that its generator ASSERT its own mapping",
@@ -39,7 +39,7 @@
           "name": "Y",
           "index": 1,
           "read_by_vertex": true,
-          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js \u2014 a search for S_Y misses that read.",
+          "note": "Addressed POSITIONALLY as X+1 in glyphVertex.js — a search for S_Y misses that read.",
           "kind": "measure"
         },
         {
@@ -140,7 +140,7 @@
     "$comment": [
       "The segmented monoid's element (ScanElem), as it lives in a GPU buffer.",
       "Same rule as the slot buffers: counts and measures are different arrays.",
-      "tail_adv is the ONLY measure \u2014 it is an f32 sum accumulated per-add, which",
+      "tail_adv is the ONLY measure — it is an f32 sum accumulated per-add, which",
       "is what makes the reduce exact under regrouping. Everything else is a count."
     ],
     "counts": {
@@ -150,7 +150,7 @@
         {
           "name": "RESET",
           "index": 0,
-          "note": "absorbing: combine(a,b)=b when b.reset \u2014 file isolation is structural",
+          "note": "absorbing: combine(a,b)=b when b.reset — file isolation is structural",
           "kind": "count"
         },
         {
@@ -193,7 +193,7 @@
         {
           "name": "TAIL_ADV",
           "index": 0,
-          "note": "f32 per add \u2014 the discipline that makes the reduce exact under regrouping",
+          "note": "f32 per add — the discipline that makes the reduce exact under regrouping",
           "kind": "measure"
         }
       ]
@@ -202,7 +202,7 @@
   "itemTable": {
     "$comment": [
       "Per-item layout params as the GPU sees them. Authored f64 on the host and",
-      "NARROWED to f32 here, because Metal has no double precision \u2014 which is why",
+      "NARROWED to f32 here, because Metal has no double precision — which is why",
       "paginate on device is an eps-tier comparison rather than a bit-exact one.",
       "HAS_PAGE is a flag riding this buffer; it is 0 or 1 and exact either way."
     ],
@@ -213,82 +213,99 @@
         {
           "name": "ORIGIN_Y",
           "index": 0,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "ORIGIN_Y"
         },
         {
           "name": "ORIGIN_Z",
           "index": 1,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "ORIGIN_Z"
         },
         {
           "name": "PAGE_ROWS",
           "index": 2,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "PAGE_ROWS"
         },
         {
           "name": "PAGE_COLS",
           "index": 3,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "PAGE_COLS"
         },
         {
           "name": "SCROLL_ROWS",
           "index": 4,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "SCROLL_ROWS"
         },
         {
           "name": "PAGES_WIDE",
           "index": 5,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "PAGES_WIDE"
         },
         {
           "name": "WRAP_WIDTH",
           "index": 6,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "WRAP_WIDTH"
         },
         {
           "name": "LINE_HEIGHT",
           "index": 7,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "LINE_HEIGHT"
         },
         {
           "name": "PAGE_LINE_HEIGHT",
           "index": 8,
-          "kind": "measure"
+          "kind": "measure",
+          "orphan": "REALIZES NOTHING. Dead: NaN in every fixture (fixture_census), and poisoning its read left every suite green. The render side has never had it. Pending removal — it is ITEM_PARAMS' one true disagreement and the reason the assertion exists."
         },
         {
           "name": "Z_STEP",
           "index": 9,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "Z_STEP"
         },
         {
           "name": "BAND_STRIDE_Y",
           "index": 10,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "BAND_STRIDE_Y"
         },
         {
           "name": "DEPTH_PER_BAND",
           "index": 11,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "DEPTH_PER_BAND"
         },
         {
           "name": "DEPTH_PER_COL",
           "index": 12,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "DEPTH_PER_COL"
         },
         {
           "name": "PAGE_STRIDE_X",
           "index": 13,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "PAGE_GAP_X",
+          "derived": "PAGE_GAP_X + the item's widest row (bounds lane MAX_ROW_EXTENT). This layer derives on the host and stores the result; the render side stores the gap and derives on device. Both realize the same semantic parameter."
         },
         {
           "name": "HAS_PAGE",
           "index": 14,
-          "kind": "count"
+          "kind": "count",
+          "realization_only": "encodes ABSENCE of a page. The render side encodes the same fact as a null page object with zeroed geometry."
         },
         {
           "name": "ORIGIN_X",
           "index": 15,
-          "kind": "measure"
+          "kind": "measure",
+          "realizes": "ORIGIN_X"
         }
       ]
     }
@@ -297,10 +314,10 @@
     "$comment": [
       "Per-item bounds + fold scalars. 8 lanes, and lane 6 is why this section exists.",
       "",
-      "TOTAL_ROWS is a COUNT (row + 1) that the TSL side stores via floatToOrderedKey \u2014",
+      "TOTAL_ROWS is a COUNT (row + 1) that the TSL side stores via floatToOrderedKey —",
       "an exact integer on a float carrier, aliasing past 2^24. Reachable: S_ROW is the",
       "VISUAL row, so at wrap=1 rows track glyph count, crossing 2^24 at ~16.8MB inside",
-      "a 44.7MB arena. foldGeometry.js:146 has been doing Math.trunc(p.totalRows || 0) \u2014",
+      "a 44.7MB arena. foldGeometry.js:146 has been doing Math.trunc(p.totalRows || 0) —",
       "a consumer defensively truncating a count back to an integer, which is a",
       "downstream compensating for an upstream that lost its type.",
       "",
@@ -344,7 +361,7 @@
         "name": "TOTAL_ROWS",
         "index": 6,
         "kind": "count",
-        "note": "the fold scalar the TSL side carries as a float ordered key \u2014 see above"
+        "note": "the fold scalar the TSL side carries as a float ordered key — see above"
       },
       {
         "name": "MAX_ROW_EXTENT",
@@ -354,5 +371,94 @@
       }
     ],
     "stride": 8
+  },
+  "itemParams": {
+    "$comment": [
+      "The per-item layout parameters, as SEMANTICS. This is the set both layers",
+      "must be able to express; it is NOT anyone's item table.",
+      "",
+      "It exists because the first version of ITEM_PARAMS was emitted from the",
+      "engine's itemTable with the strides removed — the same container leak the",
+      "tier split fixed, one level subtler: the strides went and the SHAPE stayed.",
+      "Asserted against, it produced five failures of which ONE was a real gap and",
+      "four were 'we made different, equally valid container choices'. A check that",
+      "reports four false positives per true one trains its reader to ignore it.",
+      "",
+      "PAGE_GAP_X is named by the INPUT, not by the derived stride. A caller supplies",
+      "a gap; the fan stride is (widest item-relative row + gap) and WHERE that",
+      "derivation happens is each layer's business — the render side derives it on",
+      "device from a fold scalar, the engine derives it on the host. Same fact.",
+      "",
+      "Deliberately NOT here, as realization rather than semantics:",
+      "  HAS_PAGE     one layer carries an explicit flag, the other encodes absence",
+      "               as a null page with zeroed geometry. Two encodings of 'no page'.",
+      "  BYTE_COUNT   the item's extent, not a layout parameter. One layer keeps it",
+      "               in the item table because its kernels resolve ownership on",
+      "               device; the other resolves it elsewhere.",
+      "  PAGE_STRIDE_X as distinct from the gap — a derivation point, see above."
+    ],
+    "params": [
+      {
+        "name": "ORIGIN_X",
+        "kind": "measure"
+      },
+      {
+        "name": "ORIGIN_Y",
+        "kind": "measure"
+      },
+      {
+        "name": "ORIGIN_Z",
+        "kind": "measure"
+      },
+      {
+        "name": "WRAP_WIDTH",
+        "kind": "measure",
+        "note": "the fold unit; overrides PAGE_COLS when nonzero"
+      },
+      {
+        "name": "Z_STEP",
+        "kind": "measure",
+        "note": "depth per wrap segment"
+      },
+      {
+        "name": "LINE_HEIGHT",
+        "kind": "measure",
+        "note": "world y per row. REQUIRED — never the glyph's own height"
+      },
+      {
+        "name": "SCROLL_ROWS",
+        "kind": "measure"
+      },
+      {
+        "name": "PAGE_ROWS",
+        "kind": "measure"
+      },
+      {
+        "name": "PAGE_COLS",
+        "kind": "measure",
+        "note": "also the fold unit when WRAP_WIDTH is 0"
+      },
+      {
+        "name": "PAGES_WIDE",
+        "kind": "measure"
+      },
+      {
+        "name": "BAND_STRIDE_Y",
+        "kind": "measure"
+      },
+      {
+        "name": "DEPTH_PER_BAND",
+        "kind": "measure"
+      },
+      {
+        "name": "DEPTH_PER_COL",
+        "kind": "measure"
+      },
+      {
+        "name": "PAGE_GAP_X",
+        "kind": "measure",
+        "note": "world x gap between fanned page columns — the INPUT; the stride is derived from it plus the widest item-relative row"
+      }
+    ]
   }
 }

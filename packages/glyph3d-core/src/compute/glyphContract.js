@@ -23,6 +23,16 @@ export const RECORD_BYTES = 8 * RECORD_FIELD_BYTES;
 export const RECORD_MEASURES = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'GLYPH_ID']);
 export const RECORD_COUNTS = Object.freeze(['ROW', 'COL']);
 
+// ── KNOWN DEVIATIONS: declared, justified, and still violations ────────────
+/** Fields whose kind is EXACT but which ride a float carrier TODAY, with the
+ *  reason. A layer asserting KIND needs this to tell a real violation from the
+ *  documented one — without it the contract states a rule that NO layer
+ *  currently satisfies, and the first assertion written against it fails for a
+ *  reason its author cannot act on. Deviations are debts, not exemptions. */
+export const KNOWN_DEVIATIONS = Object.freeze({
+    GLYPH_ID: "This is an IDENTITY living in the measures buffer. It is here only because it is copied verbatim from the trie's f32 blocks, so it cannot move until the TRIE FORMAT moves. It is the single exception in the system and it is deliberately visible: one identity, in the wrong array, naming its own fix.",
+});
+
 // ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────
 /** KIND per field. Every layer must ASSERT its own mapping respects these —
  *  that assertion is what a layer owes; its lane numbering is its own affair. */
@@ -80,7 +90,7 @@ export const VERTEX_READ = Object.freeze(['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'G
 
 /** The SET of per-item layout parameters both layers must be able to express.
  *  Names and kinds only — where they sit in anyone's item table is not shared. */
-export const ITEM_PARAMS = Object.freeze(['ORIGIN_Y', 'ORIGIN_Z', 'PAGE_ROWS', 'PAGE_COLS', 'SCROLL_ROWS', 'PAGES_WIDE', 'WRAP_WIDTH', 'LINE_HEIGHT', 'PAGE_LINE_HEIGHT', 'Z_STEP', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_STRIDE_X', 'HAS_PAGE', 'ORIGIN_X']);
+export const ITEM_PARAMS = Object.freeze(['ORIGIN_X', 'ORIGIN_Y', 'ORIGIN_Z', 'WRAP_WIDTH', 'Z_STEP', 'LINE_HEIGHT', 'SCROLL_ROWS', 'PAGE_ROWS', 'PAGE_COLS', 'PAGES_WIDE', 'BAND_STRIDE_Y', 'DEPTH_PER_BAND', 'DEPTH_PER_COL', 'PAGE_GAP_X']);
 
 /** Per-item bounds fields, and which of them are exact (never an ordered key). */
 export const BOUNDS_FIELDS = Object.freeze(['MIN_X', 'MIN_Y', 'MIN_Z', 'MAX_X', 'MAX_Y', 'MAX_Z', 'TOTAL_ROWS', 'MAX_ROW_EXTENT']);

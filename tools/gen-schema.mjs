@@ -113,6 +113,38 @@ function validate(s) {
                 + `RECORD_BYTES is derived assuming 4 bytes per field and would be wrong`);
         }
     }
+    // THE SEMANTIC SET AND THIS LAYER'S TABLE MUST ACCOUNT FOR EACH OTHER, in both
+    // directions. Layout freedom is not content freedom: a parameter one layer has
+    // and another cannot express is behaviour the conformance corpus can never see,
+    // because it only compares outputs on inputs BOTH layers accept.
+    const semantic = new Set(s.itemParams.params.map(p => p.name));
+    const realized = new Set();
+    for (const lane of s.itemTable.measures.lanes) {
+        const kinds = ['realizes', 'realization_only', 'orphan'].filter(k => k in lane);
+        if (kinds.length !== 1) {
+            errs.push(`itemTable.${lane.name}: must declare exactly one of realizes / `
+                + `realization_only / orphan — has ${kinds.length}. A lane whose relationship `
+                + `to the semantic set is unstated is how a field ends up in one layer and `
+                + `not the other with nothing to notice.`);
+            continue;
+        }
+        if (lane.realizes) {
+            if (!semantic.has(lane.realizes)) {
+                errs.push(`itemTable.${lane.name}: realizes '${lane.realizes}', which is not `
+                    + `a semantic parameter`);
+            }
+            if (realized.has(lane.realizes)) {
+                errs.push(`itemTable: '${lane.realizes}' realized by more than one lane`);
+            }
+            realized.add(lane.realizes);
+        }
+    }
+    for (const name of semantic) {
+        if (!realized.has(name)) {
+            errs.push(`itemParams.${name}: no lane of this layer's item table realizes it — `
+                + `a layout parameter this backend cannot express`);
+        }
+    }
     if (errs.length) throw new Error('schema invalid:\n  ' + errs.join('\n  '));
     return s;
 }
@@ -250,6 +282,16 @@ const js = [
     `export const RECORD_MEASURES = Object.freeze(${quoted(m.lanes.filter(l => l.read_by_vertex).sort((a,b)=>a.index-b.index).map(l => l.name))});`,
     `export const RECORD_COUNTS = Object.freeze(${quoted(c.lanes.filter(l => l.read_by_vertex).sort((a,b)=>a.index-b.index).map(l => l.name))});`,
     '',
+    '// ── KNOWN DEVIATIONS: declared, justified, and still violations ────────────',
+    '/** Fields whose kind is EXACT but which ride a float carrier TODAY, with the',
+    ' *  reason. A layer asserting KIND needs this to tell a real violation from the',
+    ' *  documented one — without it the contract states a rule that NO layer',
+    ' *  currently satisfies, and the first assertion written against it fails for a',
+    ' *  reason its author cannot act on. Deviations are debts, not exemptions. */',
+    `export const KNOWN_DEVIATIONS = Object.freeze({`,
+    ...[...m.lanes, ...c.lanes].filter(l => l.misplaced).map(l => `    ${l.name}: ${JSON.stringify(l.misplaced)},`),
+    `});`,
+    '',
     '// ── SHARED SEMANTICS: kinds, not containers ────────────────────────────────',
     '/** KIND per field. Every layer must ASSERT its own mapping respects these —',
     ' *  that assertion is what a layer owes; its lane numbering is its own affair. */',
@@ -272,7 +314,7 @@ const js = [
     '',
     '/** The SET of per-item layout parameters both layers must be able to express.',
     ' *  Names and kinds only — where they sit in anyone\'s item table is not shared. */',
-    `export const ITEM_PARAMS = Object.freeze(${quoted(it.measures.lanes.map(l => l.name))});`,
+    `export const ITEM_PARAMS = Object.freeze(${quoted(schema.itemParams.params.map(p => p.name))});`,
     '',
     '/** Per-item bounds fields, and which of them are exact (never an ordered key). */',
     `export const BOUNDS_FIELDS = Object.freeze(${quoted(ib.lanes.map(l => l.name))});`,
