@@ -174,13 +174,23 @@ const CASES = [
         }],
     },
     {
-        // The minified app bundle's FIRST 48KB: lines up to 305,978 chars in the
-        // full file, so this slice is one enormous line — wrap at 120 makes it
-        // hundreds of visual rows from a single source line, the exact shape
-        // rowsUnderWrap exists for and no constructed fixture dared.
+        // A REAL minified bundle slice, VENDORED: engine/fixtures/inputs/
+        // minified-sample.js is 48KB of one-enormous-line JS (47 newlines in
+        // 49,152 bytes), checked in and frozen. It began life as the app
+        // bundle's first 48KB (index-GRwQWdWg.js) — a content-hashed dist/
+        // artifact that was never tracked, so the day a rebuild replaced it,
+        // this generator died with ENOENT and the fixture became permanently
+        // unreproducible. The input was RECOVERED from the committed fixture
+        // itself (format v2 carries the source bytes) and vendored 2026-08-31.
+        // A fixture input must be TRACKED: an untracked input makes the
+        // fixture a snapshot of an accident.
+        //
+        // Why this shape: wrap at 120 makes hundreds of visual rows from a
+        // single source line — the exact shape rowsUnderWrap exists for and
+        // no constructed fixture dared.
         name: 'real-minified',
         bytes: new Uint8Array(readFileSync(
-            join(HERE, '../../app/dist/assets/index-GRwQWdWg.js')).subarray(0, 49152)),
+            join(HERE, 'inputs/minified-sample.js'))),
         items: [{
             origin: { x: 0, y: 0, z: 0 }, wrapWidth: 120, zStep: 0.1, lineHeight: 1.0,
         }],
