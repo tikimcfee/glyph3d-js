@@ -85,7 +85,7 @@ import {
     I_WRAP_WIDTH, I_Z_STEP, I_LINE_HEIGHT, I_BYTE_COUNT,
 } from './glyphPipelineReference.js';
 import { CHUNK_SIZE, GROUP_SIZE } from './glyphPipelineScan.js';
-import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS } from './GlyphTrie.js';
+import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
@@ -300,7 +300,10 @@ export default class GlyphPipelineKernels {
             );
         }
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
-        this.trieBlocks = instancedArray(trie.blocks.length, 'float').setName('GlyphTrieBlocks');
+        // 'uint': the trie is a Uint32Array with the same discipline as the slot buffer —
+        // glyphId and flags native, advance and height bitcast. Declared 'float' this would
+        // reinterpret both exact lanes as denormals, silently.
+        this.trieBlocks = instancedArray(trie.blocks.length, 'uint').setName('GlyphTrieBlocks');
         // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix
         // levels, and the ordinal map (leader ordinal → byte index, per item's byte range).
         this.partials = instancedArray(this.maxChunks * P_STRIDE, 'uint').setName('GlyphScanPartials');
@@ -476,11 +479,20 @@ export default class GlyphPipelineKernels {
             const tflags = this.trieBlocks.element(eo.add(uint(LANE_FLAGS))).toVar('tf');
 
             const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            slots.element(o.add(uint(S_GLYPH_ID))).assign(bitcast(glyphId, 'uint'));   // DEFERRED: still a trie float
-            slots.element(o.add(uint(S_ADVANCE))).assign(bitcast(advance, 'uint'));
-            slots.element(o.add(uint(S_HEIGHT))).assign(bitcast(height, 'uint'));
+            // All three are STRAIGHT COPIES now. The trie and the slot buffer are both
+            // u32 with the same convention — exact lanes native, measures holding f32 bits
+            // — so a measure moves verbatim and needs no bitcast in either direction.
+            // glyphId was `bitcast(glyphId, 'uint')` off an f32 trie lane; it is an exact
+            // identity in both containers now and copies as one.
+            slots.element(o.add(uint(S_GLYPH_ID))).assign(glyphId);
+            slots.element(o.add(uint(S_ADVANCE))).assign(advance);
+            slots.element(o.add(uint(S_HEIGHT))).assign(height);
 
-            const missing = tflags.greaterThan(float(0.5)).toVar('missing');
+            // A real bit test. This was `tflags.greaterThan(float(0.5))` — a float proxy
+            // for "the bitfield is nonzero", which happened to work because FLAG_MISSING
+            // is the only bit. It tests the actual bit now, so a second flag cannot make
+            // the proxy quietly wrong.
+            const missing = tflags.bitAnd(uint(FLAG_MISSING)).notEqual(uint(0)).toVar('missing');
             // Newline-ness is decided HERE, once — the scan reads the flag bit, never
             // a codepoint lane (there is none; the byte buffer is the codepoint truth).
             const nlBit = cp.equal(uint(NEWLINE)).select(uint(F_NEWLINE), uint(0)).toVar('nlBit');
@@ -1260,7 +1272,10 @@ export default class GlyphPipelineKernels {
             If(slabX.lessThan(int(0)), () => { Return(); });
             If(fi.element(fb.add(uint(FI_DIRTY))).lessThan(float(0.5)), () => { Return(); });
 
-            const gid = uint(bitcast(S.element(o.add(uint(S_GLYPH_ID))), 'float')).toVar('fGid');   // DEFERRED
+            // Native u32 read. This was uint(bitcast(..., 'float')) — reinterpret the
+            // lane as f32, then CONVERT back to an integer — a round trip that existed
+            // only because the trie handed decode an f32 id. The lane is exact now.
+            const gid = S.element(o.add(uint(S_GLYPH_ID))).toVar('fGid');
             const d = float(0).toVar('fD');
             If(gid.lessThan(u.farInkCount), () => { d.assign(this.farInk.element(gid)); });
 

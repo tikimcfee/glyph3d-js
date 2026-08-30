@@ -78,10 +78,16 @@ console.log('the vertex path indexes in u32 and reads per lane kind');
     ok(!/bitcast/.test(rowcol), 'no bitcast on a count lane');
 
     // Every lane the vertex path names must be classified, and read the matching way.
-    for (const [name, lane] of Object.entries({ S_X: null, S_ADVANCE: null, S_HEIGHT: null, S_GLYPH_ID: null })) {
+    for (const [name, lane] of Object.entries({ S_X: null, S_ADVANCE: null, S_HEIGHT: null })) {
         ok(new RegExp(`fl\\(${name}`).test(src), `${name} is read through the float-lane helper`);
         void lane;
     }
+    // S_GLYPH_ID is an EXACT lane now (the trie moved to u32), so it CONVERTS rather than
+    // reinterprets. Reading it through fl() would decode an integer's bit pattern as a
+    // denormal — near text unaffected, far-LOD UVs collapsed. Asserted both ways.
+    ok(!/fl\(S_GLYPH_ID/.test(src), 'S_GLYPH_ID is NOT read through the float-lane helper');
+    ok(/element\(base\.add\(int\(S_GLYPH_ID\)\)\)\.toFloat\(\)/.test(src),
+       'S_GLYPH_ID converts (.toFloat()) from its native count lane');
     ok(FLOAT_LANES.size + COUNT_LANES.size === SLOT_STRIDE,
        `the lane kinds still cover the stride (${FLOAT_LANES.size} + ${COUNT_LANES.size} vs ${SLOT_STRIDE})`);
 }

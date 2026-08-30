@@ -75,24 +75,46 @@ console.log('every lane respects its declared KIND');
         if (MEASURE_FIELDS.includes(n)) violations.push(n);
     }
 
-    // An EXACT field on a float carrier is the defect this whole line of work removed —
-    // and "exact in practice" is the argument the ordered-key wall died of. The contract
-    // permits declared, justified debts; it does not permit silent ones.
-    const undeclared = violations.filter((n) => !(n in KNOWN_DEVIATIONS));
-    ok(undeclared.length === 0,
-       `no lane violates its KIND without a declared deviation (undeclared: [${undeclared}])`);
+    // TWO SCOPES, and conflating them was a bug in this file rather than in the code.
+    //
+    // KNOWN_DEVIATIONS is SYSTEM-WIDE: it records debts the contract tolerates anywhere.
+    // LAYER_CLAIMED below is what THIS layer still needs. They are not the same list, and
+    // the original version of this tooth asserted the global one against local violations
+    // — so the moment this layer paid its debt, it failed with `settled: [GLYPH_ID]` even
+    // though the entry was still true of the backend's container. The tripwire fired
+    // correctly and pointed at the wrong file.
+    //
+    // Scoped properly, both halves survive:
+    const LAYER_CLAIMED = Object.freeze({
+        // (empty) — this layer currently claims no deviation. GLYPH_ID was the last one:
+        // an identity on a float lane because decode copied it verbatim from an f32 trie
+        // block. The trie is u32 now (identities native, measures bitcast) and the id is
+        // exact end to end.
+    });
 
-    // A deviation list that outlives its deviation is a permanent hole with a comment on
-    // it. Every declared debt must still BE a debt.
-    const settled = Object.keys(KNOWN_DEVIATIONS).filter((n) => !violations.includes(n));
-    ok(settled.length === 0,
-       `every KNOWN_DEVIATION is still an actual violation — a settled debt must be `
-       + `removed, not left as a standing exemption (settled: [${settled}])`);
+    // 1. Nothing violates without the CONTRACT permitting it.
+    const unpermitted = violations.filter((n) => !(n in KNOWN_DEVIATIONS));
+    ok(unpermitted.length === 0,
+       `no lane violates its KIND without a contract-level deviation (unpermitted: [${unpermitted}])`);
 
-    // The one live debt, named, so its disappearance is visible in a diff.
-    ok(violations.includes('GLYPH_ID'),
-       'GLYPH_ID is still the declared deviation (it rides the trie\'s f32 blocks; the fix '
-       + 'is u32 glyph ids in the trie format, a layer below both of us)');
+    // 2. Nothing violates without THIS LAYER declaring it needs to. A contract-level
+    //    entry is permission, not an excuse — another layer's debt does not cover mine.
+    const unclaimed = violations.filter((n) => !(n in LAYER_CLAIMED));
+    ok(unclaimed.length === 0,
+       `every violation here is claimed by this layer (unclaimed: [${unclaimed}])`);
+
+    // 3. A local claim may not outlive its debt. This is the no-stale-exemption rule,
+    //    now asserted against the scope it can actually speak for.
+    const staleClaim = Object.keys(LAYER_CLAIMED).filter((n) => !violations.includes(n));
+    ok(staleClaim.length === 0,
+       `every claimed deviation is still an actual violation here (stale: [${staleClaim}])`);
+
+    // 4. THE FIX, pinned so it cannot silently regress. GLYPH_ID was the pipeline's last
+    //    float-carried identity; if it returns to a float lane, this names it.
+    ok(!violations.includes('GLYPH_ID'),
+       'GLYPH_ID is no longer a violation here — it is an exact lane, native u32');
+    ok(Ref.COUNT_LANES.has(Ref.S_GLYPH_ID) && !Ref.FLOAT_LANES.has(Ref.S_GLYPH_ID),
+       'S_GLYPH_ID is classified as a count lane');
 
     // The partition the binary lane guard depends on.
     ok(EXACT_FIELDS.every((f) => !MEASURE_FIELDS.includes(f)),

@@ -216,7 +216,10 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
         const fl = (l) => bitcast(byteSlots.element(base.add(int(l))), 'float');
         iPos     = vec4(fl(S_X), fl(S_X + 1), fl(S_X + 2), float(0));
         iSize    = vec2(fl(S_ADVANCE), fl(S_HEIGHT));
-        iGlyphId = fl(S_GLYPH_ID);   // DEFERRED: still a trie float
+        // EXACT lane now — the trie moved to u32, so the id is a native integer and
+        // CONVERTS to float for the shader's use rather than being reinterpreted.
+        // bitcast here would read the integer's bit pattern as a denormal.
+        iGlyphId = byteSlots.element(base.add(int(S_GLYPH_ID))).toFloat();
         // The glyph's exact grid position (apply's integer lanes) — the fragment's
         // far-texture UV rides this. Non-byte fields have no grid truth → (0,0),
         // which their hasSlab=0 far-group texel turns back into the impostor path.

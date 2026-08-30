@@ -36,7 +36,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bakeFile, prefixAt, rowsUnderWrap, CK_STRIDE } from '../../packages/glyph3d-core/src/compute/glyphBake.js';
 import { lanesFromPrefix } from '../../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
-import { buildGlyphTrie } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
+import { buildGlyphTrie, trieLaneValue } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const utf8 = (s) => new TextEncoder().encode(s);
@@ -124,7 +124,11 @@ for (const c of CASES) {
     w.f64(c.lineHeight); w.u32(K);
     w.bytes(c.bytes);
     for (const v of trie.blockIndex) w.u32(v);
-    for (const v of trie.blocks) w.f64(v);
+    // Per LANE, not raw: blocks are u32 with the measures BITCAST, so the raw word
+    // for advance/height is a bit pattern, not a value. The format carries VALUES
+    // precisely so a container change leaves the corpus untouched — decoding here
+    // is what makes that true.
+    for (let i = 0; i < trie.blocks.length; i++) w.f64(trieLaneValue(trie.blocks, i));
 
     w.u32(r.leaders); w.u32(r.newlines); w.u32(r.totalRows); w.u32(r.maxLineLen);
     w.f64(r.maxRowExtent); w.f64(r.maxLineWidth); w.f64(r.maxHeight);

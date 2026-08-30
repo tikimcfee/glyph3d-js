@@ -29,7 +29,7 @@ import {
   runPipeline, decodeAndResolve, paginate, boundsReduce, allocSlots, rowsForLine,
   deriveStride, SLOT_STRIDE, S_GLYPH_ID, S_X, S_Y, S_Z, S_ROW, S_COL,
   S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, S_ORD, F_LEADER, NEWLINE, fval,
-  FLOAT_LANES, COUNT_LANES } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  FLOAT_LANES, COUNT_LANES, laneValue } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -142,7 +142,9 @@ for (const { name, bytes } of CORPORA) {
   const gotGids = [], gotOffsets = [];
   for (let id = 0; id < bytes.length; id++) {
     if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) {
-      gotGids.push(fval(slots[id * SLOT_STRIDE + S_GLYPH_ID])); gotOffsets.push(id);
+      // laneValue, not fval: it consults the lane-kind table, so this read follows
+      // S_GLYPH_ID from a float carrier to a count one without the test being edited.
+      gotGids.push(laneValue(slots, id * SLOT_STRIDE + S_GLYPH_ID)); gotOffsets.push(id);
     }
   }
   ok(gotGids.length === wantCps.length, `${name}: leader count ${gotGids.length} vs ${wantCps.length}`);
@@ -409,7 +411,11 @@ for (const { name, bytes } of CORPORA) {
   ok(missing.length === 0, `every lane 0..${SLOT_STRIDE - 1} is classified (unclassified: [${missing}])`);
   ok(seen.size === SLOT_STRIDE, `the table covers exactly SLOT_STRIDE lanes (${seen.size} vs ${SLOT_STRIDE})`);
   // S_GLYPH_ID is deliberately a FLOAT lane: it is copied from the trie's f32 blocks.
-  ok(FLOAT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID is classified as a float carrier (trie-sourced)');
+  // S_GLYPH_ID was the pipeline's last float-carried identity, and it was one only
+  // because decode copied it verbatim from an f32 trie block. The trie moved to u32
+  // (identities native, measures bitcast), so the id is exact end to end.
+  ok(COUNT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID is a COUNT lane — an identity, stored exactly');
+  ok(!FLOAT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID no longer rides a float carrier');
   ok(COUNT_LANES.has(S_ORD), 'S_ORD is a count lane — the exactness the migration bought');
 }
 

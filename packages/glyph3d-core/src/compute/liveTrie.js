@@ -26,7 +26,7 @@ import { buildGlyphTrie } from './GlyphTrie.js';
  * Build the pipeline trie from the live atlas's shape cache.
  * @param {Object} atlas - the booted GlyphAtlas (needs _shapeCache, _shaper, getCharSize)
  * @param {number} worldScale - the grid's world scale (charWidth / pixelWidth)
- * @returns {{blockIndex: Uint32Array, blocks: Float32Array}} the trie buffers
+ * @returns {{blockIndex: Uint32Array, blocks: Uint32Array}} the trie buffers
  */
 export function buildLiveTrie(atlas, worldScale) {
     const cache = atlas?._shapeCache;

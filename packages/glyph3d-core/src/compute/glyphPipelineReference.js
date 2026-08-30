@@ -144,10 +144,10 @@ export const F_LEADER = 1;        // this byte begins a codepoint
  * blocks, so it stays a float carrier until the trie format itself moves.
  */
 export const FLOAT_LANES = Object.freeze(new Set([
-    S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV,
+    S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV,
 ]));
 /** Lanes stored natively as integers — exact for the full u32 range. */
-export const COUNT_LANES = Object.freeze(new Set([S_ROW, S_COL, S_FLAGS, S_ORD]));
+export const COUNT_LANES = Object.freeze(new Set([S_GLYPH_ID, S_ROW, S_COL, S_FLAGS, S_ORD]));
 /** @param {number} lane @returns {boolean} true when the lane carries a bitcast f32. */
 export function isFloatLane(lane) { return FLOAT_LANES.has(lane); }
 
@@ -284,10 +284,10 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
 
     const g = trieLookup(trie, cp);
     const o = id * SLOT_STRIDE;
-    // DEFERRED lane: the glyph id comes straight from the trie's f32 blocks, so it
-    // stays a FLOAT carrier (bitcast) until the trie format moves. Storing it raw
-    // would truncate through the u32 buffer and disagree with the kernels.
-    slots[o + S_GLYPH_ID] = fbits(g.glyphId);
+    // EXACT lane. The trie moved to u32 (GlyphTrie: identities native, measures
+    // bitcast), so the glyph id arrives as an integer and is stored as one. It was a
+    // float carrier only because it was copied verbatim from an f32 trie block.
+    slots[o + S_GLYPH_ID] = g.glyphId;
     slots[o + S_ADVANCE] = fbits(g.advance);
     slots[o + S_HEIGHT] = fbits(g.height);
     slots[o + S_FLAGS] = F_LEADER
@@ -773,7 +773,9 @@ export function farScatterOracle(slots, byteLength, items, farItems, { colorAt, 
         const tx = Math.min(FAR_SLAB - 1, Math.max(0, Math.trunc(col / cpt)));
         const ty = Math.min(FAR_SLAB - 1, Math.max(0, Math.trunc(row / rpt)));
         const ab = ((slabY + ty) * FAR_TEX + slabX + tx) * 4;
-        const d = densityAt(fval(slots[o + S_GLYPH_ID]) | 0) || 0;
+        // Exact lane: read natively. Was fval(...)|0 — reinterpret then truncate, the
+        // oracle's mirror of the kernel's bitcast round trip.
+        const d = densityAt(slots[o + S_GLYPH_ID]) || 0;
         const c = colorAt(id);
         // The kernel linearizes (pow 2.2) BEFORE accumulating — mips then average ink
         // energy, so thin minified text dims physically instead of gamma-crushing.
