@@ -8,6 +8,27 @@ All run under Bun (the repo runtime). The dev loop must be up for browser tools:
 `tools/dev.sh` (Vite :5173 + relay :8080), `tools/dev.sh vite` to restart + clear cache
 after editing core, `make dev-status` to check.
 
+## What is NOT covered
+
+A gate list reads as a coverage claim, so the gaps belong beside it — otherwise clean
+numbers imply the coverage nobody wrote.
+
+- **The far-LOD UV derivation (`vRowCol` → far texel) has no GPU gate.** `far-texels-check`
+  proves the far SCATTER and NORMALIZE *kernels* against their CPU oracles; it does not
+  exercise the vertex shader's mapping from the row/col lanes to a far-atlas UV. That path
+  is where a `'float'` storage node over the u32 slot buffer lived undetected, and its
+  failure mode is silent: near text renders correctly while every far glyph collapses to
+  texel (0,0). Covered by *inference* today, not evidence.
+- **The `glyph` pick channel past 2²⁴.** `pick-id-gpu-check` drives the `flat` channel,
+  where the ID *is* the uniform. The glyph channel adds `baseId.add(instanceIndex)` on top
+  of that same uniform — checked at source level, never rendered at a large base.
+- **No arena has been staged past 16MB on GPU.** `arena-capacity.test.mjs` covers the
+  seams headlessly; the ceiling (`ARENA_MAX_BYTES`, 42.7MB) is buildable in principle and
+  no test builds one.
+
+Add to this list when you find a gap, and delete from it when you close one — an entry
+that outlives its gap is the same defect as a deviation that outlives its debt.
+
 ## Browser drive-loop
 
 - **`smoke.mjs`** — boot the app in a real (WebGPU) browser, capture every console
