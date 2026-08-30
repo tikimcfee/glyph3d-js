@@ -272,7 +272,8 @@ export function runScanPipeline(bytes, trie, opts = {}, tuning = {}) {
         ...it.page,
         pageStrideX: deriveStride({ maxRowExtent: scalarRows[i][7] }, it.page),
         wrap: wraps[i], zStep: resolveParams[i].zStep, origin: it.origin,
-        lineHeight: resolveParams[i].lineHeight ?? it.page?.lineHeight,
+        // The ITEM's, as in the reference — the page fallback was unreachable. See there.
+        lineHeight: resolveParams[i].lineHeight,
     }));
     for (let id = 0; id < n; id++) {
         paginate(slots, id, pageParams[itemForByte(items, id)]);

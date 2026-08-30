@@ -26,7 +26,7 @@
 // how the lineHeight branch survived. So the last section takes a STAGED item and feeds it
 // to the oracle, pinning the relationship rather than the two endpoints.
 
-import { runPipeline, assertLineHeight } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, assertLineHeight, SLOT_STRIDE, S_Y } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { runScanPipeline } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import GlyphPipelineArena from '../packages/glyph3d-core/src/compute/GlyphPipelineArena.js';
@@ -71,6 +71,35 @@ console.log('the pipelines refuse it, rather than producing NaN lanes');
     // The legal case still works, or the guard is just breaking everything.
     ok(threw(() => runPipeline(bytes, trie, { items: [item(CELL_H)] })) === null,
        'a stated lineHeight still runs');
+}
+
+console.log('the ITEM owns the pitch — a page-level lineHeight is not consulted');
+{
+    // `pageParams.lineHeight` used to read `resolved[i].lineHeight ?? it.page?.lineHeight`.
+    // The RHS went unreachable when the item-level guard started guaranteeing a finite
+    // number (proven by making it throw and running everything without it firing), and it
+    // was never a feature: the `??` prefers the ITEM's, so a page pitch could only take
+    // effect on an item whose lineHeight was unset — the input that is now illegal.
+    //
+    // Asserted BEHAVIOURALLY rather than by grepping for the `??`: a source check would
+    // pass on any rewrite that reintroduced the precedence in a different shape.
+    const ITEM_LH = 2, PAGE_LH = 99;      // wildly different, so a mix-up cannot hide in eps
+    const page = { pageRows: 4, pagesWide: 1, lineHeight: PAGE_LH };
+    const withPage = runPipeline(bytes, trie,
+        { items: [{ byteStart: 0, byteCount: bytes.length, origin: { x: 0, y: 0, z: 0 },
+                    lineHeight: ITEM_LH, page }] });
+    const noPageLh = runPipeline(bytes, trie,
+        { items: [{ byteStart: 0, byteCount: bytes.length, origin: { x: 0, y: 0, z: 0 },
+                    lineHeight: ITEM_LH, page: { pageRows: 4, pagesWide: 1 } }] });
+
+    let differs = 0;
+    for (let i = 0; i * SLOT_STRIDE < withPage.slots.length; i++) {
+        const o = i * SLOT_STRIDE;
+        if (withPage.slots[o + S_Y] !== noPageLh.slots[o + S_Y]) differs++;
+    }
+    ok(differs === 0,
+       `a page-level lineHeight (${PAGE_LH}) changes nothing next to the item's (${ITEM_LH}) `
+       + `— ${differs} Y lane(s) moved`);
 }
 
 console.log('THE SEAM: what stage() produces, the oracle accepts');

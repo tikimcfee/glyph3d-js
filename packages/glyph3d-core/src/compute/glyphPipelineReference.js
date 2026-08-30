@@ -619,7 +619,22 @@ export function runPipeline(bytes, trie, opts = {}) {
         ...it.page,
         pageStrideX: deriveStride({ maxRowExtent: scalarRows[i][7] }, it.page),
         wrap: resolved[i].wrapWidth, zStep: resolved[i].zStep, origin: it.origin,
-        lineHeight: resolved[i].lineHeight ?? it.page?.lineHeight,
+        // The ITEM's lineHeight, full stop. This read used to be
+        // `resolved[i].lineHeight ?? it.page?.lineHeight`, and the right-hand side became
+        // unreachable the moment assertLineHeight started guaranteeing a finite number
+        // above — proven by making the RHS throw and running the whole suite, the fixture
+        // generator and a GPU gate without it firing once.
+        //
+        // It was never a feature either. The `??` prefers the ITEM's value, so a
+        // page-specific pitch could only ever take effect on an item whose lineHeight was
+        // unset — i.e. only through the malformed input that is now illegal. The page's
+        // own pitch was gated on the bug. (mojo-rising's find and argument.)
+        //
+        // NOTE for anyone adding one back: a lineHeight on the page INPUT is not consulted.
+        // Fixtures and tests still pass one, always equal to the item's, so nothing is
+        // silently diverging today — but that redundancy is worth removing, and whether an
+        // ignored page.lineHeight should be REFUSED rather than ignored is a separate call.
+        lineHeight: resolved[i].lineHeight,
     }));
     for (let id = 0; id < bytes.length; id++) {
         paginate(slots, id, pageParams[itemForByte(items, id)]);
