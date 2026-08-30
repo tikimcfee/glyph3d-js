@@ -94,6 +94,22 @@ after editing core, `make dev-status` to check.
   bun tools/far-texels-check.mjs
   ```
 
+- **`pick-id-gpu-check.mjs`** — the pick-ID hardware gate: an ID past 2²⁴ must survive
+  the RGBA8 round trip and resolve to the object it was aimed at. Drives the real
+  `PickingSystem` on the app's live WebGPU renderer, reserving ID space through the real
+  first-fit allocator (never by writing `pickStartId` by hand, which would skip both the
+  allocator and its guard), then rendering a channel pass and decoding the pixel.
+  IDs are chosen to break a wrong carrier: 2²⁴+1 (collapses in f32), `ARENA_MAX_BYTES`
+  (44,739,242 → 44,739,240), 2³¹ (a signed `shiftRight` sign-extends into ALPHA), and
+  near 2³². `tools/pick-identity.test.mjs` covers the arithmetic and the source-level
+  carriers headlessly; only this file can say the SHADER carries them.
+  Mutation-verified: restoring `uniform(0)` (an f32 carrier) fails 11 teeth, and the
+  failures read `token="reservation"` — the pick resolving to the WRONG OBJECT, which is
+  the real symptom and the reason a warning was never enough.
+  ```
+  bun tools/pick-id-gpu-check.mjs
+  ```
+
 ## Performance armory
 
 The measurement stack, cheapest first. The standing law: **pixels and wire-level
