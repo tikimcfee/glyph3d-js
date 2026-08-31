@@ -17,6 +17,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
+import { tintForPath } from '../core/fileKind.js';
 import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
 import { windowSeedable, byteRangeForRows } from '../compute/glyphPipelineWindow.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
@@ -466,6 +467,19 @@ class CodeGrid extends FramedGlyphField {
         this.config.backgroundColor = color;
     }
 
+    /**
+     * The panel's fill: the file-type tint, falling back to the theme background for a
+     * file whose type we cannot name. Mirrors FileRow._panelFill deliberately.
+     *
+     * Without this, opening a file LOST its tint permanently: a click swaps the FileRow
+     * for a CodeGrid, and a CodeGrid spawns from gridTheme() with the flat theme colour.
+     * The far map would go readable, then go blank behind you as you worked.
+     * @private @returns {number|string} panel fill
+     */
+    _panelFill() {
+        return tintForPath(this.getSourcePath?.(), this.config.backgroundColor);
+    }
+
     // setBorder / setStateColors / setBorderFlag — the in-shader border delegators (this._panel?.x)
     // — are inherited from FramedGlyphField. setBackgroundColor / setBackgroundStyle stay below
     // (they touch CodeGrid-specific config + glyph-alpha).
@@ -753,11 +767,18 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Set source path metadata
+     * Set source path metadata.
+     *
+     * REPAINTS THE PANEL. The path is what decides the file-type tint, and it arrives
+     * AFTER construction (fileLoader.js calls this on an already-built grid), so a panel
+     * filled at build time got the flat theme colour and would have kept it forever.
+     * Measured before this line existed: a .go grid and a .js grid rendered byte-identical
+     * pixels.
      * @param {string} path - Source file path
      */
     setSourcePath(path) {
         this.sourcePath = path;
+        this._panel?.setFill(this._panelFill());
     }
 
     // ============ Lifecycle ============
@@ -1172,7 +1193,7 @@ class CodeGrid extends FramedGlyphField {
         // panel must OCCLUDE content behind it (other grids stacked in a dock); `transparent` only
         // when opacity<1, so a full-opacity panel stays genuinely solid.
         this._panel = createPanelMaterial({
-            color: this.config.backgroundColor,
+            color: this._panelFill(),
             opacity: this.config.backgroundOpacity,
             side: THREE.DoubleSide,
             depthWrite: true,
@@ -1199,7 +1220,9 @@ class CodeGrid extends FramedGlyphField {
         if (color != null) this.config.backgroundColor = color;
         if (opacity != null) this.config.backgroundOpacity = opacity;
         if (!this._panel) return;
-        this._panel.setFill(color, opacity);
+        // Resolve through the tint: the theme fanout hits EVERY grid, and passing its
+        // colour straight through here is exactly what erased the tint before.
+        this._panel.setFill(this._panelFill(), opacity);
         if (opacity != null) this._applyGlyphAlpha();
     }
 

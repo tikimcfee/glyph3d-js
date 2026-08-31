@@ -76,6 +76,7 @@ var textExts = map[string]bool{
 	".swift": true, ".metal": true,
 	".cs": true, ".fs": true, ".fsx": true,
 	".rs": true, ".go": true, ".zig": true, ".nim": true,
+	".mojo": true, ".🔥": true,   // the engine/ port — without these the walker never LISTS them
 	".java": true, ".kt": true, ".kts": true, ".scala": true, ".groovy": true, ".gradle": true,
 	".d": true, ".v": true, ".vhdl": true, ".sv": true,
 

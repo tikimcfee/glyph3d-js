@@ -50,7 +50,7 @@ const TEXT_EXT = new Set([
     'html', 'htm', 'css', 'scss', 'sass', 'less', 'svg', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env',
     'md', 'mdx', 'markdown', 'txt', 'text', 'rst', 'adoc', 'log', 'csv', 'tsv',
     'go', 'rs', 'py', 'pyi', 'rb', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh', 'm', 'mm',
-    'cs', 'swift', 'php', 'pl', 'pm', 'lua', 'r', 'jl', 'dart', 'scala', 'clj', 'cljs', 'ex', 'exs', 'erl', 'hs', 'ml', 'fs', 'nim', 'zig', 'v',
+    'cs', 'swift', 'php', 'pl', 'pm', 'lua', 'r', 'jl', 'dart', 'scala', 'clj', 'cljs', 'ex', 'exs', 'erl', 'hs', 'ml', 'fs', 'nim', 'zig', 'v', 'mojo', '🔥',
     'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'make', 'mk', 'cmake', 'dockerfile', 'gradle', 'sql', 'graphql', 'gql', 'proto', 'wgsl', 'glsl', 'vert', 'frag', 'tsl',
     'gitignore', 'gitattributes', 'editorconfig', 'npmrc', 'nvmrc', 'lock', 'patch', 'diff',
 ]);
@@ -61,6 +61,133 @@ export function extOf(path) {
     const dot = base.lastIndexOf('.');
     return dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
 }
+
+/**
+ * FAR-MAP TINT — the background color a file's panel wears so that, pulled back far
+ * enough that its glyphs are gone, you can still read the SHAPE of a workspace.
+ *
+ * Why this exists: at overview the per-file panels are all drawn, all correctly sized,
+ * and all THE SAME COLOR — so hundreds of correct rectangles render as one slab. The
+ * geometry was never missing; the contrast was. Coloring by language makes structure
+ * that is already on screen become visible.
+ *
+ * ONE COLOR PER LANGUAGE, not per family. Grouping Python with JavaScript because both
+ * are "scripting" hides the distinction you actually want at a glance. Extensions that
+ * are genuinely the SAME language share a color (.js/.mjs/.cjs/.jsx are all JavaScript);
+ * different languages never do.
+ *
+ * Extensionless files (Makefile, Dockerfile, LICENSE — and whole languages that skip the
+ * convention) resolve to OTHER rather than being guessed at. Content-driven coloring is
+ * the eventual answer for those and is deliberately not attempted here.
+ *
+ * Hex ints, because PanelField.setFill takes "hex int or THREE.Color-compatible" and
+ * THREE.Color.set() cannot consume the repo's {r,g,b} convention directly.
+ */
+const LANG_BY_EXT = {
+    // DIALECTS SPLIT. Technically all JavaScript, but .jsx is components where .js is
+    // modules, and .mjs/.cjs are opposite module systems — a repo that mixes them is
+    // exactly the repo that wants to see where the mixing happens.
+    js: 'javascript', jsx: 'jsx', mjs: 'mjs', cjs: 'cjs',
+    ts: 'typescript', tsx: 'tsx',
+    py: 'python', pyi: 'python',
+    go: 'go',
+    rs: 'rust',
+    mojo: 'mojo', '🔥': 'mojo',   // Mojo's alternate extension
+    c: 'c', h: 'c',
+    cc: 'cpp', cpp: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp',
+    java: 'java', kt: 'kotlin', kts: 'kotlin',
+    cs: 'csharp',
+    swift: 'swift', m: 'objc', mm: 'objc',
+    rb: 'ruby', php: 'php', lua: 'lua', pl: 'perl', pm: 'perl',
+    r: 'r', jl: 'julia', dart: 'dart', scala: 'scala',
+    ex: 'elixir', exs: 'elixir', erl: 'erlang',
+    hs: 'haskell', ml: 'ocaml', fs: 'fsharp', clj: 'clojure', cljs: 'clojure',
+    zig: 'zig', nim: 'nim', v: 'vlang',
+
+    wgsl: 'shader', glsl: 'shader', vert: 'shader', frag: 'shader', tsl: 'shader',
+
+    html: 'html', htm: 'html', xml: 'xml', svg: 'svg',
+    css: 'css', scss: 'css', sass: 'css', less: 'css',
+
+    json: 'json', jsonc: 'json', json5: 'json',
+    yaml: 'yaml', yml: 'yaml', toml: 'toml',
+    csv: 'csv', tsv: 'csv',
+    sql: 'sql', proto: 'proto', graphql: 'graphql', gql: 'graphql',
+
+    md: 'markdown', mdx: 'markdown', markdown: 'markdown',
+    txt: 'text', text: 'text', rst: 'text', adoc: 'text',
+
+    sh: 'shell', bash: 'shell', zsh: 'shell', fish: 'shell',
+    ps1: 'powershell', bat: 'batch', cmd: 'batch',
+    make: 'make', mk: 'make', cmake: 'make', dockerfile: 'docker', gradle: 'gradle',
+
+    ini: 'config', cfg: 'config', conf: 'config', env: 'config', lock: 'config',
+    gitignore: 'config', gitattributes: 'config', editorconfig: 'config',
+    npmrc: 'config', nvmrc: 'config',
+
+    log: 'log', patch: 'diff', diff: 'diff',
+};
+
+/**
+ * Language → panel tint. Tuned to stay distinguishable from each other AND from the
+ * backdrop at a few pixels across; OTHER keeps the historical panel color so an
+ * unrecognized file looks exactly as it always did.
+ * Override per deployment — this table is the whole configuration surface.
+ */
+export const LANG_TINTS = {
+    javascript: 0x3a3520, jsx:       0x4a3c16, mjs:     0x2f3a26, cjs:    0x3a2c16,
+    typescript: 0x24354a, tsx:       0x18415c, python:  0x2b3a4a, ruby:   0x4a2028,
+    go:         0x1c3a44, rust:      0x4a2f1c, mojo:    0x4a1c33, c:      0x2a2a3e,
+    cpp:        0x33244a, java:      0x3e2a1c, kotlin:  0x35204a, csharp: 0x2a3a20,
+    swift:      0x4a2a1c, objc:      0x1c2a4a, php:     0x2f2a4a, lua:    0x1c1c4a,
+    perl:       0x3a2440, r:         0x1c334a, julia:   0x3a204a, dart:   0x1c3a3a,
+    scala:      0x4a2020, elixir:    0x38304a, erlang:  0x4a2038, haskell:0x2a1c4a,
+    ocaml:      0x4a3520, fsharp:    0x204a44, clojure: 0x27401c, zig:    0x4a3a1c,
+    nim:        0x40401c, vlang:     0x1c4038,
+
+    shader:     0x33203a,
+    html:       0x3a2a20, xml: 0x2e2620, svg: 0x203a2a,
+    css:        0x203a33,
+    json:       0x20293a, yaml: 0x263040, toml: 0x2c2a3a,
+    csv:        0x2a3340, sql: 0x1f3040, proto: 0x30303a, graphql: 0x3a2036,
+    markdown:   0x2e2e33, text: 0x333333,
+    shell:      0x2a3320, powershell: 0x1f2f42, batch: 0x30302a,
+    make:       0x3a3020, docker: 0x1f3448, gradle: 0x2f3320,
+    config:     0x33302a, log: 0x2a2a2a, diff: 0x3a2030,
+
+    other:      0x1a1a2e,   // the historical default — unrecognized looks unchanged
+};
+
+/**
+ * @param {string} path
+ * @returns {string} language key — always a key of LANG_TINTS ('other' when unknown)
+ */
+export function languageOf(path) {
+    return LANG_BY_EXT[extOf(path)] || 'other';
+}
+
+/**
+ * The panel tint for a file, with the THEME colour as the base.
+ *
+ * Precedence matters and the obvious way round is wrong: `grid.backgroundColor` is a
+ * theme setting that fans out to EVERY grid (settings.js:837), so treating it as an
+ * override meant it always won and the tint never fired — 579 files all resolved to
+ * one colour, which looks exactly like the feature not existing.
+ *
+ * So the theme supplies the colour for files we cannot type, and a known language wins.
+ * One setting stays meaningful, and an unrecognized or extensionless file keeps looking
+ * exactly as it always did.
+ *
+ * @param {?string} path
+ * @param {?number|string} base - the theme background; used when the language is unknown
+ * @returns {number|string} panel fill
+ */
+export function tintForPath(path, base = null) {
+    const lang = languageOf(path);
+    if (lang !== 'other') return LANG_TINTS[lang];
+    return base ?? LANG_TINTS.other;
+}
+
 
 /** @param {string} format @returns {string} MIME for createImageBitmap's Blob */
 export function mimeForFormat(format) {
