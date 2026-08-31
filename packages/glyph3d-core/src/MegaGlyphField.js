@@ -81,8 +81,13 @@ export class MegaGlyphField {
             maxInstances: arena.maxBytes,
             worldScale, slugData, shaper,
             bytePipeline: true,
-            // One mesh spanning every grid: no meaningful CPU bounds exist (per-view
-            // culling is the visibility lane, a later milestone).
+            // One mesh spanning every grid: no meaningful CPU bounds exist, so three's
+            // per-OBJECT cull is off. Per-VIEW culling is NOT missing — it is _cullRanges
+            // below, which frustum-tests each view and emits an indirect draw buffer.
+            // (This comment said "a later milestone" long after that milestone shipped,
+            // and cost a reader a wrong conclusion on 2026-08-30. Measured: the same
+            // 19.55M-instance scene draws 19.58M instances at overview and 1.99M at near
+            // — a 10x reduction, entirely from the culling this comment denied existed.)
             frustumCulled: false,
         });
         // Group 0 = THE dead group. Tombstoned (restaged/disposed) slot ranges point

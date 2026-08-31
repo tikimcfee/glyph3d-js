@@ -206,6 +206,64 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ANATOMY_URL=http://localhost:5174/ bun tools/frame-anatomy.mjs
   ```
 
+  **THREE TRAPS IN THIS TOOL, all of which produced confident wrong answers on
+  2026-08-30. Read before quoting a number from it.**
+
+  - **`renderMsPerFrame` is ONE PASS, not a frame.** It accumulates
+    `gl.info.render.timestamp` once per 250ms poll (~12 samples over 3s) and divides by
+    the FRAME count (thousands). At 250-500fps with 2 renders/frame that is 500-1000
+    passes per window, and the query pool overflows (this file's own comment says so).
+    It reported **0.04ms while the GPU was doing real work**, and that number was used —
+    by two people, independently — to rule out the fragment shader. Do not quote it as a
+    per-frame GPU cost. Fix it or delete it; a number that reads healthy while measuring
+    almost nothing is worse than no number.
+
+  - **`ANATOMY_UNCAPPED=1` perturbs the whole machine, and changes the REGIME.**
+    `--disable-gpu-vsync --disable-frame-rate-limit` makes the page render flat out and
+    pin the GPU. On unified memory that starves the window server: the human at the desk
+    sees their desktop stutter, and may reasonably report it as an app bug (that is
+    exactly what happened). It also measures THROUGHPUT — how fast the loop spins against
+    a saturated queue — not whether a frame fits in 16.7ms. A profile taken there is full
+    of `submit` / `getCurrentTexture`, which is the signature of the saturated queue, not
+    of the app. Use it only in short bursts, only when HEADROOM is the question, and say
+    so out loud before running it beside a human.
+
+  - **Under vsync, `p50` is worthless.** It is 16.7ms by construction whether there is 4x
+    headroom or none. Measured capped, two builds with a real 2x GPU-cost difference both
+    reported a flat 60fps and identical p50. **Stutter lives in the tail**: report p95/p99
+    and the COUNT of frames past 16.7ms, or the check cannot see the thing it exists for.
+
+- **A camera verb that silently does not take.** `camera.focus <n>` no-opped on one run
+  of a near/far comparison with no error; only a `nearestDist` column logged beside the
+  timing caught it — the row read as a clean NEAR result at the FAR distance. **Log the
+  scene state you INTEND next to every number you measure**, or a mis-set-up run is
+  indistinguishable from a finding.
+
+- **`frame-tail.mjs`** — **DOES IT HOLD 60?** The capped counterpart to `frame-anatomy`.
+  Reports p50/p95/p99/max, the COUNT of frames past 16.7ms, instances actually DRAWN, and
+  ms-per-million. Capped by construction — there is deliberately no uncapped flag to reach
+  for. Found the overview frame cost on 2026-08-30 after a day of instruments that could
+  not: `frame-anatomy` only measures a STILL frame, and uncapped only measures throughput.
+  ```
+  bun tools/frame-tail.mjs --url http://localhost:5174/ --dir . --label mybranch
+  ```
+  **The law it establishes:** overview frame time is LINEAR in instances actually drawn,
+  at **~4.11ms per million** — so the 60fps budget is **~4.0M drawn instances**. That is
+  the number a render change should be argued against.
+
+  **`drawn` comes from the INDIRECT buffer, not `geometry.instanceCount`.** The mega field
+  draws indirect (`MegaGlyphField._cullRanges`), so `instanceCount` is ignored at
+  draw-encode time — it reads 19.5M at every pose while the real drawn count swings 10x
+  between near and overview. An experiment that sets `instanceCount` changes a number the
+  draw never reads and returns a confident null result; that happened here.
+
+  **What came back NEGATIVE**, so nobody re-runs them: fragment/LOD shading cost, the
+  vertex alpha-cull (it degenerates clipPos AFTER the vertex shader has already run, so
+  the work is spent), draw-call count (inversely correlated), JS heap (7.5GB, but GC never
+  appears in the profile), and per-frame uploads/dispatches (65B/frame, zero dispatches).
+  With every glyph culled the main thread is **84% idle** — the cost is GPU-side per
+  instance, and the only lever is drawing FEWER instances.
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —
