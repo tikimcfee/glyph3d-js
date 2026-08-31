@@ -108,8 +108,8 @@ try {
   });
   console.log(`scene: ${census.grids} grids · ${census.glyphs ?? '?'} glyph instances · ` +
     `${(census.liveBytes / 1048576).toFixed(1)}MB live · ${census.views} views · frustumCulled=${census.culled}\n`);
-  console.log('  pose        p50     p95     p99     max    >16.7ms      drawn  recs   glyphPx   ms/Minst');
-  console.log('  ' + '-'.repeat(96));
+  console.log('  pose        p50     p95     p99     max    >16.7ms      drawn  recs  promo/demo   glyphPx');
+  console.log('  ' + '-'.repeat(98));
 
   async function pose(name, verb) {
     if (verb) await app.cmd(verb);
@@ -131,12 +131,16 @@ try {
       // count swings 10x between near and overview. Reporting the wrong one hides the
       // single variable that predicts frame time.
       const mf = c.renderer?.glyphPipelineArena?.megaField;
+      // Only the ISSUED records draw — summing over capacity includes stale leftovers
+      // from frames that had more records, and reported more instances than the scene has.
       const arr = mf?._indirect?.attr?.array;
       let drawn = 0;
-      for (let i = 0; i < (mf?._indirect?.capacity || 0); i++) drawn += (arr ? arr[i * 5 + 1] : 0);
+      const nrec = mf?._indirectOffsets?.length || 0;
+      for (let i = 0; i < nrec; i++) drawn += (arr ? arr[i * 5 + 1] : 0);
       return {
         dist: best, glyphPx: (1.0 * h) / (2 * best * Math.tan(fov / 2)),
         drawn, records: mf?._indirectOffsets?.length ?? 0, indirect: mf?._indirectState ?? null,
+        promoted: mf?._promotedViews ?? null, demoted: mf?._demotedViews ?? null,
       };
     });
     await app.evalPage(() => { const t = window.__ft; t.s = []; t.draws = 0; t.tris = 0; t.renders = 0; t.on = true; });
@@ -150,7 +154,7 @@ try {
       `${pct(f,0.99).toFixed(1).padStart(6)}ms ${(f[f.length-1]||0).toFixed(0).padStart(5)}ms ` +
       `${String(missed).padStart(5)}/${String(f.length).padEnd(5)} ${((missed/nf)*100).toFixed(1).padStart(4)}% ` +
       `${(st.drawn/1e6).toFixed(2).padStart(7)}M ${String(st.records).padStart(5)} ` +
-      `${st.glyphPx.toFixed(2).padStart(9)} ${(pct(f,0.5)/((st.drawn||1)/1e6)).toFixed(2).padStart(9)}`
+      `${String(st.promoted).padStart(6)}/${String(st.demoted).padEnd(5)} ${st.glyphPx.toFixed(2).padStart(8)}`
     );
   }
 

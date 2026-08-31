@@ -58,6 +58,42 @@ const _scl = new THREE.Vector3();
 const _frustum = new THREE.Frustum();
 const _projScreen = new THREE.Matrix4();
 const _cullBox = new THREE.Box3();
+const _boxCtr = new THREE.Vector3();
+const _boxSz = new THREE.Vector3();
+
+/**
+ * How many glyph instances may be DRAWN in one frame before the far tier takes over.
+ *
+ * MEASURED, not chosen. Overview frame time is linear in instances actually drawn at
+ * ~4.11ms per million (tools/frame-tail.mjs, 2026-08-30: 6.10M -> 25.6ms and 19.55M ->
+ * 80.4ms; slope 4.20 vs 4.16 across a 3.2x range, intercept ~0). A 16.7ms frame divided
+ * by that slope is ~4.06M, so:
+ *
+ *     16.7ms / 4.11ms-per-million = 4.0M instances
+ *
+ * ...and then MEASURED AGAIN, because that derivation was optimistic. A 4M budget
+ * actually renders at 19.5ms, not 16.6ms: the slope describes glyph instances only, and a
+ * 694-file scene also pays ~3ms of per-frame cost that has nothing to do with them (a
+ * panel per file, the minimap's second scene, the pose sweep). Swept in one session on
+ * one scene — 8M/38.4ms, 4M/19.5ms, 2M/16.7ms, 1M/16.7ms — 2M is the largest value that
+ * actually holds vsync, and 1M buys nothing further.
+ *
+ * So: the slope gives the CEILING, the sweep gives the number. Both are written down
+ * because the gap between them is the fixed cost, and the next person to change the
+ * per-view overhead needs to know this constant depends on it.
+ *
+ * This is deliberately NOT a settings row. The last LOD tier shipped twelve dials and a
+ * LEGACY A/B option recording an experiment nobody concluded, and it rotted. A budget
+ * derived from a measured slope is self-explaining; a dial is taste that outlives its
+ * reason. Set it to Infinity to draw everything (the A/B for measurement).
+ */
+const DEFAULT_INSTANCE_BUDGET = 2_000_000;
+
+/** Hysteresis: an already-promoted view keeps its glyphs until the budget is exceeded by
+ *  this factor. Without it a view sitting exactly on the line flickers every frame, and
+ *  the swap between glyphs and its panel is a POP, not a cross-fade — there is no shared
+ *  output to blend between 40k quads and one. */
+const PROMOTION_HYSTERESIS = 1.15;
 
 export class MegaGlyphField {
     /**
@@ -100,6 +136,11 @@ export class MegaGlyphField {
 
         /** Live views, unordered (dispose splices). @type {MegaFieldView[]} */
         this.views = [];
+        /** Drawn-instance budget for one frame — see DEFAULT_INSTANCE_BUDGET. Infinity
+         *  draws every visible view's glyphs (the measurement A/B). @type {number} */
+        this._instanceBudget = DEFAULT_INSTANCE_BUDGET;
+        /** Scratch for the promotion ranking — reused, never reallocated per frame. */
+        this._promoScratch = [];
         /** Pose-only group rentals (panel faces etc.) — swept like view nodes.
          *  @type {Array<{node, groupId, _mat: Float32Array, dead: boolean}>} */
         this._poseGroups = [];
@@ -153,6 +194,17 @@ export class MegaGlyphField {
     }
 
     get instanceMesh() { return this.field.instanceMesh; }
+
+    /**
+     * Set the per-frame drawn-instance budget. `Infinity` draws every visible view's
+     * glyphs — that is the measurement A/B, and it is a VALUE rather than a flag so
+     * there is no second code path to keep honest.
+     * @param {number} n instances, or Infinity
+     */
+    setInstanceBudget(n) {
+        this._instanceBudget = (Number.isFinite(n) && n > 0) ? n : Infinity;
+        return this;
+    }
 
     /**
      * Create a view. `node` is the Object3D whose matrixWorld poses the view's
@@ -466,11 +518,16 @@ export class MegaGlyphField {
         let rec = -1;                           // current run's record index
         let runEnd = -1;
         let visibleRanges = 0;
+        // ── PASS 1: frustum-cull, then RANK the survivors by on-screen size ──────
+        // Culling alone cannot fix the overview frame: at that distance every file is
+        // GENUINELY in frustum, so there is nothing left to cull and all ~19.5M instances
+        // draw. The remaining lever is drawing FEWER instances per file, which is what the
+        // promotion below does — the biggest views on screen keep their glyphs, everything
+        // past the budget falls back to the per-file panel that is ALREADY being drawn.
+        const promo = this._promoScratch;
+        let promoN = 0;
         for (let i = 0; i < r.length; i++) {
             const view = r[i].view;
-            // World box CACHED per view — recomputed only when the pose sweep saw
-            // the node move or the GPU bounds landed (a per-frame applyMatrix4
-            // across every range was ~1ms of pure overhead at ~2k ranges).
             if (view._worldBoxDirty !== false) {
                 const b = view.bounds;
                 if (b && view.node && Number.isFinite(b.min?.x) && Number.isFinite(b.max?.x)) {
@@ -479,11 +536,66 @@ export class MegaGlyphField {
                     wb.max.set(b.max.x, b.max.y, b.max.z ?? 0);
                     wb.applyMatrix4(view.node.matrixWorld);
                 } else {
-                    view._worldBox = null;      // no bounds yet → drawn unconditionally
+                    view._worldBox = null;
                 }
                 view._worldBoxDirty = false;
             }
-            if (view._worldBox && !_frustum.intersectsBox(view._worldBox)) continue;
+            if (view._worldBox && !_frustum.intersectsBox(view._worldBox)) { view._promoted = false; continue; }
+            // No bounds yet → drawn unconditionally, as before. Rank it first so a view
+            // still waiting on its extent never loses its glyphs to the budget.
+            let score = Infinity;
+            if (view._worldBox) {
+                view._worldBox.getCenter(_boxCtr);
+                view._worldBox.getSize(_boxSz);
+                const dist = camera.position.distanceTo(_boxCtr) || 1e-6;
+                const extent = Math.max(_boxSz.x, _boxSz.y, _boxSz.z);
+                const ang = extent / dist;          // angular size; area ∝ its square
+                score = ang * ang;
+            }
+            // REUSE the scratch entries — this runs every frame over every view, and
+            // 1388 fresh objects per frame is pure GC churn for no reason.
+            const slot = promo[promoN] || (promo[promoN] = { view: null, score: 0, n: 0 });
+            slot.view = view; slot.score = score; slot.n = r[i].end - r[i].base;
+            promoN++;
+        }
+        // Biggest on screen first — "what am I actually looking at" in one comparator.
+        // Truncate to the live count, then sort in place. slice() here would allocate a
+        // fresh array every frame the view count differs from the scratch length, which
+        // is most frames — the whole point of the scratch is to not do that.
+        promo.length = promoN;
+        promo.sort((x, y) => y.score - x.score);
+        const budget = this._instanceBudget;
+        let spent = 0, promoted = 0;
+        for (let k = 0; k < promoN; k++) {
+            const p = promo[k];
+            // Hysteresis: a view that had glyphs last frame gets a larger allowance, so a
+            // view parked on the boundary does not flicker between glyphs and panel.
+            const allow = p.view._promoted ? budget * PROMOTION_HYSTERESIS : budget;
+            const fits = spent + p.n <= allow;
+            p.view._promoted = fits;
+            if (fits) { spent += p.n; promoted++; }
+        }
+        this._drawnInstances = spent;
+        this._promotedViews = promoted;
+        this._demotedViews = promoN - promoted;
+
+        // ── PASS 2: emit indirect records, in RANGE order so run-merging still works ──
+        for (let i = 0; i < r.length; i++) {
+            const view = r[i].view;
+            // Frustum AND budget, both decided in pass 1. A demoted view draws no glyphs;
+            // its panel is already in the PanelField pass, so the file stays visible as a
+            // language-tinted rectangle rather than disappearing.
+            if (!view._promoted) {
+                // A SKIPPED LIVE RANGE BREAKS THE RUN. Merging spans base..end, so an
+                // excluded view sitting inside a merged record is drawn anyway — measured:
+                // a 4M budget drew 9.04M because runs merged straight over the demoted.
+                // MERGE_GAP's trade (a few dead slots to save a draw call) was written when
+                // draw calls looked expensive; they are not. Draw-call count is INVERSELY
+                // correlated with frame time here, while instances are linear in it, so the
+                // trade flips: prefer another record over another instance.
+                rec = -1;
+                continue;
+            }
             visibleRanges++;
             if (rec >= 0 && r[i].base - runEnd <= MERGE_GAP) {
                 a[rec * 5 + 1] = r[i].end - a[rec * 5 + 4];   // extend: count = end − firstInstance
