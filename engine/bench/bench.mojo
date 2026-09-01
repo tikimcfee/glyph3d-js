@@ -8,10 +8,10 @@
 
 from std.time import perf_counter_ns
 from std.memory import bitcast
-from glyph_schema import LC_STRIDE, LC_ROW
+from glyph_schema import LC_STRIDE, LC_ROW, LM_STRIDE, LM_X
 
 comptime PROBE_BYTE = 1028
-from glyph_pipeline import Trie, Item, run_pipeline
+from glyph_pipeline import Trie, Item, run_pipeline, PipelineResult
 from glyph_scan import run_scan_pipeline
 from glyph_bake import bake_file
 
@@ -40,14 +40,24 @@ def load_input() raises -> BenchInput:
             | (Int(data[at + 3]) << 24)
         )
 
-    if u32_at(raw, 0) != 0x58443347:
-        raise Error("bad bench.bin (run: bun engine/bench/gen-bench.mjs)")
+    # 'G3DY' — the SPLIT-CARRIER trie (gen-bench.mjs bumped the magic when the
+    # format moved, so this loader fails at the header instead of reading f32
+    # advances as integer glyph ids; the old 'G3DX' tag is deliberately not
+    # accepted). Both sides now realize the same two containers, so the trie
+    # arrives as straight copies — no deinterleave, no bitcast, which is the
+    # carrier discipline paying its way at a file format seam.
+    if u32_at(raw, 0) != 0x59443347:
+        raise Error(
+            "bad bench.bin — expected 'G3DY' (split-carrier trie). If this is a"
+            " stale 'G3DX' file, regenerate: bun engine/bench/gen-bench.mjs"
+        )
     var byte_len = u32_at(raw, 4)
     var block_index_len = u32_at(raw, 8)
-    var blocks_len = u32_at(raw, 12)
+    var exact_len = u32_at(raw, 12)
+    var measure_len = u32_at(raw, 16)
 
     var bytes = List[UInt8](capacity=byte_len)
-    var at = 16
+    var at = 20
     for i in range(byte_len):
         bytes.append(raw[at + i])
     at += byte_len
@@ -55,23 +65,33 @@ def load_input() raises -> BenchInput:
     for i in range(block_index_len):
         block_index.append(UInt32(u32_at(raw, at + i * 4)))
     at += block_index_len * 4
-    # bench.bin carries the JS trie's Uint32Array raw: identities and bitfields
-    # native, measures bitcast (entry-major GLYPH_ID, ADVANCE, HEIGHT, FLAGS).
-    # Realize the engine's split-by-carrier container from it.
-    var entries = blocks_len // 4
-    var blocks_m = List[Float32](capacity=entries * 2)
-    var blocks_c = List[UInt32](capacity=entries * 2)
-    for i in range(entries):
-        var w0 = UInt32(u32_at(raw, at + (i * 4 + 0) * 4))  # GLYPH_ID
-        var w1 = UInt32(u32_at(raw, at + (i * 4 + 1) * 4))  # ADVANCE (bitcast)
-        var w2 = UInt32(u32_at(raw, at + (i * 4 + 2) * 4))  # HEIGHT (bitcast)
-        var w3 = UInt32(u32_at(raw, at + (i * 4 + 3) * 4))  # FLAGS
-        blocks_m.append(bitcast[DType.float32](w1))
-        blocks_m.append(bitcast[DType.float32](w2))
-        blocks_c.append(w0)
-        blocks_c.append(w3)
+    var blocks_c = List[UInt32](capacity=exact_len)   # GLYPH_ID, FLAGS
+    for i in range(exact_len):
+        blocks_c.append(UInt32(u32_at(raw, at + i * 4)))
+    at += exact_len * 4
+    var blocks_m = List[Float32](capacity=measure_len)  # ADVANCE, HEIGHT
+    for i in range(measure_len):
+        blocks_m.append(bitcast[DType.float32](UInt32(u32_at(raw, at + i * 4))))
 
     return BenchInput(bytes^, Trie(block_index^, blocks_m^, blocks_c^))
+
+
+def probe_x(res: PipelineResult) -> Int:
+    """A MEASURE lane folded into the checksum, and it is not decoration.
+
+    The checksum was leaders + a ROW lane — both pure counts, both derived from
+    line breaks and column positions, NEITHER of which reads an advance. So the
+    number could not discriminate a misread trie: swapping the ADVANCE and
+    HEIGHT lanes at load time left both printed checksums BIT-IDENTICAL
+    (measured, not assumed). That is the failure mode that had already bitten
+    the JS bench, which viewed a u32 trie as f32 and took every exact lane as a
+    denormal while nothing failed.
+
+    X is the fold's f32 output and depends on the advance of every preceding
+    glyph in the segment, so folding its bits in makes the measure lanes
+    load-bearing on the printed number. Bits, not the float: an integer
+    checksum must not be built from a float compare."""
+    return Int(res.lm[PROBE_BYTE * LM_STRIDE + LM_X].to_bits())
 
 
 def one_item(byte_count: Int, wrap: Int) -> List[Item]:
@@ -118,7 +138,7 @@ def main() raises:
         var res = run_pipeline(input.bytes, input.trie, items)
         var t1 = perf_counter_ns()
         if r > 0:
-            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW])
+            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW]) + probe_x(res)
             if t1 - t0 < best:
                 best = t1 - t0
     report("pipeline  (mojo)", best, mb, sum)
@@ -135,7 +155,7 @@ def main() raises:
         var res = run_pipeline[witness=False](input.bytes, input.trie, items)
         var t1 = perf_counter_ns()
         if r > 0:
-            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW])
+            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW]) + probe_x(res)
             if t1 - t0 < best:
                 best = t1 - t0
     report("pipeline- elided", best, mb, sum)
@@ -148,7 +168,7 @@ def main() raises:
         var res = run_scan_pipeline(input.bytes, input.trie, items, 64, 256)
         var t1 = perf_counter_ns()
         if r > 0:
-            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW])
+            sum += res.leaders + Int(res.lc[PROBE_BYTE * LC_STRIDE + LC_ROW]) + probe_x(res)
             if t1 - t0 < best:
                 best = t1 - t0
     report("scan      (mojo)", best, mb, sum)

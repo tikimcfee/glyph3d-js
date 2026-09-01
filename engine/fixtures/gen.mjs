@@ -24,7 +24,9 @@
  *   u32 byteLen  u32 itemCount  u32 blockIndexLen  u32 blocksFloatLen
  *   u8[byteLen] bytes
  *   u32[blockIndexLen] blockIndex
- *   f32[blocksFloatLen] blocks
+ *   f64[blocksFloatLen] blocks   (VALUES, per the carrier note above — this
+ *       line said f32 until 2026-09-01, a v1 leftover contradicting the note
+ *       four lines above it and the writer that has always emitted f64)
  *   itemCount × item record:
  *     u32 byteStart  u32 byteCount
  *     f64 originX originY originZ

@@ -3,8 +3,18 @@
  * concatenated into one corpus (~2.4MB of real source), plus the trie over its
  * codepoints, as one binary both benches load.
  *
- * Format 'G3DX' (little-endian): u32 magic, u32 byteLen, u32 blockIndexLen,
- * u32 blocksFloatLen, bytes, blockIndex, blocks.
+ * Format 'G3DY' (little-endian), v2 — the SPLIT-CARRIER trie:
+ *   u32 magic, u32 byteLen, u32 blockIndexLen, u32 blocksExactLen,
+ *   u32 blocksMeasureLen           (20-byte header)
+ *   u8[byteLen] bytes
+ *   u32[blockIndexLen] blockIndex
+ *   u32[blocksExactLen] blocksExact      GLYPH_ID, FLAGS per entry
+ *   f32[blocksMeasureLen] blocksMeasure  ADVANCE, HEIGHT per entry
+ *
+ * v1 was 'G3DX': a 16-byte header and ONE u32 array with the measures bitcast.
+ * The magic moved with the format on purpose — see the note above the header
+ * write. Readers: engine/bench/bench.mojo and engine/bench/split_bench.mojo,
+ * both of which reject 'G3DX' rather than reading it as v2.
  *
  * Run: bun engine/bench/gen-bench.mjs   (writes engine/bench/bench.bin, gitignored)
  */

@@ -12,7 +12,8 @@
  *   u32 magic 0x42443347  u32 version=2   (v2: trie blocks are f64 VALUES — see gen.mjs)
  *   u32 byteLen  u32 blockIndexLen  u32 blocksFloatLen
  *   f64 lineHeight  u32 checkpointInterval
- *   u8[byteLen] bytes   u32[] blockIndex   f32[] blocks
+ *   u8[byteLen] bytes   u32[] blockIndex   f64[] blocks   (VALUES; the f32
+ *       here was a v1 leftover contradicting the v2 note one line above)
  *   expected record:
  *     u32 leaders  u32 newlines  u32 totalRows  u32 maxLineLen
  *     f64 maxRowExtent  f64 maxLineWidth  f64 maxHeight

@@ -225,13 +225,19 @@ def load() raises -> BenchIn:
         return (Int(d[at]) | (Int(d[at + 1]) << 8) | (Int(d[at + 2]) << 16)
                 | (Int(d[at + 3]) << 24))
 
-    if u32_at(raw, 0) != 0x58443347:
-        raise Error("bad bench.bin (run: bun engine/bench/gen-bench.mjs)")
+    # 'G3DY' — split-carrier trie; see bench.mojo's loader for why the magic
+    # moved with the format rather than staying over new bytes.
+    if u32_at(raw, 0) != 0x59443347:
+        raise Error(
+            "bad bench.bin — expected 'G3DY' (split-carrier trie). If this is a"
+            " stale 'G3DX' file, regenerate: bun engine/bench/gen-bench.mjs"
+        )
     var byte_len = u32_at(raw, 4)
     var bil = u32_at(raw, 8)
-    var bl = u32_at(raw, 12)
+    var exact_len = u32_at(raw, 12)
+    var measure_len = u32_at(raw, 16)
     var bytes = List[UInt8](capacity=byte_len)
-    var at = 16
+    var at = 20
     for i in range(byte_len):
         bytes.append(raw[at + i])
     at += byte_len
@@ -239,16 +245,13 @@ def load() raises -> BenchIn:
     for i in range(bil):
         bi.append(UInt32(u32_at(raw, at + i * 4)))
     at += bil * 4
-    # New-format bench.bin: identities/bitfields native u32, measures bitcast
-    # (entry-major GLYPH_ID, ADVANCE, HEIGHT, FLAGS).
-    var entries = bl // 4
-    var bm = List[Float32](capacity=entries * 2)
-    var bc = List[UInt32](capacity=entries * 2)
-    for i in range(entries):
-        bm.append(bitcast[DType.float32](UInt32(u32_at(raw, at + (i * 4 + 1) * 4))))
-        bm.append(bitcast[DType.float32](UInt32(u32_at(raw, at + (i * 4 + 2) * 4))))
-        bc.append(UInt32(u32_at(raw, at + (i * 4 + 0) * 4)))
-        bc.append(UInt32(u32_at(raw, at + (i * 4 + 3) * 4)))
+    var bc = List[UInt32](capacity=exact_len)    # GLYPH_ID, FLAGS
+    for i in range(exact_len):
+        bc.append(UInt32(u32_at(raw, at + i * 4)))
+    at += exact_len * 4
+    var bm = List[Float32](capacity=measure_len)  # ADVANCE, HEIGHT
+    for i in range(measure_len):
+        bm.append(bitcast[DType.float32](UInt32(u32_at(raw, at + i * 4))))
     return BenchIn(bytes^, Trie(bi^, bm^, bc^))
 
 
