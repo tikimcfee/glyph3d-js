@@ -47,23 +47,22 @@ numbers imply the coverage nobody wrote.
   `[load]` records but they are ad-hoc traces across different corpora, NOT a controlled
   differential, so they cannot settle it. Whoever measures it wants 15452e3 vs 1d2359e on
   one corpus via `load.stats` / `bun tools/loadstorm-check.mjs`. Until then it stays a
-  reading of code, not a number.
-- **The far-tier deletion's FRAGMENT COST was never measured** (1d2359e). The three-tier
-  LOD was removed for failing its visual purpose — it never stopped the moiré. That is a
-  different claim from "it cost nothing", and the commit argues the first while retiring
-  the second in silence. Raised by render-bender, who read the surviving path instead of
-  the commit message. The accounting, recovered from the deleted diff:
-  the loop skip fired ONLY past `lodHi` 0.60 (~1.7px/glyph on the best-resolved axis), and
-  the far sample was HOISTED out of the branch, so every fragment at every distance paid
-  one texture sample + an `fwidth` for a tier it usually never took. Net: the deletion is
-  a win above ~1.7px and an unmeasured **regression below it**, where a 256-iteration loop
-  with 2 unconditional `textureLoad`s per curve now runs for text that used to skip it —
-  on a transparent material (no early-Z) with `frustumCulled: false`.
-  **If it matters, the fix is a footprint early-out to the curve-count density proxy —
-  three lines — not the tier.** The loop-skip and the far texture were always separable;
-  the impostor fallback skipped the loop with no slab, no atlas and no compute kernels.
-  render-bender is running 15452e3 vs 1d2359e as a differential; the camera path has to
-  reach `fwMin > 0.6` or it measures nothing about this.
+  reading of code, not a number. **Still open after the perf pass** — `frame-tail`'s
+  negative result for uploads (65B/frame against a ~70B baseline) is a STILL-FRAME
+  measurement and says nothing about the load path, which is where this claim lives. Do
+  not let that number retire this one; an adjacent-looking number is exactly how an
+  unmeasured claim gets quietly settled.
+- **RESOLVED — the far-tier deletion's fragment cost, measured.** It was recorded here as
+  an unmeasured debt: I deleted the three-tier LOD (1d2359e) for failing its VISUAL
+  purpose and never measured its COST, which render-bender correctly called out as two
+  separable claims. They then measured it, and the entry is kept as a resolution rather
+  than deleted because the number is the point: **the deleted three-tier LOD is ~2x
+  throughput uncapped at 300k glyphs, ~5% at real scale, and capped, both builds hold a
+  flat 60.** So the concern was real, bounded, and does not matter in practice — and the
+  three-line footprint early-out that was on the table is NOT worth writing. The lever at
+  real scale turned out to be elsewhere entirely: frame time is linear in instances DRAWN
+  (~4.11ms/million), so the fix was drawing fewer instances per file at distance
+  (`0131cd8`, overview 80.4ms → 16.7ms), not making each fragment cheaper.
 - **The headless layout suites cannot see the layout KERNEL at all.** Measured 2026-08-30,
   not inferred: a real defect in `GlyphLayoutKernel`'s item mapping that puts 96.56% of
   slots beyond eps on the GPU leaves `layout`, `layout-fuzz`, `layout-mirror` and
