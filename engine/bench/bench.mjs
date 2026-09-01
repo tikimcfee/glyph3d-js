@@ -22,14 +22,28 @@ const PROBE_BYTE = 1028;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(HERE, 'bench.bin'));
 const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-if (dv.getUint32(0, true) !== 0x58443347) throw new Error('bad bench.bin');
+// 'G3DY' — v2, split-carrier trie. The magic changed WITH the format on purpose: this
+// reader was already stale before the split (it viewed the trie blocks as a Float32Array
+// while the generator wrote a Uint32Array with the measures bitcast, so every exact lane
+// came back as a denormal), and nothing failed because a raw byte view will accept any
+// bytes offered. A magic that moves with the layout is what turns that into an error.
+if (dv.getUint32(0, true) !== 0x59443347) {
+    throw new Error('bad or stale bench.bin — expected G3DY (split-carrier trie); '
+        + 'regenerate with: bun engine/bench/gen-bench.mjs');
+}
 const byteLen = dv.getUint32(4, true);
 const blockIndexLen = dv.getUint32(8, true);
-const blocksLen = dv.getUint32(12, true);
-const bytes = new Uint8Array(raw.buffer, raw.byteOffset + 16, byteLen);
-const blockIndex = new Uint32Array(raw.buffer.slice(raw.byteOffset + 16 + byteLen, raw.byteOffset + 16 + byteLen + blockIndexLen * 4));
-const blocks = new Float32Array(raw.buffer.slice(raw.byteOffset + 16 + byteLen + blockIndexLen * 4, raw.byteOffset + 16 + byteLen + blockIndexLen * 4 + blocksLen * 4));
-const trie = { blockIndex, blocks };
+const exactLen = dv.getUint32(12, true);
+const measureLen = dv.getUint32(16, true);
+const H = 20;
+const bytes = new Uint8Array(raw.buffer, raw.byteOffset + H, byteLen);
+let off = raw.byteOffset + H + byteLen;
+const blockIndex = new Uint32Array(raw.buffer.slice(off, off + blockIndexLen * 4));
+off += blockIndexLen * 4;
+const blocksExact = new Uint32Array(raw.buffer.slice(off, off + exactLen * 4));
+off += exactLen * 4;
+const blocksMeasure = new Float32Array(raw.buffer.slice(off, off + measureLen * 4));
+const trie = { blockIndex, blocksExact, blocksMeasure };
 
 const MB = byteLen / (1024 * 1024);
 const REPS = 5;

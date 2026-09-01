@@ -13,6 +13,21 @@ after editing core, `make dev-status` to check.
 A gate list reads as a coverage claim, so the gaps belong beside it — otherwise clean
 numbers imply the coverage nobody wrote.
 
+- **THREE fixtures ingest repo source files that we edit, so they drift on regeneration.**
+  `real-kernels.pipe.bin` reads `glyphPipelineKernels.js`; `bake-repo-file.bake.bin` and
+  `bake-repo-small-k.bake.bin` read `glyphPipelineScan.js`. Every change to those files
+  moves the corpus, so a regeneration diff can never distinguish "the pipeline's output
+  changed" from "the input file changed" without someone reasoning it out by hand — which
+  is a check that depends on remembering to perform it. Same family as the vendoring rule
+  already paid for (an untracked input makes a fixture a snapshot of an accident): here
+  the input is tracked but MUTABLE, which fails the same way more slowly. The fix is to
+  vendor a frozen slice, as `minified-sample.js` already is. **Decision pending.**
+- **No regeneration check runs `gen-bake.mjs`.** Recorded once before and not closed, and
+  it recurred: 3da6542 removed `trieLaneValue`, `gen.mjs` was updated, `gen-bake.mjs` was
+  not, and it broke outright — invisible to all fifteen engine suites, because they read
+  COMMITTED fixtures and a dead generator changes nothing they can see. Caught by stamping
+  mtimes to 2020 before regenerating. Until some check runs all three generators, that
+  stamp is the only instrument that sees this class.
 - **The `glyph` pick channel past 2²⁴.** `pick-id-gpu-check` drives the `flat` channel,
   where the ID *is* the uniform. The glyph channel adds `baseId.add(instanceIndex)` on top
   of that same uniform — checked at source level, never rendered at a large base.
