@@ -48,12 +48,12 @@
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runPipeline, SLOT_STRIDE, FLOAT_LANES, fval,
-    S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z,
-    S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD,
+import { runPipeline, mBase, eBase, slotCount,
+    E_GLYPH_ID, M_ADVANCE, M_HEIGHT, M_X, M_Y, M_Z,
+    E_ROW, E_COL, E_FLAGS, M_BASE_X, M_LINE_ADV, E_ORD,
 } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { FIXTURE_MEASURE_STRIDE as MEASURE_STRIDE, FIXTURE_COUNT_STRIDE as COUNT_STRIDE } from '../glyph_schema.mjs';
-import { buildGlyphTrie, trieLaneValue } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
+import { buildGlyphTrie, trieWireValue, trieWireLength } from '../../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const utf8 = (s) => new TextEncoder().encode(s);
@@ -232,33 +232,37 @@ const CASES = [
 ];
 
 
-// The slot buffer is u32: COUNT lanes (S_ROW/S_COL/S_FLAGS/S_ORD) are stored
+// The slot buffer is u32: COUNT lanes (E_ROW/E_COL/E_FLAGS/E_ORD) are stored
 // natively, FLOAT lanes are bitcast. The corpus carries VALUES, so each lane is
 // decoded by kind before it is written — otherwise a float lane serializes its
 // BIT PATTERN as an f64 value and every fixture shifts while nothing semantic
-// moved. S_GLYPH_ID is deferred (still a trie float), so it decodes as a float.
+// moved. E_GLYPH_ID is deferred (still a trie float), so it decodes as a float.
 // FLOAT_LANES is imported — the lane kinds live in ONE place (the oracle).
 // v3: the oracle still carries 12 mixed lanes in one u32 array; the SCHEMA says
 // measures and counts are different buffers. Split here — the generator is the
 // seam, exactly as it was for the f64 carrier in v2. Measures go out as f64
 // VALUES (representation-independent); counts go out as exact u32.
-const MEASURE_FROM = [S_X, S_Y, S_Z, S_ADVANCE, S_HEIGHT, S_GLYPH_ID, S_BASE_X, S_LINE_ADV];
-const COUNT_FROM = [S_ROW, S_COL, S_FLAGS, S_ORD];
+// (container, lane) pairs, because the FIXTURE's measure block and this layer's measure
+// ARRAY are not the same set: GLYPH_ID is written into the fixture's measure block (a
+// frozen v2 format decision) while living in the exact array here. The wire order below
+// is the format; where each value is read FROM is this layer's business. Keeping both
+// facts in one table is what makes the corpus survive a container change untouched.
+const MEASURE_FROM = [['m', M_X], ['m', M_Y], ['m', M_Z], ['m', M_ADVANCE],
+    ['m', M_HEIGHT], ['x', E_GLYPH_ID], ['m', M_BASE_X], ['m', M_LINE_ADV]];
+const COUNT_FROM = [E_ROW, E_COL, E_FLAGS, E_ORD];
 if (MEASURE_FROM.length !== MEASURE_STRIDE || COUNT_FROM.length !== COUNT_STRIDE) {
     throw new Error(`fixture lane map disagrees with the schema (${MEASURE_FROM.length}/${MEASURE_STRIDE}, `
         + `${COUNT_FROM.length}/${COUNT_STRIDE}) — run bun tools/gen-schema.mjs`);
 }
 function writeSlotValues(w, slots) {
-    const nb = slots.length / SLOT_STRIDE;
+    const nb = slotCount(slots);
     for (let i = 0; i < nb; i++) {
-        const base = i * SLOT_STRIDE;
-        for (const lane of MEASURE_FROM) {
-            w.f64(FLOAT_LANES.has(lane) ? fval(slots[base + lane]) : slots[base + lane]);
+        for (const [c, lane] of MEASURE_FROM) {
+            w.f64(c === 'm' ? slots.m[mBase(i) + lane] : slots.x[eBase(i) + lane]);
         }
     }
     for (let i = 0; i < nb; i++) {
-        const base = i * SLOT_STRIDE;
-        for (const lane of COUNT_FROM) w.u32(slots[base + lane]);
+        for (const lane of COUNT_FROM) w.u32(slots.x[eBase(i) + lane]);
     }
 }
 
@@ -299,14 +303,14 @@ for (const c of CASES) {
     const w = new Writer();
     w.u32(0x46443347); w.u32(3);
     w.u32(c.bytes.length); w.u32(items.length);
-    w.u32(trie.blockIndex.length); w.u32(trie.blocks.length);
+    w.u32(trie.blockIndex.length); w.u32(trieWireLength(trie));
     w.bytes(c.bytes);
     w.u32array(trie.blockIndex);
     // Per LANE, not raw: blocks are u32 with the measures BITCAST, so the raw word
     // for advance/height is a bit pattern, not a value. The format carries VALUES
     // precisely so a container change leaves the corpus untouched — decoding here
     // is what makes that true.
-    for (let i = 0; i < trie.blocks.length; i++) w.f64(trieLaneValue(trie.blocks, i));
+    for (let i = 0, n = trieWireLength(trie); i < n; i++) w.f64(trieWireValue(trie, i));
     for (const it of items) {
         w.u32(it.byteStart); w.u32(it.byteCount);
         w.f64(it.origin?.x || 0); w.f64(it.origin?.y || 0); w.f64(it.origin?.z || 0);

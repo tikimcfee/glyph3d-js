@@ -628,20 +628,29 @@ function _fieldUniform(initial, read) {
  * (see core/glyphVertex.js). The placeholder keeps the node valid before any pipeline
  * attaches. Read-only: vertex-stage storage is core WebGPU only as read-only.
  */
-function _fieldSlots() {
-    // 'uint', matching the slot buffer's own type (glyphPipelineKernels: the
-    // slots array is instancedArray(..., 'uint')). This declaration is what the
-    // shader reads the memory AS — WGSL will bind the same bytes as array<f32>
-    // with no validation error, so a stale 'float' here silently reinterprets
-    // every count lane as a denormal (row 5 -> 0x5 -> ~7e-45 -> 0) and makes
-    // glyphVertex's .toFloat() a no-op. Near text is unaffected; the far-LOD UV
-    // collapses to texel (0,0) for every glyph. Nothing errors.
-    const placeholder = new StorageInstancedBufferAttribute(new Uint32Array(4), 1);
-    return registerByteSlotsNode(storage(placeholder, 'uint', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
+function _fieldSlotsM() {
+    // 'float' — the measure array's own type. The declaration is what the shader reads
+    // the memory AS: WGSL binds the same bytes as array<u32> with no validation error,
+    // so a wrong type here reinterprets silently rather than failing. That is not a
+    // hypothetical — a stale 'float' over the OLD mixed u32 buffer turned every count
+    // lane into a denormal and collapsed the far-LOD UV to texel (0,0) with nothing
+    // logged. Split, the two declarations can no longer be confused for each other.
+    const phM = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
+    return registerByteSlotsNode(storage(phM, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
         const f = object && object.userData && object.userData.glyphField;
-        return (f && f._byteSlots) || self.value;
-    }));
+        return (f && f._byteSlotM) || self.value;
+    }), 'm');
 }
+
+/** The exact half of the same seam — u32 counts and the glyph identity. */
+function _fieldSlotsX() {
+    const phX = new StorageInstancedBufferAttribute(new Uint32Array(4), 1);
+    return registerByteSlotsNode(storage(phX, 'uint', 1).toReadOnly().onObjectUpdate(({ object }, self) => {
+        const f = object && object.userData && object.userData.glyphField;
+        return (f && f._byteSlotX) || self.value;
+    }), 'x');
+}
+
 
 /**
  * The group-table storage node — vec4 rows, resolved per rendered object from
@@ -682,7 +691,8 @@ function _getSharedFieldMaterial(kind) {
     const frameTexNode     = _fieldTexture(_makePlaceholderRGBATexture(), '_frameTexture');
     const frameColsNode    = _fieldUniform(1, (f) => f._frameCols || 1);
     const frameRowsNode    = _fieldUniform(1, (f) => f._frameRows || 1);
-    const byteSlotsNode    = isByte ? _fieldSlots() : null;
+    const byteSlotMNode    = isByte ? _fieldSlotsM() : null;
+    const byteSlotXNode    = isByte ? _fieldSlotsX() : null;
 
     const { vertexFn, vColor, vGroupAlpha, vAddedColor, vFillAmount, vGlyphUV, vCurveStart, vCurveCount, vMode, vEmojiCell, vRowCol } =
         _buildVertexNode({
@@ -693,7 +703,8 @@ function _getSharedFieldMaterial(kind) {
             glyphMapTex:    glyphMapTexNode,
             glyphMapWidth:  glyphMapWNode,
             renderMode:     renderModeNode,
-            byteSlots:      byteSlotsNode,
+            byteSlotM:      byteSlotMNode,
+            byteSlotX:      byteSlotXNode,
         });
 
     const outputNode = kind === 'occluder'
@@ -777,7 +788,8 @@ export default class GlyphField {
         // attributes. _byteSlots attaches at first load; slot index == instance index ==
         // arena byte offset (the mega-field is the one byte field, spanning the arena).
         this._bytePipeline = !!options.bytePipeline;
-        this._byteSlots = null;
+        this._byteSlotM = null;
+        this._byteSlotX = null;
 
         // Frustum-cull opt-out (see _createInstanceMesh): the CPU-side geometry bounds cover
         // instance positions only, so a field anchored via group offsets has a false bounding
@@ -1970,11 +1982,12 @@ export default class GlyphField {
             // glyphs would silently render some other file's bytes.
             throw new Error(`GlyphField.attachBytePipeline: nonzero slotBase (${slotBase}) — stage through a MegaGlyphField view`);
         }
-        this._byteSlots = pipeline.slots.value;
+        this._byteSlotM = pipeline.slotM.value;
+        this._byteSlotX = pipeline.slotX.value;
         // Re-point the shared slots nodes (render + pick) and wake their bind groups —
         // after an arena realloc the old buffer is destroyed, and without this every
         // frame's submit would reference it (see rebindByteSlots in core/glyphVertex).
-        rebindByteSlots(this._byteSlots);
+        rebindByteSlots({ m: this._byteSlotM, x: this._byteSlotX });
         const geom = this.instanceMesh.geometry;
         // Highlight is the capacity-sized instanceHighlight attribute — nothing to grow here.
         geom.instanceCount = Math.min(byteLength, this.config.maxInstances);

@@ -76,8 +76,8 @@ import GlyphPipelineKernels, { ARENA_MAX_BYTES } from './glyphPipelineKernels.js
  *
  *  The per-ITEM bound in stage() is a DIFFERENT rule and still applies — see there. */
 const ORDINAL_EXACT_BYTES = ARENA_MAX_BYTES;
-import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride, SLOT_STRIDE,
-    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, laneValue} from './glyphPipelineReference.js';
+import { runPipeline, paginate as refPaginate, boundsReduce as refBoundsReduce, deriveStride,
+    mBase, eBase, M_X, M_Y, M_Z, M_BASE_X, E_ROW, E_COL, E_FLAGS, F_LEADER} from './glyphPipelineReference.js';
 import { buildLiveTrie, encodeMisses } from './liveTrie.js';
 import { loadStats } from '../core/loadStats.js';
 
@@ -679,22 +679,21 @@ export default class GlyphPipelineArena {
         if (!ref) return { ok: false, reason: 'no mirror' };
         const gpu = await this._kernels.readSlots();
         let worst = 0, badRows = 0, badPos = 0;
-        const STRIDE = SLOT_STRIDE;
         for (let id = 0; id < item.byteCount; id++) {
-            const b = id * STRIDE;                    // mirror slot (file-relative)
-            const g = (item.byteStart + id) * STRIDE; // arena slot
+            const bm = mBase(id), be = eBase(id);                       // mirror (file-relative)
+            const gm = mBase(item.byteStart + id), ge = eBase(item.byteStart + id);  // arena
             // NAMED lanes, not literals. These were hardcoded 9 / 7,8 / [4,5,6,10] —
             // every one exactly +1 off, left behind when the codepoint lane was
-            // dropped (13 -> 12 lanes). So this check has been reading S_BASE_X as
-            // the leader flag and comparing the wrong lanes ever since. Constants
-            // cannot drift that way.
-            if ((ref[b + S_FLAGS] & F_LEADER) === 0) continue;
-            if (gpu[g + S_ROW] !== ref[b + S_ROW] || gpu[g + S_COL] !== ref[b + S_COL]) badRows++;
-            for (const l of [S_X, S_Y, S_Z, S_BASE_X]) {
-                // Float lanes are bitcast in the u32 buffer — DECODE before any
-                // magnitude-scaled compare, or the epsilon is applied to bit patterns.
-                // (The count lanes above stay raw: identical bits IS identical value.)
-                const gv = laneValue(gpu, g + l), rv = laneValue(ref, b + l);
+            // dropped (13 -> 12 lanes), so this check spent that time reading BASE_X
+            // as the leader flag. Constants cannot drift that way.
+            if ((ref.x[be + E_FLAGS] & F_LEADER) === 0) continue;
+            if (gpu.x[ge + E_ROW] !== ref.x[be + E_ROW] || gpu.x[ge + E_COL] !== ref.x[be + E_COL]) badRows++;
+            for (const l of [M_X, M_Y, M_Z, M_BASE_X]) {
+                // Both sides are f32 arrays now, so these ARE values — the decode step
+                // that used to stand here (the epsilon was once being applied to bit
+                // patterns) has nothing left to decode. The comparison is the same
+                // comparison; what changed is that the carrier can no longer lie about it.
+                const gv = gpu.m[gm + l], rv = ref.m[bm + l];
                 // Magnitude-scaled: a foldless line prefix is an f32 sum whose valid
                 // groupings differ by ~|x|·5e-5 — absolute eps at world scale would
                 // flag legitimate f32 grouping on any long line.

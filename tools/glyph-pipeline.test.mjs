@@ -27,9 +27,10 @@ import { readFileSync } from 'node:fs';
 import { buildGlyphTrie, trieLookup, BLOCK_INDEX_LENGTH } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
   runPipeline, decodeAndResolve, paginate, boundsReduce, allocSlots, rowsForLine,
-  deriveStride, SLOT_STRIDE, S_GLYPH_ID, S_X, S_Y, S_Z, S_ROW, S_COL,
-  S_ADVANCE, S_HEIGHT, S_FLAGS, S_BASE_X, S_ORD, F_LEADER, NEWLINE, fval,
-  FLOAT_LANES, COUNT_LANES, laneValue } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  deriveStride, SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE, mBase, eBase,
+  M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_BASE_X, M_LINE_ADV,
+  E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, E_ORD, F_LEADER, NEWLINE, cloneSlots, slotCount,
+  } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -141,10 +142,10 @@ for (const { name, bytes } of CORPORA) {
   // match the id the wanted codepoint resolves to.
   const gotGids = [], gotOffsets = [];
   for (let id = 0; id < bytes.length; id++) {
-    if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) {
-      // laneValue, not fval: it consults the lane-kind table, so this read follows
-      // S_GLYPH_ID from a float carrier to a count one without the test being edited.
-      gotGids.push(laneValue(slots, id * SLOT_STRIDE + S_GLYPH_ID)); gotOffsets.push(id);
+    if ((slots.x[eBase(id) + E_FLAGS] & F_LEADER) !== 0) {
+      // A direct read of the exact array. This went through laneValue when the kind
+      // lived in a side table and the read had to consult it; the array is the kind now.
+      gotGids.push(slots.x[eBase(id) + E_GLYPH_ID]); gotOffsets.push(id);
     }
   }
   ok(gotGids.length === wantCps.length, `${name}: leader count ${gotGids.length} vs ${wantCps.length}`);
@@ -170,14 +171,14 @@ function sequentialFold(bytes, slots, wrap = 0) {
   const xs = new Float64Array(bytes.length);
   let rowBase = 0, c = 0, x = 0;
   for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    const om = mBase(id), oe = eBase(id);
+    if ((slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
     if (wrap > 0 && c > 0 && c % wrap === 0) x = 0;        // this glyph starts a new visual row
     row[id] = rowBase + (wrap > 0 ? Math.floor(c / wrap) : 0);
     col[id] = c;
     xs[id] = x;
     if (bytes[id] === NEWLINE) { rowBase += rowsForLine(c, wrap); c = 0; x = 0; }
-    else { x += fval(slots[o + S_ADVANCE]); c += 1; }
+    else { x += slots.m[om + M_ADVANCE]; c += 1; }
   }
   return { row, col, xs };
 }
@@ -192,11 +193,11 @@ for (const wrapWidth of [0, 24, 200]) {
     const want = sequentialFold(bytes, run.slots, wrapWidth);
     let rowBad = 0, colBad = 0, xBad = 0, xWorst = 0;
     for (let id = 0; id < bytes.length; id++) {
-      const o = id * SLOT_STRIDE;
-      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      if (run.slots[o + S_ROW] !== want.row[id]) rowBad++;
-      if (run.slots[o + S_COL] !== want.col[id]) colBad++;
-      const dx = Math.abs(fval(run.slots[o + S_X]) - want.xs[id]);
+      const om = mBase(id), oe = eBase(id);
+      if ((run.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+      if (run.slots.x[oe + E_ROW] !== want.row[id]) rowBad++;
+      if (run.slots.x[oe + E_COL] !== want.col[id]) colBad++;
+      const dx = Math.abs(run.slots.m[om + M_X] - want.xs[id]);
       xWorst = Math.max(xWorst, dx);
       if (dx > ftol(want.xs[id])) xBad++;
     }
@@ -216,18 +217,18 @@ for (const wrapWidth of [0, 24, 200]) {
   let wrappedRows = 0, flatRows = 0, maxX = 0, wrappedMaxX = 0, flatXBad = 0;
   let x64 = 0;
   for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((wrapped.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    wrappedRows = Math.max(wrappedRows, wrapped.slots[o + S_ROW]);
-    flatRows = Math.max(flatRows, flat.slots[o + S_ROW]);
+    const om = mBase(id), oe = eBase(id);
+    if ((wrapped.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+    wrappedRows = Math.max(wrappedRows, wrapped.slots.x[oe + E_ROW]);
+    flatRows = Math.max(flatRows, flat.slots.x[oe + E_ROW]);
     // foldless x must TRACK the true f64 prefix — 5e-3 relative allows serial f32
     // summation's systematic rounding bias (~1e-3 at 40k constant increments; adjacent
     // spacing stays exact), while the old walk's fuse capped x at 4096 × advance —
     // a 90% relative error at the tail this lane exists to keep out.
-    if (Math.abs(fval(flat.slots[o + S_X]) - x64) > Math.max(1e-3, Math.abs(x64) * 5e-3)) flatXBad++;
-    maxX = Math.max(maxX, fval(flat.slots[o + S_X]));
-    wrappedMaxX = Math.max(wrappedMaxX, fval(wrapped.slots[o + S_X]));
-    x64 += fval(flat.slots[o + S_ADVANCE]);
+    if (Math.abs(flat.slots.m[om + M_X] - x64) > Math.max(1e-3, Math.abs(x64) * 5e-3)) flatXBad++;
+    maxX = Math.max(maxX, flat.slots.m[om + M_X]);
+    wrappedMaxX = Math.max(wrappedMaxX, wrapped.slots.m[om + M_X]);
+    x64 += flat.slots.m[om + M_ADVANCE];
   }
   ok(flatRows === 0, `single-line unwrapped: ${flatRows} rows (expected 1 absurd row)`);
   ok(wrappedRows > 190, `single-line wrapped: only ${wrappedRows} rows`);
@@ -247,8 +248,8 @@ for (const wrapWidth of [0, 24, 200]) {
   // value and folded with another. State it at the item level, where the fold reads it.
   const a = runPipeline(bytes, trie, { page, lineHeight: CELL_H });
   // Re-apply kernel 9's remap over the finished slots with the same derived params —
-  // reconstructive means NOTHING moves (it re-derives from S_BASE_X + integers).
-  const again = a.slots.slice();
+  // reconstructive means NOTHING moves (it re-derives from M_BASE_X + integers).
+  const again = cloneSlots(a.slots);
   const p = { ...page, pageStrideX: deriveStride(a.itemBounds[0], page), wrap: 0, lineHeight: CELL_H };
   for (let id = 0; id < bytes.length; id++) paginate(again, id, p);
   let moved = 0;
@@ -258,9 +259,9 @@ for (const wrapWidth of [0, 24, 200]) {
   // and it actually moved things into more than one column and more than one depth plane
   const xs = new Set(), zs = new Set();
   for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    xs.add(Math.round(fval(a.slots[o + S_X]))); zs.add(Math.round(fval(a.slots[o + S_Z])));
+    const om = mBase(id), oe = eBase(id);
+    if ((a.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+    xs.add(Math.round(a.slots.m[om + M_X])); zs.add(Math.round(a.slots.m[om + M_Z]));
   }
   ok(zs.size > 1, `paginate: only ${zs.size} depth plane(s) — the fan never engaged`);
   ok(xs.size > 4, `paginate: only ${xs.size} distinct x — vacuous`);
@@ -271,12 +272,12 @@ for (const wrapWidth of [0, 24, 200]) {
   const expectStride = a.itemBounds[0].maxRowExtent + page.pageGapX;
   let strideBad = 0, strideChecked = 0;
   for (let id = 0; id < bytes.length; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((a.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-    const yPage = Math.floor(a.slots[o + S_ROW] / page.pageRows);
+    const om = mBase(id), oe = eBase(id);
+    if ((a.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+    const yPage = Math.floor(a.slots.x[oe + E_ROW] / page.pageRows);
     if (yPage % page.pagesWide !== 1) continue;   // fan column 1: offset = stride × 1
     strideChecked++;
-    if (Math.abs((fval(a.slots[o + S_X]) - fval(a.slots[o + S_BASE_X])) - expectStride) > 1e-3) strideBad++;
+    if (Math.abs((a.slots.m[om + M_X] - a.slots.m[om + M_BASE_X]) - expectStride) > 1e-3) strideBad++;
   }
   ok(strideChecked > 50 && strideBad === 0,
     `derived stride: ${strideBad} of ${strideChecked} column-1 glyphs off the maxRowExtent+gap law`);
@@ -296,10 +297,10 @@ for (const { name, bytes } of CORPORA) {
        `${name}${page ? ' paged' : ''}: reduce differs from a second reduce`);
     let outside = 0;
     for (let id = 0; id < bytes.length; id++) {
-      const o = id * SLOT_STRIDE;
-      if ((run.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      const x = fval(run.slots[o + S_X]), y = fval(run.slots[o + S_Y]), z = fval(run.slots[o + S_Z]);
-      const w = fval(run.slots[o + S_ADVANCE]), h = fval(run.slots[o + S_HEIGHT]);
+      const om = mBase(id), oe = eBase(id);
+      if ((run.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+      const x = run.slots.m[om + M_X], y = run.slots.m[om + M_Y], z = run.slots.m[om + M_Z];
+      const w = run.slots.m[om + M_ADVANCE], h = run.slots.m[om + M_HEIGHT];
       if (x < b.min.x || y < b.min.y || z < b.min.z
        || x + w > b.max.x + 1e-9 || y + h > b.max.y + 1e-9 || z > b.max.z) outside++;
     }
@@ -332,8 +333,8 @@ for (const { name, bytes } of CORPORA) {
 
   // file-relative row/col: the fold reset at each file's first byte
   for (let i = 1; i < defs.length; i++) {
-    const b = starts[i] * SLOT_STRIDE;
-    if (base.slots[b + S_ROW] !== 0 || base.slots[b + S_COL] !== 0) relBad++;
+    const b = eBase(starts[i]);
+    if (base.slots.x[b + E_ROW] !== 0 || base.slots.x[b + E_COL] !== 0) relBad++;
   }
 
   // per-item equality with the single-file runs
@@ -342,13 +343,15 @@ for (const { name, bytes } of CORPORA) {
   for (let i = 0; i < defs.length; i++) {
     const single = singles[i];
     for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
-      const gm = (starts[i] + id) * SLOT_STRIDE, gs = id * SLOT_STRIDE;
-      if ((base.slots[gm + S_FLAGS] & F_LEADER) === 0) continue;
-      if (base.slots[gm + S_ROW] !== single.slots[gs + S_ROW]
-       || base.slots[gm + S_COL] !== single.slots[gs + S_COL]) driftBad++;
-      for (const l of [S_X, S_Y, S_Z]) {
-        // Decode both sides — float lanes are bitcast in the u32 buffer.
-        const bv = fval(base.slots[gm + l]), sv = fval(single.slots[gs + l]);
+      const gx = eBase(starts[i] + id), sx = eBase(id);
+      const gmm = mBase(starts[i] + id), smm = mBase(id);
+      if ((base.slots.x[gx + E_FLAGS] & F_LEADER) === 0) continue;
+      if (base.slots.x[gx + E_ROW] !== single.slots.x[sx + E_ROW]
+       || base.slots.x[gx + E_COL] !== single.slots.x[sx + E_COL]) driftBad++;
+      for (const l of [M_X, M_Y, M_Z]) {
+        // Both sides are f32 arrays — these ARE the values. The decode that stood here
+        // had nothing to do with the comparison and everything to do with the container.
+        const bv = base.slots.m[gmm + l], sv = single.slots.m[smm + l];
         if (Math.abs(bv - sv) > ftol(sv)) posBad++;
       }
     }
@@ -362,10 +365,11 @@ for (const { name, bytes } of CORPORA) {
     const re = runPipeline(concat, trie, { wrapWidth, lineHeight: CELL_H, zStep, items: items2 });
     for (const i of [0, 2]) {
       for (let id = 0; id < defs[i].corpus.bytes.length; id++) {
-        const b = (starts[i] + id) * SLOT_STRIDE;
-        for (const l of [S_X, S_Y, S_Z, S_ROW, S_COL]) {
-          if (re.slots[b + l] !== base.slots[b + l]) { isoBad++; break; }
-        }
+        const bm = mBase(starts[i] + id), bx = eBase(starts[i] + id);
+        let moved = false;
+        for (const l of [M_X, M_Y, M_Z]) if (re.slots.m[bm + l] !== base.slots.m[bm + l]) moved = true;
+        for (const l of [E_ROW, E_COL]) if (re.slots.x[bx + l] !== base.slots.x[bx + l]) moved = true;
+        if (moved) isoBad++;
       }
     }
   }
@@ -389,7 +393,7 @@ for (const { name, bytes } of CORPORA) {
   ok(run.misses.every((cp) => cp === 0x1F4A9), 'missing: reported the right codepoint');
   // 'c' must sit one full cell past the un-encoded emoji's advance, not on top of it.
   const cIdx = bytes.indexOf(0x63);   // 'c' — ASCII, so byte == codepoint
-  ok(fval(run.slots[cIdx * SLOT_STRIDE + S_X]) > CELL_W * 2.5,
+  ok(run.slots.m[mBase(cIdx) + M_X] > CELL_W * 2.5,
      'missing: an un-encoded glyph still occupies its advance');
 }
 
@@ -402,21 +406,28 @@ for (const { name, bytes } of CORPORA) {
 // shared table is TOTAL and DISJOINT — add a lane without classifying it and this
 // fails, instead of some consumer quietly reading it as the wrong kind.
 {
-  const seen = new Set();
-  let overlap = 0, missing = [];
-  for (const l of FLOAT_LANES) { if (seen.has(l)) overlap++; seen.add(l); }
-  for (const l of COUNT_LANES) { if (seen.has(l)) overlap++; seen.add(l); }
-  for (let l = 0; l < SLOT_STRIDE; l++) if (!seen.has(l)) missing.push(l);
-  ok(overlap === 0, `no lane is both a count and a float (${overlap} overlapping)`);
-  ok(missing.length === 0, `every lane 0..${SLOT_STRIDE - 1} is classified (unclassified: [${missing}])`);
-  ok(seen.size === SLOT_STRIDE, `the table covers exactly SLOT_STRIDE lanes (${seen.size} vs ${SLOT_STRIDE})`);
-  // S_GLYPH_ID is deliberately a FLOAT lane: it is copied from the trie's f32 blocks.
-  // S_GLYPH_ID was the pipeline's last float-carried identity, and it was one only
-  // because decode copied it verbatim from an f32 trie block. The trie moved to u32
-  // (identities native, measures bitcast), so the id is exact end to end.
-  ok(COUNT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID is a COUNT lane — an identity, stored exactly');
-  ok(!FLOAT_LANES.has(S_GLYPH_ID), 'S_GLYPH_ID no longer rides a float carrier');
-  ok(COUNT_LANES.has(S_ORD), 'S_ORD is a count lane — the exactness the migration bought');
+  // RESTATED FOR TWO CONTAINERS. This used to assert that FLOAT_LANES and COUNT_LANES
+  // were disjoint and total over SLOT_STRIDE — a side table classifying lanes inside one
+  // mixed buffer. Those sets are gone: a lane's array IS its kind, so there is nothing
+  // left to classify and nothing left to disagree. What survives is the property the old
+  // tooth actually protected — that no lane went missing in the move.
+  const M_LANES = [M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_BASE_X, M_LINE_ADV];
+  const E_LANES = [E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, E_ORD];
+  const perm = (lanes, stride) => {
+    const l = lanes.slice().sort((a, b) => a - b);
+    return l.length === stride && l.every((v, i) => v === i);
+  };
+  ok(perm(M_LANES, SLOT_MEASURE_STRIDE),
+     `measure lanes are a permutation of 0..${SLOT_MEASURE_STRIDE - 1} (got [${M_LANES}])`);
+  ok(perm(E_LANES, SLOT_EXACT_STRIDE),
+     `exact lanes are a permutation of 0..${SLOT_EXACT_STRIDE - 1} (got [${E_LANES}])`);
+  ok(SLOT_MEASURE_STRIDE + SLOT_EXACT_STRIDE === 12,
+     `the split conserves the record: 7 + 5 = 12 lanes (got ${SLOT_MEASURE_STRIDE} + ${SLOT_EXACT_STRIDE})`);
+  // The two that cost the most to learn, now structural rather than asserted: an
+  // identity and an ordinal cannot ride a float carrier because there is no float
+  // carrier for them to ride. Both are lanes of the u32 array by construction.
+  ok(E_LANES.includes(E_GLYPH_ID), 'GLYPH_ID is an EXACT-array lane — the last float-carried identity, settled');
+  ok(E_LANES.includes(E_ORD), 'ORD is an EXACT-array lane — the ordinal wall, settled');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} glyph-pipeline: ${pass} passed, ${fail} failed`);

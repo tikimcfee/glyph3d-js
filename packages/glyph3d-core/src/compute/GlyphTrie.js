@@ -4,12 +4,13 @@
  * The GPU resolves a decoded codepoint to its glyph with two dependent loads and no
  * hashing:
  *
- *     block = blockIndex[cp >> 8]                    // u32[4352], covers all of Unicode
- *     entry = blocks[(block << 8 | (cp & 0xFF)) * 4] // {glyphId, advance, height, flags}
+ *     block = blockIndex[cp >> 8]                          // u32[4352], all of Unicode
+ *     entry = { blocksExact[e * 2 + ...], blocksMeasure[e * 2 + ...] }
  *
- * BOTH buffers are Uint32Array. The entry mixes two KINDS and the container carries them
- * the way the slot buffer does: glyphId and flags are exact identities/bitfields stored
- * NATIVELY, advance and height are measures stored as BITCAST f32. See ENTRY_STRIDE.
+ * The entry is SPLIT BY CARRIER: glyphId and flags are exact (identity, bitfield) and
+ * live in a Uint32Array; advance and height are measures and live in a Float32Array.
+ * There are no bitcasts and no lane-kind table, because the array a lane lives in IS
+ * its kind.
  *
  * This is the standard Unicode property trie (ICU's UTrie2 shape, one level shallower).
  * It replaces hashing the character and matching hashes to atlas slots: no collisions to
@@ -37,55 +38,53 @@ export const BLOCK_MASK = BLOCK_SIZE - 1;
 export const BLOCK_INDEX_LENGTH = 0x110000 >> BLOCK_SHIFT;   // 4352
 
 /**
- * u32 words per entry: [glyphId, advance, height, flags].
+ * Entry lanes, SPLIT BY CARRIER — two arrays, one kind each.
  *
- * glyphId and flags are EXACT (an identity and a bitfield); advance and height are
- * MEASURES. One array keeps the GPU binding to one buffer, so the two kinds share a
- * container — and the container is uint, with the measures bitcast.
- *
- * It used to be a Float32Array with glyphId riding an f32 lane, justified as "glyph ids
- * are well under 2^24, so the integer is exact." That is the argument the ordinal wall
- * died of: exact-in-practice on a float carrier is a bound nobody is checking, and it
- * made S_GLYPH_ID a float lane all the way up the pipeline because the value was copied
- * verbatim from here. flags was worse — a bitfield read with `&` through an f32.
+ * It was one Uint32Array of four lanes with advance/height bitcast, and before that a
+ * Float32Array with glyphId riding an f32 lane, justified as "glyph ids are well under
+ * 2^24, so the integer is exact." That is the argument the ordinal wall died of, and it
+ * propagated: the slot buffer's GLYPH_ID was a float lane only because decode copied it
+ * verbatim from here. A container's mistake travels to everything it feeds.
  */
-export const ENTRY_STRIDE = 4;
+export const TRIE_EXACT_STRIDE = 2;
+export const TE_GLYPH_ID = 0;     // identity
+export const TE_FLAGS = 1;        // bitfield
 
-/** Entry lane offsets. EXACT lanes are stored natively; MEASURE lanes are bitcast f32. */
-export const LANE_GLYPH_ID = 0;   // exact — identity
-export const LANE_ADVANCE = 1;    // measure — bitcast
-export const LANE_HEIGHT = 2;     // measure — bitcast
-export const LANE_FLAGS = 3;      // exact — bitfield
+export const TRIE_MEASURE_STRIDE = 2;
+export const TM_ADVANCE = 0;
+export const TM_HEIGHT = 1;
 
-/** Lanes of an entry that carry a bitcast f32 rather than a native integer. */
-export const TRIE_MEASURE_LANES = Object.freeze(new Set([LANE_ADVANCE, LANE_HEIGHT]));
-
-// IEEE reinterpretation, module-local ON PURPOSE. glyphPipelineReference exports the same
-// pair, but it IMPORTS this file (trieLookup), so importing back would be circular — and
-// this module is deliberately dependency-free and worker-safe. The duplication is two
-// three-line primitives that reinterpret bits; unlike a lane-KIND table they cannot drift
-// semantically. NOTHING asserts the two agree — no test imports both pairs.
-const _f = new Float32Array(1);
-const _u = new Uint32Array(_f.buffer);
-/** f32 value -> its u32 bit pattern. @param {number} f @returns {number} */
-export function trieFbits(f) { _f[0] = f; return _u[0]; }
-/** u32 bit pattern -> the f32 it encodes. @param {number} u @returns {number} */
-export function trieFval(u) { _u[0] = u >>> 0; return _f[0]; }
+/** Logical lanes per entry, in FIXTURE/WIRE order: [glyphId, advance, height, flags].
+ *  The corpus carries VALUES in this order so a container change cannot move its bytes;
+ *  `trieWireValue` is the one place that mapping lives. */
+export const ENTRY_LANES = 4;
 
 /**
- * The VALUE at a flat index into `blocks`, decoded by lane kind — the trie's mirror of
- * laneValue() for the slot buffer.
+ * The entry's `i`th lane in WIRE order, as a VALUE.
  *
- * Anything that serializes the trie by VALUE (the fixture corpus carries f64 values so a
- * container change cannot move the bytes) must go through this. Writing the raw words
- * instead re-serializes the measures as their BIT PATTERNS, which is a corpus change
- * wearing the costume of a no-op — it is what the fixture regeneration caught when the
- * container moved.
+ * Anything that serializes the trie must go through this. Writing raw words instead
+ * re-serialized the measures as BIT PATTERNS — a corpus change wearing the costume of a
+ * no-op, which is exactly what the fixture regeneration caught when the container last
+ * moved. Now that the measures live in an f32 array there are no bit patterns to leak,
+ * but the wire ORDER still has to come from one place.
  *
- * @param {Uint32Array} blocks @param {number} index @returns {number}
+ * @param {{blocksExact:Uint32Array, blocksMeasure:Float32Array}} trie
+ * @param {number} i flat wire index (entry * ENTRY_LANES + lane)
+ * @returns {number}
  */
-export function trieLaneValue(blocks, index) {
-    return TRIE_MEASURE_LANES.has(index % ENTRY_STRIDE) ? trieFval(blocks[index]) : blocks[index];
+export function trieWireValue(trie, i) {
+    const e = (i / ENTRY_LANES) | 0, lane = i % ENTRY_LANES;
+    switch (lane) {
+        case 0: return trie.blocksExact[e * TRIE_EXACT_STRIDE + TE_GLYPH_ID];
+        case 1: return trie.blocksMeasure[e * TRIE_MEASURE_STRIDE + TM_ADVANCE];
+        case 2: return trie.blocksMeasure[e * TRIE_MEASURE_STRIDE + TM_HEIGHT];
+        default: return trie.blocksExact[e * TRIE_EXACT_STRIDE + TE_FLAGS];
+    }
+}
+
+/** Wire-order lane count for a built trie (what the fixture header records). */
+export function trieWireLength(trie) {
+    return (trie.blocksExact.length / TRIE_EXACT_STRIDE) * ENTRY_LANES;
 }
 
 /** This codepoint has no atlas entry yet — render blank, report it, keep the layout right. */
@@ -101,8 +100,8 @@ export const FLAG_MISSING = 1;
  * @param {number} [opts.missingAdvance] - advance an unmapped codepoint still occupies, so a
  *   file full of un-encoded characters lays out at the right width instead of collapsing.
  * @param {number} [opts.missingHeight]
- * @returns {{blockIndex: Uint32Array, blocks: Uint32Array, blockCount: number,
- *            mapped: number, bytes: number}}
+ * @returns {{blockIndex: Uint32Array, blocksExact: Uint32Array,
+ *            blocksMeasure: Float32Array, blockCount: number, mapped: number, bytes: number}}
  */
 export function buildGlyphTrie(codepoints, resolve, opts = {}) {
     const missingAdvance = opts.missingAdvance ?? 0;
@@ -110,13 +109,13 @@ export function buildGlyphTrie(codepoints, resolve, opts = {}) {
 
     // Block 0 is the shared MISSING block — every unmapped block slot points at it, so the
     // common case (almost all of Unicode) costs one u32 in blockIndex and nothing else.
-    const missingBlock = new Uint32Array(BLOCK_SIZE * ENTRY_STRIDE);
+    const missingExact = new Uint32Array(BLOCK_SIZE * TRIE_EXACT_STRIDE);
+    const missingMeasure = new Float32Array(BLOCK_SIZE * TRIE_MEASURE_STRIDE);
     for (let i = 0; i < BLOCK_SIZE; i++) {
-        const o = i * ENTRY_STRIDE;
-        missingBlock[o + LANE_GLYPH_ID] = 0;                        // exact
-        missingBlock[o + LANE_ADVANCE] = trieFbits(missingAdvance); // measure
-        missingBlock[o + LANE_HEIGHT] = trieFbits(missingHeight);   // measure
-        missingBlock[o + LANE_FLAGS] = FLAG_MISSING;                // exact
+        missingExact[i * TRIE_EXACT_STRIDE + TE_GLYPH_ID] = 0;
+        missingExact[i * TRIE_EXACT_STRIDE + TE_FLAGS] = FLAG_MISSING;
+        missingMeasure[i * TRIE_MEASURE_STRIDE + TM_ADVANCE] = missingAdvance;
+        missingMeasure[i * TRIE_MEASURE_STRIDE + TM_HEIGHT] = missingHeight;
     }
 
     // Group the mapped codepoints by block so each block is built once.
@@ -131,43 +130,51 @@ export function buildGlyphTrie(codepoints, resolve, opts = {}) {
     }
 
     const blockIndex = new Uint32Array(BLOCK_INDEX_LENGTH);   // all zero = the missing block
-    const built = [missingBlock];
-    /** Content-dedup: identical blocks share storage (runs of identical metrics are common). */
+    const built = [{ e: missingExact, m: missingMeasure }];
+    /** Content-dedup: identical blocks share storage (runs of identical metrics are common).
+     *  The key spans BOTH arrays — two blocks agreeing on ids and flags but differing in
+     *  advance are different blocks, and a key built from one array alone would merge them. */
     const seen = new Map();
     let mapped = 0;
 
     for (const [b, cps] of byBlock) {
-        const block = new Uint32Array(BLOCK_SIZE * ENTRY_STRIDE);
-        block.set(missingBlock);                    // start fully missing, fill what resolves
+        const e = new Uint32Array(missingExact);       // start fully missing, fill what resolves
+        const m = new Float32Array(missingMeasure);
         let any = false;
         for (const cp of cps) {
-            const m = resolve(cp);
-            if (!m) continue;
-            const o = (cp & BLOCK_MASK) * ENTRY_STRIDE;
-            block[o + LANE_GLYPH_ID] = m.glyphId;              // exact — native
-            block[o + LANE_ADVANCE] = trieFbits(m.advance);    // measure — bitcast
-            block[o + LANE_HEIGHT] = trieFbits(m.height);      // measure — bitcast
-            block[o + LANE_FLAGS] = 0;                         // exact — native
+            const g = resolve(cp);
+            if (!g) continue;
+            const eo = (cp & BLOCK_MASK) * TRIE_EXACT_STRIDE;
+            const mo = (cp & BLOCK_MASK) * TRIE_MEASURE_STRIDE;
+            e[eo + TE_GLYPH_ID] = g.glyphId;
+            e[eo + TE_FLAGS] = 0;
+            m[mo + TM_ADVANCE] = g.advance;
+            m[mo + TM_HEIGHT] = g.height;
             any = true;
             mapped++;
         }
         if (!any) continue;                          // nothing resolved — leave it pointing at missing
 
-        const key = block.join(',');
+        const key = `${e.join(',')}|${m.join(',')}`;
         let slot = seen.get(key);
-        if (slot === undefined) { slot = built.length; built.push(block); seen.set(key, slot); }
+        if (slot === undefined) { slot = built.length; built.push({ e, m }); seen.set(key, slot); }
         blockIndex[b] = slot;
     }
 
-    const blocks = new Uint32Array(built.length * BLOCK_SIZE * ENTRY_STRIDE);
-    for (let i = 0; i < built.length; i++) blocks.set(built[i], i * BLOCK_SIZE * ENTRY_STRIDE);
+    const blocksExact = new Uint32Array(built.length * BLOCK_SIZE * TRIE_EXACT_STRIDE);
+    const blocksMeasure = new Float32Array(built.length * BLOCK_SIZE * TRIE_MEASURE_STRIDE);
+    for (let i = 0; i < built.length; i++) {
+        blocksExact.set(built[i].e, i * BLOCK_SIZE * TRIE_EXACT_STRIDE);
+        blocksMeasure.set(built[i].m, i * BLOCK_SIZE * TRIE_MEASURE_STRIDE);
+    }
 
     return {
         blockIndex,
-        blocks,
+        blocksExact,
+        blocksMeasure,
         blockCount: built.length,
         mapped,
-        bytes: blockIndex.byteLength + blocks.byteLength,
+        bytes: blockIndex.byteLength + blocksExact.byteLength + blocksMeasure.byteLength,
     };
 }
 
@@ -175,19 +182,20 @@ export function buildGlyphTrie(codepoints, resolve, opts = {}) {
  * Resolve one codepoint — the exact two-load sequence the shader runs, for CPU-side
  * reference and tests. Never diverge these: this IS the shader body in JS.
  *
- * @param {{blockIndex: Uint32Array, blocks: Uint32Array}} trie
+ * @param {{blockIndex:Uint32Array, blocksExact:Uint32Array, blocksMeasure:Float32Array}} trie
  * @param {number} cp
  * @returns {{glyphId:number, advance:number, height:number, missing:boolean}}
  */
 export function trieLookup(trie, cp) {
     const block = trie.blockIndex[cp >> BLOCK_SHIFT];
-    const o = ((block << BLOCK_SHIFT) | (cp & BLOCK_MASK)) * ENTRY_STRIDE;
+    const entry = (block << BLOCK_SHIFT) | (cp & BLOCK_MASK);
+    const eo = entry * TRIE_EXACT_STRIDE, mo = entry * TRIE_MEASURE_STRIDE;
     return {
-        glyphId: trie.blocks[o + LANE_GLYPH_ID],                 // exact — native u32
-        advance: trieFval(trie.blocks[o + LANE_ADVANCE]),        // measure — bitcast
-        height: trieFval(trie.blocks[o + LANE_HEIGHT]),          // measure — bitcast
-        // A BITFIELD, and now genuinely one: `&` on the raw word rather than on an f32
-        // that JS coerced to int32 first.
-        missing: (trie.blocks[o + LANE_FLAGS] & FLAG_MISSING) !== 0,
+        glyphId: trie.blocksExact[eo + TE_GLYPH_ID],
+        advance: trie.blocksMeasure[mo + TM_ADVANCE],
+        height: trie.blocksMeasure[mo + TM_HEIGHT],
+        // A real bitfield test on a real integer lane.
+        missing: (trie.blocksExact[eo + TE_FLAGS] & FLAG_MISSING) !== 0,
     };
 }
+

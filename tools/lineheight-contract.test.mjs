@@ -3,7 +3,7 @@
 //   bun tools/lineheight-contract.test.mjs
 //
 // lineHeight is the ITEM's row pitch, never the glyph's own height. The oracle used to
-// substitute the glyph's S_HEIGHT when an item omitted it, which staggered baselines
+// substitute the glyph's M_HEIGHT when an item omitted it, which staggered baselines
 // within a row: a taller CJK glyph at -row*1.61 beside its neighbours at -row*1.4. The
 // GPU kernel never had that branch, so the oracle and the Mojo port agreed with each
 // other and disagreed with the renderer, in a case no gate could see.
@@ -26,7 +26,7 @@
 // how the lineHeight branch survived. So the last section takes a STAGED item and feeds it
 // to the oracle, pinning the relationship rather than the two endpoints.
 
-import { runPipeline, assertLineHeight, SLOT_STRIDE, S_Y } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, assertLineHeight, SLOT_MEASURE_STRIDE, mBase, eBase, M_Y } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { runScanPipeline } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import GlyphPipelineArena from '../packages/glyph3d-core/src/compute/GlyphPipelineArena.js';
@@ -93,9 +93,9 @@ console.log('the ITEM owns the pitch — a page-level lineHeight is not consulte
                     lineHeight: ITEM_LH, page: { pageRows: 4, pagesWide: 1 } }] });
 
     let differs = 0;
-    for (let i = 0; i * SLOT_STRIDE < withPage.slots.length; i++) {
-        const o = i * SLOT_STRIDE;
-        if (withPage.slots[o + S_Y] !== noPageLh.slots[o + S_Y]) differs++;
+    for (let i = 0; i < withPage.slots.m.length / SLOT_MEASURE_STRIDE; i++) {
+        const om = mBase(i), oe = eBase(i);
+        if (withPage.slots.m[om + M_Y] !== noPageLh.slots.m[om + M_Y]) differs++;
     }
     ok(differs === 0,
        `a page-level lineHeight (${PAGE_LH}) changes nothing next to the item's (${ITEM_LH}) `

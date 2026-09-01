@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bakeFile } from '../../packages/glyph3d-core/src/compute/glyphBake.js';
-import { runPipeline, SLOT_STRIDE, S_ROW } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, eBase, E_ROW } from '../../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { runScanPipeline } from '../../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 
 // Probe a NAMED lane of a named byte. The old checksum sampled slots[12345] — a
@@ -52,9 +52,9 @@ bench('bake      (js/bun)', () => {
 });
 bench('pipeline  (js/bun)', () => {
     const r = runPipeline(bytes, trie, { origin: { x: 0, y: 0, z: 0 }, lineHeight: 1.0, wrapWidth: 100 });
-    return r.leaders + (r.slots[PROBE_BYTE * SLOT_STRIDE + S_ROW] | 0);
+    return r.leaders + (r.slots.x[eBase(PROBE_BYTE) + E_ROW] | 0);
 });
 bench('scan      (js/bun)', () => {
     const r = runScanPipeline(bytes, trie, { origin: { x: 0, y: 0, z: 0 }, lineHeight: 1.0, wrapWidth: 100 });
-    return r.leaders + (r.slots[PROBE_BYTE * SLOT_STRIDE + S_ROW] | 0);
+    return r.leaders + (r.slots.x[eBase(PROBE_BYTE) + E_ROW] | 0);
 });

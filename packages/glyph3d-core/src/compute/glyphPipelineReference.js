@@ -69,97 +69,118 @@ export const NEWLINE = 0x0A;
 // The slot buffer is u32. Twelve lanes, two kinds, and the buffer can only have
 // one type — so one kind travels reinterpreted.
 //
-// COUNTS (S_ROW/S_COL/S_FLAGS/S_ORD) are stored natively and are now exact for
+// COUNTS (ROW/COL/FLAGS/ORD) live in the u32 array and are exact for
 // the full u32 range. That is the whole point: they used to ride f32 lanes,
 // where consecutive integers stop being representable past 2^24 and two glyphs
 // fold onto one ordinal while addressing stays perfectly exact.
 //
-// FLOATS (S_ADVANCE/S_HEIGHT/S_X/S_Y/S_Z/S_BASE_X/S_LINE_ADV) are bitcast. This
-// is the direction that costs nothing: a bitcast is a reinterpretation, so all
-// 32 bits survive and the round-trip is exact — unlike the int-in-float it
-// replaces, which destroyed information.
+// MEASURES (X/Y/Z/ADVANCE/HEIGHT/BASE_X/LINE_ADV) live in the f32 array, where a
+// measure is simply the number it is.
 //
-// fbits() also PRESERVES THE ROUNDING. Storing into a Float32Array rounded to
-// f32 implicitly, and the oracle's whole discipline depends on that happening
-// at exactly the same points; the Float32Array staging view below rounds
-// identically, so no store changes value.
-const _fbuf = new Float32Array(1);
-const _ubuf = new Uint32Array(_fbuf.buffer);
-/** f32 value → its u32 bit pattern (rounds to f32 exactly as a lane store did). */
-export function fbits(f) { _fbuf[0] = f; return _ubuf[0]; }
-/** u32 bit pattern → the f32 value it encodes. */
-export function fval(u) { _ubuf[0] = u >>> 0; return _fbuf[0]; }
+// THE IEEE REINTERPRETATION PAIR IS GONE. `fbits` wrote an f32's bit pattern into a u32
+// lane and `fval` read it back; their entire job was moving a measure into and out of a
+// container that was the wrong kind for it. Assignment into a Float32Array rounds to f32
+// exactly as fbits did — that is what its own "PRESERVES THE ROUNDING" note was about —
+// so with the measures in their own array there is no pattern left to write. Deleting
+// the helpers is the migration's last step, and the point of deleting them rather than
+// leaving them unused: the primitive that made a mixed container POSSIBLE no longer
+// exists, so the next lane cannot quietly reach for it.
 
 
 /**
  * Per-slot lanes. One flat Uint32Array so the GPU binds one buffer — counts native,
  * floats bitcast (see LANE KINDS above).
  *
- * The fold pass (scan on the GPU, serial here) writes ONLY the exact lanes — S_ROW,
- * S_COL, S_LINE_ADV, S_ORD. resolveX turns them into the fold-relative S_BASE_X (plus
- * the unpaginated S_X/S_Y/S_Z), and paginate remaps from S_BASE_X + integers. Each
+ * The fold pass (scan on the GPU, serial here) writes E_ROW, E_COL, E_ORD and
+ * M_LINE_ADV. resolveX turns them into the fold-relative M_BASE_X (plus the
+ * unpaginated M_X/M_Y/M_Z), and paginate remaps from M_BASE_X + the exact lanes. Each
  * pass's cross-thread read set is the PREVIOUS pass's write set — no pass reads a lane
  * written by a racing sibling, which is what makes every dispatch deterministic.
  */
-export const SLOT_STRIDE = 12;
-export const S_GLYPH_ID = 0;
-export const S_ADVANCE = 1;
-export const S_HEIGHT = 2;
-export const S_X = 3;
-export const S_Y = 4;
-export const S_Z = 5;
-export const S_ROW = 6;      // exact: the glyph's visual row (wrap segments included)
-export const S_COL = 7;      // exact: glyphs since the last newline
-export const S_FLAGS = 8;
-export const S_BASE_X = 9;   // resolveX's fold-relative x (+ item origin), written once —
-                             // paginate reads THIS, so the page remap is a pure function
-                             // of base position and re-running it accumulates nothing
-export const S_LINE_ADV = 10; // exact fold: f32 advance sum since line start (exclusive).
-                              // The foldless x, and resolveX's gather-free source.
-export const S_ORD = 11;      // exact fold: item-relative leader ordinal (newlines
-                              // included). Native u32: exact for the full range.
+/**
+ * THE SLOT RECORD, SPLIT BY CARRIER — two arrays, one kind each.
+ *
+ * It was ONE Uint32Array of 12 lanes with the seven measures held as bitcast f32 and a
+ * LANE_KIND set on the side saying which was which. That container cost this project the
+ * ordinal wall, the pick ids, foldScalars' totalRows, GLYPH_ID, and I_BYTE_COUNT — five
+ * defects, one cause, every one of them an exact value on a float carrier. Each was fixed
+ * by moving a lane; the CAUSE was the container, and it survived every fix.
+ *
+ * Split, the kind IS the container. A measure read as a count is not a correct-looking
+ * access returning a denormal — it is a read of a different array. `fbits`/`fval` are
+ * gone from this file's slot paths entirely: writing an f64 into a Float32Array rounds
+ * exactly as `fbits` did (that is what its "PRESERVES THE ROUNDING" note was about), so
+ * the bit-pattern round trip existed only to smuggle a float through a uint container.
+ *
+ * LANE ORDER IS THE WIRE ORDER. The render-read fields form a contiguous PREFIX of each
+ * array — X, Y, Z, ADVANCE, HEIGHT then the fold scratch; GLYPH_ID, ROW, COL then the
+ * fold scratch. That is the contract's truncation rule (`glyphContract.js`: emitting a
+ * record is a TRUNCATION of what the producer keeps, never a repack), and it makes this
+ * layer's containers structurally identical to the native backend's GlyphRecord —
+ * [f32;5] + [u32;3] with a 32-byte assert. Same kinds, same order, no bitcast at the seam.
+ */
+
+/** MEASURE lanes — an f32 array. Lanes 0..4 are the render-read prefix. */
+export const SLOT_MEASURE_STRIDE = 7;
+export const M_X = 0;
+export const M_Y = 1;
+export const M_Z = 2;
+export const M_ADVANCE = 3;
+export const M_HEIGHT = 4;
+export const M_BASE_X = 5;    // resolveX's fold-relative x (+ item origin), written once —
+                              // paginate reads THIS, so the page remap is a pure function
+                              // of base position and re-running it accumulates nothing
+export const M_LINE_ADV = 6;  // fold: advance sum since line start (exclusive). The
+                              // foldless x, and resolveX's gather-free source.
+
+/** EXACT lanes — a u32 array. Lanes 0..2 are the render-read prefix. */
+export const SLOT_EXACT_STRIDE = 5;
+export const E_GLYPH_ID = 0;
+export const E_ROW = 1;       // the glyph's visual row (wrap segments included)
+export const E_COL = 2;       // glyphs since the last newline
+export const E_FLAGS = 3;
+export const E_ORD = 4;       // fold: item-relative leader ordinal (newlines included)
+
+/** Render-read prefix lengths — what a record emission truncates TO. */
+export const RENDER_MEASURE_COUNT = 5;   // X Y Z ADVANCE HEIGHT
+export const RENDER_EXACT_COUNT = 3;     // GLYPH_ID ROW COL
+
+/**
+ * Allocate/address helpers. Every lane site goes through a NAMED lane and one of these
+ * two arrays; there is no flat index into a mixed buffer any more, so there is nothing
+ * left for a `laneValue`-style kind lookup to disambiguate. `laneValue` and `isFloatLane`
+ * are deleted rather than ported: a helper whose whole job was telling two kinds apart
+ * inside one container has no meaning once the container is the kind.
+ */
+export const mBase = (id) => id * SLOT_MEASURE_STRIDE;
+export const eBase = (id) => id * SLOT_EXACT_STRIDE;
+
+/** Byte capacity of a slot pair — derived from the MEASURE array, and asserted against
+ *  the exact one so a pair built from mismatched lengths cannot pass silently. */
+export function slotCount(s) {
+    const n = s.m.length / SLOT_MEASURE_STRIDE;
+    if (s.x.length / SLOT_EXACT_STRIDE !== n) {
+        throw new Error(`slotCount: the pair disagrees — ${n} bytes of measures vs `
+            + `${s.x.length / SLOT_EXACT_STRIDE} of exact lanes`);
+    }
+    return n;
+}
+
+/** A deep copy of a slot pair (`slots.slice()` on the old flat buffer). */
+export const cloneSlots = (s) => ({ m: s.m.slice(), x: s.x.slice() });
 
 // There is NO codepoint lane: a slot index IS its source byte offset, so the codepoint
 // is always re-derivable from the byte buffer. The one downstream decision it fed —
-// "is this a newline?" — is a decode-time fact and rides S_FLAGS as F_NEWLINE.
+// "is this a newline?" — is a decode-time fact and rides E_FLAGS as F_NEWLINE.
 export const F_LEADER = 1;        // this byte begins a codepoint
 
-/**
- * LANE KINDS — the one place that says which lanes are counts and which are floats.
- *
- * The slot buffer is u32 and holds two kinds of value, so every consumer that reads
- * a lane has to know which it is. That knowledge used to live in prose and in
- * ad-hoc sets copied into gen.mjs, verifyItem, and four comparators — and EVERY
- * copy drifted at least once: verifyItem carried hardcoded indices that went stale
- * by one when the codepoint lane was dropped (13 -> 12), and three tolerance
- * comparators silently measured bit patterns after the u32 migration.
- *
- * Derive from these. Do not re-list lanes at a call site.
- *
- * FLOAT lanes are bitcast (fbits/fval on the CPU, TSL bitcast on the GPU).
- * COUNT lanes are stored natively and are exact across the whole u32 range — which
- * is the point of the migration.
- *
- * S_GLYPH_ID is a COUNT lane: it is copied straight from the trie's blocks, and the
- * trie moved to u32 (identities native, measures bitcast), so the id is exact end to
- * end. It was the pipeline's LAST float-carried identity — a float lane only because
- * decode copied it verbatim from an f32 trie block. The fix is pinned by
- * `tools/contract-conformance.test.mjs`, so a return to FLOAT_LANES fails there.
- */
-export const FLOAT_LANES = Object.freeze(new Set([
-    S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV,
-]));
-/** Lanes stored natively as integers — exact for the full u32 range. */
-export const COUNT_LANES = Object.freeze(new Set([S_GLYPH_ID, S_ROW, S_COL, S_FLAGS, S_ORD]));
-/** @param {number} lane @returns {boolean} true when the lane carries a bitcast f32. */
-export function isFloatLane(lane) { return FLOAT_LANES.has(lane); }
 
 /**
  * An item's lineHeight must be a finite number. This is the SPEC's contract, and it
  * refuses rather than substitutes.
  *
  * There used to be a substitution: an unset lineHeight silently selected the glyph's own
- * S_HEIGHT, which staggered baselines within a row (a taller CJK glyph at -row * 1.61
+ * the glyph's own height, which staggered baselines within a row (a taller CJK glyph at -row * 1.61
  * beside its neighbours at -row * 1.4). The GPU kernel never had that branch, so the
  * oracle and the Mojo port agreed with each other and disagreed with the renderer — in a
  * case no gate could see. Deleting the substitution (see the previous commit) left the
@@ -189,11 +210,6 @@ export function assertLineHeight(lineHeight, itemIndex = 0) {
         + 'with no opinion should pass an explicit value, as GlyphPipelineArena.stage() does.',
     );
 }
-/** Decode one lane BY KIND — floats reinterpreted, counts returned as-is. */
-export function laneValue(slots, index) {
-    return FLOAT_LANES.has(index % SLOT_STRIDE) ? fval(slots[index]) : slots[index];
-}
-
 export const F_RENDERED = 2;      // layout completed this slot (a truth marker, not a
                                   // publish protocol — no pass ever waits on it)
 export const F_NEWLINE = 4;       // the codepoint is 0x0A — the fold's one content test
@@ -273,7 +289,10 @@ export const ITEM_EXACT_LANE_OF = Object.freeze({
 
 /** Allocate the slot buffer for a file of `byteLength` bytes. */
 export function allocSlots(byteLength) {
-    return new Uint32Array(byteLength * SLOT_STRIDE);
+    return {
+        m: new Float32Array(byteLength * SLOT_MEASURE_STRIDE),
+        x: new Uint32Array(byteLength * SLOT_EXACT_STRIDE),
+    };
 }
 
 /**
@@ -315,9 +334,9 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
         // non-leaders by size (0,0), and a rewritten range's pad was a real glyph in
         // the previous run (fresh arrays are born zero; REWRITES are why this write
         // must exist — the GPU decode kernel makes the same two writes every run).
-        const o = id * SLOT_STRIDE;
-        slots[o + S_ADVANCE] = fbits(0);
-        slots[o + S_HEIGHT] = fbits(0);
+        const om = mBase(id), oe = eBase(id);
+        slots.m[om + M_ADVANCE] = 0;
+        slots.m[om + M_HEIGHT] = 0;
         return;
     }
 
@@ -329,14 +348,14 @@ export function decodeAndResolve(bytes, slots, trie, id, misses) {
     else cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
 
     const g = trieLookup(trie, cp);
-    const o = id * SLOT_STRIDE;
+    const om = mBase(id), oe = eBase(id);
     // EXACT lane. The trie moved to u32 (GlyphTrie: identities native, measures
     // bitcast), so the glyph id arrives as an integer and is stored as one. It was a
     // float carrier only because it was copied verbatim from an f32 trie block.
-    slots[o + S_GLYPH_ID] = g.glyphId;
-    slots[o + S_ADVANCE] = fbits(g.advance);
-    slots[o + S_HEIGHT] = fbits(g.height);
-    slots[o + S_FLAGS] = F_LEADER
+    slots.x[oe + E_GLYPH_ID] = g.glyphId;
+    slots.m[om + M_ADVANCE] = g.advance;
+    slots.m[om + M_HEIGHT] = g.height;
+    slots.x[oe + E_FLAGS] = F_LEADER
         | (cp === NEWLINE ? F_NEWLINE : 0)
         | (g.missing ? F_MISSING : 0);
     if (g.missing && misses) misses.push(cp);    // atomic append on the GPU
@@ -399,19 +418,19 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
     const zStep = params.zStep || 0;
     let baseRow = 0, col = 0, lineAdv = 0, segAdv = 0, ord = 0;
     for (let id = itemStart; id < itemStart + byteCount; id++) {
-        const o = id * SLOT_STRIDE;
-        const flags = slots[o + S_FLAGS];
+        const om = mBase(id), oe = eBase(id);
+        const flags = slots.x[oe + E_FLAGS];
         if ((flags & F_LEADER) === 0) continue;
         const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
         const row = baseRow + wrapRow;
         const x = fold > 0 ? segAdv : lineAdv;
-        slots[o + S_ROW] = row;
-        slots[o + S_COL] = col;
-        slots[o + S_LINE_ADV] = fbits(lineAdv);
-        slots[o + S_ORD] = ord;
-        slots[o + S_BASE_X] = fbits(x + ox);
-        slots[o + S_X] = fbits(x + ox);
-        // lineHeight is the ITEM's, never the glyph's. The `?? slots[S_HEIGHT]` fallback
+        slots.x[oe + E_ROW] = row;
+        slots.x[oe + E_COL] = col;
+        slots.m[om + M_LINE_ADV] = lineAdv;
+        slots.x[oe + E_ORD] = ord;
+        slots.m[om + M_BASE_X] = x + ox;
+        slots.m[om + M_X] = x + ox;
+        // lineHeight is the ITEM's, never the glyph's. The per-glyph height fallback
         // that stood here staggered baselines WITHIN a row whenever an item omitted it:
         // a taller glyph (CJK, emoji) landed at -row * ITS height while its neighbours
         // sat at -row * theirs. Measured: row 1 with CELL_H 1.4 beside 1.61 gave
@@ -421,9 +440,9 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
         // from the item table, unconditionally), so the ORACLE was the outlier — and the
         // Mojo port reproduced the oracle faithfully, which meant the two checked layers
         // agreed with each other and disagreed with the renderer. See the commit.
-        slots[o + S_Y] = fbits(-row * params.lineHeight + oy);
-        slots[o + S_Z] = fbits(-wrapRow * zStep + oz);
-        slots[o + S_FLAGS] = flags | F_RENDERED;
+        slots.m[om + M_Y] = -row * params.lineHeight + oy;
+        slots.m[om + M_Z] = -wrapRow * zStep + oz;
+        slots.x[oe + E_FLAGS] = flags | F_RENDERED;
         if (ordToByte) ordToByte[itemStart + ord] = id;
         if (scalars) {
             if (row + 1 > scalars[6]) scalars[6] = row + 1;   // totalRows (pre-conveyor)
@@ -443,9 +462,9 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
             // stays log-bounded, near this value). segAdv stays fround-per-add — it is
             // the fold>0 x, and matching the GPU's f32 order is what makes those lanes
             // bit-exact.
-            lineAdv += fval(slots[o + S_ADVANCE]);
+            lineAdv += slots.m[om + M_ADVANCE];
             segAdv = (fold > 0 && col % fold === 0) ? 0
-                : Math.fround(segAdv + fval(slots[o + S_ADVANCE]));
+                : Math.fround(segAdv + slots.m[om + M_ADVANCE]);
         }
     }
 }
@@ -459,14 +478,14 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
  * predecessors — each found in O(1) through the ordinal map (leaders in one line are
  * consecutive ordinals; no newline can intervene inside a fold unit). At most `fold`
  * small advances sum in f32: exact to representation, never a difference of file-scale
- * prefixes. Foldless, x IS the line prefix (S_LINE_ADV).
+ * prefixes. Foldless, x IS the line prefix (M_LINE_ADV).
  *
  * Also reduces the item's FOLD SCALARS (lanes 6/7 of the bounds table): totalRows =
  * max(row+1) and the item-relative widest row max(x) — reduced HERE, before paginate,
  * because the page-fan stride derives from lane 7 and paginate reads it.
  *
- * Cross-thread reads: previous passes' lanes + the ordinal map. Writes: S_BASE_X,
- * S_X/S_Y/S_Z, the scalar reduce. Read set and write set are disjoint lanes —
+ * Cross-thread reads: previous passes' lanes + the ordinal map. Writes: M_BASE_X,
+ * M_X/M_Y/M_Z, the scalar reduce. Read set and write set are disjoint lanes —
  * deterministic under any schedule.
  *
  * @param {Uint32Array} slots @param {number} id
@@ -475,12 +494,12 @@ export function layoutItem(slots, itemStart, byteCount, params = {}, ordToByte =
  * @param {Float64Array|number[]} [scalars] - the item's 8-lane bounds row (6/7 written)
  */
 export function resolveX(slots, id, p, ordToByte, scalars) {
-    const o = id * SLOT_STRIDE;
-    if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
+    const om = mBase(id), oe = eBase(id);
+    if ((slots.x[oe + E_FLAGS] & F_LEADER) === 0) return;
     const wrap = Math.max(0, Math.trunc(p.wrapWidth || 0));
     const fold = wrap > 0 ? wrap : Math.max(0, Math.trunc(p.pageCols || 0));
-    const col = slots[o + S_COL];
-    const ord = slots[o + S_ORD];
+    const col = slots.x[oe + E_COL];
+    const ord = slots.x[oe + E_ORD];
     const itemStart = Math.max(0, Math.trunc(p.itemStart || 0));
 
     let x = 0;
@@ -490,19 +509,19 @@ export function resolveX(slots, id, p, ordToByte, scalars) {
         const back = col % fold;
         for (let k = back; k >= 1; k--) {
             const q = ordToByte[itemStart + ord - k];
-            x = Math.fround(x + fval(slots[q * SLOT_STRIDE + S_ADVANCE]));
+            x = Math.fround(x + slots.m[mBase(q) + M_ADVANCE]);
         }
     } else {
-        x = fval(slots[o + S_LINE_ADV]);
+        x = slots.m[om + M_LINE_ADV];
     }
 
-    const row = slots[o + S_ROW];
+    const row = slots.x[oe + E_ROW];
     const wrapRow = wrap > 0 ? Math.floor(col / wrap) : 0;
-    slots[o + S_BASE_X] = fbits(x + (p.origin?.x || 0));
-    slots[o + S_X] = fbits(x + (p.origin?.x || 0));
+    slots.m[om + M_BASE_X] = x + (p.origin?.x || 0);
+    slots.m[om + M_X] = x + (p.origin?.x || 0);
     // Same rule as layoutItem: the ITEM's line height, never the glyph's own.
-    slots[o + S_Y] = fbits(-row * p.lineHeight + (p.origin?.y || 0));
-    slots[o + S_Z] = fbits(-wrapRow * (p.zStep || 0) + (p.origin?.z || 0));
+    slots.m[om + M_Y] = -row * p.lineHeight + (p.origin?.y || 0);
+    slots.m[om + M_Z] = -wrapRow * (p.zStep || 0) + (p.origin?.z || 0);
 
     if (scalars) {
         if (row + 1 > scalars[6]) scalars[6] = row + 1;   // totalRows (pre-conveyor)
@@ -546,7 +565,7 @@ export function deriveStride(foldScalars, page) {
 /**
  * KERNEL — thread per byte. Pagination as a PURE per-slot remap OF THE BASE POSITION.
  *
- * The remap is RECONSTRUCTIVE, never accumulative: x reads the untouched S_BASE_X, and
+ * The remap is RECONSTRUCTIVE, never accumulative: x reads the untouched M_BASE_X, and
  * y/z rebuild from the exact integer lanes. Running it again with new params re-derives
  * from base — there is no "re-paginate", the remap cannot double-apply.
  *
@@ -558,15 +577,15 @@ export function deriveStride(foldScalars, page) {
  * @param {Uint32Array} slots @param {number} id @param {PageParams} p
  */
 export function paginate(slots, id, p) {
-    const o = id * SLOT_STRIDE;
-    if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
+    const om = mBase(id), oe = eBase(id);
+    if ((slots.x[oe + E_FLAGS] & F_LEADER) === 0) return;
 
     const rows = Math.max(0, Math.trunc(p.pageRows || 0));
     const cols = Math.max(0, Math.trunc(p.pageCols || 0));
     const scroll = Math.max(0, Math.trunc(p.scrollRows || 0));
     if (rows === 0 && cols === 0 && scroll === 0) return;
 
-    const row = slots[o + S_ROW], col = slots[o + S_COL];
+    const row = slots.x[oe + E_ROW], col = slots.x[oe + E_COL];
     // The conveyor: scroll shifts content up; rows scrolled above the origin (negative
     // screenRow) stay in flow — the page gate is screenRow >= rows, so they never paginate.
     const screenRow = row - scroll;
@@ -586,9 +605,9 @@ export function paginate(slots, id, p) {
     const wrap = Math.max(0, Math.trunc(p.wrap || 0));
     const seg = wrap > 0 ? Math.floor(col / wrap) : 0;
     const oy = p.origin?.y || 0, oz = p.origin?.z || 0;
-    slots[o + S_X] = fbits(fval(slots[o + S_BASE_X]) + (yPage % wide) * (p.pageStrideX || 0));
-    slots[o + S_Y] = fbits(oy - (screenRow - yPage * rows) * p.lineHeight - band * (p.bandStrideY || 0));
-    slots[o + S_Z] = fbits(oz - seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0));
+    slots.m[om + M_X] = slots.m[om + M_BASE_X] + (yPage % wide) * (p.pageStrideX || 0);
+    slots.m[om + M_Y] = oy - (screenRow - yPage * rows) * p.lineHeight - band * (p.bandStrideY || 0);
+    slots.m[om + M_Z] = oz - seg * (p.zStep || 0) + band * (p.depthPerBand || 0) + xPage * (p.depthPerColumn || 0);
 }
 
 /**
@@ -600,10 +619,10 @@ export function paginate(slots, id, p) {
  * @param {Uint32Array} slots @param {number} id @param {Float64Array|number[]} box
  */
 export function boundsReduce(slots, id, box) {
-    const o = id * SLOT_STRIDE;
-    if ((slots[o + S_FLAGS] & F_LEADER) === 0) return;
-    const x = fval(slots[o + S_X]), y = fval(slots[o + S_Y]), z = fval(slots[o + S_Z]);
-    const w = fval(slots[o + S_ADVANCE]), h = fval(slots[o + S_HEIGHT]);
+    const om = mBase(id), oe = eBase(id);
+    if ((slots.x[oe + E_FLAGS] & F_LEADER) === 0) return;
+    const x = slots.m[om + M_X], y = slots.m[om + M_Y], z = slots.m[om + M_Z];
+    const w = slots.m[om + M_ADVANCE], h = slots.m[om + M_HEIGHT];
     if (x < box[0]) box[0] = x;
     if (y < box[1]) box[1] = y;
     if (z < box[2]) box[2] = z;
@@ -703,7 +722,7 @@ export function runPipeline(bytes, trie, opts = {}) {
 
     let leaders = 0;
     for (let id = 0; id < bytes.length; id++) {
-        if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) leaders++;
+        if ((slots.x[eBase(id) + E_FLAGS] & F_LEADER) !== 0) leaders++;
     }
 
     return {

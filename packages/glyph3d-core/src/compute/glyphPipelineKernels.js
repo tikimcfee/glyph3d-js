@@ -74,8 +74,9 @@
 
 import { TSL } from 'three/webgpu';
 import {
-    SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-    S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_NEWLINE,
+    SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE,
+    M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_BASE_X, M_LINE_ADV,
+    E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, E_ORD, F_NEWLINE,
     F_LEADER, F_RENDERED, F_MISSING, NEWLINE,
     ITEM_MEASURE_STRIDE, IM_ORIGIN_X, IM_ORIGIN_Y, IM_ORIGIN_Z, IM_PAGE_GAP_X,
     IM_BAND_STRIDE_Y, IM_DEPTH_PER_BAND, IM_DEPTH_PER_COL, IM_Z_STEP, IM_LINE_HEIGHT,
@@ -83,7 +84,8 @@ import {
     IE_WRAP_WIDTH, IE_BYTE_COUNT,
 } from './glyphPipelineReference.js';
 import { CHUNK_SIZE, GROUP_SIZE } from './glyphPipelineScan.js';
-import { BLOCK_SHIFT, BLOCK_MASK, ENTRY_STRIDE, LANE_GLYPH_ID, LANE_ADVANCE, LANE_HEIGHT, LANE_FLAGS, FLAG_MISSING } from './GlyphTrie.js';
+import { BLOCK_SHIFT, BLOCK_MASK, TRIE_EXACT_STRIDE, TRIE_MEASURE_STRIDE,
+    TE_GLYPH_ID, TE_FLAGS, TM_ADVANCE, TM_HEIGHT, FLAG_MISSING } from './GlyphTrie.js';
 
 const {
     Fn, If, Loop, Break, Return, uniform, instancedArray, instanceIndex,
@@ -119,10 +121,10 @@ export const MAX_FOLD_RESUM = 4096;
  * The vertex path indexes with the same u32 arithmetic as the kernels
  * (glyphVertex.js), so it addresses everything the arena can hold.
  */
-export const KERNEL_MAX_BYTES = Math.floor(2 ** 32 / SLOT_STRIDE);
+export const KERNEL_MAX_BYTES = Math.floor(2 ** 32 / Math.max(SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE));
 
 /** Bytes of GPU storage one source byte costs in the slot buffer (12 lanes x u32). */
-export const SLOT_BYTES_PER_SOURCE_BYTE = SLOT_STRIDE * 4;
+export const SLOT_BYTES_PER_SOURCE_BYTE = (SLOT_MEASURE_STRIDE + SLOT_EXACT_STRIDE) * 4;
 
 /**
  * The storage-buffer binding size the app asks the device for (GlyphCanvas
@@ -293,7 +295,8 @@ export default class GlyphPipelineKernels {
         // is where an over-large arena actually dies — and it dies as a bare
         // `Out of memory` that mentions nothing about glyphs. Name the request.
         try {
-            this.slots = instancedArray(this.maxBytes * SLOT_STRIDE, 'uint').setName('GlyphSlots');
+            this.slotM = instancedArray(this.maxBytes * SLOT_MEASURE_STRIDE, 'float').setName('GlyphSlotMeasures');
+            this.slotX = instancedArray(this.maxBytes * SLOT_EXACT_STRIDE, 'uint').setName('GlyphSlotExact');
         } catch (err) {
             const mb = (n) => `${(n / (1024 * 1024)).toFixed(1)}MB`;
             throw new Error(
@@ -305,10 +308,12 @@ export default class GlyphPipelineKernels {
             );
         }
         this.trieIndex = instancedArray(trie.blockIndex.length, 'uint').setName('GlyphTrieIndex');
-        // 'uint': the trie is a Uint32Array with the same discipline as the slot buffer —
-        // glyphId and flags native, advance and height bitcast. Declared 'float' this would
-        // reinterpret both exact lanes as denormals, silently.
-        this.trieBlocks = instancedArray(trie.blocks.length, 'uint').setName('GlyphTrieBlocks');
+        // Split by carrier, like everything else the pipeline binds. The trie feeds decode,
+        // and decode's output feeds the whole layout — so a container mistake here travels:
+        // GLYPH_ID rode a float lane the entire length of the pipeline for no reason except
+        // that decode copied it verbatim from an f32 trie block.
+        this.trieExact = instancedArray(trie.blocksExact.length, 'uint').setName('GlyphTrieExact');
+        this.trieMeasure = instancedArray(trie.blocksMeasure.length, 'float').setName('GlyphTrieMeasure');
         // The scan's ladder: chunk partials, their group reduces, the two exclusive-prefix
         // levels, and the ordinal map (leader ordinal → byte index, per item's byte range).
         // Each rung is a PAIR — counts (u32) beside the one advance (f32). The pairing is
@@ -355,9 +360,11 @@ export default class GlyphPipelineKernels {
         for (const node of this._allNodes()) node.value.name = node.name;
 
         this.trieIndex.value.array.set(trie.blockIndex);
-        this.trieBlocks.value.array.set(trie.blocks);
+        this.trieExact.value.array.set(trie.blocksExact);
+        this.trieMeasure.value.array.set(trie.blocksMeasure);
         this.trieIndex.value.needsUpdate = true;
-        this.trieBlocks.value.needsUpdate = true;
+        this.trieExact.value.needsUpdate = true;
+        this.trieMeasure.value.needsUpdate = true;
         this.maxMisses = maxMisses;
 
         // ── Uniforms — the dispatch widths ONLY. Origin, every page param, AND
@@ -384,7 +391,7 @@ export default class GlyphPipelineKernels {
 
     /** @private */
     _allNodes() {
-        return [this.byteWords, this.slots, this.trieIndex, this.trieBlocks,
+        return [this.byteWords, this.slotM, this.slotX, this.trieIndex, this.trieExact, this.trieMeasure,
             this.partials.c, this.partials.a, this.partialPrefix.c, this.partialPrefix.a,
             this.supers.c, this.supers.a, this.superPrefix.c, this.superPrefix.a, this.ordToByte,
             this.itemBoxes, this.foldScalars, this.itemStrides,
@@ -422,7 +429,7 @@ export default class GlyphPipelineKernels {
      */
     _buildDecode() {
         const u = this._u;
-        const slots = this.slots;
+        const slotM = this.slotM, slotX = this.slotX;
         return Fn(() => {
             const id = instanceIndex;
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
@@ -433,15 +440,15 @@ export default class GlyphPipelineKernels {
             // setFiles — the old lockup at scale): every byte's flags lane is GPU-written
             // every run, so stale content from a previous, larger load can't ghost.
             If(n.equal(int(0)), () => {
-                const o0 = id.mul(uint(SLOT_STRIDE));
-                slots.element(o0.add(uint(S_FLAGS))).assign(uint(0));
+                const om0 = id.mul(uint(SLOT_MEASURE_STRIDE)), oe0 = id.mul(uint(SLOT_EXACT_STRIDE));
+                slotX.element(oe0.add(uint(E_FLAGS))).assign(uint(0));
                 // Zero the SIZE lanes too, making the non-leader invariant EXPLICIT:
                 // the vertex culls by size (0,0) without checking flags, and a
                 // rewritten range's 0x80 edit slack was a real glyph last run. (The
                 // invariant already held via buffer refresh, but it held silently —
                 // these writes make it true by construction, not by side effect.)
-                slots.element(o0.add(uint(S_ADVANCE))).assign(uint(0));   // bits of 0.0f
-                slots.element(o0.add(uint(S_HEIGHT))).assign(uint(0));    // bits of 0.0f
+                slotM.element(om0.add(uint(M_ADVANCE))).assign(float(0));
+                slotM.element(om0.add(uint(M_HEIGHT))).assign(float(0));
                 Return();
             });
 
@@ -469,22 +476,22 @@ export default class GlyphPipelineKernels {
 
             // Trie: two dependent loads, no hashing.
             const block = this.trieIndex.element(cp.shiftRight(uint(BLOCK_SHIFT))).toVar('blk');
-            const eo = block.shiftLeft(uint(BLOCK_SHIFT)).bitOr(cp.bitAnd(uint(BLOCK_MASK)))
-                .mul(uint(ENTRY_STRIDE)).toVar('eo');
-            const glyphId = this.trieBlocks.element(eo.add(uint(LANE_GLYPH_ID))).toVar('gid');
-            const advance = this.trieBlocks.element(eo.add(uint(LANE_ADVANCE))).toVar('adv');
-            const height = this.trieBlocks.element(eo.add(uint(LANE_HEIGHT))).toVar('hgt');
-            const tflags = this.trieBlocks.element(eo.add(uint(LANE_FLAGS))).toVar('tf');
+            const entry = block.shiftLeft(uint(BLOCK_SHIFT)).bitOr(cp.bitAnd(uint(BLOCK_MASK))).toVar('ent');
+            const te = entry.mul(uint(TRIE_EXACT_STRIDE)).toVar('te');
+            const tm = entry.mul(uint(TRIE_MEASURE_STRIDE)).toVar('tm');
+            const glyphId = this.trieExact.element(te.add(uint(TE_GLYPH_ID))).toVar('gid');
+            const advance = this.trieMeasure.element(tm.add(uint(TM_ADVANCE))).toVar('adv');
+            const height = this.trieMeasure.element(tm.add(uint(TM_HEIGHT))).toVar('hgt');
+            const tflags = this.trieExact.element(te.add(uint(TE_FLAGS))).toVar('tf');
 
-            const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            // All three are STRAIGHT COPIES now. The trie and the slot buffer are both
-            // u32 with the same convention — exact lanes native, measures holding f32 bits
-            // — so a measure moves verbatim and needs no bitcast in either direction.
-            // glyphId was `bitcast(glyphId, 'uint')` off an f32 trie lane; it is an exact
-            // identity in both containers now and copies as one.
-            slots.element(o.add(uint(S_GLYPH_ID))).assign(glyphId);
-            slots.element(o.add(uint(S_ADVANCE))).assign(advance);
-            slots.element(o.add(uint(S_HEIGHT))).assign(height);
+            const om = id.mul(uint(SLOT_MEASURE_STRIDE)).toVar('slotM'), oe = id.mul(uint(SLOT_EXACT_STRIDE)).toVar('slotE');
+            // STRAIGHT COPIES, and now they are copies between MATCHING carriers: an exact
+            // identity from the trie's u32 array into the slot's u32 array, a measure from
+            // the trie's f32 array into the slot's f32 array. Nothing reinterprets anything
+            // at this seam, which is the seam that used to make GLYPH_ID a float.
+            slotX.element(oe.add(uint(E_GLYPH_ID))).assign(glyphId);
+            slotM.element(om.add(uint(M_ADVANCE))).assign(advance);
+            slotM.element(om.add(uint(M_HEIGHT))).assign(height);
 
             // A real bit test. This was `tflags.greaterThan(float(0.5))` — a float proxy
             // for "the bitfield is nonzero", which happened to work because FLAG_MISSING
@@ -494,7 +501,7 @@ export default class GlyphPipelineKernels {
             // Newline-ness is decided HERE, once — the scan reads the flag bit, never
             // a codepoint lane (there is none; the byte buffer is the codepoint truth).
             const nlBit = cp.equal(uint(NEWLINE)).select(uint(F_NEWLINE), uint(0)).toVar('nlBit');
-            slots.element(o.add(uint(S_FLAGS)))
+            slotX.element(oe.add(uint(E_FLAGS)))
                 .assign(missing.select(uint(F_LEADER | F_MISSING), uint(F_LEADER)).bitOr(nlBit));
 
             // Report the codepoint so the CPU can encode it and grow the atlas. Bounded ring:
@@ -669,9 +676,9 @@ export default class GlyphPipelineKernels {
      * @private
      */
     _leafInto(acc, id, cur) {
-        const S = this.slots;
-        const o = id.mul(uint(SLOT_STRIDE)).toVar('lfO');
-        const flags = int(S.element(o.add(uint(S_FLAGS)))).toVar('lfFlags');
+        const SM = this.slotM, SX = this.slotX;
+        const om = id.mul(uint(SLOT_MEASURE_STRIDE)).toVar('mlfO'), oe = id.mul(uint(SLOT_EXACT_STRIDE)).toVar('elfO');
+        const flags = int(SX.element(oe.add(uint(E_FLAGS)))).toVar('lfFlags');
         const isStart = id.equal(cur.itemStartByte).toVar('lfStart');
 
         If(isStart, () => {
@@ -697,7 +704,7 @@ export default class GlyphPipelineKernels {
                 acc.tailAdv.assign(float(0));
             }).Else(() => {
                 acc.tailLen.addAssign(int(1));
-                acc.tailAdv.addAssign(bitcast(S.element(o.add(uint(S_ADVANCE))), 'float'));
+                acc.tailAdv.addAssign(SM.element(om.add(uint(M_ADVANCE))));
                 If(acc.nl.equal(int(0)), () => { acc.headLen.assign(acc.tailLen); });
             });
         });
@@ -811,7 +818,7 @@ export default class GlyphPipelineKernels {
      */
     _buildApply() {
         const u = this._u;
-        const S = this.slots;
+        const SM = this.slotM, SX = this.slotX;
         const itemSearch = this._buildItemSearch();
         return Fn(() => {
             const c = instanceIndex;
@@ -827,8 +834,8 @@ export default class GlyphPipelineKernels {
                 // The item's first byte folds from identity — clear BEFORE the query.
                 If(id.equal(cur.itemStartByte), () => { this._elemClear(acc); });
 
-                const o = id.mul(uint(SLOT_STRIDE)).toVar('aO');
-                const flags = int(S.element(o.add(uint(S_FLAGS)))).toVar('aFlags');
+                const om = id.mul(uint(SLOT_MEASURE_STRIDE)).toVar('maO'), oe = id.mul(uint(SLOT_EXACT_STRIDE)).toVar('eaO');
+                const flags = int(SX.element(oe.add(uint(E_FLAGS)))).toVar('aFlags');
                 If(flags.bitAnd(int(F_LEADER)).notEqual(int(0)), () => {
                     // THE GAP GUARD: a byte outside its resolved item's [start, end)
                     // range is DEAD SPACE (a tombstoned range the arena's free-list
@@ -850,14 +857,14 @@ export default class GlyphPipelineKernels {
                         .select(col.div(cur.wrap), int(0)).toVar('aWrapRow');
                     const row = closed.add(wrapRow).toVar('aRow');
 
-                    S.element(o.add(uint(S_ROW))).assign(row.toUint());
-                    S.element(o.add(uint(S_COL))).assign(col.toUint());
-                    S.element(o.add(uint(S_LINE_ADV))).assign(bitcast(acc.tailAdv, 'uint'));
-                    S.element(o.add(uint(S_ORD))).assign(acc.glyphs.toUint());
-                    S.element(o.add(uint(S_FLAGS))).assign(uint(flags.bitOr(int(F_RENDERED))));
+                    SX.element(oe.add(uint(E_ROW))).assign(row.toUint());
+                    SX.element(oe.add(uint(E_COL))).assign(col.toUint());
+                    SM.element(om.add(uint(M_LINE_ADV))).assign(acc.tailAdv);
+                    SX.element(oe.add(uint(E_ORD))).assign(acc.glyphs.toUint());
+                    SX.element(oe.add(uint(E_FLAGS))).assign(uint(flags.bitOr(int(F_RENDERED))));
                     this.ordToByte.element(cur.itemStartByte.add(uint(acc.glyphs))).assign(id);
                     }).Else(() => {
-                        S.element(o.add(uint(S_FLAGS))).assign(uint(0));
+                        SX.element(oe.add(uint(E_FLAGS))).assign(uint(0));
                     });
                 });
 
@@ -883,17 +890,18 @@ export default class GlyphPipelineKernels {
      */
     _buildResolveX() {
         const u = this._u;
-        const S = this.slots;
+        const SM = this.slotM, SX = this.slotX;
         const M = this.itemMeasures;
         const X = this.itemExact;
         const starts = this.itemStarts;
         const itemSearch = this._buildItemSearch();
-        const lane = (slot, l) => S.element(slot.mul(uint(SLOT_STRIDE)).add(uint(l)));
+        const laneM = (slot, l) => SM.element(slot.mul(uint(SLOT_MEASURE_STRIDE)).add(uint(l)));
+        const laneX = (slot, l) => SX.element(slot.mul(uint(SLOT_EXACT_STRIDE)).add(uint(l)));
 
         return Fn(() => {
             const id = instanceIndex;
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
-            If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
+            If(int(laneX(id, E_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
             const item = itemSearch(id).toVar('item');
             const im = item.mul(uint(ITEM_MEASURE_STRIDE)).toVar('im');
@@ -907,13 +915,13 @@ export default class GlyphPipelineKernels {
             const lineHeight = M.element(im.add(uint(IM_LINE_HEIGHT))).toVar('lineHeight');
             const zWrapStep = M.element(im.add(uint(IM_Z_STEP))).toVar('zWrapStep');
 
-            const col = int(lane(id, S_COL)).toVar('col');
-            const ord = int(lane(id, S_ORD)).toVar('ord');
+            const col = int(laneX(id, E_COL)).toVar('col');
+            const ord = int(laneX(id, E_ORD)).toVar('ord');
             // S_ROW is a native u32 COUNT lane. Hold it BOTH ways on purpose: the float
             // is the Y placement's operand (row * lineHeight is geometry), the u32 is the
             // identity that feeds the totalRows reduce below. Floating it once and reusing
             // that for both is what put an exact count on an f32 carrier.
-            const rowU = lane(id, S_ROW).toVar('rowU');
+            const rowU = laneX(id, E_ROW).toVar('rowU');
             const row = rowU.toFloat().toVar('row');
             const fold = wrap.greaterThan(int(0)).select(wrap, pageCols).toVar('fold');
 
@@ -924,20 +932,20 @@ export default class GlyphPipelineKernels {
                 Loop(MAX_FOLD_RESUM, () => {
                     If(k.lessThan(int(1)), () => { Break(); });
                     const q = this.ordToByte.element(itemStart.add(uint(ord.sub(k)))).toVar('q');
-                    x.addAssign(bitcast(lane(q, S_ADVANCE), 'float'));
+                    x.addAssign(laneM(q, M_ADVANCE));
                     k.subAssign(int(1));
                 });
             }).Else(() => {
-                x.assign(bitcast(lane(id, S_LINE_ADV), 'float'));
+                x.assign(laneM(id, M_LINE_ADV));
             });
 
             const wrapping = wrap.greaterThan(int(0)).toVar('wrapping');
             const wrapRow = wrapping.select(col.div(wrap), int(0)).toVar('wrapRow');
-            const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            S.element(o.add(uint(S_BASE_X))).assign(bitcast(x.add(originX), 'uint'));
-            S.element(o.add(uint(S_X))).assign(bitcast(x.add(originX), 'uint'));
-            S.element(o.add(uint(S_Y))).assign(bitcast(row.negate().mul(lineHeight).add(originY), 'uint'));
-            S.element(o.add(uint(S_Z))).assign(bitcast(originZ.sub(wrapRow.toFloat().mul(zWrapStep)), 'uint'));
+            const om = id.mul(uint(SLOT_MEASURE_STRIDE)).toVar('mo'), oe = id.mul(uint(SLOT_EXACT_STRIDE)).toVar('eo');
+            SM.element(om.add(uint(M_BASE_X))).assign(x.add(originX));
+            SM.element(om.add(uint(M_X))).assign(x.add(originX));
+            SM.element(om.add(uint(M_Y))).assign(row.negate().mul(lineHeight).add(originY));
+            SM.element(om.add(uint(M_Z))).assign(originZ.sub(wrapRow.toFloat().mul(zWrapStep)));
 
             // ── fold scalars, fused per ITEM: total visual rows + the widest row. `x` is
             //    the pre-origin sum — item-relative by construction, which is what makes
@@ -998,16 +1006,17 @@ export default class GlyphPipelineKernels {
      */
     _buildPaginateAndBounds() {
         const u = this._u;
-        const S = this.slots;
+        const SM = this.slotM, SX = this.slotX;
         const M = this.itemMeasures;
         const X = this.itemExact;
         const itemSearch = this._buildItemSearch();
-        const lane = (slot, l) => S.element(slot.mul(uint(SLOT_STRIDE)).add(uint(l)));
+        const laneM = (slot, l) => SM.element(slot.mul(uint(SLOT_MEASURE_STRIDE)).add(uint(l)));
+        const laneX = (slot, l) => SX.element(slot.mul(uint(SLOT_EXACT_STRIDE)).add(uint(l)));
 
         return Fn(() => {
             const id = instanceIndex;
             If(id.greaterThanEqual(u.byteLength), () => { Return(); });
-            If(int(lane(id, S_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
+            If(int(laneX(id, E_FLAGS)).bitAnd(int(F_LEADER)).equal(int(0)), () => { Return(); });
 
             // ── Item resolution: this thread's file — its origin + page params + fold
             //    metrics come from the item table.
@@ -1029,9 +1038,9 @@ export default class GlyphPipelineKernels {
             const lineHeight = M.element(im.add(uint(IM_LINE_HEIGHT))).toVar('lineHeight');
             const zWrapStep = M.element(im.add(uint(IM_Z_STEP))).toVar('zWrapStep');
 
-            const o = id.mul(uint(SLOT_STRIDE)).toVar('o');
-            const row = int(lane(id, S_ROW)).toVar('row');
-            const col = int(lane(id, S_COL)).toVar('col');
+            const om = id.mul(uint(SLOT_MEASURE_STRIDE)).toVar('mo'), oe = id.mul(uint(SLOT_EXACT_STRIDE)).toVar('eo');
+            const row = int(laneX(id, E_ROW)).toVar('row');
+            const col = int(laneX(id, E_COL)).toVar('col');
             // The conveyor: scroll shifts content up; rows scrolled above the origin
             // (negative screenRow) stay in flow — the page gate leaves them untouched.
             const screenRow = row.sub(scrollRows).toVar('screenRow');
@@ -1039,7 +1048,7 @@ export default class GlyphPipelineKernels {
             // (already within the fold unit), and y/z are rebuilt from the exact integer
             // lanes. Re-running with new params re-derives from base — there is no
             // "re-paginate", the remap cannot double-apply.
-            const x = bitcast(lane(id, S_BASE_X), 'float').toVar('x');
+            const x = laneM(id, M_BASE_X).toVar('x');
 
             // EVERY page decision reads the integer lanes. Keying this off the float position
             // put 119 glyphs on the wrong page in the reference's own tests, because f32
@@ -1062,14 +1071,14 @@ export default class GlyphPipelineKernels {
             const zf = originZ.sub(seg.toFloat().mul(zWrapStep))
                 .add(yPage.div(wide).toFloat().mul(depthPerBand))
                 .add(xPage.toFloat().mul(depthPerCol)).toVar('zf');
-            S.element(o.add(uint(S_X))).assign(bitcast(xf, 'uint'));
-            S.element(o.add(uint(S_Y))).assign(bitcast(yf, 'uint'));
-            S.element(o.add(uint(S_Z))).assign(bitcast(zf, 'uint'));
+            SM.element(om.add(uint(M_X))).assign(xf);
+            SM.element(om.add(uint(M_Y))).assign(yf);
+            SM.element(om.add(uint(M_Z))).assign(zf);
 
             // ── the item's box, fused (over the FINAL positions; the fold scalars live in
             //    resolveX's fused reduce — they don't change under a repaginate) ──────────
-            const w = bitcast(lane(id, S_ADVANCE), 'float').toVar('w');
-            const h = bitcast(lane(id, S_HEIGHT), 'float').toVar('h');
+            const w = laneM(id, M_ADVANCE).toVar('w');
+            const h = laneM(id, M_HEIGHT).toVar('h');
             const bb = item.mul(uint(6)).toVar('bb');
             atomicMin(this.itemBoxes.element(bb), floatToOrderedKey(xf));
             atomicMin(this.itemBoxes.element(bb.add(uint(1))), floatToOrderedKey(yf));
@@ -1419,10 +1428,11 @@ export default class GlyphPipelineKernels {
         return out;
     }
 
-    /** @returns {Promise<Uint32Array>} the whole slot buffer — the parity path, not a
-     *  render path. u32: count lanes read natively, float lanes need fval() (or
-     *  bitcast on the GPU). A Float32Array view here would reinterpret every count
-     *  as a denormal and every float as a huge integer — silently, with no error.
+    /** @returns {Promise<{m: Float32Array, x: Uint32Array}>} both slot arrays — the
+     *  parity path, not a render path. Each view matches its buffer's own type, so the
+     *  hazard this comment used to warn about (a Float32Array view over the mixed u32
+     *  buffer, reinterpreting every count as a denormal, silently and with no error)
+     *  is not a mistake that can be made here any more.
      *
      *  The readback is bounded to the LIVE byte range: under the arena the slots buffer is
      *  capacity-sized, so an unbounded readback buffer allocation could fail before a
@@ -1431,9 +1441,11 @@ export default class GlyphPipelineKernels {
         // Snapshot ONCE: a coalesced flush can land during the readback await and grow
         // byteLength, and a view sized by the post-await value overruns the pre-await
         // readback ("Invalid typed array length" — the byte-field itest race).
-        const n = this.byteLength * SLOT_STRIDE;
-        const raw = await this.renderer.getArrayBufferAsync(this.slots.value, null, 0, n * Uint32Array.BYTES_PER_ELEMENT);
-        return new Uint32Array(raw, 0, n);
+        const nm = this.byteLength * SLOT_MEASURE_STRIDE;
+        const ne = this.byteLength * SLOT_EXACT_STRIDE;
+        const mRaw = await this.renderer.getArrayBufferAsync(this.slotM.value, null, 0, nm * Float32Array.BYTES_PER_ELEMENT);
+        const xRaw = await this.renderer.getArrayBufferAsync(this.slotX.value, null, 0, ne * Uint32Array.BYTES_PER_ELEMENT);
+        return { m: new Float32Array(mRaw, 0, nm), x: new Uint32Array(xRaw, 0, ne) };
     }
 
     /** @returns {Promise<number[]>} codepoints with no atlas entry, for the CPU to encode. */

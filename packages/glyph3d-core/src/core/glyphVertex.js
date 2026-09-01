@@ -26,10 +26,11 @@ import {
     positionLocal, instanceIndex, storage,
     vec2, vec3, vec4, float, int, ivec2,
     modelViewMatrix, cameraProjectionMatrix,
-    If, cross, bitcast, uint,
+    If, cross, uint,
 } from 'three/tsl';
 
-import { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_ROW, S_COL } from '../compute/glyphPipelineReference.js';
+import { SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE, M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT,
+    E_GLYPH_ID, E_ROW, E_COL } from '../compute/glyphPipelineReference.js';
 
 /**
  * The group-table row schema — ONE storage buffer, GROUP_STRIDE vec4s per group.
@@ -82,12 +83,16 @@ export const RENDER_MODE = Object.freeze({ GLYPH: 0, BITMAP: 1, FRAME: 2 });
  * just syncs the version without rebuilding anything.) Realloc is rare and loud;
  * the one-off re-init is the accepted cost.
  */
-const _byteSlotsNodes = new Set();
+// TWO registries, because the slot record is two buffers now — an f32 array of measures
+// beside a u32 array of exact lanes. A node is registered under the carrier it reads, so
+// a rebind can never point a float node at the integer buffer.
+const _byteSlotsNodes = { m: new Set(), x: new Set() };
 const _byteSlotsMaterials = new Set();
 
-/** Register a byte-slots storage node (returns it, for inline use at build sites). */
-export function registerByteSlotsNode(node) {
-    _byteSlotsNodes.add(node);
+/** Register a byte-slots storage node under its CARRIER ('m' measures | 'x' exact). */
+export function registerByteSlotsNode(node, kind) {
+    if (kind !== 'm' && kind !== 'x') throw new Error(`registerByteSlotsNode: kind must be 'm' or 'x', got ${kind}`);
+    _byteSlotsNodes[kind].add(node);
     return node;
 }
 
@@ -97,13 +102,16 @@ export function registerByteSlotsMaterial(material) {
     return material;
 }
 
-/** Point every registered byte-slots node at `attribute` and rebuild their bind groups. */
-export function rebindByteSlots(attribute) {
+/** Point every registered byte-slots node at its buffer and rebuild their bind groups.
+ *  @param {{m: *, x: *}} bufs the pipeline's measure and exact slot attributes */
+export function rebindByteSlots(bufs) {
     let changed = false;
-    for (const node of _byteSlotsNodes) {
-        if (node.value !== attribute) {
-            node.value = attribute;
-            changed = true;
+    for (const kind of ['m', 'x']) {
+        for (const node of _byteSlotsNodes[kind]) {
+            if (node.value !== bufs[kind]) {
+                node.value = bufs[kind];
+                changed = true;
+            }
         }
     }
     if (changed) {
@@ -187,7 +195,7 @@ export function getGlyphWidthCompress() { return glyphWidthCompress.value; }
  *   clipPos is the vertex return (culled); the rest are byproducts the render
  *   material uses for its varyings (picking ignores them).
  */
-export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups, byteSlots = null }) {
+export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups, byteSlotM = null, byteSlotX = null }) {
     // instancePosition is stride-4 (itemSize=4) on every field — read it as vec4
     // and use .xyz (.w is padding). A stride-3 declaration bakes a wrong
     // vertex-fetch stride into the pipeline.
@@ -201,30 +209,29 @@ export function buildGlyphVertexTransform({ glyphMapTex, glyphMapWidth, renderMo
     // range's edit slack was a real glyph last run) — so size (0,0) collapses the quad
     // to a point: invisible, unpickable.
     let iPos, iSize, iGlyphId, iRowCol;
-    if (byteSlots) {
-        // UINT, matching the kernels (id.mul(uint(SLOT_STRIDE)) throughout). This used
-        // to convert a natively-unsigned instanceIndex DOWN to i32, which wrapped at
-        // 2^31/SLOT_STRIDE — half the addressable range, and silently: past that point
-        // every glyph reads a negative index and renders garbage geometry with no
-        // error. The arena's ceiling is only meaningful if the vertex path can address
-        // what the arena can hold.
-        const base = instanceIndex.mul(uint(SLOT_STRIDE));
-        // The slot buffer is u32: count lanes are stored natively, float lanes are
-        // bitcast. S_X + 1 / S_X + 2 are the Y and Z lanes addressed POSITIONALLY —
-        // they are float lanes despite the constant reading S_X, and a search for
-        // S_Y / S_Z will not find them.
-        const fl = (l) => bitcast(byteSlots.element(base.add(int(l))), 'float');
-        iPos     = vec4(fl(S_X), fl(S_X + 1), fl(S_X + 2), float(0));
-        iSize    = vec2(fl(S_ADVANCE), fl(S_HEIGHT));
-        // EXACT lane now — the trie moved to u32, so the id is a native integer and
-        // CONVERTS to float for the shader's use rather than being reinterpreted.
-        // bitcast here would read the integer's bit pattern as a denormal.
-        iGlyphId = byteSlots.element(base.add(int(S_GLYPH_ID))).toFloat();
-        // The glyph's exact grid position (apply's integer lanes) — the fragment's
-        // far-texture UV rides this. Non-byte fields have no grid truth → (0,0),
-        // which their hasSlab=0 far-group texel turns back into the impostor path.
-        // Count lanes: native u32 now, so they convert rather than reinterpret.
-        iRowCol  = vec2(byteSlots.element(base.add(int(S_ROW))).toFloat(), byteSlots.element(base.add(int(S_COL))).toFloat());
+    if (byteSlotM && byteSlotX) {
+        // UINT bases, matching the kernels. This used to convert a natively-unsigned
+        // instanceIndex DOWN to i32, which wrapped at 2^31/stride — half the addressable
+        // range, and silently: past that point every glyph reads a negative index and
+        // renders garbage geometry with no error.
+        const bm = instanceIndex.mul(uint(SLOT_MEASURE_STRIDE));
+        const bx = instanceIndex.mul(uint(SLOT_EXACT_STRIDE));
+        // NO BITCASTS. The measures live in an f32 array and read as floats; the exact
+        // lanes live in a u32 array and CONVERT (never reinterpret) for the shader's use.
+        //
+        // Y and Z used to be addressed POSITIONALLY as `S_X + 1` / `S_X + 2`, with a
+        // comment admitting that a search for S_Y or S_Z would not find them. They are
+        // named now — the split forced every lane to be spelled.
+        iPos     = vec4(byteSlotM.element(bm.add(int(M_X))),
+                        byteSlotM.element(bm.add(int(M_Y))),
+                        byteSlotM.element(bm.add(int(M_Z))), float(0));
+        iSize    = vec2(byteSlotM.element(bm.add(int(M_ADVANCE))),
+                        byteSlotM.element(bm.add(int(M_HEIGHT))));
+        iGlyphId = byteSlotX.element(bx.add(int(E_GLYPH_ID))).toFloat();
+        // The glyph's exact grid position (apply's integer lanes). Non-byte fields have
+        // no grid truth and read (0, 0).
+        iRowCol  = vec2(byteSlotX.element(bx.add(int(E_ROW))).toFloat(),
+                        byteSlotX.element(bx.add(int(E_COL))).toFloat());
     } else {
         iPos     = attribute('instancePosition', 'vec4');
         iSize    = attribute('instanceSize',     'vec2');

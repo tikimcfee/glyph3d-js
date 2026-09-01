@@ -18,7 +18,7 @@
 // a lane added without deciding what it is. A one-way check misses whichever direction it
 // isn't looking, and the direction it isn't looking is where drift accumulates.
 
-import { ITEM_PARAMS, KIND, EXACT_FIELDS, MEASURE_FIELDS, KNOWN_DEVIATIONS }
+import { ITEM_PARAMS, KIND, EXACT_FIELDS, MEASURE_FIELDS, KNOWN_DEVIATIONS, VERTEX_READ }
     from '../packages/glyph3d-core/src/compute/glyphContract.js';
 import * as Ref from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
@@ -104,18 +104,22 @@ console.log('the item arrays realize every semantic parameter');
 
 console.log('every lane respects its declared KIND');
 {
-    const nameOf = {};
-    for (const k of Object.keys(Ref)) if (k.startsWith('S_')) nameOf[Ref[k]] = k.slice(2);
+    // ENUMERATED per carrier. This used to scrape `S_*` exports and cross-reference two
+    // lane-kind SETS — a side table classifying lanes inside one mixed buffer. Both are
+    // gone: the array a lane lives in IS its kind, so the question "does this lane's kind
+    // match its carrier" is answered by which list it appears in.
+    const MEASURE_LANES = ['X', 'Y', 'Z', 'ADVANCE', 'HEIGHT', 'BASE_X', 'LINE_ADV'];
+    const EXACT_LANES = ['GLYPH_ID', 'ROW', 'COL', 'FLAGS', 'ORD'];
 
     const violations = [];
-    for (const lane of Ref.FLOAT_LANES) {
-        const n = nameOf[lane];
-        if (EXACT_FIELDS.includes(n)) violations.push(n);
-    }
-    for (const lane of Ref.COUNT_LANES) {
-        const n = nameOf[lane];
-        if (MEASURE_FIELDS.includes(n)) violations.push(n);
-    }
+    for (const n of MEASURE_LANES) if (EXACT_FIELDS.includes(n)) violations.push(n);
+    for (const n of EXACT_LANES) if (MEASURE_FIELDS.includes(n)) violations.push(n);
+
+    // The lists must still describe the real containers, or the check above is fiction.
+    ok(MEASURE_LANES.length === Ref.SLOT_MEASURE_STRIDE,
+       `the measure list covers the measure array (${MEASURE_LANES.length} vs ${Ref.SLOT_MEASURE_STRIDE})`);
+    ok(EXACT_LANES.length === Ref.SLOT_EXACT_STRIDE,
+       `the exact list covers the exact array (${EXACT_LANES.length} vs ${Ref.SLOT_EXACT_STRIDE})`);
 
     // TWO SCOPES, and conflating them was a bug in this file rather than in the code.
     //
@@ -155,8 +159,20 @@ console.log('every lane respects its declared KIND');
     //    float-carried identity; if it returns to a float lane, this names it.
     ok(!violations.includes('GLYPH_ID'),
        'GLYPH_ID is no longer a violation here — it is an exact lane, native u32');
-    ok(Ref.COUNT_LANES.has(Ref.S_GLYPH_ID) && !Ref.FLOAT_LANES.has(Ref.S_GLYPH_ID),
-       'S_GLYPH_ID is classified as a count lane');
+    ok(EXACT_LANES.includes('GLYPH_ID') && !MEASURE_LANES.includes('GLYPH_ID'),
+       'GLYPH_ID lives in the EXACT array — structurally, not by classification');
+
+    // 5. THE RENDER-READ PREFIX, which the split made checkable. The contract says
+    //    emitting a record is a TRUNCATION of what a producer keeps, never a repack —
+    //    so every render-read field must sort BEFORE every unread one, in both arrays.
+    //    That is what makes this layer's containers a prefix of the native backend's
+    //    [f32;5] + [u32;3] GlyphRecord rather than merely compatible with it.
+    const readM = MEASURE_LANES.slice(0, Ref.RENDER_MEASURE_COUNT);
+    const readX = EXACT_LANES.slice(0, Ref.RENDER_EXACT_COUNT);
+    const wantRead = [...VERTEX_READ].sort();
+    ok([...readM, ...readX].sort().join() === wantRead.join(),
+       `the render-read PREFIX of both arrays is exactly VERTEX_READ `
+       + `(got [${[...readM, ...readX].sort()}], want [${wantRead}])`);
 
     // The partition the binary lane guard depends on.
     ok(EXACT_FIELDS.every((f) => !MEASURE_FIELDS.includes(f)),

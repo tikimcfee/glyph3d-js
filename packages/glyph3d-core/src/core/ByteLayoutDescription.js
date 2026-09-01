@@ -1,4 +1,4 @@
-import { SLOT_STRIDE, S_X, S_Y, S_Z, S_ADVANCE, S_FLAGS, F_LEADER, fval} from '../compute/glyphPipelineReference.js';
+import { SLOT_MEASURE_STRIDE, M_X, M_Y, M_Z, M_ADVANCE, mBase } from '../compute/glyphPipelineReference.js';
 
 /**
  * ByteLayoutDescription — the queryable product of a byte-pipeline layout. The Layer 2
@@ -126,22 +126,22 @@ export default class ByteLayoutDescription {
     positionAt(line, col) {
         const off = this.byteOffsetOf(line, col);
         if (off < 0 || !this.slots) return null;
-        const mirrorLen = this.slots.length / SLOT_STRIDE;
+        const mirrorLen = this.slots.m.length / SLOT_MEASURE_STRIDE;
         if (off >= this.bytes.length) {
             // EOL col on a final line with no trailing newline: the caret sits on the last
             // glyph's right edge (its x + its advance).
             const lastLocal = this.bytes.length - 1 - this.sourceBase;
             if (lastLocal < 0 || lastLocal >= mirrorLen) return null;   // outside the window
-            const last = lastLocal * SLOT_STRIDE;
+            const last = mBase(lastLocal);
             return {
-                x: fval(this.slots[last + S_X]) + fval(this.slots[last + S_ADVANCE]),
-                y: fval(this.slots[last + S_Y]), z: fval(this.slots[last + S_Z]),
+                x: this.slots.m[last + M_X] + this.slots.m[last + M_ADVANCE],
+                y: this.slots.m[last + M_Y], z: this.slots.m[last + M_Z],
             };
         }
         const local = off - this.sourceBase;
         if (local < 0 || local >= mirrorLen) return null;               // outside the window
-        const o = local * SLOT_STRIDE;
-        return { x: fval(this.slots[o + S_X]), y: fval(this.slots[o + S_Y]), z: fval(this.slots[o + S_Z]) };
+        const o = mBase(local);
+        return { x: this.slots.m[o + M_X], y: this.slots.m[o + M_Y], z: this.slots.m[o + M_Z] };
     }
 
     /**

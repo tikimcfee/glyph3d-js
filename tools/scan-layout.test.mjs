@@ -20,8 +20,8 @@
 
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT,
-  S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, S_LINE_ADV, S_ORD, F_LEADER, fval} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  runPipeline, SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE, mBase, eBase, E_GLYPH_ID, M_ADVANCE, M_HEIGHT,
+  M_X, M_Y, M_Z, E_ROW, E_COL, E_FLAGS, M_BASE_X, M_LINE_ADV, E_ORD, F_LEADER} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import {
   runScanPipeline, scanIdentity, scanLeaf, scanCombine,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
@@ -78,23 +78,31 @@ function randomText(r, lines = 40) {
 
 // ── comparator: exact where the algebra promises exact, eps where f32 grouping may differ ──
 function diffSlots(name, refSlots, gotSlots, n, foldPerByte) {
-  const EXACT = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
+  // The bit-exact set, split by the array each lane lives in. ADVANCE and HEIGHT are
+  // measures but must still match BIT-exactly (they are copied, never recomputed).
+  const EXACT_X = [E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, E_ORD];
+  const EXACT_M = [M_ADVANCE, M_HEIGHT];
   let bad = null, worstRel = 0;
   for (let id = 0; id < n && !bad; id++) {
-    const o = id * SLOT_STRIDE;
-    if ((refSlots[o + S_FLAGS] & F_LEADER) === 0) {
-      for (let l = 0; l < SLOT_STRIDE; l++) if (gotSlots[o + l] !== refSlots[o + l]) bad = { id, l, why: 'non-leader lane differs' };
+    const om = mBase(id), oe = eBase(id);
+    if ((refSlots.x[oe + E_FLAGS] & F_LEADER) === 0) {
+      for (let l = 0; l < SLOT_MEASURE_STRIDE; l++) {
+        if (gotSlots.m[mBase(id) + l] !== refSlots.m[mBase(id) + l]) bad = { id, l, why: 'non-leader measure lane differs' };
+      }
+      for (let l = 0; l < SLOT_EXACT_STRIDE; l++) {
+        if (gotSlots.x[eBase(id) + l] !== refSlots.x[eBase(id) + l]) bad = { id, l, why: 'non-leader exact lane differs' };
+      }
       continue;
     }
-    for (const l of EXACT) if (gotSlots[o + l] !== refSlots[o + l]) bad = { id, l, why: 'exact lane' };
+    for (const l of EXACT_X) if (gotSlots.x[eBase(id) + l] !== refSlots.x[eBase(id) + l]) bad = { id, l, why: 'exact lane' };
+    for (const l of EXACT_M) if (gotSlots.m[mBase(id) + l] !== refSlots.m[mBase(id) + l]) bad = { id, l, why: 'copied measure lane' };
     const folded = foldPerByte(id) > 0;
-    for (const l of [S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV]) {
-      // DECODE the float lanes: they are bitcast in the u32 slot buffer, and a
-      // relative epsilon on bit patterns is ~100x looser than on values (the
-      // exponent field dominates the difference). The bit-exact branch below is
-      // fine on raw bits — identical bits IS identical value.
-      const a = fval(refSlots[o + l]), b = fval(gotSlots[o + l]);
-      if (folded && l !== S_LINE_ADV) {
+    for (const l of [M_X, M_Y, M_Z, M_BASE_X, M_LINE_ADV]) {
+      // Straight reads: both sides are f32 arrays, so these ARE values. The decode
+      // that stood here existed because a relative epsilon on BIT PATTERNS is ~100x
+      // looser than on values — a hazard the container created and the split removes.
+      const a = refSlots.m[mBase(id) + l], b = gotSlots.m[mBase(id) + l];
+      if (folded && l !== M_LINE_ADV) {
         if (a !== b) bad = { id, l, why: 'fold>0 float lane must be bit-exact' };
       } else {
         // Serial-vs-tree f32 grouping: error bound grows with run length; 1e-4
@@ -216,8 +224,8 @@ const PAGE_COLS = { pageCols: 40, depthPerColumn: 4 };
     diffSlots(`multi-item K=${K} G=${G}`, oracle.slots, scan.slots, all.length, fold);
 
     for (const it of items) {
-      const o = it.byteStart * SLOT_STRIDE;
-      ok(scan.slots[o + S_ROW] === 0 && scan.slots[o + S_COL] === 0 && scan.slots[o + S_ORD] === 0,
+      const oe = eBase(it.byteStart);
+      ok(scan.slots.x[oe + E_ROW] === 0 && scan.slots.x[oe + E_COL] === 0 && scan.slots.x[oe + E_ORD] === 0,
         `reset law K=${K}: item @${it.byteStart} first leader is row0/col0/ord0`);
     }
     for (let i = 0; i < items.length; i++) {
@@ -242,10 +250,9 @@ const PAGE_COLS = { pageCols: 40, depthPerColumn: 4 };
   for (const i of [0, 2]) {
     const it = items[i];
     for (let id = it.byteStart; id < it.byteStart + it.byteCount; id++) {
-      const o = id * SLOT_STRIDE;
-      for (const l of [S_ROW, S_COL, S_ORD, S_X, S_Y, S_Z, S_BASE_X]) {
-        if (scanA.slots[o + l] !== scanB.slots[o + l]) leaked++;
-      }
+      const om = mBase(id), oe = eBase(id);
+      for (const l of [E_ROW, E_COL, E_ORD]) if (scanA.slots.x[oe + l] !== scanB.slots.x[oe + l]) leaked++;
+      for (const l of [M_X, M_Y, M_Z, M_BASE_X]) if (scanA.slots.m[om + l] !== scanB.slots.m[om + l]) leaked++;
     }
   }
   ok(leaked === 0, `isolation: ${leaked} lanes leaked across a sibling item's content change`);

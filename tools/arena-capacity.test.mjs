@@ -22,7 +22,7 @@ import GlyphPipelineKernels, {
     KERNEL_MAX_BYTES, ARENA_MAX_BYTES, REQUESTED_BINDING_CAP,
     SLOT_BYTES_PER_SOURCE_BYTE, assertSlotBufferFits,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineKernels.js';
-import { SLOT_STRIDE, ITEM_MEASURE_STRIDE, ITEM_EXACT_STRIDE,
+import { SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE, ITEM_MEASURE_STRIDE, ITEM_EXACT_STRIDE,
     ITEM_MEASURE_LANE_OF, ITEM_EXACT_LANE_OF, IE_BYTE_COUNT }
     from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
@@ -32,8 +32,13 @@ const threw = (fn) => { try { fn(); return null; } catch (e) { return e.message;
 
 console.log('one constant, not two');
 {
-    ok(SLOT_BYTES_PER_SOURCE_BYTE === SLOT_STRIDE * 4,
-       `a source byte costs SLOT_STRIDE x 4 = ${SLOT_STRIDE * 4}B of slot (got ${SLOT_BYTES_PER_SOURCE_BYTE})`);
+    // The split conserves the per-byte cost: 7 measures + 5 exact lanes, 4 bytes each,
+    // is the same 48B the single 12-lane buffer charged. The arena ceiling is derived
+    // from THIS, so a split that quietly changed it would move the ceiling too.
+    ok(SLOT_BYTES_PER_SOURCE_BYTE === (SLOT_MEASURE_STRIDE + SLOT_EXACT_STRIDE) * 4,
+       `a source byte costs (${SLOT_MEASURE_STRIDE} + ${SLOT_EXACT_STRIDE}) x 4 = `
+       + `${(SLOT_MEASURE_STRIDE + SLOT_EXACT_STRIDE) * 4}B of slot (got ${SLOT_BYTES_PER_SOURCE_BYTE})`);
+    ok(SLOT_BYTES_PER_SOURCE_BYTE === 48, `and that is still 48B (got ${SLOT_BYTES_PER_SOURCE_BYTE})`);
     // The arena imports the kernels' ceiling. If someone re-states it, this is the
     // test that notices — the drift that shipped a wedged arena was exactly this.
     const src = await Bun.file('packages/glyph3d-core/src/compute/GlyphPipelineArena.js').text();
@@ -52,8 +57,10 @@ console.log('one constant, not two');
     ok(ARENA_MAX_BYTES === 44739242, `ARENA_MAX_BYTES is 44,739,242 (got ${ARENA_MAX_BYTES})`);
     ok(ARENA_MAX_BYTES > 2 ** 24,
        `the f32 wall is actually GONE: ${ARENA_MAX_BYTES} > ${2 ** 24} (a revert lands here)`);
-    ok(KERNEL_MAX_BYTES === Math.floor(2 ** 32 / SLOT_STRIDE),
-       `KERNEL_MAX_BYTES is the u32 index wall (got ${KERNEL_MAX_BYTES})`);
+    // The index wall is the WIDER stride's — whichever array runs out of u32 index
+    // first bounds the pair. Measures at 7 lanes reach the wall before exact at 5.
+    ok(KERNEL_MAX_BYTES === Math.floor(2 ** 32 / Math.max(SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE)),
+       `KERNEL_MAX_BYTES is the u32 index wall of the wider array (got ${KERNEL_MAX_BYTES})`);
 
     // The two are DIFFERENT things, and conflating them is what put a 341MB ceiling in
     // front of an arena that OOMs on the host mirror past ~64MB of source.
@@ -66,7 +73,8 @@ console.log('the kernels guard fires at the boundary');
     // A bare shell: the guard runs before anything touches the GPU.
     const construct = (maxBytes) => threw(() => new GlyphPipelineKernels(
         { backend: {} },
-        { maxBytes, maxItems: 16, trie: { blockIndex: new Uint32Array(1), blocks: new Float32Array(1) } },
+        { maxBytes, maxItems: 16, trie: { blockIndex: new Uint32Array(1),
+            blocksExact: new Uint32Array(2), blocksMeasure: new Float32Array(2) } },
     ));
     // Assert construction SUCCEEDS, not merely that it failed for some other reason.
     // The previous form checked !/exceeds KERNEL_MAX_BYTES/ against the message, so a

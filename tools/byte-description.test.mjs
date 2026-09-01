@@ -3,7 +3,7 @@
 //   bun tools/byte-description.test.mjs
 
 import ByteLayoutDescription, { buildByteLineIndex } from '../packages/glyph3d-core/src/core/ByteLayoutDescription.js';
-import { runPipeline, SLOT_STRIDE, S_X, S_Y, fval} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { runPipeline, mBase, M_X, M_Y } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 
 let pass = 0, fail = 0;
@@ -57,10 +57,10 @@ ok(nlSlot && nlSlot.line === 2 && nlSlot.col === 12, `the newline slot → (2,12
 
 // ── positions read the mirror ──
 const p00 = desc.positionAt(0, 0);
-ok(p00 && p00.x === fval(mirror.slots[0 * SLOT_STRIDE + S_X]) && p00.y === fval(mirror.slots[S_Y]), 'positionAt(0,0) = slot 0');
+ok(p00 && p00.x === mirror.slots.m[mBase(0) + M_X] && p00.y === mirror.slots.m[M_Y], 'positionAt(0,0) = slot 0');
 // EOL on line 2 = the newline slot, whose x is the line's full advance sum.
 const pEol = desc.positionAt(2, 12);
-const nlX = fval(mirror.slots[22 * SLOT_STRIDE + S_X]);
+const nlX = mirror.slots.m[mBase(22) + M_X];
 ok(Math.abs(pEol.x - nlX) < 1e-6, `EOL caret x = newline slot x (${pEol.x} vs ${nlX})`);
 // 你 is double-advance: the space after it (col 7) sits 2×CELL_W past 你's x (col 6).
 const p7 = desc.positionAt(2, 7);
@@ -71,7 +71,7 @@ const pTail = desc.positionAt(3, 4);
 ok(pTail && Number.isFinite(pTail.x), 'final-line EOL caret resolves');
 // line 1 (empty) positionAt(1,0) = the line-1 newline slot.
 const pEmpty = desc.positionAt(1, 0);
-ok(pEmpty && pEmpty.y === fval(mirror.slots[3 * SLOT_STRIDE + S_Y]), 'empty line caret = its newline slot');
+ok(pEmpty && pEmpty.y === mirror.slots.m[mBase(3) + M_Y], 'empty line caret = its newline slot');
 
 // ── extent ──
 const ext = desc.extent();

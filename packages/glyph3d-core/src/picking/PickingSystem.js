@@ -230,18 +230,19 @@ export class PickingSystem {
         // Byte-pipeline fields read position/size/glyphId from the pipeline's slot buffer
         // (GlyphField._fieldSlots does the same for the render material — one buffer,
         // instance index == arena slot).
-        let byteSlots = null;
+        let byteSlotM = null, byteSlotX = null;
         if (byteMode) {
-            // 'uint', matching the slot buffer's own type (glyphPipelineKernels: the
-            // slots array is instancedArray(..., 'uint')). This declaration is what the
-            // shader reads the memory AS — WGSL will bind the same bytes as array<f32>
-            // with no validation error, so a stale 'float' here silently reinterprets
-            // every count lane as a denormal (row 5 -> 0x5 -> ~7e-45 -> 0) and makes
-            // glyphVertex's .toFloat() a no-op. Near text is unaffected; the far-LOD UV
-            // collapses to texel (0,0) for every glyph. Nothing errors.
-            const placeholder = new StorageInstancedBufferAttribute(new Uint32Array(4), 1);
-            byteSlots = registerByteSlotsNode(storage(placeholder, 'uint', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
-                (object && object.userData.glyphField && object.userData.glyphField._byteSlots) || self.value));
+            // Two nodes, one per carrier — the declaration is what the shader reads the
+            // memory AS, and WGSL binds the same bytes under either type with no
+            // validation error. A stale 'float' over the OLD mixed u32 buffer silently
+            // reinterpreted every count lane as a denormal and made .toFloat() a no-op;
+            // nothing errored. Split, each node's type matches exactly one buffer.
+            const phM = new StorageInstancedBufferAttribute(new Float32Array(4), 1);
+            byteSlotM = registerByteSlotsNode(storage(phM, 'float', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
+                (object && object.userData.glyphField && object.userData.glyphField._byteSlotM) || self.value), 'm');
+            const phX = new StorageInstancedBufferAttribute(new Uint32Array(4), 1);
+            byteSlotX = registerByteSlotsNode(storage(phX, 'uint', 1).toReadOnly().onObjectUpdate(({ object }, self) =>
+                (object && object.userData.glyphField && object.userData.glyphField._byteSlotX) || self.value), 'x');
         }
 
         // Per-mesh ID-block start (read straight off userData — set by register()).
@@ -258,7 +259,8 @@ export class PickingSystem {
             // GlyphId/GroupId) are declared inside it by name and bind to this mesh.
             const { clipPos } = buildGlyphVertexTransform({
                 glyphMapTex, glyphMapWidth, renderMode, groups, maxGroups,
-                byteSlots,
+                byteSlotM,
+                byteSlotX,
             });
             return clipPos;
         });

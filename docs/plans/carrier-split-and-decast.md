@@ -99,9 +99,10 @@ classified by the buffer each touches) gives 31, not the 33 estimated above:
 | ordered-key helpers (atomics — legitimate, keep) | 2 |
 | **`trieBlocks`** | **0** |
 
-**Standing at 16 of 31**: the 14 on `slots` and the 2 legitimate atomics helpers. Every
-cast left in the kernels is now either on the one buffer that still mixes kinds, or is an
-ordered key that has to be an integer for `atomicMin`/`atomicMax` to work at all.
+**FINAL: 2 of 31.** Both are the ordered-key helpers, which must be integers for
+`atomicMin`/`atomicMax` to work at all. `glyphVertex`, `PickingSystem`, the reference,
+the trie, the arena and the scan contain zero. There is no mixed-kind container left in
+the pipeline.
 
 `trieBlocks` has **zero**. Both the trie and the slot buffer are u32-with-bitcast-measures
 today, so a measure copies from one to the other VERBATIM — the verbatim copy is the
@@ -121,9 +122,26 @@ single-kind.** So order by casts-deleted-with-nothing-added:
    Each rung is now a `{c, a}` pair — counts u32 beside one advance f32 — paired in plain
    JS at construction, so all nine call sites still name a rung and nothing changed at
    dispatch. `P_STRIDE` 8 → 7. **18 → 16 sites.**
-3. **`slots` + `trieBlocks` TOGETHER** — 14 deleted, 0 added, and only together. This is
-   the step that wants the far-LOD gate first (below), and the step the record/compaction
-   work may subsume rather than repeat.
+3. ✅ **`slots` + `trieBlocks` TOGETHER — DONE.** 14 deleted, 0 added, and only together:
+   the trie feeds decode and decode feeds the slot record, so splitting either alone just
+   moves the cast to the seam between them. `slots` became `slotM` (f32 x 7) + `slotX`
+   (u32 x 5); the trie became `blocksExact` (u32 x 2) + `blocksMeasure` (f32 x 2).
+   **31 -> 2 sites**, and the 2 are the ordered-key atomics helpers.
+
+   The far-LOD gate this step was blocked on never had to be built — deleting the far tier
+   removed the path it would have gated.
+
+   Lane ORDER was chosen, not inherited: the render-read fields lead each array (X Y Z
+   ADVANCE HEIGHT | GLYPH_ID ROW COL), so a record emission is a TRUNCATION per the
+   contract, and this layer's containers are structurally the native backend's
+   GlyphRecord — `[f32;5] + [u32;3]`, 32 bytes. Same kinds, same order, no cast at the seam.
+
+   `fbits`/`fval` are DELETED, not merely unused. Their whole job was moving a measure in
+   and out of a uint container; assignment into a Float32Array rounds identically (which is
+   what fbits' own "PRESERVES THE ROUNDING" note was about). Deleting them means the
+   primitive that made a mixed container possible no longer exists for a future lane to
+   reach for. `tools/lanemap.mjs` went the same way — a survey that classified lanes by kind
+   inside one buffer has nothing left to classify.
 4. **`farItems` — DEFERRED, deliberately, and it corrects the census above.**
 
 ## THE CENSUS COUNTED SYMPTOMS OF ONLY ONE FAILURE

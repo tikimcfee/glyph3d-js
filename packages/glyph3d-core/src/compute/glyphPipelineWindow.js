@@ -45,8 +45,8 @@
  */
 
 import {
-    SLOT_STRIDE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD, F_LEADER, F_RENDERED, NEWLINE,
-    allocSlots, decodeAndResolve, resolveX, paginate, boundsReduce, sequenceLength, fbits} from './glyphPipelineReference.js';
+    mBase, eBase, M_LINE_ADV, E_ROW, E_COL, E_FLAGS, E_ORD, F_LEADER, F_RENDERED, NEWLINE,
+    allocSlots, decodeAndResolve, resolveX, paginate, boundsReduce, sequenceLength} from './glyphPipelineReference.js';
 import { scanIdentity, scanCombine, scanLeaf, scanLeafValue, lanesFromPrefix } from './glyphPipelineScan.js';
 import { CK_STRIDE, checkpointAt, decodeCodepointAt } from './glyphBake.js';
 import { trieLookup } from './GlyphTrie.js';
@@ -184,15 +184,15 @@ export function runWindow(bytes, trie, p, win) {
     // partialPrefix replaced by the index's seed).
     const R = { ...seed };
     for (let id = from; id < to; id++) {
-        const o = id * SLOT_STRIDE;
-        const flags = slots[o + S_FLAGS];
+        const om = mBase(id), oe = eBase(id);
+        const flags = slots.x[oe + E_FLAGS];
         if ((flags & F_LEADER) !== 0) {
             const v = lanesFromPrefix(R, wrap);
-            slots[o + S_ROW] = v.row;
-            slots[o + S_COL] = v.col;
-            slots[o + S_LINE_ADV] = fbits(v.lineAdv);
-            slots[o + S_ORD] = v.ord;
-            slots[o + S_FLAGS] = flags | F_RENDERED;
+            slots.x[oe + E_ROW] = v.row;
+            slots.x[oe + E_COL] = v.col;
+            slots.m[om + M_LINE_ADV] = v.lineAdv;
+            slots.x[oe + E_ORD] = v.ord;
+            slots.x[oe + E_FLAGS] = flags | F_RENDERED;
             ordToByte[v.ord] = id;
         }
         scanCombine(R, scanLeaf(slots, id, wrap, id === 0));

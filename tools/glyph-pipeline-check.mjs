@@ -175,7 +175,8 @@ const probe = (opts) => `(async (o) => {
   } catch (e) { return { fatal: 'offscreen renderer init failed: ' + (e && e.message || e) }; }
   R.renderer = store.renderer.constructor.name;
 
-  const { SLOT_STRIDE, S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_X, S_Y, S_Z, S_ROW, S_COL, S_FLAGS, S_BASE_X, F_LEADER, fval } = refMod;
+  const { mBase, eBase, M_X, M_Y, M_Z, M_ADVANCE, M_HEIGHT, M_BASE_X,
+    E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, F_LEADER } = refMod;
   const enc = new TextEncoder();
   const LINE_H = CELL_H;
 
@@ -185,21 +186,21 @@ const probe = (opts) => `(async (o) => {
   const diffSlots = (L, fail, ref, gpu, lo, hi) => {
     let firstBad = -1;
     for (let id = lo; id < hi; id++) {
-      const b = id * SLOT_STRIDE;
-      const leaderRef = (ref.slots[b + S_FLAGS] & F_LEADER) !== 0;
-      const leaderGpu = (gpu[b + S_FLAGS] & F_LEADER) !== 0;
+      const bm = mBase(id), bx = eBase(id);
+      const leaderRef = (ref.slots.x[bx + E_FLAGS] & F_LEADER) !== 0;
+      const leaderGpu = (gpu.x[bx + E_FLAGS] & F_LEADER) !== 0;
       if (leaderRef !== leaderGpu) { fail('slot ' + id + ' leader mismatch ref=' + leaderRef + ' gpu=' + leaderGpu); if (firstBad < 0) firstBad = id; continue; }
       if (!leaderRef) continue;
       L.exactChecked++;
-      if (gpu[b + S_GLYPH_ID] !== ref.slots[b + S_GLYPH_ID]) { fail('slot ' + id + ' glyphId ' + gpu[b + S_GLYPH_ID] + ' != ' + ref.slots[b + S_GLYPH_ID]); if (firstBad < 0) firstBad = id; }
-      if (gpu[b + S_ROW] !== ref.slots[b + S_ROW]) { fail('slot ' + id + ' ROW ' + gpu[b + S_ROW] + ' != ' + ref.slots[b + S_ROW]); if (firstBad < 0) firstBad = id; }
-      if (gpu[b + S_COL] !== ref.slots[b + S_COL]) { fail('slot ' + id + ' COL ' + gpu[b + S_COL] + ' != ' + ref.slots[b + S_COL]); if (firstBad < 0) firstBad = id; }
-      if (gpu[b + S_ADVANCE] !== ref.slots[b + S_ADVANCE] || gpu[b + S_HEIGHT] !== ref.slots[b + S_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
-      for (const [lane2, name] of [[S_X, 'x'], [S_Y, 'y'], [S_Z, 'z'], [S_BASE_X, 'baseX']]) {
+      if (gpu.x[bx + E_GLYPH_ID] !== ref.slots.x[bx + E_GLYPH_ID]) { fail('slot ' + id + ' glyphId ' + gpu.x[bx + E_GLYPH_ID] + ' != ' + ref.slots.x[bx + E_GLYPH_ID]); if (firstBad < 0) firstBad = id; }
+      if (gpu.x[bx + E_ROW] !== ref.slots.x[bx + E_ROW]) { fail('slot ' + id + ' ROW ' + gpu.x[bx + E_ROW] + ' != ' + ref.slots.x[bx + E_ROW]); if (firstBad < 0) firstBad = id; }
+      if (gpu.x[bx + E_COL] !== ref.slots.x[bx + E_COL]) { fail('slot ' + id + ' COL ' + gpu.x[bx + E_COL] + ' != ' + ref.slots.x[bx + E_COL]); if (firstBad < 0) firstBad = id; }
+      if (gpu.m[bm + M_ADVANCE] !== ref.slots.m[bm + M_ADVANCE] || gpu.m[bm + M_HEIGHT] !== ref.slots.m[bm + M_HEIGHT]) { fail('slot ' + id + ' metrics mismatch'); if (firstBad < 0) firstBad = id; }
+      for (const [lane2, name] of [[M_X, 'x'], [M_Y, 'y'], [M_Z, 'z'], [M_BASE_X, 'baseX']]) {
         // Float lanes are bitcast in the u32 slot buffer: DECODE both sides before a
         // magnitude-scaled compare. On bit patterns the same 5e-5 gate is ~1.3% on
         // values — the net would still be here, with holes in it.
-        const gv = fval(gpu[b + lane2]), rv = fval(ref.slots[b + lane2]);
+        const gv = gpu.m[bm + lane2], rv = ref.slots.m[bm + lane2];
         const d = Math.abs(gv - rv);
         if (d > L.maxDelta) L.maxDelta = d;
         // The scan is deterministic, so the only float slack is representation, not
@@ -345,12 +346,12 @@ const probe = (opts) => `(async (o) => {
       // File-relative lanes: every item's first glyph is row 0, col 0 — the walk floored
       // at the file's first byte and never crossed into the previous file.
       for (let i = 1; i < parts.length; i++) {
-        const b = starts[i] * SLOT_STRIDE;
-        if (ref.slots[b + S_ROW] !== 0 || ref.slots[b + S_COL] !== 0) {
-          fail('item ' + i + ' REF first glyph at row ' + ref.slots[b + S_ROW] + ' col ' + ref.slots[b + S_COL] + ' (not file-relative)');
+        const b = eBase(starts[i]);
+        if (ref.slots.x[b + E_ROW] !== 0 || ref.slots.x[b + E_COL] !== 0) {
+          fail('item ' + i + ' REF first glyph at row ' + ref.slots.x[b + E_ROW] + ' col ' + ref.slots.x[b + E_COL] + ' (not file-relative)');
         }
-        if (gpu[b + S_ROW] !== 0 || gpu[b + S_COL] !== 0) {
-          fail('item ' + i + ' GPU first glyph at row ' + gpu[b + S_ROW] + ' col ' + gpu[b + S_COL] + ' (not file-relative)');
+        if (gpu.x[b + E_ROW] !== 0 || gpu.x[b + E_COL] !== 0) {
+          fail('item ' + i + ' GPU first glyph at row ' + gpu.x[b + E_ROW] + ' col ' + gpu.x[b + E_COL] + ' (not file-relative)');
         }
       }
       if (!ref.itemBounds || ref.itemBounds.length !== parts.length) fail('ref itemBounds missing or wrong length');
@@ -368,10 +369,15 @@ const probe = (opts) => `(async (o) => {
         let isoBad = 0, isoFirst = -1;
         for (let id = 0; id < total; id++) {
           if (id >= starts[ci] && id < starts[ci] + parts[ci].bytes.length) continue;
-          const b = id * SLOT_STRIDE;
-          for (let l = 0; l < SLOT_STRIDE; l++) {
-            if (gpu2[b + l] !== gpu[b + l]) { isoBad++; if (isoFirst < 0) isoFirst = id; break; }
+          const bm = mBase(id), bx = eBase(id);
+          let moved = false;
+          for (let l = 0; l < refMod.SLOT_MEASURE_STRIDE && !moved; l++) {
+            if (gpu2.m[bm + l] !== gpu.m[bm + l]) moved = true;
           }
+          for (let l = 0; l < refMod.SLOT_EXACT_STRIDE && !moved; l++) {
+            if (gpu2.x[bx + l] !== gpu.x[bx + l]) moved = true;
+          }
+          if (moved) { isoBad++; if (isoFirst < 0) isoFirst = id; }
         }
         if (isoBad > 0) fail('isolation: ' + isoBad + ' slots OUTSIDE item ' + ci + ' moved when its params changed (first at byte ' + isoFirst + ')');
         const ref2 = refMod.runPipeline(concat, fixtureTrie, Object.assign({}, fieldParams, { items: refItems(mods) }));

@@ -55,10 +55,10 @@
  */
 
 import {
-    SLOT_STRIDE, S_ADVANCE, S_ROW, S_COL, S_FLAGS, S_LINE_ADV, S_ORD,
+    mBase, eBase, M_ADVANCE, M_LINE_ADV, E_ROW, E_COL, E_FLAGS, E_ORD,
     F_LEADER, F_NEWLINE, F_RENDERED,
     allocSlots, decodeAndResolve, itemForByte, rowsForLine, resolveX, paginate, assertLineHeight,
-    boundsReduce, deriveStride, normalizeItems, fbits, fval,
+    boundsReduce, deriveStride, normalizeItems,
 } from './glyphPipelineReference.js';
 
 /** Chunk width: bytes folded serially per scan thread. */
@@ -95,11 +95,11 @@ export function scanLeafValue(isNewline, advance, isLeader, wrap, isItemStart) {
 
 /** The leaf for byte `id`, read from the decoded slots. */
 export function scanLeaf(slots, id, wrap, isItemStart) {
-    const o = id * SLOT_STRIDE;
+    const om = mBase(id), oe = eBase(id);
     return scanLeafValue(
-        (slots[o + S_FLAGS] & F_NEWLINE) !== 0,
-        fval(slots[o + S_ADVANCE]),
-        (slots[o + S_FLAGS] & F_LEADER) !== 0,
+        (slots.x[oe + E_FLAGS] & F_NEWLINE) !== 0,
+        slots.m[om + M_ADVANCE],
+        (slots.x[oe + E_FLAGS] & F_LEADER) !== 0,
         wrap, isItemStart,
     );
 }
@@ -239,15 +239,15 @@ export function runScanPipeline(bytes, trie, opts = {}, tuning = {}) {
         for (let id = from; id < to; id++) {
             const cu = cursor.at(id);
             if (cu.isStart) Object.assign(R, scanIdentity(), { wrap: cu.wrap });
-            const o = id * SLOT_STRIDE;
-            const flags = slots[o + S_FLAGS];
+            const om = mBase(id), oe = eBase(id);
+            const flags = slots.x[oe + E_FLAGS];
             if ((flags & F_LEADER) !== 0) {
                 const v = lanesFromPrefix(R, cu.wrap);
-                slots[o + S_ROW] = v.row;
-                slots[o + S_COL] = v.col;
-                slots[o + S_LINE_ADV] = fbits(v.lineAdv);
-                slots[o + S_ORD] = v.ord;
-                slots[o + S_FLAGS] = flags | F_RENDERED;
+                slots.x[oe + E_ROW] = v.row;
+                slots.x[oe + E_COL] = v.col;
+                slots.m[om + M_LINE_ADV] = v.lineAdv;
+                slots.x[oe + E_ORD] = v.ord;
+                slots.x[oe + E_FLAGS] = flags | F_RENDERED;
                 ordToByte[items[cu.index].byteStart + v.ord] = id;
             }
             scanCombine(R, scanLeaf(slots, id, cu.wrap, cu.isStart));
@@ -296,7 +296,7 @@ export function runScanPipeline(bytes, trie, opts = {}, tuning = {}) {
 
     let leaders = 0;
     for (let id = 0; id < n; id++) {
-        if ((slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) !== 0) leaders++;
+        if ((slots.x[eBase(id) + E_FLAGS] & F_LEADER) !== 0) leaders++;
     }
 
     return {

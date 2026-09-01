@@ -21,7 +21,7 @@
 
 import { buildGlyphTrie } from '../packages/glyph3d-core/src/compute/GlyphTrie.js';
 import {
-  runPipeline, SLOT_STRIDE, S_ROW, S_COL, S_ORD, S_LINE_ADV, S_FLAGS, F_LEADER, fval} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+  runPipeline, SLOT_MEASURE_STRIDE, SLOT_EXACT_STRIDE, mBase, eBase, E_ROW, E_COL, E_ORD, M_LINE_ADV, E_FLAGS, F_LEADER} from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 import { scanIdentity, lanesFromPrefix } from '../packages/glyph3d-core/src/compute/glyphPipelineScan.js';
 import {
   bakeFile, foldBytes, prefixAt, rowsUnderWrap, checkpointAt, CK_STRIDE,
@@ -30,7 +30,7 @@ import { encodeBakeIndex, decodeBakeIndex } from '../packages/glyph3d-core/src/c
 import {
   windowSeedable, windowSeedAt, byteRangeForRows, runWindow,
 } from '../packages/glyph3d-core/src/compute/glyphPipelineWindow.js';
-import { deriveStride, S_X, S_Y, S_Z, S_BASE_X, S_ADVANCE, S_HEIGHT, S_GLYPH_ID } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
+import { deriveStride, M_X, M_Y, M_Z, M_BASE_X, M_ADVANCE, M_HEIGHT, E_GLYPH_ID } from '../packages/glyph3d-core/src/compute/glyphPipelineReference.js';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? Number(process.argv[i + 1]) : d; };
 const SEEDS = arg('--seeds', 60);
@@ -153,14 +153,14 @@ for (const [name, text] of CORPORA) {
   let bad = 0, checked = 0;
   for (let t = 0; t < 60 && checked < 40; t++) {
     const id = Math.floor(r() * bytes.length);
-    const o = id * SLOT_STRIDE;
-    if ((oracle.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
+    const om = mBase(id), oe = eBase(id);
+    if ((oracle.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
     checked++;
     const lanes = lanesFromPrefix(prefixAt(bytes, trie, rec, id), 0);
-    if (lanes.row !== oracle.slots[o + S_ROW]) bad++;
-    if (lanes.col !== oracle.slots[o + S_COL]) bad++;
-    if (lanes.ord !== oracle.slots[o + S_ORD]) bad++;
-    if (Math.abs(lanes.lineAdv - fval(oracle.slots[o + S_LINE_ADV])) / Math.max(1, Math.abs(lanes.lineAdv)) > 1e-4) bad++;
+    if (lanes.row !== oracle.slots.x[oe + E_ROW]) bad++;
+    if (lanes.col !== oracle.slots.x[oe + E_COL]) bad++;
+    if (lanes.ord !== oracle.slots.x[oe + E_ORD]) bad++;
+    if (Math.abs(lanes.lineAdv - oracle.slots.m[om + M_LINE_ADV]) / Math.max(1, Math.abs(lanes.lineAdv)) > 1e-4) bad++;
   }
   ok(bad === 0, `${name}: ${bad} lane mismatches over ${checked} sampled leaders`);
 }
@@ -314,17 +314,18 @@ for (const [name, text] of CORPORA) {
 {
   const winDiff = (name, fullSlots, winSlots, from, to, fold) => {
     let bad = null;
-    const EXACT = [S_GLYPH_ID, S_ADVANCE, S_HEIGHT, S_ROW, S_COL, S_FLAGS, S_ORD];
+    const EXACT_X = [E_GLYPH_ID, E_ROW, E_COL, E_FLAGS, E_ORD];
+    const EXACT_M = [M_ADVANCE, M_HEIGHT];
     for (let id = from; id < to && !bad; id++) {
-      const o = id * SLOT_STRIDE;
-      if ((fullSlots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      for (const l of EXACT) if (winSlots[o + l] !== fullSlots[o + l]) bad = { id, l, why: 'exact lane' };
-      for (const l of [S_X, S_Y, S_Z, S_BASE_X, S_LINE_ADV]) {
-        // Float lanes are bitcast in the u32 slot buffer — decode before any
-        // TOLERANCE compare, or the epsilon is applied to bit patterns. (The
-        // EXACT lanes above stay raw: identical bits IS identical value.)
-        const a = fval(fullSlots[o + l]), b = fval(winSlots[o + l]);
-        if (fold > 0 && l !== S_LINE_ADV) {
+      const om = mBase(id), oe = eBase(id);
+      if ((fullSlots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+      for (const l of EXACT_X) if (winSlots.x[oe + l] !== fullSlots.x[oe + l]) bad = { id, l, why: 'exact lane' };
+      for (const l of EXACT_M) if (winSlots.m[om + l] !== fullSlots.m[om + l]) bad = { id, l, why: 'copied measure lane' };
+      for (const l of [M_X, M_Y, M_Z, M_BASE_X, M_LINE_ADV]) {
+        // Values, directly — both are f32 arrays. The decode that stood here was
+        // guarding against an epsilon applied to bit patterns; there are none now.
+        const a = fullSlots.m[om + l], b = winSlots.m[om + l];
+        if (fold > 0 && l !== M_LINE_ADV) {
           if (a !== b) bad = { id, l, why: 'fold>0 float lane must be bit-exact' };
         } else if (Math.abs(a - b) / Math.max(1, Math.abs(a)) > 1e-4) {
           bad = { id, l, why: `rel ${(Math.abs(a - b) / Math.max(1, Math.abs(a))).toExponential(2)}` };
@@ -384,9 +385,9 @@ for (const [name, text] of CORPORA) {
     // Coverage: every leader in rows [r0, r1) lies inside the window.
     let missed = 0;
     for (let id = 0; id < bytes.length; id++) {
-      const o = id * SLOT_STRIDE;
-      if ((full.slots[o + S_FLAGS] & F_LEADER) === 0) continue;
-      const row = full.slots[o + S_ROW];
+      const om = mBase(id), oe = eBase(id);
+      if ((full.slots.x[oe + E_FLAGS] & F_LEADER) === 0) continue;
+      const row = full.slots.x[oe + E_ROW];
       if (row >= r0 && row < r1 && (id < win.from || id >= win.to)) missed++;
     }
     ok(missed === 0, `seed ${9000 + s}: ${missed} leaders of rows [${r0},${r1}) fell outside the window`);
@@ -439,11 +440,11 @@ for (const [name, text] of CORPORA) {
     const winRun = runPipeline(bytes.subarray(win.from, win.to), trie, { ...lane, scrollRows: scroll - r0 });
     let bad = 0;
     for (let id = win.from; id < win.to; id++) {
-      const fo = id * SLOT_STRIDE, wo = (id - win.from) * SLOT_STRIDE;
-      if ((full.slots[fo + S_FLAGS] & F_LEADER) === 0) continue;
-      if (full.slots[fo + S_GLYPH_ID] !== winRun.slots[wo + S_GLYPH_ID]) bad++;
-      for (const l of [S_X, S_Y, S_Z]) {
-        if (full.slots[fo + l] !== winRun.slots[wo + l]) bad++;     // BIT-exact, no eps
+      const fom = mBase(id), foe = eBase(id), wom = mBase(id - win.from), woe = eBase(id - win.from);
+      if ((full.slots.x[foe + E_FLAGS] & F_LEADER) === 0) continue;
+      if (full.slots.x[foe + E_GLYPH_ID] !== winRun.slots.x[woe + E_GLYPH_ID]) bad++;
+      for (const l of [M_X, M_Y, M_Z]) {
+        if (full.slots.m[fom + l] !== winRun.slots.m[wom + l]) bad++;   // BIT-exact, no eps
       }
     }
     ok(bad === 0, `window-item seed ${11000 + t} wrap=${wrap} scroll=${scroll} rows[${r0},${r1}): ${bad} position lanes differ`);
@@ -473,12 +474,15 @@ for (const [name, text] of CORPORA) {
     const pad = runPipeline(padded, trie, lane);
     let bad = 0;
     for (let id = 0; id < content.length; id++) {
-      for (let l = 0; l < SLOT_STRIDE; l++) {
-        if (bare.slots[id * SLOT_STRIDE + l] !== pad.slots[id * SLOT_STRIDE + l]) bad++;
+      for (let l = 0; l < SLOT_MEASURE_STRIDE; l++) {
+        if (bare.slots.m[mBase(id) + l] !== pad.slots.m[mBase(id) + l]) bad++;
+      }
+      for (let l = 0; l < SLOT_EXACT_STRIDE; l++) {
+        if (bare.slots.x[eBase(id) + l] !== pad.slots.x[eBase(id) + l]) bad++;
       }
     }
     for (let id = content.length; id < padded.length; id++) {
-      if (pad.slots[id * SLOT_STRIDE + S_FLAGS] & F_LEADER) bad++;   // pad must stay inert
+      if (pad.slots.x[eBase(id) + E_FLAGS] & F_LEADER) bad++;   // pad must stay inert
     }
     const bb = bare.itemBounds[0], pb = pad.itemBounds[0];
     if (!!bb !== !!pb || (bb && (bb.totalRows !== pb.totalRows
