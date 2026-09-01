@@ -34,6 +34,7 @@ import { ensureMegaField } from '../MegaGlyphField.js';
 import { loadStats } from '../core/loadStats.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
+import { tintForPath } from '../core/fileKind.js';
 import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
 import { windowSeedable, byteRangeForRows } from '../compute/glyphPipelineWindow.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
@@ -59,7 +60,11 @@ export default class FileRow extends BoundedObject3D {
 
         this.config = {
             showBackground: options.showBackground !== false,
-            backgroundColor: options.backgroundColor ?? 0x1a1a2e,
+            // null = no explicit override; the panel fill resolves from the file's
+            // type at paint time (setSourcePath lands after construction, so this
+            // cannot be baked here). FAMILY_TINTS.other IS the old 0x1a1a2e, so an
+            // unrecognized or extensionless file looks exactly as it always did.
+            backgroundColor: options.backgroundColor ?? null,
             backgroundOpacity: options.backgroundOpacity ?? 0.92,
             backgroundPadding: options.backgroundPadding || 1.0,
             showFilename: options.showFilename !== false,
@@ -363,14 +368,22 @@ export default class FileRow extends BoundedObject3D {
             width, height,
             (cb.min.z ?? 0) - 0.5,
         );
-        pf.setFill(slot, this.config.backgroundColor, this.config.backgroundOpacity);
+        pf.setFill(slot, this._panelFill(), this.config.backgroundOpacity);
         pf.setVisible(slot, true);
     }
 
     // ── The data surface (what iterated consumers read) ─────────────────────
 
     getSourcePath() { return this.sourcePath || this.userData?.sourcePath || null; }
-    setSourcePath(path) { this.sourcePath = path; }
+    setSourcePath(path) {
+        this.sourcePath = path;
+        // The path decides the tint and lands after construction — repaint. (FileRow's
+        // panel also repaints on the bounds sync, so this is belt-and-braces here and
+        // load-bearing on CodeGrid, which builds its panel exactly once.)
+        if (this._panelSlot != null) {
+            this._panels()?.setFill(this._panelSlot, this._panelFill(), this.config.backgroundOpacity);
+        }
+    }
     getFilename() { return this.filename; }
     getRenderer() { return this._renderer; }
     getLineCount() { return this._byteLineIndex ? this._byteLineIndex.lineByteStart.length : 0; }
@@ -407,6 +420,20 @@ export default class FileRow extends BoundedObject3D {
         this._panels()?.setBorder(opts);
     }
 
+    /**
+     * The panel's fill: the file-type tint, falling back to the theme background for a
+     * file whose type we cannot name.
+     *
+     * This is what makes the far view readable. Pulled back far enough that glyphs are
+     * gone, every panel is still drawn and still correctly sized — but painted one flat
+     * color they read as a single slab, so the structure that IS on screen is invisible.
+     * Tinting by family turns the same geometry into a map of the workspace.
+     * @private @returns {number} hex fill
+     */
+    _panelFill() {
+        return tintForPath(this.getSourcePath(), this.config.backgroundColor);
+    }
+
     /** @private the panel field, before or after this row's own load. */
     _panels() {
         return this._panelField ?? getPipelineArena()?.megaField?.panels ?? null;
@@ -417,7 +444,7 @@ export default class FileRow extends BoundedObject3D {
         if (color != null) this.config.backgroundColor = color;
         if (opacity != null) this.config.backgroundOpacity = opacity;
         if (this._panelSlot != null) {
-            this._panelField.setFill(this._panelSlot, this.config.backgroundColor, this.config.backgroundOpacity);
+            this._panelField.setFill(this._panelSlot, this._panelFill(), this.config.backgroundOpacity);
         }
     }
 
