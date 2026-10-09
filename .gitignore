@@ -36,7 +36,6 @@ __pycache__/
 
 # Go CLI build output + dependencies
 cli/glyph3d-cli
-cli/go.sum
 cli/.claude/scheduled_tasks.lock
 cli/web/
 
