@@ -24,7 +24,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphField from '../GlyphField.js';
+import InstancedField from './InstancedField.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -88,7 +88,7 @@ class FrameGrid extends FramedGlyphField {
         // One renderer, sized to the cell count, kept in frame mode. defaultColor is
         // white so the frame shows its true color (the shader multiplies the sampled
         // texel by the per-instance color — white = passthrough, see GlyphField).
-        this._renderer = new GlyphField(scene, atlas, {
+        this._renderer = new InstancedField(scene, atlas, {
             maxInstances: this._cellCount,
             defaultColor: { r: 1, g: 1, b: 1 },
         });

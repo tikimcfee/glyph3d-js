@@ -1,6 +1,6 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment, Minimap } from '@glyph3d/r3f';
 import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';

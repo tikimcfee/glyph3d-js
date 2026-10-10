@@ -260,6 +260,18 @@ export default class FontChain {
     }
 
     /**
+     * Single-codepoint lookup matching MonospaceShapeCache interface.
+     * @param {number} codepoint
+     * @returns {{ g: number, ax: number }}
+     */
+    lookup(codepoint) {
+        const shaped = this.shape(String.fromCodePoint(codepoint));
+        return (shaped && shaped.length > 0)
+            ? { g: shaped[0].g, ax: shaped[0].ax }
+            : { g: BLANK_SLOT, ax: this._primaryAx() };
+    }
+
+    /**
      * Outline segments for a slot, pulled from the slot's own font. The blank
      * slot has no outline (renders as an empty cell).
      * @param {number} slot

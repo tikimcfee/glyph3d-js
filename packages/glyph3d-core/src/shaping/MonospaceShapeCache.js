@@ -36,6 +36,9 @@ export default class MonospaceShapeCache {
     /** @returns {number} Number of cached codepoints */
     get size() { return this._map.size; }
 
+    /** @returns {number} primary font units-per-em */
+    get upem() { return this._shaper?.upem || 2048; }
+
     /** @returns {Iterable<number>} the cached working set (primed + encountered so far) */
     codepoints() { return this._map.keys(); }
 
@@ -121,6 +124,15 @@ export default class MonospaceShapeCache {
         // Trim to actual glyph count (handles surrogate pairs reducing the output length)
         if (outIdx < result.length) result.length = outIdx;
         return result;
+    }
+
+    /**
+     * Shape text (alias for shapeLine for shaper interface compatibility).
+     * @param {string} text
+     * @returns {Array<{g: number, ax: number, dx: number, dy: number}>}
+     */
+    shape(text) {
+        return this.shapeLine(text);
     }
 
     /**

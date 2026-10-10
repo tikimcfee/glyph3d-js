@@ -40,31 +40,10 @@
  */
 
 import * as THREE from 'three';
-import { Line2NodeMaterial, LineBasicNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
-import { uniform } from 'three/tsl';
-import { LineSegments2 } from 'three/addons/lines/webgpu/LineSegments2.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
-
-/**
- * Line2NodeMaterial's transparent branch composites against
- * viewportOpaqueMipTexture() — a full-canvas framebuffer COPY + mip chain
- * EVERY frame, and in three r185 that FramebufferTexture's binding goes stale
- * on a canvas resize: "Destroyed texture … used in a submit", a validation
- * storm per resize with wires in the scene (the relay log 2026-08-08).
- * Thin translucent wires want plain alpha blending, not opaque-pass
- * transmission — mask the flag DURING THE NODE-GRAPH BUILD ONLY, so the
- * material keeps its transparent-pass sorting and blend state but never
- * builds the framebuffer-grab branch. Re-check on every three bump.
- */
-class WireLineMaterial extends Line2NodeMaterial {
-    setupDiffuseColor(builder) {
-        const wasTransparent = this.transparent;
-        this.transparent = false;
-        try { super.setupDiffuseColor(builder); }
-        finally { this.transparent = wasTransparent; }
-    }
-}
 import { partitionChildren, leafBox, subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
 
 // Ivan's field-tested dials (2026-08-01, refined same day): a WIDE bus margin and a
@@ -111,19 +90,13 @@ export default class ContentTreeArrows {
         this.showFiles = true;      // hub → file lines (settings: tree.fileLines)
         this.showDirs = true;       // hub → child-dir lines (settings: tree.dirLines)
         this._links = new Map();    // dir path → { mesh, geo, count, thick }
-        // The hairline material: alpha through opacityNode (the ONLY path the WebGPU
-        // backend actually blends), shared by every hairline link. Live-tunable.
-        this._alpha = uniform(this.opts.opacity);
-        this._thinMat = new LineBasicNodeMaterial({ vertexColors: true, transparent: true, depthWrite: false });
-        this._thinMat.opacityNode = this._alpha;
-        // The weighted materials, pooled by QUANTIZED stroke width (≈ one per visible
-        // depth level) — never one per directory (pipeline count is the scarce resource).
+        this._alpha = { value: this.opts.opacity };
+        this._thinMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, opacity: this.opts.opacity });
         this._thickMats = new Map();
         // Pad hardware: ONE shared unit-disc geometry + material for every pin pad,
         // instance-colored, fading on the same opacity uniform as the traces.
         this._padGeo = new THREE.CircleGeometry(1, 16);
-        this._padMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
-        this._padMat.opacityNode = this._alpha;
+        this._padMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, opacity: this.opts.opacity });
         this._offRelayout = tree.onRelayout(() => this.update());
         this.update();
     }
@@ -137,6 +110,8 @@ export default class ContentTreeArrows {
             if (BUILD_OPTS.has(k)) rebuild = true;
         }
         this._alpha.value = this.opts.opacity;
+        this._thinMat.opacity = this.opts.opacity;
+        this._padMat.opacity = this.opts.opacity;
         for (const mat of this._thickMats.values()) mat.opacity = this.opts.opacity;
         if (rebuild) for (const path of [...this._links.keys()]) this._dropLinks(path);
         this.update();
@@ -160,12 +135,14 @@ export default class ContentTreeArrows {
         const key = Math.round(width * 100) / 100;
         let mat = this._thickMats.get(key);
         if (!mat) {
-            mat = new WireLineMaterial({ vertexColors: true });
-            mat.worldUnits = true;
-            mat.linewidth = key;
-            mat.transparent = true;       // transparent-pass sort/blend; the grab branch is masked (see WireLineMaterial)
-            mat.opacity = this.opts.opacity;
-            mat.depthWrite = false;
+            mat = new LineMaterial({
+                vertexColors: true,
+                worldUnits: true,
+                linewidth: key,
+                transparent: true,
+                opacity: this.opts.opacity,
+                depthWrite: false,
+            });
             this._thickMats.set(key, mat);
         }
         return mat;

@@ -22,7 +22,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphField from '../GlyphField.js';
+import InstancedField from './InstancedField.js';
 import TerminalEmulator from './TerminalEmulator.js';
 import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -155,7 +155,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
         // One dedicated renderer per terminal (phase 1).
         // Phase 2: shared renderer via segment allocation.
-        this._renderer = new GlyphField(scene, atlas, {
+        this._renderer = new InstancedField(scene, atlas, {
             maxInstances: this._totalCount,
             worldScale,
             defaultColor: { r: 0.0, g: 1.0, b: 0.0 },
@@ -1306,39 +1306,27 @@ export default class TerminalGrid extends FramedGlyphField {
      * @private
      */
     _writeToInstanceBuffer() {
-        const geom = this._renderer.instanceMesh.geometry;
-        const cpAttr    = geom.attributes.instanceGlyphId;
-        const colorAttr = geom.attributes.instanceColor;
+        const count = this._totalCount;   // live cells + depth-history block
+        const live  = this._cellCount;    // bg applies to the live region only
+        const sb    = this._renderer?.slotBuffer;
 
-        if (!cpAttr || !colorAttr) {
-            // Attributes not set up yet (e.g., skipPrealloc path): do a full apply.
+        if (!sb || sb.capacity < count) {
             this._applyToRenderer();
             return;
         }
 
-        const cpArr    = cpAttr.array;
-        const colorArr = colorAttr.array;
-        const count    = this._totalCount;   // live cells + depth-history block
-        const live     = this._cellCount;    // bg applies to the live region only
-
-        // BULK fill-carrier write: piggyback the per-cell ANSI bg onto this existing projection
-        // loop — 4 bytes/slot straight into the highlight texture's data, then ONE markHighlightDirty()
-        // (vs N setGlyphHighlight calls, each re-flagging the upload). Live cells with a bg paint a
-        // FILL texel; everything else (default-bg live cells + the whole history block) writes 0 = no
-        // fill, so a cleared cell doesn't leave a stale bar. See GlyphField.highlightBuffer.
-        const hl = this._renderer.highlightBuffer(count);
+        const u32 = sb.uint32;
+        const hl  = this._renderer.highlightBuffer(count);
         const bgR = this._cellBgR, bgG = this._cellBgG, bgB = this._cellBgB, bgA = this._cellBgA;
 
         for (let i = 0; i < count; i++) {
-            cpArr[i] = this._glyphId(this._codepoints[i]);
+            const b = i * 8;
+            u32[b + 3] = this._glyphId(this._codepoints[i]) >>> 0;
 
-            // STRIDE-4: instanceColor is the storage-class RGBA8 lane (the far
-            // kernel's compute u32 view; the 4th byte is padding) — same contract
-            // as applyPrebuiltBuffers' converted array. Cell colors are 0-1 → ×255.
-            const c = i * 4;
-            colorArr[c]     = (this._cellR[i] * 255 + 0.5) | 0;
-            colorArr[c + 1] = (this._cellG[i] * 255 + 0.5) | 0;
-            colorArr[c + 2] = (this._cellB[i] * 255 + 0.5) | 0;
+            const cr = (this._cellR[i] * 255 + 0.5) | 0;
+            const cg = (this._cellG[i] * 255 + 0.5) | 0;
+            const cb = (this._cellB[i] * 255 + 0.5) | 0;
+            u32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16) | 0xff000000;
 
             if (hl) {
                 const h = i * 4;
@@ -1346,18 +1334,17 @@ export default class TerminalGrid extends FramedGlyphField {
                     hl[h]     = (bgR[i] * 255 + 0.5) | 0;
                     hl[h + 1] = (bgG[i] * 255 + 0.5) | 0;
                     hl[h + 2] = (bgB[i] * 255 + 0.5) | 0;
-                    hl[h + 3] = GlyphField.encodeHighlightAlpha(bgA[i]);   // >0 → FILL
+                    hl[h + 3] = InstancedField.encodeHighlightAlpha(bgA[i]);   // >0 → FILL
                 } else {
                     hl[h] = 0; hl[h + 1] = 0; hl[h + 2] = 0; hl[h + 3] = 0;   // no fill
                 }
             }
         }
 
-        cpAttr.needsUpdate    = true;
-        colorAttr.needsUpdate = true;
+        if (this._renderer._interleavedBuffer) {
+            this._renderer._interleavedBuffer.needsUpdate = true;
+        }
         if (hl) this._renderer.markHighlightDirty();
-        // instanceCount is unchanged if cell count did not change.
-        // After resize, _applyToRenderer() sets the correct instanceCount.
     }
 
     /**

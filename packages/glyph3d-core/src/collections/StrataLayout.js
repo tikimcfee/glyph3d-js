@@ -1,6 +1,4 @@
 import * as THREE from 'three';
-import { LineBasicNodeMaterial } from 'three/webgpu';
-import { uniform } from 'three/tsl';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { measureSlotSpan } from '../core/foldEvaluate.js';
 
@@ -54,7 +52,7 @@ export function setStrataParam(key, value) {
     if (!(key in STRATA_PARAMS)) return;
     STRATA_PARAMS[key] = value;
     for (const inst of _activeInstances) {
-        if (key === 'boxOpacity') { if (inst._opacityU) inst._opacityU.value = value; }
+        if (key === 'boxOpacity') { if (inst._boxMat) inst._boxMat.opacity = value; }
         else inst._reapply();
     }
 }
@@ -303,18 +301,13 @@ export class StrataLayout {
         if (!parent) return false;
         if (!this._boxMesh) {
             this._boxGeo = new THREE.BufferGeometry();
-            // NodeMaterial line — plain LineBasicMaterial, auto-converted by the WebGPU backend,
-            // wasn't honoring transparent/opacity for lines (it rendered OPAQUE, occluding the
-            // glyphs underneath). A real NodeMaterial blends correctly — same path the panel
-            // backgrounds use: an explicit opacityNode as the alpha, transparent + depthWrite
-            // off so the code shows through. The uniform lets boxOpacity scrub live.
-            this._opacityU = uniform(this.cfg.boxOpacity);
-            this._boxMat = new LineBasicNodeMaterial();
-            this._boxMat.vertexColors = true;
-            this._boxMat.transparent = true;
-            this._boxMat.depthWrite = false;
-            this._boxMat.depthTest = true;
-            this._boxMat.opacityNode = this._opacityU;
+            this._boxMat = new THREE.LineBasicMaterial({
+                vertexColors: true,
+                transparent: true,
+                depthWrite: false,
+                depthTest: true,
+                opacity: this.cfg.boxOpacity,
+            });
             this._boxMesh = new THREE.LineSegments(this._boxGeo, this._boxMat);
             this._boxMesh.frustumCulled = false;
             this._boxMesh.renderOrder = RENDER_ORDER.CONNECTION; // draw over the glyph quads
@@ -331,7 +324,7 @@ export class StrataLayout {
         this._boxMesh.parent?.remove(this._boxMesh);
         this._boxGeo?.dispose();
         this._boxMat?.dispose();
-        this._boxMesh = null; this._boxGeo = null; this._boxMat = null; this._opacityU = null;
+        this._boxMesh = null; this._boxGeo = null; this._boxMat = null;
     }
 
     /** Cold-engine fallback: re-fold once the model rebuilds (brief flow flash between). */

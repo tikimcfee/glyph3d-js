@@ -26,6 +26,10 @@ class ErrorTracker {
             log.warn('ErrorTracker already initialized');
             return;
         }
+        if (typeof window === 'undefined') {
+            this.isInitialized = true;
+            return;
+        }
 
         // Uncaught exceptions
         window.addEventListener('error', (event) => {

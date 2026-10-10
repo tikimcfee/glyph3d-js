@@ -50,7 +50,7 @@ class WebcamHandSource {
      */
     async init() {
         try {
-            const vision = await import(VISION_BUNDLE_URL);
+            const vision = await import(/* @vite-ignore */ VISION_BUNDLE_URL);
             const { HandLandmarker, FilesetResolver } = vision;
 
             const wasmFileset = await FilesetResolver.forVisionTasks(WASM_URL);

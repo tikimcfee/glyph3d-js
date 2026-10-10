@@ -1,10 +1,17 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
-import { setGlyphLodParam, GLYPH_LOD_DEFAULTS } from '@glyph3d/core/GlyphField.js';
+import {
+  setGlyphLodParam, GLYPH_LOD_DEFAULTS,
+  setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT,
+} from '@glyph3d/core';
 import { setFarInkParam, farInkParams } from '@glyph3d/core/core/FarTextAtlas.js';
-import { setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } from '@glyph3d/core/core/glyphVertex.js';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
-import { setLabelPillStyle, LABEL_PILL_DEFAULTS } from '@glyph3d/core/MegaGlyphField.js';
+export const LABEL_PILL_DEFAULTS = Object.freeze({ hairline: 0.22, hairlineWidth: 1.5 });
+const _labelPillStyle = { ...LABEL_PILL_DEFAULTS };
+function setLabelPillStyle({ hairline, hairlineWidth } = {}) {
+  if (hairline != null) _labelPillStyle.hairline = hairline;
+  if (hairlineWidth != null) _labelPillStyle.hairlineWidth = hairlineWidth;
+}
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';

@@ -388,6 +388,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     applyGroupSettings(state.ctx, 'Loading'); // fold the streamed-build budget in at boot
     applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
     applyGroupSettings(state.ctx, 'Glyph LOD');  // fold persisted minification/LOD dials into the global glyph uniforms at boot
+    applyGroupSettings(state.ctx, 'Display & glyph LOD');
     applyGroupSettings(state.ctx, 'Grid');       // set the configured default fold before any grid spawns (file.open / session restore)
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the

@@ -46,7 +46,7 @@
  */
 
 import * as THREE from 'three';
-import GlyphField from '../GlyphField.js';
+import InstancedField from './InstancedField.js';
 import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
@@ -283,14 +283,11 @@ export default class ContentTreeLabels {
 
         const glyphCount = items.reduce((n, it) => n + it.text.length + (it.countText?.length ?? 0), 0)
             + (o.plate ? items.length : 0);   // one fill-cell instance per plated label
-        const field = new GlyphField(this.tree.root, this.atlas, {
+        const field = new InstancedField(this.tree.root, this.atlas, {
             maxInstances: Math.max(glyphCount, 64),
             maxGroups: items.length + 1,
             worldScale: o.worldScale,
             defaultColor: { r: 1, g: 1, b: 1 },
-            // Glyphs bake LABEL-LOCAL and the anchors ride group offsets, so this one mesh
-            // spans the whole tree via offsets the CPU-side bounds can't see — its bounding
-            // sphere is false, and culling every label as one unit is both wrong and worthless.
             frustumCulled: false,
         });
         this._field = field;

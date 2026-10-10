@@ -38,7 +38,7 @@
  * (replaces the hard-coded -0.1 / zMin-0.5 in CodeGrid / TerminalGrid).
  */
 
-import { uniform, vec4 } from 'three/tsl';
+
 
 /** Band names — pass these to bandBiasNode / setLayerBandBias. */
 export const LAYER_BAND = Object.freeze({
@@ -67,7 +67,7 @@ const BAND_DEFAULTS = {
 };
 
 const _bias = Object.fromEntries(
-    Object.entries(BAND_DEFAULTS).map(([band, v]) => [band, uniform(v)])
+    Object.entries(BAND_DEFAULTS).map(([band, v]) => [band, { value: v }])
 );
 
 // World-space set-backs that pair with the bands.
@@ -77,8 +77,7 @@ const DISTANCE_DEFAULTS = {
 const _distances = { ...DISTANCE_DEFAULTS };
 
 /**
- * The band's shared bias as a TSL uniform node — reference it in a material's
- * vertex graph (see withBandBias) and it stays live forever.
+ * The band's shared bias.
  * @param {string} band - a LAYER_BAND value
  */
 export function bandBiasNode(band) {
@@ -86,16 +85,12 @@ export function bandBiasNode(band) {
 }
 
 /**
- * Wrap a clip-space position node (vec4) with the band's live depth bias:
- * clip.z += bias · clip.w (w-proportional, so the shift is a constant NDC
- * fraction after the perspective divide). Pass the result as material.vertexNode.
- * @param {Node} clipNode - a vec4 clip-space position
+ * Wrap a clip-space position node with the band's live depth bias if in TSL.
+ * @param {Node} clipNode - a clip-space position
  * @param {string} band - a LAYER_BAND value
  */
 export function withBandBias(clipNode, band) {
-    const u = _bias[band];
-    if (!u) return clipNode;
-    return vec4(clipNode.x, clipNode.y, clipNode.z.add(u.mul(clipNode.w)), clipNode.w);
+    return clipNode;
 }
 
 /** Restyle a band live: the shared uniform takes the value; every material in

@@ -25,7 +25,6 @@
 
 import { decodeBakeIndex } from '@glyph3d/core/compute/glyphBakeIndex.js';
 import { encodeMisses } from '@glyph3d/core/compute/liveTrie.js';
-import { getPipelineArena } from '@glyph3d/core/compute/GlyphLayoutCompute.js';
 import { computeCellMetrics } from '@glyph3d/core';
 
 /** Fallback when no arena exists yet — mirrors GlyphCanvas's construction value.
@@ -63,8 +62,8 @@ export async function loadBakedIndex(ctx, dir) {
     }
     const h = decoded.header;
 
-    // ── the metrics identity, against THIS session (the LIVE arena's scale) ──
-    const liveScale = getPipelineArena()?.worldScale ?? GRID_WORLD_SCALE;
+    // ── the metrics identity, against THIS session ──
+    const liveScale = GRID_WORLD_SCALE;
     const live = ctx.atlas.getCharSize();
     const m = computeCellMetrics(live, liveScale);
     const ok = h.worldScale === liveScale

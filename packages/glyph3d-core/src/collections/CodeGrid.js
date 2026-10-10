@@ -11,17 +11,16 @@
  */
 
 import * as THREE from 'three';
-import { ensureMegaField } from '../MegaGlyphField.js';
 import { loadStats } from '../core/loadStats.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
-import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
-import { windowSeedable, byteRangeForRows } from '../compute/glyphPipelineWindow.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
-import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
+import { pageFold } from '../core/foldGeometry.js';
+import LayoutDescription from '../core/LayoutDescription.js';
+import { generateLayout } from '../core/LayoutGenerator.js';
+import InstancedField from './InstancedField.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
@@ -84,7 +83,7 @@ class CodeGrid extends FramedGlyphField {
             // Slug vector rendering data (passed through to the renderer)
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
-            shaper: options.shaper || (atlas && atlas._shaper) || null,
+            shaper: options.shaper || (atlas && (atlas._shapeCache || atlas._shaper)) || null,
             // Layout params — how this file folds into space (Step 3a). Per-grid; threaded
             // through the build's `shared` channel AND read by _buildLayoutDescription's geom,
             // so the glyphs and the caret/highlight queries can never fold differently.
@@ -128,7 +127,6 @@ class CodeGrid extends FramedGlyphField {
         // Group — the renderer's instanceMesh will be added to the scene through
         // a THREE.Group child so CodeGrid's own Object3D transform is honoured.
         this._rendererGroup = new THREE.Group();
-        this.scene.add(this._rendererGroup);
 
         // Lazy GPU renderer — the _renderer slot is declared by FramedGlyphField; CodeGrid
         // creates it on first load with a right-sized buffer, so it stays null until then.
@@ -148,18 +146,8 @@ class CodeGrid extends FramedGlyphField {
         // with this grid's home placement and writes the initial transform.
         this._initScale(this.config.gridScale);
 
-        // Content bounds are NOT stored: they are the layout's extent, derived from the
-        // pipeline's CPU mirror in O(1) (_getContentBounds). World box (getBounds) is
-        // BoundedObject3D's, derived per call.
-        // The byte-pipeline engine state: this grid's ITEM HANDLES into the shared
-        // GlyphPipelineArena (one pipeline per app — the multi-file hoist), the file's
-        // bytes, and the newline byte-offset index. A handle carries { itemIndex,
-        // byteStart, byteLength, mirror, setPage, verify, dispose }.
-        this._pipeline = null;
-        this._filenamePipeline = null;
         this._filenameField = null;
-        this._bytes = null;
-        this._byteLineIndex = null;
+        this._layout = null;
 
         // ── Windowing (opt-in scrollable viewport over the full source) ──────
         // Off by default → the grid renders the whole file. setWindow() switches
@@ -296,27 +284,10 @@ class CodeGrid extends FramedGlyphField {
      * @private @param {string} text
      */
     _beginLoad(text) {
-        this.content = text;                 // the new data (content + lines set together)
+        this.content = text;
         this.lines = text.split('\n');
-        // The byte pipeline's input: UTF-8 bytes + the newline index (the only line
-        // structure — the GPU walk derives row/col itself).
-        this._bytes = _textEncoder.encode(text);
-        this._byteLineIndex = buildByteLineIndex(this._bytes);
-        // A pre-armed record describes specific bytes — a load of different content
-        // (grid.window slices, hex views, any non-file text) must not keep it: its
-        // checkpoints would seed garbage windows. Dropped here, the next fold simply
-        // self-bakes the actual bytes.
-        if (this._bakedRecord && this._bakedRecord.byteLength !== this._bytes.length) {
-            this._bakedRecord = null;
-        }
-        // No growth path: the view is unsized — capacity is the ARENA's (it grows
-        // itself); a bigger file just stages a bigger item.
-        this._ensureRenderer();              // reconstruct if content was evicted
-        this._clearRenderedText();           // drop the PRIOR render's glyphs; the layout below adds the new ones
-        // Size the panel NOW from whatever measure exists (the baked record's prior
-        // when nothing is staged): the background otherwise sat as a visible 1×1
-        // unit plane until the fold's FIT stage — the "tiny panel" flash a
-        // materializing row's click made user-facing.
+        this._ensureRenderer();
+        this._clearRenderedText();
         this._updateBackground();
     }
 
@@ -435,18 +406,7 @@ class CodeGrid extends FramedGlyphField {
         this.content = '';
         this.lines = [];
         this.filename = '';
-        this._bytes = null;
-        this._byteLineIndex = null;
         this._layout = null;
-        this._bakedRecord = null;
-        this._byteWindow = null;
-        if (this._renderer) this._renderer.sourceBase = 0;
-        // Detach from the arena items (their space leaks — v1; see the arena header) so a
-        // later realloc never re-attaches this field at a stale byteStart.
-        this._pipeline?.dispose?.();
-        this._pipeline = null;
-        this._filenamePipeline?.dispose?.();
-        this._filenamePipeline = null;
 
         if (this._renderer) this._renderer.clear();
         if (this._filenameField) this._filenameField.clear();
@@ -598,8 +558,16 @@ class CodeGrid extends FramedGlyphField {
     setPickingSystem(pickingSystem) {
         this._pickingSystem = pickingSystem;
         if (!pickingSystem) return;
-        if (this._background) pickingSystem.register('grid', this._background, this);
-        getPipelineArena()?.megaField?.setPickingSystem(pickingSystem);
+        if (this._background) {
+            try { pickingSystem.register?.('grid', this._background, this); } catch (_) {}
+        }
+        if (this._renderer?.instanceMesh) {
+            try {
+                pickingSystem.register?.('glyph', this._renderer.instanceMesh, this._renderer, {
+                    count: this._renderer.getGlyphCount?.() || this._renderer.instanceMesh.geometry.instanceCount || 0
+                });
+            } catch (_) {}
+        }
     }
 
     /**
@@ -803,68 +771,36 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * The view-state fold: scroll/frame changed, CONTENT did not. Same gate as
-     * _relayout — callers write state and enter; the fold itself decides (inside
-     * the hold, so the decision can't go stale under a racing restage): a staged
-     * window that still covers the view repaginates (kernel 3 only); one that
-     * doesn't restages through the full loop. `repaginate` false = coverage check
-     * only (setFrameRows: the clip is already applied; covered means done).
+     * The view-state fold: scroll/frame changed, CONTENT did not.
      * @private
      */
     async _foldView(repaginate) {
-        if (this._relayoutBusy) { this._relayoutPending = true; return this; }
-        this._relayoutBusy = true;
-        try {
-            if (!this._windowCovers(this._scrollOffset)) {
-                await this._relayoutLoop();
-            } else if (repaginate) {
-                const lp = resolveLayoutParams(this._foldLayout());
-                await this._pipeline?.setPage(this._pageParams(lp, this.metrics));
-                this._updateBackground();
-                this._applyDecorations();
-                if (this._relayoutPending) await this._relayoutLoop();   // a fold queued mid-repaginate
-            }
-        } finally {
-            this._relayoutBusy = false;
-        }
-        return this;
+        return this._relayout();
     }
 
     /** The fold body — assumes the _relayoutBusy gate is HELD by the caller. @private */
     async _relayoutLoop() {
-            do {
-                this._relayoutPending = false;
-                this.getLineCount();                       // ensure this.lines is populated
-                if (this._linesDirty) {                    // edits mutate this.lines → resync content
-                    this.content = this.lines.join('\n');
-                    // …and the BYTES: the pipeline stages this._bytes, so the resync
-                    // must reach them or the fold re-stages the pre-edit text (the
-                    // caret moves — it reads lines — while the glyphs stand still).
-                    // A fossil from the builder era, when the fold consumed content.
-                    this._bytes = _textEncoder.encode(this.content);
-                    this._byteLineIndex = buildByteLineIndex(this._bytes);
-                    this._linesDirty = false;
-                }
-                // Empty CONTENT still lays out when there's a filename: the label is
-                // its own arena item, and an empty file in a tree keeps its nameplate.
-                if (!this.content && !this.filename) continue;   // nothing at all (loop exits unless pending)
-                this._ensureRenderer();                    // reconstruct if content was evicted
-                this._clearRenderedText();                 // drop the prior render's glyphs
-                // The staged pipeline: FOLD (+ ARRANGE, inside _layoutContent) → FIT →
-                // clamp → DECORATE. There is no bounds STAGE any more: the extent is a closed
-                // form the fold already determined (_getContentBounds), so the panel just reads
-                // it. Arrangers ran inside the fold, so what it reads is the arranged footprint.
-                await this._layoutContent();               // FOLD: re-add + re-flush + line tables + _layout (+ arrange)
-                this._updateBackground();                  // FIT: re-fit the panel to the settled extent
-                // Clamp the edit caret into the fresh content before the decorate stage paints it.
-                if (this._cursor) {
-                    const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
-                    const cl = Math.max(0, Math.min(this._cursor.col, cpLen(this.lines[ln] ?? '')));
-                    this._cursor.line = ln;
-                    this._cursor.col = cl;
-                }
-                this._applyDecorations();                  // DECORATE: caret + external overlays, re-projected onto the new fold
-            } while (this._relayoutPending);
+        do {
+            this._relayoutPending = false;
+            this.getLineCount();                       // ensure this.lines is populated
+            if (this._linesDirty) {                    // edits mutate this.lines → resync content
+                this.content = this.lines.join('\n');
+                this._linesDirty = false;
+            }
+            if (!this.content && !this.filename) continue;   // nothing at all
+            this._ensureRenderer();                    // reconstruct if content was evicted
+            this._clearRenderedText();                 // drop the prior render's glyphs
+            await this._layoutContent();               // FOLD: layout + geometry + layoutDescription
+            this._updateBackground();                  // FIT: re-fit the panel to the settled extent
+            // Clamp the edit caret into the fresh content before the decorate stage paints it.
+            if (this._cursor) {
+                const ln = Math.max(0, Math.min(this._cursor.line, this.lines.length - 1));
+                const cl = Math.max(0, Math.min(this._cursor.col, cpLen(this.lines[ln] ?? '')));
+                this._cursor.line = ln;
+                this._cursor.col = cl;
+            }
+            this._applyDecorations();                  // DECORATE: caret + external overlays
+        } while (this._relayoutPending);
     }
 
     /** Scroll / layout / frame relayout (reuses this.content). @private @returns {Promise<this>} */
@@ -926,9 +862,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {number}
      */
     getTotalVisualRows() {
-        // ONE row authority: the record's total, carried on the window (degenerate or
-        // not). The GPU bounds remain only as the pre-record fallback (no arena).
-        return this._byteWindow?.totalRows || Math.round(this._pipeline?.bounds?.totalRows || 0);
+        return this._layout?.totalRows ?? 0;
     }
 
     /**
@@ -952,30 +886,14 @@ class CodeGrid extends FramedGlyphField {
     async setFrameRows(rows) {
         this._frameRows = Math.max(0, Math.round(rows) || 0);
         this._applyClip();
-        this._updateBackground();  // panel tracks the frame even when no scroll re-clamp/relayout is needed
+        this._updateBackground();
         const clamped = Math.max(0, Math.min(this._scrollOffset, this.getMaxScroll()));
         if (clamped !== this._scrollOffset) return this.setScrollOffset(clamped);
-        // The frame is a footprint input to the staged WINDOW (span = frameRows when
-        // set): growing it can expose rows the window never staged — blank glyphs no
-        // scroll would heal. The fold checks coverage inside its gate; covered = done
-        // (the clip is already applied above).
-        return this._foldView(false);
+        return this;
     }
 
-    /**
-     * Do the staged window's rows cover the view at `scroll`? True for full-staged
-     * grids. The bottom check is inert once the window already reaches the file's
-     * last row — near EOF there is nothing more to stage, and without this escape
-     * every tick in the last `span` rows would re-stage (getMaxScroll allows
-     * scrolling to the last row when frameless).
-     * @private
-     */
+    /** @private */
     _windowCovers(scroll) {
-        const w = this._byteWindow;
-        if (!w) return true;
-        const span = Math.max(1, this._frameRows || this.config.windowRows);
-        if (scroll < w.startRow) return false;
-        if (scroll + span > w.endRow && w.endRow < w.totalRows) return false;
         return true;
     }
 
@@ -1041,39 +959,40 @@ class CodeGrid extends FramedGlyphField {
      * Dispose of all resources
      */
     dispose() {
-        // Leave the grid picking channel cleanly before the panel is torn down, or the
-        // pass would swap materials onto a disposed mesh. (The glyph channel is the
-        // mega-field's ONE registration — a view dispose just tombstones its range.)
-        if (this._pickingSystem && this._background) {
-            this._pickingSystem.unregister('grid', this._background);
+        if (this._pickingSystem) {
+            if (this._background) {
+                try { this._pickingSystem.unregister?.('grid', this._background); } catch (_) {}
+            }
+            if (this._renderer?.instanceMesh) {
+                try { this._pickingSystem.unregister?.('glyph', this._renderer.instanceMesh); } catch (_) {}
+            }
         }
 
-        // Dispose the views (range → dead group; the mega mesh lives on)
         if (this._renderer) {
+            if (this._rendererGroup && this._renderer.instanceMesh) {
+                this._rendererGroup.remove(this._renderer.instanceMesh);
+            }
             this._renderer.dispose();
             this._renderer = null;
         }
         if (this._filenameField) {
+            if (this._rendererGroup && this._filenameField.instanceMesh) {
+                this._rendererGroup.remove(this._filenameField.instanceMesh);
+            }
             this._filenameField.dispose();
             this._filenameField = null;
         }
-        // Detach the arena handles BEFORE any realloc could re-attach the dead views.
-        this._pipeline?.dispose?.();
-        this._pipeline = null;
-        this._filenamePipeline?.dispose?.();
-        this._filenamePipeline = null;
 
-        // Remove renderer group from scene
         if (this._rendererGroup) {
-            this.scene.remove(this._rendererGroup);
+            this.scene?.remove(this._rendererGroup);
+            this.remove(this._rendererGroup);
             while (this._rendererGroup.children.length > 0) {
                 this._rendererGroup.remove(this._rendererGroup.children[0]);
             }
         }
 
-        this._disposePanel();   // free + detach the background panel (FramedGlyphField)
+        this._disposePanel();
 
-        // Dispose caret overlay (lazy-created in enterEdit)
         if (this._caretMesh) {
             this._caretMesh.geometry.dispose();
             this._caretMesh.material.dispose();
@@ -1125,32 +1044,22 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _createRendererView() {
-        const arena = getPipelineArena();
-        if (!arena) {
-            // Loud once, not per grid: no arena means no WebGPU compute — the byte
-            // pipeline (and so the mega-field) cannot exist; the grid stays empty.
-            if (!CodeGrid._noArenaNoted) {
-                CodeGrid._noArenaNoted = true;
-                console.error('CodeGrid: no pipeline arena — the byte pipeline needs WebGPU; this grid renders EMPTY (boot log has the reason)');
-            }
-            this._renderer = null;
-            return;
-        }
-        if (this.config.occluder && !CodeGrid._occluderByteNoted) {
-            CodeGrid._occluderByteNoted = true;
-            console.warn('CodeGrid: occluder LOD is not byte-native yet — rendering via the mega-field glyph path');
-        }
-        this._renderer = ensureMegaField(arena, {
-            scene:         this.scene,
-            atlas:         this.atlas,
-            worldScale:    this.config.worldScale,
-            slugData:      this.config.slugData,
-            shaper:        this.config.shaper,
-            pickingSystem: this._pickingSystem,
-        }).createView({ node: this, color: this.config.textColor });
-        // Fade glyphs to match the panel from the start, so a translucent grid reads
-        // as one coherent sheet.
+        this._renderer = new InstancedField(null, this.atlas, {
+            worldScale: this.config.worldScale,
+            slugData: this.config.slugData,
+            shaper: this.config.shaper,
+            defaultColor: this.config.textColor,
+            frustumCulled: false,
+        });
+        this._rendererGroup.add(this._renderer.instanceMesh);
         this._applyGlyphAlpha();
+        if (this._pickingSystem && this._renderer?.instanceMesh) {
+            try {
+                this._pickingSystem.register?.('glyph', this._renderer.instanceMesh, this._renderer, {
+                    count: this._renderer.getGlyphCount?.() || this._renderer.instanceMesh.geometry.instanceCount || 0
+                });
+            } catch (_) {}
+        }
     }
 
     /**
@@ -1180,6 +1089,7 @@ class CodeGrid extends FramedGlyphField {
         });
 
         this._background = new THREE.Mesh(geometry, this._panel.material);
+        this._background.frustumCulled = false;
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND; // Draw backgrounds before glyphs
         // Behind the text by the live band distance (was hard-coded -0.1; the polygonOffset
         // band above is what actually guarantees the order — this keeps geometric parallax).
@@ -1244,7 +1154,7 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     async _layoutContent() {
-        // The filename: its own VIEW + arena item at y=0; the content sits 1.5 rows below.
+        // The filename: its own VIEW + InstancedField at y=0; the content sits 1.5 rows below.
         if (this.config.showFilename && this.filename) {
             await this._layoutFilename();
         } else if (this._filenameField) {
@@ -1254,386 +1164,108 @@ class CodeGrid extends FramedGlyphField {
             ? -this.metrics.lineHeight * 1.5
             : 0;
 
-        if (this.content.length > 0) {
+        if (this.content && this.content.length > 0) {
+            if (!this._renderer) this._ensureRenderer();
             const m = this.metrics;
             const lp = resolveLayoutParams(this._foldLayout());
-            const arena = getPipelineArena();
-            // No arena → no view either (_createRendererView logged the loud-once
-            // error); the grid stays empty rather than storming shader errors.
-            if (!arena || !this._renderer) return;
-            // THE RECORD ALWAYS EXISTS: with no disk record (single opens, edits,
-            // unbaked repos), the grid folds its OWN — one streaming O(bytes) pass
-            // against the live trie (the same advances the GPU resolves), joining
-            // _beginLoad's two existing O(bytes) passes. The disk index is a
-            // WARM-START (skips this pass, pre-measures storms), never a mode.
-            if (!this._bakedRecord && arena.trie) {
-                const tBake = performance.now();
-                this._bakedRecord = bakeFile(this._bytes, arena.trie, { lineHeight: m.lineHeight });
-                this._bakedProvenance = 'self';
-                this._bakedChecked = false;               // a fresh record re-arms the gate
-                const bakeMs = performance.now() - tBake;
-                loadStats.selfBakes++;
-                loadStats.selfBakeMs += bakeMs;
-                if (bakeMs > 10) console.info(`[bake] ${this.filename || this.name}: self-baked in ${bakeMs.toFixed(1)}ms (${this._bakedRecord.totalRows} rows, ${this._bytes.length} bytes)`);
+            const wrapWidth = lp.wrapWidth || 0;
+            const zStep = m.charHeight * (lp.zWrapSpacing || 0);
+
+            const result = generateLayout(this.content, {
+                shaper: this.config.shaper || this.atlas?._shapeCache || this.atlas?._shaper,
+                metrics: m,
+                origin: { x: 0, y: this._layoutOriginY, z: 0 },
+                wrapWidth: wrapWidth,
+                zWrapSpacing: lp.zWrapSpacing || 0,
+                pageHeight: lp.pageHeight || 0,
+                pagesWide: lp.pagesWide || 1,
+                pageGapX: lp.pageGapX || 10,
+                pageGapY: lp.pageGapY || 10,
+                pageDepth: lp.pageDepth || 20,
+                axis: lp.axis || 'xy',
+                color: this.config.textColor,
+                scrollOffset: this._scrollOffset || 0,
+                targetBuffer: this._renderer.slotBuffer,
+            });
+
+            this._renderer.setSlots(result.buffer, result.glyphCount);
+            this._renderer.setLayoutExtent(result.bounds);
+            if (this._pickingSystem && this._renderer?.instanceMesh) {
+                try {
+                    this._pickingSystem.register?.('glyph', this._renderer.instanceMesh, this._renderer, {
+                        count: result.glyphCount
+                    });
+                } catch (_) {}
             }
 
-            // Rows are known BEFORE staging (the record): clamp the conveyor here.
-            // (This replaces the post-laid over-scroll self-correction recursion and
-            // its re-entry guard — the grid no longer stages to learn its size.)
-            if (this._bakedRecord) {
-                const clampWrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-                const totalRows = rowsUnderWrap(this._bakedRecord, clampWrap);
-                const maxScroll = this._frameRows > 0 ? Math.max(0, totalRows - this._frameRows) : totalRows;
-                if (this._scrollOffset > maxScroll) this._scrollOffset = maxScroll;
-            }
+            this._layout = new LayoutDescription({
+                lineSlotBase: result.lineStarts,
+                lineStartRow: result.lineStartRows,
+                lineLengths: result.lineLengths,
+                sizes: null,
+                wrapWidth: wrapWidth,
+                page: (lp.pageHeight > 0) ? pageFold(lp, m, result.maxRowExtent) : null,
+                originX: 0,
+                originY: this._layoutOriginY,
+                originZ: 0,
+                lineSpacing: m.lineHeight,
+                zStep: zStep,
+                cellHeight: m.charHeight,
+                advance: m.charWidth,
+                scrollOffset: this._scrollOffset || 0,
+                totalRows: result.totalRows,
+                maxRowExtent: result.maxRowExtent,
+                maxSegs: result.maxSegs,
+            });
 
-            // THE WINDOW ALWAYS EXISTS: _resolveWindow answers a partial window for a
-            // large seedable unpaged file, and the DEGENERATE window (the whole file)
-            // for everything else — one shape, no mode. It snaps to a row start, so
-            // the arena's fresh per-item fold computes it exactly; the start row rides
-            // as the scrollRows bias (_windowScroll, 0 when degenerate); sourceBase
-            // keeps every consumer in file-byte space (0 when degenerate).
-            //
-            // Stage the NEW item WITHOUT attaching the view (field: null): the view
-            // keeps rendering the OLD item's glyphs through the whole flush — the
-            // attach happens at the SWAP below, once the new slots are laid. (The
-            // empty-frame flash on edit/crossing was the synchronous attach pointing
-            // the view at a not-yet-laid range.) If the arena refuses (the
-            // f32-ordinal wall — live bytes past 2^24 even after free-list reuse),
-            // the grid keeps its previous window untouched — nothing was re-pointed.
-            // An INITIAL load still fails loud (nothing previous to keep).
-            const prevPipeline = this._pipeline;
-            const prevWindow = this._byteWindow;
-            this._byteWindow = this._resolveWindow(lp, arena);
-
-            // THE EDIT FAST PATH — terminal-style: write, don't restage. When the
-            // content still FITS the staged item's capacity (its 0x80 edit slack)
-            // and the fold's shape is unchanged, the bytes REWRITE in place: no new
-            // item, no attach, no lane copy, ZERO arena growth per keystroke — the
-            // coalesced flush re-folds and the same slots repaint. Typing burns
-            // slack only at stage time, never the arena; a session of edits costs
-            // one slack restage per ~editSlackBytes of net growth. (This is the fix
-            // for typing hitting the f32 wall mid-sentence: 54KB × keystrokes.)
-            const foldSig = `${lp.wrapWidth || 0}|${m.lineHeight}|${m.charHeight * (lp.zWrapSpacing || 0)}|${this._layoutOriginY}`;
-            if (prevPipeline && this._byteWindow.degenerate
-                    && foldSig === this._foldSig
-                    && this._bytes.length <= (prevPipeline.capacity ?? 0)
-                    && (this._renderer?.sourceBase || 0) === 0) {
-                await prevPipeline.rewrite(this._bytes, this._pageParams(lp, m));
-                // The gate waits for a restage's fresh readback — this fold's bounds
-                // record can be one coalesced readback stale.
-                this._bakedChecked = true;
-                // The fold's tail, same as the restage path below: fresh caret/query
-                // tables over the edited bytes, clip re-applied.
-                this._buildLayoutDescription();
-                this._applyClip();
-                this._applyArrangers();
-                return;
-            }
-
-            let staged;
-            try {
-                staged = arena.stage({
-                    bytes: this._bytes.subarray(this._byteWindow.from, this._byteWindow.to),
-                    origin: { x: 0, y: this._layoutOriginY, z: 0 },
-                    page: this._pageParams(lp, m),
-                    wrapWidth: lp.wrapWidth || 0,
-                    lineHeight: m.lineHeight,
-                    zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                    field: null,
-                    // Edit slack: a grid being EDITED stages room to grow, so the
-                    // keystrokes that follow take the rewrite path above.
-                    capacity: (this._byteWindow.degenerate && (this._cursor || this._modified))
-                        ? (this._byteWindow.to - this._byteWindow.from)
-                            + Math.max(this.config.editSlackBytes, (this._byteWindow.to - this._byteWindow.from) >> 3)
-                        : 0,
-                });
-            } catch (err) {
-                if (!prevPipeline) throw err;
-                this._byteWindow = prevWindow;
-                console.error(`[window] ${this.filename || this.name}: re-stage refused (${err?.message || err}) — keeping the previous window (u32 ordinal lanes are the lift)`);
-                return;
-            }
-            this._foldSig = foldSig;
-            // Sampled lifecycle log: one line per 10 partial-window restages per grid —
-            // enough to watch crossings live (log.search window) without a scroll storm.
-            if (!this._byteWindow.degenerate) {
-                this._windowRestages = (this._windowRestages || 0) + 1;
-                if (this._windowRestages % 10 === 1) {
-                    console.info(`[window] ${this.filename || this.name}: restage #${this._windowRestages} rows[${this._byteWindow.startRow},${this._byteWindow.endRow}) bytes[${this._byteWindow.from},${this._byteWindow.to}) scroll ${this._scrollOffset}`);
-                }
-            }
-            this._pipeline = staged;
-            await arena.requestFlush();
-
-            // THE SWAP — right after the flush ENCODES: GPU submission order puts
-            // those compute dispatches before any later render pass, so the slots
-            // are valid for every frame that can see the new range. The view
-            // re-points here in ONE beat — range + sourceBase atomically, paint
-            // lanes carried across the file-space overlap (no green flash while
-            // the analyzer coalesces) — and the old item retires. Every frame
-            // until this line rendered the previous content; none renders empty,
-            // none waits on a readback to show a typed character.
-            staged.adoptField(this._renderer, this._byteWindow.from);
-            prevPipeline?.dispose?.();
-
-            // The extent gate: the GPU's per-item bounds land off ONE coalesced
-            // readback; waiting here means the load's settle sees a MEASURED grid
-            // (tree layout, scroll clamps and culling all read the record) — but
-            // VISIBILITY never waited for it: the swap above already happened.
-            // Resolves even on device loss — a load never hangs on it.
-            await this._pipeline.laid;
-
-            // The bake gate: the GPU's bounds vs the index's prediction, once per load.
-            // Rows are integer-exact under any wrap; the widest row compares only when
-            // nothing folds (a folded line's segments aren't derivable from the record).
-            // A mismatch means a stale record or fold drift — loud, never corrected
-            // silently (the GPU extent is the truth either way).
-            if (this._bakedRecord && !this._bakedChecked && this._pipeline.bounds) {
-                this._bakedChecked = true;
-                const rec = this._bakedRecord;
-                const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-                const got = this._pipeline.bounds;
-                // The GPU folded rows [startRow, endRow) — every row in a window holds
-                // a leader, so the item's row count is the span exactly. Degenerate
-                // windows make this rowsUnderWrap(rec, wrap) — the same number.
-                const wantRows = this._byteWindow.endRow - this._byteWindow.startRow;
-                if (Math.round(got.totalRows) !== wantRows) {
-                    console.warn(`[bake] ${this.filename || this.name}: baked rows(wrap ${wrap}) = ${wantRows} ≠ GPU ${got.totalRows} — stale record or fold drift`);
-                } else if (this._byteWindow.degenerate && (wrap === 0 || rec.maxLineLen <= wrap)) {
-                    // Whole-file stages only: a partial window's widest row is the window's.
-                    const rel = Math.abs(got.maxRowExtent - rec.maxRowExtent) / Math.max(1, rec.maxRowExtent);
-                    if (rel > 1e-4) {
-                        console.warn(`[bake] ${this.filename || this.name}: baked widest row ${rec.maxRowExtent} vs GPU ${got.maxRowExtent} (rel ${rel.toExponential(2)}) — metrics drift?`);
-                    }
-                }
-            }
+            this._scheduleAnalyze();
+        } else {
+            this._layout = null;
+            if (this._renderer) this._renderer.clear();
         }
-        this._buildLayoutDescription();
+
         this._applyClip();
-        // (No per-grid pick registration: the mega-field holds the ONE glyph-channel
-        // entry and re-registers itself as its instance count grows.)
-
-        // (The over-scroll self-correction recursion is gone: rows are known from the
-        // record BEFORE staging, so the conveyor clamps pre-stage — see above.)
-        this._applyArrangers(); // ARRANGE stage — empty until arrangers are byte-native
+        this._applyArrangers();
     }
 
     /**
-     * Layout params → the pipeline's page params. One gate (screenRow >= pageRows, in the
-     * kernel), so pageRows flows straight through; the strides mirror the Layer 1 fold:
-     * newspaper bands step DOWN in y, z-pages recede per page, and the x stride is the
-     * mirror's measured widest row + the gap (computed by the adapter, never nominal).
-     * @private
-     */
-    _pageParams(lp, m) {
-        const rows = Math.max(0, Math.trunc(lp.pageHeight || 0));
-        if (rows === 0) return { scrollRows: this._windowScroll() };
-        const charAdvance = m.charWidth + (m.spacing || 0);
-        if ((lp.axis || 'xy') === 'z') {
-            return {
-                pageRows: rows, pagesWide: 1,
-                depthPerBand: (lp.pageDepth || 0) * m.lineHeight,
-                scrollRows: this._windowScroll(),
-            };
-        }
-        return {
-            pageRows: rows,
-            pagesWide: Math.max(1, Math.trunc(lp.pagesWide || 1)),
-            pageGapX: (lp.pageGapX || 0) * charAdvance,
-            bandStrideY: rows * m.lineHeight + (lp.pageGapY || 0) * m.lineHeight,
-            scrollRows: this._windowScroll(),
-        };
-    }
-
-    /**
-     * The kernel-facing scroll: window-relative. A windowed item's rows count from its
-     * own start, so the absolute scroll carries the window's start row as a bias —
-     * screenRow = (row − startRow) − (scroll − startRow) = absolute row − absolute
-     * scroll, the identical remap. Non-negative by construction: the window never
-     * starts below the scroll position (startRow = scroll − margin, clamped).
-     * @private
-     */
-    _windowScroll() {
-        return Math.max(0, (this._scrollOffset || 0) - (this._byteWindow?.startRow || 0));
-    }
-
-    /**
-     * The staged window — ALWAYS a window, one shape. A large seedable unpaged file
-     * gets a partial window (rows [scroll − margin, scroll + span + margin)); every
-     * other case answers the DEGENERATE window: the whole file. The refusals are
-     * inputs to this resolver, not grid-level modes: small file (windowMinBytes),
-     * paged view (a paged item derives its fan stride from its OWN widest row —
-     * carrying the baked stride in is the follow-up), wrapping lines (wrap-0
-     * checkpoints cannot seed them — windowSeedable), no trie.
-     * @private
-     * @returns {{from:number, to:number, startRow:number, endRow:number,
-     *            totalRows:number, degenerate:boolean}}
-     */
-    _resolveWindow(lp, arena) {
-        const rec = this._bakedRecord;
-        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-        const totalRows = rec ? rowsUnderWrap(rec, wrap) : 0;
-        const whole = {
-            from: 0, to: this._bytes.length,
-            startRow: 0, endRow: totalRows, totalRows, degenerate: true,
-        };
-        const cfg = this.config;
-        if (!rec || !(cfg.windowMinBytes > 0) || this._bytes.length < cfg.windowMinBytes) return whole;
-        if (Math.trunc(lp.pageHeight || 0) > 0) return whole;
-        if (!windowSeedable(rec, wrap)) {
-            if (!this._windowRefusedNoted) {
-                this._windowRefusedNoted = true;
-                console.info(`[bake] ${this.filename || this.name}: lines wrap at ${wrap} — degenerate window (full fold)`);
-            }
-            return whole;
-        }
-        const trie = arena?.trie;
-        if (!trie) return whole;
-        const span = Math.max(1, this._frameRows || cfg.windowRows);
-        const margin = Math.max(0, cfg.windowMarginRows);
-        const s = Math.min(this._scrollOffset || 0, Math.max(0, totalRows - 1));
-        const r0 = Math.max(0, s - margin);
-        const r1 = Math.min(totalRows, s + span + margin);
-        if (r0 <= 0 && r1 >= totalRows) return whole;     // the window IS the file
-        const w = byteRangeForRows(this._bytes, trie, rec, r0, r1, wrap);
-        if (!w || (w.from === 0 && w.to >= this._bytes.length)) return whole;
-        return { from: w.from, to: w.to, startRow: r0, endRow: r1, totalRows, degenerate: false };
-    }
-
-    /**
-     * The filename's own VIEW (its own group: independent color + visibility toggle),
-     * staged into the SAME arena as the content — its own item at y=0 above the
-     * content (wrap 0: a label never folds). Poses off the same grid node.
+     * The filename's own InstancedField, placed above content.
      * @private
      */
     async _layoutFilename() {
-        const arena = getPipelineArena();
-        if (!arena) return;   // the content path already logged the loud-once error
+        if (!this.filename) return;
         if (!this._filenameField) {
-            this._filenameField = ensureMegaField(arena, {
-                scene: this.scene, atlas: this.atlas,
+            this._filenameField = new InstancedField(null, this.atlas, {
                 worldScale: this.config.worldScale,
-                pickingSystem: this._pickingSystem,
-            }).createView({ node: this, color: this.config.filenameColor });
+                slugData: this.config.slugData || this.atlas?._slugData,
+                shaper: this.config.shaper || this.atlas?._shapeCache || this.atlas?._shaper,
+                defaultColor: this.config.filenameColor,
+                frustumCulled: false,
+            });
+            this._rendererGroup.add(this._filenameField.instanceMesh);
         }
         this._filenameField.setVisible(true);
-        // Same name already staged → keep its item (a windowed grid re-runs
-        // _layoutContent on every window crossing; the label hasn't moved).
-        if (this._filenamePipeline && this._filenameStagedText === this.filename) return;
+        if (this._filenameStagedText === this.filename) return;
         this._filenameStagedText = this.filename;
-        this._filenamePipeline?.dispose?.();
-        this._filenamePipeline = arena.stage({
-            bytes: _textEncoder.encode(this.filename),
+        this._filenameField.loadText(this.filename, {
+            color: this.config.filenameColor,
             origin: { x: 0, y: 0, z: 0 },
-            page: null,
+            metrics: this.metrics,
             wrapWidth: 0,
-            lineHeight: this.metrics.lineHeight,
-            zStep: 0,
-            field: this._filenameField,
         });
-        await arena.requestFlush();
     }
 
     /**
-     * The content bounds in this grid's local frame — the pipeline's extent, derived from
-     * the CPU mirror (the oracle the GPU slots are gate-checked against). Synchronous by
-     * construction: the mirror paginates in place on scroll/mode changes, so there is no
-     * readback and nothing to invalidate.
+     * The content bounds in this grid's local frame.
      * @private
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        const w = this._byteWindow;
-        // Nothing staged yet: the RECORD still measures the file (a materialized
-        // row hands its record over before the first fold) — without this, the
-        // click-to-focus camera fit ran against an empty box for the one beat
-        // between materialize and laid, and flew to a degenerate frame.
-        if (!w) return this._layout?.extent() ?? this._bakedPriorExtent();
-        // ONE rule: the pipeline measures what it STAGED; the record measures the
-        // FILE; the grid's footprint is the file's. A degenerate window staged the
-        // whole file, so its live extent is the sharpest answer (exact under
-        // wrapping, scroll-current); a partial window's extent is the window's —
-        // there the record speaks for the file (exact in the seedable regime).
-        return w.degenerate
-            ? (this._layout?.extent() ?? this._bakedPriorExtent())
-            : (this._bakedPriorExtent() ?? this._layout?.extent());
+        return this._layout?.extent() ?? null;
     }
 
-    /**
-     * Attach this file's BAKED record (the repo's layout index — glyphBake.js). Two
-     * consumers: _bakedPriorExtent measures the grid before its bytes are laid (the
-     * load storm's mid-stream pours place a real footprint instead of a unit box),
-     * and the post-laid gate checks the GPU's bounds against the baked prediction.
-     * @param {{leaders:number, maxLineWidth:number, maxLineLen:number, total:Object,
-     *          lineHist:Map<number,number>}} record
-     */
     setBakedRecord(record) {
         this._bakedRecord = record || null;
-        this._bakedProvenance = record ? 'index' : null;
-        this._bakedChecked = false;
-    }
-
-    /**
-     * The measure PRIOR from the baked record, under this grid's CURRENT fold — used
-     * only while the pipeline hasn't laid (then the GPU extent takes over). Rows are
-     * EXACT for any wrap (the record's line histogram); width is exact when no line
-     * folds and a bounded overestimate when one does (a segment is never wider than
-     * its whole line). Pagination is ignored — the boot fold is unpaged (pageHeight
-     * 0); a paged grid just measures by its unpaged column until laid.
-     * @private
-     * @returns {{min:Object, max:Object, width:number, height:number, depth:number}|null}
-     */
-    _bakedPriorExtent() {
-        const rec = this._bakedRecord;
-        if (!rec || !(rec.leaders > 0) || this.content.length === 0) return null;
-        const m = this.metrics;
-        const lp = resolveLayoutParams(this._foldLayout());
-        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-        const rows = rowsUnderWrap(rec, wrap);
-        const originY = (this.config.showFilename && this.filename)
-            ? -m.lineHeight * 1.5
-            : 0;
-        const zStep = m.charHeight * (lp.zWrapSpacing || 0);
-        const segs = wrap > 0 ? Math.max(1, Math.ceil(rec.maxLineLen / wrap)) : 1;
-        const min = { x: 0, y: originY - (rows - 1) * m.lineHeight, z: -(segs - 1) * zStep };
-        // Top edge follows the layout origin: with a filename shown, content starts
-        // 1.5 rows down — a charHeight-at-zero top would slab the panel over the label.
-        const max = { x: rec.maxLineWidth, y: originY + m.charHeight, z: 0 };
-        return {
-            min, max,
-            width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
-        };
-    }
-
-    // ============ Line → Byte-Slot Mapping ============
-
-    /** The wrap width the CURRENT fold uses (arranger overrides included). @private */
-    _foldWrapWidth() {
-        return Math.max(0, Math.trunc(resolveLayoutParams(this._foldLayout()).wrapWidth || 0));
-    }
-
-    /**
-     * Build the queryable description for the current layout — the ONE source the caret /
-     * highlight / selection query against (positionAt, slotForChar) AND the source of the
-     * content's own extent (extent()). Byte-backed: slot == source byte offset, positions
-     * read the pipeline's CPU mirror (the oracle the GPU is gate-checked against).
-     * Rebuilt every load. @private
-     */
-    _buildLayoutDescription() {
-        const idx = this._byteLineIndex;
-        // The HANDLE, not the mirror: touching .mirror here would materialize the CPU
-        // oracle for every loaded grid — extent() reads the GPU bounds record instead,
-        // and the oracle materializes on the first actual slot query (caret/edit).
-        this._layout = (idx && this._pipeline) ? new ByteLayoutDescription({
-            bytes: this._bytes,
-            lineByteStart: idx.lineByteStart,
-            lineLengths: idx.lineLengths,
-            pipeline: this._pipeline,
-            scrollOffset: this._scrollOffset || 0,
-            sourceBase: this._byteWindow?.from || 0,
-        }) : null;
-        this._scheduleAnalyze();
     }
 
     /**

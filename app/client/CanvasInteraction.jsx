@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import { useAppCommands } from './CommandProvider.jsx';
 import { resolveGesture } from './gestureResolver.js';
 import { moveVerbFor } from './surfaceInteractions.js';
@@ -332,7 +332,10 @@ export function CanvasPicker() {
       const sx = s.x, sy = s.y; // the pixel THIS pick samples — stamped onto handleHoverAt
       ps.setMousePosition(sx - rect.left, sy - rect.top);
       if (camMoved) ps.markDirty();
-      if (!s.pickPending && ps._needsPick) {
+      const now = performance.now();
+      if (!s.lastPickTime) s.lastPickTime = 0;
+      if (!s.pickPending && ps._needsPick && (now - s.lastPickTime >= 33)) {
+        s.lastPickTime = now;
         s.pickPending = true;
         ps.pickAsync('grid', c, scene).then((hit) => {
           // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.

@@ -89,7 +89,7 @@ const SURFACE_PROJECTORS = {
     // the captured record it returns to). A seated terminal's .position is carrel-LOCAL, so a
     // world-space fact applied here would yank it out of the ring. applyView sets the LOCAL
     // geometry (position + grid + emulator) directly — no verb replay on the load path.
-    const held = !!store.ctx.holderOf?.(s.id);
+    const held = !!store.ctx.holderOf?.(s.id) || !!store.ctx.cameraDock?.has?.(s.id);
     const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
     // Readability zoom for a LOOSE terminal (held tiles get theirs from the holder's own
     // reconcile — the dock re-applies zoom + box-fit itself). Guarded like applyView:

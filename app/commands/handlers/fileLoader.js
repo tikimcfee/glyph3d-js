@@ -97,8 +97,6 @@ export function getDiskMtime(grid) {
     return grid?._diskMtime ?? null;
 }
 
-/** Dedupe + construct the FileRow shell for a text path (shared by every text
- *  build path). Returns null when the file is already open. @private */
 function prepFileRow(ctx, path, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
@@ -121,21 +119,13 @@ function seatFileRow(ctx, path, row, notRendered, mtime) {
 }
 
 /**
- * Create, load, and seat a text ROW — the load unit of rows-not-actors. Seating
- * (tree insert + registration) is SYNCHRONOUS — the tree grows in walk order and
- * the bulk path's mid-stream pours see the row immediately — while the bytes
- * stage on the shared arena. The returned `load` resolves when the row is staged,
- * adopted, and MEASURED — the baked record answers before the GPU does, so the
- * bulk settle never waits on a per-file bounds readback.
+ * Create, load, and seat a text ROW.
  * @private
  * @returns {{id: string, load: Promise}|null}
  */
 function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
     const row = prepFileRow(ctx, path, notRendered);
     if (!row) return null;
-    // The baked record (repo layout index) warm-starts the row's measure; real
-    // content only — a placeholder's synthetic text has nothing to do with the
-    // file's bake, so the row self-bakes it.
     const load = row.load(path, body, { baked: notRendered ? null : baked });
     const id = seatFileRow(ctx, path, row, notRendered, mtime);
     return { id, load };

@@ -69,7 +69,7 @@ start_vite() {
   echo "→ vite: clear cache + (re)start on :$VITE_PORT"
   kill_port "$VITE_PORT" vite
   rm -rf "$APP_DIR/node_modules/.vite"
-  ( cd "$APP_DIR" && nohup bun run dev >"$VITE_LOG" 2>&1 & )
+  ( cd "$APP_DIR" && nohup bun run dev >"$VITE_LOG" 2>&1 & disown )
   sleep 2
   if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
     echo "  vite up → http://localhost:$VITE_PORT/   (log: $VITE_LOG)"
@@ -84,7 +84,7 @@ start_relay() {
   echo "→ relay: rebuild Go + (re)start on :$RELAY_PORT   (note: this kills live terminals)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & )
+  ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & disown )
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServe), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".

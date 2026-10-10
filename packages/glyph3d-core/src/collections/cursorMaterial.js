@@ -17,44 +17,86 @@
  *
  * depthWrite is OFF: the block sits just in front of its glyph (tests depth so a nearer window
  * occludes it) but never writes depth, so it can't occlude the glyphs it overlays.
+ *
+ * WebGL2 (GLSL 3.00 ES) THREE.ShaderMaterial implementation.
  */
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { uv, vec2, float, uniform, min, max, smoothstep, fwidth } from 'three/tsl';
 
 /** Default hollow-outline thickness, in SCREEN PIXELS. */
 export const CURSOR_BORDER_WIDTH = 1.5;
+
+const VERTEX_SHADER = `
+precision highp float;
+
+in vec3 position;
+in vec2 uv;
+
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+
+out vec2 vUv;
+
+void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const FRAGMENT_SHADER = `
+precision highp float;
+precision highp int;
+
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform vec3 uColor;
+uniform float uFill;
+uniform float uBorder;
+uniform float uBorderW;
+
+void main() {
+    // Crisp screen-pixel outline at the quad edge (panel-size term cancels in fwidth).
+    vec2 edge = vec2(0.5, 0.5) - abs(vUv - vec2(0.5, 0.5));
+    vec2 fw = fwidth(edge);
+    vec2 px = edge / max(fw, vec2(1e-6, 1e-6));
+    float d = min(px.x, px.y);
+    float band = 1.0 - smoothstep(uBorderW - 0.5, uBorderW + 0.5, d);
+
+    float alpha = max(uFill, band * uBorder);
+    if (alpha <= 0.0) discard;
+    fragColor = vec4(uColor, alpha);
+}
+`;
 
 /**
  * @param {Object} [opts]
  * @param {number|string} [opts.color=0x6ee7a0] - cursor color (focus green by default)
  * @param {number} [opts.fillOpacity=0.5] - solid-block alpha when focused (glyph reads through)
  * @param {number} [opts.borderWidth=CURSOR_BORDER_WIDTH] - hollow-outline thickness in screen px
- * @returns {{ material: MeshBasicNodeMaterial, setState, setStyle }}
+ * @returns {{ material: THREE.ShaderMaterial, setState: Function, setStyle: Function }}
  */
 export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
                                        borderWidth = CURSOR_BORDER_WIDTH } = {}) {
-    const uColor = uniform(new THREE.Color(color));
-    const uFill = uniform(0);                 // fill alpha (0 = hollow; fillOpacity = solid)
-    const uBorder = uniform(1);               // outline alpha (1 = drawn; 0 = none)
-    const uBorderW = uniform(borderWidth);    // screen pixels
-    let fill = fillOpacity;                    // remembered solid-fill alpha (CPU side)
+    const uColorVal = new THREE.Color(color);
+    let fill = fillOpacity;
 
-    // Crisp screen-pixel outline at the quad edge (panel-size term cancels in fwidth).
-    const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());   // per-axis dist to edge, [0, 0.5]
-    const px = edge.div(max(fwidth(edge), float(1e-6)));     // → screen pixels, per axis
-    const d = min(px.x, px.y);                               // pixels to the nearest edge
-    const band = smoothstep(uBorderW.sub(float(0.5)), uBorderW.add(float(0.5)), d).oneMinus();
+    const uniforms = {
+        uColor: { value: uColorVal },
+        uFill: { value: 0.0 },
+        uBorder: { value: 1.0 },
+        uBorderW: { value: borderWidth },
+    };
 
-    const material = new MeshBasicNodeMaterial();
-    material.transparent = true;
-    material.depthWrite = false;
-    material.side = THREE.DoubleSide;
-    material.colorNode = uColor;
-    // SOLID fills the quad at `fill`; HOLLOW lights only the border band. max() means a focused
-    // cursor is a clean fill (no double-drawn rim) and an unfocused one is a pure outline.
-    material.opacityNode = max(uFill, band.mul(uBorder));
+    const material = new THREE.RawShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        vertexShader: VERTEX_SHADER,
+        fragmentShader: FRAGMENT_SHADER,
+        uniforms,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
 
     return {
         material,
@@ -62,16 +104,19 @@ export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
         /** Set the look: 'hollow' (outline), 'solid' (filled block), or 'captured' (filled + ring). */
         setState(state) {
             const solid = state === 'solid' || state === 'captured';
-            uFill.value = solid ? fill : 0;
+            uniforms.uFill.value = solid ? fill : 0.0;
             // The ring shows for hollow (the whole cue) and captured (block + ring); plain solid has none.
-            uBorder.value = state === 'solid' ? 0 : 1;
+            uniforms.uBorder.value = state === 'solid' ? 0.0 : 1.0;
         },
 
         /** Live restyle — color, solid-fill alpha, outline width. Re-applies the current look. */
-        setStyle({ color, fillOpacity, borderWidth } = {}) {
-            if (color != null) uColor.value.set(color);
-            if (fillOpacity != null) { fill = fillOpacity; if (uFill.value > 0) uFill.value = fill; }
-            if (borderWidth != null) uBorderW.value = borderWidth;
+        setStyle({ color: c, fillOpacity: fo, borderWidth: bw } = {}) {
+            if (c != null) uniforms.uColor.value.set(c);
+            if (fo != null) {
+                fill = fo;
+                if (uniforms.uFill.value > 0) uniforms.uFill.value = fill;
+            }
+            if (bw != null) uniforms.uBorderW.value = bw;
         },
     };
 }

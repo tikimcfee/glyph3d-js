@@ -7,12 +7,23 @@
  * @license MIT
  */
 
-// Core rendering — GlyphField is the WebGPU/TSL renderer (the one renderer);
-// MegaGlyphField is the arena-backed field every byte grid is a VIEW into.
+// Core rendering — InstancedField is the high-performance WebGL2 vertex-instanced renderer;
+// InstancedSlotBuffer manages the 32-byte RenderSlot interleaved binary layout.
 export { default as GlyphAtlas } from './GlyphAtlas.js';
 export { default as EmojiAtlas } from './EmojiAtlas.js';
-export { default as GlyphField } from './GlyphField.js';
-export { MegaGlyphField, MegaFieldView, ensureMegaField } from './MegaGlyphField.js';
+export { default as InstancedField } from './collections/InstancedField.js';
+export { InstancedSlotBuffer, packRgba8, unpackRgba8 } from './core/InstancedSlotBuffer.js';
+export { generateLayout } from './core/LayoutGenerator.js';
+export {
+    createGlyphMaterial,
+    setGlyphLodParam,
+    getGlyphLodParams,
+    GLYPH_LOD_DEFAULTS,
+    setGlyphWidthCompress,
+    getGlyphWidthCompress,
+    GLYPH_WIDTH_COMPRESS_DEFAULT,
+} from './core/glyphMaterial.js';
+export { default as GlyphField } from './collections/InstancedField.js';
 
 // Collections - batched text abstractions
 export { default as CodeGrid } from './collections/CodeGrid.js';

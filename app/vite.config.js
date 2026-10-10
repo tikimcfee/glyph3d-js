@@ -33,17 +33,6 @@ const bootStampPlugin = {
   },
 };
 
-// The ONE intentional alias: serve the WebGPU build of three for BOTH `three`
-// and `three/webgpu`. The webgpu build is a superset (it carries WebGPURenderer
-// + the node-material/TSL system), and pointing both specifiers at the same file
-// guarantees a SINGLE three module instance across r3f, the bindings, and the
-// core (otherwise instanceof/hook checks across the boundary break). Resolved via
-// node so it works wherever three is hoisted (workspace root, not hardcoded).
-const threeWebGPU = require.resolve('three/webgpu');
-
-// Everything else (react, react-dom, @react-three/fiber, @glyph3d/core, @glyph3d/r3f)
-// resolves natively through the bun workspace's node_modules symlinks + each
-// package's exports map. No alias reinvention of module resolution.
 export default defineConfig({
   // Where the build will be MOUNTED. Default '/' serves dev and the cli-embedded
   // build (binary serves at root); the hosted IDE lives under glyph3d.dev/ide/,
@@ -54,10 +43,6 @@ export default defineConfig({
     __GLYPH_BOOT_BUILD__: JSON.stringify(gitStamp()),
   },
   resolve: {
-    alias: [
-      { find: /^three$/, replacement: threeWebGPU },
-      { find: /^three\/webgpu$/, replacement: threeWebGPU },
-    ],
     // Single instance of these even if a transitive dep pulls its own copy.
     dedupe: ['three', 'react', 'react-dom', '@react-three/fiber'],
   },

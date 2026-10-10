@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
-import * as THREE from 'three/webgpu';
+import * as THREE from 'three';
 import { worldBounds } from '@glyph3d/core/services';
 import { useGridRegistry } from './context.jsx';
 
@@ -9,50 +9,9 @@ const _rsize = new THREE.Vector2();
 /**
  * <Minimap> — a 3D overview HUD: a schematic of the whole space in a corner, with the
  * user's camera drawn as a moving frustum-cone so position + heading read at a glance.
- *
- * Two deliberate design calls:
- *
- *  1. SCHEMATIC, not a second render of the real scene. Re-rendering thousands of glyphs
- *     at thumbnail scale is both expensive AND illegible (mush). Instead the minimap scene
- *     holds one translucent BOX per framed surface, sized straight from its world AABB
- *     (getBounds) — footprints/massing, the "city skyline." It's cheaper than a real
- *     re-render and it's the right level of detail for a map. Boxes live in WORLD
- *     coordinates; the minimap camera just frames that world from an external vantage, so
- *     the cone (the user camera, in world space) moves through the same schematic.
- *
- *  2. A genuine SECOND RENDER PASS (the old GL minimap did this and it held up fine on
- *     portables — a pass is cheap; it's stacking many that gets tricky). r3f has no drei
- *     here, so we take the render loop over with a positive `useFrame` priority: r3f stops
- *     auto-rendering, and this callback renders the main scene exactly as r3f would, then
- *     renders the minimap scene into a scissored corner viewport. Main is drawn FIRST and
- *     the minimap is wrapped so a minimap error can never blank the app.
- *
- * Fed entirely by state we already own (registry bounds + the live camera pose), read-only
- * — it never mutates the world or React state per frame (the WebGPU render-loop rule).
- *
- * WebGPU notes / risk points if it looks off:
- *   - setViewport/setScissor take LOGICAL px (three multiplies by pixelRatio); y is from
- *     the BOTTOM. We pass r3f's CSS `size` and restore the full viewport each frame.
- *   - minimapScene.background + autoClear (default) clears ONLY the scissor region.
- *
- * @param {object} [props]
- * @param {number} [props.fraction=0.26]  minimap width/height as a fraction of the canvas
- * @param {number} [props.margin=12]      gap from the canvas edge, CSS px
- * @param {number} [props.fov=35]         minimap camera field of view
- * @param {[number,number,number]} [props.viewDir]  external vantage direction (toward content)
- */
-/**
- * An InstancedMesh whose instance matrices ride a STORAGE attribute. Three's
- * WebGPU instancing puts a small mesh's matrices (≤1024) in a uniform buffer
- * that re-uploads WHOLE every frame regardless of changes; a
- * StorageInstancedBufferAttribute flips it onto the version-gated path with
- * addUpdateRange support, so a still skyline uploads nothing.
  */
 function makeFills(geo, material, capacity) {
   const fills = new THREE.InstancedMesh(geo, material, capacity);
-  const im = new THREE.StorageInstancedBufferAttribute(fills.instanceMatrix.array, 16);
-  im.name = 'MinimapProxyMatrices';
-  fills.instanceMatrix = im;
   fills.frustumCulled = false;
   return fills;
 }

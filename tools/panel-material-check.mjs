@@ -5,6 +5,7 @@
 //
 //   bun tools/panel-material-check.mjs
 
+import * as THREE from 'three';
 import { createPanelMaterial, BORDER_FLAGS, setPanelStateColorDefaults } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
 
 let failures = 0;
@@ -12,10 +13,10 @@ const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) fa
 
 // Opaque fill → solid panel (occludes dock stacks), border nodes present.
 const opaque = createPanelMaterial({ color: 0x101020, opacity: 1, depthWrite: true });
-ok(opaque.material.constructor.name === 'MeshBasicNodeMaterial', 'builds a MeshBasicNodeMaterial');
+ok(opaque.material instanceof THREE.Material, 'builds a Material');
 ok(opaque.material.transparent === false, 'opacity 1 → not transparent (genuinely solid)');
 ok(opaque.material.depthWrite === true, 'depthWrite preserved (occludes content behind it)');
-ok(!!opaque.material.colorNode && !!opaque.material.opacityNode, 'fill + border live in colorNode/opacityNode');
+ok(!!opaque.material.uniforms?.uFill && !!opaque.material.uniforms?.uBorderColor, 'fill + border live in uniforms');
 
 // Translucent fill → transparent so the rim alpha can blend on a docked tile.
 const glass = createPanelMaterial({ color: 0x101020, opacity: 0.9 });

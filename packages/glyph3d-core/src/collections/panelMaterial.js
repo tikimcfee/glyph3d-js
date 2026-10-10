@@ -31,9 +31,6 @@
  */
 
 import * as THREE from 'three';
-import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { uv, vec2, float, uint, uniform, mix, smoothstep, min, max, fwidth, bitAnd, select, time, sin, modelViewProjection } from 'three/tsl';
-import { withBandBias } from '../core/layerBands.js';
 
 /** Default border thickness in SCREEN PIXELS. */
 export const PANEL_BORDER_WIDTH = 1.5;
@@ -47,8 +44,6 @@ export const BORDER_FLAGS = Object.freeze({
     CAPTURED: 1 << 4,   // greedy keyboard capture settled on this window (Esc + all keys flow here)
     EDGE:     1 << 5,   // a constant identity hairline (label pills) — no state semantics, no pulse
 });
-
-const TAU = Math.PI * 2;
 
 // State colors — the legible interaction vocabulary (focus/hover/input), shared by the in-shader
 // border AND the directory overlay so the two never drift. These are the DEFAULTS a panel is born
@@ -80,63 +75,102 @@ export function setPanelStateColorDefaults({ hover, focus, input, capture } = {}
  * @param {number} [opts.opacity=1] - fill opacity (transparent flag tracks opacity<1)
  * @param {number} [opts.side=THREE.DoubleSide]
  * @param {boolean} [opts.depthWrite=true] - the panel occludes content behind it (dock stacks)
- * @param {string} [opts.layerBand] - a LAYER_BAND name: the vertex stage wears the band's
- *        live clip-z depth bias (the `band.*` settings dials — see core/layerBands.js), so
- *        stacked translucent layers keep a deterministic depth order at any camera distance
- * @returns {{ material: MeshBasicNodeMaterial, setFill, setBorder, setBorderFlag, getBorderFlags }}
+ * @param {string} [opts.layerBand]
+ * @returns {{ material: THREE.ShaderMaterial, setFill, setBorder, setBorderFlag, getBorderFlags, setStateColors, getStateColors }}
  */
 export function createPanelMaterial({ color = 0x000000, opacity = 1,
                                       side = THREE.DoubleSide, depthWrite = true, layerBand = null } = {}) {
-    const uFill = uniform(new THREE.Color(color));
-    const uOpacity = uniform(opacity);
-    const uBorderColor = uniform(new THREE.Color(0xffffff)); // identity hue (DOCKED)
-    const uBorderWidth = uniform(PANEL_BORDER_WIDTH);        // screen pixels
-    const uBorderIntensity = uniform(1);                    // master rim opacity
-    const uFlags = uniform(0, 'uint');                      // BORDER_FLAGS bit-set
-    // Per-panel state colors, seeded from the current module defaults (clone so each panel owns its
-    // own uniform); setStateColors() restyles them live.
-    const uHoverColor = uniform(STATE_DEFAULTS.hover.clone());
-    const uFocusColor = uniform(STATE_DEFAULTS.focus.clone());
-    const uInputColor = uniform(STATE_DEFAULTS.input.clone());
-    const uCaptureColor = uniform(STATE_DEFAULTS.capture.clone());
+    const uFill = { value: new THREE.Color(color) };
+    const uOpacity = { value: opacity };
+    const uBorderColor = { value: new THREE.Color(0xffffff) }; // identity hue (DOCKED)
+    const uBorderWidth = { value: PANEL_BORDER_WIDTH };        // screen pixels
+    const uBorderIntensity = { value: 1.0 };                   // master rim opacity
+    const uFlags = { value: 0 };                               // BORDER_FLAGS bit-set
+    const uHoverColor = { value: STATE_DEFAULTS.hover.clone() };
+    const uFocusColor = { value: STATE_DEFAULTS.focus.clone() };
+    const uInputColor = { value: STATE_DEFAULTS.input.clone() };
+    const uCaptureColor = { value: STATE_DEFAULTS.capture.clone() };
+    const uTime = { value: 0.0 };
 
-    const F = BORDER_FLAGS;
-    const has = (mask) => bitAnd(uFlags, uint(mask)).greaterThan(uint(0)); // bool node
-    const on = uFlags.greaterThan(uint(0));
-    const anyState = has(F.HOVERED | F.FOCUSED | F.INPUT | F.CAPTURED);
-    const accent = has(F.FOCUSED | F.INPUT | F.CAPTURED); // states that thicken the line
+    const material = new THREE.ShaderMaterial({
+        glslVersion: THREE.GLSL3,
+        uniforms: {
+            uFill,
+            uOpacity,
+            uBorderColor,
+            uBorderWidth,
+            uBorderIntensity,
+            uFlags,
+            uHoverColor,
+            uFocusColor,
+            uInputColor,
+            uCaptureColor,
+            uTime,
+        },
+        vertexShader: `
+            out vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            precision highp float;
+            precision highp int;
 
-    // Border COLOR: a transient state REPLACES the resting color outright — the dominant state color
-    // (priority captured > input > focused > hovered) while any state is active, else the material's
-    // set color (the dock identity hue). A gentle hover pulse rides on top. No blend, so focus shows
-    // full strength, not a half-tint of the identity. CAPTURED wins — it's the strongest "you are
-    // fully in this window" cue.
-    const stateCol = select(has(F.CAPTURED), uCaptureColor,
-                       select(has(F.INPUT), uInputColor,
-                         select(has(F.FOCUSED), uFocusColor, uHoverColor)));
-    const pulse = select(has(F.HOVERED), sin(time.mul(TAU * 1.1)).mul(0.5).add(0.5).mul(0.2).add(0.85), float(1));
-    const borderCol = select(anyState, stateCol, uBorderColor).mul(pulse);
+            in vec2 vUv;
+            out vec4 fragColor;
 
-    // Border SHAPE: a crisp pixel-wide line at the edge; focus/input thicken it, CAPTURED thickest
-    // (a bold locked frame).
-    const w = uBorderWidth.mul(select(has(F.CAPTURED), float(2.6), select(accent, float(1.6), float(1))));
-    const edge = vec2(0.5, 0.5).sub(uv().sub(0.5).abs());     // per-axis dist to edge, [0, 0.5]
-    const px = edge.div(max(fwidth(edge), float(1e-6)));       // → screen pixels, per axis
-    const d = min(px.x, px.y);                                // pixels to the nearest edge
-    const band = smoothstep(w.sub(float(0.5)), w.add(float(0.5)), d).oneMinus();
-    const rim = band.mul(select(on, uBorderIntensity, float(0)));
+            uniform vec3 uFill;
+            uniform float uOpacity;
+            uniform vec3 uBorderColor;
+            uniform float uBorderWidth;
+            uniform float uBorderIntensity;
+            uniform int uFlags;
+            uniform vec3 uHoverColor;
+            uniform vec3 uFocusColor;
+            uniform vec3 uInputColor;
+            uniform vec3 uCaptureColor;
+            uniform float uTime;
 
-    const material = new MeshBasicNodeMaterial();
-    material.transparent = opacity < 1;
-    material.side = side;
-    material.depthWrite = depthWrite;
-    material.forceSinglePass = true;   // transparent+DoubleSide double-pass: no (see GlyphField)
-    material.colorNode = mix(uFill, borderCol, rim);
-    material.opacityNode = max(uOpacity, rim);
-    // The layer-band depth bias rides the vertex stage (a live shared uniform — see
-    // core/layerBands.js): clip.z += bias·w. modelViewProjection IS the standard clip
-    // output, so this replaces nothing but the depth the fragment lands at.
-    if (layerBand) material.vertexNode = withBandBias(modelViewProjection, layerBand);
+            void main() {
+                int F_DOCKED   = 1;
+                int F_HOVERED  = 2;
+                int F_FOCUSED  = 4;
+                int F_INPUT    = 8;
+                int F_CAPTURED = 16;
+                int F_EDGE     = 32;
+
+                bool isCaptured = (uFlags & F_CAPTURED) != 0;
+                bool isInput    = (uFlags & F_INPUT) != 0;
+                bool isFocused  = (uFlags & F_FOCUSED) != 0;
+                bool isHovered  = (uFlags & F_HOVERED) != 0;
+                bool anyState   = isCaptured || isInput || isFocused || isHovered;
+                bool accent     = isCaptured || isInput || isFocused;
+
+                vec3 stateCol = isCaptured ? uCaptureColor : (isInput ? uInputColor : (isFocused ? uFocusColor : uHoverColor));
+                float pulse = isHovered ? (sin(uTime * 6.9115) * 0.5 + 0.5) * 0.2 + 0.85 : 1.0;
+                vec3 borderCol = (anyState ? stateCol : uBorderColor) * pulse;
+
+                float scaleFactor = isCaptured ? 2.6 : (accent ? 1.6 : 1.0);
+                float w = uBorderWidth * scaleFactor;
+
+                vec2 edge = vec2(0.5) - abs(vUv - vec2(0.5));
+                vec2 px = edge / max(fwidth(edge), vec2(1e-6));
+                float d = min(px.x, px.y);
+                float band = 1.0 - smoothstep(w - 0.5, w + 0.5, d);
+                float rim = (uFlags > 0) ? (band * uBorderIntensity) : 0.0;
+
+                vec3 finalColor = mix(uFill, borderCol, rim);
+                float finalAlpha = max(uOpacity, rim);
+
+                fragColor = vec4(finalColor, finalAlpha);
+            }
+        `,
+        transparent: opacity < 1,
+        side,
+        depthWrite,
+    });
 
     let flags = 0;
     return {

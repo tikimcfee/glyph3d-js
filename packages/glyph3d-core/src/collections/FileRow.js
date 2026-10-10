@@ -1,54 +1,29 @@
 /**
  * FileRow — a file's DATA presence in the field: the load unit of the
- * rows-not-actors architecture (docs/perf-swarm/landing-plan.md, move 1).
+ * rows-not-actors architecture.
  *
- * A bulk load pours FileRows, not CodeGrids. A row is a real THREE.Object3D —
- * it lives in the ContentTree exactly where the CodeGrid leaf lives, its
- * matrixWorld poses its mega-field views through the existing pose sweep, and
- * the scene graph stays the scene graph — but it owns NO interaction machinery:
- * no edit state, no caret, no scroll/frame conveyor, no ScaleModel, no unique
- * GPU material. What it has:
- *
- *   - the file's bytes staged as an arena item + a mega-field VIEW (glyphs),
- *   - a second item + view for the filename label (same shape as CodeGrid's),
- *   - a measure served from the BAKED record (rows/widest exact before the GPU
- *     answers — MEASURES v3's "leaves declare intrinsic" made literal),
- *   - a panel SLOT in the mega-field's PanelField (one instanced draw for every
- *     panel, posed by the same group texel that poses this row's glyphs — no
- *     per-row mesh, no per-row material, no first-draw cost),
- *   - the colorizer contract (content + _layout + getRenderer), so rows paint
- *     syntax eagerly like grids always did.
- *
- * The CodeGrid ACTOR materializes on first interaction (focus/edit/save/verbs)
- * — the command layer's materialize seam swaps it into this row's place. The
- * row answers everything the ITERATED surfaces read (bounds, names, counts,
- * pose, color/highlight writes); anything interactive belongs to the actor.
- *
- * Border flags (hover/focus) are a per-instance LANE in the panel field — every
- * row has live border capability, no material travels.
+ * A bulk load pours FileRows, not heavy CodeGrids. A row is a real THREE.Object3D
+ * living in the ContentTree with lightweight instanced glyph rendering and panel
+ * backgrounds. The interactive CodeGrid actor materializes on first interaction
+ * (focus, edit, etc.) via materializeActor in fileLoader.js.
  */
 
 import * as THREE from 'three';
 import BoundedObject3D from './BoundedObject3D.js';
-import { ensureMegaField } from '../MegaGlyphField.js';
-import { loadStats } from '../core/loadStats.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
-import { rowsUnderWrap, bakeFile } from '../compute/glyphBake.js';
-import { windowSeedable, byteRangeForRows } from '../compute/glyphPipelineWindow.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { getPipelineArena } from '../compute/GlyphLayoutCompute.js';
-import ByteLayoutDescription, { buildByteLineIndex } from '../core/ByteLayoutDescription.js';
+import LayoutDescription from '../core/LayoutDescription.js';
 import { analyzeGrid } from '../parsing/SyntaxColorizer.js';
-
-const _textEncoder = new TextEncoder();
+import InstancedField from './InstancedField.js';
+import { generateLayout } from '../core/LayoutGenerator.js';
+import { createPanelMaterial } from './panelMaterial.js';
 
 export default class FileRow extends BoundedObject3D {
     /**
      * @param {THREE.Scene} scene
      * @param {Object} atlas - the booted GlyphAtlas
-     * @param {Object} options - the same theme bag CodeGrid takes (gridTheme());
-     *   the row reads the subset it renders with.
+     * @param {Object} [options]
      */
     constructor(scene, atlas, options = {}) {
         super();
@@ -67,259 +42,153 @@ export default class FileRow extends BoundedObject3D {
             textColor: options.textColor || { r: 0.0, g: 1.0, b: 0.0 },
             worldScale: options.worldScale || 0.025,
             layout: { ...DEFAULT_LAYOUT, ...(options.layout || {}) },
-            // Windowed staging knobs — same semantics as CodeGrid's; a row never
-            // scrolls, so a partial window is always rows [0, span + margin).
-            windowMinBytes: options.windowMinBytes ?? 256 * 1024,
-            windowRows: options.windowRows ?? 600,
-            windowMarginRows: options.windowMarginRows ?? 200,
         };
 
         this.filename = '';
         this.sourcePath = null;
         this.content = '';
 
-        // Same field mapping as CodeGrid._computeMetrics — the fold reads
-        // lineHeight/spacing, cellMetrics speaks lineSpacing/letterSpacing.
-        const cm = computeCellMetrics(atlas.getCharSize(), this.config.worldScale);
-        this.metrics = { charWidth: cm.charWidth, charHeight: cm.charHeight, lineHeight: cm.lineSpacing, spacing: cm.letterSpacing };
+        const cm = computeCellMetrics(atlas?.getCharSize?.() || { width: 9.6, height: 18 }, this.config.worldScale);
+        this.metrics = {
+            charWidth: cm.charWidth,
+            charHeight: cm.charHeight,
+            lineHeight: cm.lineSpacing,
+            spacing: cm.letterSpacing,
+        };
 
-        // Colorizer contract (SyntaxColorizer.analyzeGrid / runAnalyze).
         this._analyzeGen = 0;
         this._highlights = null;
         this._layout = null;
-
-        // Staging state.
-        this._bytes = null;
-        this._byteLineIndex = null;
         this._bakedRecord = null;
-        this._bakedProvenance = null;
-        this._byteWindow = null;      // { from, to, startRow, endRow, totalRows, degenerate }
         this._layoutOriginY = 0;
-        this._pipeline = null;
-        this._filenamePipeline = null;
-        this._renderer = null;        // content MegaFieldView
-        this._filenameField = null;   // filename MegaFieldView
-        this._pickingSystem = null;
 
-        // Panel: an instance SLOT in the mega-field's PanelField, claimed at
-        // load (it needs the view's groupId); sized from the measure.
-        this._panelField = null;
-        this._panelSlot = null;
-
+        this._renderer = null;
+        this._background = null;
+        this._panel = null;
         this._borderFlags = 0;
+        this._extentCache = null;
         this._localBoundsCache = null;
         this._layoutBoundsCache = null;
+        this._pickingSystem = null;
     }
 
-    // ── Load: bytes → record → window → arena item → view ───────────────────
-
     /**
-     * Stage the file's bytes and filename into the arena and measure from the
-     * record. Resolves when the row is staged + adopted (visible next flush) —
-     * NOT gated on the GPU bounds readback: the measure comes from the record,
-     * so the batch settle never waits per-row. `this.laid` carries the GPU
-     * gate for callers that want it.
-     * @param {string} path - full path (the filename label text, as CodeGrid)
+     * Stage the file's content and filename.
+     * @param {string} path
      * @param {string} content
-     * @param {{ baked?: Object }} [opts] - a disk-index record; absent → self-bake
+     * @param {{ baked?: Object }} [opts]
      */
     async load(path, content, { baked } = {}) {
         this.filename = path;
-        this.content = content;
-        this._bytes = _textEncoder.encode(content);
-        this._byteLineIndex = buildByteLineIndex(this._bytes);
-
-        const arena = getPipelineArena();
-        if (!arena || !arena.trie) {
-            if (!FileRow._noArenaNoted) {
-                FileRow._noArenaNoted = true;
-                console.error('FileRow: no pipeline arena — the byte pipeline needs WebGPU; rows render EMPTY (boot log has the reason)');
-            }
-            return this;
-        }
+        this.content = content || '';
+        if (baked) this._bakedRecord = baked;
 
         const m = this.metrics;
         const lp = resolveLayoutParams(this.config.layout);
-
-        // THE RECORD ALWAYS EXISTS — a disk record warm-starts, otherwise the row
-        // folds its own (the same streaming pass CodeGrid runs).
-        if (baked && baked.byteLength === this._bytes.length) {
-            this._bakedRecord = baked;
-            this._bakedProvenance = 'index';
-        } else {
-            const tBake = performance.now();
-            this._bakedRecord = bakeFile(this._bytes, arena.trie, { lineHeight: m.lineHeight });
-            this._bakedProvenance = 'self';
-            const bakeMs = performance.now() - tBake;
-            loadStats.selfBakes++;
-            loadStats.selfBakeMs += bakeMs;
-            if (bakeMs > 10) console.info(`[bake] ${this.filename}: self-baked in ${bakeMs.toFixed(1)}ms (${this._bakedRecord.totalRows} rows, ${this._bytes.length} bytes)`);
-        }
-
         this._layoutOriginY = (this.config.showFilename && this.filename)
             ? -m.lineHeight * 1.5
             : 0;
 
-        // Views (created once; load is called once per row).
-        const mega = ensureMegaField(arena, {
-            scene: this.scene, atlas: this.atlas,
-            worldScale: this.config.worldScale,
-            slugData: this.atlas?._slugData, shaper: this.atlas?._shaper,
-            pickingSystem: this._pickingSystem,
-        });
-        if (!this._renderer) this._renderer = mega.createView({ node: this, color: this.config.textColor });
-        if (this._panelSlot == null) {
-            this._panelField = mega.panels;
-            this._panelSlot = mega.panels.alloc(this, this._renderer.groupId);
+        if (!this._renderer) {
+            this._renderer = new InstancedField(null, this.atlas, {
+                worldScale: this.config.worldScale,
+                slugData: this.atlas?._slugData,
+                shaper: this.atlas?._shapeCache || this.atlas?._shaper,
+                defaultColor: this.config.textColor,
+                frustumCulled: false,
+            });
+            this.add(this._renderer.instanceMesh);
         }
 
+        let bounds = null;
+
+        // 1. Filename header
+        if (this.config.showFilename && this.filename) {
+            const fnRes = generateLayout(this.filename, {
+                shaper: this.atlas?._shapeCache || this.atlas?._shaper,
+                metrics: m,
+                origin: { x: 0, y: 0, z: 0 },
+                wrapWidth: 0,
+                color: this.config.filenameColor,
+                targetBuffer: this._renderer.slotBuffer,
+                append: false,
+            });
+            bounds = fnRes.bounds;
+        }
+
+        // 2. File content
         if (this.content.length > 0) {
-            this._byteWindow = this._resolveWindow(lp, arena);
-            const w = this._byteWindow;
-            const staged = arena.stage({
-                bytes: this._bytes.subarray(w.from, w.to),
+            const hasHeader = !!(this.config.showFilename && this.filename);
+            const res = generateLayout(this.content, {
+                shaper: this.atlas?._shapeCache || this.atlas?._shaper,
+                metrics: m,
                 origin: { x: 0, y: this._layoutOriginY, z: 0 },
-                page: { scrollRows: 0 },
                 wrapWidth: lp.wrapWidth || 0,
-                lineHeight: m.lineHeight,
-                zStep: m.charHeight * (lp.zWrapSpacing || 0),
-                field: null,
+                zWrapSpacing: lp.zWrapSpacing || 0,
+                color: this.config.textColor,
+                targetBuffer: this._renderer.slotBuffer,
+                append: hasHeader,
+                previousBounds: bounds,
             });
-            this._pipeline = staged;
+            bounds = res.bounds;
+            this._renderer.setSlots(res.buffer, res.glyphCount);
+            this._renderer.setLayoutExtent(bounds);
 
-            // The filename: its own item + view at y=0 (wrap 0 — a label never folds).
-            if (this.config.showFilename && this.filename) {
-                if (!this._filenameField) {
-                    this._filenameField = mega.createView({ node: this, color: this.config.filenameColor });
-                }
-                this._filenamePipeline = arena.stage({
-                    bytes: _textEncoder.encode(this.filename),
-                    origin: { x: 0, y: 0, z: 0 },
-                    page: null,
-                    wrapWidth: 0,
-                    lineHeight: m.lineHeight,
-                    zStep: 0,
-                    field: this._filenameField,
-                });
-            }
-
-            await arena.requestFlush();
-            // The swap discipline (same as CodeGrid): adopt right after the flush
-            // ENCODES — GPU submission order makes the slots valid for any frame
-            // that can see the range; nothing waits on a readback to show glyphs.
-            staged.adoptField(this._renderer, w.from);
-
-            this._layout = new ByteLayoutDescription({
-                bytes: this._bytes,
-                lineByteStart: this._byteLineIndex.lineByteStart,
-                lineLengths: this._byteLineIndex.lineLengths,
-                pipeline: staged,
-                scrollOffset: 0,
-                sourceBase: w.from,
+            this._layout = new LayoutDescription({
+                lineSlotBase: res.lineStarts,
+                lineStartRow: res.lineStartRows,
+                lineLengths: res.lineLengths,
+                wrapWidth: lp.wrapWidth || 0,
+                originX: 0,
+                originY: this._layoutOriginY,
+                originZ: 0,
+                lineSpacing: m.lineHeight,
+                totalRows: res.totalRows,
+                maxRowExtent: res.maxRowExtent,
+                maxSegs: res.maxSegs,
             });
-
-            /** The GPU gate, NOT awaited by the load: rows measure from the record.
-             *  Consumers that need laid bounds (the bake gate) chain here. */
-            this.laid = staged.laid;
-            this._armBakeGate(lp);
-
-            // Eager colorize — parity with the grid era (CF-k's worker-pool lane
-            // moves this off-thread; the row already speaks that contract).
-            this._analyzeGen++;
-            analyzeGrid(this);
+        } else if (bounds) {
+            this._renderer.setSlots(this._renderer.slotBuffer, this._renderer.slotBuffer.count);
+            this._renderer.setLayoutExtent(bounds);
         }
+
+        this._extentCache = bounds ? {
+            min: { ...bounds.min },
+            max: { ...bounds.max },
+            width: bounds.width,
+            height: bounds.height,
+            depth: bounds.depth,
+        } : null;
 
         this._updateBackground();
+        this._analyzeGen++;
+        analyzeGrid(this);
+
+        if (this._pickingSystem) {
+            this.setPickingSystem(this._pickingSystem);
+        }
+
         return this;
     }
 
-    /**
-     * The row's staged window — CodeGrid._resolveWindow with scroll pinned 0
-     * and no frame: a large seedable unpaged file stages rows [0, span+margin),
-     * everything else the DEGENERATE whole file.
-     * @private
-     */
-    _resolveWindow(lp, arena) {
-        const rec = this._bakedRecord;
-        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-        const totalRows = rec ? rowsUnderWrap(rec, wrap) : 0;
-        const whole = {
-            from: 0, to: this._bytes.length,
-            startRow: 0, endRow: totalRows, totalRows, degenerate: true,
-        };
-        const cfg = this.config;
-        if (!rec || !(cfg.windowMinBytes > 0) || this._bytes.length < cfg.windowMinBytes) return whole;
-        if (Math.trunc(lp.pageHeight || 0) > 0) return whole;
-        if (!windowSeedable(rec, wrap)) return whole;
-        if (!arena?.trie) return whole;
-        const r1 = Math.min(totalRows, cfg.windowRows + cfg.windowMarginRows);
-        if (r1 >= totalRows) return whole;
-        const w = byteRangeForRows(this._bytes, arena.trie, rec, 0, r1, wrap);
-        if (!w || (w.from === 0 && w.to >= this._bytes.length)) return whole;
-        return { from: w.from, to: w.to, startRow: 0, endRow: r1, totalRows, degenerate: false };
+    loadFile(filename, content) {
+        return this.load(filename, content);
     }
 
-    /** The bake gate as a fire-and-forget chain on `laid` — loud, never blocking. @private */
-    _armBakeGate(lp) {
-        const rec = this._bakedRecord;
-        const pipeline = this._pipeline;
-        if (!rec || !pipeline?.laid) return;
-        pipeline.laid.then(() => {
-            const got = pipeline.bounds;
-            if (!got || pipeline !== this._pipeline) return;
-            const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-            const w = this._byteWindow;
-            const wantRows = w.endRow - w.startRow;
-            if (Math.round(got.totalRows) !== wantRows) {
-                console.warn(`[bake] ${this.filename}: baked rows(wrap ${wrap}) = ${wantRows} ≠ GPU ${got.totalRows} — stale record or fold drift`);
-            }
-        }).catch(() => { /* device loss resolves laid; nothing to gate */ });
+    setBakedRecord(baked) {
+        this._bakedRecord = baked;
     }
 
-    // ── Measure: the record IS the measure ──────────────────────────────────
+    // ── Bounds ──────────────────────────────────────────────────────────────
 
-    /**
-     * The row's content extent from the baked record — rows exact under any
-     * wrap (the line histogram), width exact when nothing folds. Same math as
-     * CodeGrid._bakedPriorExtent; for a row it is not a prior, it is THE measure.
-     *
-     * CACHED: a row's record, metrics and layout are immutable after load()
-     * (anything that would change them materializes the actor first), while
-     * the per-frame iterators (occlusion culler, minimap, camera soft-bounds)
-     * call getBounds → here once per row per frame — the recompute was a
-     * resolveLayoutParams + histogram walk × 1500 rows × 60Hz.
-     * @private
-     * @returns {{min:Object, max:Object, width:number, height:number, depth:number}|null}
-     */
     _recordExtent() {
-        if (this._extentCache !== undefined) return this._extentCache;
-        const rec = this._bakedRecord;
-        if (!rec || !(rec.leaders > 0) || this.content.length === 0) {
-            // Null only becomes final once content is loaded; before that, stay uncached.
-            if (this.content.length === 0) return null;
-            this._extentCache = null;
-            return null;
-        }
-        const m = this.metrics;
-        const lp = resolveLayoutParams(this.config.layout);
-        const wrap = Math.max(0, Math.trunc(lp.wrapWidth || 0));
-        const rows = rowsUnderWrap(rec, wrap);
-        const originY = this._layoutOriginY;
-        const zStep = m.charHeight * (lp.zWrapSpacing || 0);
-        const segs = wrap > 0 ? Math.max(1, Math.ceil(rec.maxLineLen / wrap)) : 1;
-        const min = { x: 0, y: originY - (rows - 1) * m.lineHeight, z: -(segs - 1) * zStep };
-        const max = { x: rec.maxLineWidth, y: originY + m.charHeight, z: 0 };
-        this._extentCache = {
-            min, max,
-            width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
-        };
         return this._extentCache;
     }
 
-    /** Plain-object content bounds (the CodeGrid-shaped accessor). */
-    getContentBounds() { return this._recordExtent(); }
+    getContentBounds() {
+        return this._recordExtent();
+    }
 
-    /** Unpadded local box for layout containers (nodeUtils.leafBox). */
     layoutBounds() {
         const cb = this._recordExtent();
         if (!cb) return new THREE.Box3();
@@ -329,92 +198,106 @@ export default class FileRow extends BoundedObject3D {
         return this._layoutBoundsCache;
     }
 
-    /** Padded local box (panel padding + Z slab) — the world consumers' box. */
     getLocalBounds() {
         const cb = this._recordExtent();
         if (!this._localBoundsCache) this._localBoundsCache = new THREE.Box3();
         const box = this._localBoundsCache;
         if (!cb) { box.makeEmpty(); return box; }
         const padding = this.config.backgroundPadding;
-        box.min.set(cb.min.x - padding, cb.min.y - padding, cb.min.z - BOUNDS_Z_PAD);
-        box.max.set(cb.max.x + padding, cb.max.y + padding, cb.max.z + BOUNDS_Z_PAD);
+        box.min.set(cb.min.x - padding, cb.min.y - padding, (cb.min.z ?? 0) - BOUNDS_Z_PAD);
+        box.max.set(cb.max.x + padding, cb.max.y + padding, (cb.max.z ?? 0) + BOUNDS_Z_PAD);
         return box;
     }
 
-    /** Size + place the panel-field instance from the measure. @private */
     _updateBackground() {
-        const pf = this._panelField;
-        const slot = this._panelSlot;
-        if (pf == null || slot == null) return;
-        if (!this.config.showBackground) { pf.setVisible(slot, false); return; }
+        this._boundsCacheDirty = true;
+        if (!this.config.showBackground) {
+            if (this._background) this._background.visible = false;
+            return;
+        }
+
         const cb = this._recordExtent();
-        if (!cb) { pf.setVisible(slot, false); return; }
+        if (!cb || cb.width <= 0 || cb.height <= 0) {
+            if (this._background) this._background.visible = false;
+            return;
+        }
+
+        if (!this._background) {
+            const geo = new THREE.PlaneGeometry(1, 1);
+            this._panel = createPanelMaterial({
+                color: this.config.backgroundColor,
+                opacity: this.config.backgroundOpacity,
+                side: THREE.DoubleSide,
+                depthWrite: true,
+            });
+            this._background = new THREE.Mesh(geo, this._panel.material);
+            this._background.frustumCulled = false;
+            this.add(this._background);
+            if (this._pickingSystem) {
+                this._pickingSystem.register('grid', this._background, this);
+            }
+        }
+
         const padding = this.config.backgroundPadding;
         const width = cb.width + padding * 2;
         const height = cb.height + padding * 2;
-        if (!(width > 0 && height > 0)) { pf.setVisible(slot, false); return; }
-        pf.setRect(slot,
+        this._background.scale.set(width, height, 1);
+        const zMin = cb.min.z !== undefined ? cb.min.z : 0;
+        this._background.position.set(
             cb.min.x + cb.width / 2,
             cb.min.y + cb.height / 2,
-            width, height,
-            (cb.min.z ?? 0) - 0.5,
+            zMin - 0.5
         );
-        pf.setFill(slot, this.config.backgroundColor, this.config.backgroundOpacity);
-        pf.setVisible(slot, true);
+        this._background.visible = true;
     }
 
-    // ── The data surface (what iterated consumers read) ─────────────────────
+    // ── Accessors ───────────────────────────────────────────────────────────
 
     getSourcePath() { return this.sourcePath || this.userData?.sourcePath || null; }
     setSourcePath(path) { this.sourcePath = path; }
     getFilename() { return this.filename; }
     getRenderer() { return this._renderer; }
-    getLineCount() { return this._byteLineIndex ? this._byteLineIndex.lineByteStart.length : 0; }
-    getGlyphCount() { return this._bakedRecord?.leaders ?? 0; }
-    getCharForSlot(slot) { return this._layout?.charForSlot(slot) ?? null; }
-    getTotalVisualRows() { return this._byteWindow?.totalRows ?? 0; }
+    getLineCount() {
+        return this._layout ? this._layout.lineLengths.length : (this.content ? this.content.split('\n').length : 0);
+    }
+    getGlyphCount() { return this._renderer?.getGlyphCount() ?? 0; }
+    getCharForSlot(slot) { return this._layout?.charForSlot?.(slot) ?? null; }
+    getTotalVisualRows() { return this._layout?.totalRows ?? 0; }
     getHighlights() { return this._highlights; }
-    update(_dt) { /* rows animate nothing */ }
+    update(_dt) {}
 
-    /** The picking wire: one registration each for the panel field ('grid'
-     *  channel) and the mega-field ('glyph' channel) — nothing per row. */
+    // ── Picking ─────────────────────────────────────────────────────────────
+
     setPickingSystem(ps) {
-        if (!ps || this._pickingSystem === ps) return;
+        if (!ps) return;
         this._pickingSystem = ps;
-        const arena = getPipelineArena();
-        arena?.megaField?.setPickingSystem?.(ps);
+        if (this._background) {
+            ps.register('grid', this._background, this);
+        }
+        if (this._renderer?.instanceMesh) {
+            ps.register('glyph', this._renderer.instanceMesh, this);
+        }
     }
 
-    // ── Border flags: a per-instance lane in the panel field ─────────────────
+    // ── Border & theme ──────────────────────────────────────────────────────
 
-    /** Hover/focus/input feedback — writes this row's flag byte in the field. */
     setBorderFlag(mask, on) {
         this._borderFlags = on ? (this._borderFlags | mask) : (this._borderFlags & ~mask);
-        if (this._panelSlot != null) this._panelField.setFlags(this._panelSlot, this._borderFlags);
+        this._panel?.setBorderFlag?.(mask, on);
     }
 
-    /** State colors are FIELD-wide uniforms (idempotent across rows). */
     setStateColors(colors) {
-        this._panels()?.setStateColors(colors);
+        this._panel?.setStateColors?.(colors);
     }
 
-    /** Border identity (color/width/intensity) — same field-wide seam. */
     setBorder(opts) {
-        this._panels()?.setBorder(opts);
+        this._panel?.setBorder?.(opts);
     }
 
-    /** @private the panel field, before or after this row's own load. */
-    _panels() {
-        return this._panelField ?? getPipelineArena()?.megaField?.panels ?? null;
-    }
-
-    /** Theme restyle (settings fanout runs this per registered grid). */
     setBackgroundStyle({ color, opacity } = {}) {
         if (color != null) this.config.backgroundColor = color;
         if (opacity != null) this.config.backgroundOpacity = opacity;
-        if (this._panelSlot != null) {
-            this._panelField.setFill(this._panelSlot, this.config.backgroundColor, this.config.backgroundOpacity);
-        }
+        this._panel?.setFill?.(this.config.backgroundColor, this.config.backgroundOpacity);
     }
 
     showBackground(visible) {
@@ -422,29 +305,28 @@ export default class FileRow extends BoundedObject3D {
         this._updateBackground();
     }
 
-    // ── Lifecycle ────────────────────────────────────────────────────────────
+    // ── Lifecycle ───────────────────────────────────────────────────────────
 
-    /**
-     * Release the row's arena items + views + panel slot. Shared resources
-     * (the panel field, its materials) stay — they are app-wide by design.
-     */
     dispose() {
-        if (this._panelSlot != null) {
-            this._panelField.free(this._panelSlot);
-            this._panelSlot = null;
-            this._panelField = null;
+        if (this._pickingSystem) {
+            if (this._background) this._pickingSystem.unregister('grid', this._background);
+            if (this._renderer?.instanceMesh) this._pickingSystem.unregister('glyph', this._renderer.instanceMesh);
+            this._pickingSystem = null;
         }
-        this._pipeline?.dispose?.();
-        this._pipeline = null;
-        this._filenamePipeline?.dispose?.();
-        this._filenamePipeline = null;
-        this._renderer?.dispose?.();
-        this._renderer = null;
-        this._filenameField?.dispose?.();
-        this._filenameField = null;
+        if (this._renderer) {
+            this._renderer.dispose();
+            this.remove(this._renderer.instanceMesh);
+            this._renderer = null;
+        }
+        if (this._background) {
+            this._background.geometry.dispose();
+            this._background.material.dispose();
+            this.remove(this._background);
+            this._background = null;
+            this._panel = null;
+        }
         this._layout = null;
-        this._bytes = null;
-        this._byteLineIndex = null;
+        this._extentCache = null;
         this.parent?.remove(this);
     }
 }
