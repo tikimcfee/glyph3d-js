@@ -160,9 +160,10 @@ export default function registerNavigationCommands(router) {
             id = ctx.registry.getIdByGrid(node);
             if (!id) return null; // a tree leaf not in the registry — never clear primary by "focusing" it
             ctx.attentionManager.set('primary', id, { entity: ctx.registry.get(id) });
-            const idx = ctx.getGrids().indexOf(node);
+            const liveGrid = ctx.registry.get(id)?.grid ?? node;
+            const idx = ctx.getGrids().indexOf(liveGrid);
             if (idx >= 0) ctx.cameraController?.focusOnGrid(idx);
-            else ctx.cameraController?.focusOnObject?.(node);
+            else ctx.cameraController?.focusOnObject?.(liveGrid);
         }
         const p = ctx.contentTree?.parentOf(node); // PATH-derived parent, not the (reparent-able) THREE parent
         if (p && p.userData) p.userData._navLastChild = node;

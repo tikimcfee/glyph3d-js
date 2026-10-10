@@ -182,6 +182,9 @@ export function materializeActor(ctx, id) {
     if (notRendered) grid.userData.notRendered = notRendered;
     else setDiskMtime(grid, mtime);
     if (row._bakedRecord) grid.setBakedRecord(row._bakedRecord);
+    // Seed donor extent from row to eliminate the async materialization bounds gap
+    const rowExtent = row.getContentBounds();
+    if (rowExtent) grid.setSeedExtent(rowExtent);
     // Hand the actor the row's parse: content is identical, so the colorizer's
     // content-cache repaints from these captures instead of re-parsing the file.
     if (row._highlights) grid._highlights = row._highlights;
@@ -194,11 +197,16 @@ export function materializeActor(ctx, id) {
         // landed off-field, which is where the click-focus camera then flew.)
         const swapped = ctx.contentTree?.replaceLeaf?.(path, grid);
         if (!swapped) ctx.contentTree?.insert(grid, path);   // row never made the tree (bare registry entry)
-        ctx.registry.unregister(id);                  // then re-register: no overwrite warn
-        ctx.addGrid(grid, { id, type: 'grid' });
+        if (typeof ctx.registry?.replace === 'function') {
+            ctx.registry.replace(id, grid, { type: 'grid' });
+        } else {
+            ctx.registry.unregister(id);                  // then re-register: no overwrite warn
+            ctx.addGrid(grid, { id, type: 'grid' });
+        }
     });
 
     const load = grid.loadFile(path, row.content);
+    grid.loadPromise = load;
     load.catch((err) => console.warn(`materializeActor: ${path} load failed:`, err))
         .finally(() => row.dispose());
     return grid;

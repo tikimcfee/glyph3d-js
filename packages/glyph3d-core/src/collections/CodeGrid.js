@@ -148,6 +148,8 @@ class CodeGrid extends FramedGlyphField {
 
         this._filenameField = null;
         this._layout = null;
+        this._seedExtent = null;
+        this.loadPromise = null;
 
         // ── Windowing (opt-in scrollable viewport over the full source) ──────
         // Off by default → the grid renders the whole file. setWindow() switches
@@ -304,7 +306,9 @@ class CodeGrid extends FramedGlyphField {
         // Through the ONE mutex: a load racing an edit's relayout (or a windowed
         // grid's scroll crossing) must serialize on the same _relayoutBusy gate —
         // a raw _layoutContent here was the second door around it.
-        await this._relayout();
+        this.loadPromise = this._relayout();
+        await this.loadPromise;
+        this._seedExtent = null;
         return this;
     }
 
@@ -1256,12 +1260,75 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
+     * Seed initial content bounds (used by materializeActor to eliminate bounds gap).
+     * @param {Object} extent - { min, max, width, height, depth }
+     */
+    setSeedExtent(extent) {
+        if (!extent) return;
+        this._seedExtent = {
+            min: { ...extent.min },
+            max: { ...extent.max },
+            width: extent.width,
+            height: extent.height,
+            depth: extent.depth ?? 0,
+        };
+        this._updateBackground();
+    }
+
+    /**
      * The content bounds in this grid's local frame.
      * @private
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        return this._layout?.extent() ?? null;
+        let cb = this._layout?.extent() ?? null;
+        if (!cb && this._seedExtent) {
+            cb = this._seedExtent;
+        }
+
+        if (this.config.showFilename && this.filename) {
+            const m = this.metrics;
+            const fnW = this.filename.length * m.charWidth;
+            const fnH = m.charHeight;
+            const fnMinY = -fnH;
+            const fnMaxY = 0;
+            if (cb) {
+                const minX = Math.min(cb.min.x, 0);
+                const maxX = Math.max(cb.max.x, fnW);
+                const minY = Math.min(cb.min.y, fnMinY);
+                const maxY = Math.max(cb.max.y, fnMaxY);
+                const minZ = Math.min(cb.min.z, 0);
+                const maxZ = Math.max(cb.max.z, 0);
+                return {
+                    min: { x: minX, y: minY, z: minZ },
+                    max: { x: maxX, y: maxY, z: maxZ },
+                    width: maxX - minX,
+                    height: maxY - minY,
+                    depth: maxZ - minZ,
+                };
+            } else {
+                return {
+                    min: { x: 0, y: fnMinY, z: 0 },
+                    max: { x: fnW, y: fnMaxY, z: 0 },
+                    width: fnW,
+                    height: fnH,
+                    depth: 0,
+                };
+            }
+        }
+
+        if (!cb) {
+            const m = this.metrics;
+            return {
+                min: { x: 0, y: -m.charHeight, z: 0 },
+                max: { x: m.charWidth, y: 0, z: 0 },
+                width: m.charWidth,
+                height: m.charHeight,
+                depth: 0,
+            };
+        }
+
+        return cb;
     }
 
     setBakedRecord(record) {

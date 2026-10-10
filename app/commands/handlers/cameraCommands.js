@@ -64,28 +64,35 @@ export default function registerCameraCommands(router) {
         // tab-activation fired `camera.focus <docked terminal>`, whose flyTo({pitch:0,yaw:0}) zeroed
         // the just-loaded camera pose (position looked kept since the tile sits where you are). The
         // dock owns a docked tile's framing — leave the world camera be. Loose windows still frame.
-        if (resolved.registryId && (ctx.holderOf?.(resolved.registryId) === ctx.cameraDock || ctx.cameraDock?.has?.(resolved.registryId))) {
-            return { text: `OK: '${resolved.registryId}' is docked — the dock frames it`, data: { docked: true, registryId: resolved.registryId } };
+        if ((resolved.registryId && ctx.cameraDock && (ctx.holderOf?.(resolved.registryId) === ctx.cameraDock || ctx.cameraDock?.has?.(resolved.registryId)))
+            || (resolved.grid && ctx.dockTiles?.has?.(resolved.grid))) {
+            return { text: `OK: '${resolved.registryId || target}' is docked — the dock frames it`, data: { docked: true, registryId: resolved.registryId } };
         }
 
-        const idx = resolved.idx >= 0 ? resolved.idx : grids.indexOf(resolved.grid);
-        let framed = false;
-        if (idx >= 0) {
-            ctx.cameraController.focusOnGrid(idx);
-            if (ctx.spatialNav) ctx.spatialNav.focusGrid(idx, false);
-            framed = true;
-        } else if (resolved.grid) {
-            // A non-grid window (e.g. a terminal): frame it by its world bounds. Terminals aren't
-            // in getGrids('grid') so focusOnGrid can't reach them, but they carry getBounds, and
-            // terminal.focus deliberately leaves framing to camera.focus. One focus verb, any window.
-            framed = !!ctx.cameraController.focusOnObject?.(resolved.grid);
-        }
-        if (!framed) return { text: `ERR: resolved "${target}" but could not frame it`, data: null };
-        const label = resolved.registryId || grids[idx]?.getFilename?.() || `#${idx}`;
-        return {
-            text: `OK: focusing on "${label}"`,
-            data: { index: idx, registryId: resolved.registryId }
+        const doFrame = () => {
+            const currentGrids = ctx.getGrids();
+            const idx = resolved.idx >= 0 ? resolved.idx : currentGrids.indexOf(resolved.grid);
+            let framed = false;
+            if (idx >= 0) {
+                framed = !!ctx.cameraController.focusOnGrid(idx);
+                if (framed && ctx.spatialNav) ctx.spatialNav.focusGrid(idx, false);
+            }
+            if (!framed && resolved.grid) {
+                // A non-grid window (e.g. a terminal) or grid fallback: frame it by its world bounds.
+                framed = !!ctx.cameraController.focusOnObject?.(resolved.grid);
+            }
+            if (!framed) return { text: `ERR: resolved "${target}" but could not frame it`, data: null };
+            const label = resolved.registryId || currentGrids[idx]?.getFilename?.() || `#${idx}`;
+            return {
+                text: `OK: focusing on "${label}"`,
+                data: { index: idx, registryId: resolved.registryId }
+            };
         };
+
+        if (resolved.grid?.loadPromise) {
+            return resolved.grid.loadPromise.then(doFrame).catch(doFrame);
+        }
+        return doFrame();
     }, { description: 'Focus camera on grid by index, registry ID, or name', usage: '<index|id|name>' });
 
     router.register('camera.reset', (args, ctx) => {

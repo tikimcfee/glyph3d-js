@@ -105,6 +105,35 @@ export default class SceneRegistry {
         return entry;
     }
 
+    /**
+     * Replace an existing registered object in place.
+     * Preserves entry Map insertion order (preventing getGrids index drift).
+     * @param {string} id
+     * @param {Object} newGrid
+     * @param {Object} [opts]
+     * @returns {RegistryEntry}
+     */
+    replace(id, newGrid, opts = {}) {
+        const existing = this._entries.get(id);
+        if (!existing) {
+            return this.register(id, newGrid, opts);
+        }
+        this._gridToId.delete(existing.grid);
+        this._pickable.delete(existing);
+        this._metaUnindex(existing);
+
+        existing.grid = newGrid;
+        if (opts.type !== undefined) existing.type = opts.type;
+        if (opts.role !== undefined) existing.role = opts.role;
+        if (opts.meta) existing.meta = { ...existing.meta, ...opts.meta };
+
+        this._gridToId.set(newGrid, id);
+        if (this._pickableTypes.has(this._tag(existing))) this._pickable.add(existing);
+        this._metaIndexAdd(existing);
+        this._invalidateCache(this._tag(existing));
+        return existing;
+    }
+
     /** The machinery key: presentation role when carried, species when loose. @private */
     _tag(entry) {
         return entry.role || entry.type;

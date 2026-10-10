@@ -70,7 +70,10 @@ export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = fals
     const deliver = (grid, idx, registryId) => {
         if (actor && grid?.isFileRow && registryId != null) {
             const upgraded = ctx.materializeActor?.(registryId);
-            if (upgraded) return { grid: upgraded, idx, registryId };
+            if (upgraded) {
+                const newIdx = ctx.getGrids().indexOf(upgraded);
+                return { grid: upgraded, idx: newIdx >= 0 ? newIdx : idx, registryId };
+            }
         }
         return { grid, idx, registryId };
     };

@@ -988,7 +988,7 @@ export class ViewerCameraController {
         // Cap the FIT height to the readable-lines window so a long file frames its head at a
         // readable size (the rest scrolls); the top-anchor uses the FULL plane height. lineSpacing
         // is read off the TRUE plane height, so the cap is right even for a rotated grid.
-        const lineCount = grid.lines ? grid.lines.length : 1;
+        const lineCount = (typeof grid.getLineCount === 'function' ? grid.getLineCount() : grid.lines?.length) || 1;
         const READABLE_LINES = 35;
         const fitHeight = (Math.min(lineCount, READABLE_LINES) / Math.max(lineCount, 1)) * plane.height;
 
@@ -1002,12 +1002,13 @@ export class ViewerCameraController {
 
     focusOnGrid(index) {
         const pose = this.computeGridFocus(index);
-        if (!pose) return;
+        if (!pose) return false;
         // Fly to the file's head (top-anchored), squared to its face (reverse-billboard pitch/yaw).
         this.flyTo({ position: pose, pitch: pose.pitch, yaw: pose.yaw });
         window.dispatchEvent(new CustomEvent('camera-focus-changed', {
             detail: { index }
         }));
+        return true;
     }
 
     /**

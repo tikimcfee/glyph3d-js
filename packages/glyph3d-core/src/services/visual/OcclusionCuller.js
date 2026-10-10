@@ -144,6 +144,11 @@ export class OcclusionCuller {
 
     /** @param {boolean} v Off ⇒ everything un-culls and proxies stop drawing entirely. */
     setEnabled(v) {
+        if (v && typeof this.renderer?.isOccluded !== 'function') {
+            this.enabled = false;
+            this.group.visible = false;
+            return;
+        }
         this.enabled = !!v;
         this.group.visible = this.enabled;
         if (!this.enabled) {
