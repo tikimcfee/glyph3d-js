@@ -1150,6 +1150,34 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
+     * Ensure all codepoints in the given text have their glyphs encoded in LiveSlugAtlas.
+     * Newly sighted outline glyphs have their curves encoded; newly sighted emoji slots
+     * have their canvas cells rasterized and their glyphMap entries written.
+     * @private
+     * @param {string} text
+     */
+    _ensureGlyphsEncoded(text) {
+        const atlas = this.atlas;
+        const live = atlas?._live;
+        const shapeCache = atlas?._shapeCache || (this.config.shaper?.lookup ? this.config.shaper : null);
+        if (!live || !shapeCache || !text) return;
+        if (!atlas._seenCodepoints) atlas._seenCodepoints = new Set();
+        const seen = atlas._seenCodepoints;
+        let fresh = null;
+        for (let i = 0; i < text.length;) {
+            const cp = text.codePointAt(i);
+            i += cp > 0xFFFF ? 2 : 1;
+            if (cp > 32 && !seen.has(cp)) {
+                seen.add(cp);
+                (fresh ?? (fresh = [])).push(cp);
+            }
+        }
+        if (fresh && fresh.length > 0) {
+            live.ensureCodepoints(fresh, shapeCache);
+        }
+    }
+
+    /**
      * Layout content — the byte-in GPU pipeline IS the layout: stage the bytes into the
      * SHARED pipeline arena (this grid is one item) → the coalesced flush dispatches the
      * whole storm in three dispatches. No worker, no builder, no CPU fold, no per-grid
@@ -1170,6 +1198,7 @@ class CodeGrid extends FramedGlyphField {
 
         if (this.content && this.content.length > 0) {
             if (!this._renderer) this._ensureRenderer();
+            this._ensureGlyphsEncoded(this.content);
             const m = this.metrics;
             const lp = resolveLayoutParams(this._foldLayout());
             const wrapWidth = lp.wrapWidth || 0;
@@ -1238,6 +1267,7 @@ class CodeGrid extends FramedGlyphField {
      */
     async _layoutFilename() {
         if (!this.filename) return;
+        this._ensureGlyphsEncoded(this.filename);
         if (!this._filenameField) {
             this._filenameField = new InstancedField(null, this.atlas, {
                 worldScale: this.config.worldScale,

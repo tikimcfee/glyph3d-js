@@ -56,6 +56,7 @@ uniform int hasHighlight;
 flat out int vCurveStart;
 flat out int vCurveCount;
 flat out int vMode;
+flat out int vEmojiCell;
 out vec2 vGlyphUV;
 out vec3 vColor;
 out float vGroupAlpha;
@@ -72,6 +73,7 @@ void main() {
     vCurveStart = int(info.x);
     vCurveCount = int(info.y);
     vMode       = int(info.z); // 0 = slug vector, 1 = bitmap emoji, 2 = blank
+    vEmojiCell  = int(info.w);
 
     // Quad sizing: bitmap emoji get square quad (height x height); outline gets advance
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
@@ -145,6 +147,9 @@ precision highp int;
 #define MAX_CURVES 256
 
 uniform highp usampler2D curveTexture;
+uniform sampler2D emojiTexture;
+uniform int emojiCols;
+uniform int emojiRows;
 
 // Greeking & LOD dials
 uniform int uGreekMode;       // 0 = disabled, 1 = smooth blend, 2 = pure hard bypass
@@ -157,6 +162,7 @@ uniform float uMinHi;         // 0.20 — fuzz full (footprint)
 flat in int vCurveStart;
 flat in int vCurveCount;
 flat in int vMode;
+flat in int vEmojiCell;
 in vec2 vGlyphUV;
 in vec3 vColor;
 in float vGroupAlpha;
@@ -232,8 +238,53 @@ float computeCoverage(float invDiameter, float dilate, vec2 p0, vec2 p1, vec2 p2
 }
 
 void main() {
-    // Mode 2 or empty slot: discard
+    // Mode 2: blank cell
     if (vMode == 2) discard;
+
+    // ── Bitmap / emoji branch (vMode == 1) ──────────────────────────
+    if (vMode == 1) {
+        float cols = float(emojiCols > 0 ? emojiCols : 16);
+        float rows = float(emojiRows > 0 ? emojiRows : 16);
+        float fcell = float(vEmojiCell);
+        float col = mod(fcell, cols);
+        float row = floor(fcell / cols);
+        vec2 atlasUV = vec2(
+            (col + vGlyphUV.x) / cols,
+            (row + (1.0 - vGlyphUV.y)) / rows
+        );
+        vec4 texel = texture(emojiTexture, atlasUV);
+        if (texel.a < 0.01) {
+            if (vBgColor.a <= 0.0 && vFillAmount <= 0.0) discard;
+            float bgAlpha = max(vFillAmount, vBgColor.a) * vGroupAlpha;
+            if (bgAlpha <= 0.0) discard;
+            vec3 fillRgb = vFillAmount > 0.0 ? vAddedColor : vBgColor.rgb;
+            fragColor = vec4(pow(fillRgb, vec3(2.2)) * bgAlpha, bgAlpha);
+            return;
+        }
+
+        vec3 rgb = texel.rgb;
+        if (vFillAmount > 0.0) {
+            rgb = mix(rgb, vAddedColor, vFillAmount);
+        } else if (length(vAddedColor) > 0.0) {
+            rgb = clamp(rgb + vAddedColor, 0.0, 1.0);
+        }
+        vec3 linearRgb = pow(rgb, vec3(2.2));
+        float outAlpha = texel.a * vGroupAlpha;
+
+        if (vBgColor.a <= 0.0 && vFillAmount <= 0.0) {
+            fragColor = vec4(linearRgb * outAlpha, outAlpha);
+            return;
+        }
+
+        float bgAlpha = max(vBgColor.a, vFillAmount) * vGroupAlpha;
+        vec3 bgRgb = pow(vFillAmount > 0.0 ? vAddedColor : vBgColor.rgb, vec3(2.2)) * bgAlpha;
+        float finalAlpha = outAlpha + bgAlpha * (1.0 - outAlpha);
+        vec3 finalRgb = (linearRgb * outAlpha) + bgRgb * (1.0 - outAlpha);
+        fragColor = vec4(finalRgb, finalAlpha);
+        return;
+    }
+
+    // ── Slug vector outline branch (vMode == 0) ─────────────────────
     if (vCurveCount == 0 && vFillAmount <= 0.0 && vBgColor.a <= 0.0) discard;
 
     vec2 fw = fwidth(vGlyphUV);
@@ -329,6 +380,21 @@ function makePlaceholderUintTexture() {
     return tex;
 }
 
+/**
+ * Create a placeholder 1x1 RGBA filterable texture.
+ */
+function makePlaceholderRGBATexture() {
+    const tex = new THREE.DataTexture(
+        new Uint8Array(4), 1, 1,
+        THREE.RGBAFormat, THREE.UnsignedByteType
+    );
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
 export const GLYPH_LOD_DEFAULTS = Object.freeze({
     dilatePx: 0.75,
     soften: 0.45,
@@ -409,6 +475,7 @@ export function getGlyphWidthCompress() {
 export function createGlyphMaterial(options = {}) {
     const curveTex = options.curveTexture || makePlaceholderUintTexture();
     const glyphMapTex = options.glyphMapTexture || makePlaceholderUintTexture();
+    const emojiTex = options.emojiTexture || makePlaceholderRGBATexture();
     const maxGroups = options.maxGroups || 64;
 
     const uniforms = {
@@ -417,6 +484,9 @@ export function createGlyphMaterial(options = {}) {
         glyphMapWidth: { value: glyphMapTex.image?.width || TEXTURE_WIDTH },
         groupTexture: { value: options.groupTexture || null },
         maxGroups: { value: maxGroups },
+        emojiTexture: { value: emojiTex },
+        emojiCols: { value: options.emojiCols || 16 },
+        emojiRows: { value: options.emojiRows || 16 },
         uWidthCompress: { value: _currentWidthCompress },
         highlightTexture: { value: null },
         hasHighlight: { value: 0 },

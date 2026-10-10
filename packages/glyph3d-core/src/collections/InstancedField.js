@@ -156,13 +156,21 @@ export default class InstancedField {
         return geometry;
     }
 
+    get emojiAtlas() {
+        return this.atlas?._emojiAtlas || this.atlas?._shaper?._emojiAtlas || this._shaper?._emojiAtlas || null;
+    }
+
     /** @private */
     _createMaterial() {
+        const ea = this.emojiAtlas;
         return createGlyphMaterial({
             curveTexture: this._slugData?.curveTexture,
             glyphMapTexture: this._slugData?.glyphMapTexture,
             groupTexture: this._groupTexture,
             maxGroups: this.maxGroups,
+            emojiTexture: ea?.getTexture?.(THREE) || null,
+            emojiCols: ea?.cols || 16,
+            emojiRows: ea?.rows || 16,
         });
     }
 
@@ -184,7 +192,33 @@ export default class InstancedField {
                 this.material.uniforms.glyphMapTexture.value = slugData.glyphMapTexture;
                 this.material.uniforms.glyphMapWidth.value = slugData.glyphMapTexture.image?.width || 1024;
             }
+            const ea = this.emojiAtlas;
+            const tex = ea?.getTexture?.(THREE);
+            if (tex && this.material.uniforms.emojiTexture) {
+                this.material.uniforms.emojiTexture.value = tex;
+                this.material.uniforms.emojiCols.value = ea.cols || 16;
+                this.material.uniforms.emojiRows.value = ea.rows || 16;
+            }
             this.material.needsUpdate = true;
+        }
+    }
+
+    /**
+     * Refresh the emoji atlas texture and grid dimensions after new emoji cells were drawn.
+     * Called by LiveSlugAtlas._refreshEmojiTextures on registered fields.
+     */
+    setEmojiTexture() {
+        const ea = this.emojiAtlas;
+        if (!ea) return;
+        const tex = ea.getTexture?.(THREE);
+        if (tex) {
+            tex.needsUpdate = true;
+            if (this.material?.uniforms?.emojiTexture) {
+                this.material.uniforms.emojiTexture.value = tex;
+                this.material.uniforms.emojiCols.value = ea.cols || 16;
+                this.material.uniforms.emojiRows.value = ea.rows || 16;
+                this.material.needsUpdate = true;
+            }
         }
     }
 
@@ -215,6 +249,26 @@ export default class InstancedField {
      * @returns {{ bounds: Object, totalRows: number, glyphCount: number }}
      */
     loadText(text, options = {}) {
+        const live = this.atlas?._live;
+        const shaper = this.atlas?._shapeCache || this._shaper;
+        if (live && shaper && text) {
+            const str = Array.isArray(text) ? text.join('\n') : String(text);
+            if (!this.atlas._seenCodepoints) this.atlas._seenCodepoints = new Set();
+            const seen = this.atlas._seenCodepoints;
+            let fresh = null;
+            for (let i = 0; i < str.length;) {
+                const cp = str.codePointAt(i);
+                i += cp > 0xFFFF ? 2 : 1;
+                if (cp > 32 && !seen.has(cp)) {
+                    seen.add(cp);
+                    (fresh ?? (fresh = [])).push(cp);
+                }
+            }
+            if (fresh && fresh.length > 0) {
+                live.ensureCodepoints(fresh, shaper);
+            }
+        }
+
         const opts = {
             shaper: this._shaper,
             worldScale: this.worldScale,
