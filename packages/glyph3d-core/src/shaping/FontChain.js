@@ -83,6 +83,9 @@ export default class FontChain {
     /** @returns {boolean} */
     get ready() { return this._ready; }
 
+    /** @returns {import('./HarfBuzzShaper.js').default|null} primary font shaper */
+    get primaryShaper() { return this._fonts[0]?.shaper || null; }
+
     /** @returns {number} primary font units-per-em (the layout reference) */
     get upem() { return this._fonts[0]?.shaper.upem || 2048; }
 
@@ -108,15 +111,27 @@ export default class FontChain {
             const name = spec.name || `font${i}`;
             let buffer;
             try {
-                const resp = await fetch(spec.url);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                buffer = await resp.arrayBuffer();
+                if (spec.buffer || spec.data || spec.arrayBuffer) {
+                    const raw = spec.buffer || spec.data || spec.arrayBuffer;
+                    buffer = (raw instanceof Uint8Array) ? raw.buffer : raw;
+                } else if (spec.url) {
+                    const resp = await fetch(spec.url);
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    buffer = await resp.arrayBuffer();
+                } else {
+                    throw new Error('spec must provide url, buffer, or data');
+                }
             } catch (err) {
-                console.warn(`[FontChain] skipping "${name}" (${spec.url}): ${err.message}`);
+                console.warn(`[FontChain] skipping "${name}" (${spec.url || 'in-memory buffer'}): ${err.message}`);
                 continue;
             }
             const shaper = new HarfBuzzShaper();
-            await shaper.init(buffer, { wasmUrl: options.wasmUrl, hb: sharedHb, name });
+            await shaper.init(buffer, {
+                wasmUrl: options.wasmUrl,
+                wasmBinary: options.wasmBinary,
+                hb: sharedHb || options.hb,
+                name
+            });
             if (!sharedHb) sharedHb = shaper.hb;
 
             const coverage = new Set(shaper.collectUnicodes());

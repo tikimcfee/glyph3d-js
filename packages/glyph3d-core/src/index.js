@@ -23,6 +23,8 @@ export {
     getGlyphWidthCompress,
     GLYPH_WIDTH_COMPRESS_DEFAULT,
 } from './core/glyphMaterial.js';
+
+// Backwards compatibility alias: GlyphField re-exports InstancedField
 export { default as GlyphField } from './collections/InstancedField.js';
 
 // Collections - batched text abstractions
@@ -77,7 +79,18 @@ export { ConnectionRenderer } from './annotations/index.js';
 export { parseFileRef, parseStackTrace, parseLogLine, parseAuto } from './parsing/index.js';
 
 // Text shaping (HarfBuzz WASM) + Slug vector encoding
-export { HarfBuzzShaper, MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder, SlugBuffer, encodeGlyph } from './shaping/index.js';
+export {
+    HarfBuzzShaper,
+    FontChain,
+    MonospaceShapeCache,
+    shapeText,
+    collectUniqueGlyphIds,
+    SlugEncoder,
+    LiveSlugAtlas,
+    SlugBuffer,
+    encodeGlyph,
+    loadSlugCore,
+} from './shaping/index.js';
 
 // Buffer builders (HarfBuzz-shaped path only)
 export { buildBatchBuffers, buildShapedBatchBuffers } from './workers/builders/index.js';

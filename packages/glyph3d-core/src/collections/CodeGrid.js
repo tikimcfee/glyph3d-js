@@ -1,10 +1,9 @@
 /**
  * CodeGrid — a single source file represented in 3D space.
  *
- * Directly manages a GlyphField (WebGPU / TSL) renderer for deferred
- * batching, flush, and GPU updates, plus the cursor + in-place edit ops,
- * highlight ranges, and the windowing/framing layout. (The deferred-add /
- * flush / worker-flush logic lives here.)
+ * Directly manages an InstancedField (WebGL2) renderer for high-performance
+ * instanced glyph rendering, plus cursor and in-place text editing,
+ * syntax highlighting, and windowed viewport layout.
  *
  * Part of the layered rendering architecture:
  * - GlyphAtlas -> CodeGrid -> GridLayoutManager
@@ -46,9 +45,6 @@ function cpLen(str) {
     return n;
 }
 
-/** The byte pipeline's encoder (one per module — TextEncoder is stateless). */
-const _textEncoder = new TextEncoder();
-
 class CodeGrid extends FramedGlyphField {
     /**
      * Create a CodeGrid
@@ -84,23 +80,12 @@ class CodeGrid extends FramedGlyphField {
             // Check options first, then atlas (shared across all renderers)
             slugData: options.slugData || (atlas && atlas._slugData) || null,
             shaper: options.shaper || (atlas && (atlas._shapeCache || atlas._shaper)) || null,
-            // Layout params — how this file folds into space (Step 3a). Per-grid; threaded
-            // through the build's `shared` channel AND read by _buildLayoutDescription's geom,
-            // so the glyphs and the caret/highlight queries can never fold differently.
+            // Layout params — how this file folds into space. Per-grid.
             layout: { ...DEFAULT_LAYOUT, ...(options.layout || {}) },
-            // Windowed staging (slots are a CACHE): a file at/above windowMinBytes with a
-            // baked record stages only rows [scroll − margin, scroll + span + margin) as
-            // its arena item — the index seeds the window, the item-reset fold computes it
-            // exactly, the record supplies the full-file measure. 0 disables.
-            windowMinBytes: options.windowMinBytes ?? 256 * 1024,
             // Window span in visual rows when no clip frame is set (a frame's rows win).
             windowRows: options.windowRows ?? 600,
-            // Hysteresis: rows staged beyond the view on each side — scroll inside the
-            // margin is a repaginate; crossing it re-stages one window.
+            // Hysteresis: rows staged beyond the view on each side
             windowMarginRows: options.windowMarginRows ?? 200,
-            // Bytes of 0x80 pad staged past an EDITED grid's content, so keystrokes
-            // rewrite in place (zero arena growth) instead of restaging the file.
-            editSlackBytes: options.editSlackBytes ?? 4096,
         };
 
         // Content state
@@ -108,11 +93,6 @@ class CodeGrid extends FramedGlyphField {
         this.sourcePath = null;
         this.content = '';
         this.lines = [];
-
-        /** The staged window — ALWAYS a window once content is laid ({from, to,
-         *  startRow, endRow, totalRows, degenerate}; degenerate = the whole file —
-         *  see _resolveWindow). Null only before the first fold. */
-        this._byteWindow = null;
 
         // Render-neutral analysis products (built off-critical-path).
         this._highlights = null;        // { gen, lang, captures } — syntax colors / 2D decorations (eager)
@@ -273,21 +253,17 @@ class CodeGrid extends FramedGlyphField {
      * @returns {this} For chaining
      */
     /**
-     * Shared load preamble: stash content + lines, reconstruct an evicted renderer, and queue
-     * the clear. Everything up to the one layout call lives here once — content and lines are
-     * always set together, on every load.
-     *
-     * TODO(load+normalize): content is stored RAW. A future "load & normalize data" pass belongs
-     * here — normalize line endings (\r\n, \r → \n), strip BOM, settle encoding — ONCE at the load
-     * seam so every downstream consumer can assume \n. Today \r\n drifts the two render targets
-     * apart: split('\n') leaves \r in a line (a \r buffer slot in 3D), while CodeMirror strips \r in
-     * the 2D editor, so tree-sitter capture offsets (indexed into this raw text) misalign across the
-     * views. Normalizing here removes the whole off-by-N class. See EditorPanel + SyntaxColorizer.
+     * Shared load preamble: normalize line endings (\r\n, \r → \n), stash content + lines,
+     * reconstruct an evicted renderer, and queue the clear. Normalizing here guarantees that
+     * 3D buffer slots, tree-sitter captures, and 2D editor offsets align cleanly without \r drift.
      * @private @param {string} text
      */
     _beginLoad(text) {
-        this.content = text;
-        this.lines = text.split('\n');
+        const normalized = (typeof text === 'string')
+            ? text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+            : String(text || '');
+        this.content = normalized;
+        this.lines = normalized.split('\n');
         this._ensureRenderer();
         this._clearRenderedText();
         this._updateBackground();
@@ -550,13 +526,11 @@ class CodeGrid extends FramedGlyphField {
         );
     }
 
-    // getRenderer() is inherited from FramedGlyphField (returns the mega-field VIEW —
-    // canvas picking maps a resolved glyph hit back to this grid through it).
+    // getRenderer() is inherited from FramedGlyphField (returns the InstancedField renderer).
 
     /**
-     * Wire the PickingSystem. Overrides FramedGlyphField: the glyph channel is the
-     * MEGA-FIELD's one registration (every byte view shares it — a view has no mesh
-     * to register); only the 'grid' channel (the background panel) is per-grid.
+     * Wire the PickingSystem. Registers the background panel for 'grid' picking
+     * and the InstancedField's instanceMesh for 'glyph' picking.
      * @param {import('../picking/PickingSystem.js').PickingSystem} pickingSystem
      */
     setPickingSystem(pickingSystem) {
@@ -840,12 +814,7 @@ class CodeGrid extends FramedGlyphField {
         const clamped = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
         if (clamped === this._scrollOffset) return this;
         this._scrollOffset = clamped;
-        // WINDOWED grid leaving its staged rows: one re-stage of a fresh window around
-        // the new position (the hysteresis margin makes this a crossing cost, not a
-        // per-tick cost — ticks inside the margin take the repaginate path below).
-        // The fold decides from here (inside its gate): a covering window repaginates
-        // (kernel 3 only — scroll ticks across grids still coalesce on the arena's
-        // repaginate gate); a crossing restages a fresh window through the full loop.
+        // Re-fold view with the updated scroll position.
         return this._foldView(true);
     }
 
@@ -1007,7 +976,6 @@ class CodeGrid extends FramedGlyphField {
         this._resetBatchState();
         this.content = '';
         this.lines = [];
-        this._contentTextIds = [];
     }
 
     // ============ Private Methods ============
@@ -1018,18 +986,17 @@ class CodeGrid extends FramedGlyphField {
      * @returns {Object} { charWidth, charHeight, lineHeight, spacing }
      */
     _computeMetrics() {
-        const atlasCharSize = this.atlas.getCharSize();
+        const atlasCharSize = (this.atlas && typeof this.atlas.getCharSize === 'function')
+            ? this.atlas.getCharSize()
+            : { width: 48 * 0.6, height: 48 * 1.15 };
         const scale = this.config.worldScale;
         const m = computeCellMetrics(atlasCharSize, scale);
         return { charWidth: m.charWidth, charHeight: m.charHeight, lineHeight: m.lineSpacing, spacing: m.letterSpacing };
     }
 
     /**
-     * Ensure the grid's render presence exists — a VIEW into the app's ONE
-     * mega-field (the arena's render face), not a per-grid GlyphField: the view is
-     * unsized (the arena owns capacity), so there is nothing to reconstruct after
-     * eviction beyond re-creating the facade. Called at the top of loadText() so
-     * that method is safe to use on evicted grids.
+     * Ensure the grid's InstancedField renderer exists.
+     * Called at the top of loadText() so that method is safe to use on evicted grids.
      * @private
      */
     _ensureRenderer() {
@@ -1041,10 +1008,7 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Create this grid's mega-field VIEW and wire it up. The view facade speaks the
-     * GlyphField surface (colors, highlight, alpha, clip) offset into the shared
-     * field; the grid itself is the view's pose node (its matrixWorld is the view's
-     * group texel). No per-grid GPU objects — the whole point of the mega-field.
+     * Create this grid's InstancedField renderer and wire it up to the scene hierarchy.
      * @private
      */
     _createRendererView() {
@@ -1178,11 +1142,8 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Layout content — the byte-in GPU pipeline IS the layout: stage the bytes into the
-     * SHARED pipeline arena (this grid is one item) → the coalesced flush dispatches the
-     * whole storm in three dispatches. No worker, no builder, no CPU fold, no per-grid
-     * kernels. The filename rides its own tiny field as another arena item above the
-     * content.
+     * Layout content — runs LayoutGenerator to emit 32-byte RenderSlots directly
+     * into the InstancedField slot buffer, updates bounds, and synchronizes the picking system.
      * @private
      */
     async _layoutContent() {
@@ -1257,6 +1218,7 @@ class CodeGrid extends FramedGlyphField {
             if (this._renderer) this._renderer.clear();
         }
 
+        this._updateBackground();
         this._applyClip();
         this._applyArrangers();
     }
@@ -1801,13 +1763,9 @@ class CodeGrid extends FramedGlyphField {
      * Rebuild glyphs after a content mutation, clearing stale highlights and
      * re-painting the caret.
      *
-     * Routes through the byte pipeline: the edit re-encodes and re-runs the three
-     * dispatches, and _beginLoad right-sizes the buffers when the content grew.
-     *
      * Edit ops fire-and-forget the returned promise. Routes through the SHARED _relayout mutex
-     * (not a separate guard) so edit and scroll/layout relayouts serialize. _linesDirty tells
-     * _relayout to re-sync content from the edit-mutated line array (cursor clamp + repaint
-     * live in _relayout).
+     * so edit and scroll/layout relayouts serialize. _linesDirty tells _relayout to re-sync
+     * content from the edit-mutated line array (cursor clamp + repaint live in _relayout).
      *
      * @private
      * @returns {Promise<this>}

@@ -869,7 +869,9 @@ export default class InstancedField {
         if (this.atlas?._live && typeof this.atlas._live.unregisterField === 'function') {
             this.atlas._live.unregisterField(this);
         }
-        if (this.instanceMesh && this.scene) {
+        if (this.instanceMesh?.parent) {
+            this.instanceMesh.parent.remove(this.instanceMesh);
+        } else if (this.instanceMesh && this.scene) {
             this.scene.remove(this.instanceMesh);
         }
         this.geometry?.dispose();

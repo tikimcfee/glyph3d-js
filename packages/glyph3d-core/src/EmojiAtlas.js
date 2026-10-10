@@ -37,7 +37,8 @@ export default class EmojiAtlas {
      * @param {number} [opts.cols=16]    Cells per row (cols×cols capacity).
      * @param {string} [opts.fontFamily] CSS emoji font stack.
      */
-    constructor({ cellPx = 72, cols = 16, fontFamily } = {}) {
+    constructor(options = {}) {
+        const { cellPx = 72, cols = 16, fontFamily, canvas, createCanvas } = options;
         this.cellPx = cellPx;
         this.cols = cols;
         this.rows = cols; // square grid → cols*cols capacity
@@ -52,15 +53,18 @@ export default class EmojiAtlas {
         this._dirty = false;
 
         const px = this.cellPx * this.cols;
-        this._canvas = (typeof document !== 'undefined')
-            ? document.createElement('canvas')
-            : null;
+        this._canvas = canvas
+            || (typeof createCanvas === 'function' ? createCanvas(px, px) : null)
+            || (typeof document !== 'undefined' ? document.createElement('canvas') : null)
+            || (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(px, px) : null);
         if (this._canvas) {
             this._canvas.width = px;
             this._canvas.height = px;
             this._ctx = this._canvas.getContext('2d', { willReadFrequently: false });
-            this._ctx.textAlign = 'center';
-            this._ctx.textBaseline = 'middle';
+            if (this._ctx) {
+                this._ctx.textAlign = 'center';
+                this._ctx.textBaseline = 'middle';
+            }
         }
         /** @private THREE.CanvasTexture, lazily created */
         this._texture = null;
@@ -183,5 +187,18 @@ export default class EmojiAtlas {
         const d = this._dirty;
         this._dirty = false;
         return d;
+    }
+
+    /**
+     * Dispose GPU and canvas resources.
+     */
+    dispose() {
+        if (this._texture) {
+            this._texture.dispose();
+            this._texture = null;
+        }
+        this._byCp.clear();
+        this._ctx = null;
+        this._canvas = null;
     }
 }

@@ -41,18 +41,19 @@ export default class HarfBuzzShaper {
      *
      * @param {ArrayBuffer} fontBuffer - Raw .ttf/.otf font file bytes
      * @param {Object}  [options]
-     * @param {string}  [options.wasmUrl] - Override path to hb.wasm (for workers)
-     * @param {Object}  [options.hb]      - An already-initialized hbjs module to reuse
-     * @param {string}  [options.name]    - Human-readable font name (logging only)
+     * @param {string}  [options.wasmUrl]    - Override path to hb.wasm (for workers)
+     * @param {ArrayBuffer|Uint8Array} [options.wasmBinary] - Raw WASM bytes for offline/embedded usage
+     * @param {Object}  [options.hb]         - An already-initialized hbjs module to reuse
+     * @param {string}  [options.name]       - Human-readable font name (logging only)
      * @returns {Promise<void>}
      */
     async init(fontBuffer, options = {}) {
-        const { wasmUrl, hb, name = 'font' } = options;
+        const { wasmUrl, wasmBinary, hb, name = 'font' } = options;
         if (hb) {
             this._hb = hb;
         } else {
             const wasmStart = performance.now();
-            this._hb = await initHarfBuzz(wasmUrl);
+            this._hb = await initHarfBuzz(wasmBinary ? { wasmBinary, wasmUrl } : wasmUrl);
             console.log(`[HarfBuzz] WASM loaded (${(performance.now() - wasmStart).toFixed(1)}ms)`);
         }
 
