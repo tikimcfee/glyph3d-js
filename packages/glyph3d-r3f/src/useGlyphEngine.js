@@ -5,7 +5,7 @@ import { bootGlyphEngine } from './glyphEngine.js';
  * Boot the glyph engine (atlas + shaper + slug) once and expose its state.
  * Renderer-independent, so it runs before any <GlyphCanvas> mounts.
  *
- * @param {import('./glyphEngine.js').GlyphEngineOptions} options - Must include `fontUrl`.
+ * @param {import('@glyph3d/core/glyphEngine.js').GlyphEngineOptions} options - Must include `fontUrl`.
  * @returns {{ atlas: object|null, stage: string, error: Error|null }}
  */
 export function useGlyphEngine(options) {

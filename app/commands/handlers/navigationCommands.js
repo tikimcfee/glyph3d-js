@@ -20,6 +20,7 @@ import {
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { canonicalPath } from './pathResolve.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** @type {Map<string, TourDefinition>} */
 const tours = new Map();
@@ -41,7 +42,7 @@ const tours = new Map();
 /**
  * Create an annotation grid positioned above a target grid.
  * Uses anchor-based placement: resolveAnchor(bounds, 'top') + gap offset.
- * @param {Object} ctx
+ * @param {AppContext} ctx
  * @param {number} gridIndex
  * @param {string} text
  * @returns {string|null} annotation id, or null if grid has no bounds
@@ -99,7 +100,7 @@ function createTourAnnotation(ctx, gridIndex, text) {
 
 /**
  * Remove a tour annotation by id.
- * @param {Object} ctx
+ * @param {AppContext} ctx
  * @param {string} id
  */
 function removeTourAnnotation(ctx, id) {
@@ -136,6 +137,7 @@ export default function registerNavigationCommands(router) {
     // The focused tree node = attention.primary's entity. Both file leaves (grids)
     // and dir nodes live in the ContentTree as THREE objects, so .parent /
     // contentChildren / sibling-adjacency walk either uniformly.
+    /** @param {AppContext} ctx */
     const currentFocusNode = (ctx) => {
         const id = ctx.attention?.primary?.id ?? null;
         return id ? (ctx.registry?.get(id)?.grid ?? null) : null;
@@ -147,6 +149,7 @@ export default function registerNavigationCommands(router) {
     // Records the node as its directory's last-focused child so focus.child (o)
     // descends BACK to where you were — i/o is a reversible elevator, not a bounce
     // onto the first-child spine.
+    /** @param {AppContext} ctx */
     const focusTreeNode = (ctx, node) => {
         let id;
         if (node.userData?.isDir) {

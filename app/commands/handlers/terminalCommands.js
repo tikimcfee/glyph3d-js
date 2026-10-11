@@ -25,6 +25,7 @@ import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import { terminalTheme } from '../../client/settings.js';
 import { encodeBase64, decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const log = createLogger('terminal');
 
@@ -55,7 +56,7 @@ function waitForTerminal(registry, id, timeoutMs = 15000) {
 
 /**
  * Lazily initialise the terminal registry map on ctx.
- * @param {Object} ctx - command context
+ * @param {AppContext} ctx - command context
  * @returns {Map<string, TerminalGrid>}
  */
 function getTerminals(ctx) {

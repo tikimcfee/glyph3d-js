@@ -11,10 +11,11 @@
  */
 
 import { COLORS } from './colorConstants.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /**
  * Save a grid's visual state before modification. First-writer-wins.
- * @param {Object} ctx - command context with gridVisualState Map, getGrids(), and registry
+ * @param {AppContext} ctx - command context with gridVisualState Map, getGrids(), and registry
  * @param {number} gridIndex
  */
 export function saveGridState(ctx, gridIndex) {
@@ -34,7 +35,7 @@ export function saveGridState(ctx, gridIndex) {
 
 /**
  * Restore a grid to its saved visual state.
- * @param {Object} ctx - command context
+ * @param {AppContext} ctx - command context
  * @param {number} gridIndex
  * @returns {boolean} true if state was restored
  */
@@ -58,7 +59,7 @@ export function restoreGridState(ctx, gridIndex) {
 
 /**
  * Restore all modified grids to their saved visual state.
- * @param {Object} ctx - command context
+ * @param {AppContext} ctx - command context
  * @returns {number} count of restored grids
  */
 export function restoreAllGridStates(ctx) {

@@ -21,11 +21,12 @@ import { parseAuto } from '@glyph3d/core/parsing/index.js';
 import TourSequencer from '@glyph3d/core/services/tour/TourSequencer.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { getWorldBounds, resolveAnchor, animateCamera, frameBounds } from './spatialHelpers.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /**
  * Lazily initialize TourSequencer and ConnectionRenderer on the context bag.
  * ConnectionRenderer is a shared GPU resource: one instance per scene.
- * @param {Object} ctx - command context bag
+ * @param {AppContext} ctx - command context bag
  * @returns {TourSequencer}
  */
 function getSequencer(ctx) {

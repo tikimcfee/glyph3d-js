@@ -35,6 +35,7 @@ import { agentIdForSession, kimiAgentIdForSession,
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
 import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
 
@@ -51,7 +52,7 @@ const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.i
  * stream converges on the same book. The ONE open path: the agent.open verb and
  * session restore both ride it. Hydrate itself is frame-sliced, so a deep history
  * streams in over a few frames instead of one long task.
- * @param {Object} ctx
+ * @param {AppContext} ctx
  * @param {string} sessionId full session id (the record's filename stem)
  * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
  *        becomes the book's retention override; omitted → the book's cap (its override,
@@ -113,7 +114,9 @@ const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + 'M' : b >= 102
 
 /** Canonicalize a record's target against the live registry (an open file's registry id
  *  is its canonical path), then sink the record into the books. The shared sink for the
- *  manual `agent.activity` verb and the raw `agent.tool`/`agent.message` ingress. */
+ *  manual `agent.activity` verb and the raw `agent.tool`/`agent.message` ingress.
+ * @param {AppContext} ctx
+ */
 function emitActivity(ctx, books, id, type, { action, target, detail, result, meta }) {
     let label = target || null;
     if (target) {
@@ -137,7 +140,9 @@ const kimiWireLanes = new Map();   // laneId -> { state, pending: [], timer, met
 
 /** Sink a kimi lane's translated batch: normalize each event through the ONE registry and
  *  page it in, then forward any newly-appeared provenance (llm.request model, first
- *  turn.prompt title, cwd…) to the lane — setLaneMeta merges and rebakes the nameplate. */
+ *  turn.prompt title, cwd…) to the lane — setLaneMeta merges and rebakes the nameplate.
+ * @param {AppContext} ctx
+ */
 function flushKimiWireLane(ctx, books, id, lane) {
     lane.timer = null;
     const events = lane.pending;

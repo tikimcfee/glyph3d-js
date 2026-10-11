@@ -1,3 +1,5 @@
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
+
 /**
  * dock.* commands — the camera-locked HUD bar of window tiles (CameraDock).
  *
@@ -10,6 +12,7 @@
  * and the session store see docked membership for free.
  */
 
+/** @param {AppContext} ctx */
 function getDock(ctx) {
     return ctx.cameraDock && typeof ctx.cameraDock.lock === 'function' ? ctx.cameraDock : null;
 }
@@ -18,6 +21,7 @@ function getDock(ctx) {
  * Resolve a registry id OR a surface index (grids + terminals) to { id, grid }.
  * Unlike resolveGridByIdOrIndex (code grids only), the dock takes any framed
  * surface — a terminal docks exactly like a file.
+ * @param {AppContext} ctx
  */
 export function resolveSurface(ctx, arg) {
     const key = String(arg ?? '');

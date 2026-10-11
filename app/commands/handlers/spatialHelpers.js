@@ -11,6 +11,7 @@
 
 import * as THREE from 'three';
 import { zDistanceForFit, easeInOutCubic } from '@glyph3d/core/services/spatial/spatialMath.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 // The world floor (a fixed constant): content rests above it. The ground plane
 // (SceneEnvironment) is drawn at this same Y. The world is a paused physics scene —
@@ -52,7 +53,7 @@ export function resolveGrid(grids, arg, label = 'grid') {
  *                               (sourcePath.endsWith) and camera.focus (filename
  *                               substring) wrappers — one matcher, not three.
  *
- * @param {Object} ctx - command context bag (must have .registry and .getGrids)
+ * @param {AppContext} ctx - command context bag (must have .registry and .getGrids)
  * @param {string} arg - registry ID, numeric index, or (with byName) name/path
  * @param {string} [label='grid'] - label for error messages
  * @param {{ byName?: boolean, actor?: boolean }} [opts] - byName enables the
@@ -220,7 +221,7 @@ export function unionBounds(grids, indices) {
  * resolver — modeCommands' mode.jump/adjacencies and navigationCommands'
  * focus.neighbor both call it, so spatial nav has one definition.
  *
- * @param {Object} ctx - command context (needs .registry)
+ * @param {AppContext} ctx - command context (needs .registry)
  * @param {string|null} currentId - registry id to navigate FROM
  * @returns {{ up: Object|null, down: Object|null, left: Object|null, right: Object|null }}
  *   each value a RegistryEntry or null
@@ -275,7 +276,7 @@ const _adjCenter = new THREE.Vector3();
  * near edge instead of losing to a small file on its center. Sibling-ness is
  * PATH-derived (parentOf), immune to reparenting (dock).
  *
- * @param {Object} ctx - command context (needs .contentTree)
+ * @param {AppContext} ctx - command context (needs .contentTree)
  * @param {THREE.Object3D} node - the focused tree node (file leaf or dir node)
  * @returns {{ up: THREE.Object3D|null, down: THREE.Object3D|null, left: THREE.Object3D|null, right: THREE.Object3D|null }}
  */
@@ -369,7 +370,7 @@ export function computeBoundsFocus(camera, bounds, padding) {
 /**
  * Frame the camera on an AABB. Sets position, resets pitch/yaw.
  * Cancels any in-flight animation.
- * @param {Object} ctx - command context bag
+ * @param {AppContext} ctx - command context bag
  * @param {{ center: {x,y,z}, max: {x,y,z}, size: {x,y,z} }} bounds
  * @param {number} padding - extra world units per edge
  */
@@ -386,7 +387,7 @@ export function frameBounds(ctx, bounds, padding) {
 /**
  * Smoothly animate camera to a position over `duration` ms.
  * Returns a Promise that resolves on completion or cancellation.
- * @param {Object} ctx - command context bag
+ * @param {AppContext} ctx - command context bag
  * @param {number} x
  * @param {number} y
  * @param {number} z

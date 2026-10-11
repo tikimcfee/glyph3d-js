@@ -30,6 +30,7 @@
 import * as THREE from 'three';
 import { box, kvLines } from '../formatResponse.js';
 import { findCarrelOwner, unseat } from './carrelCommands.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const r2 = (n) => Math.round(n * 100) / 100;
 const _drop = new THREE.Vector3();
@@ -37,7 +38,9 @@ const _drop = new THREE.Vector3();
 /** The FOCUSED volume — the strata idiom for books: a bare book verb acts on what
  *  you're looking at. attention.primary resolves through the owners' LOOKUPS (never
  *  id surgery): a volume's own registry entry carries the volume as its object; a
- *  focused file's durable book may be riding a volume right now — walk up to it. */
+ *  focused file's durable book may be riding a volume right now — walk up to it.
+ * @param {AppContext} ctx
+ */
 function focusedVolume(ctx) {
     const id = ctx.attentionManager?.get?.('primary')?.id;
     if (!id) return null;
@@ -57,7 +60,9 @@ function focusedVolume(ctx) {
  *  Every agent form resolves inside AgentBooks.resolveLane by LOOKUP + field
  *  check — no prefix surgery here. (A blind `agent:` strip once mutilated the
  *  wheel's `agent:book:<id>` group ids into nonsense and the covers stopped
- *  turning; the id-space owner is the only party fit to read its own addresses.) */
+ *  turning; the id-space owner is the only party fit to read its own addresses.)
+ * @param {AppContext} ctx
+ */
 function resolveBook(ctx, id) {
     if (!id) {
         const vol = focusedVolume(ctx);
@@ -78,7 +83,9 @@ function resolveBook(ctx, id) {
 }
 
 /** A volume's page turn changes which file fronts the deck — the open-page label's TEXT
- *  changes with it, so the label field re-bakes (position keeps following live). */
+ *  changes with it, so the label field re-bakes (position keeps following live).
+ * @param {AppContext} ctx
+ */
 function afterTurn(ctx, hit) {
     if (hit.kind === 'volume') ctx.contentTreeLabels?.rebuild?.();
 }

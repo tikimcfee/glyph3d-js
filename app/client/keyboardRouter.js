@@ -196,7 +196,7 @@ function domInputFocused(doc) {
  * edit mode so the caret hides) — the one bit of attention bookkeeping the old router owned.
  *
  * @param {Object} env
- * @param {import('@glyph3d/core/services/interaction').AttentionManager} env.am
+ * @param {import('@glyph3d/core/services/interaction/AttentionManager.js').default} env.am
  * @param {(cmd: string|string[]) => any} env.exec
  * @param {Object} env.gestureEnv  env for resolveGesture (Esc tier)
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]

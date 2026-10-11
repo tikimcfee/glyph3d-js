@@ -294,7 +294,7 @@ export function paintHistoryRegion({
  * @param {Object} options
  * @param {number} options.count
  * @param {number} options.liveCount
- * @param {import('./InstancedSlotBuffer.js').InstancedSlotBuffer} options.slotBuffer
+ * @param {import('../core/InstancedSlotBuffer.js').InstancedSlotBuffer} options.slotBuffer
  * @param {Uint8ClampedArray|null} options.highlightBuffer
  * @param {Float32Array} options.codepoints
  * @param {Float32Array} options.cellR

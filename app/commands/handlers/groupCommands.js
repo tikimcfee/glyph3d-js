@@ -6,11 +6,12 @@
  */
 
 import { resolveGridByIdOrIndex, fmtVec } from './spatialHelpers.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /**
  * Resolve a grid identifier to a registry ID.
  * Accepts registry ID, numeric index, or sourcePath.
- * @param {Object} ctx
+ * @param {AppContext} ctx
  * @param {string} arg
  * @returns {{ registryId: string }|{ error: string }}
  */

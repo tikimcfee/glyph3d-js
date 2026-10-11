@@ -1,3 +1,5 @@
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
+
 /**
  * panel.* commands — open / close / toggle the IDE's dock panels (Files, Repo,
  * Terminals, Crew, …) through the bus. dockview lets a tab be closed but offers
@@ -9,6 +11,7 @@
  * engine is still booting (no dock yet) they return a clean ERR.
  */
 
+/** @param {AppContext} ctx */
 function getDock(ctx) {
     return ctx.dock && typeof ctx.dock.open === 'function' ? ctx.dock : null;
 }

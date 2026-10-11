@@ -23,6 +23,7 @@ import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js'
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
 import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
+/** @import { AppContext } from './CommandProvider.jsx' */
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
 // per entry) and the settings.* verbs (validate + apply). Only WIRED knobs live
@@ -66,7 +67,9 @@ const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
 const bandParam = (band) => (_ctx, v) => setLayerBandBias(band, v);
 
 /** apply() for the grid-background set-back dial: store the new band distance and nudge
- *  every live grid/terminal background by the z delta (no relayout). */
+ *  every live grid/terminal background by the z delta (no relayout).
+ * @param {AppContext} ctx
+ */
 const gridBgGapParam = (ctx, v) => {
   setBandDistance(LAYER_BAND.GRID_BACKGROUND, v);
   for (const t of ['grid', 'terminal'])
@@ -868,12 +871,18 @@ export const SETTINGS = [
   { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 64, step: 1, apply: strataParam('maxDepth') },
 ];
 
-/** Push a background restyle to every live grid/terminal of `type`. */
+/**
+ * Push a background restyle to every live grid/terminal of `type`.
+ * @param {AppContext} ctx
+ */
 function themeAll(ctx, type, style) {
   for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setBackgroundStyle?.(style);
 }
 
-/** Push a cursor-block restyle to every live terminal (color / focused fill / hollow outline). */
+/**
+ * Push a cursor-block restyle to every live terminal (color / focused fill / hollow outline).
+ * @param {AppContext} ctx
+ */
 function cursorStyleAll(ctx, style) {
   for (const e of ctx?.registry?.findByType?.('terminal') ?? []) e.grid?.setCursorStyle?.(style);
 }
@@ -891,7 +900,9 @@ export function interactionTheme() {
 }
 
 /** Push the configured state colors to every surface that wears them: the cache the overlay reads,
- *  the default new panels are born with, and every live panel's in-shader border. One vocabulary. */
+ *  the default new panels are born with, and every live panel's in-shader border. One vocabulary.
+ * @param {AppContext} ctx
+ */
 function applyStateColors(ctx) {
   const c = {
     focus: getSetting('appearance.focusColor'),
@@ -954,7 +965,10 @@ export function getSetting(key) {
   return coerce(def, stateController.get(key, def.default));
 }
 
-/** Persist a setting and apply it live (a no-op live for reload-required knobs). */
+/**
+ * Persist a setting and apply it live (a no-op live for reload-required knobs).
+ * @param {AppContext} ctx
+ */
 export function setSetting(ctx, key, value) {
   const def = BY_KEY.get(key);
   if (!def) return { ok: false, error: `unknown setting "${key}"` };
@@ -987,7 +1001,7 @@ export function schemeSettingsOpts(scheme) {
  * apply()s otherwise fire only on a user change, so a persisted value would sit unused
  * until touched; call this once the subsystem exists (e.g. the dock, post-construction)
  * to fold the stored values in at boot. Skips reload-required (boot-baked) knobs.
- * @param {Object} ctx @param {string} group
+ * @param {AppContext} ctx @param {string} group
  */
 export function applyGroupSettings(ctx, group) {
   for (const def of SETTINGS) {
@@ -995,7 +1009,10 @@ export function applyGroupSettings(ctx, group) {
   }
 }
 
-/** Drop all stored settings (back to defaults) and re-apply the live ones. */
+/**
+ * Drop all stored settings (back to defaults) and re-apply the live ones.
+ * @param {AppContext} ctx
+ */
 export function resetSettings(ctx) {
   let reloadNeeded = false;
   for (const def of SETTINGS) {
@@ -1006,7 +1023,10 @@ export function resetSettings(ctx) {
   return { reloadNeeded };
 }
 
-/** Reset ONE setting to its default — drop the stored value, re-apply the default live. */
+/**
+ * Reset ONE setting to its default — drop the stored value, re-apply the default live.
+ * @param {AppContext} ctx
+ */
 export function resetSetting(ctx, key) {
   const def = BY_KEY.get(key);
   if (!def) return { ok: false, error: `unknown setting "${key}"` };

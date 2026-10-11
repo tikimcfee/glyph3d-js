@@ -12,6 +12,7 @@
  */
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { renderSheetGrid } from './fileLoader.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const DEF_COLOR = { r: 0.3, g: 0.8, b: 1.0 }; // matches highlightCommands' 'blue'
 
@@ -36,7 +37,7 @@ function pathFromURI(u) {
  * Open (or focus) the grid for an LSP location, highlight its range, and fly to it.
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).
  * Shared by lsp.definition (a query result) and lsp.goto (a known location).
- * @param {object} ctx
+ * @param {AppContext} ctx
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  * @param {object} loc
  */

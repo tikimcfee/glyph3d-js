@@ -41,6 +41,7 @@ import { gridTheme, getSetting } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 import { classifyByExtension, classifyBytes } from '@glyph3d/core';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const SNIFF_BYTES = 4096;        // head window for the magic-bytes + UTF-8 probe (doubles as the hex block)
 const IMAGE_CARD_WIDTH = 32;     // world width of an image quad; height follows the source aspect
@@ -97,6 +98,7 @@ export function getDiskMtime(grid) {
     return grid?._diskMtime ?? null;
 }
 
+/** @param {AppContext} ctx */
 function prepFileRow(ctx, path, notRendered) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
@@ -111,7 +113,9 @@ function prepFileRow(ctx, path, notRendered) {
  *  row's text is synthetic, never the file's bytes (file.save is disabled for it).
  *  The single insertion point into the content tree: parent the row under its
  *  directory node BEFORE addGrid (so addGrid's `if (!grid.parent) scene.add` skips —
- *  the tree owns it). The caller relayouts once after a batch. @private */
+ *  the tree owns it). The caller relayouts once after a batch. @private
+ * @param {AppContext} ctx
+ */
 function seatFileRow(ctx, path, row, notRendered, mtime) {
     if (!notRendered) setDiskMtime(row, mtime);
     ctx.contentTree?.insert(row, path);
@@ -121,6 +125,7 @@ function seatFileRow(ctx, path, row, notRendered, mtime) {
 /**
  * Create, load, and seat a text ROW.
  * @private
+ * @param {AppContext} ctx
  * @returns {{id: string, load: Promise}|null}
  */
 function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
@@ -135,7 +140,9 @@ function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
  *  placeholder card. Resolves once the row is seated + staged (null if already
  *  open). `mtime` (optional) is the disk mtime the content was read at, stashed
  *  for the save-time stale-write check; omit it for content with no disk identity
- *  (GitHub). */
+ *  (GitHub).
+ * @param {AppContext} ctx
+ */
 export async function addFileRow(ctx, path, content, mtime, baked) {
     const reason = unreadableReason(content);
     const r = registerFileRow(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime, baked);
@@ -144,7 +151,10 @@ export async function addFileRow(ctx, path, content, mtime, baked) {
     return r.id;
 }
 
-/** Register a placeholder row from tree metadata alone — the file was never fetched (oversize). */
+/**
+ * Register a placeholder row from tree metadata alone — the file was never fetched (oversize).
+ * @param {AppContext} ctx
+ */
 export async function addUnfetchedRow(ctx, path, bytes) {
     const reason = { bytes };
     const r = registerFileRow(ctx, path, placeholderBody(reason), reason);
@@ -166,6 +176,7 @@ export async function addUnfetchedRow(ctx, path, bytes) {
  *
  * Callers: attention focus (primary/key), edit/save/semantic/grid verbs — any
  * path about to exercise the interactive surface a row doesn't carry.
+ * @param {AppContext} ctx
  * @returns {Object|null} the actor grid (or whatever the entry holds)
  */
 export function materializeActor(ctx, id) {
@@ -215,7 +226,10 @@ export function materializeActor(ctx, id) {
 // ── image grids ─────────────────────────────────────────────────────────────────────────
 // Decode lives in FrameGrid.textureFromImageBytes (core) so the trail's image snapshots share it.
 
-/** Create + register an image as a single-cell FrameGrid — the texture carries the pixels, NOT the cells. */
+/**
+ * Create + register an image as a single-cell FrameGrid — the texture carries the pixels, NOT the cells.
+ * @param {AppContext} ctx
+ */
 function registerImageGrid(ctx, path, texture, width, height, kind) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
@@ -230,7 +244,10 @@ function registerImageGrid(ctx, path, texture, width, height, kind) {
 
 // ── binary grids (hex) ──────────────────────────────────────────────────────────────────
 
-/** Create + register a binary file as a hex BLOCK row — "can't read it, here are the bytes". */
+/**
+ * Create + register a binary file as a hex BLOCK row — "can't read it, here are the bytes".
+ * @param {AppContext} ctx
+ */
 async function registerBinaryGrid(ctx, path, bytes) {
     const size = bytes.length >= SNIFF_BYTES ? ` (first ${bytes.length.toLocaleString()} bytes)` : ` (${bytes.length.toLocaleString()} bytes)`;
     const body = `binary — no text or image signature${size}\n\n` + bytesToHexView(bytes, { cols: HEX_COLS });
@@ -248,6 +265,7 @@ async function registerBinaryGrid(ctx, path, bytes) {
  * images and for files whose batch text fetch failed (real binaries fall to the hex block
  * here). A later interactive open upgrades the row through renderSheetGrid/materializeActor.
  * Returns the registry id (= path), or null when already registered. Throws if the read fails.
+ * @param {AppContext} ctx
  */
 export async function addClassifiedRow(ctx, path) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
@@ -264,6 +282,7 @@ export async function addClassifiedRow(ctx, path) {
  * Extension is the confident hint (image / known-text route with no extra fetch); anything
  * unknown asks the bytes — a magic-signature sniff names an image even with no extension,
  * else a UTF-8 probe splits text from binary, and binary gets the hex-render attempt.
+ * @param {AppContext} ctx
  */
 export async function renderSheetGrid(ctx, path) {
     const uri = `file:///${String(path).replace(/^\/+/, '')}`;
@@ -274,7 +293,10 @@ export async function renderSheetGrid(ctx, path) {
     return id;
 }
 
-/** The classify + ensure-registered core (returns an id that may be a ROW). @private */
+/**
+ * The classify + ensure-registered core (returns an id that may be a ROW). @private
+ * @param {AppContext} ctx
+ */
 async function classifySheetGrid(ctx, path, uri) {
     const existing = ctx.registry.findByMeta?.('sourcePath', uri) || [];
     if (existing.length) return existing[0].id;          // already rendered
@@ -307,7 +329,10 @@ async function classifySheetGrid(ctx, path, uri) {
     return renderTextSheet(ctx, path, uri);
 }
 
-/** Text path — fetch UTF-8, render as a row (placeholder if oversize). */
+/**
+ * Text path — fetch UTF-8, render as a row (placeholder if oversize).
+ * @param {AppContext} ctx
+ */
 async function renderTextSheet(ctx, path, uri) {
     const fp = ctx.fileProvider;
     // Prefer the stat-aware read so the grid learns the disk mtime it's synced to
@@ -321,7 +346,10 @@ async function renderTextSheet(ctx, path, uri) {
     return (await addFileRow(ctx, path, content)) ?? racedId(ctx, uri);
 }
 
-/** Image path — fetch bytes, decode to a texture, render as a single-cell FrameGrid sized to aspect. */
+/**
+ * Image path — fetch bytes, decode to a texture, render as a single-cell FrameGrid sized to aspect.
+ * @param {AppContext} ctx
+ */
 async function renderImageSheet(ctx, path, uri, kind) {
     if (typeof ctx.fileProvider.getBytes !== 'function') throw new Error('image open needs the relay file source');
     const bytes = await ctx.fileProvider.getBytes(path);
@@ -329,7 +357,10 @@ async function renderImageSheet(ctx, path, uri, kind) {
     return registerImageGrid(ctx, path, texture, width, height, kind) ?? racedId(ctx, uri);
 }
 
-/** A concurrent open registered this path during our await — return its id, never null. */
+/**
+ * A concurrent open registered this path during our await — return its id, never null.
+ * @param {AppContext} ctx
+ */
 function racedId(ctx, uri) {
     const raced = ctx.registry.findByMeta?.('sourcePath', uri) || [];
     return raced[0]?.id ?? null;

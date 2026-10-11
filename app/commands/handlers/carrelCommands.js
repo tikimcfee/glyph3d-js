@@ -28,16 +28,21 @@ import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { resolveSurface } from './dockCommands.js';
 import { getSetting } from '../../client/settings.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** The knobs Settings ▸ Carrel stores — folded into a NEW desk at birth. */
 const CARREL_KNOBS = ['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg',
                       'tableFrac', 'shadowSoft', 'glowStrength'];
 
+/** @param {AppContext} ctx */
 function carrels(ctx) {
     return ctx.carrels instanceof Map ? ctx.carrels : null;
 }
 
-/** Resolve a carrel by name, else the active one, else the most recently created. */
+/**
+ * Resolve a carrel by name, else the active one, else the most recently created.
+ * @param {AppContext} ctx
+ */
 function findCarrel(ctx, name) {
     const map = carrels(ctx);
     if (!map) return null;
@@ -48,7 +53,10 @@ function findCarrel(ctx, name) {
     return last;
 }
 
-/** The carrel currently holding a surface id, or null. (window.drop asks too.) */
+/**
+ * The carrel currently holding a surface id, or null. (window.drop asks too.)
+ * @param {AppContext} ctx
+ */
 export function findCarrelOwner(ctx, id) {
     // Holder protocol: use holderOf, but only return carrels (dock is not a carrel owner).
     const holder = ctx.holderOf?.(id);
@@ -59,13 +67,18 @@ export function findCarrelOwner(ctx, id) {
     return holder.carrelName != null ? holder : null;
 }
 
-/** Record (or clear, with null) the carrel view fact for a surface. */
+/**
+ * Record (or clear, with null) the carrel view fact for a surface.
+ * @param {AppContext} ctx
+ */
 function setFact(ctx, id, value, kind) {
     ctx.workspace?.setSurfaceView?.(id, kind ?? ctx.registry?.get?.(id)?.type, { carrel: value });
 }
 
 /** A world-managed desk's footprint changed by a VERB (seat/release/knob) — tell the
- *  world row. Footprint-diffed on the other side, so a no-move touch costs a measure. */
+ *  world row. Footprint-diffed on the other side, so a no-move touch costs a measure.
+ * @param {AppContext} ctx
+ */
 function worldTouch(ctx, carrel) {
     if (carrel?.worldManaged) ctx.world?.relayout();
 }
@@ -75,6 +88,7 @@ function worldTouch(ctx, carrel) {
  * release — optionally re-aimed at a caller-computed pose (`to`, the
  * Carrel.release re-aim; book.move pins a dragged book at its drop spot). The
  * one unseat path — the carrel.release verb and the drag-off ride it together.
+ * @param {AppContext} ctx
  * @returns {Carrel|null} the desk it left, or null if it wasn't seated
  */
 export function unseat(ctx, id, to = null) {
@@ -91,6 +105,7 @@ export function unseat(ctx, id, to = null) {
  * by lane id. The returned `grid` is always a live Object3D the Carrel can seat;
  * a seated agent book keeps streaming (AgentBooks.update eases lanes, not root
  * children, so its deck stays live while borrowed).
+ * @param {AppContext} ctx
  * @returns {{id:string, grid:Object, kind:string|undefined}|null}
  */
 function resolveHostable(ctx, arg) {
@@ -129,6 +144,7 @@ function resolveHostable(ctx, arg) {
  * (type 'carrel') either way, so the camera's dynamic-speed / soft-bounds /
  * fit-all spine (getSurfaces) sees it — a desk is a PLACE, not cargo;
  * resolveSurface refuses to treat it as one.
+ * @param {AppContext} ctx
  * @returns {Carrel}
  */
 function buildCarrel(ctx, name, { radius, managed = false } = {}) {
@@ -168,7 +184,7 @@ const AGENT_SHELF = 'agents';
  * placement, no Settings fold — the desk stands back up exactly where it lived,
  * dressed as it was, and pre-shaped (expect) for the member complement the
  * restore manifest will seat as windows materialize.
- * @param {Object} ctx
+ * @param {AppContext} ctx
  * @param {{name:string, position?:{x,y,z}, yaw?:number, params?:Object, members?:Array}} saved
  * @returns {Carrel|null}
  */
@@ -212,6 +228,7 @@ export function restoreCarrel(ctx, saved) {
  *    'agents' desk, a grid-mode desk auto-created on first need. Once per lane
  *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
  *    user put them. Settings ▸ Agent Books `book.autoShelf` off disarms this pass.
+ * @param {AppContext} ctx
  */
 export function scheduleCarrelSweep(ctx) {
     if (ctx._carrelSweepTimer) return;
@@ -223,7 +240,9 @@ export function scheduleCarrelSweep(ctx) {
 }
 
 /** The sweep body, callable synchronously (SessionStore runs one last pass at the
- *  end of restore to catch members that landed after the final change event). */
+ *  end of restore to catch members that landed after the final change event).
+ * @param {AppContext} ctx
+ */
 export function carrelSweep(ctx) {
     const map = carrels(ctx);
     if (!map || !ctx.scene) return;
@@ -235,6 +254,7 @@ export function carrelSweep(ctx) {
  *  from the MODEL (the single authority), not a manifest. Idempotent: a member already
  *  seated at the right desk is skipped; one held elsewhere is left alone. A member that
  *  hasn't materialized yet stays in the model and is re-offered on the next sweep.
+ * @param {AppContext} ctx
  *  @see scheduleCarrelSweep */
 function serveResidence(ctx, map) {
     const claimed = ctx.workspace?.listCarreled?.() ?? [];
@@ -257,7 +277,10 @@ function serveResidence(ctx, map) {
     }
 }
 
-/** Pass 2 — the agents-shelf default for unclaimed newcomers. @see scheduleCarrelSweep */
+/**
+ * Pass 2 — the agents-shelf default for unclaimed newcomers. @see scheduleCarrelSweep
+ * @param {AppContext} ctx
+ */
 function autoShelf(ctx, map) {
     const lanes = ctx.agentBooks?.lanes;
     if (!lanes) return;

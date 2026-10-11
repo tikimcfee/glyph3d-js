@@ -1,3 +1,5 @@
+/** @import { AppContext } from '../client/CommandProvider.jsx' */
+
 /**
  * loadTrace — staged timing for the LOAD FLOW, bus-native and quiet.
  *
@@ -29,7 +31,7 @@
 const RING_CAP = 60;
 
 /**
- * @param {object} ctx the command context (the ring lives at ctx.loadTraces)
+ * @param {AppContext} ctx the command context (the ring lives at ctx.loadTraces)
  * @param {string} kind operation kind: 'openDir' | 'open' | 'repo' | 'restore' …
  * @param {string} [target] what was loaded (a dir, a path, an owner/repo)
  */
@@ -74,7 +76,7 @@ export function beginLoad(ctx, kind, target = '') {
  * `[frames]` line attributed to that load and its most recent stage — so
  * "chunky" decomposes into WHICH load, WHERE. Blocks outside any load log only
  * at ≥100ms (general jank stays visible, noise stays out of the store).
- * @param {object} ctx @returns {() => void} uninstall
+ * @param {AppContext} ctx @returns {() => void} uninstall
  */
 export function installFrameWatch(ctx) {
     if (typeof PerformanceObserver === 'undefined') return () => {};

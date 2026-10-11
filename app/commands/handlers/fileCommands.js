@@ -25,6 +25,7 @@ import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addClassifiedRow, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { loadBakedIndex } from './bakedIndex.js';
 import { canonicalPath, toFileUri } from './pathResolve.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /**
  * Fast non-crypto content hash. FNV-1a 32-bit over the full string. Collision rate is
@@ -45,6 +46,7 @@ export function contentHash(text) {
 /**
  * Resolve the save target: explicit registry id / index, or fall back to the current primary
  * attention target when empty. Returns the resolveGridByIdOrIndex shape plus a `uri` to write.
+ * @param {AppContext} ctx
  */
 function resolveSaveTarget(ctx, args) {
     const target = args[0] ?? ctx.attention?.primary?.id ?? null;

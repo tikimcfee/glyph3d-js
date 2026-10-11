@@ -18,6 +18,7 @@ import {
     animateCamera,
     resolveAdjacencies,
 } from './spatialHelpers.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const READER_ANIMATE_MS = 350;
 
@@ -29,6 +30,7 @@ const READER_ANIMATE_MS = 350;
  * Files use cameraController.computeGridFocus for reader-friendly top-alignment;
  * agent windows use computeBoundsFocus for center-framing. Either path eases
  * the camera over READER_ANIMATE_MS when {animate: true} (the default).
+ * @param {AppContext} ctx
  */
 function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
     if (!grid) return false;
@@ -84,13 +86,17 @@ function enterReader(ctx, grid, regIdx, registryId, { animate = true } = {}) {
     return true;
 }
 
-/** Drop reader lock and attention override. */
+/**
+ * Drop reader lock and attention override.
+ * @param {AppContext} ctx
+ */
 function enterExplorer(ctx) {
     ctx.attentionManager.clear('primary');
     ctx.mode.state = 'explorer';
     if (ctx.readerCompass) ctx.readerCompass.setVisible(false);
 }
 
+/** @param {AppContext} ctx */
 function resolveByNameOrFallback(ctx, target) {
     const resolved = resolveGridByIdOrIndex(ctx, target);
     if (!resolved.error) return resolved;
@@ -168,6 +174,7 @@ export default function registerModeCommands(router) {
     // Reader-only navigation: step to prev/next grid in registry order.
     // In explorer mode these return an error so keybindings can safely fall
     // through without accidentally scrolling the scene.
+    /** @param {AppContext} ctx */
     const step = (ctx, delta) => {
         if (ctx.mode.state !== 'reader') {
             return { text: 'ERR: mode.next/prev only valid in reader mode', data: null };

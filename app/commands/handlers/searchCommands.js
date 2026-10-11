@@ -21,6 +21,7 @@
  */
 
 import { box, table, kvLines } from '../formatResponse.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** Split trailing flags off the query words. Flags are exact tokens, so a query
  *  containing `-e` as text still works when it isn't in flag position. */
@@ -46,13 +47,18 @@ const shortPath = (p, n = 52) => (p.length > n ? '…' + p.slice(-(n - 1)) : p);
  */
 export default function registerSearchCommands(router) {
 
-    /** The one control object. Absent only before the scene is wired. */
+    /**
+     * The one control object. Absent only before the scene is wired.
+     * @param {AppContext} ctx
+     */
     const bookOf = (ctx) => ctx.searchBook || null;
+    /** @param {AppContext} ctx */
     const need = (ctx) => {
         const b = bookOf(ctx);
         return b ? { book: b } : { error: 'ERR: search is not available (no scene/relay yet)' };
     };
 
+    /** @param {AppContext} ctx */
     async function runSearch(ctx, uri, args) {
         const { query, opts } = parseSearchArgs(args);
         if (!query) return { text: 'ERR: usage: search <query> [-e regex] [-s case] [-w word]', data: null };

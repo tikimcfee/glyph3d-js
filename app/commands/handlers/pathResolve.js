@@ -1,3 +1,5 @@
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
+
 /**
  * Canonical path normalization at the verb boundary.
  *
@@ -16,7 +18,7 @@
  */
 
 /**
- * @param {object} ctx - command context (reads ctx.fileProvider.rootInfo)
+ * @param {AppContext} ctx - command context (reads ctx.fileProvider.rootInfo)
  * @param {string} path
  * @returns {string} canonical key for this provider's key space
  */

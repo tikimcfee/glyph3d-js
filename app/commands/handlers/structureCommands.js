@@ -11,6 +11,7 @@ import StructureLayout from '@glyph3d/core/collections/StructureLayout.js';
 import StrataLayout from '@glyph3d/core/collections/StrataLayout.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { applyGroupSettings } from '../../client/settings.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const KINDS = new Set(['function', 'method', 'class', 'interface', 'enum', 'type', 'variable', 'field']);
 
@@ -30,6 +31,7 @@ function strataFor(grid) {
     return c;
 }
 
+/** @param {AppContext} ctx */
 function resolveGrid(ctx, gridArg) {
     const targetId = gridArg ?? ctx.attention?.primary?.id ?? ctx.attention?.key?.id ?? null;
     if (!targetId) return { error: 'no focused grid — open a file or pass <grid>' };

@@ -11,11 +11,13 @@
  */
 
 import { resolveSurface } from './dockCommands.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** Split-axis vocabulary: h/x → 'x' (side-by-side), v/y → 'y' (stacked). tmux/i3 spelling welcome. */
 const AXES = { h: 'x', x: 'x', horizontal: 'x', v: 'y', y: 'y', vertical: 'y' };
 const DIRS = ['left', 'right', 'up', 'down'];
 
+/** @param {AppContext} ctx */
 const getDock = (ctx) => (ctx.cameraDock && typeof ctx.cameraDock.splitPane === 'function' ? ctx.cameraDock : null);
 
 /**

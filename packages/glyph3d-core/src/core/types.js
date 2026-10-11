@@ -9,7 +9,7 @@
  *   import './core/types.js'; // JSDoc only — no exports consumed at runtime
  *
  * Or reference via JSDoc in consuming files:
- *   @type {import('./core/types.js').GlyphBufferSet}
+ *   @type {import('@glyph3d/core/core/types.js').GlyphBufferSet}
  */
 
 /**
@@ -104,3 +104,6 @@
  * @property {Function} clear               - (r: number, g: number, b: number, a: number) → void
  * @property {Function} readPixel           - (target: RenderTarget, x: number, y: number) → Promise<Uint8Array>
  */
+
+// A module (not a script), so import('…/types.js').X resolves; a script's typedefs are global-only.
+export {};

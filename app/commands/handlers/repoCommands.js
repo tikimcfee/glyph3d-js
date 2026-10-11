@@ -15,7 +15,10 @@
 
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 
-/** Dispose every code grid, clear annotations, stop any camera animation. */
+/**
+ * Dispose every code grid, clear annotations, stop any camera animation.
+ * @param {AppContext} ctx
+ */
 function clearScene(ctx) {
     // removeGrids is the canonical bulk-dispose path: geometry freed, unregistered,
     // zero intermediate re-packs, one world settle at the end.
@@ -28,6 +31,7 @@ function clearScene(ctx) {
 }
 
 import { beginLoad } from '../loadTrace.js';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** owner/repo/branch (3+ plain segments) → a /tree/ URL parseGitHubUrl accepts; else pass through. */
 function normalizeRepoRef(ref) {

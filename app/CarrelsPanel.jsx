@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-/** @import { AppClient } from './client/CommandProvider.jsx' */
+/** @import { AppClient, AppContext } from './client/CommandProvider.jsx' */
 
 /**
  * CarrelsPanel — the 2D roster of the world's reading desks (Carrel).
@@ -128,6 +128,7 @@ const hex = (n) => `#${(n >>> 0).toString(16).padStart(6, '0')}`;
  * Everything hostable, categorized — a fresh snapshot each render while the menu
  * is open. Registry surfaces by type (volumes excluded — they're per-pass
  * presentation objects, not seatable windows) + the agent shelf's lanes.
+ * @param {AppContext} ctx
  */
 function hostableSections(ctx) {
     const entries = ctx?.registry?.list?.() || [];

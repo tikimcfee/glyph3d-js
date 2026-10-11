@@ -24,6 +24,7 @@
 import { box } from '../formatResponse.js';
 import { getSlugCacheState, clearSlugCore } from '@glyph3d/core/shaping';
 import { peekWorkerBridge } from '@glyph3d/core/workers';
+/** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const KB = 1024, MB = 1024 * 1024;
 
@@ -122,7 +123,10 @@ function readArena(renderer) {
     };
 }
 
-/** Worker pool: per-worker UV-map caches scale with core count, so it is per-device. */
+/**
+ * Worker pool: per-worker UV-map caches scale with core count, so it is per-device.
+ * @param {AppContext} ctx
+ */
 function readWorkers(ctx) {
     // peek, NOT get — getWorkerBridge() would BUILD the pool we are trying to measure.
     const bridge = peekWorkerBridge();
@@ -135,7 +139,10 @@ function readWorkers(ctx) {
     };
 }
 
-/** Scene census — what is actually resident, from the registry. */
+/**
+ * Scene census — what is actually resident, from the registry.
+ * @param {AppContext} ctx
+ */
 function readScene(ctx) {
     const reg = ctx.registry;
     if (!reg || typeof reg.list !== 'function') return { ready: false };
