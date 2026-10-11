@@ -9,7 +9,7 @@
 // think/text, tool.call/tool.result pairing across distance, the path→file_path dialect
 // rename, the Bash stdout + Read file-meta enrichments, and the bookkeeping-line skips.
 
-import { parseKimiSession, parseKimiSessionAsync, kimiAgentIdForSession, createKimiWireState, kimiWireLineToEvents }
+import { parseKimiSession, parseKimiSessionAsync, kimiAgentIdForSession, agentIdForEntry, createKimiWireState, kimiWireLineToEvents }
   from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
 
 let pass = 0, fail = 0;
@@ -100,6 +100,9 @@ eq(kimiAgentIdForSession('session_474cf46e-c317-40eb-ae0e-e02cd9aaa074'), '474cf
 eq(kimiAgentIdForSession('474cf46e-c317'), '474cf46e', 'id without the prefix still derives');
 eq(kimiAgentIdForSession('session_'), 'kimi', 'empty after strip → kimi');
 eq(kimiAgentIdForSession(null), 'kimi', 'null → kimi');
+eq(agentIdForEntry({ id: 'session_474cf46e-c317-40eb-ae0e-e02cd9aaa074', harness: 'kimi' }), '474cf46e',
+   'archive entry → lane id: kimi harness takes the kimi derivation (a prefix-only kimi book restores by it)');
+eq(agentIdForEntry({ id: '474cf46e-c317-40eb-ae0e-e02cd9aaa074' }), '474cf46e', 'archive entry → lane id: claude default');
 
 // ── meta: provenance harvested from the bookkeeping lines (first-seen wins) ───────────
 eq(meta, {

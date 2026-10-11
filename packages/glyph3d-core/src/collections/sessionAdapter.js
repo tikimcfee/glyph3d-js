@@ -291,6 +291,18 @@ export function kimiAgentIdForSession(sessionId) {
     return s ? s.slice(0, 8) : 'kimi';
 }
 
+/**
+ * The lane id an archive entry opens under — the per-harness derivation (a kimi id's
+ * `session_` prefix would collapse every kimi lane to one id under the claude rule).
+ * The ONE place an archive entry meets a lane: open, the panel's open-lane filter, and
+ * restore of a prefix-only (hook-born) book all compare lane ids through it.
+ * @param {{ id: string, harness?: string }} entry
+ * @returns {string}
+ */
+export function agentIdForEntry({ id, harness }) {
+    return harness === 'kimi' ? kimiAgentIdForSession(id) : agentIdForSession(id);
+}
+
 /** Kimi tool args → Claude-shaped input: the file tools' `path` becomes `file_path`. */
 function kimiInput(name, args) {
     const input = (args && typeof args === 'object') ? { ...args } : {};

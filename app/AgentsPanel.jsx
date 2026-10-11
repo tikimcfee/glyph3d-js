@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { kimiAgentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
+import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
 /** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
@@ -165,14 +165,6 @@ function humanSize(n) {
     return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)}M`;
 }
 
-// Session ids are UUIDs; lanes opened from the archive carry the 8-char prefix
-// (dashes stripped). Normalizing both sides makes the open-lane match symmetric.
-const sessPrefix = (id) => String(id).replace(/-/g, '').slice(0, 8);
-
-// The lane id an archive entry opens under — per harness (a kimi id's `session_`
-// prefix would otherwise show/match as "session_x"; its derivation strips it).
-const sessLaneId = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.id) : sessPrefix(s.id));
-
 /** @param {{ client: AppClient | null }} props */
 export default function AgentsPanel({ client }) {
     const books = () => client?.ctx?.agentBooks || null;
@@ -263,7 +255,7 @@ export default function AgentsPanel({ client }) {
     // adapter feeds it), expand its row, and re-list so it leaves the archive group.
     const openSession = useCallback((s) => {
         exec(['agent.open', s.id]);
-        setExpanded(sessLaneId(s));
+        setExpanded(agentIdForEntry(s));
         refreshArchive();
     }, [exec, refreshArchive]);
 
@@ -271,8 +263,8 @@ export default function AgentsPanel({ client }) {
     const atLast = !sel || sel.head >= (sel.count - 1);
     const anyDone = agents.some((a) => a.state === 'done');
     // Sessions already open as lanes are not listed again — their lane row IS their row.
-    const openLanes = new Set(agents.map((a) => sessPrefix(a.id)));
-    const archived = (sessions || []).filter((s) => !openLanes.has(sessLaneId(s)));
+    const openLanes = new Set(agents.map((a) => a.id));
+    const archived = (sessions || []).filter((s) => !openLanes.has(agentIdForEntry(s)));
 
     return (
         <div style={S.content}>
@@ -380,7 +372,7 @@ export default function AgentsPanel({ client }) {
                         <div key={s.id} style={S.sessRow}
                             onClick={() => openSession(s)}
                             title={`${s.id} — open as a lane (agent.open)`}>
-                            <span style={S.sessId}>{sessLaneId(s)}</span>
+                            <span style={S.sessId}>{agentIdForEntry(s)}</span>
                             {s.harness === 'kimi' && <span style={S.sessHarness}>kimi</span>}
                             <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
                             <span style={S.sessSize}>{humanSize(s.size)}</span>

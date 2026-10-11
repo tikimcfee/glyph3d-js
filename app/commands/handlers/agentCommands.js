@@ -29,7 +29,7 @@
 
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { agentIdForSession, kimiAgentIdForSession,
+import { agentIdForEntry,
          createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
@@ -38,10 +38,6 @@ import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
-
-/** The lane id an archive entry opens under — per-harness derivation (the kimi ids'
- *  `session_` prefix would collapse every kimi lane to one id under the claude rule). */
-const agentIdForEntry = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.id) : agentIdForSession(s.id));
 
 /**
  * Open a stored agent session as a book: fetch the harness's own record (the durable
@@ -70,7 +66,7 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
     if (!ctx.agentBooks) throw new Error('agent books not wired');
     const r1 = (n) => Math.round(n * 10) / 10;
     const isKimi = harness === 'kimi';
-    const agentId = isKimi ? kimiAgentIdForSession(sessionId) : agentIdForSession(sessionId);
+    const agentId = agentIdForEntry({ id: sessionId, harness });
     const agentType = isKimi ? 'kimi' : 'claude';
 
     // Transport: TAIL-GROW over the binary result plane — the relay line-aligns

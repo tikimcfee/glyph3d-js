@@ -54,6 +54,7 @@
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
 import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 import { openAgentSession } from '../commands/handlers/agentCommands.js';
+import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
@@ -576,9 +577,10 @@ export default class SessionStore {
         if (!sid && a.prefix) {
           archivePromise ??= provider.list();
           const archive = await archivePromise;
-          const norm = String(a.prefix).replace(/-/g, '');
-          sid = archive.find((s) => (!a.harness || (s.harness || 'claude') === a.harness)
-            && s.id.replace(/-/g, '').startsWith(norm))?.id || null;
+          const hits = archive.filter((s) => (s.harness || 'claude') === (a.harness || 'claude')
+            && agentIdForEntry(s) === a.prefix);
+          if (hits.length > 1) console.warn(`[session] agent book ${a.prefix}: ${hits.length} archive records share its lane id — left closed`);
+          sid = hits.length === 1 ? hits[0].id : null;
         }
         if (!sid) return;   // nothing on disk answers to this book — it stays closed
         const r = await openAgentSession(this.ctx, sid, { limit: a.limit, harness: a.harness });
