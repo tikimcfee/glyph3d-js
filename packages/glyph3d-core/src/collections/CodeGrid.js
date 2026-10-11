@@ -23,28 +23,28 @@ import InstancedField from './InstancedField.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
 import { paletteLUT } from '../parsing/syntaxPaletteJob.js';
 import FramedGlyphField from './FramedGlyphField.js';
-import { createPanelMaterial } from './panelMaterial.js';
-
-// Reused for lines without wraps — most lines, in the common case.
-// Frozen so accidental mutation surfaces immediately.
-
-// The cursor `col` is a CODEPOINT index — the same model the editor verbs use. JS strings
-// are UTF-16, so a surrogate-pair emoji (😀 = 2 code units) makes codepoint indices diverge
-// from String.slice/.length. These convert, so edits never land inside a surrogate pair
-// (which splits/corrupts an emoji) nor at the wrong offset (inserting before the caret).
-// For ASCII they're identity, so the common path is unaffected.
-/** Codepoint index → UTF-16 offset within `str`. */
-function cpToU16(str, cp) {
-    let u = 0;
-    for (let n = 0; n < cp && u < str.length; n++) u += str.codePointAt(u) > 0xFFFF ? 2 : 1;
-    return u;
-}
-/** Count of CODEPOINTS in `str` (not UTF-16 code units). */
-function cpLen(str) {
-    let n = 0;
-    for (let u = 0; u < str.length; n++) u += str.codePointAt(u) > 0xFFFF ? 2 : 1;
-    return n;
-}
+import {
+    cpToU16,
+    cpLen,
+    clampCursor,
+    insertText,
+    deleteBackward,
+    deleteForward,
+    splitLine,
+    moveCursor,
+    createCaretMesh,
+    positionCaretMesh,
+    clampWindow,
+    sliceWindowText,
+    computeMaxScroll,
+    clampScroll,
+    computeFrameClip,
+    createBackgroundMesh,
+    fitBackground,
+    applyRangeHighlight,
+    clearLineHighlight,
+    clearAllHighlights,
+} from './grid/index.js';
 
 class CodeGrid extends FramedGlyphField {
     /**
@@ -350,8 +350,7 @@ class CodeGrid extends FramedGlyphField {
     /** @private Clamp _winFirstLine to [0, lineCount - visibleRows]. */
     _clampWindow() {
         const total = this._sourceLines ? this._sourceLines.length : 0;
-        const max = Math.max(0, total - this._winRows);
-        this._winFirstLine = Math.max(0, Math.min(this._winFirstLine, max));
+        this._winFirstLine = clampWindow(this._winFirstLine, total, this._winRows);
     }
 
     /**
@@ -359,12 +358,7 @@ class CodeGrid extends FramedGlyphField {
      * path (the full source lives in _sourceLines; this only re-feeds the slice).
      */
     async _renderWindow() {
-        const src = this._sourceLines || [];
-        const first = this._winFirstLine;
-        const slice = src
-            .slice(first, first + this._winRows)
-            .map((line) => line.slice(0, this._winCols))
-            .join('\n');
+        const slice = sliceWindowText(this._sourceLines, this._winFirstLine, this._winRows, this._winCols);
         await this.loadText(slice);
         return this;
     }
@@ -825,7 +819,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {Promise<this>}
      */
     async setScrollOffset(rows) {
-        const clamped = Math.max(0, Math.min(Math.round(rows), this.getMaxScroll()));
+        const clamped = clampScroll(rows, this.getMaxScroll());
         if (clamped === this._scrollOffset) return this;
         this._scrollOffset = clamped;
         // Re-fold view with the updated scroll position.
@@ -858,8 +852,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {number}
      */
     getMaxScroll() {
-        const total = this.getTotalVisualRows();
-        return this._frameRows > 0 ? Math.max(0, total - this._frameRows) : total;
+        return computeMaxScroll(this.getTotalVisualRows(), this._frameRows);
     }
 
     /**
@@ -936,7 +929,8 @@ class CodeGrid extends FramedGlyphField {
         if (this._frameRows > 0) {
             const ls = this.metrics.lineHeight;
             const originY = this._layoutOriginY ?? 0;
-            this._renderer.setClipYRange(originY + 0.5 * ls, originY - (this._frameRows - 0.5) * ls);
+            const { top, bottom } = computeFrameClip(originY, this._frameRows, ls);
+            this._renderer.setClipYRange(top, bottom);
         } else {
             this._renderer.setClipYRange(null, null);
         }
@@ -1057,27 +1051,10 @@ class CodeGrid extends FramedGlyphField {
      * @private
      */
     _initBackground() {
-        const geometry = new THREE.PlaneGeometry(1, 1);
-        // The panel material paints the fill AND an in-shader border band (see panelMaterial.js):
-        // border strength 0 = a plain fill, drop-in for the old MeshBasicMaterial. depthWrite: the
-        // panel must OCCLUDE content behind it (other grids stacked in a dock); `transparent` only
-        // when opacity<1, so a full-opacity panel stays genuinely solid.
-        this._panel = createPanelMaterial({
-            color: this.config.backgroundColor,
-            opacity: this.config.backgroundOpacity,
-            side: THREE.DoubleSide,
-            depthWrite: true,
-            layerBand: LAYER_BAND.GRID_BACKGROUND,   // one depth step in front of the page face
-        });
-
-        this._background = new THREE.Mesh(geometry, this._panel.material);
-        this._background.frustumCulled = false;
-        this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND; // Draw backgrounds before glyphs
-        // Behind the text by the live band distance (was hard-coded -0.1; the polygonOffset
-        // band above is what actually guarantees the order — this keeps geometric parallax).
         this._bgGap = getBandDistance(LAYER_BAND.GRID_BACKGROUND);
-        this._background.position.z = -this._bgGap;
-        this._background.visible = this.config.showBackground;
+        const { mesh, panel } = createBackgroundMesh(this.config, this._bgGap);
+        this._panel = panel;
+        this._background = mesh;
         this.add(this._background);
     }
 
@@ -1424,15 +1401,7 @@ class CodeGrid extends FramedGlyphField {
      */
     getLineSlotCount(line) {
         if (!this.lines || line < 0 || line >= this.lines.length) return 0;
-        const text = this.lines[line];
-        const len = text.length;
-        let count = 0;
-        for (let i = 0; i < len; ) {
-            const cp = text.codePointAt(i);
-            count++;
-            i += cp > 0xFFFF ? 2 : 1;
-        }
-        return count;
+        return cpLen(this.lines[line] ?? '');
     }
 
     // ============ Glyph Highlighting ============
@@ -1449,16 +1418,7 @@ class CodeGrid extends FramedGlyphField {
      * @param {number} [fillOpacity=0] - 0 = additive tint; >0 = background-fill opacity (0–1)
      */
     highlightRange(startLine, startCol, endLine, endCol, color, fillOpacity = 0) {
-        if (!this._renderer || !this._layout) return;
-
-        for (let line = startLine; line <= endLine; line++) {
-            const cStart = (line === startLine) ? startCol : 0;
-            const cEnd   = (line === endLine)   ? endCol   : this.getLineSlotCount(line);
-            for (let col = cStart; col < cEnd; col++) {
-                const slot = this.getSlotForChar(line, col); // → LayoutDescription, one source
-                if (slot >= 0) this._renderer.setGlyphHighlight(slot, color, fillOpacity);
-            }
-        }
+        applyRangeHighlight(this._renderer, this._layout, startLine, startCol, endLine, endCol, color, fillOpacity);
     }
 
     /**
@@ -1482,12 +1442,7 @@ class CodeGrid extends FramedGlyphField {
      * @param {number} line - 0-based line index
      */
     clearLineHighlight(line) {
-        if (!this._renderer || !this._layout) return;
-        const count = this.getLineSlotCount(line);
-        for (let i = 0; i < count; i++) {
-            const slot = this.getSlotForChar(line, i); // → LayoutDescription, one source
-            if (slot >= 0) this._renderer.setGlyphHighlight(slot, null);
-        }
+        clearLineHighlight(this._renderer, this._layout, line);
     }
 
     /**
@@ -1495,11 +1450,7 @@ class CodeGrid extends FramedGlyphField {
      * Delegates to clearLineHighlight() for each line — uses the RGBA8 DataTexture path.
      */
     clearAllHighlights() {
-        if (!this._layout) return; // canonical state guard, matches clearLineHighlight
-        const lineCount = this.getLineCount();
-        for (let line = 0; line < lineCount; line++) {
-            this.clearLineHighlight(line);
-        }
+        clearAllHighlights(this._renderer, this._layout, this.getLineCount());
     }
 
     // ============ In-grid Editing ============
@@ -1585,36 +1536,14 @@ class CodeGrid extends FramedGlyphField {
      */
     setCursor(line, col) {
         if (!this._cursor) return;
-        const ln = Math.max(0, Math.min(line, this.lines.length - 1));
-        const cl = Math.max(0, Math.min(col, cpLen(this.lines[ln] ?? '')));
-        this._cursor = { line: ln, col: cl };
+        this._cursor = clampCursor(this.lines, line, col);
         this._updateCaretMesh();
     }
 
     /** Insert a string at the cursor. Splits on `\n` to span multiple lines. */
     editInsert(str) {
         if (!this._cursor || !str) return;
-        const parts = String(str).split('\n');
-        const { line, col } = this._cursor;
-        const cur = this.lines[line] ?? '';
-        const u = cpToU16(cur, col);              // codepoint col → UTF-16 split offset
-        const before = cur.slice(0, u);
-        const after  = cur.slice(u);
-
-        if (parts.length === 1) {
-            this.lines[line] = before + parts[0] + after;
-            this._cursor.col = col + cpLen(parts[0]);   // advance by CODEPOINTS inserted
-        } else {
-            const tail = parts[parts.length - 1];
-            const newLines = [
-                before + parts[0],
-                ...parts.slice(1, -1),
-                tail + after,
-            ];
-            this.lines.splice(line, 1, ...newLines);
-            this._cursor.line = line + parts.length - 1;
-            this._cursor.col  = cpLen(tail);
-        }
+        insertText(this.lines, this._cursor, str);
         this._relayoutPreservingCursor();
     }
 
@@ -1622,21 +1551,8 @@ class CodeGrid extends FramedGlyphField {
     editDeleteBackward() {
         if (!this._cursor) return;
         const { line, col } = this._cursor;
-        if (col > 0) {
-            const cur = this.lines[line] ?? '';
-            // Delete the WHOLE codepoint before the caret (both surrogate halves of an emoji).
-            this.lines[line] = cur.slice(0, cpToU16(cur, col - 1)) + cur.slice(cpToU16(cur, col));
-            this._cursor.col = col - 1;
-        } else if (line > 0) {
-            const prev = this.lines[line - 1] ?? '';
-            const cur  = this.lines[line] ?? '';
-            this._cursor.line = line - 1;
-            this._cursor.col  = cpLen(prev);
-            this.lines[line - 1] = prev + cur;
-            this.lines.splice(line, 1);
-        } else {
-            return;  // nothing to delete
-        }
+        if (col === 0 && line === 0) return;
+        deleteBackward(this.lines, this._cursor);
         this._relayoutPreservingCursor();
     }
 
@@ -1644,28 +1560,15 @@ class CodeGrid extends FramedGlyphField {
     editDeleteForward() {
         if (!this._cursor) return;
         const { line, col } = this._cursor;
-        const cur = this.lines[line] ?? '';
-        if (col < cpLen(cur)) {
-            // Delete the WHOLE codepoint at the caret (both surrogate halves of an emoji).
-            this.lines[line] = cur.slice(0, cpToU16(cur, col)) + cur.slice(cpToU16(cur, col + 1));
-        } else if (line < this.lines.length - 1) {
-            this.lines[line] = cur + (this.lines[line + 1] ?? '');
-            this.lines.splice(line + 1, 1);
-        } else {
-            return;
-        }
+        if (line >= this.lines.length - 1 && col >= cpLen(this.lines[line] ?? '')) return;
+        deleteForward(this.lines, this._cursor);
         this._relayoutPreservingCursor();
     }
 
     /** Enter: split current line at cursor; cursor moves to start of new line. */
     editSplitLine() {
         if (!this._cursor) return;
-        const { line, col } = this._cursor;
-        const cur = this.lines[line] ?? '';
-        const u = cpToU16(cur, col);
-        this.lines.splice(line, 1, cur.slice(0, u), cur.slice(u));
-        this._cursor.line = line + 1;
-        this._cursor.col  = 0;
+        splitLine(this.lines, this._cursor);
         this._relayoutPreservingCursor();
     }
 
@@ -1676,30 +1579,8 @@ class CodeGrid extends FramedGlyphField {
      */
     editMoveCursor(dx, dy) {
         if (!this._cursor) return;
-        let { line, col } = this._cursor;
-        const lineCount = this.lines.length;
-
-        // Vertical first. Steps are in CODEPOINTS (cpLen), so the caret crosses an emoji in one
-        // press and never lands between its surrogate halves.
-        if (dy) {
-            line = Math.max(0, Math.min(line + dy, lineCount - 1));
-            col  = Math.min(col, cpLen(this.lines[line] ?? ''));
-        }
-
-        // Then horizontal, wrapping line boundaries
-        while (dx > 0) {
-            const len = cpLen(this.lines[line] ?? '');
-            if (col < len) { col++; dx--; continue; }
-            if (line < lineCount - 1) { line++; col = 0; dx--; continue; }
-            break;
-        }
-        while (dx < 0) {
-            if (col > 0) { col--; dx++; continue; }
-            if (line > 0) { line--; col = cpLen(this.lines[line] ?? ''); dx++; continue; }
-            break;
-        }
-
-        this.setCursor(line, col);
+        this._cursor = moveCursor(this.lines, this._cursor, dx, dy);
+        this._updateCaretMesh();
     }
 
     /** Home: jump to col 0 on the current line. */
@@ -1722,58 +1603,21 @@ class CodeGrid extends FramedGlyphField {
      */
     _initCaretMesh() {
         if (this._caretMesh) return;
-        const c = CodeGrid.CARET_COLOR;
-        const geo = new THREE.PlaneGeometry(1, 1);
-        const mat = new THREE.MeshBasicMaterial({
-            color: new THREE.Color(c.r, c.g, c.b),
-            transparent: true,
-            opacity: 0.85,
-            side: THREE.DoubleSide,
-            depthWrite: false,
+        this._caretMesh = createCaretMesh({
+            color: CodeGrid.CARET_COLOR,
+            renderOrder: CodeGrid.CARET_RENDER_ORDER,
         });
-        this._caretMesh = new THREE.Mesh(geo, mat);
-        this._caretMesh.renderOrder = CodeGrid.CARET_RENDER_ORDER;
-        this._caretMesh.frustumCulled = false;  // grid-local; let parent do culling
         this.add(this._caretMesh);
     }
 
     /**
      * Position the caret mesh at the current cursor.
-     *
-     * Pure layout-derived math via _resolveCaretWorldPosition: visual row
-     * from the per-line wrap ruler, x from intra-segment col, y from
-     * origin + row * lineSpacing, then pagination. No slot reads, no
-     * neighbor sampling. Same layout invariants the worker obeyed when
-     * placing glyphs, so the caret aligns naturally — even on empty
-     * lines, post-wrap segments, and post-pagination pages.
-     *
      * @private
      */
     _updateCaretMesh() {
         if (!this._caretMesh || !this._cursor) return;
-        const m = this.metrics;
-        if (!m) return;
-
         const pos = this._resolveCaretWorldPosition(this._cursor.line, this._cursor.col);
-        if (!pos) {
-            this._caretMesh.visible = false;
-            this._emitCursorChange(); // cursor is still live; only the caret hid
-            return;
-        }
-
-        const barWidth  = Math.max(m.charWidth * 0.1, 0.5);
-        const barHeight = m.lineHeight;
-
-        // Plane is centered on its origin; shift right by half-width so the
-        // bar's left edge sits at the resolved x.
-        this._caretMesh.scale.set(barWidth, barHeight, 1);
-        // pos.z tracks the glyph depth (z-wrap staircase / pagination); +0.05 keeps the
-        // caret just in front so it never z-fights the glyphs (0 for unwrapped lines).
-        this._caretMesh.position.set(pos.x + barWidth / 2, pos.y, pos.z + 0.05);
-        this._caretMesh.visible = true;
-        // Every cursor-visible change funnels through this repaint (setCursor,
-        // enterEdit, arrow moves, post-edit relayout clamp) — emit here so
-        // subscribers track the cursor without polling.
+        positionCaretMesh(this._caretMesh, pos, this.metrics);
         this._emitCursorChange();
     }
 
@@ -1817,56 +1661,12 @@ class CodeGrid extends FramedGlyphField {
      */
     _sizeBackgroundTo(bounds) {
         if (!this._background || !this.config.showBackground) {
-            if (this._background) {
-                this._background.visible = false;
-            }
+            if (this._background) this._background.visible = false;
             return;
         }
-
-        if (!bounds) {
-            this._background.visible = false;
-            return;
-        }
-
-        const padding = this.config.backgroundPadding;
-
-        // When a frame is active (Step 3c.2), back the FRAME window — a fixed band of
-        // frameRows rows at the content x-extent — not the full (scrolled) content, so the
-        // panel matches what the shader clip actually shows and stays put as content scrolls
-        // through it. Otherwise back the whole content. The frame clips Y only, so width is
-        // always the content x-extent.
-        const ls      = this.metrics.lineHeight;
+        const ls = this.metrics.lineHeight;
         const originY = this._layoutOriginY ?? 0;
-        const framed  = this._frameRows > 0;
-        const frameH  = this._frameRows * ls;
-
-        const width  = bounds.width + padding * 2;
-        const height = (framed ? frameH : bounds.height) + padding * 2;
-
-        if (width > 0 && height > 0) {
-            this._background.scale.set(width, height, 1);
-
-            // Position background at the BACK of the bounding box (Z min) so it sits behind
-            // all Z-wrapped / z-paged text layers.
-            const zMin = bounds.min.z !== undefined ? bounds.min.z : 0;
-            const backgroundZ = zMin - (this._bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND));
-
-            // Vertical center: the fixed frame band when framed (scroll-independent — the
-            // window stays put while content flows through it), else the content center.
-            const centerY = framed
-                ? (originY + 0.5 * ls) - frameH / 2
-                : bounds.min.y + bounds.height / 2;
-
-            this._background.position.set(
-                bounds.min.x + bounds.width / 2,
-                centerY,
-                backgroundZ
-            );
-
-            this._background.visible = true;
-        } else {
-            this._background.visible = false;
-        }
+        fitBackground(this._background, bounds, this.config.backgroundPadding, this._frameRows, ls, originY, this._bgGap);
     }
 }
 
