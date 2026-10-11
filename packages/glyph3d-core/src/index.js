@@ -96,6 +96,13 @@ export {
     loadSlugCore,
 } from './shaping/index.js';
 
+// Engine bootstrapping & core character ranges
+export {
+    bootGlyphEngine,
+    DEFAULT_ENGINE_OPTIONS,
+    LARGE_CORE_RANGES,
+} from './glyphEngine.js';
+
 // Buffer builders (HarfBuzz-shaped path only)
 export { buildBatchBuffers, buildShapedBatchBuffers } from './workers/builders/index.js';
 

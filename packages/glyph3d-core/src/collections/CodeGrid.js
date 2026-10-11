@@ -385,6 +385,7 @@ class CodeGrid extends FramedGlyphField {
 
         if (this._renderer) this._renderer.clear();
         if (this._filenameField) this._filenameField.clear();
+        if (this._memoryEdges) this._memoryEdges.clear();
         this._resetBatchState();
 
         this._updateBackground();
@@ -973,6 +974,11 @@ class CodeGrid extends FramedGlyphField {
         }
 
         this._disposePanel();
+
+        if (this._memoryEdges) {
+            this._memoryEdges.dispose();
+            this._memoryEdges = null;
+        }
 
         if (this._caretMesh) {
             this._caretMesh.geometry.dispose();
