@@ -31,7 +31,7 @@ function mockWindow() {
 }
 const camera = { fov: 70, aspect: 1.6, quaternion: new THREE.Quaternion(), position: new THREE.Vector3() };
 
-const dock = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() } });
+const dock = new CameraDock({ atlas: HEADLESS_ATLAS });
 new THREE.Scene().add(dock);
 dock.update(0.016, camera);
 

@@ -71,12 +71,6 @@ export class AttentionManager {
          *  @private @type {boolean} */
         this._captured = false;
 
-        /** Enumerable dock map. L2 will populate this via CameraDock.
-         *  Kept here (not on CameraDock.docks) so L1 command handlers that
-         *  snapshot scene state don't need a second service reference.
-         *  @type {Map<string, { anchor: string, offset: object, ts: number }>} */
-        this.docks = new Map();
-
         /** @private @type {Map<string, Array<Function>>} */
         this._listeners = new Map();
     }
@@ -220,7 +214,6 @@ export class AttentionManager {
             primary: this.state.primary ? { id: this.state.primary.id, ts: this.state.primary.ts } : null,
             key:     this.state.key     ? { id: this.state.key.id,     ts: this.state.key.ts }     : null,
             captured: this._captured,
-            docks:   Array.from(this.docks.entries()).map(([id, d]) => ({ id, ...d })),
         };
     }
 

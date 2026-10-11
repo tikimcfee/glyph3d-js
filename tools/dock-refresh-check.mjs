@@ -48,7 +48,7 @@ function makeGrid(cols, rows, placement = 1) {
 
 // A docked dock with one tile, viewport pinned, animator settled on demand.
 function rig() {
-  const d = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() }, layout: 'linear' });
+  const d = new CameraDock({ atlas: HEADLESS_ATLAS, layout: 'linear' });
   new THREE.Scene().add(d);
   d._viewH = 100; d._viewW = 160;
   d.settle = () => { for (let i = 0; i < 6; i++) d.animator.update(10); d._viewH = 100; d._viewW = 160; };
@@ -191,7 +191,7 @@ const frameScale = (d, g) => Math.min(innerW(d) / g.cols, innerH(d) / (g.rows * 
 // tiles could report the same slot and a shadowed tile ate its sibling's hover/wheel. _relayout
 // now numbers ALL entries by Map order in one place, so slots stay unique through any spotlight.
 function slotDock(n) {
-  const d = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() } });
+  const d = new CameraDock({ atlas: HEADLESS_ATLAS });
   d.attach = () => {};
   d._animateTile = () => {};        // skip THREE math; we only assert slot labels
   d._viewH = 100; d._viewW = 160;
@@ -204,7 +204,6 @@ function slotDock(n) {
       slot: i,
       quatTarget: { setFromUnitVectors() {}, identity() {} },
     });
-    d.attentionManager.docks.set(id, { offset: {} });
   }
   return d;
 }

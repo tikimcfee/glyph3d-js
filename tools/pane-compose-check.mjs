@@ -31,7 +31,7 @@ function makeGrid(cols, rows) {
     return g;
 }
 function rig() {
-    const d = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() }, layout: 'linear' });
+    const d = new CameraDock({ atlas: HEADLESS_ATLAS, layout: 'linear' });
     new THREE.Scene().add(d);
     d._viewH = 100; d._viewW = 160;
     d.settle = () => { for (let i = 0; i < 8; i++) d.animator.update(10); d._viewH = 100; d._viewW = 160; };

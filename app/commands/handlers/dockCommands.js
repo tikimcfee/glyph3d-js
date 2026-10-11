@@ -8,8 +8,8 @@
  * terminal, dimensionally scaled into a tile that rides the camera. lock/release
  * animate the slide + resize; the bar re-packs itself.
  *
- * State of record is AttentionManager.docks (CameraDock writes it), so attention.info
- * and the session store see docked membership for free.
+ * Membership of record is the workspace model's `view.docked` fact; the CameraDock is
+ * its live projection.
  */
 
 /** @param {AppContext} ctx */

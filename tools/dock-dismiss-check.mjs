@@ -28,7 +28,7 @@ function mockWindow() {
 }
 
 const scene = new THREE.Scene();
-const dock = new CameraDock({ atlas: HEADLESS_ATLAS, attentionManager: { docks: new Map() } });
+const dock = new CameraDock({ atlas: HEADLESS_ATLAS });
 scene.add(dock);
 
 const g1 = mockWindow(), g2 = mockWindow();
@@ -46,7 +46,6 @@ ok(dock.dismiss('t1') === true, 'dismiss(framed): returns true');
 ok(!dock.has('t1'), 'dismiss: entry dropped');
 ok(dock.paneTree === null && dock.focusedPane === null, 'dismiss(framed): frame emptied');
 ok(g1.parent !== dock, 'dismiss: orphan lifted out of the bar (no dead child left animating)');
-ok(!dock.attentionManager.docks.has('t1'), 'dismiss: AttentionManager.docks entry dropped');
 ok(!dock.tiles.has(g1), 'dismiss: removed from the camera-speed tiles set');
 ok(dock.has('t2'), 'dismiss: the sibling tile is untouched');
 

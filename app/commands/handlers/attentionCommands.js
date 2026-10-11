@@ -103,7 +103,6 @@ export default function registerAttentionCommands(router) {
                 ? `  ${s.padEnd(8)}${v.id}  (ts=${Math.round(v.ts)})`
                 : `  ${s.padEnd(8)}(cleared)`;
         });
-        lines.push(`  docks   ${info.docks.length} entries`);
         return {
             text: `OK: attention\n${lines.join('\n')}`,
             data: info,

@@ -536,9 +536,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
     // Camera-locked HUD dock: a bar of window tiles that rides the view. Reparents
     // a docked grid/terminal under itself (world-preserving attach) and scales it to
-    // a tile. Shares the AttentionManager so its .docks map is the record of truth.
-    // <DockRunner/> ticks it; dock.* verbs drive it.
-    const cameraDock = new CameraDock({ attentionManager: state.ctx.attentionManager, atlas: state.ctx.atlas });
+    // a tile. <DockRunner/> ticks it; dock.* verbs drive it.
+    const cameraDock = new CameraDock({ atlas: state.ctx.atlas });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
     state.ctx.holders.add(cameraDock);  // Holder protocol: dock joins on create

@@ -2,8 +2,7 @@
  * CameraDock — a camera-locked HUD bar that holds windows (code grids /
  * terminals) as live, dimensionally-scaled tiles.
  *
- * This is the L2 the AttentionManager.docks map was stubbed for. A docked
- * window is the SAME live Object3D — not a proxy or snapshot — reparented under
+ * A docked window is the SAME live Object3D — not a proxy or snapshot — reparented under
  * this node and scaled down via its Object3D transform. An 80×80 terminal keeps
  * its 80×80 buffer; only its `scale` shrinks, so it reads as a tidy box without
  * losing a cell. ("Shrunk dimensionally, not re-windowed.")
@@ -41,8 +40,8 @@
  * transform are captured on lock and restored on release — we never assume the
  * scene is the home.
  *
- * State of record lives in the shared AttentionManager.docks map (passed in), so
- * command handlers and the session store read one place, not a second service.
+ * Dock membership of record is the workspace model's `view.docked` fact; this bar is
+ * its live projection (entries), driven by the dock.* verbs and the restore reconcile.
  *
  * @typedef {Object} DockEntry
  * @property {string} id
@@ -129,7 +128,6 @@ function extentFromBox(lb) {
 export class CameraDock extends THREE.Object3D {
     /**
      * @param {Object} [opts]
-     * @param {Object} [opts.attentionManager] - shared AttentionManager (its .docks map is the record of truth)
      * @param {Object} opts.atlas - GlyphAtlas for the tile nameplates (FieldLabel text)
      * @param {number} [opts.distance=10]   - world units ahead of the camera the bar sits
      * @param {number} [opts.boxFrac=0.1]   - slot-box height as a fraction of the visible height
@@ -162,7 +160,7 @@ export class CameraDock extends THREE.Object3D {
      * @param {'name+dims'|'name'|'dims'|'off'} [opts.labelFormat='name+dims'] - plate text ('off' hides nameplates)
      * @param {'linear'|'radial'} [opts.layout='radial']
      */
-    constructor({ attentionManager = null, atlas = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
+    constructor({ atlas = null, distance = 10, boxFrac = 0.1, boxAspect = 1.15, gapFrac = 0.4,
                   maxColumns = 0, fillFrac = 0.9, maxArcDeg = 80, maxRiseDeg = 80, bottomFrac = 0.86,
                   frameW = 1, frameH = 1, frameX = 0, frameY = 0,
                   frameMarginLeft = 0.06, frameMarginRight = 0.06, frameMarginTop = 0.06, frameMarginBottom = 0.06,
@@ -175,7 +173,6 @@ export class CameraDock extends THREE.Object3D {
                   layout = 'radial' } = {}) {
         super();
         this.name = 'camera-dock';
-        this.attentionManager = attentionManager;
         this.atlas = atlas;                   // nameplate text source (FieldLabel)
         this.distance = distance;
         this.boxFrac = boxFrac;       // slot-box height as a fraction of the visible height
@@ -518,11 +515,6 @@ export class CameraDock extends THREE.Object3D {
         this.tiles.add(grid);
 
         this.entries.set(id, entry);
-        this.attentionManager?.docks?.set(id, {
-            anchor: 'camera',
-            offset: { slot: entry.slot },
-            ts: (typeof performance !== 'undefined' ? performance.now() : 0),
-        });
 
         // Paint the window's identity hue onto its panel edge — the in-shader border (no extra
         // object). The DOCKED bit makes it show; it wears this hue while docked, release() clears it.
@@ -581,7 +573,6 @@ export class CameraDock extends THREE.Object3D {
             if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
             e.grid?.setControlActive?.('pin', false);
         }
-        this.attentionManager?.docks?.delete(id);
 
         // Home parent may have been pruned (file closed while docked) — fall back to
         // the scene (this bar's own parent) so the window is never orphaned.
@@ -622,7 +613,6 @@ export class CameraDock extends THREE.Object3D {
             if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
             e.grid?.setControlActive?.('pin', false);
         }
-        this.attentionManager?.docks?.delete(id);
 
         // The grid is being disposed, so stop any tween still writing to it and lift it out of the
         // bar's children. dispose() couldn't: a DOCKED grid's parent is THIS node (reparented on
@@ -736,8 +726,6 @@ export class CameraDock extends THREE.Object3D {
         const contentH = Math.max(ext.h, 1e-3);
         const eff = Math.min(subW / contentW, subH / contentH) * fd;
         this._animateTile(e, subCx * fd, subCy * fd, this.distance * (1 - fd), eff);
-        const d = this.attentionManager?.docks?.get(e.id);
-        if (d) d.offset = { slot: 'frame' };
     }
 
     /** The nameplate text for an entry, per labelFormat: the window's name, its live dimensions
@@ -950,8 +938,6 @@ export class CameraDock extends THREE.Object3D {
                     } else {
                         this._animateTile(e, sx, sy, sz, scales[i] * f, _dir);
                         this._placeLabel(e, sx, sy, sz, scales[i] * f, _dir, boxes[i].h * f);
-                        const d = this.attentionManager?.docks?.get(e.id);
-                        if (d) d.offset = { slot: e.slot };
                     }
                 });
             } else {
@@ -980,8 +966,6 @@ export class CameraDock extends THREE.Object3D {
                     } else {
                         this._animateTile(e, sx, rowY, 0, scales[i]);
                         this._placeLabel(e, sx, rowY, 0, scales[i], null, boxH);
-                        const d = this.attentionManager?.docks?.get(e.id);
-                        if (d) d.offset = { slot: e.slot };
                     }
                 });
             }
