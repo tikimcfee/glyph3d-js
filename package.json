@@ -20,6 +20,7 @@
   "homepage": "https://github.com/tikimcfee/glyph3d-js#readme",
   "bugs": "https://github.com/tikimcfee/glyph3d-js/issues",
   "devDependencies": {
+    "@types/three": "~0.185.0",
     "harfbuzzjs": "^0.4.8",
     "playwright": "^1.60.0",
     "three": "^0.185.1"
