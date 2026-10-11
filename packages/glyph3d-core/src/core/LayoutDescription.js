@@ -30,7 +30,8 @@ export default class LayoutDescription {
      * @param {Int32Array|number[]} p.lineLengths - line → codepoint count
      * @param {Float32Array|null} p.sizes   - per-slot [advance, height]; real advances make x EXACT
      * @param {number} [p.wrapWidth] - slots per visual row, 0 = no wrap
-     * @param {?Object} [p.page]     - pageFold output; null / rows<=0 = pagination off
+     * @param {?Object} [p.page]     - pageFold output (rows<=0 = pagination off). It also carries
+     *                                 the row pitch pageShift reads: null places every row at y 0.
      * @param {number} [p.originX]
      * @param {number} [p.originY]
      * @param {number} [p.originZ]

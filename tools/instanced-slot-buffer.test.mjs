@@ -120,7 +120,7 @@ console.log('Testing LayoutGenerator...');
 {
     const text = 'Hello\nWorld';
     const result = generateLayout(text, {
-        metrics: { charWidth: 10, charHeight: 20, lineHeight: 24, worldScale: 1.0 },
+        metrics: { charWidth: 10, charHeight: 20, lineSpacing: 24, worldScale: 1.0 },
         wrapWidth: 0,
     });
 
@@ -140,7 +140,7 @@ console.log('Testing LayoutGenerator...');
     close(s4.pos[0], 40.0, 'Slot 4 x=40');
     close(s4.pos[1], -10.0, 'Slot 4 y=-10');
 
-    // Slot 5 ('W'): x=0, y=-34 (-lineHeight - charHeight/2 = -24 - 10 = -34)
+    // Slot 5 ('W'): x=0, y=-34 (-lineSpacing - charHeight/2 = -24 - 10 = -34)
     const s5 = result.buffer.getSlot(5);
     close(s5.pos[0], 0.0, 'Slot 5 x=0');
     close(s5.pos[1], -34.0, 'Slot 5 y=-34');
@@ -154,7 +154,7 @@ console.log('Testing LayoutGenerator...');
 {
     const longLine = '123456789012'; // 12 chars
     const result = generateLayout(longLine, {
-        metrics: { charWidth: 10, charHeight: 20, lineHeight: 24, worldScale: 1.0 },
+        metrics: { charWidth: 10, charHeight: 20, lineSpacing: 24, worldScale: 1.0 },
         wrapWidth: 5, // wraps every 5 chars -> 3 segments (5, 5, 2)
         zWrapSpacing: 0.15, // zStep = 0.15 * 20 = 3
     });

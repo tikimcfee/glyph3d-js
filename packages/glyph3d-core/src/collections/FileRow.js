@@ -48,13 +48,7 @@ export default class FileRow extends BoundedObject3D {
         this.sourcePath = null;
         this.content = '';
 
-        const cm = computeCellMetrics(atlas?.getCharSize?.() || { width: 9.6, height: 18 }, this.config.worldScale);
-        this.metrics = {
-            charWidth: cm.charWidth,
-            charHeight: cm.charHeight,
-            lineHeight: cm.lineSpacing,
-            spacing: cm.letterSpacing,
-        };
+        this.metrics = computeCellMetrics(atlas?.getCharSize?.() || { width: 9.6, height: 18 }, this.config.worldScale);
 
         this._analyzeGen = 0;
         this._highlights = null;
@@ -86,7 +80,7 @@ export default class FileRow extends BoundedObject3D {
         const m = this.metrics;
         const lp = resolveLayoutParams(this.config.layout);
         this._layoutOriginY = (this.config.showFilename && this.filename)
-            ? -m.lineHeight * 1.5
+            ? -m.lineSpacing * 1.5
             : 0;
 
         if (!this._renderer) {
@@ -142,10 +136,11 @@ export default class FileRow extends BoundedObject3D {
                 originX: 0,
                 originY: this._layoutOriginY,
                 originZ: 0,
-                lineSpacing: m.lineHeight,
+                lineSpacing: m.lineSpacing,
                 totalRows: res.totalRows,
                 maxRowExtent: res.maxRowExtent,
                 maxSegs: res.maxSegs,
+                page: res.page,
             });
         } else if (bounds) {
             this._renderer.setSlots(this._renderer.slotBuffer, this._renderer.slotBuffer.count);

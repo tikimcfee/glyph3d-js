@@ -799,7 +799,7 @@ export class CameraDock extends THREE.Object3D {
      *  scales with the CONTENT (eff = the tile's rendered contain-fit scale), not the slot
      *  box. Grids without text metrics fall back to a small box fraction. @private */
     _labelHeight(e, eff, boxH) {
-        const line = e.grid?._metrics?.lineSpacing ?? e.grid?.metrics?.lineSpacing ?? e.grid?.metrics?.lineHeight;
+        const line = e.grid?._metrics?.lineSpacing ?? e.grid?.metrics?.lineSpacing;
         return line ? this.labelLines * line * eff : 0.2 * boxH;
     }
 

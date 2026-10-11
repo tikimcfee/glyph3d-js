@@ -16,7 +16,6 @@ import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
-import { pageFold } from '../core/foldGeometry.js';
 import LayoutDescription from '../core/LayoutDescription.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import InstancedField from './InstancedField.js';
@@ -929,7 +928,7 @@ class CodeGrid extends FramedGlyphField {
     _applyClip() {
         if (!this._renderer || typeof this._renderer.setClipYRange !== 'function') return;
         if (this._frameRows > 0) {
-            const ls = this.metrics.lineHeight;
+            const ls = this.metrics.lineSpacing;
             const originY = this._layoutOriginY ?? 0;
             const { top, bottom } = computeFrameClip(originY, this._frameRows, ls);
             this._renderer.setClipYRange(top, bottom);
@@ -998,15 +997,14 @@ class CodeGrid extends FramedGlyphField {
     /**
      * Compute atlas-derived metrics. Called at construction and after atlas swap.
      * @private
-     * @returns {Object} { charWidth, charHeight, lineHeight, spacing }
+     * @returns {ReturnType<typeof computeCellMetrics>} the cell metrics, as computed
      */
     _computeMetrics() {
         const atlasCharSize = (this.atlas && typeof this.atlas.getCharSize === 'function')
             ? this.atlas.getCharSize()
             : { width: 48 * 0.6, height: 48 * 1.15 };
         const scale = this.config.worldScale;
-        const m = computeCellMetrics(atlasCharSize, scale);
-        return { charWidth: m.charWidth, charHeight: m.charHeight, lineHeight: m.lineSpacing, spacing: m.letterSpacing };
+        return computeCellMetrics(atlasCharSize, scale);
     }
 
     /**
@@ -1152,7 +1150,7 @@ class CodeGrid extends FramedGlyphField {
             this._filenameField.setVisible(false);
         }
         this._layoutOriginY = (this.config.showFilename && this.filename)
-            ? -this.metrics.lineHeight * 1.5
+            ? -this.metrics.lineSpacing * 1.5
             : 0;
 
         if (this.content && this.content.length > 0) {
@@ -1169,12 +1167,12 @@ class CodeGrid extends FramedGlyphField {
                 origin: { x: 0, y: this._layoutOriginY, z: 0 },
                 wrapWidth: wrapWidth,
                 zWrapSpacing: lp.zWrapSpacing || 0,
-                pageHeight: lp.pageHeight || 0,
-                pagesWide: lp.pagesWide || 1,
-                pageGapX: lp.pageGapX || 10,
-                pageGapY: lp.pageGapY || 10,
-                pageDepth: lp.pageDepth || 20,
-                axis: lp.axis || 'xy',
+                pageHeight: lp.pageHeight,
+                pagesWide: lp.pagesWide,
+                pageGapX: lp.pageGapX,
+                pageGapY: lp.pageGapY,
+                pageDepth: lp.pageDepth,
+                axis: lp.axis,
                 color: this.config.textColor,
                 scrollOffset: this._scrollOffset || 0,
                 targetBuffer: this._renderer.slotBuffer,
@@ -1196,11 +1194,11 @@ class CodeGrid extends FramedGlyphField {
                 lineLengths: result.lineLengths,
                 sizes: null,
                 wrapWidth: wrapWidth,
-                page: (lp.pageHeight > 0) ? pageFold(lp, m, result.maxRowExtent) : null,
+                page: result.page,
                 originX: 0,
                 originY: this._layoutOriginY,
                 originZ: 0,
-                lineSpacing: m.lineHeight,
+                lineSpacing: m.lineSpacing,
                 zStep: zStep,
                 cellHeight: m.charHeight,
                 advance: m.charWidth,
@@ -1671,7 +1669,7 @@ class CodeGrid extends FramedGlyphField {
             if (this._background) this._background.visible = false;
             return;
         }
-        const ls = this.metrics.lineHeight;
+        const ls = this.metrics.lineSpacing;
         const originY = this._layoutOriginY ?? 0;
         fitBackground(this._background, bounds, this.config.backgroundPadding, this._frameRows, ls, originY, this._bgGap);
     }

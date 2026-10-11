@@ -203,7 +203,7 @@ export function createCaretMesh(options = {}) {
  * Position and scale the caret mesh to match a world/grid-local cursor position.
  * @param {THREE.Mesh|null} caretMesh
  * @param {{x: number, y: number, z?: number}|null} pos
- * @param {{charWidth: number, lineHeight: number}|null} metrics
+ * @param {{charWidth: number, lineSpacing: number}|null} metrics
  * @returns {boolean} whether caret was positioned and made visible
  */
 export function positionCaretMesh(caretMesh, pos, metrics) {
@@ -212,7 +212,7 @@ export function positionCaretMesh(caretMesh, pos, metrics) {
         return false;
     }
     const barWidth = Math.max(metrics.charWidth * 0.1, 0.5);
-    const barHeight = metrics.lineHeight;
+    const barHeight = metrics.lineSpacing;
 
     caretMesh.scale.set(barWidth, barHeight, 1);
     caretMesh.position.set(pos.x + barWidth / 2, pos.y, (pos.z ?? 0) + 0.05);

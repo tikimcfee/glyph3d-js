@@ -2,10 +2,13 @@
  * LayoutGenerator — High-speed CPU text layout generator emitting 32-byte RenderSlots.
  *
  * Produces deterministic, ordered InstancedSlotBuffer instances directly from text
- * using MonospaceShapeCache / FontChain and fold geometry rules.
+ * using MonospaceShapeCache / FontChain. Rows place in flow; the page fold is
+ * foldGeometry's pageFold/pageShift — the same one LayoutDescription answers caret,
+ * pick, and extent queries with — applied once the widest row is known.
  */
 
-import { InstancedSlotBuffer, packRgba8 } from './InstancedSlotBuffer.js';
+import { InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_POS_X, LANE_POS_Y, LANE_POS_Z, LANE_ADVANCE } from './InstancedSlotBuffer.js';
+import { pageFold, pageShift } from './foldGeometry.js';
 
 export const DEFAULT_LAYOUT_CONFIG = {
     wrapWidth: 200,
@@ -24,7 +27,7 @@ export const DEFAULT_LAYOUT_CONFIG = {
  * @param {string|string[]} text - Input string or array of lines
  * @param {Object} [options]
  * @param {Object} [options.shaper] - FontChain or MonospaceShapeCache (optional)
- * @param {Object} [options.metrics] - { charWidth, charHeight, lineHeight, worldScale, pixelWidth, pixelHeight }
+ * @param {Object} [options.metrics] - cell metrics (core/cellMetrics): { charWidth, charHeight, lineSpacing, letterSpacing, worldScale }
  * @param {{x:number, y:number, z:number}} [options.origin={x:0, y:0, z:0}] - World space origin
  * @param {number} [options.wrapWidth=200] - Columns before wrapping (0 = off)
  * @param {number} [options.zWrapSpacing=0.15] - Z step per intra-line wrap as multiple of charHeight
@@ -38,7 +41,7 @@ export const DEFAULT_LAYOUT_CONFIG = {
  * @param {number} [options.groupId=0] - Group index for group table TRS
  * @param {Array<{start:number, end:number, color:number}>} [options.spans] - Optional syntax color spans
  * @param {InstancedSlotBuffer} [options.targetBuffer] - Optional reusable buffer
- * @returns {{ buffer: InstancedSlotBuffer, glyphCount: number, lineStarts: number[], totalRows: number, bounds: { min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number}, width:number, height:number, depth:number } }}
+ * @returns {{ buffer: InstancedSlotBuffer, glyphCount: number, lineStarts: Int32Array, lineLengths: Int32Array, lineStartRows: Int32Array, totalRows: number, maxRowExtent: number, maxSegs: number, page: ReturnType<typeof pageFold>, bounds: { min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number}, width:number, height:number, depth:number } }}
  */
 export function generateLayout(text, options = {}) {
     const lines = Array.isArray(text) ? text : (typeof text === 'string' ? text.split('\n') : []);
@@ -48,7 +51,7 @@ export function generateLayout(text, options = {}) {
     const worldScale = metrics.worldScale || 0.025;
     const charWidth = metrics.charWidth || (48 * 0.6 * worldScale);
     const charHeight = metrics.charHeight || (48 * 1.15 * worldScale);
-    const lineHeight = metrics.lineHeight || metrics.lineSpacing || (charHeight * 1.2);
+    const lineSpacing = metrics.lineSpacing || (charHeight * 1.2);
     const upem = (shaper && shaper.upem)
         ? shaper.upem
         : (shaper && shaper._shaper && shaper._shaper.upem)
@@ -59,12 +62,15 @@ export function generateLayout(text, options = {}) {
     const wrapWidth = options.wrapWidth !== undefined ? Math.max(0, Math.trunc(options.wrapWidth)) : 200;
     const zStep = (options.zWrapSpacing !== undefined ? options.zWrapSpacing : 0.15) * charHeight;
 
-    const pageHeight = Math.max(0, Math.trunc(options.pageHeight || 0));
-    const pagesWide = Math.max(1, Math.trunc(options.pagesWide || 1));
-    const pageGapX = (options.pageGapX || 10) * charWidth;
-    const pageGapY = (options.pageGapY || 10) * lineHeight;
-    const pageDepth = (options.pageDepth || 20) * lineHeight;
-    const axis = options.axis === 'z' ? 'z' : 'xy';
+    const D = DEFAULT_LAYOUT_CONFIG;
+    const fold = {
+        pageHeight: Math.max(0, Math.trunc(options.pageHeight || 0)),
+        pagesWide: options.pagesWide ?? D.pagesWide,
+        pageGapX: options.pageGapX ?? D.pageGapX,
+        pageGapY: options.pageGapY ?? D.pageGapY,
+        pageDepth: options.pageDepth ?? D.pageDepth,
+        axis: options.axis,
+    };
 
     const defaultColorPacked = typeof options.color === 'number'
         ? ((((options.color & 0xFF) << 16) | (options.color & 0xFF00) | ((options.color >> 16) & 0xFF) | 0xFF000000) >>> 0)
@@ -102,12 +108,8 @@ export function generateLayout(text, options = {}) {
     let maxRowExtent = 0;
     let maxSegs = 0;
 
-    let inkMinX = (isAppend && options.previousBounds) ? options.previousBounds.min.x : Infinity;
-    let inkMinY = (isAppend && options.previousBounds) ? options.previousBounds.min.y : Infinity;
-    let inkMinZ = (isAppend && options.previousBounds) ? options.previousBounds.min.z : Infinity;
-    let inkMaxX = (isAppend && options.previousBounds) ? options.previousBounds.max.x : -Infinity;
-    let inkMaxY = (isAppend && options.previousBounds) ? options.previousBounds.max.y : -Infinity;
-    let inkMaxZ = (isAppend && options.previousBounds) ? options.previousBounds.max.z : -Infinity;
+    // Each slot's screen row, kept for the page fold (which needs the FINAL widest row).
+    const slotRows = fold.pageHeight > 0 ? new Int32Array(approxTotalGlyphs) : null;
 
     let charOffsetGlobal = 0;
     let activeSpanIdx = 0;
@@ -121,6 +123,7 @@ export function generateLayout(text, options = {}) {
         let col = 0;
         let lineAdv = 0.0;
         let segAdv = 0.0;
+        let curSeg = 0;
 
         for (let i = 0; i < lineLen; i++) {
             const cp = line.codePointAt(i);
@@ -169,43 +172,23 @@ export function generateLayout(text, options = {}) {
                 glyphId = cp;
             }
 
-            // Intra-line wrapping
-            let wrapSeg = 0;
-            let segCol = col;
-            if (wrapWidth > 0 && col >= wrapWidth) {
-                wrapSeg = Math.floor(col / wrapWidth);
-                segCol = col % wrapWidth;
-                if (segCol === 0) {
-                    segAdv = 0.0;
-                }
+            // Intra-line wrapping. Entering a new segment restarts its advance at the
+            // columns already past the break (nonzero only when a tab crossed it).
+            const wrapSeg = wrapWidth > 0 ? Math.floor(col / wrapWidth) : 0;
+            if (wrapSeg !== curSeg) {
+                curSeg = wrapSeg;
+                segAdv = (col % wrapWidth) * charWidth;
             }
             if (wrapSeg > maxSegs) maxSegs = wrapSeg;
 
-            const visualRow = baseRow + wrapSeg;
-            const screenRow = visualRow - scrollOffset;
+            const screenRow = baseRow + wrapSeg - scrollOffset;
 
-            // Compute Base X, Y, Z before pagination
-            const itemRelX = (wrapWidth > 0) ? segAdv : lineAdv;
-            let posX = origin.x + itemRelX;
+            // Flow position; the page fold (if on) is applied after the loop.
+            const posX = origin.x + ((wrapWidth > 0) ? segAdv : lineAdv);
             // Vertical anchor is cell vertical center
-            let posY = origin.y - (screenRow * lineHeight) - (charHeight * 0.5);
-            let posZ = origin.z - (wrapSeg * zStep);
-
-            // Pagination calculation
-            if (pageHeight > 0 && screenRow >= pageHeight) {
-                const pageIdx = Math.floor(screenRow / pageHeight);
-                const rowInPage = screenRow % pageHeight;
-                posY = origin.y - (rowInPage * lineHeight) - (charHeight * 0.5);
-
-                if (axis === 'z') {
-                    posZ -= pageIdx * pageDepth;
-                } else {
-                    const colPage = pageIdx % pagesWide;
-                    const rowPage = Math.floor(pageIdx / pagesWide);
-                    posX += colPage * (maxRowExtent + pageGapX);
-                    posY -= rowPage * (pageHeight * lineHeight + pageGapY);
-                }
-            }
+            const posY = origin.y - (screenRow * lineSpacing) - (charHeight * 0.5);
+            const posZ = origin.z - (wrapSeg * zStep);
+            if (slotRows) slotRows[totalGlyphs - startSlot] = screenRow;
 
             // Color resolution (spans override)
             let glyphColor = defaultColorPacked;
@@ -230,22 +213,12 @@ export function generateLayout(text, options = {}) {
                 charHeight
             );
 
-            // Bounds accumulation
-            const right = posX + advance;
-            const top = posY + charHeight * 0.5;
-            const bottom = posY - charHeight * 0.5;
-            if (posX < inkMinX) inkMinX = posX;
-            if (right > inkMaxX) inkMaxX = right;
-            if (bottom < inkMinY) inkMinY = bottom;
-            if (top > inkMaxY) inkMaxY = top;
-            if (posZ < inkMinZ) inkMinZ = posZ;
-            if (posZ > inkMaxZ) inkMaxZ = posZ;
-
             col++;
             lineAdv += advance;
             segAdv += advance;
-            if (segAdv > maxRowExtent) maxRowExtent = segAdv;
-            if (lineAdv > maxRowExtent) maxRowExtent = lineAdv;
+            // The widest VISUAL row — a wrapped line contributes its segments, not its length.
+            const rowExtent = wrapWidth > 0 ? segAdv : lineAdv;
+            if (rowExtent > maxRowExtent) maxRowExtent = rowExtent;
             totalGlyphs++;
             charOffsetGlobal++;
         }
@@ -256,6 +229,37 @@ export function generateLayout(text, options = {}) {
         const lineWrapSegs = (wrapWidth > 0 && col > 0) ? Math.floor((col - 1) / wrapWidth) : 0;
         baseRow += (1 + lineWrapSegs);
         charOffsetGlobal++; // newline char
+    }
+
+    // The page fold, from the final widest row — so every column shares one stride.
+    // Always built: rows 0 = pagination off, and it still carries the row pitch the
+    // description's positionAt reads.
+    const page = pageFold(fold, { charWidth, letterSpacing: metrics.letterSpacing || 0, lineSpacing }, maxRowExtent);
+    const f32 = slotBuffer.f32;
+    if (slotRows) {
+        for (let s = startSlot; s < totalGlyphs; s++) {
+            const shift = pageShift(slotRows[s - startSlot], page);
+            const b = s * SLOT_FLOATS;
+            f32[b + LANE_POS_X] += shift.dx;
+            f32[b + LANE_POS_Y] = origin.y - shift.relY - charHeight * 0.5;
+            f32[b + LANE_POS_Z] += shift.dz;
+        }
+    }
+
+    // Ink bounds over the placed slots (merged with the prior item's when appending).
+    const prev = isAppend ? options.previousBounds : null;
+    let inkMinX = prev ? prev.min.x : Infinity, inkMaxX = prev ? prev.max.x : -Infinity;
+    let inkMinY = prev ? prev.min.y : Infinity, inkMaxY = prev ? prev.max.y : -Infinity;
+    let inkMinZ = prev ? prev.min.z : Infinity, inkMaxZ = prev ? prev.max.z : -Infinity;
+    for (let s = startSlot; s < totalGlyphs; s++) {
+        const b = s * SLOT_FLOATS;
+        const x = f32[b + LANE_POS_X], y = f32[b + LANE_POS_Y], z = f32[b + LANE_POS_Z];
+        if (x < inkMinX) inkMinX = x;
+        if (x + f32[b + LANE_ADVANCE] > inkMaxX) inkMaxX = x + f32[b + LANE_ADVANCE];
+        if (y - charHeight * 0.5 < inkMinY) inkMinY = y - charHeight * 0.5;
+        if (y + charHeight * 0.5 > inkMaxY) inkMaxY = y + charHeight * 0.5;
+        if (z < inkMinZ) inkMinZ = z;
+        if (z > inkMaxZ) inkMaxZ = z;
     }
 
     const bounds = totalGlyphs > 0 ? {
@@ -283,6 +287,7 @@ export function generateLayout(text, options = {}) {
         totalRows: baseRow,
         maxRowExtent,
         maxSegs,
+        page,
         bounds,
     };
 }
