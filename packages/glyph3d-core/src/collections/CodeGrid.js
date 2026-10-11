@@ -21,6 +21,7 @@ import LayoutDescription from '../core/LayoutDescription.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import InstancedField from './InstancedField.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
+import { paletteLUT } from '../parsing/syntaxPaletteJob.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 
@@ -625,6 +626,19 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
+     * Apply syntax palette colors to the grid's rendered text slots.
+     * Accurately maps UTF-8 palette bytes to 3D RenderSlots per line.
+     * @param {Uint8Array} palette
+     * @param {Float32Array} lut
+     */
+    applySyntaxPalette(palette, lut) {
+        if (!this._renderer || !this._layout || !palette || !lut) return;
+        const lineStarts = this._layout.lineSlotBase;
+        if (!lineStarts) return;
+        this._renderer.setGlyphPaletteRange(palette, lut, this.lines, lineStarts);
+    }
+
+    /**
      * The cached semantic structure model (the arborist's output) for the CURRENT
      * content, or null if it hasn't been built yet / is stale / unsupported. Sync
      * and side-effect-free — use ensureSemantics() to build on demand. Canonical
@@ -1211,6 +1225,10 @@ class CodeGrid extends FramedGlyphField {
                 maxRowExtent: result.maxRowExtent,
                 maxSegs: result.maxSegs,
             });
+
+            if (this._highlights?.palette) {
+                this.applySyntaxPalette(this._highlights.palette, paletteLUT());
+            }
 
             this._scheduleAnalyze();
         } else {

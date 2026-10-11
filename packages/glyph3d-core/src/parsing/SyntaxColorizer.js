@@ -141,7 +141,7 @@ async function runAnalyze(grid) {
         if (!renderer || typeof renderer.setGlyphColorRange !== 'function') return;
         const src = readableSource(grid);
         if (!src) return;
-        const { descriptor, text } = src;
+        const { descriptor, text, lines } = src;
 
         const gen = grid._analyzeGen;                 // snapshot before the async parse
         const prev = grid._highlights;
@@ -176,9 +176,11 @@ async function runAnalyze(grid) {
         else grid._highlights = hl;
 
         // THE write: base coat + every capture in one pass (palette 0 = FOREGROUND),
-        // one update range. The view clamps to its staged window internally.
-        if (typeof renderer.setGlyphPaletteRange === 'function') {
-            renderer.setGlyphPaletteRange(palette, paletteLUT());
+        // accurately aligned to 3D RenderSlots per line.
+        if (typeof grid.applySyntaxPalette === 'function') {
+            grid.applySyntaxPalette(palette, paletteLUT());
+        } else if (typeof renderer.setGlyphPaletteRange === 'function') {
+            renderer.setGlyphPaletteRange(palette, paletteLUT(), lines, grid._layout?.lineSlotBase);
         } else {
             // A non-view renderer (older field surface): base coat only.
             const total = renderer.getGlyphCount?.() ?? 0;

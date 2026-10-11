@@ -557,23 +557,94 @@ export default class InstancedField {
 
     /**
      * Color a range of glyphs using a color palette and LUT (for SyntaxColorizer).
-     * @param {Uint8Array} palette - Per-character palette index
+     * When text/lines and lineStarts are provided, maps UTF-8 palette bytes to
+     * 32-byte RenderSlots per line (properly skipping newlines, tabs, and handling
+     * multibyte characters).
+     *
+     * @param {Uint8Array} palette - Per-byte palette index
      * @param {Float32Array} lut - Palette RGB lookup table (3 floats per entry)
+     * @param {string|string[]} [textOrLines] - Optional text or array of lines
+     * @param {Int32Array|number[]} [lineStarts] - Optional start slot index per line
      */
-    setGlyphPaletteRange(palette, lut) {
-        const base = this.sourceBase || 0;
-        const count = Math.min(this._cachedGlyphCount, palette.length - base);
-        if (count <= 0) return;
-        const u32 = this.slotBuffer.uint32;
-        const start = base | 0;
-        for (let i = 0; i < count; i++) {
-            const p = palette[start + i] * 3;
-            const r = (lut[p] * 255 + 0.5) | 0;
-            const g = (lut[p + 1] * 255 + 0.5) | 0;
-            const b = (lut[p + 2] * 255 + 0.5) | 0;
-            const packed = (r & 0xff) | ((g & 0xff) << 8) | ((b & 0xff) << 16);
-            this.slotBuffer.setColor(i, packed);
+    setGlyphPaletteRange(palette, lut, textOrLines, lineStarts) {
+        if (!palette || !lut || !this.slotBuffer) return;
+
+        // Build pre-packed uint32 colors for all palette indices
+        const lutCount = (lut.length / 3) | 0;
+        const packedLUT = new Uint32Array(lutCount);
+        for (let p = 0; p < lutCount; p++) {
+            const r = (lut[p * 3] * 255 + 0.5) | 0;
+            const g = (lut[p * 3 + 1] * 255 + 0.5) | 0;
+            const b = (lut[p * 3 + 2] * 255 + 0.5) | 0;
+            packedLUT[p] = (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16);
         }
+
+        const lines = Array.isArray(textOrLines)
+            ? textOrLines
+            : (typeof textOrLines === 'string' ? textOrLines.split('\n') : null);
+
+        if (lines && lineStarts && lineStarts.length >= lines.length) {
+            // Line-aware mapping: properly bridges UTF-8 byte ruler with RenderSlots
+            let byteOffset = 0;
+            const paletteLen = palette.length;
+            const lineCount = lines.length;
+
+            for (let lineIdx = 0; lineIdx < lineCount; lineIdx++) {
+                const line = lines[lineIdx];
+                const lineLen = line.length;
+                const slotBase = lineStarts[lineIdx];
+                let slotOffset = 0;
+
+                for (let i = 0; i < lineLen;) {
+                    const cp = line.codePointAt(i);
+                    i += cp > 0xFFFF ? 2 : 1;
+
+                    if (cp === 9) {
+                        // Tab: 1 byte in UTF-8, no slot in slotBuffer
+                        byteOffset++;
+                        continue;
+                    }
+                    if (cp === 13) {
+                        // CR: 1 byte in UTF-8, no slot in slotBuffer
+                        byteOffset++;
+                        continue;
+                    }
+
+                    // Codepoint byte length in UTF-8
+                    const byteLen = (cp <= 0x7F) ? 1 : (cp <= 0x7FF) ? 2 : (cp <= 0xFFFF) ? 3 : 4;
+
+                    if (byteOffset < paletteLen) {
+                        const palIdx = palette[byteOffset];
+                        const packed = packedLUT[palIdx] !== undefined ? packedLUT[palIdx] : packedLUT[0];
+                        this.slotBuffer.setColor(slotBase + slotOffset, packed);
+                    }
+
+                    slotOffset++;
+                    byteOffset += byteLen;
+                }
+
+                // Skip newline byte between lines
+                if (byteOffset < paletteLen) {
+                    if (palette[byteOffset] === 0x0D && byteOffset + 1 < paletteLen && palette[byteOffset + 1] === 0x0A) {
+                        byteOffset += 2;
+                    } else {
+                        byteOffset++;
+                    }
+                }
+            }
+        } else {
+            // Fallback sequential mapping
+            const base = this.sourceBase || 0;
+            const count = Math.min(this._cachedGlyphCount, palette.length - base);
+            if (count <= 0) return;
+            const start = base | 0;
+            for (let i = 0; i < count; i++) {
+                const palIdx = palette[start + i];
+                const packed = packedLUT[palIdx] !== undefined ? packedLUT[palIdx] : packedLUT[0];
+                this.slotBuffer.setColor(i, packed);
+            }
+        }
+
         if (this._interleavedBuffer) {
             this._interleavedBuffer.needsUpdate = true;
         }
