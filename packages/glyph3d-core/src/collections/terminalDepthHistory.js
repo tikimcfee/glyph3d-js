@@ -120,3 +120,226 @@ export function reflowHistoryRows(history, cols) {
 export function depthFade(h, depthMax, fadeMin) {
     return depthMax > 1 ? 1 - (h / (depthMax - 1)) * (1 - fadeMin) : 1;
 }
+
+/**
+ * Pre-compute world-space XYZ positions for live terminal cells and depth-history slots.
+ * Live cells are placed row-major starting at origin (x increases rightward, y decreases downward).
+ * Depth-history slots are page-quantized, stepping back in −Z and optionally rising in +Y.
+ *
+ * @param {Float32Array} positions
+ * @param {number} cols
+ * @param {number} rows
+ * @param {number} depthMax
+ * @param {{charWidth:number,charHeight:number,letterSpacing:number,lineSpacing:number}} metrics
+ * @param {number} depthYStep
+ * @param {number} depthZStep
+ */
+export function computeTerminalPositions(positions, cols, rows, depthMax, metrics, depthYStep, depthZStep) {
+    const strideX = metrics.charWidth + metrics.letterSpacing;
+    const strideY = metrics.lineSpacing;
+
+    for (let row = 0; row < rows; row++) {
+        const y = -row * strideY;
+        for (let col = 0; col < cols; col++) {
+            const idx = (row * cols + col) * 3;
+            positions[idx]     = col * strideX;
+            positions[idx + 1] = y;
+            positions[idx + 2] = 0;
+        }
+    }
+
+    const base0 = cols * rows;
+    const R = rows;
+    const pageRise  = depthYStep;
+    const pageDepth = depthZStep;
+    for (let h = 0; h < depthMax; h++) {
+        const p = Math.floor(h / R);
+        const i = h % R;
+        const rowFromTop = (R - 1) - i;
+        const y = (p + 1) * pageRise - rowFromTop * strideY;
+        const z = -(p + 1) * pageDepth;
+        for (let col = 0; col < cols; col++) {
+            const idx = (base0 + h * cols + col) * 3;
+            positions[idx]     = col * strideX;
+            positions[idx + 1] = y;
+            positions[idx + 2] = z;
+        }
+    }
+}
+
+/**
+ * Fill sizes array with uniform charWidth x charHeight.
+ *
+ * @param {Float32Array} sizes
+ * @param {number} totalCount
+ * @param {number} charWidth
+ * @param {number} charHeight
+ */
+export function computeTerminalSizes(sizes, totalCount, charWidth, charHeight) {
+    for (let i = 0; i < totalCount; i++) {
+        sizes[i * 2]     = charWidth;
+        sizes[i * 2 + 1] = charHeight;
+    }
+}
+
+/**
+ * Calculate the bounding extent for terminal glyphs in local space.
+ *
+ * @param {number} cols
+ * @param {number} rows
+ * @param {number} depthMax
+ * @param {{charWidth:number,charHeight:number,letterSpacing:number,lineSpacing:number}} metrics
+ * @param {number} depthYStep
+ * @param {number} depthZStep
+ * @returns {{min:{x:number,y:number,z:number}, max:{x:number,y:number,z:number}}}
+ */
+export function computeTerminalGlyphExtent(cols, rows, depthMax, metrics, depthYStep, depthZStep) {
+    const strideX = metrics.charWidth + metrics.letterSpacing;
+    const strideY = metrics.lineSpacing;
+    const pages = depthMax > 0 ? Math.ceil(depthMax / rows) : 0;
+    return {
+        min: {
+            x: 0,
+            y: -(rows - 1) * strideY,
+            z: -pages * depthZStep,
+        },
+        max: {
+            x: (cols - 1) * strideX + metrics.charWidth,
+            y: pages * depthYStep + metrics.charHeight,
+            z: 0,
+        },
+    };
+}
+
+/**
+ * Snapshot the live screen region of canonical typed arrays into an array of immutable row objects.
+ *
+ * @param {Float32Array} codepoints
+ * @param {Float32Array} cellR
+ * @param {Float32Array} cellG
+ * @param {Float32Array} cellB
+ * @param {number} cols
+ * @param {number} rows
+ * @returns {Array<{cp:Float32Array, r:Float32Array, g:Float32Array, b:Float32Array}>}
+ */
+export function snapshotLiveRegion(codepoints, cellR, cellG, cellB, cols, rows) {
+    const snap = new Array(rows);
+    for (let y = 0; y < rows; y++) {
+        const base = y * cols;
+        const rcp = new Float32Array(cols);
+        const rr = new Float32Array(cols);
+        const rg = new Float32Array(cols);
+        const rb = new Float32Array(cols);
+        for (let x = 0; x < cols; x++) {
+            rcp[x] = codepoints[base + x];
+            rr[x]  = cellR[base + x];
+            rg[x]  = cellG[base + x];
+            rb[x]  = cellB[base + x];
+        }
+        snap[y] = { cp: rcp, r: rr, g: rg, b: rb };
+    }
+    return snap;
+}
+
+/**
+ * Write the depth-history ring into the history region of canonical typed arrays.
+ *
+ * @param {Object} options
+ * @param {Float32Array} options.codepoints
+ * @param {Float32Array} options.cellR
+ * @param {Float32Array} options.cellG
+ * @param {Float32Array} options.cellB
+ * @param {Array<{cp:Float32Array, r:Float32Array, g:Float32Array, b:Float32Array}>} options.history
+ * @param {number} options.cols
+ * @param {number} options.rows
+ * @param {number} options.depthMax
+ * @param {number} options.depthFadeMin
+ * @param {boolean} options.depthEnabled
+ * @param {boolean} options.altActive
+ */
+export function paintHistoryRegion({
+    codepoints, cellR, cellG, cellB,
+    history, cols, rows, depthMax, depthFadeMin, depthEnabled, altActive
+}) {
+    if (depthMax === 0) return;
+    const base0 = cols * rows;
+    const n = history ? history.length : 0;
+    const hide = !depthEnabled || altActive;
+    const pageCount = Math.max(1, Math.ceil(depthMax / rows));
+
+    for (let h = 0; h < depthMax; h++) {
+        const base = base0 + h * cols;
+        if (hide || h >= n) {
+            for (let x = 0; x < cols; x++) {
+                const i = base + x;
+                codepoints[i] = 32; cellR[i] = 0; cellG[i] = 0; cellB[i] = 0;
+            }
+            continue;
+        }
+        const row = history[h];
+        const fade = depthFade(Math.floor(h / rows), pageCount, depthFadeMin);
+        for (let x = 0; x < cols; x++) {
+            const i = base + x;
+            codepoints[i] = row.cp[x];
+            cellR[i] = row.r[x] * fade;
+            cellG[i] = row.g[x] * fade;
+            cellB[i] = row.b[x] * fade;
+        }
+    }
+}
+
+/**
+ * Synchronize canonical typed arrays directly into InstancedSlotBuffer and highlight buffer.
+ *
+ * @param {Object} options
+ * @param {number} options.count
+ * @param {number} options.liveCount
+ * @param {import('./InstancedSlotBuffer.js').InstancedSlotBuffer} options.slotBuffer
+ * @param {Uint8ClampedArray|null} options.highlightBuffer
+ * @param {Float32Array} options.codepoints
+ * @param {Float32Array} options.cellR
+ * @param {Float32Array} options.cellG
+ * @param {Float32Array} options.cellB
+ * @param {Float32Array} options.cellBgR
+ * @param {Float32Array} options.cellBgG
+ * @param {Float32Array} options.cellBgB
+ * @param {Float32Array} options.cellBgA
+ * @param {(cp:number)=>number} options.glyphIdLookup
+ * @param {(a:number)=>number} options.encodeHighlightAlpha
+ * @returns {boolean} true if buffers were synced, false if buffer capacity too small
+ */
+export function syncTerminalBuffers({
+    count, liveCount, slotBuffer, highlightBuffer,
+    codepoints, cellR, cellG, cellB,
+    cellBgR, cellBgG, cellBgB, cellBgA,
+    glyphIdLookup, encodeHighlightAlpha
+}) {
+    if (!slotBuffer || slotBuffer.capacity < count) return false;
+    const u32 = slotBuffer.uint32;
+    const hl  = highlightBuffer;
+
+    for (let i = 0; i < count; i++) {
+        const b = i * 8;
+        const gid = glyphIdLookup ? glyphIdLookup(codepoints[i]) : codepoints[i];
+        u32[b + 3] = gid >>> 0;
+
+        const cr = (cellR[i] * 255 + 0.5) | 0;
+        const cg = (cellG[i] * 255 + 0.5) | 0;
+        const cb = (cellB[i] * 255 + 0.5) | 0;
+        u32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16) | 0xff000000;
+
+        if (hl) {
+            const h = i * 4;
+            if (i < liveCount && cellBgA && cellBgA[i] > 0) {
+                hl[h]     = (cellBgR[i] * 255 + 0.5) | 0;
+                hl[h + 1] = (cellBgG[i] * 255 + 0.5) | 0;
+                hl[h + 2] = (cellBgB[i] * 255 + 0.5) | 0;
+                hl[h + 3] = encodeHighlightAlpha ? encodeHighlightAlpha(cellBgA[i]) : 255;
+            } else {
+                hl[h] = 0; hl[h + 1] = 0; hl[h + 2] = 0; hl[h + 3] = 0;
+            }
+        }
+    }
+    return true;
+}
+

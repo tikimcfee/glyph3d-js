@@ -23,12 +23,25 @@ export {
 
 export {
     computeBackgroundLayout,
+    computeCellGridLayout,
     createBackgroundMesh,
     fitBackground,
 } from './GridBackground.js';
+
 
 export {
     applyRangeHighlight,
     clearLineHighlight,
     clearAllHighlights,
 } from './GridHighlight.js';
+
+export {
+    TERMINAL_CONTROL_SPEC,
+    GridChrome,
+} from './GridChrome.js';
+
+export {
+    DEFAULT_CURSOR_RENDER_ORDER,
+    GridBlockCursor,
+} from './GridBlockCursor.js';
+

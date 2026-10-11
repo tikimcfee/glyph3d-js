@@ -44,6 +44,28 @@ export function computeBackgroundLayout(bounds, padding, frameRows, lineHeight, 
 }
 
 /**
+ * Compute background layout for a fixed cell grid (cols x rows) with metrics.
+ *
+ * @param {number} cols
+ * @param {number} rows
+ * @param {{charWidth:number,charHeight:number,letterSpacing:number,lineSpacing:number}} metrics
+ * @param {number} [padding=0.3]
+ * @param {number} [bgGap]
+ * @returns {{width:number, height:number, cx:number, cy:number, strideX:number, strideY:number, z:number}}
+ */
+export function computeCellGridLayout(cols, rows, metrics, padding = 0.3, bgGap) {
+    const strideX = metrics.charWidth + metrics.letterSpacing;
+    const strideY = metrics.lineSpacing;
+    const width = cols * strideX + padding * 2;
+    const height = rows * strideY + padding * 2;
+    const cx = (cols * strideX) / 2 - metrics.charWidth / 2;
+    const cy = -(rows * strideY) / 2 + strideY / 2;
+    const gap = bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND);
+    return { width, height, cx, cy, strideX, strideY, z: -gap };
+}
+
+
+/**
  * Create a background plane mesh backed by panelMaterial.
  * @param {Object} config
  * @param {number|string} [config.backgroundColor]

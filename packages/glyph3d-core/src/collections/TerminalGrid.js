@@ -24,14 +24,28 @@
 import * as THREE from 'three';
 import InstancedField from './InstancedField.js';
 import TerminalEmulator from './TerminalEmulator.js';
-import { detectVerticalScroll, captureScrolledRows, depthFade, reflowHistoryRows } from './terminalDepthHistory.js';
+import {
+    detectVerticalScroll,
+    captureScrolledRows,
+    reflowHistoryRows,
+    computeTerminalPositions,
+    computeTerminalSizes,
+    computeTerminalGlyphExtent,
+    snapshotLiveRegion,
+    paintHistoryRegion,
+    syncTerminalBuffers,
+} from './terminalDepthHistory.js';
+import {
+    computeCellGridLayout,
+    GridChrome,
+    TERMINAL_CONTROL_SPEC,
+    GridBlockCursor,
+} from './grid/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import FramedGlyphField from './FramedGlyphField.js';
-import Button3D from '../components/Button3D.js';
 import { createPanelMaterial } from './panelMaterial.js';
-import { createCursorMaterial } from './cursorMaterial.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
@@ -61,6 +75,8 @@ const PASTE_START = '\x1b[200~';
 const PASTE_END   = '\x1b[201~';
 
 export default class TerminalGrid extends FramedGlyphField {
+    static CONTROL_SPEC = TERMINAL_CONTROL_SPEC;
+
     /**
      * @param {THREE.Scene} scene
      * @param {import('../GlyphAtlas.js').default} atlas
@@ -229,19 +245,11 @@ export default class TerminalGrid extends FramedGlyphField {
         // as one coherent sheet (text + bg together), not opaque text over glass.
         this._applyGlyphAlpha();
 
-        // Window chrome: a bottom-edge row of controls — the drag grips (green RESIZES
-        // cols/rows → PTY, red SCALES the Object3D zoom) PLUS click buttons (pin, and the
-        // size/scale ± dials). All are visible affordances AND 'handle' pick targets on
-        // one channel, distinguished by token.role. Generalized into a single control
-        // list (CONTROL_SPEC) and DEPTH-TESTED so they occlude like the panel.
-        this._controls = [];       // [{ spec, mesh }] — see CONTROL_SPEC
+        // Window chrome: a bottom-edge row of controls
+        this._chrome = null;
         this._initControls();
 
-        // Cursor block — marks the live cell where typing lands (xterm's cursorX/cursorY, surfaced
-        // by the emulator into the screen buffer). Drawn SOLID (translucent block, glyph reads
-        // through) when this terminal holds the keyboard, HOLLOW (outline) otherwise — so every
-        // terminal shows its prompt spot and the focused one reads as "type here". Style is born
-        // configurable (see TERMINAL_CURSOR_DEFAULTS); focus state rides setCursorFocused.
+        // Cursor block — marks the live cell where typing lands
         this._cursorColor       = options.cursorColor       ?? TERMINAL_CURSOR_DEFAULTS.color;
         this._cursorFillOpacity = options.cursorFillOpacity ?? TERMINAL_CURSOR_DEFAULTS.fillOpacity;
         this._cursorBorderWidth = options.cursorBorderWidth ?? TERMINAL_CURSOR_DEFAULTS.borderWidth;
@@ -249,9 +257,9 @@ export default class TerminalGrid extends FramedGlyphField {
         this._cursorVisible  = true;            // emulator-driven draw gate (always on for now)
         this._cursorFocused  = false;           // keyboard-target → solid; else hollow
         this._cursorCaptured = false;           // greedy capture settled → solid + ring (wins over focused)
-        this._cursorMesh     = null;
-        this._cursorCtl      = null;
+        this._cursorBlock    = null;
         this._initCursorMesh();
+
 
         // Add the renderer's mesh as a child so transforms propagate.
         this.add(this._renderer.instanceMesh);
@@ -392,68 +400,36 @@ export default class TerminalGrid extends FramedGlyphField {
      * @private
      */
     _snapshotLive() {
-        const cols = this.cols;
-        const rows = this.rows;
-        const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
-        const snap = new Array(rows);
-        for (let y = 0; y < rows; y++) {
-            const base = y * cols;
-            const rcp = new Float32Array(cols);
-            const rr = new Float32Array(cols);
-            const rg = new Float32Array(cols);
-            const rb = new Float32Array(cols);
-            for (let x = 0; x < cols; x++) {
-                rcp[x] = cp[base + x];
-                rr[x] = cr[base + x];
-                rg[x] = cg[base + x];
-                rb[x] = cb[base + x];
-            }
-            snap[y] = { cp: rcp, r: rr, g: rg, b: rb };
-        }
-        this._prevRows = snap;
+        this._prevRows = snapshotLiveRegion(
+            this._codepoints,
+            this._cellR,
+            this._cellG,
+            this._cellB,
+            this.cols,
+            this.rows
+        );
     }
 
     /**
      * Write the depth-history ring into the history region of the canonical arrays
      * ([_cellCount, _totalCount)). History slot h holds ring entry h (newest at 0),
-     * dimmed by depth toward _depthFadeMin. Empty slots — and the whole block while
-     * disabled or showing an alt-screen TUI — are blanked (spaces draw nothing).
-     * Slot POSITIONS are static (see _computePositions); only content moves here.
+     * dimmed by depth toward _depthFadeMin.
      * @private
      */
     _paintHistory() {
-        if (this._depthMax === 0) return;
-        const cols = this.cols;
-        const base0 = this._cellCount;
-        const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
-        const hist = this._history;
-        const n = hist.length;
-        const dmax = this._depthMax;
-        const fmin = this._depthFadeMin;
-        const hide = !this._depthEnabled || this._altActive;
-        // Fade by PAGE (not per line) so each page is uniformly lit + readable, with
-        // older pages dimmer — matches the page-quantized layout.
-        const pageCount = Math.max(1, Math.ceil(dmax / this.rows));
-
-        for (let h = 0; h < dmax; h++) {
-            const base = base0 + h * cols;
-            if (hide || h >= n) {
-                for (let x = 0; x < cols; x++) {
-                    const i = base + x;
-                    cp[i] = 32; cr[i] = 0; cg[i] = 0; cb[i] = 0;
-                }
-                continue;
-            }
-            const row = hist[h];
-            const fade = depthFade(Math.floor(h / this.rows), pageCount, fmin);
-            for (let x = 0; x < cols; x++) {
-                const i = base + x;
-                cp[i] = row.cp[x];
-                cr[i] = row.r[x] * fade;
-                cg[i] = row.g[x] * fade;
-                cb[i] = row.b[x] * fade;
-            }
-        }
+        paintHistoryRegion({
+            codepoints: this._codepoints,
+            cellR: this._cellR,
+            cellG: this._cellG,
+            cellB: this._cellB,
+            history: this._history,
+            cols: this.cols,
+            rows: this.rows,
+            depthMax: this._depthMax,
+            depthFadeMin: this._depthFadeMin,
+            depthEnabled: this._depthEnabled,
+            altActive: this._altActive,
+        });
     }
 
     /**
@@ -742,6 +718,14 @@ export default class TerminalGrid extends FramedGlyphField {
     // Cursor block — "where typing lands"
     // ================================================================
 
+    get _cursorMesh() {
+        return this._cursorBlock?.mesh;
+    }
+
+    get _cursorCtl() {
+        return this._cursorBlock?.ctl;
+    }
+
     /**
      * Mark this terminal as the keyboard target (solid block) or not (hollow outline). Driven by
      * the shell's attention loop: the input-active terminal goes solid, the rest stay hollow. Cheap
@@ -765,8 +749,15 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /** Pick the cursor look from the focus/capture flags: captured ▸ solid ▸ hollow. @private */
     _applyCursorState() {
-        const state = this._cursorCaptured ? 'captured' : this._cursorFocused ? 'solid' : 'hollow';
-        this._cursorCtl?.setState(state);
+        if (this._cursorCaptured) {
+            this._cursorBlock?.setCaptured(true);
+        } else if (this._cursorFocused) {
+            this._cursorBlock?.setCaptured(false);
+            this._cursorBlock?.setFocused(true);
+        } else {
+            this._cursorBlock?.setCaptured(false);
+            this._cursorBlock?.setFocused(false);
+        }
     }
 
     /** Show/hide the cursor block without forgetting its cell (e.g. a future DECTCEM hide). */
@@ -784,51 +775,36 @@ export default class TerminalGrid extends FramedGlyphField {
         if (color != null) this._cursorColor = color;
         if (fillOpacity != null) this._cursorFillOpacity = fillOpacity;
         if (borderWidth != null) this._cursorBorderWidth = borderWidth;
-        this._cursorCtl?.setStyle({ color, fillOpacity, borderWidth });
+        this._cursorBlock?.setStyle({ color, fillOpacity, borderWidth });
     }
 
     /**
-     * Lazy-build the cursor block: a unit plane scaled per cell, its material flipping between a
-     * translucent solid (focused) and a hollow outline (unfocused). A child of this Object3D, so it
-     * rides the terminal's world position/scale exactly like the glyph cells. @private
+     * Lazy-build the cursor block via GridBlockCursor.
+     * @private
      */
     _initCursorMesh() {
-        if (this._cursorMesh) return;
-        this._cursorCtl = createCursorMaterial({
+        if (this._cursorBlock) return;
+        this._cursorBlock = new GridBlockCursor({
+            parent: this,
+            metrics: this._metrics,
             color: this._cursorColor,
             fillOpacity: this._cursorFillOpacity,
             borderWidth: this._cursorBorderWidth,
+            renderOrder: CURSOR_RENDER_ORDER,
         });
         this._applyCursorState();
-        this._cursorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._cursorCtl.material);
-        this._cursorMesh.renderOrder = CURSOR_RENDER_ORDER;
-        this._cursorMesh.frustumCulled = false;   // grid-local; the parent culls
-        this.add(this._cursorMesh);
         this._updateCursorMesh();
     }
 
     /**
-     * Park the cursor block on its live cell. Same cell math as _computePositions (glyph anchor =
-     * col*strideX, −row*strideY) shifted to the cell CENTER and sized to the full advance cell, so
-     * the block tiles the cell like a real terminal cursor. Hidden when the terminal is hidden or the
-     * cursor falls outside the live screen. @private
+     * Park the cursor block on its live cell.
+     * @private
      */
     _updateCursorMesh() {
-        if (!this._cursorMesh) return;
-        const { x, y } = this._cursor;
-        if (!this._visible || !this._cursorVisible || x < 0 || x >= this.cols || y < 0 || y >= this.rows) {
-            this._cursorMesh.visible = false;
-            return;
-        }
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-        this._cursorMesh.scale.set(strideX, strideY, 1);
-        // Cell left edge sits at col*strideX (the glyph anchor); +½ stride centers the block. y is
-        // the glyph's vertical center (rows step by strideY). +0.05 z keeps it just in front of the
-        // glyph so it never z-fights — same offset as CodeGrid's caret.
-        this._cursorMesh.position.set(x * strideX + strideX / 2, -y * strideY, 0.05);
-        this._cursorMesh.visible = true;
+        if (!this._cursorBlock) return;
+        this._cursorBlock.setGridVisible(this._visible);
+        this._cursorBlock.setCursorVisible(this._cursorVisible);
+        this._cursorBlock.update(this._cursor.x, this._cursor.y, this.cols, this.rows, this._metrics);
     }
 
     /**
@@ -854,18 +830,11 @@ export default class TerminalGrid extends FramedGlyphField {
      */
     getLocalBounds() {
         if (!this._localBounds || this._localBoundsDirty) {
-            const m = this._metrics;
-            const strideX = m.charWidth + m.letterSpacing;
-            const strideY = m.lineSpacing;
-            const pad = this._bgPadding;
-            const width  = this.cols * strideX + pad * 2;
-            const height = this.rows * strideY + pad * 2;
-            const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
-            const cy = -(this.rows * strideY) / 2 + strideY / 2;
+            const layout = computeCellGridLayout(this.cols, this.rows, this._metrics, this._bgPadding);
             // Small Z thickness so an edge-on ray still intersects the flat panel.
             this._localBounds = new THREE.Box3(
-                new THREE.Vector3(cx - width / 2, cy - height / 2, -1),
-                new THREE.Vector3(cx + width / 2, cy + height / 2, 1),
+                new THREE.Vector3(layout.cx - layout.width / 2, layout.cy - layout.height / 2, -1),
+                new THREE.Vector3(layout.cx + layout.width / 2, layout.cy + layout.height / 2, 1),
             );
             this._localBoundsDirty = false;
         }
@@ -1018,24 +987,22 @@ export default class TerminalGrid extends FramedGlyphField {
         if (this._pickingSystem) {
             if (this._renderer)   this._pickingSystem.unregister('glyph', this._renderer);
             if (this._background) this._pickingSystem.unregister('grid', this._background);
-            for (const c of this._controls) this._pickingSystem.unregister('handle', c.button);
+            this._chrome?.unregisterPicking(this._pickingSystem);
         }
         if (this._renderer) {
             this._renderer.instanceMesh.geometry.dispose();
             this._renderer.instanceMesh.material.dispose();
             this._renderer = null;
         }
-        if (this._cursorMesh) {
-            this._cursorMesh.geometry.dispose();
-            this._cursorMesh.material.dispose();
-            this.remove(this._cursorMesh);
-            this._cursorMesh = null;
-            this._cursorCtl = null;
+        if (this._cursorBlock) {
+            this._cursorBlock.dispose();
+            this._cursorBlock = null;
         }
-        this._disposePanel();   // free + detach the background panel (FramedGlyphField) — now also
-                                // removes it from this Object3D, which TG's inline teardown skipped
-        for (const c of this._controls) c.button.dispose();
-        this._controls = [];
+        this._disposePanel();   // free + detach the background panel (FramedGlyphField)
+        if (this._chrome) {
+            this._chrome.dispose();
+            this._chrome = null;
+        }
         this.scene.remove(this);
     }
 
@@ -1051,43 +1018,15 @@ export default class TerminalGrid extends FramedGlyphField {
      * @private
      */
     _computePositions() {
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-
-        for (let row = 0; row < this.rows; row++) {
-            const y = -row * strideY;
-            for (let col = 0; col < this.cols; col++) {
-                const idx = (row * this.cols + col) * 3;
-                this._positions[idx]     = col * strideX;
-                this._positions[idx + 1] = y;
-                this._positions[idx + 2] = 0;
-            }
-        }
-
-        // Depth-history slots, PAGE-QUANTIZED: history is grouped into pages of `rows`
-        // lines. Each page is a flat screenful at the live screen's Y, stepped straight
-        // back by one page-depth in −Z (page 0 = newest screenful, just behind the live
-        // screen; higher p = older, further back). Within a page the newest line sits
-        // at the bottom row (mirroring how it looked live). Slot positions are fixed;
-        // history CONTENT shifts through slots, so they only change on resize / reshape.
-        const base0 = this._cellCount;
-        const R = this.rows;
-        const pageRise  = this._depthYStep;   // +Y per page (0 → flat straight-back deck)
-        const pageDepth = this._depthZStep;   // −Z per page
-        for (let h = 0; h < this._depthMax; h++) {
-            const p = Math.floor(h / R);          // page index (0 = newest screenful)
-            const i = h % R;                      // line within page (0 = newest line)
-            const rowFromTop = (R - 1) - i;       // newest line → bottom row of the page
-            const y = (p + 1) * pageRise - rowFromTop * strideY;
-            const z = -(p + 1) * pageDepth;
-            for (let col = 0; col < this.cols; col++) {
-                const idx = (base0 + h * this.cols + col) * 3;
-                this._positions[idx]     = col * strideX;
-                this._positions[idx + 1] = y;
-                this._positions[idx + 2] = z;
-            }
-        }
+        computeTerminalPositions(
+            this._positions,
+            this.cols,
+            this.rows,
+            this._depthMax,
+            this._metrics,
+            this._depthYStep,
+            this._depthZStep
+        );
     }
 
     /**
@@ -1096,12 +1035,7 @@ export default class TerminalGrid extends FramedGlyphField {
      * @private
      */
     _computeSizes() {
-        const w = this._metrics.charWidth;
-        const h = this._metrics.charHeight;
-        for (let i = 0; i < this._totalCount; i++) {
-            this._sizes[i * 2]     = w;
-            this._sizes[i * 2 + 1] = h;
-        }
+        computeTerminalSizes(this._sizes, this._totalCount, this._metrics.charWidth, this._metrics.charHeight);
     }
 
     /**
@@ -1133,97 +1067,52 @@ export default class TerminalGrid extends FramedGlyphField {
      * terminal-tab × (terminal.kill) and arms the red 'close-confirm' "Sure?" popup.
      * @private
      */
-    static CONTROL_SPEC = [
-        { role: 'resize',        label: 'Resize', color: 0x6ee7a0, grab: true  },                    // green grip: drag → cols/rows
-        { role: 'scale',         label: 'Scale',  color: 0xf2787a, grab: true  },                    // red grip:   drag → zoom
-        { role: 'capture',       label: 'Lock',   color: 0xff7a18, grab: false },                    // orange:     click → settle/unsettle keyboard capture
-        { role: 'pin',           label: 'Pin',    color: 0xf2c14e, grab: false },                    // amber:      click → maximize toggle
-        { role: 'drop',          label: 'Drop',   color: 0x8ab4f8, grab: false },                    // blue:       click → set down camera-front (window.drop)
-        { role: 'close',         label: 'Close',  color: 0x8a93a0, grab: false },                    // slate:      click → arm the confirm
-        { role: 'close-confirm', label: 'Sure?',  color: 0xe5534b, grab: false, popupOf: 'close' },  // alarm red:  click → terminal.kill
-    ];
+    get _controls() {
+        return this._chrome ? this._chrome.controls : [];
+    }
 
     /**
-     * Build the chrome control row from CONTROL_SPEC: one labeled Button3D per control, sized
-     * to ~1.5 cells tall (width derives from the label). The buttons own their hover/active
-     * visuals and are DEPTH-TESTED (RENDER_ORDER.GRID_CHROME) so a closer window occludes them
-     * rather than floating on top. `popupOf` controls start hidden. Children of this Object3D,
-     * so they ride gridScale + world position; placed by _layoutControls(). @private
+     * Build the chrome control row from CONTROL_SPEC.
+     * @private
      */
     _initControls() {
-        const m = this._metrics;
-        const h = m.lineSpacing * 1.5;
-        this._controls = TerminalGrid.CONTROL_SPEC.map((spec) => {
-            const button = new Button3D({
-                label: spec.label, height: h, color: spec.color, grab: spec.grab,
-                opacity: spec.grab ? 0.66 : 0.6, role: spec.role,
-            });
-            if (spec.popupOf) button.visible = false; // a confirm popup — hidden (and inert) until armed
-            this.add(button);
-            return { spec, button };
-        });
+        if (this._chrome) return;
+        this._chrome = new GridChrome(this, this._metrics, TerminalGrid.CONTROL_SPEC);
         this._layoutControls();
     }
 
     /**
-     * Place the control row along the bottom edge, packing the pills right→left from the SE
-     * corner (each by its own width + a gap). A `popupOf` control is placed ABOVE its anchor
-     * instead of in the row. Same extent math as getBounds(); called on construction and after
-     * every resize. @private
+     * Place the control row along the bottom edge, packing pills right→left from the SE corner.
+     * @private
      */
     _layoutControls() {
-        if (!this._controls?.length) return;
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-        const pad = this._bgPadding;
-        const width  = this.cols * strideX + pad * 2;
-        const height = this.rows * strideY + pad * 2;
-        const cx = (this.cols * strideX) / 2 - m.charWidth / 2;
-        const cy = -(this.rows * strideY) / 2 + strideY / 2;
-        const edgeY = cy - height / 2;
-        const gap = strideX * 0.5;
-        const placed = new Map(); // role → { x, h } so popups can sit above their anchor
-        let xRight = cx + width / 2;     // right edge of the next pill (rightmost sits on the SE corner)
-        for (const c of this._controls) {
-            if (c.spec.popupOf) continue; // placed below, relative to its anchor
-            const w = c.button.width;
-            const x = xRight - w / 2;
-            c.button.position.set(x, edgeY, 0.5);
-            placed.set(c.spec.role, { x, h: c.button.height });
-            xRight -= (w + gap);
-        }
-        for (const c of this._controls) {
-            if (!c.spec.popupOf) continue;
-            const anchor = placed.get(c.spec.popupOf);
-            if (anchor) c.button.position.set(anchor.x, edgeY + anchor.h + gap, 0.5);
-        }
+        this._chrome?.layout(this.cols, this.rows, this._bgPadding);
     }
 
     /**
-     * Register every chrome control on the 'handle' pick channel. The token carries the
-     * `button` so the central press router can call its onClick + drive setHovered. Idempotent
-     * re-register after a resize re-keys the moved meshes' id-blocks. @private
+     * Register chrome controls on the 'handle' pick channel.
+     * @private
      */
     _registerControls() {
-        if (!this._pickingSystem) return;
-        for (const c of this._controls) {
-            this._pickingSystem.register('handle', c.button, { grid: this, edge: 'se', role: c.spec.role, button: c.button });
-        }
+        this._chrome?.registerPicking(this._pickingSystem, this);
     }
 
-    /** Reflect a control's sticky "engaged" visual (e.g. the Pin button while the window is
-     *  pinned). Looked up by role; a no-op if the control isn't present. */
+    /**
+     * Reflect a control's sticky "engaged" visual.
+     * @param {string} role
+     * @param {boolean} on
+     */
     setControlActive(role, on) {
-        const c = this._controls?.find((x) => x.spec.role === role);
-        c?.button.setActive(!!on);
+        this._chrome?.setActive(role, on);
     }
 
-    /** Show/hide a control (e.g. the 'close-confirm' popup). A hidden button isn't pick-rendered,
-     *  so it's inert until shown. Looked up by role; a no-op if the control isn't present. */
+    /**
+     * Show/hide a control.
+     * @param {string} role
+     * @param {boolean} on
+     */
     setControlVisible(role, on) {
-        const c = this._controls?.find((x) => x.spec.role === role);
-        if (c) c.button.visible = !!on;
+        this._chrome?.setVisible(role, on);
     }
 
     // ================================================================
@@ -1275,34 +1164,19 @@ export default class TerminalGrid extends FramedGlyphField {
      * @returns {{min:{x,y,z}, max:{x,y,z}}}
      */
     _glyphExtent() {
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-        const pages = this._depthMax > 0 ? Math.ceil(this._depthMax / this.rows) : 0;
-        return {
-            min: {
-                x: 0,
-                y: -(this.rows - 1) * strideY,
-                z: -pages * this._depthZStep,
-            },
-            max: {
-                x: (this.cols - 1) * strideX + m.charWidth,
-                y: pages * this._depthYStep + m.charHeight,
-                z: 0,
-            },
-        };
+        return computeTerminalGlyphExtent(
+            this.cols,
+            this.rows,
+            this._depthMax,
+            this._metrics,
+            this._depthYStep,
+            this._depthZStep
+        );
     }
 
     /**
-     * Per-frame GPU sync: write codepoints and colors from the canonical parallel
-     * arrays directly into the geometry's InstancedBufferAttribute backing arrays,
-     * then flag needsUpdate once each.
-     *
-     * Positions and sizes are unchanged between frames — no needsUpdate on them.
-     *
-     * Falls back to _applyToRenderer() if the attribute arrays have not been
-     * initialized yet (should not happen in normal use).
-     *
+     * Per-frame GPU sync: write codepoints and colors from canonical parallel arrays
+     * into slotBuffer and highlightBuffer.
      * @private
      */
     _writeToInstanceBuffer() {
@@ -1315,30 +1189,27 @@ export default class TerminalGrid extends FramedGlyphField {
             return;
         }
 
-        const u32 = sb.uint32;
-        const hl  = this._renderer.highlightBuffer(count);
-        const bgR = this._cellBgR, bgG = this._cellBgG, bgB = this._cellBgB, bgA = this._cellBgA;
+        const hl = this._renderer.highlightBuffer(count);
+        const synced = syncTerminalBuffers({
+            count,
+            liveCount: live,
+            slotBuffer: sb,
+            highlightBuffer: hl,
+            codepoints: this._codepoints,
+            cellR: this._cellR,
+            cellG: this._cellG,
+            cellB: this._cellB,
+            cellBgR: this._cellBgR,
+            cellBgG: this._cellBgG,
+            cellBgB: this._cellBgB,
+            cellBgA: this._cellBgA,
+            glyphIdLookup: (code) => this._glyphId(code),
+            encodeHighlightAlpha: InstancedField.encodeHighlightAlpha,
+        });
 
-        for (let i = 0; i < count; i++) {
-            const b = i * 8;
-            u32[b + 3] = this._glyphId(this._codepoints[i]) >>> 0;
-
-            const cr = (this._cellR[i] * 255 + 0.5) | 0;
-            const cg = (this._cellG[i] * 255 + 0.5) | 0;
-            const cb = (this._cellB[i] * 255 + 0.5) | 0;
-            u32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16) | 0xff000000;
-
-            if (hl) {
-                const h = i * 4;
-                if (i < live && bgA[i] > 0) {
-                    hl[h]     = (bgR[i] * 255 + 0.5) | 0;
-                    hl[h + 1] = (bgG[i] * 255 + 0.5) | 0;
-                    hl[h + 2] = (bgB[i] * 255 + 0.5) | 0;
-                    hl[h + 3] = InstancedField.encodeHighlightAlpha(bgA[i]);   // >0 → FILL
-                } else {
-                    hl[h] = 0; hl[h + 1] = 0; hl[h + 2] = 0; hl[h + 3] = 0;   // no fill
-                }
-            }
+        if (!synced) {
+            this._applyToRenderer();
+            return;
         }
 
         if (this._renderer._interleavedBuffer) {
@@ -1523,21 +1394,9 @@ export default class TerminalGrid extends FramedGlyphField {
      */
     _updateBackground() {
         if (!this._background) return;
-
-        const m = this._metrics;
-        const strideX = m.charWidth + m.letterSpacing;
-        const strideY = m.lineSpacing;
-        const pad = this._bgPadding;
-
-        const width  = this.cols * strideX + pad * 2;
-        const height = this.rows * strideY + pad * 2;
-
-        this._background.scale.set(width, height, 1);
         this._bgGap ??= getBandDistance(LAYER_BAND.GRID_BACKGROUND);
-        this._background.position.set(
-            (this.cols * strideX) / 2 - m.charWidth / 2,
-            -(this.rows * strideY) / 2 + strideY / 2,
-            -this._bgGap  // just behind text — the live band distance (was hard-coded -0.1)
-        );
+        const layout = computeCellGridLayout(this.cols, this.rows, this._metrics, this._bgPadding, this._bgGap);
+        this._background.scale.set(layout.width, layout.height, 1);
+        this._background.position.set(layout.cx, layout.cy, layout.z);
     }
 }

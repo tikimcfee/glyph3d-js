@@ -14,7 +14,9 @@ import {
     clampScroll,
     computeFrameClip,
     computeBackgroundLayout,
+    computeCellGridLayout,
 } from '../packages/glyph3d-core/src/collections/grid/index.js';
+
 
 console.log('Testing Grid Helpers...');
 
@@ -144,6 +146,17 @@ console.log('Testing Grid Helpers...');
     assert.strictEqual(bg.position.x, 0);
     assert.strictEqual(bg.position.y, -10);
     assert.strictEqual(bg.position.z, -1.1);
+
+    const cellLayout = computeCellGridLayout(80, 24, { charWidth: 10, charHeight: 20, letterSpacing: 2, lineSpacing: 25 }, 0.5, 0.2);
+    assert.ok(cellLayout);
+    assert.strictEqual(cellLayout.strideX, 12);
+    assert.strictEqual(cellLayout.strideY, 25);
+    assert.strictEqual(cellLayout.width, 80 * 12 + 1.0);
+    assert.strictEqual(cellLayout.height, 24 * 25 + 1.0);
+    assert.strictEqual(cellLayout.cx, (80 * 12) / 2 - 5);
+    assert.strictEqual(cellLayout.cy, -(24 * 25) / 2 + 12.5);
+    assert.strictEqual(cellLayout.z, -0.2);
 }
 
 console.log('grid-helpers.test: all checks passed');
+
