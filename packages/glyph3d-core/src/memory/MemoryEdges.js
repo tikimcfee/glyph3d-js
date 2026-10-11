@@ -108,6 +108,7 @@ export class MemoryEdges {
         this.grid.remove(this._cones);
         this._shaftGeo.dispose();
         this._shaftMat.dispose();
+        this._cones.dispose();
         this._cones.geometry.dispose();
         this._coneMat.dispose();
     }
