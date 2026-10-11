@@ -27,7 +27,7 @@
  *   agent.activity dev claude bash "npm test" "" "5 passing"
  */
 
-import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { canonicalPath } from './pathResolve.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
 import { agentIdForEntry,
          createKimiWireState, kimiWireLineToEvents }
@@ -109,15 +109,16 @@ const fmtAge = (ms) => {
 const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + 'M' : b >= 1024 ? Math.round(b / 1024) + 'K' : b + 'B');
 
 /** Canonicalize a record's target against the live registry (an open file's registry id
- *  is its canonical path), then sink the record into the books. The shared sink for the
- *  manual `agent.activity` verb and the raw `agent.tool`/`agent.message` ingress.
+ *  is its canonical path — an exact lookup, so `/a/b.js` never lands on an open `b.jsx`),
+ *  then sink the record into the books. The shared sink for the manual `agent.activity`
+ *  verb and the raw `agent.tool`/`agent.message` ingress.
  * @param {AppContext} ctx
  */
 function emitActivity(ctx, books, id, type, { action, target, detail, result, meta }) {
     let label = target || null;
     if (target) {
-        const r = resolveGridByIdOrIndex(ctx, target, 'grid', { byName: true });
-        if (!r.error) label = r.registryId || target;
+        const key = canonicalPath(ctx, target);
+        if (ctx.registry?.has?.(key)) label = key;
     }
     books.activity(id, type, { action, target: label, detail, result, meta });
     return label;

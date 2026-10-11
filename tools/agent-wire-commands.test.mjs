@@ -8,6 +8,9 @@
 //     rebakes the nameplate
 //   - agent.kimi-wire <id> <b64line>: raw wire lines → shared dialect → tool/message
 //     sheets (debounced batch), provenance (model/title/cwd) forwarded to the lane
+//   - agent.activity target attribution: EXACT canonical-path lookup against the
+//     registry — '/a/b.js' never lands on an open '/a/b.jsx'; an open file's target
+//     becomes its registry id; a non-path target passes through untouched
 //
 // Headless: the 2d-canvas stub stands in for the DOM; AgentBooks runs scene-only.
 
@@ -84,6 +87,18 @@ const ctx = { agentBooks: books, sessionProvider: null };
         `nameplate shows live provenance (got "${lane.label.text}")`);
     const bad = handlers['agent.kimi-wire']([id, '!!!notb64!!!'], ctx);
     ok(bad.text.startsWith('OK') && bad.text.includes('dropped'), 'malformed wire line drops quietly');
+}
+
+// ── agent.activity: target attribution is an exact lookup ──
+{
+    const open = new Set(['/a/b.jsx', '/proj/src/x.js']);
+    const actx = { ...ctx, registry: { has: (id) => open.has(id) },
+                   fileProvider: { rootInfo: { root: '/proj', home: '/home/u' } } };
+    const tgt = (t) => handlers['agent.activity'](['act1', 'claude', 'Read', t], actx).data.target;
+    ok(tgt('/a/b.js') === '/a/b.js', `'/a/b.js' does not attribute to open '/a/b.jsx' (got "${tgt('/a/b.js')}")`);
+    ok(tgt('src/x.js') === '/proj/src/x.js', `a relative target canonicalizes to the open file's id (got "${tgt('src/x.js')}")`);
+    ok(tgt('npm test') === 'npm test', 'a non-path target passes through');
+    ok(tgt('0') === '0', 'a numeric target is not a grid index');
 }
 
 console.log(`\nagent-wire-commands: ${pass} passed, ${fail} failed`);
