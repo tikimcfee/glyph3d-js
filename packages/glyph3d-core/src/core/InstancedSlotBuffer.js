@@ -1,23 +1,27 @@
 /**
  * InstancedSlotBuffer — 32-byte RenderSlot binary buffer for WebGL2 instanced rendering.
  *
- * Directly mirrors glyph3d-rs/crates/glyph-field-instanced/src/slot.rs.
+ * Mirrors the field order of glyph3d-rs/crates/glyph-field-instanced/src/slot.rs.
  * Total Stride: 32 Bytes (8 x 4-byte lanes)
  *
  * Offset (Bytes)  Type      Field       Description
  * 0..11           vec3<f32> pos         World-space pen origin (left edge, cell-vertical center)
- * 12..15          u32       glyph_id    FontChain global glyph slot (keys glyphmap texture)
- * 16..19          u32       color       Packed RGBA8 (sRGB display color, little-endian)
- * 20..23          u32       group_id    Index into group table (pose/clipping/alpha)
+ * 12..15          f32       glyph_id    FontChain global glyph slot (keys glyphmap texture)
+ * 16..19          f32       color       Packed RGB888 value (sRGB display color, r in the low byte)
+ * 20..23          f32       group_id    Index into group table (pose/clipping/alpha)
  * 24..27          f32       advance     Cell advance / width in world units
  * 28..31          f32       height      Cell height in world units
+ *
+ * Every lane is a float attribute to WebGL2 (`in float aGlyphId`), so glyph_id, color
+ * and group_id hold integer VALUES in f32 lanes, exact up to 2^24 — not u32 bit patterns
+ * as in slot.rs. Alpha lives in the group table, not the slot. Write lanes through the
+ * setters below; there is no integer view.
  */
 
 import * as THREE from 'three';
 
 export const SLOT_BYTES = 32;
 export const SLOT_FLOATS = 8;
-export const SLOT_U32S = 8;
 
 export const LANE_POS_X = 0;
 export const LANE_POS_Y = 1;
@@ -65,8 +69,8 @@ export function unpackRgba8(packed) {
 }
 
 /**
- * InstancedSlotBuffer manages an ArrayBuffer of 32-byte RenderSlot records with
- * high-performance zero-copy Float32Array and Uint32Array views.
+ * InstancedSlotBuffer manages an ArrayBuffer of 32-byte RenderSlot records through
+ * one zero-copy Float32Array view.
  */
 export class InstancedSlotBuffer {
     /**
@@ -77,8 +81,6 @@ export class InstancedSlotBuffer {
         this._count = 0;
         this.buffer = new ArrayBuffer(this._capacity * SLOT_BYTES);
         this.f32 = new Float32Array(this.buffer);
-        this.u32 = new Uint32Array(this.buffer);
-        this.u8 = new Uint8Array(this.buffer);
     }
 
     /** Number of active slots */
@@ -88,11 +90,6 @@ export class InstancedSlotBuffer {
 
     set count(val) {
         this._count = val;
-    }
-
-    /** Uint32Array view alias */
-    get uint32() {
-        return this.u32;
     }
 
     /** Float32Array view alias */
@@ -126,8 +123,6 @@ export class InstancedSlotBuffer {
         new Uint8Array(newBuffer).set(new Uint8Array(this.buffer, 0, this._count * SLOT_BYTES));
         this.buffer = newBuffer;
         this.f32 = new Float32Array(this.buffer);
-        this.u32 = new Uint32Array(this.buffer);
-        this.u8 = new Uint8Array(this.buffer);
         this._capacity = newCap;
     }
 
@@ -217,6 +212,15 @@ export class InstancedSlotBuffer {
      */
     setColor(index, packedColor) {
         this.f32[index * SLOT_FLOATS + LANE_COLOR] = (packedColor & 0xFFFFFF);
+    }
+
+    /**
+     * Update the glyph id of a slot.
+     * @param {number} index
+     * @param {number} glyphId
+     */
+    setGlyphId(index, glyphId) {
+        this.f32[index * SLOT_FLOATS + LANE_GLYPH_ID] = glyphId;
     }
 
     /**

@@ -290,6 +290,7 @@ export function paintHistoryRegion({
 
 /**
  * Synchronize canonical typed arrays directly into InstancedSlotBuffer and highlight buffer.
+ * Glyph ids and colors go through the slot buffer's lane setters (float-valued lanes).
  *
  * @param {Object} options
  * @param {number} options.count
@@ -315,18 +316,15 @@ export function syncTerminalBuffers({
     glyphIdLookup, encodeHighlightAlpha
 }) {
     if (!slotBuffer || slotBuffer.capacity < count) return false;
-    const u32 = slotBuffer.uint32;
     const hl  = highlightBuffer;
 
     for (let i = 0; i < count; i++) {
-        const b = i * 8;
-        const gid = glyphIdLookup ? glyphIdLookup(codepoints[i]) : codepoints[i];
-        u32[b + 3] = gid >>> 0;
+        slotBuffer.setGlyphId(i, glyphIdLookup ? glyphIdLookup(codepoints[i]) : codepoints[i]);
 
         const cr = (cellR[i] * 255 + 0.5) | 0;
         const cg = (cellG[i] * 255 + 0.5) | 0;
         const cb = (cellB[i] * 255 + 0.5) | 0;
-        u32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16) | 0xff000000;
+        slotBuffer.setColor(i, (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16));
 
         if (hl) {
             const h = i * 4;

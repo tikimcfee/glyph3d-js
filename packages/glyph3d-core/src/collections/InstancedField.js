@@ -756,24 +756,22 @@ export default class InstancedField {
         const itemMeta = buffers.itemMeta;
 
         this.slotBuffer.ensureCapacity(count);
-        const f32 = this.slotBuffer.float32;
-        const u32 = this.slotBuffer.uint32;
 
         for (let i = 0; i < count; i++) {
-            const b = i * 8;
-            f32[b + 0] = positions ? positions[i * 3 + 0] : 0;
-            f32[b + 1] = positions ? positions[i * 3 + 1] : 0;
-            f32[b + 2] = positions ? positions[i * 3 + 2] : 0;
-            const gid = glyphIds ? glyphIds[i] : 0;
-            f32[b + 3] = gid;
             const cr = colors ? (colors[i * 3 + 0] * 255 + 0.5) | 0 : 255;
             const cg = colors ? (colors[i * 3 + 1] * 255 + 0.5) | 0 : 255;
             const cb = colors ? (colors[i * 3 + 2] * 255 + 0.5) | 0 : 255;
-            f32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16);
-            const grp = groupIds ? groupIds[i] : 0;
-            f32[b + 5] = grp;
-            f32[b + 6] = sizes ? sizes[i * 2 + 0] : 1.0;
-            f32[b + 7] = sizes ? sizes[i * 2 + 1] : 1.0;
+            this.slotBuffer.setSlot(
+                i,
+                positions ? positions[i * 3 + 0] : 0,
+                positions ? positions[i * 3 + 1] : 0,
+                positions ? positions[i * 3 + 2] : 0,
+                glyphIds ? glyphIds[i] : 0,
+                (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16),
+                groupIds ? groupIds[i] : 0,
+                sizes ? sizes[i * 2 + 0] : 1.0,
+                sizes ? sizes[i * 2 + 1] : 1.0,
+            );
         }
 
         this.setSlots(this.slotBuffer, count);
