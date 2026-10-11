@@ -232,7 +232,7 @@ export default function registerGridCommands(router) {
         if (resolved.error) return { text: resolved.error, data: null };
 
         const name = resolved.grid.getFilename?.() || resolved.registryId || '(unnamed)';
-        const removedEntry = ctx.removeGrid(resolved.registryId || resolved.idx);
+        const removedEntry = ctx.removeGrid(resolved.registryId);
         if (!removedEntry) return { text: 'ERR: removal failed', data: null };
 
         return {

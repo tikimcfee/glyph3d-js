@@ -23,21 +23,6 @@ export const WORLD_FLOOR_Y = 0;
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Validate a grid index from a raw string argument.
- * @param {Array} grids - array of CodeGrid instances
- * @param {string} arg - raw string index from command args
- * @param {string} [label='grid'] - label for error messages (e.g. 'source', 'target')
- * @returns {{ grid: Object, idx: number } | { error: string }}
- */
-export function resolveGrid(grids, arg, label = 'grid') {
-    const idx = parseInt(arg);
-    if (isNaN(idx) || idx < 0 || idx >= grids.length) {
-        return { error: `ERR: invalid ${label} index ${arg} (0-${grids.length - 1})` };
-    }
-    return { grid: grids[idx], idx };
-}
-
-/**
  * Resolve a grid by registry ID or array index.
  *
  * Integer-first rule: if arg is a pure digit string (/^\d+$/), treat as

@@ -89,19 +89,9 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 
     // `relayout:false` defers the tree re-pack for BULK removals (file.closeDir):
     // the caller batches one relayout at the end instead of N full packings.
-    removeGrid(idOrIndex, { relayout = true } = {}) {
-      let entry, regId;
-      if (typeof idOrIndex === 'number' || /^\d+$/.test(idOrIndex)) {
-        const idx = typeof idOrIndex === 'number' ? idOrIndex : parseInt(idOrIndex);
-        const grids = registry.toArray('grid');
-        if (idx < 0 || idx >= grids.length) return null;
-        regId = registry.getIdByGrid(grids[idx]);
-        if (!regId) return null;
-        entry = registry.unregister(regId);
-      } else {
-        regId = idOrIndex;
-        entry = registry.unregister(idOrIndex);
-      }
+    // Takes a registry id — index/name forms resolve upstream (resolveGridByIdOrIndex).
+    removeGrid(regId, { relayout = true } = {}) {
+      const entry = registry.unregister(regId);
       if (!entry) return null;
 
       // A content-tree leaf (registry id == its path) detaches THROUGH the tree and
