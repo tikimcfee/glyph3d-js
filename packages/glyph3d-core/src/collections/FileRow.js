@@ -117,7 +117,9 @@ export default class FileRow extends BoundedObject3D {
                 wrapWidth: lp.wrapWidth || 0,
                 zWrapSpacing: lp.zWrapSpacing || 0,
                 color: this.config.textColor,
+                tabWidth: lp.tabWidth,
                 targetBuffer: this._renderer.slotBuffer,
+                targetSizes: this._layout?.sizes,
                 append: hasHeader,
                 previousBounds: bounds,
             });
@@ -129,6 +131,7 @@ export default class FileRow extends BoundedObject3D {
                 lineSlotBase: res.lineStarts,
                 lineStartRow: res.lineStartRows,
                 lineLengths: res.lineLengths,
+                sizes: res.sizes,
                 wrapWidth: lp.wrapWidth || 0,
                 originX: 0,
                 originY: this._layoutOriginY,

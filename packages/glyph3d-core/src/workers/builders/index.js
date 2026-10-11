@@ -32,6 +32,7 @@
  *  pageGapY      line-height gap between page rows (vertical).
  *  pageDepth     z-gap between page planes when axis:'z', as a multiple of lineSpacing.
  *  axis          'xy' = newspaper (pages fan in X, default); 'z' = z-pages (pages stack in depth, later behind earlier).
+ *  tabWidth      tab stop in display cells, counted from the logical line's start (core/LayoutGenerator).
  *
  * `0` means "off/unbounded" for wrapWidth/pageHeight so the struct stays
  * structured-clone-safe across the worker boundary (no `Infinity`).
@@ -45,6 +46,7 @@ export const DEFAULT_LAYOUT = {
     pageGapY: 10,
     pageDepth: 20,
     axis: 'xy',
+    tabWidth: 4,
 };
 
 /**
@@ -92,6 +94,7 @@ export function resolveLayoutParams(layout) {
         pageGapY:     layout.pageGapY     ?? DEFAULT_LAYOUT.pageGapY,
         pageDepth:    layout.pageDepth    ?? DEFAULT_LAYOUT.pageDepth,
         axis:         layout.axis         ?? DEFAULT_LAYOUT.axis,
+        tabWidth:     layout.tabWidth     ?? DEFAULT_LAYOUT.tabWidth,
     };
 }
 

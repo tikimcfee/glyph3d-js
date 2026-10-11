@@ -1169,9 +1169,11 @@ class CodeGrid extends FramedGlyphField {
                 pageGapY: lp.pageGapY,
                 pageDepth: lp.pageDepth,
                 axis: lp.axis,
+                tabWidth: lp.tabWidth,
                 color: this.config.textColor,
                 scrollOffset: this._scrollOffset || 0,
                 targetBuffer: this._renderer.slotBuffer,
+                targetSizes: this._layout?.sizes,
             });
 
             this._renderer.setSlots(result.buffer, result.glyphCount);
@@ -1188,7 +1190,7 @@ class CodeGrid extends FramedGlyphField {
                 lineSlotBase: result.lineStarts,
                 lineStartRow: result.lineStartRows,
                 lineLengths: result.lineLengths,
-                sizes: null,
+                sizes: result.sizes,
                 wrapWidth: wrapWidth,
                 page: result.page,
                 originX: 0,

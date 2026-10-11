@@ -20,7 +20,7 @@ import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
-import { LAYOUT_PRESETS, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
+import { LAYOUT_PRESETS, DEFAULT_LAYOUT, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
 /** @import { AppContext } from './CommandProvider.jsx' */
 
@@ -392,6 +392,13 @@ export const SETTINGS = [
     key: 'grid.defaultLayout', label: 'Default fold (new grids)', group: 'Code grids',
     type: 'enum', options: Object.keys(LAYOUT_PRESETS), default: 'long-column',
     apply: (_ctx, v) => setDefaultLayout(LAYOUT_PRESETS[v]),
+  },
+  // Tab stops — a tab advances to the next multiple of N display cells from the start of
+  // its line (the glyph3d-rs rule); its column stays one. Live: refolds every code grid.
+  {
+    key: 'grid.tabWidth', label: 'Tab width (cells)', group: 'Code grids',
+    type: 'number', default: DEFAULT_LAYOUT.tabWidth, min: 1, max: 16, step: 1,
+    apply: (ctx, v) => tabWidthAll(ctx, v),
   },
   {
     key: 'grid.analyzeDebounceMs', label: 'Syntax re-color pause (ms, 0 = every fold)', group: 'Code grids',
@@ -826,6 +833,21 @@ export const SETTINGS = [
  * Push a background restyle to every live grid/terminal of `type`.
  * @param {AppContext} ctx
  */
+/**
+ * Set the tab stop for new grids and refold every live code grid to it, then re-flow
+ * the tree once (a wider tab stop widens the grid).
+ * @param {AppContext} ctx
+ * @param {number} cells
+ */
+function tabWidthAll(ctx, cells) {
+  setDefaultLayout({ tabWidth: cells });
+  const refolds = [];
+  for (const e of ctx?.registry?.findByType?.('grid') ?? []) {
+    if (!e.role && typeof e.grid?.getLayout === 'function') refolds.push(e.grid.setLayout({ tabWidth: cells }));
+  }
+  if (refolds.length) Promise.all(refolds).then(() => ctx.contentTree?.relayoutAndRest());
+}
+
 function themeAll(ctx, type, style) {
   for (const e of ctx?.registry?.findByType?.(type) ?? []) e.grid?.setBackgroundStyle?.(style);
 }

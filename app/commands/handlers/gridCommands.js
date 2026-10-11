@@ -404,12 +404,13 @@ export default function registerGridCommands(router) {
         '--wrap': 'wrapWidth', '--page-height': 'pageHeight', '--pages-wide': 'pagesWide',
         '--z-spacing': 'zWrapSpacing', '--gap-x': 'pageGapX', '--gap-y': 'pageGapY',
         '--page-depth': 'pageDepth', '--axis': 'axis',  // axis z = pages stack in depth (Step 3b)
+        '--tab-width': 'tabWidth',                        // tab stop, display cells (1..64)
     };
-    const COUNT_FLAGS = new Set(['wrapWidth', 'pageHeight', 'pagesWide']);  // integer counts → floored
+    const COUNT_FLAGS = new Set(['wrapWidth', 'pageHeight', 'pagesWide', 'tabWidth']);  // integer counts → floored
     router.register('grid.layout', async (args, ctx) => {
         const presetNames = Object.keys(LAYOUT_PRESETS).join('|');
         if (args.length < 1) {
-            return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y --page-depth D --axis xy|z]`, data: null };
+            return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y --page-depth D --axis xy|z --tab-width T]`, data: null };
         }
         const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
@@ -448,6 +449,9 @@ export default function registerGridCommands(router) {
             // never Infinity (keeps it clean + structured-clone-safe). Counts floor to ints.
             if (!Number.isFinite(n) || n < 0) return { text: `ERR: ${args[i]} must be a finite number ≥ 0`, data: null };
             patch[key] = COUNT_FLAGS.has(key) ? Math.floor(n) : n;
+            if (key === 'tabWidth' && !(patch.tabWidth >= 1 && patch.tabWidth <= 64)) {
+                return { text: 'ERR: --tab-width must be 1..64 cells', data: null };
+            }
         }
 
         await resolved.grid.setLayout(patch);

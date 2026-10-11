@@ -589,7 +589,7 @@ export default class InstancedField {
             : (typeof textOrLines === 'string' ? textOrLines.split('\n') : null);
 
         if (lines && lineStarts && lineStarts.length >= lines.length) {
-            // Line-aware mapping: properly bridges UTF-8 byte ruler with RenderSlots
+            // Line-aware mapping: UTF-8 byte ruler → RenderSlots, one slot per codepoint
             let byteOffset = 0;
             const paletteLen = palette.length;
             const lineCount = lines.length;
@@ -603,17 +603,6 @@ export default class InstancedField {
                 for (let i = 0; i < lineLen;) {
                     const cp = line.codePointAt(i);
                     i += cp > 0xFFFF ? 2 : 1;
-
-                    if (cp === 9) {
-                        // Tab: 1 byte in UTF-8, no slot in slotBuffer
-                        byteOffset++;
-                        continue;
-                    }
-                    if (cp === 13) {
-                        // CR: 1 byte in UTF-8, no slot in slotBuffer
-                        byteOffset++;
-                        continue;
-                    }
 
                     // Codepoint byte length in UTF-8
                     const byteLen = (cp <= 0x7F) ? 1 : (cp <= 0x7FF) ? 2 : (cp <= 0xFFFF) ? 3 : 4;

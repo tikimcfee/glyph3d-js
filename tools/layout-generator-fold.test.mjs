@@ -10,7 +10,10 @@
 //     and the drawn glyphs' bounds sit inside the description's extent. The
 //     widest row sits past the first page break, so a column stride taken from the RUNNING
 //     widest row (not the final one) lands slots off the fold;
-//   - a wrapped line widens the fold by its widest segment, not its length.
+//   - a wrapped line widens the fold by its widest segment, not its length;
+//   - tab stops (the glyph3d-rs rule): one slot and one COLUMN per tab, advancing to the next
+//     multiple of tabWidth display cells from the LOGICAL line's start (a wrap does not
+//     restart the count); syntax colors stay on their glyphs past a tab.
 
 import * as THREE from 'three';
 import CodeGrid from '../packages/glyph3d-core/src/collections/CodeGrid.js';
@@ -24,10 +27,13 @@ const near = (a, b) => Math.abs(a - b) < 1e-3;
 const atlas = { getCharSize: () => ({ width: 28, height: 55 }), _slugData: null, _shaper: null };
 const scene = new THREE.Scene();
 
-// Tab-free (tabs own no slot — see the caret note in the CF report), rows of varied width
-// so the widest row sits deep in the file, past the first page break.
+// Rows of varied width (the widest deep in the file, past the first page break), every
+// fifth one tab-indented with a mid-line tab — so slots after a tab land on the fold too.
 const lines = [];
-for (let i = 0; i < 700; i++) lines.push(`row ${i} ` + 'x'.repeat(i % 37) + (i === 520 ? 'W'.repeat(90) : ''));
+for (let i = 0; i < 700; i++) {
+    const body = `row ${i} ` + 'x'.repeat(i % 37) + (i === 520 ? 'W'.repeat(90) : '');
+    lines.push(i % 5 === 0 ? `\t\t${body}\tend` : body);
+}
 const text = lines.join('\n');
 
 const finite = (b) => [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z].every(Number.isFinite);
@@ -81,6 +87,45 @@ for (const [name, preset] of Object.entries(LAYOUT_PRESETS)) {
     const w = grid._layout.maxRowExtent / grid.metrics.charWidth;
     ok(near(w, 50), `wrapped line: widest row = 50 cols (got ${w.toFixed(1)})`);
     grid.dispose?.();
+}
+
+// Tab stops.
+{
+    const cellsAt = async (text, layout) => {
+        const grid = new CodeGrid(scene, atlas, { showFilename: false });
+        await grid.loadText(text);
+        await grid.setLayout({ pageHeight: 0, ...layout });
+        const cw = grid.metrics.charWidth, f = grid._renderer.slotBuffer.f32;
+        const xs = [];
+        for (let s = 0; s < grid._renderer.slotBuffer.count; s++) xs.push(+(f[s * SLOT_FLOATS + LANE_POS_X] / cw).toFixed(3));
+        return { xs, d: grid._layout, grid };
+    };
+    let r = await cellsAt('a\tb', { tabWidth: 4, wrapWidth: 0 });
+    ok(r.xs.length === 3 && r.xs[2] === 4, `'a\\tb' w4: tab owns a slot, b at cell 4 (got ${r.xs})`);
+    r = await cellsAt('abcd\tX', { tabWidth: 4, wrapWidth: 0 });
+    ok(r.xs[5] === 8, `a tab ON a stop spans a whole stop (X at 8, got ${r.xs[5]})`);
+    r = await cellsAt('\t\tX', { tabWidth: 4, wrapWidth: 0 });
+    ok(r.xs[2] === 8 && r.d.lineSlotCount(0) === 3, `two tabs: X at 8, 3 slots (got ${r.xs[2]}, ${r.d.lineSlotCount(0)})`);
+    r = await cellsAt('a\tb', { tabWidth: 1, wrapWidth: 0 });
+    ok(r.xs[2] === 2, `tabWidth 1: a tab is one cell (b at 2, got ${r.xs[2]})`);
+    // wrap 4: 'abcd' | 'e' '\t' 'X' — 5 cells before the tab, k = 4 − 5 % 4 = 3, so X sits at
+    // segment x 1 + 3 = 4 cells; the tab is ONE column (X is the segment's third slot).
+    r = await cellsAt('abcde\tX', { tabWidth: 4, wrapWidth: 4 });
+    ok(r.xs[6] === 4 && r.d.lineStartRow.length === 1 && r.d.totalRows === 2,
+        `the stop counts from the LOGICAL line across a wrap (X at 4 on row 2, got ${r.xs[6]}, rows ${r.d.totalRows})`);
+    const p = r.d.positionAt(0, 6);
+    ok(near(p.x / r.grid.metrics.charWidth, 4), `positionAt past a tab reads the real advance (got ${(p.x / r.grid.metrics.charWidth).toFixed(3)})`);
+
+    // Syntax colors: palette bytes 'a' '\t' 'b' → indices 1, 2, 3; each lands on its own slot.
+    const { paletteLUT } = await import('../packages/glyph3d-core/src/parsing/syntaxPaletteJob.js');
+    r = await cellsAt('a\tb', { tabWidth: 4, wrapWidth: 0 });
+    const lut = paletteLUT();
+    r.grid._renderer.setGlyphPaletteRange(new Uint8Array([1, 2, 3]), lut, ['a\tb'], r.d.lineSlotBase);
+    const ref = await cellsAt('xyz', { wrapWidth: 0 });
+    ref.grid._renderer.setGlyphPaletteRange(new Uint8Array([1, 2, 3]), lut, ['xyz'], ref.d.lineSlotBase);
+    const col = (g, i) => g._renderer.slotBuffer.getSlot(i).color;
+    ok([0, 1, 2].every((i) => col(r.grid, i) === col(ref.grid, i)) && col(r.grid, 0) !== col(r.grid, 2),
+        `palette colors stay on their glyphs past a tab (${[0, 1, 2].map((i) => col(r.grid, i).toString(16))})`);
 }
 
 console.log(`\n${fail ? '✗' : '✓'} layout-generator-fold: ${pass} passed, ${fail} failed`);

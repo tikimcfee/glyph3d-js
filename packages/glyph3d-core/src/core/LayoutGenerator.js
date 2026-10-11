@@ -5,21 +5,21 @@
  * using MonospaceShapeCache / FontChain. Rows place in flow; the page fold is
  * foldGeometry's pageFold/pageShift — the same one LayoutDescription answers caret,
  * pick, and extent queries with — applied once the widest row is known.
+ *
+ * ONE SLOT PER CODEPOINT — tab and CR included — so a slot's offset in its line IS the
+ * column, and caret, highlight, and syntax color address one space with no mapping.
+ *
+ * TAB STOPS (the glyph3d-rs rule, fold::TabWidth): a tab advances to the next multiple of
+ * `tabWidth` DISPLAY CELLS counted from the start of its LOGICAL line — a double-width
+ * glyph counts two, a zero-width one none, and a wrap segment or page does not restart
+ * the count. A tab on a stop spans a whole stop. Its COLUMN is still one: wrap, rows and
+ * pages count slots, never cells. It draws as the space glyph (no curves, so nothing
+ * shows unless a fill highlight spans it).
  */
 
 import { InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_POS_X, LANE_POS_Y, LANE_POS_Z, LANE_ADVANCE } from './InstancedSlotBuffer.js';
 import { pageFold, pageShift } from './foldGeometry.js';
-
-export const DEFAULT_LAYOUT_CONFIG = {
-    wrapWidth: 200,
-    zWrapSpacing: 0.15,
-    pageHeight: 0,
-    pagesWide: 1,
-    pageGapX: 10,
-    pageGapY: 10,
-    pageDepth: 20,
-    axis: 'xy',
-};
+import { DEFAULT_LAYOUT } from '../workers/builders/index.js';
 
 /**
  * Generate a 32-byte InstancedSlotBuffer from text.
@@ -41,7 +41,9 @@ export const DEFAULT_LAYOUT_CONFIG = {
  * @param {number} [options.groupId=0] - Group index for group table TRS
  * @param {Array<{start:number, end:number, color:number}>} [options.spans] - Optional syntax color spans
  * @param {InstancedSlotBuffer} [options.targetBuffer] - Optional reusable buffer
- * @returns {{ buffer: InstancedSlotBuffer, glyphCount: number, lineStarts: Int32Array, lineLengths: Int32Array, lineStartRows: Int32Array, totalRows: number, maxRowExtent: number, maxSegs: number, page: ReturnType<typeof pageFold>, bounds: { min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number}, width:number, height:number, depth:number } }}
+ * @param {number} [options.tabWidth] - tab stop in display cells (default DEFAULT_LAYOUT.tabWidth)
+ * @param {Float32Array} [options.targetSizes] - reusable [advance, height] table
+ * @returns {{ buffer: InstancedSlotBuffer, sizes: Float32Array, glyphCount: number, lineStarts: Int32Array, lineLengths: Int32Array, lineStartRows: Int32Array, totalRows: number, maxRowExtent: number, maxSegs: number, page: ReturnType<typeof pageFold>, bounds: { min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number}, width:number, height:number, depth:number } }}
  */
 export function generateLayout(text, options = {}) {
     const lines = Array.isArray(text) ? text : (typeof text === 'string' ? text.split('\n') : []);
@@ -62,7 +64,7 @@ export function generateLayout(text, options = {}) {
     const wrapWidth = options.wrapWidth !== undefined ? Math.max(0, Math.trunc(options.wrapWidth)) : 200;
     const zStep = (options.zWrapSpacing !== undefined ? options.zWrapSpacing : 0.15) * charHeight;
 
-    const D = DEFAULT_LAYOUT_CONFIG;
+    const D = DEFAULT_LAYOUT;
     const fold = {
         pageHeight: Math.max(0, Math.trunc(options.pageHeight || 0)),
         pagesWide: options.pagesWide ?? D.pagesWide,
@@ -108,6 +110,26 @@ export function generateLayout(text, options = {}) {
     let maxRowExtent = 0;
     let maxSegs = 0;
 
+    // Per-slot [advance, height] — LayoutDescription's sizes, so positionAt sums the REAL
+    // advances (tabs, emoji). Slot-global like the buffer; reuses `targetSizes` when it fits.
+    const sizesNeeded = (startSlot + approxTotalGlyphs) * 2;
+    let sizes = options.targetSizes;
+    if (!sizes || sizes.length < sizesNeeded) {
+        const grown = new Float32Array(sizesNeeded);
+        if (sizes && isAppend) grown.set(sizes.subarray(0, Math.min(sizes.length, startSlot * 2)));
+        sizes = grown;
+    }
+
+    const tabWidth = Math.max(1, Math.trunc(options.tabWidth ?? D.tabWidth));
+    let spaceGid = null;
+    const spaceGlyphId = () => {
+        if (spaceGid === null) {
+            const s = shaper?.lookup ? shaper.lookup(32) : shaper?.shape ? shaper.shape(' ')?.[0] : null;
+            spaceGid = s ? s.g : 32;
+        }
+        return spaceGid;
+    };
+
     // Each slot's screen row, kept for the page fold (which needs the FINAL widest row).
     const slotRows = fold.pageHeight > 0 ? new Int32Array(approxTotalGlyphs) : null;
 
@@ -124,6 +146,7 @@ export function generateLayout(text, options = {}) {
         let lineAdv = 0.0;
         let segAdv = 0.0;
         let curSeg = 0;
+        let lineCells = 0;   // display cells from the logical line's start (the tab-stop count)
 
         for (let i = 0; i < lineLen; i++) {
             const cp = line.codePointAt(i);
@@ -132,27 +155,16 @@ export function generateLayout(text, options = {}) {
                 i++;
             }
 
-            // Tabs expand to next 4-space tabstop
-            if (cp === 9) {
-                const tabWidth = 4;
-                const spaces = tabWidth - (col % tabWidth);
-                col += spaces;
-                lineAdv += spaces * charWidth;
-                segAdv += spaces * charWidth;
-                charOffsetGlobal++;
-                continue;
-            }
-
-            // Carriage return skip
-            if (cp === 13) {
-                charOffsetGlobal++;
-                continue;
-            }
-
             // Resolve glyph and advance
             let glyphId = 0;
             let advance = charWidth;
-            if (shaper) {
+            if (cp === 9) {
+                // A tab: the space glyph, advancing to the next stop.
+                const k = tabWidth - (lineCells % tabWidth);
+                glyphId = spaceGlyphId();
+                advance = k * charWidth;
+                lineCells += k;
+            } else if (shaper) {
                 let shape = null;
                 if (typeof shaper.lookup === 'function') {
                     shape = shaper.lookup(cp);
@@ -171,13 +183,13 @@ export function generateLayout(text, options = {}) {
             } else {
                 glyphId = cp;
             }
+            if (cp !== 9) lineCells += Math.max(0, Math.round(advance / charWidth));
 
-            // Intra-line wrapping. Entering a new segment restarts its advance at the
-            // columns already past the break (nonzero only when a tab crossed it).
+            // Intra-line wrapping, by slot count: a new segment starts its advance at 0.
             const wrapSeg = wrapWidth > 0 ? Math.floor(col / wrapWidth) : 0;
             if (wrapSeg !== curSeg) {
                 curSeg = wrapSeg;
-                segAdv = (col % wrapWidth) * charWidth;
+                segAdv = 0;
             }
             if (wrapSeg > maxSegs) maxSegs = wrapSeg;
 
@@ -203,6 +215,8 @@ export function generateLayout(text, options = {}) {
             }
 
             // Write slot deterministically in line/col order
+            sizes[totalGlyphs * 2] = advance;
+            sizes[totalGlyphs * 2 + 1] = charHeight;
             slotBuffer.pushSlot(
                 posX,
                 posY,
@@ -289,6 +303,7 @@ export function generateLayout(text, options = {}) {
         maxRowExtent,
         maxSegs,
         page,
+        sizes,
         bounds,
     };
 }
