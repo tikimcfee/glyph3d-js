@@ -42,7 +42,7 @@ function parseSearchArgs(args) {
 const shortPath = (p, n = 52) => (p.length > n ? '…' + p.slice(-(n - 1)) : p);
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerSearchCommands(router) {
 

@@ -288,11 +288,19 @@ export function useAppCommands() {
 }
 
 /**
+ * The context bag every handler reads — its shape is buildClientContext's return.
+ * @typedef {ReturnType<typeof buildClientContext>} AppContext
+ */
+/**
+ * The app's command bus: a router over AppContext, so each handler's `ctx` is typed.
+ * @typedef {CommandRouter<AppContext>} AppRouter
+ */
+/**
  * The wired client `onReady` hands up — the one handle DOM chrome holds on the spine.
  * @typedef {Object} AppClient
- * @property {ReturnType<typeof buildClientContext>} ctx  the context bag every handler reads
- * @property {CommandRouter} router  the command bus — every action is router.execute(<verb>)
- * @property {AppClient['ctx']['registry']} registry
+ * @property {AppContext} ctx
+ * @property {AppRouter} router  the command bus — every action is router.execute(<verb>)
+ * @property {AppContext['registry']} registry
  * @property {WebSocketBridge|null} bridge  the relay socket; null until it connects
  * @property {SessionStore} [session]  saved-state store; set once the bridge is wired
  */

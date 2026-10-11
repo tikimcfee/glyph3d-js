@@ -74,7 +74,7 @@ const HEADLINE_KINDS = new Set([
 ]);
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerSemanticCommands(router) {
 

@@ -18,7 +18,7 @@ import { animateCamera, getWorldBounds, resolveGridByIdOrIndex } from './spatial
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerAnnotationCommands(router) {
 

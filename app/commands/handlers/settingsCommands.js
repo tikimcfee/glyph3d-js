@@ -11,7 +11,7 @@
 import { SETTINGS, settingDef, getSetting, setSetting, resetSettings, resetSetting } from '../../client/settings.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerSettingsCommands(router) {
     router.register('settings.set', (args, ctx) => {

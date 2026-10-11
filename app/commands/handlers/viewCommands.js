@@ -16,7 +16,7 @@ const resolve = (arg, cur) => {
 };
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerViewCommands(router) {
     router.register('view.minimap', (args, ctx) => {

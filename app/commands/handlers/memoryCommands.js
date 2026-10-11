@@ -14,7 +14,7 @@ import { decorateMemoryGrid } from '@glyph3d/core/memory/memoryGridView.js';
 import { buildMemoryLegend } from '@glyph3d/core/memory/memoryLegend.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerMemoryCommands(router) {
     // mem.view <path> [offset] [length] [cols]

@@ -11,7 +11,7 @@
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerVerifyCommands(router) {
     router.register('layout.verify', async (args, ctx) => {

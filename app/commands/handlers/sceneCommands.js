@@ -6,7 +6,7 @@
 import { box, kvLines } from '../formatResponse.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerSceneCommands(router) {
     router.register('scene.info', (args, ctx) => {

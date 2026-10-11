@@ -286,7 +286,7 @@ function autoShelf(ctx, map) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerCarrelCommands(router) {
     router.register('carrel.create', (args, ctx) => {

@@ -22,7 +22,7 @@ import { materializeActor } from './fileLoader.js';
 const VALID_SLOTS = ['hover', 'primary', 'key'];
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerAttentionCommands(router) {
 

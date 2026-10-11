@@ -16,7 +16,7 @@ import { setGlobalLogLevel, getAllLoggers } from '@glyph3d/core/utils/Logger.js'
 import { recentConsole } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerObservabilityCommands(router) {
     // ── error.* — the structured error buffer (ErrorTracker) ──

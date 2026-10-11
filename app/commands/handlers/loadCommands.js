@@ -20,7 +20,7 @@ import { box, kvLines, table } from '../formatResponse.js';
 import { formatTrace } from '../loadTrace.js';
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerLoadCommands(router) {
     router.register('load.stats', (args, ctx) => {

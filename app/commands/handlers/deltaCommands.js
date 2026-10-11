@@ -23,7 +23,7 @@ import { splitUnifiedDiff, alignTexts } from '@glyph3d/core/services/state/delta
 const noDeltas = { text: 'ERR: delta books not wired', data: null };
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerDeltaCommands(router) {
     router.register('delta.watch', (args, ctx) => {

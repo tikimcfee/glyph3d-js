@@ -19,19 +19,29 @@ import errorTracker from '../../utils/ErrorTracker.js';
 import metrics from '../../utils/Metrics.js';
 import { emitLogRecord } from './consoleForwarder.js';
 
+/**
+ * A command handler: `(args, ctx) => { text, data } | string`, sync or async.
+ * @template C
+ * @typedef {(args: string[], ctx: C) => any} CommandHandler
+ */
+
 // Per-dispatch correlation id, attached to ctx.cid so anything a handler logs can be
 // joined back to its dispatch record.
 let _cid = 0;
 
+/**
+ * @template [C=Object] the context bag's shape — inferred from `new CommandRouter(ctx)`,
+ *   so every registered handler's `ctx` is typed by its host app
+ */
 export default class CommandRouter {
     /**
-     * @param {Object} context - service registry bag with subsystem references
+     * @param {C} context - service registry bag with subsystem references
      */
     constructor(context) {
-        /** @type {Object} */
+        /** @type {C} */
         this.context = context;
 
-        /** @type {Map<string, {handler: Function, description: string, usage: string, returns: string}>} */
+        /** @type {Map<string, {handler: CommandHandler<C>, description: string, usage: string, returns: string}>} */
         this.commands = new Map();
 
         /** @type {Array<Function>} Middleware called before each command: (name, args, ctx) => void */
@@ -41,7 +51,7 @@ export default class CommandRouter {
     /**
      * Register a command handler.
      * @param {string} name - dot-separated name like "camera.move"
-     * @param {Function} handler - (args[], context) => { text: string, data: any } | string
+     * @param {CommandHandler<C>} handler
      * @param {Object} [meta]
      * @param {string} [meta.description] - one-line description
      * @param {string} [meta.usage] - usage pattern like "<x> <y> <z>"
@@ -53,7 +63,7 @@ export default class CommandRouter {
 
     /**
      * Register multiple commands from an array of definitions.
-     * @param {Array<{name: string, handler: Function, description: string, usage?: string, returns?: string}>} defs
+     * @param {Array<{name: string, handler: CommandHandler<C>, description: string, usage?: string, returns?: string}>} defs
      */
     registerAll(defs) {
         for (const def of defs) {
@@ -67,7 +77,7 @@ export default class CommandRouter {
 
     /**
      * Add middleware that runs before every command.
-     * @param {Function} fn - (name, args, context) => void
+     * @param {(name: string, args: string[], ctx: C) => void} fn
      */
     use(fn) {
         this._middleware.push(fn);

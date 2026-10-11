@@ -37,7 +37,7 @@ function pathFromURI(u) {
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).
  * Shared by lsp.definition (a query result) and lsp.goto (a known location).
  * @param {object} ctx
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  * @param {object} loc
  */
 async function jumpToLocation(ctx, router, loc) {
@@ -61,7 +61,7 @@ async function jumpToLocation(ctx, router, loc) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerLspCommands(router) {
     router.register('lsp.definition', async (args, ctx) => {

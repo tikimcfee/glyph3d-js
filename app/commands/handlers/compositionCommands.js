@@ -102,7 +102,7 @@ const STACK_DIRECTIONS = new Set(['horizontal', 'vertical', 'depth']);
 // ──────────────────────────────────────────────────────────────
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerCompositionCommands(router) {
 

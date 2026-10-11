@@ -40,7 +40,7 @@ export function resolveSurface(ctx, arg) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerDockCommands(router) {
     router.register('dock.lock', (args, ctx) => {

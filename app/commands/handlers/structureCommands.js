@@ -37,7 +37,7 @@ function resolveGrid(ctx, gridArg) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerStructureCommands(router) {
     router.register('structure.grid', async (args, ctx) => {

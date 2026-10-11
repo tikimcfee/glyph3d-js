@@ -86,7 +86,7 @@ function openedSummary(grid) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerFileCommands(router) {
     // file.open <path> [x y z]

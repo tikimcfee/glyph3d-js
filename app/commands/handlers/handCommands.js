@@ -50,7 +50,7 @@ function describe(state, rendered) {
 }
 
 /**
- * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerHandCommands(router) {
     router.register('hand.list', (_args, ctx) => {
