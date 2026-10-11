@@ -1,8 +1,8 @@
-// @glyph3d/r3f — react-three-fiber bindings for the WebGPU glyph rendering stack.
+// @glyph3d/r3f — react-three-fiber bindings for the glyph3d rendering stack.
 //
 // Composable primitives, not a monolithic wrapper:
 //   useGlyphEngine / bootGlyphEngine  — boot atlas + shaper + slug (renderer-free)
-//   <GlyphCanvas atlas>               — r3f Canvas wired for WebGPURenderer
+//   <GlyphCanvas atlas>               — r3f Canvas wired for WebGL2 / WebGPU
 //   <CodeGrid text filename .../>     — a file rendered as a 3D body
 //   <ViewerCamera />                  — fly camera (pan/look/dolly/WASD) on the active camera
 //   <SceneEnvironment />              — ground grid + gradient skydome (orientation landmarks)

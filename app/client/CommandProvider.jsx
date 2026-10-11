@@ -341,8 +341,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // → the relay log store; load.stats reports the worst). The chunky decomposer.
     const offFrameWatch = installFrameWatch(state.ctx);
 
-    // GPU glyph picking — one ID-pass system bound to the WebGPU renderer. Canvas
-    // hover/click resolves through it (CanvasPicker wires each grid/terminal in
+    // GPU glyph picking — one ID-pass system bound to the active renderer (WebGL2).
+    // Canvas hover/click resolves through it (CanvasPicker wires each grid/terminal in
     // via setPickingSystem).
     const pickingSystem = new PickingSystem(gl);
     state.ctx.pickingSystem = pickingSystem;

@@ -22,19 +22,15 @@
  * outrank a front sheet's opaque face. With camera.nearPlane ≥ ~4 the depth
  * buffer resolves the real gaps on its own. The biases are a debugging PROBE
  * (force an order, watch a layer win/lose), not a standing fix.
- *
- * WHY NOT polygonOffset: three r185's WebGPURenderer bakes polygonOffset into the
- * render pipeline at creation, the pipeline cache key (WebGPUBackend.getRenderCacheKey)
- * omits the offset values, and needsRenderUpdate never sees the change — so a live
- * edit is a no-op AND banded materials can inherit whichever pipeline a key-twin
- * created first. polygonOffset is effectively inert here. The TSL uniform path is
- * live by construction: each band owns ONE shared uniform node; setLayerBandBias
- * writes it and every material wearing the band picks it up next frame — no
- * registry, no pipeline rebuild, no material versioning.
+ * NOTE (WebGL2 / InstancedField architecture):
+ * In WebGL2, depth separation is handled directly via world-space geometric offsets
+ * (getBandDistance / setBandDistance) and explicit renderOrder. The clip-space bias
+ * stubs (withBandBias, bandBiasNode) are retained for backward compatibility with TSL
+ * nodes if running under WebGPURenderer.
  *
  * Distances (getBandDistance/setBandDistance) are the world-space set-backs that
- * pair with the biases: the bias guarantees ORDER, the gap keeps near-view
- * parallax honest. gridBackground: how far a grid's wall sits behind its text
+ * pair with the bands: the gap keeps near-view parallax honest.
+ * gridBackground: how far a grid's wall sits behind its text
  * (replaces the hard-coded -0.1 / zMin-0.5 in CodeGrid / TerminalGrid).
  */
 

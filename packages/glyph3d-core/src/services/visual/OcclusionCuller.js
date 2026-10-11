@@ -142,9 +142,19 @@ export class OcclusionCuller {
         }
     }
 
+    /**
+     * Whether the active renderer supports hardware occlusion queries
+     * (requires Three.js WebGPURenderer with isOccluded).
+     * In WebGLRenderer, occlusion queries are unsupported and culling is disabled.
+     * @returns {boolean}
+     */
+    isSupported() {
+        return typeof this.renderer?.isOccluded === 'function';
+    }
+
     /** @param {boolean} v Off ⇒ everything un-culls and proxies stop drawing entirely. */
     setEnabled(v) {
-        if (v && typeof this.renderer?.isOccluded !== 'function') {
+        if (v && !this.isSupported()) {
             this.enabled = false;
             this.group.visible = false;
             return;

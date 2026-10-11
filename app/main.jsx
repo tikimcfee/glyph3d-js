@@ -210,18 +210,27 @@ function App() {
               // load that OOM'd the device replays on restore, so a second loss
               // within a minute must NOT reload again (a reload loop never settles).
               onRenderer={(renderer) => {
-                renderer.onDeviceLost = (info) => {
+                const handleLost = (info) => {
                   renderer._isDeviceLost = true;  // the default handler's one useful act
-                  console.error(`[glyph3d] WebGPU device lost — ${info?.message || 'unknown reason'}`);
+                  const msg = info?.message || info?.statusMessage || (info instanceof Event ? 'webglcontextlost event' : 'unknown reason');
+                  console.error(`[glyph3d] GPU / WebGL context lost — ${msg}`);
                   const last = Number(sessionStorage.getItem('g3d.deviceLostReload') || 0);
                   if (Date.now() - last < 60_000) {
-                    console.error('[glyph3d] device lost again within a minute of a reload — staying put (loop guard); reload manually with a lighter scene');
+                    console.error('[glyph3d] context lost again within a minute of a reload — staying put (loop guard); reload manually with a lighter scene');
                     return;
                   }
                   sessionStorage.setItem('g3d.deviceLostReload', String(Date.now()));
-                  console.error('[glyph3d] reloading in 300ms to re-create the GPU device (session restores from the substrate)…');
+                  console.error('[glyph3d] reloading in 300ms to re-create the GPU context (session restores from the substrate)…');
                   setTimeout(() => window.location.reload(), 300);
                 };
+                renderer.onDeviceLost = handleLost;
+                // WebGL2 context loss is dispatched on the canvas DOM element
+                if (renderer.domElement && typeof renderer.domElement.addEventListener === 'function') {
+                  renderer.domElement.addEventListener('webglcontextlost', (e) => {
+                    e.preventDefault();
+                    handleLost(e);
+                  });
+                }
               }}
               style={{ position: 'absolute', inset: 0 }}
             >

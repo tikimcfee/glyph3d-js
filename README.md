@@ -1,7 +1,7 @@
 # glyph3d-js
 
 High-performance **3D text and code rendering** for [Three.js](https://threejs.org/),
-using GPU-instanced glyphs on a WebGPU renderer. Thousands of glyphs in a single
+using GPU-instanced glyphs on Three.js (WebGL2 & WebGPU). Thousands of glyphs in a single
 draw call — built for navigating source code, directory trees, and live terminals
 in 3D space.
 
@@ -28,8 +28,8 @@ This is a monorepo organized as **a package, an app, and a cli**:
 
 - **GPU-instanced rendering** — each grid of text is one `InstancedBufferGeometry`
   draw call, sized to its content; instance buffers grow on demand.
-- **WebGPU / TSL** — renders through `three/webgpu` with Three.js Shading Language
-  NodeMaterials (no GLSL). One shared material per grid kind, not one per grid.
+- **WebGL2 & WebGPU compatibility** — renders via standard `THREE.WebGLRenderer`
+  with portable GLSL shaders, or `three/webgpu` NodeMaterials. One shared material per grid kind.
 - **Vector glyphs** — HarfBuzz shaping + Slug GPU bezier coverage: analytic
   antialiasing, crisp at any scale. A prebaked glyph core ships as a static asset
   and hydrates at boot; new glyphs encode incrementally. Font fallback chain and

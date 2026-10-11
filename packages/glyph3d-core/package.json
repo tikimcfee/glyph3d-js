@@ -33,7 +33,9 @@
   "keywords": [
     "three.js",
     "threejs",
+    "webgl2",
     "webgpu",
+    "glsl",
     "tsl",
     "text",
     "3d",

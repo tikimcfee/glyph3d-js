@@ -539,10 +539,10 @@ export const SETTINGS = [
   { key: 'carrel.tableFrac', label: 'Shadow overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
   { key: 'carrel.shadowSoft', label: 'Shadow edge softness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 1, step: 0.05, apply: carrelParam('shadowSoft') },
   { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
-  // Culling — hardware occlusion-query culling (three's native occlusionTest). A candidate
-  // fully behind the OPAQUE occluder set (1.0 page faces, panels) stops drawing after
-  // `hold` consecutive occluded frames; the first visible sample brings it back at once.
-  // Experimental — off by default while the win is being measured (cull.stats).
+  // Culling — hardware occlusion-query culling (three's native occlusionTest on WebGPU).
+  // On WebGL2, hardware occlusion queries are unsupported and culling stays disabled.
+  // A candidate fully behind the OPAQUE occluder set stops drawing after `hold` consecutive
+  // occluded frames; the first visible sample brings it back at once.
   { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling & loading', type: 'bool', default: false, apply: (ctx, v) => { ctx.occlusionCuller?.setEnabled?.(v); if (v) ctx.syncCullCandidates?.(); } },
   { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling & loading', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
   // Live readout (type 'info' — not a knob): who is dark right now. The pulse that
@@ -550,6 +550,7 @@ export const SETTINGS = [
   {
     key: 'cull.dark', label: 'Dark right now', group: 'Culling & loading', type: 'info',
     read: (ctx) => {
+      if (ctx?.occlusionCuller && !ctx.occlusionCuller.isSupported()) return 'unsupported (WebGL2)';
       const s = ctx?.occlusionCuller?.stats?.();
       return s ? `${s.culled.length} / ${s.tracked}${s.enabled ? '' : '  (off)'}` : '—';
     },

@@ -113,5 +113,25 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
     culler.dispose();
 }
 
+// ── WebGL2 capability check: isSupported() returns false and setEnabled(true) stays off ──
+{
+    const webglRenderer = {
+        // standard THREE.WebGLRenderer lacks backend.resolveOccludedAsync and isOccluded
+    };
+    const culler = new OcclusionCuller({ renderer: webglRenderer, scene: new THREE.Scene() });
+    ok(culler.isSupported() === false, 'isSupported is false on WebGLRenderer');
+    culler.setEnabled(true);
+    ok(culler.enabled === false, 'setEnabled(true) stays disabled on unsupported renderer');
+    ok(culler.group.visible === false, 'proxy group remains invisible');
+    culler.dispose();
+
+    const webgpuRenderer = {
+        isOccluded: () => false,
+    };
+    const cullerGpu = new OcclusionCuller({ renderer: webgpuRenderer, scene: new THREE.Scene() });
+    ok(cullerGpu.isSupported() === true, 'isSupported is true when isOccluded is present');
+    cullerGpu.dispose();
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

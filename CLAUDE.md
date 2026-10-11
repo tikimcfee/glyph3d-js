@@ -2,12 +2,12 @@
 
 ## What this is
 
-glyph3d-js renders thousands of text glyphs in 3D at 60fps via GPU instancing on a
-WebGPU renderer — built for navigating source code, directory trees, and live
+glyph3d-js renders thousands of text glyphs in 3D at 60fps via GPU instancing on
+Three.js (WebGL2 & WebGPU) — built for navigating source code, directory trees, and live
 terminals in 3D space. The repo is organized as **a package, an app, and a cli**:
 
 - **`packages/glyph3d-core`** (`@glyph3d/core`) — the publishable rendering library:
-  glyph atlas + shaping, the `GlyphField` WebGPU renderer, `CodeGrid` / `TerminalGrid`,
+  glyph atlas + shaping, the `InstancedField` / `InstancedSlotBuffer` renderer, `CodeGrid` / `TerminalGrid`,
   layout managers, picking, the command/interaction services.
 - **`packages/glyph3d-r3f`** — react-three-fiber bindings for the core.
 - **`app/`** — the IDE: a react-three-fiber client on the core. File tree + 3D code
@@ -20,8 +20,8 @@ terminals in 3D space. The repo is organized as **a package, an app, and a cli**
 ## Tech stack
 
 - **JavaScript** (ES modules), **JSDoc** for types — no TypeScript.
-- **Three.js via `three/webgpu`**; shaders are **TSL** (Three.js Shading Language)
-  NodeMaterials, not GLSL.
+- **Three.js (WebGL2 & WebGPU)**; shaders are GLSL 3.00 ES and InstancedField materials
+  with WebGPU fallback.
 - **Bun workspace** (`packages/*`, `app`); **Vite** builds the app. The Go binary
   builds with `make`.
 - **React 19 + @react-three/fiber 9** for the app.
@@ -29,18 +29,17 @@ terminals in 3D space. The repo is organized as **a package, an app, and a cli**
   chain and color-emoji support.
 
 The IDE shell is a react-three-fiber application on a framework-agnostic rendering
-core: `@glyph3d/core` is vanilla `three/webgpu` with no UI-framework dependency; the
+core: `@glyph3d/core` is vanilla Three.js with no UI-framework dependency; the
 shell is **React 19 + react-three-fiber 9**; the two meet at the thin `@glyph3d/r3f`
-binding. New shell code is React/r3f; new rendering code is `three/webgpu` + TSL.
+binding. New shell code is React/r3f; new rendering code is Three.js + GLSL/TSL.
 
 ## Structure
 
 ```
 packages/
   glyph3d-core/src/        @glyph3d/core
-    GlyphField.js          WebGPU / TSL renderer
-    GlyphAtlas.js          font atlas (shaping → glyph metrics)
-    collections/           CodeGrid, TerminalGrid, layout managers
+    collections/           InstancedField, CodeGrid, TerminalGrid, layout managers
+    atlas/ / shaping/      GlyphAtlas, HarfBuzz shaper, Slug curve textures
     core/                  LayoutDescription (layout seam), constants, renderOrder, types
     services/              interaction (AttentionManager, keyEncoding),
                            camera (ViewerCameraController), data, orchestration
@@ -157,7 +156,7 @@ substrate), read the code and the agent memory rather than trusting a prose snap
 ## Conventions
 
 - **ES modules** + **JSDoc**. Default exports for classes, named for utilities/constants.
-- Shaders are **TSL**. Worker-compatible code in `workers/builders/` stays free of
+- Shaders are **GLSL 3.00 ES** / **TSL**. Worker-compatible code in `workers/` stays free of
   DOM/Three.js imports.
 - **One render path** — no sync/async split; the worker-compatible builder is the way
   text renders.

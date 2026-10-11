@@ -28,8 +28,20 @@ try {
     console.log(`[gpu] ${gpu.vendor}/${gpu.architecture}`);
 
     const limits = await page.evaluate(() => {
-        const d = window.__glyphClient.ctx.renderer.backend.device;
+        const renderer = window.__glyphClient?.ctx?.renderer;
+        const d = renderer?.backend?.device;
         window.__gpuErrs = [];
+        if (!d) {
+            const gl = renderer?.getContext?.();
+            if (gl) {
+                return {
+                    renderer: 'WebGL2',
+                    maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+                    maxVertexAttribs: gl.getParameter(gl.MAX_VERTEX_ATTRIBS),
+                };
+            }
+            return { error: 'No GPU device or WebGL context' };
+        }
         d.addEventListener('uncapturederror', (e) => window.__gpuErrs.push(String(e.error?.message || e.error).slice(0, 300)));
         return {
             maxTextureDimension2D: d.limits.maxTextureDimension2D,

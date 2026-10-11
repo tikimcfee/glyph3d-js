@@ -57,7 +57,7 @@ try {
     const c = window.__glyphClient;
     const renderer = c?.ctx?.renderer;
     const dev = renderer?.backend?.device;
-    if (!dev) return { err: 'no WebGPU device on __glyphClient.ctx.renderer.backend' };
+    if (!dev) return { err: 'no WebGPU device on __glyphClient.ctx.renderer.backend (active renderer is WebGL2; gpu-traffic requires WebGPU queue instrumentation)' };
     const S = window.__gpuTraffic = { frames: 0, renders: 0, labels: new Map(), stacks: new Map() };
     const stackLabel = ${JSON.stringify(STACK_LABEL)};
     const rec = (label, n) => {

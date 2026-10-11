@@ -3,7 +3,7 @@
 Thanks for your interest. This repo is organized around three things:
 
 - **the package** — `packages/glyph3d-core` (`@glyph3d/core`, the publishable
-  WebGPU text/code rendering library) + `packages/glyph3d-r3f` (react-three-fiber
+  Three.js text/code rendering library) + `packages/glyph3d-r3f` (react-three-fiber
   bindings).
 - **the app** — `app/`, a react-three-fiber IDE that consumes the package, driven
   by a command bus (UI actions and the CLI hit the same handlers).
@@ -14,8 +14,7 @@ Thanks for your interest. This repo is organized around three things:
 
 - [Bun](https://bun.sh) (workspace package manager + dev runner)
 - [Go](https://go.dev) ≥ 1.21 (only to build the `cli/` binary)
-- A **WebGPU** browser. On Linux, plain Firefox can crash on WebGPU — use a
-  Chromium-based browser (Chrome/Edge/Vivaldi) or a properly-configured Firefox.
+- A modern browser with WebGL2 (or WebGPU) support.
 
 ## Setup
 
@@ -61,9 +60,8 @@ single binary at `http://localhost:8080/`.
 ## Conventions
 
 - **ES modules** throughout; **JSDoc** for types (no TypeScript).
-- Shaders are **TSL** (Three.js Shading Language) NodeMaterials, not GLSL — the
-  renderer is WebGPU (`three/webgpu`).
-- Worker-compatible code in `packages/glyph3d-core/src/workers/builders/` must
+- Shaders are **GLSL 3.00 ES** / **TSL** NodeMaterials.
+- Worker-compatible code in `packages/glyph3d-core/src/workers/` must
   stay free of DOM/Three.js imports.
 - **One render path** — there is no sync/async split; the worker-compatible
   builder is the way text is rendered.

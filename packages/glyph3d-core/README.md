@@ -1,24 +1,24 @@
 # @glyph3d/core
 
 High-performance **3D text and code rendering** for [Three.js](https://threejs.org/),
-using GPU-instanced glyphs on a WebGPU renderer. Thousands of glyphs in a single
+using GPU-instanced glyphs on Three.js (WebGL2 & WebGPU). Thousands of glyphs in a single
 draw call — the rendering core behind the [glyph3d-js](https://github.com/tikimcfee/glyph3d-js)
 project.
 
-> `v0.1.0`, pre-release — the API is still settling.
+> `v0.2.0`, pre-release — the API is still settling.
 
 ## Install
 
 ```bash
 bun add @glyph3d/core three
-# three is a peer dependency; the renderer targets WebGPU (three/webgpu)
+# three is a peer dependency (supports standard WebGLRenderer and WebGPURenderer)
 ```
 
 ## What it provides
 
 - **GPU-instanced rendering** via `InstancedBufferGeometry` — one draw call for
   thousands of glyphs.
-- **WebGPU / TSL** NodeMaterials (no GLSL).
+- **WebGL2 & WebGPU Instanced Rendering** — portable GLSL 3.00 ES shaders with fallback compatibility.
 - **Vector glyphs** — HarfBuzz shaping + Slug GPU bezier coverage, a font fallback
   chain, and color-emoji support.
 - **CodeGrid / TerminalGrid** — source files and tmux-backed terminals as
