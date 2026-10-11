@@ -585,7 +585,7 @@ export default class Book extends BoundedObject3D {
             const idx = this.sheets.indexOf(t.sheet);
             if (idx < 0) { t.tab.visible = false; continue; }
             const band = bandOf.get(t.key) ?? 0;
-            const z = t.sheet.node.position.z;                      // live slot — the cascade
+            const z = t.sheet.node.position.z + 1;                      // live slot + 1 unit in front
             let x, y, rotY = 0;
             if (placement === 'fore') {                             // +X side, facing +X
                 x = cx + sx / 2 + protrusion + tabH * 0.5;

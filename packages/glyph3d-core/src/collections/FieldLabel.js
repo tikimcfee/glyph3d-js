@@ -167,10 +167,14 @@ export default class FieldLabel extends THREE.Object3D {
         this._anchor.scale.setScalar(s);
         this._anchor.position.set(-cx * s, -cy * s, 0);
 
+        if (this._instancedField?.instanceMesh) {
+            this._instancedField.instanceMesh.position.set(0, 0, 1 / s);
+        }
+
         if (this._plateMesh && this._plateDims) {
             const p = this._plateDims;
             this._plateMesh.scale.set(p.w, p.h, 1);
-            this._plateMesh.position.set(cx, cy, -0.01 / s);
+            this._plateMesh.position.set(cx, cy, 0);
         }
     }
 
