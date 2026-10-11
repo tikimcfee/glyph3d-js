@@ -37,7 +37,7 @@ export { default as GridLayoutManager } from './collections/GridLayoutManager.js
 export { default as HierarchicalLayoutManager } from './collections/HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './collections/SpiralLayoutManager.js';
 export { default as TreemapLayoutManager } from './collections/TreemapLayoutManager.js';
-export { default as StackLayoutManager } from './collections/StackLayoutManager.js';
+export { default as StackContainer, VStack, HStack, ZStack } from './collections/layouts/StackContainer.js';
 export { default as TerminalGrid } from './collections/TerminalGrid.js';
 export { default as TerminalEmulator } from './collections/TerminalEmulator.js';
 

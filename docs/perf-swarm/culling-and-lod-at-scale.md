@@ -104,7 +104,7 @@ node record. Bounds arrive from the arena's existing `_requestBoundsSync` readba
 **no new readbacks anywhere**.
 
 For a hierarchy: keep it two-level. The app already has natural clusters — the layout
-managers (`GridLayoutManager`, `StackLayoutManager`, `StrataLayout`, carrels) place files
+managers (`GridLayoutManager`, `StackContainer`, `StrataLayout`, carrels) place files
 in spatial groups. Each cluster gets a `ClusterNode { aabb, firstNode, nodeCount }`
 record (a few hundred entries). The cull kernel tests clusters, then only the leaves of
 surviving clusters. At 10k leaves a flat cull is already ~free (below); the hierarchy is
@@ -319,7 +319,7 @@ pass); occlusion = N proxy draws + N queries + per-frame JS loop.
 | `PickingSystem` glyph/grid channels | Same meshes + `geometry.indirect`; glyph channel registers the visible list, not capacity. ¼-res target. Char precision via `S_ROW`/`S_COL` + lazy mirror. |
 | `GlyphPipelineArena` flush / `_requestBoundsSync` / repaginate coalescing | Unchanged in shape; gains residency promotion queue (priority = LOD tier) fed by the visibility engine, and impostor generation kernel riding the same coalesced flush window. Tombstone/compaction (documented v1 leak) becomes eviction. |
 | `geometry.indirect` / `IndirectStorageBufferAttribute` (three r185.1, `WebGPUBackend.js:1862–1876`) | The indirect seam — present upstream, no patch. Verify bind-group cache behavior for an indirect buffer that compute writes (same texture-keyed cache class as the byte-slots bug; if poisoned, same material.dispose() lever). |
-| Layout managers (`GridLayoutManager`, `StackLayoutManager`, `StrataLayout`, carrels) | Provide cluster nodes for the two-level hierarchy when flat culling stops being free (>~500k nodes) and for cluster occlusion short-circuit. |
+| Layout managers (`GridLayoutManager`, `StackContainer`, `StrataLayout`, carrels) | Provide cluster nodes for the two-level hierarchy when flat culling stops being free (>~500k nodes) and for cluster occlusion short-circuit. |
 
 ---
 

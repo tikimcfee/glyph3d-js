@@ -37,6 +37,11 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
     assert(typeof Glyph3D.bootGlyphEngine === 'function', 'bootGlyphEngine exported from root');
     assert(typeof Glyph3D.DEFAULT_ENGINE_OPTIONS === 'object', 'DEFAULT_ENGINE_OPTIONS exported from root');
     assert(Array.isArray(Glyph3D.LARGE_CORE_RANGES), 'LARGE_CORE_RANGES exported from root');
+    assert(typeof Glyph3D.StackContainer === 'function', 'StackContainer exported from root');
+    assert(typeof Glyph3D.VStack === 'function', 'VStack exported from root');
+    assert(typeof Glyph3D.HStack === 'function', 'HStack exported from root');
+    assert(typeof Glyph3D.ZStack === 'function', 'ZStack exported from root');
+    assert(typeof Glyph3D.StackLayoutManager === 'undefined', 'StackLayoutManager is removed');
 
     // Check core exports
     assert(typeof CoreExports.InstancedSlotBuffer === 'function', 'core exports InstancedSlotBuffer');
