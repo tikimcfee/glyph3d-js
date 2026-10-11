@@ -857,6 +857,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.pickingSystem = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
+      state.ctx.deltaBooks?.dispose();
+      state.ctx.deltaBooks = null;
       // Disposes the run too: the walk is cancelled and the match subscription dropped,
       // so a teardown mid-search leaves nothing streaming into a freed cache.
       state.ctx.searchBook?.dispose();
