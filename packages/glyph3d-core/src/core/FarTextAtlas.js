@@ -26,9 +26,11 @@
  */
 
 import * as THREE from 'three';
-import {
-    FAR_TEX, FAR_SLAB, FAR_SLABS_PER_SIDE, FAR_MAX_SLABS,
-} from '../compute/glyphPipelineReference.js';
+
+export const FAR_TEX = 1024;
+export const FAR_SLAB = 64;
+export const FAR_SLABS_PER_SIDE = 16;
+export const FAR_MAX_SLABS = 256;
 
 /** The impostor's ink-density calibration, reused: curveCount × K, capped. The ink
  *  table is CPU-built, so a truer density (a GPU coverage bake over the curve data)

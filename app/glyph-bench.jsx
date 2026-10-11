@@ -19,7 +19,7 @@ import { buildBatchBuffers, resolveLayoutParams } from '../packages/glyph3d-core
 import sampleJs from '../_experiments/glyph-encoding/corpus/sample.js?raw';
 import tortureTxt from '../_experiments/glyph-encoding/corpus/torture.txt?raw';
 import harfbuzzSrc from '../packages/glyph3d-core/src/shaping/HarfBuzzShaper.js?raw';
-import glyphFieldSrc from '../packages/glyph3d-core/src/GlyphField.js?raw';
+import instancedFieldSrc from '../packages/glyph3d-core/src/collections/InstancedField.js?raw';
 
 const FONT_CHAIN = [
   { url: fontUrl, name: 'Cousine' },
@@ -52,7 +52,7 @@ const FIXTURES = [
   { name: 'sample.js', text: sampleJs },
   { name: 'torture.txt (CJK/emoji/RTL)', text: tortureTxt },
   { name: 'HarfBuzzShaper.js (~7k glyphs)', text: harfbuzzSrc },
-  { name: 'GlyphField.js (~64k glyphs)', text: glyphFieldSrc },
+  { name: 'InstancedField.js (~36k glyphs)', text: instancedFieldSrc },
 ];
 
 // The whole repo's JS/JSX source, eager-loaded as raw text for the memory test.

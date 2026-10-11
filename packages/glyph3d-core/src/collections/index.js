@@ -15,5 +15,7 @@ export { default as StackLayoutManager } from './StackLayoutManager.js';
 export { default as TerminalGrid } from './TerminalGrid.js';
 export { default as TerminalEmulator } from './TerminalEmulator.js';
 export { default as FrameGrid } from './FrameGrid.js';
+export { default as BoundedObject3D } from './BoundedObject3D.js';
+export { default as FramedGlyphField } from './FramedGlyphField.js';
 export { default as InstancedField } from './InstancedField.js';
 export { BORDER_FLAGS, setPanelStateColorDefaults } from './panelMaterial.js';

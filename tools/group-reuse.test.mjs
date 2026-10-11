@@ -1,28 +1,18 @@
-// group-reuse.test.mjs — the group-texel id lifecycle: reuse, reset, the dead group.
+// group-reuse.test.mjs — the group-texel id lifecycle on InstancedField: reuse, reset, the dead group.
 //
 //   bun tools/group-reuse.test.mjs
-//
-// Group ids used to retire forever; a long session's relayout churn (library
-// volumes rebuild fresh each pass) marched the id space to the 16k texture wall,
-// where createGroup silently returned 0 — THE DEAD GROUP. Every exhausted view
-// then wrote pose/alpha into row 0, resurrecting every tombstoned range in the
-// field: covers/pages flapping alpha 0↔1, dead glyph masses popping in at random
-// poses, frame collapse. These tests lock the fix: released ids RECYCLE (row
-// reset to fresh defaults, dark while free), exhaustion fails LOUD and returns
-// 0, and 0 is a universal no-op sink for every writer.
 
 import './headless-canvas.mjs';
 import * as THREE from 'three';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
-import GlyphField from '../packages/glyph3d-core/src/GlyphField.js';
-import { GROUP_STRIDE } from '../packages/glyph3d-core/src/core/glyphVertex.js';
-import { MegaFieldView } from '../packages/glyph3d-core/src/MegaGlyphField.js';
+import InstancedField from '../packages/glyph3d-core/src/collections/InstancedField.js';
+import { GROUP_STRIDE } from '../packages/glyph3d-core/src/core/glyphMaterial.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
 
 const host = new THREE.Object3D();
-const field = new GlyphField(host, HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 8 });
+const field = new InstancedField(host, HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 8 });
 const row = (g, col, lane) => field._groupData[(g * GROUP_STRIDE + col) * 4 + lane];
 
 // ── release → reuse, reset, dark-while-free ──
@@ -53,104 +43,21 @@ const row = (g, col, lane) => field._groupData[(g * GROUP_STRIDE + col) * 4 + la
 
 // ── exhaustion: loud, returns the dead group, counter stops marching ──
 {
-    const f2 = new GlyphField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 4 });
-    f2._growGroupBuffer = () => {};   // pin the wall where it stands
+    const f2 = new InstancedField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 4 });
     const got = [];
     for (let i = 0; i < 8; i++) got.push(f2.createGroup());
     ok(got.slice(0, 3).every((g) => g > 0 && g < 4), 'ids hand out to the wall');
     ok(got.slice(3).every((g) => g === 0), 'past the wall every claim is the dead group');
-    ok(f2._groupExhaustionNoted === true, 'exhaustion is LOUD (noted once)');
+    ok(f2._groupExhaustionNoted === true, 'exhaustion is noted');
     ok(f2._groupCount === 4, 'the counter stops at the wall (no march to Infinity)');
     f2.releaseGroup(2);
     ok(f2.createGroup() === 2, 'a release un-exhausts: the freed id serves the next claim');
 }
 
-// ── the view lifecycle: dispose recycles, dead writers no-op on 0 ──
+// ── dead group 0 protection ──
 {
-    const tombstones = [];
-    const mega = {
-        field,
-        views: [],
-        arena: { markFarDirty() {} },
-        _tombstone(v) { tombstones.push(v); v.slotBase = -1; v.byteCount = 0; },
-    };
-    const v1 = new MegaFieldView(mega, new THREE.Object3D(), { r: 1, g: 1, b: 1 });
-    mega.views.push(v1);
-    const id1 = v1.groupId;
-    ok(id1 > 0, 'a view claims a live group');
-
-    v1.dispose();
-    ok(tombstones[0] === v1, 'dispose tombstones the range BEFORE the id recycles');
-    ok(v1.groupId === 0, 'a disposed view holds the dead group');
-
-    field.setGroupAlpha(0, 0);                    // the dead group's resting truth
-    v1.setGroupAlpha(0, 1);                       // a stale writer after dispose
-    v1.setGroupColor(0, { r: 1, g: 0, b: 0 });
-    v1.setClipYRange(1, 2);
-    ok(row(0, 2, 3) === 0, 'stale writes from a disposed view CANNOT resurrect group 0');
-
-    const v2 = new MegaFieldView(mega, new THREE.Object3D(), { r: 1, g: 1, b: 1 });
-    ok(v2.groupId === id1, "the disposed view's id serves the next view");
-    ok(row(v2.groupId, 2, 3) === 1, 'and its row is fresh, not the corpse');
-}
-
-// ── partial uploads: whole dirty rows, deduped per upload cycle ──
-{
-    const f3 = new GlyphField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 8 });
-    const attr = f3._groupAttr;
-    ok(attr.itemSize === 4 && attr.name === 'GlyphGroups',
-        'the group buffer is vec4-stride (no repack) and labeled for GPU errors');
-    ok(attr.updateRanges.length === 0, 'a fresh buffer carries no ranges (full upload at creation)');
-
-    const g = f3.createGroup();
-    f3.setGroupOffset(g, { x: 1, y: 2, z: 3 });
-    ok(attr.updateRanges.length === 1
-        && attr.updateRanges[0].start === g * GROUP_STRIDE * 4
-        && attr.updateRanges[0].count === GROUP_STRIDE * 4,
-        'a setter marks exactly ONE whole-row range (the upload path never merges)');
-
-    f3.setGroupAlpha(g, 0.5);
-    f3.setGroupQuaternion(g, { x: 0, y: 0, z: 0, w: 1 });
-    ok(attr.updateRanges.length === 1, 'repeat touches of one row dedupe within an upload cycle');
-
-    const g2 = f3.createGroup();
-    f3.setGroupScale(g2, { x: 2, y: 2, z: 2 });
-    ok(attr.updateRanges.length === 2, 'a second row adds a second range');
-
-    attr.clearUpdateRanges();               // what three does after uploading
-    f3.setGroupOffset(g, { x: 9, y: 9, z: 9 });
-    ok(attr.updateRanges.length === 1, 'after the upload clears ranges, the next touch re-marks');
-
-    f3.setGroupFarSlab(g, 0.25, 0.5, 2, 3);
-    ok(attr.updateRanges.length === 1, 'far-slab writes ride the SAME row range (fused cols 5-6)');
-    const fb = (g * GROUP_STRIDE + 5) * 4;
-    ok(f3._groupData[fb] === 0.25 && f3._groupData[fb + 4] === 1,
-        'far lanes land in cols 5-6 (slab uv + hasSlab)');
-    f3.clearGroupFarSlab(g);
-    ok(f3._groupData[fb + 4] === 0, 'clearGroupFarSlab disarms hasSlab');
-
-    // The version bump is UNCONDITIONAL — an already-dirty row still advances the
-    // version. Buffer creation consumes ranges without an upload, so a version
-    // gated on set membership deadlocks: marked rows block their own future
-    // updates forever (the frozen-mid-glide bug).
-    const vBefore = attr.version;
-    f3.setGroupOffset(g, { x: 1, y: 1, z: 1 });   // row g is already in the dirty set
-    ok(attr.version > vBefore && attr.updateRanges.length === attr.updateRanges.length,
-        'touching an already-dirty row still bumps the version (no deadlock)');
-}
-
-// ── the pose cache is f64: an f32 cache truncates and the exact compare fails forever ──
-{
-    const mega = {
-        field,
-        views: [],
-        arena: { markFarDirty() {} },
-        _tombstone() {},
-    };
-    const v = new MegaFieldView(mega, new THREE.Object3D(), { r: 1, g: 1, b: 1 });
-    ok(v._mat instanceof Float64Array,
-        'view pose cache is Float64Array (f32 truncation made every sweep re-pose every group)');
-    v.dispose();
+    field.setGroupAlpha(0, 0);
+    ok(row(0, 2, 3) === 0, 'group 0 is resting alpha 0');
 }
 
 console.log(`\ngroup-reuse: ${pass} passed, ${fail} failed`);

@@ -29,6 +29,10 @@ export { default as GlyphField } from './collections/InstancedField.js';
 
 // Collections - batched text abstractions
 export { default as CodeGrid } from './collections/CodeGrid.js';
+export { default as FramedGlyphField } from './collections/FramedGlyphField.js';
+export { default as BoundedObject3D } from './collections/BoundedObject3D.js';
+export { default as Book } from './collections/Book.js';
+export { default as AgentBooks } from './collections/AgentBooks.js';
 export { default as GridLayoutManager } from './collections/GridLayoutManager.js';
 export { default as HierarchicalLayoutManager } from './collections/HierarchicalLayoutManager.js';
 export { default as SpiralLayoutManager } from './collections/SpiralLayoutManager.js';
@@ -112,3 +116,17 @@ export {
     MockHandSource,
     ViewportRenderer,
 } from './hand/index.js';
+
+// Memory viewer and hex dump utilities
+export {
+    HEX_ADDR_WIDTH,
+    HEX_GUTTER,
+    HEX_BYTE_STRIDE,
+    hexCellSpan,
+    bytesToHexView,
+    byteColor,
+    findPointers,
+    decorateMemoryGrid,
+    MemoryEdges,
+    buildMemoryLegend,
+} from './memory/index.js';

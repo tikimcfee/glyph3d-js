@@ -36,7 +36,7 @@ export default class FramedGlyphField extends BoundedObject3D {
          * The GlyphField renderer. The SLOT lives here (the base owns getRenderer); each
          * subclass CONSTRUCTS it — lazily in CodeGrid (created on first flush), eagerly in
          * TerminalGrid/FrameGrid (a fixed-size buffer in their constructor).
-         * @type {import('../GlyphField.js').default|null}
+         * @type {import('./InstancedField.js').default|null}
          */
         this._renderer = null;
         /**
@@ -104,7 +104,7 @@ export default class FramedGlyphField extends BoundedObject3D {
      * The underlying GlyphField renderer, so canvas picking can map a resolved pick (the
      * renderer is the 'glyph'-channel token) back to this entity. Null if a lazy subclass
      * has not created it yet.
-     * @returns {import('../GlyphField.js').default|null}
+     * @returns {import('./InstancedField.js').default|null}
      */
     getRenderer() {
         return this._renderer;

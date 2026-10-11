@@ -1,4 +1,10 @@
-import { SLOT_STRIDE, S_X, S_Y, S_Z, S_ADVANCE, S_FLAGS, F_LEADER } from '../compute/glyphPipelineReference.js';
+export const SLOT_STRIDE = 16;
+export const S_X = 0;
+export const S_Y = 1;
+export const S_Z = 2;
+export const S_ADVANCE = 6;
+export const S_FLAGS = 11;
+export const F_LEADER = 1;
 
 /**
  * ByteLayoutDescription — the queryable product of a byte-pipeline layout. The Layer 2
