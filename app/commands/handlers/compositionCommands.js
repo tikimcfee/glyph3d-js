@@ -122,9 +122,9 @@ export default function registerCompositionCommands(router) {
             };
         }
 
-        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source');
+        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source', { gridsOnly: true });
         if (srcRes.error) return { text: srcRes.error, data: null };
-        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target');
+        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target', { gridsOnly: true });
         if (tgtRes.error) return { text: tgtRes.error, data: null };
 
         if (srcRes.idx === tgtRes.idx) {
@@ -208,9 +208,9 @@ export default function registerCompositionCommands(router) {
             };
         }
 
-        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source');
+        const srcRes = resolveGridByIdOrIndex(ctx, args[0], 'source', { gridsOnly: true });
         if (srcRes.error) return { text: srcRes.error, data: null };
-        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target');
+        const tgtRes = resolveGridByIdOrIndex(ctx, args[1], 'target', { gridsOnly: true });
         if (tgtRes.error) return { text: tgtRes.error, data: null };
 
         if (srcRes.idx === tgtRes.idx) {
@@ -326,7 +326,7 @@ export default function registerCompositionCommands(router) {
         // Resolve all grid indices
         const resolved = [];
         for (const raw of indexArgs) {
-            const res = resolveGridByIdOrIndex(ctx, raw, 'grid');
+            const res = resolveGridByIdOrIndex(ctx, raw, 'grid', { gridsOnly: true });
             if (res.error) return { text: res.error, data: null };
             resolved.push(res);
         }

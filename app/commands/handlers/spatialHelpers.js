@@ -41,19 +41,28 @@ export const WORLD_FLOOR_Y = 0;
  * @param {AppContext} ctx - command context bag (must have .registry and .getGrids)
  * @param {string} arg - registry ID, numeric index, or (with byName) name/path
  * @param {string} [label='grid'] - label for error messages
- * @param {{ byName?: boolean, actor?: boolean }} [opts] - byName enables the
- *   name/path fallback (step 3); actor materializes a resolved FileRow into its
+ * @param {{ byName?: boolean, actor?: boolean, gridsOnly?: boolean }} [opts] - byName
+ *   enables the name/path fallback (step 3); actor materializes a resolved FileRow into its
  *   CodeGrid before returning — for verbs that exercise the interactive surface
- *   (edit, save, semantics, window/frame/scroll) and hold the grid ref after.
+ *   (edit, save, semantics, window/frame/scroll) and hold the grid ref after; gridsOnly
+ *   refuses anything that isn't a plain grid window (a code/text grid or an image frame,
+ *   no role) — the grid.* verbs, so `grid.close` can't dispose a terminal, carrel, or book.
  * @returns {{ grid: Object, idx: number, registryId: string|null } | { error: string }}
  */
-export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = false, actor = false } = {}) {
+export function resolveGridByIdOrIndex(ctx, arg, label = 'grid', { byName = false, actor = false, gridsOnly = false } = {}) {
     const grids = ctx.getGrids();
     const isPureInteger = /^\d+$/.test(arg);
 
     // Rows → actors at the resolver, so every return path below hands back a live
     // reference (materializeActor swaps the registry entry in place; idempotent).
     const deliver = (grid, idx, registryId) => {
+        if (gridsOnly) {
+            const e = registryId != null ? ctx.registry?.get?.(registryId) : null;
+            const kind = e ? (e.role || e.type) : null;
+            if (kind !== 'grid' && kind !== 'frame') {
+                return { error: `ERR: '${registryId ?? arg}' is a ${kind ?? 'unregistered object'}, not a grid — grid.* verbs address grids only` };
+            }
+        }
         if (actor && grid?.isFileRow && registryId != null) {
             const upgraded = ctx.materializeActor?.(registryId);
             if (upgraded) {

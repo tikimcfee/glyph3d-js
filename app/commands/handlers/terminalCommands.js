@@ -550,6 +550,9 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: x, y, z must be numbers', data: null };
         }
 
+        // A held terminal (docked tile, carrel seat) lifts out where it hangs first: the
+        // coords place it in its HOME frame, never the holder's.
+        if (ctx.holding?.holderOf(id)) ctx.holding.lift(id, { inPlace: true });
         grid.position.set(x, y, z);
 
         ctx.workspace?.setSurfaceView?.(id, 'terminal', { position: { x, y, z } });

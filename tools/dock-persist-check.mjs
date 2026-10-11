@@ -10,6 +10,7 @@
 
 import SessionStore from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
+import Holding from '../app/client/Holding.js';
 
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); if (!cond) failures++; };
@@ -67,7 +68,7 @@ function makeCameraDock() {
   };
 }
 function makeCtx(registry, cameraDock) {
-  return {
+  const ctx = {
     registry, cameraDock,
     camera: { position: { x: 0, y: 0, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, fov: 70 },
     cameraController: { cameraSpeed: 100 },
@@ -78,6 +79,8 @@ function makeCtx(registry, cameraDock) {
     // wsbridge: the projector pushes a PTY resize over this when applyView resizes a terminal.
     wsbridge: { connected: true, _pushes: [], push(owner, msg) { this._pushes.push({ owner, msg }); } },
   };
+  ctx.holding = new Holding(ctx);
+  return ctx;
 }
 function makeRouter() {
   const calls = [];

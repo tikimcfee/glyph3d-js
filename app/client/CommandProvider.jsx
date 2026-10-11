@@ -33,6 +33,7 @@ import { installFrameWatch } from '../commands/loadTrace.js';
 import { materializeActor } from '../commands/handlers/fileLoader.js';
 import SessionStore from './SessionStore.js';
 import WorkspaceModel from './WorkspaceModel.js';
+import Holding from './Holding.js';
 import { getSetting, applyGroupSettings } from './settings.js';
 import { scheduleCarrelSweep } from '../commands/handlers/carrelCommands.js';
 import { wheelScrollCommand, wheelPageCommand } from './surfaceInteractions.js';
@@ -150,22 +151,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     carrels: new Map(),
     /** @type {string|null} the active carrel's NAME (a key of carrels) */ activeCarrel: null,
 
-    // Holder protocol — unified holder membership. All holders (dock + carrels) join
-    // this set on create/restore; holderOf(id) finds which one holds a surface id.
-    // AgentBooks are excluded (they use inline parent tests at 3 sites).
-    holders: new Set(),
-    get holderOf() {
-      // Return the holder (dock or carrel) currently holding id, or null.
-      // Guarded: checks can fire before a holder exists.
-      return (id) => {
-        const dock = this.cameraDock;
-        if (dock?.has?.(id)) return dock;
-        for (const holder of this.holders) {
-          if (holder !== dock && holder?.has?.(id)) return holder;
-        }
-        return null;
-      };
-    },
+    // Who carries a window (residence = carrel, vehicle = dock) and the one place that
+    // changes it — the dock and carrel facts, their handoffs, the holdable resolver.
+    // Built in the effect beside the dock; it reads the holders lazily off this ctx.
+    /** @type {Holding|null} */ holding: null,
 
     // Agent books — every agent's run bound as a book of page-pair spreads (description
     // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
@@ -540,7 +529,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const cameraDock = new CameraDock({ atlas: state.ctx.atlas });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
-    state.ctx.holders.add(cameraDock);  // Holder protocol: dock joins on create
+    state.ctx.holding = new Holding(state.ctx);
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');
@@ -575,26 +564,31 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     syncCullCandidates();
     applyGroupSettings(state.ctx, 'Culling');
 
+    // Liveness is the registry alone — agent and delta books register their roots too.
+    // `wasLive` tracks the previous change's id set, so a surface's durable facts drop only
+    // when ITS window goes from live to gone (an explicit close): a restored claim whose
+    // window hasn't materialized yet is residence memory, not a phantom.
+    let wasLive = new Set(state.ctx.registry.list().map((e) => e.id));
     const onRemoval = () => {
-      // Agent books are hostable at carrels but live in AgentBooks' lanes, not the
-      // registry — a liveness check that only asks the registry would dismiss a
-      // seated agent book on every unrelated close. A lane is alive until cleared.
-      const isLive = (id) => state.ctx.registry.has(id) || !!state.ctx.agentBooks?.lanes?.has?.(id);
+      const reg = state.ctx.registry;
+      const isLive = (id) => reg.has(id);
       state.ctx.attentionManager?.pruneGone?.(isLive);
       cameraDock.pruneDismissed(isLive);
       for (const carrel of state.ctx.carrels.values()) carrel.pruneDismissed(isLive);
-      // A gone NON-terminal surface drops its intent (e.g. a closed docked code grid) so capture
+      // A closed NON-terminal window drops its intent (e.g. a closed docked code grid) so capture
       // can't serialize a phantom tile. Terminals are spared — their PTY re-adopts and the surface
       // is the durable buffer that re-docks/re-sizes them (terminal.kill drops it explicitly).
-      for (const s of state.ctx.workspace?.listSurfaces?.() || [])
-        if (s.kind !== 'terminal' && !isLive(s.id)) state.ctx.workspace.removeSurface(s.id);
-      // While restored desks have unseated members in the model, every registration is
-      // a chance a claimed window just materialized (a re-adopted terminal, a reopened
-      // file) — offer it its seat. Idempotent; no-op once all are seated.
-      const unseated = (state.ctx.workspace?.listCarreled?.() ?? []).some((s) => {
-        const desk = state.ctx.carrels?.get(s.view.carrel.name);
-        return desk && !desk.has(s.id);
-      });
+      const ws = state.ctx.workspace;
+      for (const id of wasLive) {
+        if (isLive(id)) continue;
+        const s = ws?.getSurface?.(id);
+        if (s && s.kind !== 'terminal') ws.removeSurface(id);
+      }
+      wasLive = new Set(reg.list().map((e) => e.id));
+      // While desks have unseated claims in the model, every registration is a chance a
+      // claimed window just materialized (a re-adopted terminal, a reopened file) — offer
+      // it its seat. Idempotent; no-op once all are seated.
+      const unseated = (ws?.listCarreled?.() ?? []).some((s) => state.ctx.holding.carrels.awaitingSeat(s.id));
       if (unseated) scheduleCarrelSweep(state.ctx);
     };
     state.ctx.registry.addChangeListener(onRemoval);

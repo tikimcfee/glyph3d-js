@@ -11,8 +11,8 @@
  * engine is still booting (no dock yet) they return a clean ERR.
  */
 
-/** @param {AppContext} ctx */
-function getDock(ctx) {
+/** The DOM dockview panel controller (distinct from the 3D camera dock). @param {AppContext} ctx */
+function panelDock(ctx) {
     return ctx.dock && typeof ctx.dock.open === 'function' ? ctx.dock : null;
 }
 
@@ -21,7 +21,7 @@ function getDock(ctx) {
  */
 export default function registerPanelCommands(router) {
     router.register('panel.list', (_args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = panelDock(ctx);
         if (!dock) return { text: 'ERR: dock not ready', data: null };
         const panels = dock.list();
         return { text: `OK: ${panels.map((p) => `${p.open ? '●' : '○'} ${p.id}`).join('  ')}`, data: { panels } };
@@ -29,7 +29,7 @@ export default function registerPanelCommands(router) {
 
     // open / close / toggle share a shape: <panel-id>, ERR on unknown id.
     const verb = (name, fn, description) => router.register(name, (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = panelDock(ctx);
         if (!dock) return { text: 'ERR: dock not ready', data: null };
         const id = args[0];
         if (!id) return { text: `ERR: usage: ${name} <panel-id>`, data: null };

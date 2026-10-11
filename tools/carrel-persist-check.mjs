@@ -8,6 +8,7 @@
 
 import SessionStore from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
+import Holding from '../app/client/Holding.js';
 
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); if (!cond) failures++; };
@@ -41,20 +42,12 @@ function makeCarrel(name) {
 
 function makeCtx(carrelsMap) {
   const ws = new WorkspaceModel();
-  return {
+  const ctx = {
     workspace: ws,
     carrels: carrelsMap,
-    holders: new Set([...carrelsMap.values()]),
     cameraDock: null,
     agentBooks: null,
     registry: null,
-    // holderOf: scans carrels for the id (simplified — no dock in this test)
-    get holderOf() {
-      return (id) => {
-        for (const c of this.carrels.values()) if (c.has(id)) return c;
-        return null;
-      };
-    },
     camera: { position: { x: 0, y: 0, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 }, fov: 70 },
     scene: { add() {}, remove() {} },
     world: null,
@@ -63,6 +56,8 @@ function makeCtx(carrelsMap) {
     status: { set() {}, clear() {} },
     wsbridge: { connected: false, push() {} },
   };
+  ctx.holding = new Holding(ctx);
+  return ctx;
 }
 
 function makeRouter() {
@@ -146,22 +141,24 @@ function makeRouter() {
   }
 }
 
-// ---- 4. pre-Slice-1 backward compat: inline members degrade gracefully --
-// A v2 snapshot (pre-Slice-1) carries members inline in carrels[].m. Restore
-// should still populate view.carrel from them — forward-additive, no migration shim.
+// ---- 4. pre-shape: a restored desk expects exactly the members the model claims for it --
+// (expect() holds the wrap stable while the complement pours in — the count comes from
+// carrelMembers, the one membership record.)
 {
   const ctx = makeCtx(new Map());
   const ss = new SessionStore({ ctx, router: makeRouter(), bridge: {} });
-  await ss.restore({
-    version: 2, files: [], camera: null, terminals: [],
-    carrels: [{ name: 'old-desk', managed: false, position: { x: 0, y: 0, z: 0 }, yaw: 0, params: {},
-                members: [{ id: 'old-term', order: 0 }, { id: 'old-grid', order: 1 }] }],
-    // No carrelMembers — pre-Slice-1 shape.
+  // The carrels phase alone — a full restore's close-out drops the pre-shape (expect(0)).
+  ss._restoreCarrels({
+    carrels: [{ name: 'desk-a', managed: false, position: { x: 0, y: 0, z: 0 }, yaw: 0, params: {} },
+              { name: 'desk-b', managed: false, position: { x: 9, y: 0, z: 0 }, yaw: 0, params: {} }],
+    carrelMembers: [
+      { id: 'x.js', name: 'desk-a', order: 0 },
+      { id: 'y.js', name: 'desk-a', order: 1 },
+      { id: 'term-2', name: 'desk-b', order: 0 },
+    ],
   });
-  eq(ctx.workspace.getSurface('old-term')?.view?.carrel, { name: 'old-desk', order: 0 },
-     'backward compat: inline c.members → view.carrel (no carrelMembers section)');
-  eq(ctx.workspace.getSurface('old-grid')?.view?.carrel, { name: 'old-desk', order: 1 },
-     'backward compat: inline c.members → view.carrel (second member)');
+  eq(ctx.carrels.get('desk-a')?._expected, 2, 'pre-shape: desk-a expects its 2 claimed members');
+  eq(ctx.carrels.get('desk-b')?._expected, 1, 'pre-shape: desk-b expects its 1 claimed member');
 }
 
 // ---- 5. round-trip: capture then restore preserves all membership --

@@ -11,6 +11,7 @@
 // Graduated from a relay-trace investigation per the debug-into-tools practice.
 
 import registerCameraCommands from '../app/commands/handlers/cameraCommands.js';
+import Holding from '../app/client/Holding.js';
 
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); if (!cond) failures++; };
@@ -22,7 +23,7 @@ registerCameraCommands({ register: (name, fn) => { handlers[name] = fn; } });
 function makeCtx({ docked }) {
   const flights = [];
   const grid = { getBounds: () => ({ isEmpty: () => false }) };
-  return {
+  const ctx = {
     flights,
     getGrids: () => [],                                  // term-19 is a terminal, not in getGrids('grid')
     registry: { get: (id) => (id === 'term-19' ? { id, grid } : null), getIdByGrid: () => null },
@@ -32,6 +33,8 @@ function makeCtx({ docked }) {
       focusOnGrid: (i) => { flights.push(['focusOnGrid', i]); },
     },
   };
+  ctx.holding = new Holding(ctx);
+  return ctx;
 }
 
 // ---- 1. docked terminal → camera.focus does NOT fly the world camera ----

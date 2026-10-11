@@ -139,11 +139,13 @@ export function wheelPageCommand(entry, dy) {
 }
 
 /**
- * The move verb (drag-to-reposition) for a surface type. Defaults to grid.move for any type
- * without a dedicated record.
- * @param {string} type
- * @returns {string}
+ * The move verb (drag-to-reposition) for a surface kind (registry role || type). A kind with a
+ * record but no moveVerb (a book's pages, a library volume) doesn't drag: null. A kind with no
+ * record at all (a frame) moves as a grid.
+ * @param {string} kind
+ * @returns {string|null}
  */
-export function moveVerbFor(type) {
-  return RECORDS[type]?.moveVerb || 'grid.move';
+export function moveVerbFor(kind) {
+  const rec = RECORDS[kind];
+  return rec ? (rec.moveVerb ?? null) : 'grid.move';
 }

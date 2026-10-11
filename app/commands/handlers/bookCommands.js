@@ -27,13 +27,10 @@
  * shelf's cfg (page dims, deck pitch, card scales, faces, covers).
  */
 
-import * as THREE from 'three';
 import { box, kvLines } from '../formatResponse.js';
-import { findCarrelOwner, unseat } from './carrelCommands.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const r2 = (n) => Math.round(n * 100) / 100;
-const _drop = new THREE.Vector3();
 
 /** The FOCUSED volume — the strata idiom for books: a bare book verb acts on what
  *  you're looking at. attention.primary resolves through the owners' LOOKUPS (never
@@ -220,22 +217,15 @@ export default function registerBookCommands(router) {
         if (!books) return { text: 'ERR: agent books not wired', data: null };
         if (args.length < 4) return { text: 'ERR: usage: book.move <id> <x> <y> <z>', data: null };
         const [id, xs, ys, zs] = args;
-        let x = Number(xs) || 0, y = Number(ys) || 0, z = Number(zs) || 0;
-        // A SEATED book's coords arrive in its desk's frame (the dragger writes the
-        // live position; the verb echoes it back). Convert desk → cluster frame and
-        // lift the book out aimed at that exact spot, then pin: dragging a book off
-        // the shelf leaves it where you dropped it, easing back to natural size.
+        const x = Number(xs) || 0, y = Number(ys) || 0, z = Number(zs) || 0;
+        // A HELD book (seated at a desk, riding the dock) lifts out first, right where it
+        // hangs — back in its cluster frame, easing to natural size — so the coords pin it
+        // like any loose book. (A drag already lifted it at pickup: window.lift.)
+        const r = ctx.holding?.resolve(id);
+        if (r && !('error' in r) && ctx.holding.holderOf(r.id)) ctx.holding.lift(r.id, { inPlace: true });
+        // The agent shelf first, else a delta set — both pin in their own cluster frame;
+        // the resolvers keep the address spaces honest.
         const hit = books.resolveLane(id);
-        const owner = hit ? findCarrelOwner(ctx, hit[0]) : null;
-        if (owner) {
-            owner.updateWorldMatrix(true, false);
-            books.root.updateWorldMatrix(true, false);
-            books.root.worldToLocal(owner.localToWorld(_drop.set(x, y, z)));
-            ({ x, y, z } = _drop);
-            unseat(ctx, hit[0], { parent: books.root, pos: { x, y, z } });
-        }
-        // The agent shelf first (its books can be carrel-seated), else a delta set —
-        // both pin in their own cluster frame; the resolvers keep the address spaces honest.
         const ok = hit ? books.moveGroup(hit[0], x, y, z)
                        : !!ctx.deltaBooks?.moveGroup?.(ctx.deltaBooks.resolveSet(id)?.[0], x, y, z);
         return ok

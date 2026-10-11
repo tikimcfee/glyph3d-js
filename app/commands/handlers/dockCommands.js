@@ -5,42 +5,24 @@
  *
  * Distinct from panel.* (the DOM dockview side panels, ctx.dock): these drive the
  * 3D bar in the canvas (ctx.cameraDock). A docked window is the SAME live grid /
- * terminal, dimensionally scaled into a tile that rides the camera. lock/release
+ * terminal / book, dimensionally scaled into a tile that rides the camera. lock/release
  * animate the slide + resize; the bar re-packs itself.
  *
- * Membership of record is the workspace model's `view.docked` fact; the CameraDock is
- * its live projection.
+ * The dock is a VEHICLE: docking a carrel-seated window borrows it, and releasing puts
+ * it back in its seat. Membership of record is the workspace model's `view.docked`
+ * fact, written only through ctx.holding.dock; the CameraDock is its live projection.
  */
 
-/** @param {AppContext} ctx */
-function getDock(ctx) {
-    return ctx.cameraDock && typeof ctx.cameraDock.lock === 'function' ? ctx.cameraDock : null;
+/** The live 3D dock, or null before it's built. @param {AppContext} ctx */
+function cameraDock(ctx) {
+    return ctx.holding?.dock.live ?? null;
 }
 
-/**
- * Resolve a registry id OR a surface index (grids + terminals) to { id, grid }.
- * Unlike resolveGridByIdOrIndex (code grids only), the dock takes any framed
- * surface — a terminal docks exactly like a file.
- * @param {AppContext} ctx
- */
-export function resolveSurface(ctx, arg) {
-    const key = String(arg ?? '');
-    const entry = ctx.registry?.get?.(key);
-    // A carrel is a PLACE things are seated at, never cargo itself — docking a
-    // desk (or seating one at another desk) is refused at the resolver.
-    if (entry && entry.type !== 'carrel') return { id: entry.id, grid: entry.grid };
-    if (entry) return null;
-
-    if (/^\d+$/.test(key)) {
-        const surfaces = ctx.getSurfaces?.() || ctx.getGrids?.() || [];
-        const i = parseInt(key, 10);
-        const grid = surfaces[i];
-        if (grid) {
-            const id = ctx.registry?.getIdByGrid?.(grid);
-            if (id && ctx.registry?.get?.(id)?.type !== 'carrel') return { id, grid };
-        }
-    }
-    return null;
+/** Resolve a dock verb's address through the one holdable resolver. @param {AppContext} ctx */
+function target(ctx, arg) {
+    const r = ctx.holding?.resolve(arg);
+    if (!r) return { error: 'holding not ready' };
+    return r;
 }
 
 /**
@@ -48,52 +30,45 @@ export function resolveSurface(ctx, arg) {
  */
 export default function registerDockCommands(router) {
     router.register('dock.lock', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (dock.has(r.id)) return { text: `OK: '${r.id}' already docked`, data: { id: r.id, docked: true } };
-        // Order: an explicit hint (legacy callers) else the next bar slot from the model. The model is
-        // the order authority now — it persists, and the dock reconcile reads it back on reload.
+        // Order: an explicit hint, else the next bar slot from the model (the order authority —
+        // it persists, and the reconcile reads it back on reload). The fact and the live tile are
+        // written together, so the verb is correct by construction.
         const hint = parseFloat(args[1]);
-        const order = Number.isFinite(hint) ? hint : (ctx.workspace?.nextDockOrder?.() ?? 0);
-        // Write the dock intent (the persisted fact) AND project it onto the live dock — the verb does
-        // both, so it's correct by construction. Restore writes the model alone and lets the reconciler
-        // project as tiles re-adopt (no dock.lock replay).
-        ctx.workspace?.setSurfaceView?.(r.id, ctx.registry?.get?.(r.id)?.type, { docked: true, dockOrder: order });
-        dock.lock(r.id, r.grid, { order });
+        ctx.holding.dock.lock(r, { order: Number.isFinite(hint) ? hint : undefined });
         return { text: `OK: docked '${r.id}'`, data: { id: r.id, docked: true } };
     }, { description: 'Dock a surface into the camera-locked HUD bar', usage: '<id|index> [order]', returns: '{ id, docked }' });
 
     router.register('dock.release', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        const id = r?.id ?? String(args[0] ?? '');
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
+        const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
-        ctx.workspace?.setSurfaceView?.(id, undefined, { docked: false }); // drop the intent + project
-        dock.release(id);
+        ctx.holding.dock.release(id);
         return { text: `OK: released '${id}'`, data: { id, docked: false } };
-    }, { description: 'Release a docked surface back into the world', usage: '<id|index>', returns: '{ id, docked }' });
+    }, { description: 'Release a docked window home (a borrowed carrel member goes back to its seat)', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.toggle', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (dock.has(r.id)) {
-            ctx.workspace?.setSurfaceView?.(r.id, undefined, { docked: false });
-            dock.release(r.id);
+            ctx.holding.dock.release(r.id);
             return { text: `OK: released '${r.id}'`, data: { id: r.id, docked: false } };
         }
-        const order = ctx.workspace?.nextDockOrder?.() ?? 0;
-        ctx.workspace?.setSurfaceView?.(r.id, ctx.registry?.get?.(r.id)?.type, { docked: true, dockOrder: order });
-        dock.lock(r.id, r.grid, { order });
+        ctx.holding.dock.lock(r);
         return { text: `OK: locked '${r.id}'`, data: { id: r.id, docked: true } };
     }, { description: 'Dock a surface if loose, release it if docked', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.list', (_args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const tiles = dock.list();
         const summary = tiles.length
@@ -103,7 +78,7 @@ export default function registerDockCommands(router) {
     }, { description: 'List the docked tiles and the bar layout', returns: '{ tiles:[{id,slot}], layout }' });
 
     router.register('dock.layout', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const mode = String(args[0] ?? '').toLowerCase();
         if (!dock.setLayout(mode)) return { text: 'ERR: usage: dock.layout <linear|radial>', data: null };
@@ -111,27 +86,28 @@ export default function registerDockCommands(router) {
     }, { description: 'Set the dock tile arrangement', usage: '<linear|radial>', returns: '{ layout }' });
 
     router.register('dock.focus', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        const id = r?.id ?? String(args[0] ?? '');
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
+        const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
         // Frame the captured HOME bounds (stable) — read BEFORE release drops the entry —
         // then release the tile back home and make it the focus. Window slides home while
         // the camera flies to meet it.
         const box = dock.homeBounds(id);
-        ctx.workspace?.setSurfaceView?.(id, undefined, { docked: false });
-        dock.release(id);
+        ctx.holding.dock.release(id);
         if (box) ctx.cameraController?.focusOnBox?.(box);
         ctx.attentionManager?.set('primary', id, { registry: ctx.registry });
         return { text: `OK: focused '${id}'`, data: { id, docked: false } };
     }, { description: 'Release a docked surface and fly to frame it', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.spotlight', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = resolveSurface(ctx, args[0]);
-        const id = r?.id ?? String(args[0] ?? '');
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
+        const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
         const state = dock.spotlight(id); // 'spotlit' | 'returned'
         // Selecting a tile is also a focus gesture, but with NO camera move (it's
@@ -145,16 +121,15 @@ export default function registerDockCommands(router) {
     }, { description: 'Spotlight a docked tile (focus area) and focus it (keyboard-live for terminals)', usage: '<id|index>', returns: '{ id, spotlit }' });
 
     router.register('dock.clear', (_args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const n = dock.list().length;
-        for (const s of ctx.workspace?.listDocked?.() || []) ctx.workspace.setSurfaceView(s.id, undefined, { docked: false });
-        dock.releaseAll();
+        ctx.holding.dock.releaseAll();
         return { text: `OK: released ${n} tile(s)`, data: { released: n } };
     }, { description: 'Release every docked surface', returns: '{ released }' });
 
     router.register('dock.set', (args, ctx) => {
-        const dock = getDock(ctx);
+        const dock = cameraDock(ctx);
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const key = String(args[0] ?? '');
         const value = parseFloat(args[1]);

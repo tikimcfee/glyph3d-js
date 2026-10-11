@@ -92,7 +92,7 @@ const SURFACE_PROJECTORS = {
     // the captured record it returns to). A seated terminal's .position is carrel-LOCAL, so a
     // world-space fact applied here would yank it out of the ring. applyView sets the LOCAL
     // geometry (position + grid + emulator) directly — no verb replay on the load path.
-    const held = !!store.ctx.holderOf?.(s.id) || !!store.ctx.cameraDock?.has?.(s.id);
+    const held = !!store.ctx.holding?.holderOf(s.id);
     const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
     // Readability zoom for a LOOSE terminal (held tiles get theirs from the holder's own
     // reconcile — the dock re-applies zoom + box-fit itself). Guarded like applyView:
@@ -154,7 +154,6 @@ export default class SessionStore {
     this._loadedSnap = null;        // the snapshot restore() ran from — quarantine + no-dock capture source
     this._failedSections = new Set(); // snapshot keys whose phase failed → capture keeps the loaded blob
     this._lastGoodDock = null;      // anti-clobber: last dock layout (loaded OR live) that had panels
-    this._pendingFrameOccupant = null; // saved frame pane (pinned window), re-raised by the dock reconcile
     /** @type {{at:number, ok:boolean, phases:Array<{name:string,ok:boolean,ms:number,error?:string}>}|null} */
     this.lastRestore = null;        // the phase report — session.status reads it
     this.dockBridgeTimeoutMs = DOCK_BRIDGE_TIMEOUT_MS;
@@ -518,24 +517,18 @@ export default class SessionStore {
   _restoreCarrels(snap) {
     const list = Array.isArray(snap.carrels) ? snap.carrels : [];
     if (!list.length) return;
-    let memberCount = 0;
+    const members = (Array.isArray(snap.carrelMembers) ? snap.carrelMembers : [])
+      .filter((m) => m?.id != null && m.name != null);
+    const claims = new Map();   // desk name → claimed member count (the expect() pre-shape)
+    for (const m of members) claims.set(m.name, (claims.get(m.name) ?? 0) + 1);
     let failed = 0;
     for (const c of list) {
-      if (!restoreCarrel(this.ctx, c)) { failed++; continue; }
-      memberCount += (c.members?.length ?? 0);  // pre-Slice-1 snapshots carry members inline
+      if (!restoreCarrel(this.ctx, c, claims.get(c.name) ?? 0)) failed++;
     }
     if (failed) this._failedSections.add('carrels');   // quarantine — don't save a partial desk set over the record
-    // Write carrel residence into the model from carrelMembers (the model-based path).
-    // Pre-Slice-1 snapshots without carrelMembers but with inline c.members fall back
-    // to those — forward-additive restore, no migration shim needed.
-    const members = Array.isArray(snap.carrelMembers) ? snap.carrelMembers
-      : list.flatMap((c) => (c.members || []).map((m) => ({ id: m.id, name: c.name, order: m.order ?? 0 })));
     for (const m of members) {
-      if (m?.id != null && m.name != null) {
-        this.ctx.workspace?.setSurfaceView?.(String(m.id), undefined, { carrel: { name: m.name, order: m.order ?? 0 } });
-      }
+      this.ctx.workspace?.setSurfaceView?.(String(m.id), undefined, { carrel: { name: m.name, order: m.order ?? 0 } });
     }
-    if (memberCount) { /* migrated from inline members — noted for the expect() pre-shape */ }
   }
 
   // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
@@ -768,8 +761,8 @@ export default class SessionStore {
     if (snap.dock3d?.tiles?.length) {
       this.ctx.cameraDock?.setLayout?.(snap.dock3d.layout || 'linear');
       // The window that holds the root view-frame (pinned) — a dock-level fact, not a per-surface
-      // flag. _reconcileDock re-raises it once it's a live tile (spotlight → frame-fit + Pin light).
-      this._pendingFrameOccupant = snap.dock3d.focused || null;
+      // flag. The dock reconcile re-raises it once it's a live tile (spotlight → frame-fit + Pin light).
+      if (this.ctx.holding) this.ctx.holding.dock.pendingFrame = snap.dock3d.focused || null;
       snap.dock3d.tiles.forEach((t, i) => {
         if (!t?.id) return;
         // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
@@ -859,44 +852,9 @@ export default class SessionStore {
         if (grid) SURFACE_PROJECTORS[s.kind]?.(this, s, grid);
       }
     }
-    this._reconcileDock();
-  }
-
-  // Dock = f(model): converge the live CameraDock to the model's docked surfaces. ADDITIVE — it locks
-  // each docked surface that's live but not yet a tile (a terminal re-adopting AFTER restore lands
-  // here when its grid appears) and re-applies its zoom + pin. It does NOT release: a verb releases
-  // live (writing docked:false), and a gone window is dismissed by pruneDismissed — both keep model
-  // and dock in step without this pass fighting them. The model IS the durable buffer, so there's no
-  // pending queue: a not-yet-live docked surface is simply skipped and caught on the next pass.
-  // Runs after the per-surface projection above, so a docked terminal is moved/sized to its restored
-  // home BEFORE it's reparented into a tile.
-  _reconcileDock() {
-    const cd = this.ctx.cameraDock;
-    const ws = this.ctx.workspace;
-    if (!cd || !ws?.listDocked) return;
-    for (const s of ws.listDocked()) {
-      if (cd.has(s.id)) continue;                       // already a tile
-      if (!this.ctx.registry.has(s.id)) continue;       // not live yet → re-adopts later, caught next pass
-      const grid = this.ctx.registry.get(s.id)?.grid;
-      if (!grid) continue;
-      const v = s.view || {};
-      // Per-tile guard: one bad surface must not abort the whole reconcile.
-      try {
-        // Direct CameraDock method (NOT a dock.lock verb). The saved slot order pins the bar
-        // position regardless of arrival timing.
-        cd.lock(s.id, grid, { order: v.dockOrder });
-        // Re-apply the readability zoom (the dock reads `user` back for its box-fit).
-        if (v.zoom && v.zoom !== 1) { grid.setZoom?.(v.zoom); cd.reflowTile?.(s.id); }
-        // Re-raise the saved frame occupant (pinned window) once it's a live tile — spotlight() fits
-        // it into the root view-frame and lights its Pin button. A dock-level fact, applied once.
-        if (this._pendingFrameOccupant === s.id && cd.focusedPane !== s.id) {
-          cd.spotlight(s.id);
-          this._pendingFrameOccupant = null;
-        }
-      } catch (e) {
-        console.warn(`[session] dock reconcile failed for '${s.id}' — skipping:`, e?.message || e);
-      }
-    }
+    // Dock = f(model), additive (Holding.dock.reconcile): a window whose desk is still waiting
+    // to seat it is skipped — the carrel sweep seats it, then docks it FROM the seat.
+    this.ctx.holding?.dock.reconcile((id) => this.ctx.holding.carrels.awaitingSeat(id));
   }
 
   // Public clear — wipe the saved snapshot on demand (the `session.clear` verb). Drops the loaded

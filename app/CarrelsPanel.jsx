@@ -124,24 +124,34 @@ const basename = (p) => {
 
 const hex = (n) => `#${(n >>> 0).toString(16).padStart(6, '0')}`;
 
+/** A member's display name: an agent book by its lane id, anything else by basename.
+ *  @param {AppContext} ctx */
+function memberLabel(ctx, id) {
+    const lane = ctx?.registry?.get?.(id)?.role === 'agent' ? ctx.agentBooks?.resolveLane?.(id) : null;
+    return lane ? `agent ${lane[0]}` : basename(id);
+}
+
 /**
- * Everything hostable, categorized — a fresh snapshot each render while the menu
- * is open. Registry surfaces by type (volumes excluded — they're per-pass
- * presentation objects, not seatable windows) + the agent shelf's lanes.
+ * Everything holdable, categorized by its kind (Holding.holdableKind — the same rule the
+ * carrel verbs apply, so the menu never offers what a verb would refuse) — a fresh
+ * snapshot each render while the menu is open.
  * @param {AppContext} ctx
  */
 function hostableSections(ctx) {
     const entries = ctx?.registry?.list?.() || [];
-    const surf = (type) => entries
-        .filter((en) => en.type === type && !String(en.id).startsWith('vol:'))
-        .map((en) => ({ id: en.id, label: basename(en.id) }));
-    const agents = (ctx?.agentBooks?.agents?.() || [])
-        .map((a) => ({ id: a.id, label: a.id, color: a.color }));
+    const hues = new Map((ctx?.agentBooks?.agents?.() || []).map((a) => [a.id, a.color]));
+    const of = (...kinds) => entries
+        .filter((en) => kinds.includes(ctx?.holding?.holdableKind(en)))
+        .map((en) => {
+            const lane = en.role === 'agent' ? ctx.agentBooks?.resolveLane?.(en.id) : null;
+            return { id: en.id, label: memberLabel(ctx, en.id), color: lane ? hues.get(lane[0]) : undefined };
+        });
     return [
-        { key: 'files', label: 'files', items: surf('grid') },
-        { key: 'terminals', label: 'terminals', items: surf('terminal') },
-        { key: 'agents', label: 'agent books', items: agents },
-        { key: 'frames', label: 'frames', items: surf('frame') },
+        { key: 'files', label: 'files', items: of('grid') },
+        { key: 'terminals', label: 'terminals', items: of('terminal') },
+        { key: 'agents', label: 'agent books', items: of('agent') },
+        { key: 'books', label: 'books', items: of('delta', 'search') },
+        { key: 'frames', label: 'frames', items: of('frame') },
     ].filter((s) => s.items.length);
 }
 
@@ -255,10 +265,10 @@ export default function CarrelsPanel({ client }) {
                             <div key={id} style={S.memberRow}
                                 onClick={() => { exec(['camera.focus', id]); after(['attention.set', 'primary', id]); }}
                                 title={`${id} — frame it (camera.focus)`}>
-                                <span style={S.memberName}>{basename(id)}</span>
+                                <span style={S.memberName}>{memberLabel(client?.ctx, id)}</span>
                                 <span style={S.home}
                                     onClick={(e) => { e.stopPropagation(); after(['carrel.release', id]); }}
-                                    title={`Send ${basename(id)} home (carrel.release)`}>↩</span>
+                                    title={`Send ${memberLabel(client?.ctx, id)} home (carrel.release)`}>↩</span>
                             </div>
                         ))}
                     </React.Fragment>
@@ -267,7 +277,7 @@ export default function CarrelsPanel({ client }) {
 
             {menu && (() => {
                 const sections = hostableSections(client?.ctx);
-                const docked = (id) => !!client?.ctx?.cameraDock?.has?.(id);
+                const docked = (id) => !!client?.ctx?.holding?.isDocked(id);
                 return (<>
                     <div style={S.backdrop} onClick={() => setMenu(null)}
                         onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />

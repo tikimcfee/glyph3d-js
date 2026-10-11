@@ -78,7 +78,9 @@ function readFocus(client) {
   const entry = reg.get(p.id);
   if (!entry?.grid) return null;
   const { id, grid, type } = entry;
-  const isGrid = typeof grid.getLayout === 'function';   // duck-type: terminals lack getLayout
+  // A plain grid window — what the grid.* controls (close, layout, scroll) address. A book's
+  // page is a CodeGrid too, but it's the book's; terminals lack getLayout.
+  const isGrid = type === 'grid' && !entry.role && typeof grid.getLayout === 'function';
   const cc = client.ctx.cameraController;
   // The VOLUME in play — the same resolution a bare book verb runs (the strata idiom):
   // the focused entity itself, or the volume the focused file's book is riding.

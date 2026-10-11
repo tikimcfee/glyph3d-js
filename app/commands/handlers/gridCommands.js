@@ -67,7 +67,7 @@ export default function registerGridCommands(router) {
     router.register('grid.info', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.info <id|index>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const g = resolved.grid;
@@ -103,7 +103,7 @@ export default function registerGridCommands(router) {
     router.register('grid.read', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.read <id|index> [startLine] [lineCount]', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         // A BOOK reads at its open page — the sheet the world shows is the
@@ -152,7 +152,7 @@ export default function registerGridCommands(router) {
     router.register('grid.color', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.color <id|index> <r> <g> <b> (0-1 floats)', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const [r, g, b] = args.slice(1, 4).map(Number);
@@ -172,7 +172,7 @@ export default function registerGridCommands(router) {
     router.register('grid.visibility', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.visibility <id|index> <true|false>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const visible = args[1].toLowerCase() === 'true' || args[1] === '1';
@@ -228,7 +228,7 @@ export default function registerGridCommands(router) {
     router.register('grid.remove', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.remove <id|index>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const name = resolved.grid.getFilename?.() || resolved.registryId || '(unnamed)';
@@ -247,7 +247,7 @@ export default function registerGridCommands(router) {
         const target = args[0] ?? ctx.attentionManager?.get('primary')?.id;
         if (!target) return { text: 'ERR: usage: grid.close <id|index> (or focus a grid first)', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, String(target));
+        const resolved = resolveGridByIdOrIndex(ctx, String(target), 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const id = resolved.registryId;
         const name = resolved.grid.getFilename?.() || id || '(unnamed)';
@@ -271,14 +271,15 @@ export default function registerGridCommands(router) {
     router.register('grid.move', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.move <id|index> <x> <y> <z>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) return { text: 'ERR: x, y, z must be numbers', data: null };
 
-        // All grids (terminals and code grids) share the same Object3D position API.
-        // setWorldPosition was a dead alias that blocked CodeGrid from being placed.
+        // A held grid (docked tile, carrel seat) lifts out where it hangs first: the coords
+        // place it in its HOME frame, never the holder's.
+        if (ctx.holding?.holderOf(resolved.registryId)) ctx.holding.lift(resolved.registryId, { inPlace: true });
         resolved.grid.position.set(x, y, z);
 
         // Persist the move — the mover's law: any verb that repositions a grid
@@ -296,7 +297,7 @@ export default function registerGridCommands(router) {
     router.register('grid.text', async (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         let text;
@@ -311,7 +312,7 @@ export default function registerGridCommands(router) {
     router.register('grid.position', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.position <id|index> <x> <y> <z>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const [x, y, z] = args.slice(1, 4).map(Number);
@@ -326,7 +327,7 @@ export default function registerGridCommands(router) {
     router.register('grid.rotation', (args, ctx) => {
         if (args.length < 4) return { text: 'ERR: usage: grid.rotation <id|index> <rx> <ry> <rz> (radians)', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const [rx, ry, rz] = args.slice(1, 4).map(Number);
@@ -341,7 +342,7 @@ export default function registerGridCommands(router) {
     router.register('grid.scale', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.scale <id|index> <factor>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const scale = parseFloat(args[1]);
@@ -364,7 +365,7 @@ export default function registerGridCommands(router) {
     router.register('grid.window', async (args, ctx) => {
         if (args.length < 3) return { text: 'ERR: usage: grid.window <id|index> <cols> <rows> [firstLine]', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
         if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setWindow !== 'function') {
             return { text: 'ERR: grid.window applies only to code grids', data: null };
@@ -410,7 +411,7 @@ export default function registerGridCommands(router) {
         if (args.length < 1) {
             return { text: `ERR: usage: grid.layout <id|index> [${presetNames}] [--wrap N --page-height H --pages-wide W --z-spacing Z --gap-x X --gap-y Y --page-depth D --axis xy|z]`, data: null };
         }
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
         if (!(resolved.grid instanceof CodeGrid) || typeof resolved.grid.setLayout !== 'function') {
             return { text: 'ERR: grid.layout applies only to code grids', data: null };
@@ -472,7 +473,7 @@ export default function registerGridCommands(router) {
     // No 2nd arg → report. Re-folds in place; no neighbor reflow (scroll is a frame op).
     router.register('grid.scroll', async (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.scroll <id|index> <±rows|top|bottom>', data: null };
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const g = resolved.grid;
         if (!(g instanceof CodeGrid) || typeof g.setScrollOffset !== 'function') {
@@ -502,7 +503,7 @@ export default function registerGridCommands(router) {
     // grid.scroll then flows content THROUGH it (the "monitor"). 0/off = no frame (full content).
     router.register('grid.frame', async (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.frame <id|index> <rows|off>', data: null };
-        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true });
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
         const g = resolved.grid;
         if (!(g instanceof CodeGrid) || typeof g.setFrameRows !== 'function') {

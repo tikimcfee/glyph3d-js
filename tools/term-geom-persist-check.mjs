@@ -11,6 +11,7 @@
 
 import SessionStore from '../app/client/SessionStore.js';
 import WorkspaceModel from '../app/client/WorkspaceModel.js';
+import Holding from '../app/client/Holding.js';
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -46,7 +47,7 @@ function makeRegistry() {
   };
 }
 function makeCtx(registry, workspace) {
-  return {
+  const ctx = {
     registry, workspace,
     camera: null, cameraController: null,
     cameraDock: { has: () => false, list: () => [], layoutMode: 'linear' },
@@ -55,6 +56,8 @@ function makeCtx(registry, workspace) {
     // The projector pushes a PTY resize over this whenever applyView resizes a terminal.
     wsbridge: { connected: true, _pushes: [], push(owner, msg) { this._pushes.push({ owner, msg }); } },
   };
+  ctx.holding = new Holding(ctx);
+  return ctx;
 }
 function makeStore(ctx, calls) {
   // Router just RECORDS commands now — the projector no longer replays terminal.resize/move; it

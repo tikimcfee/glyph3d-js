@@ -17,15 +17,22 @@
  * window.drop sets a window down directly in front of the camera: billboard-faced
  * (computed once at the drop — never locked) at the distance where it fills a view
  * fraction, then free to move like any window. Held windows (dock tile, carrel seat)
- * are released TO that pose (the holder's own glide, re-aimed); loose windows are
- * placed directly. The undock-home path (ctrl-click, dock.release) is untouched —
- * drop is the "bring it to me" alternative, not a replacement.
+ * are lifted out of every holder TO that pose (the holder's own glide, re-aimed); loose
+ * windows are placed directly. The undock-home path (ctrl-click, dock.release) is
+ * untouched — drop is the "bring it to me" alternative, not a replacement.
+ *
+ * window.lift takes a held window out of every holder right where it hangs — no slide,
+ * its scale easing back to natural. A drag picking up a docked tile or a seated window
+ * lifts it first, so the hand moves a free window.
  */
 
 import * as THREE from 'three';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
-import { resolveSurface } from './dockCommands.js';
-import { findCarrelOwner } from './carrelCommands.js';
+
+/** Resolve a window verb's address through the one holdable resolver. */
+function target(ctx, arg) {
+    return ctx.holding?.resolve(arg) ?? { error: 'holding not ready' };
+}
 
 // Default view-height fraction a dropped window lands at (arg 2 overrides per call).
 const DROP_FILL = 0.45;
@@ -86,8 +93,8 @@ function parseZoom(arg) {
  */
 export default function registerWindowCommands(router) {
     router.register('window.scale', (args, ctx) => {
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (typeof r.grid.setZoom !== 'function') {
             return { text: `ERR: '${r.id}' is not scalable`, data: null };
         }
@@ -116,8 +123,8 @@ export default function registerWindowCommands(router) {
     });
 
     router.register('window.pin', (args, ctx) => {
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const dock = ctx.cameraDock;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const id = r.id;
@@ -164,8 +171,8 @@ export default function registerWindowCommands(router) {
     });
 
     router.register('window.drop', (args, ctx) => {
-        const r = resolveSurface(ctx, args[0]);
-        if (!r) return { text: `ERR: no surface for "${args[0]}" (registry id or surface index)`, data: null };
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const cam = ctx.camera;
         if (!cam) return { text: 'ERR: camera not ready', data: null };
         const id = r.id;
@@ -173,30 +180,15 @@ export default function registerWindowCommands(router) {
         const fillArg = parseFloat(args[1]);
         const frac = Number.isFinite(fillArg) && fillArg > 0 ? fillArg : DROP_FILL;
 
-        const dock = ctx.cameraDock;
-        const holder = ctx.holderOf?.(id);
-        const docked = holder === dock;
-        const carrel = docked ? null : holder;
-        const holderHome = holder ? holder.homeOf(id) : null;
+        // The landing scale is the window's TRUE home placement (its residence chain),
+        // never a dock tile's or a carrel seat's.
+        const holderHome = ctx.holding.homeOf(id);
         const { pos, quat } = dropPose(cam, r.grid, holderHome, frac);
         const to = { parent: ctx.scene || null, pos: { x: pos.x, y: pos.y, z: pos.z }, quat };
 
-        let from = 'loose';
-        if (docked) {
-            from = 'dock';
-            ctx.workspace?.setSurfaceView?.(id, undefined, { docked: false });
-            dock.release(id, { to });
-            // A seat the dock had borrowed from goes stale the moment the window takes
-            // up free residence — clear it (a borrowed release drops the entry, no motion).
-            if (carrel) {
-                ctx.workspace?.setSurfaceView?.(id, undefined, { carrel: null });
-                carrel.release(id);
-            }
-        } else if (carrel) {
-            from = `carrel '${carrel.carrelName}'`;
-            ctx.workspace?.setSurfaceView?.(id, undefined, { carrel: null });
-            carrel.release(id, { to });
-        } else {
+        // Taking up free residence ends every holding — a borrowed seat included.
+        const from = ctx.holding.lift(id, { to }) ?? 'loose';
+        if (from === 'loose') {
             // Loose: no holder glide to ride — place it directly, in its own parent's
             // space (a tree-resident stays a resident; the next tree relayout may
             // re-seat it — drop is at home with free-floating windows and held tiles).
@@ -219,11 +211,24 @@ export default function registerWindowCommands(router) {
         ctx.session?.scheduleSave?.();
         return {
             text: `OK: dropped '${id}' before the camera (was ${from})`,
-            data: { id, from: docked ? 'dock' : carrel ? 'carrel' : 'loose', position: { x: pos.x, y: pos.y, z: pos.z } },
+            data: { id, from, position: { x: pos.x, y: pos.y, z: pos.z } },
         };
     }, {
         description: 'Set a window down directly in front of the camera (billboard-faced, then free); releases it from the dock/carrel holding it',
         usage: '<id|index> [fill]',
         returns: '{ id, from, position }',
+    });
+
+    router.register('window.lift', (args, ctx) => {
+        const r = target(ctx, args[0]);
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
+        const from = ctx.holding.lift(r.id, { inPlace: true });
+        if (!from) return { text: `OK: '${r.id}' is not held`, data: { id: r.id, from: 'loose' } };
+        ctx.session?.scheduleSave?.();
+        return { text: `OK: lifted '${r.id}' out of the ${from.replace('+', ' and ')}`, data: { id: r.id, from } };
+    }, {
+        description: 'Take a held window out of the dock/carrel right where it hangs (its scale eases back to natural)',
+        usage: '<id|index>',
+        returns: '{ id, from }',
     });
 }

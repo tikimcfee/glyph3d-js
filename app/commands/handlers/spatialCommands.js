@@ -24,7 +24,7 @@ export default function registerSpatialCommands(router) {
     router.register('grid.bounds', (args, ctx) => {
         if (args.length < 1) return { text: 'ERR: usage: grid.bounds <id|index>', data: null };
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const aabb = getWorldBounds(resolved.grid);
@@ -67,7 +67,7 @@ export default function registerSpatialCommands(router) {
         const grids = ctx.getGrids();
         const indices = [];
         for (const arg of args) {
-            const resolved = resolveGridByIdOrIndex(ctx, arg);
+            const resolved = resolveGridByIdOrIndex(ctx, arg, 'grid', { gridsOnly: true });
             if (resolved.error) return { text: resolved.error, data: null };
             indices.push(resolved.idx);
         }
@@ -103,7 +103,7 @@ export default function registerSpatialCommands(router) {
             return { text: `ERR: usage: grid.anchor <id|index> <name>\n  anchors: ${ANCHOR_NAMES.join(', ')}`, data: null };
         }
 
-        const resolved = resolveGridByIdOrIndex(ctx, args[0]);
+        const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
         const anchorName = args[1].toLowerCase();
@@ -131,9 +131,9 @@ export default function registerSpatialCommands(router) {
     router.register('grid.distance', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.distance <id|index1> <id|index2>', data: null };
 
-        const r1 = resolveGridByIdOrIndex(ctx, args[0]);
+        const r1 = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (r1.error) return { text: r1.error, data: null };
-        const r2 = resolveGridByIdOrIndex(ctx, args[1]);
+        const r2 = resolveGridByIdOrIndex(ctx, args[1], 'grid', { gridsOnly: true });
         if (r2.error) return { text: r2.error, data: null };
 
         const aabb1 = getWorldBounds(r1.grid);
@@ -167,9 +167,9 @@ export default function registerSpatialCommands(router) {
     router.register('grid.overlap', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: grid.overlap <id|index1> <id|index2>', data: null };
 
-        const r1 = resolveGridByIdOrIndex(ctx, args[0]);
+        const r1 = resolveGridByIdOrIndex(ctx, args[0], 'grid', { gridsOnly: true });
         if (r1.error) return { text: r1.error, data: null };
-        const r2 = resolveGridByIdOrIndex(ctx, args[1]);
+        const r2 = resolveGridByIdOrIndex(ctx, args[1], 'grid', { gridsOnly: true });
         if (r2.error) return { text: r2.error, data: null };
 
         const box1 = getWorldBox3(r1.grid);

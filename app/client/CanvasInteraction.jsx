@@ -201,8 +201,8 @@ export function CanvasPicker() {
     // would freeze it as undefined and every gesture would fall to the ROOT tier.
     const gestureEnv = {
       exec: (cmd) => router.execute(cmd),
-      // resolveGesture's dock.spotlight pre-empt reads the unified holder protocol
-      // (holderOf) + cameraDock off ctx. Lazy like its siblings — this child effect
+      // resolveGesture's dock.spotlight pre-empt reads ctx.holding (is the target docked?).
+      // Lazy like its siblings — this child effect
       // mounts before the parent effect creates interactionContext/cameraDock, so a
       // captured reference would freeze as undefined and every click would mis-route.
       get ctx() { return client.ctx; },
@@ -438,13 +438,20 @@ export function CanvasPicker() {
   return null;
 }
 
+/** Pointer travel (px) before a Ctrl-press becomes a drag — below it, it's a Ctrl-click
+ *  (dock.toggle, via the gesture resolver), so nothing is lifted or moved. */
+const DRAG_SLOP_PX = 5;
+
 /**
- * Object dragging — Ctrl/Cmd + drag MOVES the grid/terminal under the cursor
+ * Object dragging — Ctrl/Cmd + drag MOVES the window under the cursor
  * instead of panning the camera (the camera controller yields Ctrl-drag to us,
  * see ViewerCameraController mousedown). Default drag still pans, so you can get
  * right up to a file without nudging it; hold Ctrl when you actually want to move
- * it. The drag is direct (60fps position writes); on release we persist the final
- * spot through the same move verb the CLI uses, then nudge a session save.
+ * it. A HELD window (docked tile, carrel seat) is lifted out where it hangs the
+ * moment the drag starts (window.lift) — the hand moves a free window. The drag is
+ * direct (60fps position writes); on release we persist the final spot through the
+ * surface's move verb (the one the CLI uses), then nudge a session save. Surfaces
+ * without a move verb (a book's pages) don't drag.
  */
 export function ObjectDragger() {
   const { gl, camera } = useThree();
@@ -463,8 +470,10 @@ export function ObjectDragger() {
       // attention bus. Consistent with the outline the user sees.
       const hid = ctx.attentionManager?.get('hover')?.id;
       const entry = hid ? ctx.registry.get(hid) : null;
-      if (!entry) return;
-      drag = { grid: entry.grid, id: entry.id, type: entry.type, lastX: e.clientX, lastY: e.clientY };
+      const verb = entry ? moveVerbFor(entry.role || entry.type) : null;
+      if (!verb) return;
+      drag = { grid: entry.grid, id: entry.id, verb, startX: e.clientX, startY: e.clientY,
+               lastX: e.clientX, lastY: e.clientY, moving: false };
       router.execute(`attention.set primary ${entry.id}`); // highlight what you're moving
       dom.style.cursor = 'grabbing';
       dom.setPointerCapture?.(e.pointerId);
@@ -473,6 +482,13 @@ export function ObjectDragger() {
 
     const onMove = (e) => {
       if (!drag) return;
+      if (!drag.moving) {
+        if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_SLOP_PX) return;
+        drag.moving = true;
+        drag.lastX = e.clientX; drag.lastY = e.clientY;
+        if (ctx.holding?.holderOf(drag.id)) router.execute(['window.lift', drag.id]);
+        return;
+      }
       const dx = e.clientX - drag.lastX;
       const dy = e.clientY - drag.lastY;
       drag.lastX = e.clientX; drag.lastY = e.clientY;
@@ -497,15 +513,16 @@ export function ObjectDragger() {
 
     const onUp = (e) => {
       if (!drag) return;
-      const { id, type, grid } = drag;
+      const { id, verb, grid, moving } = drag;
       const p = grid.position;
       drag = null;
       dom.style.cursor = 'default';
       dom.releasePointerCapture?.(e.pointerId);
+      if (!moving) return;   // a Ctrl-click, not a drag — the gesture resolver owns it
       // Persist through the bus (CLI/session parity), then let the session store
-      // capture the new layout. The per-surface move verb is one record per type
+      // capture the new layout. The per-surface move verb is one record per kind
       // (surfaceInteractions), not a type branch here.
-      router.execute(`${moveVerbFor(type)} ${id} ${round(p.x)} ${round(p.y)} ${round(p.z)}`);
+      router.execute([verb, id, String(round(p.x)), String(round(p.y)), String(round(p.z))]);
       client.session?.scheduleSave?.();
     };
 

@@ -9,9 +9,9 @@
  *
  * Membership is recorded as a VIEW FACT on the workspace surface record
  * (view.carrel = {name, order}), the same shape as view.docked — the live
- * Carrel is a projection of it. Moving a window between the dock and a carrel
- * hands the HOME record over (CameraDock.homeOf / Carrel.homeOf) so home always
- * chains residence → residence, never through the vehicle.
+ * Carrel is a projection of it. Both facts, and every handoff between the dock
+ * and a desk, go through the shared Holding (ctx.holding): a carrel is a
+ * RESIDENCE, the dock a VEHICLE, and docking a seated window borrows it.
  *
  * Agent books are born onto the 'agents' shelf — a grid-mode desk auto-created
  * on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
@@ -26,7 +26,6 @@
 
 import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
-import { resolveSurface } from './dockCommands.js';
 import { getSetting } from '../../client/settings.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -53,78 +52,12 @@ function findCarrel(ctx, name) {
     return last;
 }
 
-/**
- * The carrel currently holding a surface id, or null. (window.drop asks too.)
- * @param {AppContext} ctx
- */
-export function findCarrelOwner(ctx, id) {
-    // Holder protocol: use holderOf, but only return carrels (dock is not a carrel owner).
-    const holder = ctx.holderOf?.(id);
-    if (!holder) return null;
-    // Exclude the dock — findCarrelOwner is specifically for carrels.
-    if (holder === ctx.cameraDock) return null;
-    // Verify it's actually a carrel (has carrelName).
-    return holder.carrelName != null ? holder : null;
-}
-
-/**
- * Record (or clear, with null) the carrel view fact for a surface.
- * @param {AppContext} ctx
- */
-function setFact(ctx, id, value, kind) {
-    ctx.workspace?.setSurfaceView?.(id, kind ?? ctx.registry?.get?.(id)?.type, { carrel: value });
-}
-
 /** A world-managed desk's footprint changed by a VERB (seat/release/knob) — tell the
  *  world row. Footprint-diffed on the other side, so a no-move touch costs a measure.
  * @param {AppContext} ctx
  */
 function worldTouch(ctx, carrel) {
     if (carrel?.worldManaged) ctx.world?.relayout();
-}
-
-/**
- * Lift a seated surface out of whichever desk holds it: clear the view fact and
- * release — optionally re-aimed at a caller-computed pose (`to`, the
- * Carrel.release re-aim; book.move pins a dragged book at its drop spot). The
- * one unseat path — the carrel.release verb and the drag-off ride it together.
- * @param {AppContext} ctx
- * @returns {Carrel|null} the desk it left, or null if it wasn't seated
- */
-export function unseat(ctx, id, to = null) {
-    const owner = findCarrelOwner(ctx, id);
-    if (!owner) return null;
-    setFact(ctx, id, null);
-    owner.release(id, to ? { to } : {});
-    return owner;
-}
-
-/**
- * Anything hostable at a desk: a registry surface (grid / terminal / frame) OR an
- * agent's book — the shelf's lanes are not registry surfaces, so they resolve here
- * by lane id. The returned `grid` is always a live Object3D the Carrel can seat;
- * a seated agent book keeps streaming (AgentBooks.update eases lanes, not root
- * children, so its deck stays live while borrowed).
- * @param {AppContext} ctx
- * @returns {{id:string, grid:Object, kind:string|undefined}|null}
- */
-function resolveHostable(ctx, arg) {
-    // book.list labels agent lanes `agent:<id>` — accept the label back here
-    // too (drivers paste what they see; same round-trip rule as resolveBook).
-    if (typeof arg === 'string' && arg.startsWith('agent:')) arg = arg.slice(6);
-    const surf = resolveSurface(ctx, arg);
-    if (surf) {
-        const entry = ctx.registry?.get?.(surf.id);
-        // An agent deck root (role 'agent') aliases a lane's book — seating it
-        // would give one live object two member identities. Books seat by
-        // their LANE id, below.
-        if (entry?.role === 'agent') return null;
-        return { ...surf, kind: entry?.type };
-    }
-    const key = String(arg ?? '');
-    const lane = ctx.agentBooks?.lanes?.get?.(key);
-    if (lane?.book) return { id: key, grid: lane.book, kind: 'agent-book' };
-    return null;
 }
 
 /**
@@ -143,7 +76,7 @@ function resolveHostable(ctx, arg) {
  * carrel.move takes it back out (user-placed wins, the pin law). Registered
  * (type 'carrel') either way, so the camera's dynamic-speed / soft-bounds /
  * fit-all spine (getSurfaces) sees it — a desk is a PLACE, not cargo;
- * resolveSurface refuses to treat it as one.
+ * Holding.resolve refuses to treat it as one.
  * @param {AppContext} ctx
  * @returns {Carrel}
  */
@@ -171,7 +104,6 @@ function buildCarrel(ctx, name, { radius, managed = false } = {}) {
     }
     ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
     carrels(ctx)?.set(name, carrel);
-    ctx.holders?.add(carrel);  // Holder protocol: carrel joins on create
     return carrel;
 }
 
@@ -183,20 +115,20 @@ const AGENT_SHELF = 'agents';
  * carrels phase). The saved pose and knobs are authoritative: no camera-ray
  * placement, no Settings fold — the desk stands back up exactly where it lived,
  * dressed as it was, and pre-shaped (expect) for the member complement the
- * restore manifest will seat as windows materialize.
+ * model claims for it, which seats as windows materialize.
  * @param {AppContext} ctx
- * @param {{name:string, position?:{x,y,z}, yaw?:number, params?:Object, members?:Array}} saved
+ * @param {{name:string, managed?:boolean, position?:{x,y,z}, yaw?:number, params?:Object}} saved
+ * @param {number} [expected=0] members the model claims for this desk
  * @returns {Carrel|null}
  */
-export function restoreCarrel(ctx, saved) {
+export function restoreCarrel(ctx, saved, expected = 0) {
     const map = carrels(ctx);
     if (!map || !ctx.scene || !saved?.name) return null;
     if (map.has(saved.name)) return map.get(saved.name);
     const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
     // A world-MANAGED desk re-registers as its grouping — the layout owns its pose
-    // (saved pose ignored). Snapshots from before the flag existed default the
-    // agents shelf to managed: its home has always been beside the tree in intent.
-    const managed = (saved.managed ?? (saved.name === AGENT_SHELF)) && !!ctx.world;
+    // (saved pose ignored).
+    const managed = !!saved.managed && !!ctx.world;
     if (managed) {
         carrel.worldManaged = true;
         ctx.world.register(carrel.name, carrel, () => carrel.localBounds());
@@ -208,8 +140,7 @@ export function restoreCarrel(ctx, saved) {
     }
     ctx.registry?.register?.(`carrel:${saved.name}`, carrel, { type: 'carrel' });
     map.set(saved.name, carrel);
-    ctx.holders?.add(carrel);  // Holder protocol: carrel joins on restore
-    carrel.expect((saved.members || []).length);
+    carrel.expect(expected);
     return carrel;
 }
 
@@ -218,12 +149,12 @@ export function restoreCarrel(ctx, saved) {
  * fires onChange mid-mutation, and session restore pins books right AFTER the
  * hydrate that announces them; the sweep runs after the current job settles).
  *
- * 1. MANIFEST (restored membership): ids the saved desks claim seat at their
- *    recorded desk the moment they materialize — immediately (load-is-not-replay:
- *    a rebuilt desk re-seats its members in place, nothing flies), order threaded
- *    through, cluster pins irrelevant (explicit membership outranks them). Claims
- *    are consumed on seat and otherwise persist as residence memory: a window
- *    reopened much later still comes home to its desk.
+ * 1. RESIDENCE (Holding.reconcile): model-claimed windows seat at their desk the
+ *    moment they materialize — immediately (load-is-not-replay: a rebuilt desk
+ *    re-seats its members in place, nothing flies), order threaded through, then
+ *    the dock re-locks what rides, so a seated-and-docked window rides FROM its
+ *    seat. Unserved claims persist as residence memory: a window reopened much
+ *    later still comes home to its desk.
  * 2. AUTO-SHELF (the default residence): every NEW agent book seats at the
  *    'agents' desk, a grid-mode desk auto-created on first need. Once per lane
  *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
@@ -245,36 +176,9 @@ export function scheduleCarrelSweep(ctx) {
  */
 export function carrelSweep(ctx) {
     const map = carrels(ctx);
-    if (!map || !ctx.scene) return;
-    serveResidence(ctx, map);
+    if (!map || !ctx.scene || !ctx.holding) return;
+    ctx.holding.reconcile();
     autoShelf(ctx, map);
-}
-
-/** Pass 1 — seat model-claimed members at their recorded desks. Reads view.carrel
- *  from the MODEL (the single authority), not a manifest. Idempotent: a member already
- *  seated at the right desk is skipped; one held elsewhere is left alone. A member that
- *  hasn't materialized yet stays in the model and is re-offered on the next sweep.
- * @param {AppContext} ctx
- *  @see scheduleCarrelSweep */
-function serveResidence(ctx, map) {
-    const claimed = ctx.workspace?.listCarreled?.() ?? [];
-    for (const s of claimed) {
-        const id = s.id;
-        const claim = s.view.carrel;
-        const desk = map.get(claim.name);
-        if (!desk || desk._dissolving) continue;
-        if (desk.has(id)) continue;                          // already seated — idempotent
-        const riding = ctx.holderOf?.(id);
-        if (riding && riding !== desk) continue;             // held elsewhere (dock/other carrel)
-        const r = resolveHostable(ctx, id);
-        if (!r) continue;   // not materialized yet — a later change re-offers
-        const prev = findCarrelOwner(ctx, r.id);
-        if (prev && prev !== desk) prev.release(r.id);
-        if (desk.lock(r.id, r.grid, { order: claim.order, immediate: true })) {
-            setFact(ctx, r.id, { name: desk.carrelName, order: desk.entries.get(r.id).order }, r.kind);
-            (ctx._agentShelfSeen ??= new Set()).add(r.id);   // the default pass never re-offers
-        }
-    }
 }
 
 /**
@@ -285,12 +189,13 @@ function autoShelf(ctx, map) {
     const lanes = ctx.agentBooks?.lanes;
     if (!lanes) return;
     const seen = (ctx._agentShelfSeen ??= new Set());
-    for (const id of [...seen]) if (!lanes.has(id)) seen.delete(id);   // cleared books may be reborn
+    for (const id of [...seen]) if (!ctx.registry?.has?.(id)) seen.delete(id);   // cleared books may be reborn
     if (getSetting('book.autoShelf') === false) return;
 
-    const newcomers = [...lanes.entries()].filter(([id, lane]) =>
-        !seen.has(id) && !lane.pinned && !ctx.holderOf?.(id)
-        && !ctx.workspace?.getSurface?.(id)?.view?.carrel);
+    // Books are held by their registry id (lane.groupId) — the one key the dock uses too.
+    const newcomers = [...lanes.values()].filter((lane) =>
+        !seen.has(lane.groupId) && !lane.pinned && !ctx.holding.holderOf(lane.groupId)
+        && !ctx.workspace?.getSurface?.(lane.groupId)?.view?.carrel);
     if (!newcomers.length) return;
 
     const shelf = map.get(AGENT_SHELF) ?? (() => {
@@ -300,11 +205,9 @@ function autoShelf(ctx, map) {
     })();
     if (shelf._dissolving) return;   // folding — the newcomers keep their cluster spots
 
-    for (const [id, lane] of newcomers) {
-        seen.add(id);
-        if (shelf.lock(id, lane.book)) {
-            setFact(ctx, id, { name: AGENT_SHELF, order: shelf.entries.get(id).order }, 'agent-book');
-        }
+    for (const lane of newcomers) {
+        seen.add(lane.groupId);
+        ctx.holding.seat({ id: lane.groupId, grid: lane.book }, shelf);
     }
 }
 
@@ -345,40 +248,29 @@ export default function registerCarrelCommands(router) {
                 ? `ERR: no carrel named '${carrelArg}' (have: ${have})`
                 : 'ERR: no carrel (carrel.create first)', data: null };
         }
-        const r = resolveHostable(ctx, idArg);
-        if (!r) return { text: `ERR: nothing hostable for "${idArg}" (registry id, surface index, or agent id)`, data: null };
-        if (carrel.has(r.id)) return { text: `OK: '${r.id}' already seated at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
+        const r = ctx.holding?.resolve(idArg);
+        if (!r) return { text: 'ERR: holding not ready', data: null };
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
 
-        // Occupancy handoff: never capture a vehicle (the dock) or another residence's
-        // slot pose as "home" — adopt the CURRENT holder's home record instead.
-        let home = null;
-        if (ctx.cameraDock?.has?.(r.id)) {
-            home = ctx.cameraDock.homeOf(r.id);
-            ctx.workspace?.setSurfaceView?.(r.id, undefined, { docked: false });
-            ctx.cameraDock.release(r.id);
-        } else {
-            const prev = findCarrelOwner(ctx, r.id);
-            if (prev) {
-                home = prev.homeOf(r.id);
-                prev.release(r.id);
-            }
-        }
-
-        if (!carrel.lock(r.id, r.grid, home ? { home } : {})) {
-            return { text: `ERR: could not seat '${r.id}'`, data: null };
-        }
-        setFact(ctx, r.id, { name: carrel.carrelName, order: carrel.entries.get(r.id).order }, r.kind);
+        // The handoff (dock → desk, desk → desk, borrowed → back to its seat) is Holding's.
+        const how = ctx.holding.seat(r, carrel);
+        if (how === 'already') return { text: `OK: '${r.id}' already seated at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
+        if (how === 'returned') return { text: `OK: '${r.id}' put back in its seat at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
+        if (!how) return { text: `ERR: could not seat '${r.id}'`, data: null };
         worldTouch(ctx, carrel);
         // Name the species in the receipt: a driver seating "books" by bare
         // index will read `seated terminal 'term-9'` and catch itself.
         const kindTag = r.kind ? `${r.kind} ` : '';
         return { text: `OK: seated ${kindTag}'${r.id}' at '${carrel.carrelName}'`, data: { id: r.id, kind: r.kind ?? null, carrel: carrel.carrelName } };
-    }, { description: 'Seat a surface or agent book at a carrel (default: the active one); docked windows hand over cleanly', usage: '<id|index|agent> [carrel]', returns: '{ id, carrel }' });
+    }, { description: 'Seat a window or whole book at a carrel (default: the active one); docked windows hand over cleanly, a borrowed one goes back to its seat', usage: '<id|index|book> [carrel]', returns: '{ id, carrel }' });
 
     router.register('carrel.release', (args, ctx) => {
-        const r = resolveSurface(ctx, args[0]);
-        const id = r?.id ?? String(args[0] ?? '');
-        const owner = unseat(ctx, id);
+        const r = ctx.holding?.resolve(args[0]);
+        if (!r) return { text: 'ERR: holding not ready', data: null };
+        if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
+        const id = r.id;
+        // A borrowed (docked) member stays docked — its ride now ends at the desk's home.
+        const owner = ctx.holding.unseat(id);
         if (!owner) return { text: `ERR: '${id}' is not seated at any carrel`, data: null };
         worldTouch(ctx, owner);
         return { text: `OK: '${id}' sent home from '${owner.carrelName}'`, data: { id, carrel: owner.carrelName } };
@@ -411,7 +303,7 @@ export default function registerCarrelCommands(router) {
         const carrel = findCarrel(ctx, args[0]);
         if (!map || !carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const members = carrel.list();
-        for (const m of members) setFact(ctx, m.id, null);
+        ctx.holding?.fold(carrel);
         ctx.registry?.unregister?.(`carrel:${carrel.carrelName}`); // out of the world spine now
         if (carrel.worldManaged) {
             // Leave the world row before folding — the scene holds the desk while
