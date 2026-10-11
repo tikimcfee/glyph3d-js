@@ -15,7 +15,6 @@ export { default as SceneRegistry } from './SceneRegistry.js';
 export { isMac, isLinux, primaryMod, secondaryMod } from './utils/platform.js';
 
 // State
-export { FileStateManager } from './state/FileStateManager.js';
 export { parsePatchAligned, buildAlignedDiff, getDiffColor } from './state/DiffParser.js';
 export { splitUnifiedDiff, alignPatch, alignTexts, reconstructBase, alignedStats, hunksToPatch } from './state/deltaSource.js';
 
@@ -24,8 +23,6 @@ export { BackdropManager } from './visual/BackdropManager.js';
 export { NameplateManager } from './visual/NameplateManager.js';
 
 // Interaction services
-export { SelectionManager } from './interaction/SelectionManager.js';
-export { CodeColorManager } from './interaction/CodeColorManager.js';
 export { ShortcutManager } from './interaction/ShortcutManager.js';
 
 // Spatial
@@ -38,7 +35,6 @@ export { ViewerCameraController } from './camera/ViewerCameraController.js';
 export { GitHubRepositorySource, GitHubError, RateLimitError } from './data/GitHubRepositorySource.js';
 export { RepositoryAdapter } from './data/RepositoryAdapter.js';
 export { RepositoryContentCache } from './data/RepositoryContentCache.js';
-export { HeatmapProvider } from './data/HeatmapProvider.js';
 
 // Orchestration
 export { default as CommandRouter } from './orchestration/CommandRouter.js';

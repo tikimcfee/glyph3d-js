@@ -14,7 +14,7 @@
  *
  * Usage:
  *   const sm = new ShortcutManager();
- *   sm.register('Escape', () => selectionManager.clear(grids));
+ *   sm.register('Escape', () => clearFocus());
  *   sm.register('Tab', () => selectNextFile(), { shift: () => selectPrevFile() });
  *   sm.attach();  // called once after construction
  *   sm.detach();  // on cleanup

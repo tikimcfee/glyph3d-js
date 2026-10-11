@@ -135,38 +135,6 @@ export default class ViewerAPI {
         return (await this._router.execute('camera.fitall')).data;
     }
 
-    // -- Selection --
-
-    /**
-     * Select a file by path.
-     * @param {string} path
-     */
-    async select(path) {
-        return (await this._router.execute(`select ${path}`)).data;
-    }
-
-    /**
-     * Add a file to the selection.
-     * @param {string} path
-     */
-    async selectAdd(path) {
-        return (await this._router.execute(`select.add ${path}`)).data;
-    }
-
-    /**
-     * Clear selection.
-     */
-    async selectClear() {
-        return (await this._router.execute('select.clear')).data;
-    }
-
-    /**
-     * Get selected files.
-     */
-    async selectList() {
-        return (await this._router.execute('select.list')).data;
-    }
-
     // -- Grids --
 
     /**

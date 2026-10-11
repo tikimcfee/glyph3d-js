@@ -21,8 +21,8 @@
  * i.e. today. The proxy keeps drawing while its candidate is culled — that is how the
  * candidate learns it is visible again.
  *
- * The culler only re-shows what IT hid: a candidate hidden by anyone else (group.hide,
- * a knob) is left alone and not tested. Disabled, it un-culls everything and its proxy
+ * The culler only re-shows what IT hid: a candidate hidden by anyone else (a knob,
+ * a holder) is left alone and not tested. Disabled, it un-culls everything and its proxy
  * group stops rendering — zero queries, zero overhead.
  */
 
@@ -198,7 +198,7 @@ export class OcclusionCuller {
                 e.proxy.visible = false;
                 continue;
             }
-            // Hidden by someone ELSE (group.hide, a knob): hands off — not ours to show,
+            // Hidden by someone ELSE (a knob, a holder): hands off — not ours to show,
             // pointless to test.
             if (!e.culled && !e.target.visible) {
                 e.streak = 0;

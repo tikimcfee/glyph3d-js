@@ -137,14 +137,6 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // sibling effect mounted first.
     get cameraController() { return cameraControllerRef?.current ?? null; },
 
-    // Subsystems not yet supplied by the r3f client. Commands that need these
-    // will error until the corresponding field is wired (the iterative work).
-    selectionManager: null,
-    fileStateManager: null,
-    codeColorManager: null,
-    spatialManager: null,
-
-    windowManager: null,
     /** @type {WebSocketBridge|null} */ wsbridge: null,
 
     // Camera-locked HUD bar of window tiles (CameraDock). Created in the effect
@@ -205,7 +197,6 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     annotations: new Map(),
     gridVisualState: new Map(),
     /** @type {(() => void)|null} */ _cancelCameraAnimation: null,
-    spatialNav: null,
 
     mode: { state: 'explorer' },
     attentionManager: new AttentionManager(),

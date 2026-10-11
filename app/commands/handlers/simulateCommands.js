@@ -1,11 +1,9 @@
 /**
- * Simulate commands: keyboard events and navigation status.
+ * Simulate commands: synthetic input events.
  *
- * simulate.key — dispatch a KeyboardEvent on document
- * nav.status   — report SpatialNavigator state (focus, mode, neighbors)
+ * simulate.key   — dispatch a KeyboardEvent on document
+ * simulate.wheel — dispatch a WheelEvent on the canvas
  */
-
-import { box, kvLines } from '../formatResponse.js';
 
 /**
  * Map common key names to their `code` property.
@@ -132,72 +130,4 @@ export default function registerSimulateCommands(router) {
         }));
         return { text: `OK: dispatched wheel deltaY=${dy} deltaX=${dx}`, data: { deltaY: dy, deltaX: dx } };
     }, { description: 'Dispatch a WheelEvent on the canvas (drives camera/terminal scroll)', usage: '<deltaY> [deltaX]' });
-
-    // ================================================================
-    //  nav.status
-    //
-    //  Reports SpatialNavigator state: focus index, grid name, mode,
-    //  and what h/j/k/l would navigate to from the current position.
-    // ================================================================
-
-    router.register('nav.status', (args, ctx) => {
-        const nav = ctx.spatialNav;
-        if (!nav) {
-            return {
-                text: 'ERR: SpatialNavigator not available (window._spatialNav not wired into context)',
-                data: null,
-            };
-        }
-
-        const grids = ctx.getGrids();
-        const focusIndex = nav.focusIndex;
-        const mode = nav.mode;
-
-        let focusedName = '(none)';
-        if (focusIndex >= 0) {
-            const g = grids[focusIndex];
-            if (g) {
-                focusedName = g.getFilename?.() || g.getSourcePath?.() || `grid #${focusIndex}`;
-            }
-        }
-
-        // Use the navigator's own search method — single source of truth
-        function neighborName(direction) {
-            if (focusIndex < 0) return '(no focus)';
-            const current = grids[focusIndex];
-            if (!current) return '?';
-            const bestIdx = nav.findNearest(grids, current, direction);
-            if (bestIdx < 0) return '(none)';
-            const g = grids[bestIdx];
-            const name = g.getFilename?.() || g.getSourcePath?.() || `grid #${bestIdx}`;
-            return `#${bestIdx} ${name}`;
-        }
-
-        const data = {
-            'focus':    focusIndex >= 0 ? `#${focusIndex} ${focusedName}` : '(none)',
-            'mode':     mode,
-            'grids':    String(grids.length),
-            'left (h)': neighborName('left'),
-            'right (l)':neighborName('right'),
-            'up (k)':   neighborName('up'),
-            'down (j)': neighborName('down'),
-        };
-
-        const lines = kvLines(data, 12);
-        return {
-            text: box('NAV STATUS', lines, 50) + '\nOK: nav.status',
-            data: {
-                focusIndex,
-                focusedName: focusIndex >= 0 ? focusedName : null,
-                mode,
-                gridCount: grids.length,
-                neighbors: {
-                    left:  neighborName('left'),
-                    right: neighborName('right'),
-                    up:    neighborName('up'),
-                    down:  neighborName('down'),
-                },
-            },
-        };
-    }, { description: 'Report SpatialNavigator focus, mode, and directional neighbors' });
 }

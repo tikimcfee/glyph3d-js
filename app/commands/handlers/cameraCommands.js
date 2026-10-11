@@ -75,7 +75,6 @@ export default function registerCameraCommands(router) {
             let framed = false;
             if (idx >= 0) {
                 framed = !!ctx.cameraController.focusOnGrid(idx);
-                if (framed && ctx.spatialNav) ctx.spatialNav.focusGrid(idx, false);
             }
             if (!framed && resolved.grid) {
                 // A non-grid window (e.g. a terminal) or grid fallback: frame it by its world bounds.

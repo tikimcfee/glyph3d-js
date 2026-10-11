@@ -31,7 +31,6 @@ function makeCtx({ docked }) {
       focusOnObject: (g) => { flights.push(['focusOnObject', g]); return true; },
       focusOnGrid: (i) => { flights.push(['focusOnGrid', i]); },
     },
-    spatialNav: null,
   };
 }
 

@@ -1319,11 +1319,7 @@ export default class TerminalGrid extends FramedGlyphField {
      * Create a dark background plane behind the terminal for readability.
      * Sized to fit cols×rows with padding. Updated on resize.
      *
-     * L0 invariant (editable-3d-ide cross-ref): this mesh is also the
-     * raycast hit-target for the terminal entity. EntityInputRouter's
-     * _raycast (src/services/interaction/EntityInputRouter.js) walks
-     * `registry.findByType('terminal')`, pulls `entry.grid?._background`,
-     * and intersects. So:
+     * L0 invariant: this mesh is also the terminal entity's hit target. So:
      *   - The mesh must exist and have `visible = true` (THREE.Mesh default).
      *   - It must be `DoubleSide` so a camera approaching from either side
      *     can hit it (the grid is typically drawn at z=0 with the camera
@@ -1332,7 +1328,7 @@ export default class TerminalGrid extends FramedGlyphField {
      *     _updateBackground) is effectively full-bleed over the cell grid,
      *     giving clicks a generous target even at the edge of the last row.
      * Do not remove, shrink below the cell extent, or set `visible = false`
-     * without replacing the raycast target with another mesh.
+     * without replacing the hit target with another mesh.
      * @private
      */
     _initBackground() {

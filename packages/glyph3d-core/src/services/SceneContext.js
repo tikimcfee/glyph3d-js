@@ -5,9 +5,9 @@
 /**
  * SceneContext — shared reference bag for subsystems
  *
- * Lightweight container passed to CameraController, CodeColorManager,
- * HeatmapProvider, etc. Holds references to shared Three.js objects
- * without owning their lifecycle. GitHubRepoViewer maintains ownership.
+ * Lightweight container passed to the camera controller (r3f's ViewerCamera
+ * builds it). Holds references to shared Three.js objects without owning
+ * their lifecycle.
  *
  * Grids are accessed via getGrids() (backed by a closure) rather than
  * a cached array ref, because clearGrids() replaces the array object.
