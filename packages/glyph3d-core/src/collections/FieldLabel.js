@@ -191,9 +191,11 @@ export default class FieldLabel extends THREE.Object3D {
         }
 
         if (this._text) {
+            // Row 0's center half a line below 0, so the block fills [−rows·L, 0] — the
+            // span _applyGeometry centers on the anchor and the plate.
             this._instancedField.loadText(this._text, {
                 color: this.textColor,
-                origin: { x: 0, y: 0, z: 0 },
+                origin: { x: 0, y: -this._mLine / 2, z: 0 },
                 wrapWidth: 0,
             });
         } else {

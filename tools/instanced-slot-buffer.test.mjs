@@ -133,17 +133,17 @@ console.log('Testing LayoutGenerator...');
     // Slot 0 ('H'): x=0, y=-10 (pen vertical center = -charHeight/2)
     const s0 = result.buffer.getSlot(0);
     close(s0.pos[0], 0.0, 'Slot 0 x=0');
-    close(s0.pos[1], -10.0, 'Slot 0 y=-10');
+    close(s0.pos[1], 0.0, 'Slot 0 y=0 (row 0 center on the origin)');
 
     // Slot 4 ('o'): x=40, y=-10
     const s4 = result.buffer.getSlot(4);
     close(s4.pos[0], 40.0, 'Slot 4 x=40');
-    close(s4.pos[1], -10.0, 'Slot 4 y=-10');
+    close(s4.pos[1], 0.0, 'Slot 4 y=0');
 
-    // Slot 5 ('W'): x=0, y=-34 (-lineSpacing - charHeight/2 = -24 - 10 = -34)
+    // Slot 5 ('W'): x=0, y=-24 (row 1's center: -lineSpacing)
     const s5 = result.buffer.getSlot(5);
     close(s5.pos[0], 0.0, 'Slot 5 x=0');
-    close(s5.pos[1], -34.0, 'Slot 5 y=-34');
+    close(s5.pos[1], -24.0, 'Slot 5 y=-24');
 
     // Bounds
     ok(result.bounds.width >= 50, `Bounds width is ${result.bounds.width} >= 50`);
@@ -165,19 +165,19 @@ console.log('Testing LayoutGenerator...');
     // Seg 0: slots 0..4 (1..5) at z=0, visualRow 0
     const s0 = result.buffer.getSlot(0);
     close(s0.pos[0], 0.0, 's0 x=0');
-    close(s0.pos[1], -10.0, 's0 y=-10');
+    close(s0.pos[1], 0.0, 's0 y=0');
     close(s0.pos[2], 0.0, 's0 z=0');
 
-    // Seg 1: slot 5 ('6') at x=0, visualRow 1 (y=-34), z=-3
+    // Seg 1: slot 5 ('6') at x=0, visualRow 1 (y=-24), z=-3
     const s5 = result.buffer.getSlot(5);
     close(s5.pos[0], 0.0, 's5 wraps to x=0');
-    close(s5.pos[1], -34.0, 's5 y=-34');
+    close(s5.pos[1], -24.0, 's5 y=-24');
     close(s5.pos[2], -3.0, 's5 z=-3.0');
 
-    // Seg 2: slot 10 ('1') at x=0, visualRow 2 (y=-58), z=-6
+    // Seg 2: slot 10 ('1') at x=0, visualRow 2 (y=-48), z=-6
     const s10 = result.buffer.getSlot(10);
     close(s10.pos[0], 0.0, 's10 wraps to x=0');
-    close(s10.pos[1], -58.0, 's10 y=-58');
+    close(s10.pos[1], -48.0, 's10 y=-48');
     close(s10.pos[2], -6.0, 's10 z=-6.0');
 }
 

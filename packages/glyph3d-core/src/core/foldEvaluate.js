@@ -39,10 +39,10 @@ export function measureSlotSpan(pos, sizes, startSlot, count) {
         const px = pos[s * 3], py = pos[s * 3 + 1], pz = pos[s * 3 + 2];
         const sw = sizes[s * 2], sh = sizes[s * 2 + 1];
         if (px < minX) minX = px;
-        if (py < minY) minY = py;
+        if (py - sh / 2 < minY) minY = py - sh / 2;
         if (pz < minZ) minZ = pz;
         if (px + sw > maxX) maxX = px + sw;
-        if (py + sh > maxY) maxY = py + sh;
+        if (py + sh / 2 > maxY) maxY = py + sh / 2;
         if (pz > maxZ) maxZ = pz;
     }
     if (minX === Infinity) return null;

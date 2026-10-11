@@ -185,8 +185,9 @@ export function generateLayout(text, options = {}) {
 
             // Flow position; the page fold (if on) is applied after the loop.
             const posX = origin.x + ((wrapWidth > 0) ? segAdv : lineAdv);
-            // Vertical anchor is cell vertical center
-            const posY = origin.y - (screenRow * lineSpacing) - (charHeight * 0.5);
+            // The anchor (core/foldGeometry ROW CONVENTION): pen origin x, cell-center y;
+            // row 0's center sits ON origin.y.
+            const posY = origin.y - (screenRow * lineSpacing);
             const posZ = origin.z - (wrapSeg * zStep);
             if (slotRows) slotRows[totalGlyphs - startSlot] = screenRow;
 
@@ -241,7 +242,7 @@ export function generateLayout(text, options = {}) {
             const shift = pageShift(slotRows[s - startSlot], page);
             const b = s * SLOT_FLOATS;
             f32[b + LANE_POS_X] += shift.dx;
-            f32[b + LANE_POS_Y] = origin.y - shift.relY - charHeight * 0.5;
+            f32[b + LANE_POS_Y] = origin.y - shift.relY;
             f32[b + LANE_POS_Z] += shift.dz;
         }
     }

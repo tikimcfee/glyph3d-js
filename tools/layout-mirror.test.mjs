@@ -22,7 +22,7 @@
 import { buildBatchBuffers, resolveLayoutParams } from '../packages/glyph3d-core/src/workers/builders/index.js';
 import { computeCellMetrics } from '../packages/glyph3d-core/src/core/cellMetrics.js';
 import LayoutDescription from '../packages/glyph3d-core/src/core/LayoutDescription.js';
-import { evaluateFold } from '../packages/glyph3d-core/src/core/foldEvaluate.js';
+import { evaluateFold, measureSlotSpan } from '../packages/glyph3d-core/src/core/foldEvaluate.js';
 import { pageFold, layoutScan } from '../packages/glyph3d-core/src/core/foldGeometry.js';
 
 let pass = 0, fail = 0;
@@ -76,17 +76,6 @@ const srcLines = TEXT.split('\n');
 const ORIGIN = { x: -1.5, y: 2.25, z: 0.5 };
 let emojiSlots = 0, wrappedCases = 0, paginatedCases = 0;
 
-/** The oracle's measured box: min/max over the longhand fold's own output. */
-function measure(pos, sizes, count) {
-  let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-  for (let s = 0; s < count; s++) {
-    const px = pos[s * 3], py = pos[s * 3 + 1], pz = pos[s * 3 + 2];
-    const sw = sizes[s * 2], sh = sizes[s * 2 + 1];
-    if (px < mnx) mnx = px; if (py < mny) mny = py; if (pz < mnz) mnz = pz;
-    if (px + sw > mxx) mxx = px + sw; if (py + sh > mxy) mxy = py + sh; if (pz > mxz) mxz = pz;
-  }
-  return { min: { x: mnx, y: mny, z: mnz }, max: { x: mxx, y: mxy, z: mxz } };
-}
 
 /** Assemble a description EXACTLY as CodeGrid._buildLayoutDescription does. */
 function describe(buffers, layout, scroll, displacements = null) {
@@ -172,7 +161,7 @@ for (const { name, layout: layoutSpec, scroll } of CASES) {
 
   // ── extent() vs the oracle's measured box ──
   const ext = desc.extent();
-  const box = measure(pos, buffers.sizes, buffers.count);
+  const box = measureSlotSpan(pos, buffers.sizes, 0, buffers.count);   // the oracle's measured box
   ok(!!ext, `${name}: extent produced`);
   if (ext) {
     // CONTAINMENT is the hard contract: the cull box must never clip live content.

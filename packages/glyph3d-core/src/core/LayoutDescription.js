@@ -37,7 +37,7 @@ export default class LayoutDescription {
      * @param {number} [p.originZ]
      * @param {number} p.lineSpacing
      * @param {number} [p.zStep]  - world z per intra-line wrap segment (charHeight × zWrapSpacing)
-     * @param {number} [p.cellHeight] - a row's height (position is the cell's BOTTOM edge)
+     * @param {number} [p.cellHeight] - a row's height (position is the cell's vertical center)
      * @param {number} [p.advance] - nominal per-glyph advance (fallback when sizes is absent)
      * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (the conveyor)
      * @param {Float32Array|null} [p.displacements] - arranger displacements, flat [dx,dy,dz]

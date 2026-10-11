@@ -16,9 +16,13 @@
  * readback — measures back out what was put in. Three scalars come off the layout scan
  * (`totalRows`, `maxRowExtent`, `maxSegs`) and everything below is closed form on them.
  *
- * ROW CONVENTION. A glyph's position is the BOTTOM-LEFT of its cell, so a row at world y
- * occupies [y, y + cellHeight] and a row's extent already includes its last glyph's
- * advance. `relY` throughout is distance BELOW the origin: y = origin.y − relY.
+ * ROW CONVENTION — the anchor glyph3d-rs uses too. A glyph's position is its PEN ORIGIN
+ * (the cell's left edge) at the cell's VERTICAL CENTER, so a glyph at world y occupies
+ * [y − h/2, y + h/2] and the quad grows right from x by its advance. Row 0's center sits
+ * ON the origin; rows step down by lineSpacing. `relY` throughout is distance BELOW the
+ * origin: y = origin.y − relY. The slots LayoutGenerator writes, the shader's quad
+ * (uv.y − 0.5)·height, positionAt, the caret, the frame clip and the background all
+ * read this one convention.
  *
  * PAGINATION HAS NO SEPARATE GATE. `page.rows > 0` arms it and `screenRow >= page.rows`
  * fires it — one comparison, in the kernel and here alike. Content that fits inside one
@@ -101,14 +105,14 @@ export function pageShift(screenRow, page) {
  *   maxX  the widest row, plus the fan of however many columns the content actually
  *         reached (`usedCols`, not the configured `pagesWide` — a two-page file in a
  *         five-wide layout is two columns wide, not five).
- *   maxY  the shallowest row's top edge, where "top edge" is that row's y plus the
+ *   maxY  the shallowest row's top edge, where "top edge" is that row's y plus HALF the
  *         TALLEST glyph in the item — NOT a nominal cell height. Rows sit at a uniform
  *         pitch but a glyph is not required to fit it, and one that exceeds the pitch
- *         overhangs the row above rather than the top of the item, so taking the global
- *         tallest over-covers by at most (tallest − tallest-on-the-top-row) and can never
- *         clip. Rows above page 0 — including the negative screen rows a scroll lifts
+ *         overhangs its neighbours rather than the top of the item, so taking the global
+ *         tallest over-covers by at most half (tallest − tallest-on-the-top-row) and can
+ *         never clip. Rows above page 0 — including the negative screen rows a scroll lifts
  *         above the origin — never page-shift, so the shallowest row is the first one.
- *   minY  the deepest row. Unpaginated that is the last row; paginated it is the last
+ *   minY  the deepest row's bottom edge (its y less half the tallest glyph). Unpaginated that is the last row; paginated it is the last
  *         BAND's deepest row, which is a full page's last row whenever that band holds
  *         more than one page, and the final page's own last row when it holds one.
  *         Band stride exceeds a page's own height, so the last band always dominates.
@@ -136,7 +140,8 @@ export function pageShift(screenRow, page) {
  * @param {number} p.lineSpacing
  * @param {number} [p.zStep] - world z per wrap segment
  * @param {number} [p.cellHeight] - the TALLEST glyph's height (layoutScan.maxGlyphHeight).
- *   A glyph's position is its cell's BOTTOM edge, so this is what the top edge adds.
+ *   A glyph's position is its cell's vertical center, so half of it lies above the top
+ *   row's anchor and half below the bottom row's.
  * @param {number} [p.scrollOffset] - visual rows the conveyor has shifted content up by
  * @param {?ReturnType<typeof pageFold>} [p.page]
  * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
@@ -179,8 +184,8 @@ export function foldExtent(p) {
         }
     }
 
-    const min = { x: origin.x, y: origin.y - botRelY, z: minZ };
-    const max = { x: maxX, y: origin.y - topRelY + cellH, z: origin.z };
+    const min = { x: origin.x, y: origin.y - botRelY - cellH / 2, z: minZ };
+    const max = { x: maxX, y: origin.y - topRelY + cellH / 2, z: origin.z };
     return {
         min, max,
         width: max.x - min.x,

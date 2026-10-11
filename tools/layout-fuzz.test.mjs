@@ -18,7 +18,7 @@
 import { buildBatchBuffers, resolveLayoutParams } from '../packages/glyph3d-core/src/workers/builders/index.js';
 import { computeCellMetrics } from '../packages/glyph3d-core/src/core/cellMetrics.js';
 import LayoutDescription from '../packages/glyph3d-core/src/core/LayoutDescription.js';
-import { evaluateFold } from '../packages/glyph3d-core/src/core/foldEvaluate.js';
+import { evaluateFold, measureSlotSpan } from '../packages/glyph3d-core/src/core/foldEvaluate.js';
 import { pageFold, layoutScan } from '../packages/glyph3d-core/src/core/foldGeometry.js';
 
 const argvFlag = (name, def) => {
@@ -175,13 +175,9 @@ for (let k = 0; k < SEEDS; k++) {
     // ── extent() must cover every glyph the oracle placed ──
     if (!bad) {
       const ext = desc.extent();
-      let mnx = Infinity, mny = Infinity, mnz = Infinity, mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
-      for (let s = 0; s < buffers.count; s++) {
-        const px = bulk[s * 3], py = bulk[s * 3 + 1], pz = bulk[s * 3 + 2];
-        const sw = buffers.sizes[s * 2], sh = buffers.sizes[s * 2 + 1];
-        if (px < mnx) mnx = px; if (py < mny) mny = py; if (pz < mnz) mnz = pz;
-        if (px + sw > mxx) mxx = px + sw; if (py + sh > mxy) mxy = py + sh; if (pz > mxz) mxz = pz;
-      }
+      const m = measureSlotSpan(bulk, buffers.sizes, 0, buffers.count);
+      const mnx = m?.min.x ?? Infinity, mny = m?.min.y ?? Infinity, mnz = m?.min.z ?? Infinity;
+      const mxx = m?.max.x ?? -Infinity, mxy = m?.max.y ?? -Infinity, mxz = m?.max.z ?? -Infinity;
       if (!ext) {
         bad = { seed, scroll, kind: 'extent-null', d: 0 };
       } else {
