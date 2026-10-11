@@ -123,9 +123,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   through `_relayoutPreservingCursor()`.
 - **Layout** flows through the `LayoutDescription` seam (`core/LayoutDescription.js`):
   modes are params, set via `grid.layout` / `grid.frame` / `grid.scroll`. Glyph positions
-  are computed by the GPU compute engine (`compute/GlyphLayoutKernel.js`) — one fold over
-  CPU-authored tables + params + displacements, with no CPU fallback; `layout.verify
-  <grid>` asserts the live scene.
+  are written on the CPU by `core/LayoutGenerator.js` into `InstancedSlotBuffer` slots;
+  the page fold is `core/foldGeometry.js` (`pageFold` / `pageShift`), the same one
+  `LayoutDescription` answers caret / pick / extent queries with
+  (`tools/layout-generator-fold.test.mjs` binds them).
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
 - **Frustum culling** is three's built-in per-object cull fed the real instance extent —
