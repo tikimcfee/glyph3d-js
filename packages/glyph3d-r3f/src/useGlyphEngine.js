@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bootGlyphEngine } from './glyphEngine.js';
+import { bootGlyphEngine } from '@glyph3d/core';
 
 /**
  * Boot the glyph engine (atlas + shaper + slug) once and expose its state.

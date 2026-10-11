@@ -24,9 +24,6 @@ export {
     GLYPH_WIDTH_COMPRESS_DEFAULT,
 } from './core/glyphMaterial.js';
 
-// Backwards compatibility alias: GlyphField re-exports InstancedField
-export { default as GlyphField } from './collections/InstancedField.js';
-
 // Collections - batched text abstractions
 export { default as CodeGrid } from './collections/CodeGrid.js';
 export { default as FramedGlyphField } from './collections/FramedGlyphField.js';

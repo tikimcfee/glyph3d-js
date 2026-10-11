@@ -27,7 +27,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
 // 1. Root and Core Exports
 {
     assert(typeof Glyph3D.InstancedField === 'function', 'InstancedField exported from root');
-    assert(typeof Glyph3D.GlyphField === 'function', 'GlyphField alias exported from root');
+    assert(Glyph3D.GlyphField === undefined, 'no GlyphField alias (InstancedField is the one name)');
     assert(typeof Glyph3D.InstancedSlotBuffer === 'function', 'InstancedSlotBuffer exported from root');
     assert(typeof Glyph3D.generateLayout === 'function', 'generateLayout exported from root');
     assert(typeof Glyph3D.FontChain === 'function', 'FontChain exported from root');

@@ -30,7 +30,7 @@ const { chain, fonts } = await bootHeadlessFontChain();
 const { MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder,
         slugCoreKey, saveSlugCore } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
 const { blobStore } = await import(`${ROOT}/packages/glyph3d-core/src/services/state/index.js`);
-const { LARGE_CORE_RANGES } = await import(`${ROOT}/packages/glyph3d-r3f/src/coreRanges.js`);
+const { LARGE_CORE_RANGES } = await import(`${ROOT}/packages/glyph3d-core/src/core/coreRanges.js`);
 
 const codepointsFromRanges = (ranges) => {
     let s = '';
