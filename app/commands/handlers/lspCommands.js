@@ -12,6 +12,7 @@
  */
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { renderSheetGrid } from './fileLoader.js';
+import { canonicalPath, fromFileUri } from './pathResolve.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const DEF_COLOR = { r: 0.3, g: 0.8, b: 1.0 }; // matches highlightCommands' 'blue'
@@ -29,10 +30,6 @@ function utf16ToCp(lineText, col) {
 }
 
 /** file:///<path> → <path>, the form renderSheetGrid / the registry address files by. */
-function pathFromURI(u) {
-    return String(u).replace(/^file:\/\/\//, '').replace(/^file:\/\//, '');
-}
-
 /**
  * Open (or focus) the grid for an LSP location, highlight its range, and fly to it.
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).
@@ -44,7 +41,7 @@ function pathFromURI(u) {
 async function jumpToLocation(ctx, router, loc) {
     let destId;
     try {
-        destId = await renderSheetGrid(ctx, pathFromURI(loc.uri));
+        destId = await renderSheetGrid(ctx, canonicalPath(ctx, fromFileUri(loc.uri)));
     } catch (e) {
         return { ok: false, text: `${loc.uri} (couldn't open: ${e?.message || e})` };
     }

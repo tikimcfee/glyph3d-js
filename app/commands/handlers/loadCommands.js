@@ -29,7 +29,7 @@ export default function registerLoadCommands(router) {
         if (args[0] === 'clear') {
             const n = ring.length;
             ctx.loadTraces = [];
-            ctx.frameTasks = [];
+            ctx.frameTasks?.splice(0);   // in place: installFrameWatch holds this array for the page's life
             return { text: `OK: load trace + frame rings cleared (${n} traces dropped)`, data: { cleared: n } };
         }
 

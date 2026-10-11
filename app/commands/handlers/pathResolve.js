@@ -43,3 +43,10 @@ export function canonicalPath(ctx, path) {
 export function toFileUri(path) {
     return `file:///${String(path).replace(/^\/+/, '')}`;
 }
+
+/** file:// URI → path — toFileUri's inverse. Percent-escapes decode (LSP servers send them);
+ *  a POSIX path keeps its leading `/`, a Windows drive path (`file:///C:/x`) stays `C:/x`. */
+export function fromFileUri(uri) {
+    const rest = decodeURIComponent(String(uri).replace(/^file:\/\/\/?/, ''));
+    return /^[A-Za-z]:\//.test(rest) ? rest : `/${rest}`;
+}

@@ -65,7 +65,7 @@ export default function registerCameraCommands(router) {
         // the just-loaded camera pose (position looked kept since the tile sits where you are). The
         // dock owns a docked tile's framing — leave the world camera be. Loose windows still frame.
         if ((resolved.registryId && ctx.cameraDock && (ctx.holderOf?.(resolved.registryId) === ctx.cameraDock || ctx.cameraDock?.has?.(resolved.registryId)))
-            || (resolved.grid && ctx.dockTiles?.has?.(resolved.grid))) {
+            || (resolved.grid && ctx.cameraDock?.tiles?.has?.(resolved.grid))) {
             return { text: `OK: '${resolved.registryId || target}' is docked — the dock frames it`, data: { docked: true, registryId: resolved.registryId } };
         }
 
