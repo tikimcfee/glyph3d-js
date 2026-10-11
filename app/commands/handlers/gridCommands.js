@@ -10,7 +10,7 @@ import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerGridCommands(router) {
     router.register('grid.list', (args, ctx) => {

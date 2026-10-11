@@ -26,7 +26,7 @@ function parseDims(arg) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerFrameCommands(router) {
     router.register('frame.capture', async (args, ctx) => {

@@ -19,7 +19,7 @@ const DIRS = ['left', 'right', 'up', 'down'];
 const getDock = (ctx) => (ctx.cameraDock && typeof ctx.cameraDock.splitPane === 'function' ? ctx.cameraDock : null);
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerPaneCommands(router) {
     router.register('pane.split', (args, ctx) => {

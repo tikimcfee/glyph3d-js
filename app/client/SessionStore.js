@@ -56,6 +56,7 @@ import { openAgentSession } from '../commands/handlers/agentCommands.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
+/** @import { AppClient } from './CommandProvider.jsx' */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
 // Schema policy: restore is FORWARD-ADDITIVE. Every restored field is guarded/optional, so a
@@ -142,7 +143,7 @@ export function isEphemeralSession() {
 }
 
 export default class SessionStore {
-  /** @param {{ ctx: object, router: object, bridge: object }} deps */
+  /** @param {{ ctx: AppClient['ctx'], router: AppClient['router'], bridge: AppClient['bridge'] }} deps */
   constructor({ ctx, router, bridge }) {
     this.ctx = ctx;
     this.router = router;

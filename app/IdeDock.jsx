@@ -12,6 +12,7 @@ import MonitorPanel from './MonitorPanel.jsx';
 import LayoutPanel from './LayoutPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
 import LspResultsPanel from './LspResultsPanel.jsx';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // IdeDock — the panel layer. A dockview surface that hosts the IDE's DOM panels
 // (file tree, terminals; inspector/search later) with tabs, splits, float and
@@ -68,6 +69,7 @@ function openPanel(api, id) {
   return api.addPanel(opts);
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function IdeDock({ client }) {
   const apiRef = useRef(null);
   // Live client, read by the component factory below. Survives fromJSON restore

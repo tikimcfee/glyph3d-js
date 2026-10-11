@@ -88,7 +88,7 @@ const splitTarget = (args) => (args.length >= 2 ? [args[0], args[1]] : [undefine
 const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.following ? ' · live' : ''}` : '');
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerBookCommands(router) {
     router.register('book.list', (args, ctx) => {

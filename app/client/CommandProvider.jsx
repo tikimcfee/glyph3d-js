@@ -279,10 +279,23 @@ function DockRunner({ stateRef }) {
   return null;
 }
 
-/** Access the wired command client: { ctx, router, registry, bridge }. */
+/**
+ * Access the wired command client: { ctx, router, registry, bridge }.
+ * @returns {AppClient | null}
+ */
 export function useAppCommands() {
   return useContext(AppCommandContext);
 }
+
+/**
+ * The wired client `onReady` hands up — the one handle DOM chrome holds on the spine.
+ * @typedef {Object} AppClient
+ * @property {ReturnType<typeof buildClientContext>} ctx  the context bag every handler reads
+ * @property {CommandRouter} router  the command bus — every action is router.execute(<verb>)
+ * @property {AppClient['ctx']['registry']} registry
+ * @property {WebSocketBridge|null} bridge  the relay socket; null until it connects
+ * @property {SessionStore} [session]  saved-state store; set once the bridge is wired
+ */
 
 /**
  * CommandProvider — wires the command spine inside an r3f Canvas.
@@ -319,6 +332,7 @@ function resolveRelay(loc, relayParam) {
 export default function CommandProvider({ atlas, relay = null, repo = null, cameraControllerRef, onReady, children }) {
   const { scene, camera, gl } = useThree();
   const registryBundle = useGridRegistry();
+  /** @type {{ current: AppClient | null }} */
   const stateRef = useRef(null);
 
   // Build router + context once. useThree's scene/camera/gl are stable refs;

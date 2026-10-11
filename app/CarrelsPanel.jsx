@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
  * CarrelsPanel — the 2D roster of the world's reading desks (Carrel).
@@ -143,6 +144,7 @@ function hostableSections(ctx) {
     ].filter((s) => s.items.length);
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function CarrelsPanel({ client }) {
     const [desks, setDesks] = useState([]);
     /** Open seat menu: { desk, x, y } | null. */

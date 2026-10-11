@@ -82,7 +82,7 @@ function parseZoom(arg) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerWindowCommands(router) {
     router.register('window.scale', (args, ctx) => {

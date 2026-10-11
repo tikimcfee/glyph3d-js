@@ -41,7 +41,7 @@ function normalizeRepoRef(ref) {
 }
 
 /**
- * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerRepoCommands(router) {
     router.register('repo.load', async (args, ctx) => {

@@ -20,7 +20,7 @@ function b64ToUtf8(b64) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerSystemCommands(router) {
     router.register('help', (args, ctx) => {

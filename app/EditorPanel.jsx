@@ -3,6 +3,7 @@ import CodeMirror from '@uiw/react-codemirror';
 import { EditorView, Decoration } from '@codemirror/view';
 import { StateField, RangeSetBuilder } from '@codemirror/state';
 import { resolveScopeColor, FOREGROUND } from '@glyph3d/core/parsing';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // EditorPanel — a 2D companion to the focused 3D code grid. Read-only (Phase 1): it
 // mirrors whichever CodeGrid holds primary/key focus, rendering the SAME source and the
@@ -65,6 +66,7 @@ function decorationField(captures) {
   });
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function EditorPanel({ client }) {
   const [snap, setSnap] = useState({ filename: null, content: '', captures: null });
 

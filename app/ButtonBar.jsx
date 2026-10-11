@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { getSetting } from './client/settings.js';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // ButtonBar — the top toolbar of text-label buttons (no icons, per the house
 // style). Each button is a thin command-bus surface: it runs a router command,
@@ -57,7 +58,11 @@ const styles = {
   },
 };
 
-/** A single text button that runs a command and surfaces hover. */
+/**
+ * A single text button that runs a command and surfaces hover.
+ * @param {object} props
+ * @param {AppClient | null} props.client
+ */
 function Btn({ label, title, cmd, client }) {
   const enabled = !!client;
   return (
@@ -79,6 +84,7 @@ function Btn({ label, title, cmd, client }) {
 // view.minimap setting (lit when on) and flips it via the bus (view.minimap), so the
 // button, the Settings panel, and the CLI stay in sync through the one key. Re-reads on
 // StateController's state-changed event (same channel the panel writes through).
+/** @param {{ client: AppClient | null }} props */
 function MinimapToggle({ client }) {
   const enabled = !!client;
   const [on, setOn] = useState(() => getSetting('view.minimap'));
@@ -107,6 +113,7 @@ function MinimapToggle({ client }) {
 // open/closed state; a click toggles via the bus (panel.toggle), so it's the same
 // action the CLI/Claude can run. The list is read on open (no live subscription
 // needed — it's a momentary menu).
+/** @param {{ client: AppClient | null }} props */
 function PanelsMenu({ client }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
@@ -208,6 +215,10 @@ function ConnectionChip({ client }) {
   );
 }
 
+/**
+ * @param {object} props
+ * @param {AppClient | null} props.client
+ */
 export default function ButtonBar({ client, onOpenPalette, dockHidden, onToggleDock, dockMode, onToggleDockMode }) {
   return (
     <div style={styles.bar}>

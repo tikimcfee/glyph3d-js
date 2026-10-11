@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // TerminalView — a 2D interactive xterm bound to ONE TerminalGrid (by `termId`). Separate
 // from the code EditorPanel on purpose: a terminal's input (ctrl-capture, escape sequences,
@@ -31,6 +32,10 @@ const styles = {
   empty: { padding: 12, color: '#5c6675', font: '12px ui-monospace, "JetBrains Mono", monospace' },
 };
 
+/**
+ * @param {object} props
+ * @param {AppClient | null} props.client
+ */
 export default function TerminalView({ client, termId, panelApi }) {
   const hostRef = useRef(null);
 

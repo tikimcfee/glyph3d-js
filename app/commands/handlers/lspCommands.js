@@ -36,6 +36,9 @@ function pathFromURI(u) {
  * Open (or focus) the grid for an LSP location, highlight its range, and fly to it.
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).
  * Shared by lsp.definition (a query result) and lsp.goto (a known location).
+ * @param {object} ctx
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ * @param {object} loc
  */
 async function jumpToLocation(ctx, router, loc) {
     let destId;
@@ -57,6 +60,9 @@ async function jumpToLocation(ctx, router, loc) {
     return { ok: true, gridId: destId };
 }
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerLspCommands(router) {
     router.register('lsp.definition', async (args, ctx) => {
         if (!ctx.lsp) return { text: 'ERR: LSP unavailable — connect the relay', data: null };

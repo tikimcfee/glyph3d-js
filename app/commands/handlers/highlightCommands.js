@@ -47,7 +47,7 @@ function parseColor(args, startIdx) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerHighlightCommands(router) {
 

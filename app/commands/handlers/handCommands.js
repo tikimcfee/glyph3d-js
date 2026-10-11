@@ -49,6 +49,9 @@ function describe(state, rendered) {
     return parts.join('  ');
 }
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerHandCommands(router) {
     router.register('hand.list', (_args, ctx) => {
         const stream = ctx.sourceStream;

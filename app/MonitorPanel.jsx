@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
  * MonitorPanel — where the memory went, and the levers to get it back.
@@ -88,6 +89,7 @@ function fmtBytes(b) {
     return `${(b / MB).toFixed(1)} MB`;
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function MonitorPanel({ client }) {
     const [stats, setStats] = useState(null);
     const [err, setErr] = useState(null);

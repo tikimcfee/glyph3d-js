@@ -6,6 +6,9 @@
  * The loadcurve rig reads it to put NUMBERS on the win.
  */
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerCullCommands(router) {
     router.register('cull.stats', (_args, ctx) => {
         const c = ctx.occlusionCuller;

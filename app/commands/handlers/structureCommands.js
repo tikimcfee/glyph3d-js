@@ -36,6 +36,9 @@ function resolveGrid(ctx, gridArg) {
     return resolveGridByIdOrIndex(ctx, String(targetId), 'grid', { byName: true });
 }
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerStructureCommands(router) {
     router.register('structure.grid', async (args, ctx) => {
         // [grid] [kind]; a lone arg that's a known kind applies to the focused grid.

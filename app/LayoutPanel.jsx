@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { LAYOUT_SCHEMES, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
  * LayoutPanel — the field's layout controls. Where grid.layout folds ONE file,
@@ -55,6 +56,7 @@ function readField(client) {
     };
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function LayoutPanel({ client }) {
     const [field, setField] = useState(() => readField(client));
 

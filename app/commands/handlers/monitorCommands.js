@@ -149,6 +149,9 @@ function readScene(ctx) {
     return { ready: true, total: entries.length, byType };
 }
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerMonitorCommands(router) {
 
     // ================================================================

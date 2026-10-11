@@ -159,7 +159,7 @@ function flushKimiWireLane(ctx, books, id, lane) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerAgentCommands(router) {
     router.register('agent.activity', (args, ctx) => {

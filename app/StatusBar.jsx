@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // StatusBar — the slim "what's happening" pill (bottom-left, clear of the HUD at
 // bottom-right). One-way reflection, owns no behavior:
@@ -21,6 +22,10 @@ function shortCurrent(s) {
   return s.length > 44 ? s.slice(0, 43) + '…' : s;
 }
 
+/**
+ * @param {object} props
+ * @param {AppClient | null} props.client
+ */
 export default function StatusBar({ client, hint }) {
   const [prog, setProg] = useState(null);          // { current, loaded, total } while a fetch runs (GitHub)
   const [activity, setActivity] = useState(null);  // ctx.status message — the general live signal

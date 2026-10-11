@@ -12,7 +12,7 @@
  */
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerRelayCommands(router) {
     router.register('relay.connect', (args, ctx) => {

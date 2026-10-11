@@ -1,3 +1,5 @@
+/** @import { AppClient } from './CommandProvider.jsx' */
+
 /**
  * terminalDockSync — wire a dockview group (the Terminals panel) to the terminal registry +
  * attention, returning the sync entrypoints.
@@ -16,7 +18,7 @@
  * intent, and only that takes focus + frames.
  *
  * @param {object} api dockview group api (addPanel/getPanel/panels/onDidActivePanelChange)
- * @param {{ getClient: () => object, listTerminalIds: (client: object) => string[] }} deps
+ * @param {{ getClient: () => AppClient | null, listTerminalIds: (client: AppClient) => string[] }} deps
  * @returns {{ syncPanels: Function, syncActive: Function, dispose: Function }}
  */
 export function wireTerminalDock(api, { getClient, listTerminalIds }) {

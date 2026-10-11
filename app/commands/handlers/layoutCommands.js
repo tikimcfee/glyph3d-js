@@ -27,7 +27,7 @@ import { schemeSettingsOpts } from '../../client/settings.js';
 import { WORLD_FLOOR_Y } from './spatialHelpers.js';
 
 /**
- * @param {import('../../../packages/glyph3d-core/src/services/orchestration/CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerLayoutCommands(router) {
     const names = Object.keys(LAYOUT_SCHEMES);

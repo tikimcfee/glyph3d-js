@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { canonicalPath } from './commands/handlers/pathResolve.js';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // FileTree — the Files panel IS the file browser. One tree that:
 //
@@ -213,6 +214,7 @@ function LoadedNode({ node, depth, ui }) {
   return <FileNode path={node.path} name={node.name} depth={depth} ui={ui} />;
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function FileTree({ client }) {
   const [connected, setConnected] = useState(false);
   const [rootInfo, setRootInfo] = useState(null);          // {root, extraRoots, home, sep} | null

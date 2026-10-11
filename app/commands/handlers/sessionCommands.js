@@ -12,6 +12,9 @@
  * The store is stashed on ctx.session by CommandProvider.
  */
 
+/**
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
+ */
 export default function registerSessionCommands(router) {
 
     // session.status — the phased loader's report: which named phase ran, how long it

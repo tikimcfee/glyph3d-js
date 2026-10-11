@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { kimiAgentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
  * AgentsPanel — the one 2D browser onto AgentBooks. ONE list of agent sessions, no
@@ -172,6 +173,7 @@ const sessPrefix = (id) => String(id).replace(/-/g, '').slice(0, 8);
 // prefix would otherwise show/match as "session_x"; its derivation strips it).
 const sessLaneId = (s) => (s.harness === 'kimi' ? kimiAgentIdForSession(s.id) : sessPrefix(s.id));
 
+/** @param {{ client: AppClient | null }} props */
 export default function AgentsPanel({ client }) {
     const books = () => client?.ctx?.agentBooks || null;
     const [agents, setAgents] = useState([]);

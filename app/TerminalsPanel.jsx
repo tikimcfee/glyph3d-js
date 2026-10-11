@@ -4,6 +4,7 @@ import 'dockview/dist/styles/dockview.css';
 import './ide-dock.css';
 import TerminalView from './TerminalView.jsx';
 import { wireTerminalDock } from './client/terminalDockSync.js';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // TerminalsPanel — the IDE's terminal workspace: a NESTED dockview where each live shell is a
 // real panel. Folding the old roster list and the standalone Terminal view into one tab, the
@@ -69,6 +70,7 @@ function readDims(client, id) {
   return e ? `${e.grid?.cols ?? '?'}×${e.grid?.rows ?? '?'}` : '';
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function TerminalsPanel({ client }) {
   // Live client read by the dockview component/tab factories (stable identities below).
   const clientRef = useRef(client);

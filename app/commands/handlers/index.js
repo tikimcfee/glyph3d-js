@@ -54,7 +54,7 @@ import registerVerifyCommands from './verifyCommands.js';
 
 /**
  * Register all built-in commands on a router.
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export function registerAllCommands(router) {
     registerSystemCommands(router);

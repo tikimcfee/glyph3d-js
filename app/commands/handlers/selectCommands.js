@@ -6,7 +6,7 @@
 import { box, kvLines } from '../formatResponse.js';
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerSelectCommands(router) {
     router.register('select', (args, ctx) => {

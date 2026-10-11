@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // RepoPanel — the thin SOURCES panel: what fills the world, from where.
 //
@@ -64,6 +65,7 @@ function currentRepoLabel(client) {
   return `${r.owner}/${r.repo}${r.branch ? '@' + r.branch : ''}`;
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function RepoPanel({ client }) {
   const [input, setInput] = useState('');
   const [pathInput, setPathInput] = useState('');

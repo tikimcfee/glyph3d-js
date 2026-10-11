@@ -3,6 +3,7 @@ import { stateController } from '@glyph3d/core/services/state';
 import { SETTINGS, GROUPS, getSetting } from './client/settings.js';
 import { schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import './SettingsPanel.css';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 // SettingsPanel — the IDE's settings surface. Renders the shared SETTINGS schema
 // as collapsible sections (one row per knob, grouped; all closed by default) and
@@ -140,6 +141,7 @@ const styles = {
   infoVal: { flex: '0 0 auto', color: '#9aa6ba', fontVariantNumeric: 'tabular-nums' },
 };
 
+/** @param {{ client: AppClient | null }} props */
 export default function SettingsPanel({ client }) {
   // Section order + subtitles come from GROUPS (settings.js) — the panel lists
   // sections in that registry's order, NOT the SETTINGS array order. Entries are

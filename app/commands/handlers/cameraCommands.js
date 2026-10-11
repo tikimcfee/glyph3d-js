@@ -22,7 +22,7 @@ function aimCameraAt(cc, cam, x, y, z) {
 }
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerCameraCommands(router) {
     router.register('camera.move', (args, ctx) => {

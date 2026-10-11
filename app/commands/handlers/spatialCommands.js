@@ -15,7 +15,7 @@ import {
 // ============ Command Registration ============
 
 /**
- * @param {import('../CommandRouter.js').default} router
+ * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router
  */
 export default function registerSpatialCommands(router) {
 

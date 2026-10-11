@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+/** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
  * LspResultsPanel — the 2D view on the LspNavigator controller.
@@ -67,6 +68,7 @@ function Row({ item, accent, onJump }) {
   );
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function LspResultsPanel({ client }) {
   const [st, setSt] = useState(() => readState(client));
 

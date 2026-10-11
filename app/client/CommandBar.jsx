@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
 import { rank } from './palette/rank.js';
 import { verbEntries, nounEntries } from './palette/providers.js';
+/** @import { AppClient } from './CommandProvider.jsx' */
 
 // One INFO line per palette action — what was picked and the verb line it ran.
 // Pairs with the bus dispatch trace (console.debug) and the attention timeline
@@ -72,6 +73,10 @@ function HighlightedKey({ text, positions }) {
   );
 }
 
+/**
+ * @param {object} props
+ * @param {AppClient | null} props.client
+ */
 export default function CommandBar({ client, open, onClose, onHighlight }) {
   const [value, setValue] = useState('');
   const [result, setResult] = useState(null);   // { ok: boolean, text: string }

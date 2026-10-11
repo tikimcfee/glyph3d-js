@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
+/** @import { AppClient } from './CommandProvider.jsx' */
 
 /**
  * HudPanel — THE one floating helper over the canvas: what you're locked into, and
@@ -106,6 +107,7 @@ function readFocus(client) {
   };
 }
 
+/** @param {{ client: AppClient | null }} props */
 export default function HudPanel({ client }) {
   const [f, setF] = useState(() => readFocus(client));
   const [nodes, setNodes] = useState([]);       // InteractionContext — subscription, no poll
