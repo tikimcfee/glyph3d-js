@@ -100,8 +100,8 @@ export function resolveLayoutParams(layout) {
  * Build the per-glyph ATTRIBUTES and the line table for a batch of texts.
  *
  * This is not a layout pass. Shaping decides which glyphs exist and how wide each one
- * is; the fold decides where they go, and the fold runs on the GPU (compute/GlyphLayoutKernel)
- * from the tables emitted here. So this walk touches every glyph exactly once to fill
+ * is; the fold decides where they go (core/foldEvaluate.evaluateFold over the tables
+ * emitted here). So this walk touches every glyph exactly once to fill
  * `sizes` / `glyphIds` / `colors` / `groupIds` and to record where each source line starts —
  * and nothing else. No positions, no bounds, no pagination: those were all the same CPU
  * fold, computed in registers and thrown away, and the fold's extent is a closed form on

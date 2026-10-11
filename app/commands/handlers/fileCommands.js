@@ -23,7 +23,6 @@ import { getSetting } from '../../client/settings.js';
 import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/loadStats.js';
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addClassifiedRow, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
-import { loadBakedIndex } from './bakedIndex.js';
 import { canonicalPath } from './pathResolve.js';
 import { toFileUri, fromFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
@@ -198,10 +197,6 @@ export default function registerFileCommands(router) {
             return { text: `ERR: listTree failed: ${err?.message || err}`, data: null };
         }
         trace.mark('list', { entries: listing.entries.length });
-        // The baked layout index (.glyph3d/bake/, tools/bake.mjs) — absent for most
-        // dirs (null, zero cost); present + valid, every record measures its grid
-        // before bytes lay and arms the post-laid GPU gate.
-        const baked = await loadBakedIndex(ctx, dir).catch(() => null);
 
         const joinBase = dir === '/' ? '' : dir;
         const entries = dir
@@ -245,7 +240,7 @@ export default function registerFileCommands(router) {
             let kb = 0;
             for (const c of contentMap.values()) kb += c?.content?.length ?? 0;
             trace.mark('fetch', { files: contentMap.size, kb: Math.round(kb / 1024) });
-            const stats0 = snapshotLoadStats();   // kernel-dispatch + atlas costs accrue from here
+            const stats0 = snapshotLoadStats();   // atlas + parse costs accrue from here
 
             let opened = 0;
             let placeholders = 0;
@@ -355,7 +350,7 @@ export default function registerFileCommands(router) {
                         }
                         continue;
                     }
-                    const pr = addFileRow(ctx, p, c.content, undefined, baked?.get(p)); // seats synchronously; load resolves later
+                    const pr = addFileRow(ctx, p, c.content); // seats synchronously; load resolves later
                     pending.push(pr);
                     pr.then(seat).catch(settleWarn);
                 }
@@ -374,16 +369,13 @@ export default function registerFileCommands(router) {
             // empty bounds and would measure wrong in the tree.
             const tSettle = performance.now();
             await Promise.allSettled(pending);
-            // The load-path counters (core/loadStats.js): kernel dispatches and atlas
-            // growths accrued during seat+settle — the build stage's hidden costs.
+            // The load-path counters (core/loadStats.js): atlas growths and parses
+            // accrued during seat+settle — the build stage's hidden costs.
             const d = diffLoadStats(stats0);
             trace.mark('build', {
                 grids: opened, chunks, settleMs: Math.round(performance.now() - tSettle),
-                kernels: d.kernelDispatches, kernelMs: Math.round(d.kernelMs),
                 atlasGrows: d.atlasGrows, atlasMs: Math.round(d.atlasMs),
                 atlasSwaps: d.atlasFieldsSwapped, atlasBlanks: d.atlasBlanks,
-                selfBakes: d.selfBakes, selfBakeMs: Math.round(d.selfBakeMs),
-                commits: d.commits, commitMs: Math.round(d.commitMs),
                 parses: d.analyzeParses, parseMs: Math.round(d.parseSyncMs),
                 parseWorkerMs: Math.round(d.parseWorkerMs),
                 yields: d.yields, yieldMs: Math.round(d.yieldMs),

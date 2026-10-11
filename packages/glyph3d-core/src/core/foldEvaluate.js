@@ -1,14 +1,15 @@
 /**
  * evaluateFold — the layout fold as a bulk CPU evaluator.
  *
- * The SAME pure function the GPU kernel runs (GlyphLayoutKernel) and the mirror answers
- * point queries with (LayoutDescription.positionAt), evaluated across a whole item into a
+ * The SAME pure function the mirror answers point queries with
+ * (LayoutDescription.positionAt), evaluated across a whole item into a
  * TRANSIENT Float32Array. This is the measurement primitive for consumers that need many
  * positions at once on the CPU — arrangers sizing AST blocks, box overlays, debug dumps —
  * without a persistent position buffer existing anywhere. Call, measure, drop.
  *
  * Three evaluators, one fold: parity is standing test coverage (tools/layout-mirror.test.mjs
- * binds this and positionAt to the builder; tools/layout-kernel-check.mjs binds the kernel).
+ * binds this and positionAt to the builder; tools/layout-generator-fold.test.mjs binds the
+ * rendered slots to positionAt).
  * Worker-safe: no DOM, no three.
  */
 

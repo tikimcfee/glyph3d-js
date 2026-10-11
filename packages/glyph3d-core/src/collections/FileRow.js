@@ -53,7 +53,6 @@ export default class FileRow extends BoundedObject3D {
         this._analyzeGen = 0;
         this._highlights = null;
         this._layout = null;
-        this._bakedRecord = null;
         this._layoutOriginY = 0;
 
         this._renderer = null;
@@ -70,12 +69,10 @@ export default class FileRow extends BoundedObject3D {
      * Stage the file's content and filename.
      * @param {string} path
      * @param {string} content
-     * @param {{ baked?: Object }} [opts]
      */
-    async load(path, content, { baked } = {}) {
+    async load(path, content) {
         this.filename = path;
         this.content = content || '';
-        if (baked) this._bakedRecord = baked;
 
         const m = this.metrics;
         const lp = resolveLayoutParams(this.config.layout);
@@ -168,10 +165,6 @@ export default class FileRow extends BoundedObject3D {
 
     loadFile(filename, content) {
         return this.load(filename, content);
-    }
-
-    setBakedRecord(baked) {
-        this._bakedRecord = baked;
     }
 
     // ── Bounds ──────────────────────────────────────────────────────────────

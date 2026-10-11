@@ -1,5 +1,5 @@
 // storm-probe — drive an N-file synthetic storm with full forensics:
-// console errors, device.uncapturederror, actual device limits, arena/mega sizes,
+// console errors, device.uncapturederror, actual device limits,
 // staged progress heartbeat, and crash detection. Client-only fake provider.
 //   bun tools/storm-probe.mjs [N]     (client-only; no relay)
 import { launchGpuBrowser, assertRealGpu } from './itest/driver.mjs';
@@ -88,19 +88,9 @@ try {
         try {
             beat = await Promise.race([
                 page.evaluate(() => {
-                    const c = window.__glyphClient;
-                    const arena = c.ctx.renderer.glyphPipelineArena;
-                    const mega = arena?.megaField;
                     return {
                         done: window.__stormDone, result: window.__stormResult || null,
                         totalBytes: window.__totalBytes,
-                        arena: arena ? { maxBytes: arena.maxBytes, live: arena._byteTotal, items: arena._items.length } : null,
-                        mega: mega ? {
-                            cap: mega.field.instanceMesh.geometry._maxInstanceCount,
-                            count: mega.field.instanceMesh.geometry.instanceCount,
-                            views: mega.views.length,
-                            hlRows: mega.field._highlightTexture?.image?.height || 0,
-                        } : null,
                         gpuErrs: window.__gpuErrs.length, gpuSample: window.__gpuErrs[0] || null,
                         heap: (performance.memory?.usedJSHeapSize / 1048576) | 0,
                     };
@@ -112,7 +102,7 @@ try {
             break;
         }
         lastBeat = beat;
-        console.log(`t+${((Date.now() - t0) / 1000).toFixed(0)}s: arena ${beat.arena?.live}/${beat.arena?.maxBytes}B items=${beat.arena?.items} · mega cap=${beat.mega?.cap} count=${beat.mega?.count} views=${beat.mega?.views} hlRows=${beat.mega?.hlRows} · gpuErrs=${beat.gpuErrs}${beat.gpuSample ? ` [${beat.gpuSample.slice(0, 120)}]` : ''} · heap=${beat.heap}MB${beat.done ? ` · DONE ${beat.result}` : ''}`);
+        console.log(`t+${((Date.now() - t0) / 1000).toFixed(0)}s: gpuErrs=${beat.gpuErrs}${beat.gpuSample ? ` [${beat.gpuSample.slice(0, 120)}]` : ''} · heap=${beat.heap}MB${beat.done ? ` · DONE ${beat.result}` : ''}`);
         if (beat.done) break;
     }
     console.log('--- notable console lines:');

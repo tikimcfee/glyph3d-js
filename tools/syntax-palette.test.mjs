@@ -13,7 +13,21 @@ import { runSyntaxPaletteJob, paletteLUT, paletteIndexOf, decodePackedCaptures, 
 import { parseDocument } from '../packages/glyph3d-core/src/parsing/TreeSitterEngine.js';
 import { detectLanguage } from '../packages/glyph3d-core/src/parsing/languageRegistry.js';
 import { resolveScopeColor, FOREGROUND } from '../packages/glyph3d-core/src/parsing/syntaxTheme.js';
-import { buildByteLineIndex } from '../packages/glyph3d-core/src/core/ByteLayoutDescription.js';
+
+// The oracle's byte-line index: line → first byte offset, line → codepoint count.
+function buildByteLineIndex(bytes) {
+    let lines = 1;
+    for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x0A) lines++;
+    const lineByteStart = new Int32Array(lines);
+    const lineLengths = new Int32Array(lines);
+    let line = 0;
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if (b === 0x0A) { line++; lineByteStart[line] = i + 1; continue; }
+        if ((b & 0xC0) !== 0x80) lineLengths[line]++;   // leader bytes only
+    }
+    return { lineByteStart, lineLengths };
+}
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };

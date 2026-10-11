@@ -12,7 +12,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  * The organizing idea is that each row is a TRADE, not a statistic:
  *
  *   glyph atlas    space (texture VRAM)  ← bought with → encode compute
- *   byte arena     space (GPU buffer)    ← bought with → one shared pipeline
  *   slug cache     space (IndexedDB)     ← bought with → boot time
  *   worker pool    space (per-core heap) ← bought with → parse throughput
  *
@@ -137,7 +136,7 @@ export default function MonitorPanel({ client }) {
     }, [exec, refresh]);
 
     const s = stats;
-    const heap = s?.heap, gpu = s?.gpu, atlas = s?.atlas, arena = s?.arena;
+    const heap = s?.heap, gpu = s?.gpu, atlas = s?.atlas;
     const workers = s?.workers, scene = s?.scene, slug = s?.caches?.slugCore;
 
     return (
@@ -181,27 +180,6 @@ export default function MonitorPanel({ client }) {
                             curve {atlas.curveTexture ?? '—'} · glyphmap {atlas.glyphMapTexture ?? '—'}
                         </span>
                     </Row>
-                )}
-                <Row k="arena items">
-                    {arena?.ready
-                        ? `${arena.liveItems} live / ${arena.stagedItems} staged${arena.deadItems ? ` (${arena.deadItems} dead)` : ''}`
-                        : <span style={S.note}>not ready</span>}
-                </Row>
-                {arena?.ready && (
-                    <>
-                        <Row k="arena bytes">
-                            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                {fmtBytes(arena.watermarkBytes)} / {fmtBytes(arena.capacityBytes)}
-                                <Bar used={arena.watermarkBytes} total={arena.capacityBytes} />
-                            </span>
-                        </Row>
-                        {/* The multiplier is the point: a slot is 44 B of GPU buffer per
-                            source byte, so 1 MB of source is ~44 MB of VRAM. */}
-                        <Row k="arena gpu">
-                            ~{fmtBytes(arena.bufferBytesEstimate)}{' '}
-                            <span style={S.note}>({arena.bytesPerSlot} B/byte)</span>
-                        </Row>
-                    </>
                 )}
                 <Row k="workers">
                     {workers

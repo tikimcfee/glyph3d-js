@@ -83,10 +83,6 @@ class CodeGrid extends FramedGlyphField {
             shaper: options.shaper || (atlas && (atlas._shapeCache || atlas._shaper)) || null,
             // Layout params — how this file folds into space. Per-grid.
             layout: { ...DEFAULT_LAYOUT, ...(options.layout || {}) },
-            // Window span in visual rows when no clip frame is set (a frame's rows win).
-            windowRows: options.windowRows ?? 600,
-            // Hysteresis: rows staged beyond the view on each side
-            windowMarginRows: options.windowMarginRows ?? 200,
         };
 
         // Content state
@@ -1323,10 +1319,6 @@ class CodeGrid extends FramedGlyphField {
         return cb;
     }
 
-    setBakedRecord(record) {
-        this._bakedRecord = record || null;
-    }
-
     /**
      * Schedule an analysis pass for the layout just built. Fire-and-forget: one
      * tree-sitter parse paints base glyph colors via the renderer AND rebuilds the
@@ -1640,10 +1632,6 @@ class CodeGrid extends FramedGlyphField {
     async _relayoutPreservingCursor() {
         this._linesDirty = true;
         this._modified = true;   // a content edit (insert/delete/split) happened → unsaved until file.save
-        // An edit invalidates the record — the NEXT fold re-bakes it from the edited
-        // bytes (one O(bytes) pass riding a relayout that is already O(bytes)). No
-        // regime change: the grid STAYS windowed while being edited.
-        this._bakedRecord = null;
         return this._relayout();
     }
 

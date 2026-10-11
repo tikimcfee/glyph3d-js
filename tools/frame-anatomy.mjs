@@ -1,7 +1,6 @@
 /**
  * frame-anatomy.mjs — attribute a steady-state frame: FPS percentiles, per-render-
- * call triangle/draw-call deltas (wraps gl.render), scene/mesh census, and the
- * mega-field instance census. The harness that found the transparent+DoubleSide
+ * call triangle/draw-call deltas (wraps gl.render), and the scene/mesh census. The harness that found the transparent+DoubleSide
  * double-pass (62M→31M tris) and the minimap's ~3000-draw proxy pool.
  *
  *   bun tools/frame-anatomy.mjs                    (against :5173 + scratch relay :8099)
@@ -106,23 +105,6 @@ try {
             const k = (o.name || '(unnamed)').replace(/[0-9]+/g, 'N').slice(0, 32);
             fam[k] = (fam[k] ?? 0) + 1;
         });
-        let mega = null;
-        try {
-            // The renderer-parked reference — the ONE arena reachable across
-            // module instances (an /@fs import gets a different singleton).
-            const a = gl?.glyphPipelineArena ?? null;
-            const m = a?.megaField;
-            let liveBytes = 0;
-            for (const v of m?.views ?? []) if (!v.dead) liveBytes += v.byteCount;
-            mega = {
-                instanceCount: m?.field?.instanceMesh?.geometry?.instanceCount ?? null,
-                liveBytes, views: m?.views?.length ?? 0,
-                poseGroups: m?._poseGroups?.length ?? 0,
-                panelInstances: m?.panels?.mesh?.geometry?.instanceCount ?? null,
-                panelFree: m?.panels?._freeSlots?.length ?? 0,
-            };
-        } catch { /* arena module unreachable (different serve root) */ }
-
         return {
             frame: {
                 p50: +gaps[gaps.length >> 1].toFixed(1),
@@ -136,7 +118,6 @@ try {
             passes: [...shape.values()].map(e => ({ perFrame: e.calls, tris: e.tris, frames: e.n })),
             objects, meshes,
             topMeshFamilies: Object.entries(fam).sort((a, b) => b[1] - a[1]).slice(0, 8),
-            mega,
         };
     })()`);
     console.log(JSON.stringify(report, null, 2));

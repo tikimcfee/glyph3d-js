@@ -2,7 +2,7 @@
 // this asserts they are one function. Pure node (no three, no GPU).
 //   bun tools/layout-mirror.test.mjs
 //
-// The GPU owns the laid-out position buffer. The CPU answers "where is this glyph" by
+// The CPU answers "where is this glyph" by
 // evaluating the same fold per query (LayoutDescription.positionAt) or in bulk
 // (evaluateFold), and answers "how big is this" WITHOUT evaluating it at all
 // (LayoutDescription.extent → foldGeometry.foldExtent, closed form).
@@ -16,8 +16,8 @@
 //                the closed form is exact (unpaginated content).
 //
 // Emoji double-advance, wrap staircase, scroll conveyor, arranger displacements, and both
-// pagination axes are all exercised. The kernel's own bit-exact gate against evaluateFold
-// lives in tools/layout-kernel-check.mjs (that one needs a GPU).
+// pagination axes are all exercised. The rendered slots (core/LayoutGenerator) are bound to
+// positionAt by tools/layout-generator-fold.test.mjs.
 
 import { buildBatchBuffers, resolveLayoutParams } from '../packages/glyph3d-core/src/workers/builders/index.js';
 import { computeCellMetrics } from '../packages/glyph3d-core/src/core/cellMetrics.js';

@@ -57,9 +57,8 @@
  *   through it. Stored as a plain Array (not Int32Array) in the builder output.
  *
  * There is no `bounds` and no positional metadata here. The builder does not lay anything out:
- * positions are the kernel's (compute/GlyphLayoutKernel) and the extent is a closed form on the
- * line table (core/foldGeometry.foldExtent), recorded onto the renderedTexts entry at dispatch
- * as `fold` (the scan's scalars) + `extent` (the box).
+ * positions are the fold's (core/foldEvaluate.evaluateFold) and the extent is a closed form on
+ * the line table (core/foldGeometry.foldExtent).
  */
 
 /**

@@ -134,9 +134,9 @@ The performance story is structural rather than a fast path:
 - **Prebaked glyph core** — the Slug bezier encoding for the common glyph set
   is baked headlessly and served as a static asset; boot hydrates it instead of
   re-encoding, and new glyphs append incrementally.
-- **GPU layout engine** — glyph positions are computed by a persistent per-field
-  compute kernel from CPU-authored tables, so relayouts don't stampede the main
-  thread; `layout.verify` asserts kernel parity on the live scene.
+- **One fold** — glyph positions are written by one CPU layout pass into the
+  instance buffer, and every caret, pick, and bounds query answers from the same
+  fold function, so what you click is where the glyph is drawn.
 - **Work scales with what you see** — three's per-object frustum culling runs on the
   real instance extent (geometry bounds resync after every position/count mutation),
   so off-screen grids skip their draw entirely.

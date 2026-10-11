@@ -52,47 +52,15 @@ after editing core, `make dev-status` to check.
 - **`cdp-shot.mjs`** + **`web-preview.sh`** — attach to an already-running browser via
   CDP and grab a PNG (works headed on a busy desktop). See `PREVIEW.md`.
 
-- **`arena-realloc-check.mjs`** — the arena-realloc render gate: kernels realloc (growth /
-  trie rebuild) must not strand render bind groups on the destroyed `GlyphSlots` buffer
-  (three's bind-group cache is texture-keyed; the `rebindByteSlots` seam in
-  `core/glyphVertex.js` re-inits the byte materials). Lanes watched via
-  `device.uncapturederror`, then `verifyItem` (exact) + a pixel non-blank assert.
-  Client-only (fake in-page provider, no relay).
-  ```
-  bun tools/arena-realloc-check.mjs [--url http://localhost:5273/]
-  ```
-  (`--url` on this and `glyph-pipeline-check.mjs` points a gate at a worktree's own Vite.)
-
 - **`storm-probe.mjs`** — N-file synthetic storm with full forensics: real device limits,
-  per-second heartbeat (arena live/capacity/items, mega capacity/views, GPU error count +
-  first sample, JS heap), page-crash detection, notable console tail. THE tool for
-  "loads N files then wedges" — it caught the highlight-texture dimension storm at
-  arena > 8MB and the corrupt half-realloc at the f32-ordinal wall (2^24 bytes), both
-  invisible to the fixed-size gates. Client-only (fake provider, no relay).
+  per-second heartbeat (GPU error count + first sample, JS heap), page-crash detection,
+  notable console tail. THE tool for "loads N files then wedges". Client-only (fake
+  provider, no relay).
   ```
   bun tools/storm-probe.mjs 1000
   ```
 
-- **`arena-compaction-check.mjs`** — the free-list gate: a 150×120KB adopt-restage
-  storm (18MB staged — past the f32-ordinal wall that killed it pre-compaction) must
-  complete with the high-water mark pinned at ~2× the window, plus size-churn
-  split/coalesce lanes, an exact tail-recede assert, `verifyItem` teeth over recycled
-  ranges, resolveSlot coherence, and 0 GPU errors. Client-only (fake provider).
-  ```
-  bun tools/arena-compaction-check.mjs [--url http://localhost:5273/]
-  ```
 
-- **`far-texels-check.mjs`** — the far-texture (minified text-mass LOD) gate: the
-  farScatter/farNormalize kernels (`glyphPipelineKernels.js`) vs their CPU oracles
-  (`farScatterOracle`/`farNormalizeOracle` in `compute/glyphPipelineReference.js`)
-  on a real dispatch — scatter accumulator (bit-exact expected), packed RGBA8 per
-  slab texel, the accumulator's self-cleaning reset, item isolation, and
-  content-truth teeth (a painted color run must survive into the slab). Harness
-  shape mirrors `layout-kernel-check.mjs` (client-only boot, live trie, second
-  offscreen renderer).
-  ```
-  bun tools/far-texels-check.mjs
-  ```
 
 ## Performance armory
 
@@ -135,7 +103,7 @@ same build minutes apart: headless `google/swiftshader` at **~1 rAF/s**, headed
 `apple/metal-3` at **61**. So measurement tools launch through
 `launchGpuBrowser()`, which resolves headed-vs-headless **by platform** — you do
 not pass a flag, and a tool author cannot forget the rule. Correctness gates
-(kernel-vs-oracle, does-it-boot) keep using `launchBrowser()` and stay headless
+(evaluator parity, does-it-boot) keep using `launchBrowser()` and stay headless
 everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 
 - **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
@@ -156,7 +124,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   - which SCENES render each frame → wrap `renderer.render` and collect `scene.name` (the minimap lives in a second scene)
 
 - **`frame-anatomy.mjs`** — attribute a steady-state frame: FPS percentiles, per-render-
-  call triangle/draw-call deltas, scene/mesh census, mega-field instance census, and the
+  call triangle/draw-call deltas, scene/mesh census, and the
   CPU/GPU split (the floor has a name). Found the transparent+DoubleSide double pass
   (62M→31M tris) and the minimap's ~3000-draw proxy pool.
   ```
@@ -218,48 +186,6 @@ integration-test territory: drive verbs, then assert on the resulting state/buff
 Note: tests that `repo.load` reach GitHub (network). A relay-served local project avoids
 that — prefer it for deterministic CI once wired.
 
-- **`layout-kernel-check.mjs`** — per-slot equivalence gate for the GPU layout kernel
-  (`compute/GlyphLayoutKernel.js`) against the CPU builder. Boots the app **client-only**, runs
-  the REAL `buildBatchBuffers` with the LIVE atlas (metrics via `computeCellMetrics` — no
-  hardcoded character dimensions), runs the kernel on a **second, offscreen WebGPURenderer** so
-  the live scene's renderer is untouched, and diffs every slot: max |Δ| per component, count
-  beyond epsilon, and the first 5 mismatches with codepoint/line/col.
-  Five folds, all run by default: `flat` · `column` (wrapWidth 200) · `wrap4` (wrapWidth 4, the
-  spec's Fixture A shape) · `newspaper` (pagination fanning in x) · `z-pages` (pages receding in z).
-  ```
-  bun tools/layout-kernel-check.mjs                      # all five folds, torture text
-  bun tools/layout-kernel-check.mjs --mode newspaper --ascii
-  bun tools/layout-kernel-check.mjs --text-file <path> --wrap-width 40 --mode column
-  bun tools/layout-kernel-check.mjs --selftest           # prove the HARNESS with no kernel
-  ```
-  The kernel gets `configure({ slotCount, lineTable, lineStartRow, advances, params })` —
-  `lineTable` from `itemMeta[0].lineSlotOffsets`, `advances` the per-slot `sizes[2i]`,
-  `lineStartRow` the exclusive scan the check computes itself (and then checks against the CPU
-  build's y, so the scan formula is under test too).
-
-  Coverage teeth run before the diff (two empty arrays compare equal): slots > 0, lines > 3,
-  finite positions, >1 distinct x AND y, one slot per codepoint, a line table starting at 0 that
-  never decreases, an empty line, cellWidth reproducing line 0, cellHeight being the row pitch,
-  the lineStartRow scan reproducing line y; wrapping folds add "a line exceeds wrapWidth" + a real
-  z-staircase, paginating folds add "pagination fired (`pageContentWidth` > 0)" + pages actually
-  separating. `--selftest` swaps a CPU reference model in for the kernel module through the same
-  constructor/configure/compute/readPositions surface, so the harness proves itself — that model
-  matches the builder **bit-exactly (max |Δ| = 0) on all five folds**, which makes it the
-  executable spec for what the GPU must reproduce, and proves those inputs are *sufficient*.
-
-  Three things it measured that any kernel work has to respect:
-  - **cellWidth is the builder's advance, NOT `metrics.charWidth`.** `getCharSize().width` is
-    CEIL'd to whole pixels; the builder steps by `ax / upem × (worldScale × pixelHeight)`. On the
-    current font those differ by 12.5% — the check takes the modal advance out of the builder's
-    own `sizes` buffer and warns when the metric-derived number disagrees.
-  - **…but the PAGE GAP multiplies `charWidth`, not that advance.** `paginationGeometry` uses
-    `charAdvance = metrics.charWidth + letterSpacing` for `gapXWorld` and for the `pageWidthWorld`
-    fallback. Two different cell widths in one builder; the check passes the gap unit as its own
-    `pageGapUnit` param (plus world-unit `pageGapXWorld` / `pageGapYWorld` / `pageDepthWorld`).
-  - **The builder ACCUMULATES x** (f32 rounding per store), so a closed-form `col × cellWidth`
-    drifts ~3e-7 per column and breaks a 1e-4 epsilon past ~340 columns. A prefix sum over
-    `advances` reproduces it exactly instead. The check reports the per-column rate and the
-    column budget it implies.
 
 ## Log store (relay SQLite)
 
@@ -352,17 +278,6 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   bun tools/verify-tree-sitter.mjs
   ```
 
-- **`scan-layout.test.mjs`** — the byte pipeline's ALGEBRA gate: the segmented monoid scan
-  (`compute/glyphPipelineScan.js`, the GPU's dispatch structure in JS) against the serial
-  oracle (`compute/glyphPipelineReference.js`). Associativity fuzz over random leaf cuts,
-  chunk/group-size invariance (integer lanes bit-exact at every grouping; fold>0 x
-  bit-exact — resolveX re-sums in the oracle's f32 order), the item-reset law (every
-  item's first leader is row0/col0/ord0 even when chunks straddle boundaries), content
-  isolation, and a randomized corpora sweep. Run after touching the monoid, the scan
-  spec, or the fold semantics.
-  ```
-  bun tools/scan-layout.test.mjs
-  ```
 
 - **`contenttree.test.mjs`** — unit-tests the directory recursion in `ContentTree`
   (the dir-mirroring scene graph: `insert(path)` builds the dir-node chain, `remove`,
@@ -378,11 +293,19 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
 - **`layout-mirror.test.mjs`** — the fold-mirror parity CONTRACT: `LayoutDescription.positionAt`
   and `evaluateFold` against the real builder, per slot, across flat/wrap/scroll/newspaper/
   z-pages plus arranger displacements (EOL rides the last glyph's D; empty lines take none).
-  Pure node, no GPU. The GPU kernel is bound to the same builder by `layout-kernel-check.mjs`,
-  so all three evaluators of the one fold stay provably equal. Run after touching
-  `LayoutDescription`, `foldEvaluate`, the builder's layout math, or the kernel's fold.
+  Pure node, no GPU. Run after touching `LayoutDescription`, `foldEvaluate`, or
+  `foldGeometry`.
   ```
   bun tools/layout-mirror.test.mjs
+  ```
+
+- **`layout-generator-fold.test.mjs`** — the RENDERED slots against the same fold: a
+  headless `CodeGrid` through every `grid.layout` preset, each slot `LayoutGenerator`
+  writes checked against `positionAt` (x/z exact, y on the cell's vertical center), plus
+  a finite extent per preset and a wrapped line's widest-segment row extent. Run after
+  touching `LayoutGenerator`, `CodeGrid._layoutContent`, or the cell metrics.
+  ```
+  bun tools/layout-generator-fold.test.mjs
   ```
 
 - **`layout-fuzz.test.mjs`** — adversarial randomized parity over the same three evaluators:

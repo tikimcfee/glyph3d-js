@@ -29,7 +29,7 @@
  *   renderSheetGrid(ctx, path)          classify + fetch + register + MATERIALIZE one file → id
  *   addClassifiedRow(ctx, path)         the bulk twin: same cascade, result may stay a ROW
  *                                       (file.openDir's lane for images + failed text fetches)
- *   addFileRow(ctx, path, content, mtime?, baked?)  register already-fetched text (openDir's batch path)
+ *   addFileRow(ctx, path, content, mtime?)  register already-fetched text (openDir's batch path)
  *   addUnfetchedRow(ctx, path, bytes)   register an oversize file as a placeholder from metadata
  *   materializeActor(ctx, id)           row → CodeGrid actor swap (idempotent)
  */
@@ -129,10 +129,10 @@ function seatFileRow(ctx, path, row, notRendered, mtime) {
  * @param {AppContext} ctx
  * @returns {{id: string, load: Promise}|null}
  */
-function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
+function registerFileRow(ctx, path, body, notRendered, mtime) {
     const row = prepFileRow(ctx, path, notRendered);
     if (!row) return null;
-    const load = row.load(path, body, { baked: notRendered ? null : baked });
+    const load = row.load(path, body);
     const id = seatFileRow(ctx, path, row, notRendered, mtime);
     return { id, load };
 }
@@ -144,9 +144,9 @@ function registerFileRow(ctx, path, body, notRendered, mtime, baked) {
  *  (GitHub).
  * @param {AppContext} ctx
  */
-export async function addFileRow(ctx, path, content, mtime, baked) {
+export async function addFileRow(ctx, path, content, mtime) {
     const reason = unreadableReason(content);
-    const r = registerFileRow(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime, baked);
+    const r = registerFileRow(ctx, path, reason ? placeholderBody(reason) : content, reason, mtime);
     if (!r) return null;
     await r.load;
     return r.id;
@@ -193,7 +193,6 @@ export function materializeActor(ctx, id) {
     grid.setSourcePath(uri);
     if (notRendered) grid.userData.notRendered = notRendered;
     else setDiskMtime(grid, mtime);
-    if (row._bakedRecord) grid.setBakedRecord(row._bakedRecord);
     // Seed donor extent from row to eliminate the async materialization bounds gap
     const rowExtent = row.getContentBounds();
     if (rowExtent) grid.setSeedExtent(rowExtent);

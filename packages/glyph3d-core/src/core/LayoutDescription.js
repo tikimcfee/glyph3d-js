@@ -11,12 +11,12 @@ import { pageShift, foldExtent, lineSegments } from './foldGeometry.js';
  * WORLD are derived; BUFFER slot is a cache (invariant: slot offset within a line ==
  * codepoint index). Inverse (world→source) is the GPU picking pass, not here.
  *
- * positionAt is the **fold mirror**: it evaluates the same pure layout function the compute
- * kernel runs on the GPU — wrap segment from the line's slot count, x from the REAL per-slot
- * advances (emoji are double-advance), the z staircase, and the SAME integer-row `pageShift`.
- * No position buffer exists to read: the GPU owns the laid-out array, and every input to the
- * fold is CPU-authored, so any glyph's "I am at this location" is answerable here, exactly,
- * without readback.
+ * positionAt is the **fold mirror**: it evaluates the same pure layout function
+ * core/LayoutGenerator writes the slots with — wrap segment from the line's slot count, x
+ * from the REAL per-slot advances (emoji are double-advance), the z staircase, and the SAME
+ * integer-row `pageShift` (tools/layout-generator-fold.test.mjs binds the two). Every input
+ * to the fold is CPU-authored, so any glyph's "I am at this location" is answerable here,
+ * exactly, without reading the slot buffer back.
  *
  * extent() is the same story one level up — the fold's AABB, closed form on the three scalars
  * the layout scan produces (`totalRows`, `maxRowExtent`, `maxSegs`). Bounds are a property of

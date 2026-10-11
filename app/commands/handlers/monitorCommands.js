@@ -7,9 +7,9 @@
  * where the memory actually went" is one call instead of six.
  *
  * The framing is a time / space / compute tradeoff, because that is what these
- * knobs are: the slug-core cache spends disk to buy boot time, the bake index
- * spends disk to buy layout compute, the arena spends VRAM to buy a single
- * pipeline. Which trade is right differs per machine, so the numbers are all
+ * knobs are: the slug-core cache spends disk to buy boot time, the atlas spends
+ * texture VRAM to buy encode compute, the worker pool spends per-core heap to buy
+ * parse throughput. Which trade is right differs per machine, so the numbers are all
  * MEASURED HERE — never assumed from a config.
  *
  * Read-and-reset: `monitor.stats` reports, `monitor.reset <target>` clears one
@@ -98,32 +98,6 @@ function readAtlas(atlas) {
 }
 
 /**
- * The byte pipeline. `maxBytes` is the arena's SLOT capacity — one slot per source
- * byte, and a slot is 11 f32 = 44 B of GPU buffer, so the buffer cost is the
- * multiplier, not the byte count. That multiplier is the whole reason this readout
- * exists: 1 MB of source is ~44 MB of VRAM, which is not obvious from any log line.
- */
-function readArena(renderer) {
-    const arena = renderer?.glyphPipelineArena;
-    if (!arena) return { ready: false };
-    const live = arena._liveCount ?? null;
-    const staged = arena._items?.length ?? null;
-    const freeBytes = (arena._free || []).reduce((a, r) => a + (r.length || 0), 0);
-    return {
-        ready: true,
-        liveItems: live,
-        stagedItems: staged,
-        deadItems: live != null && staged != null ? staged - live : null,
-        maxItems: arena.maxItems ?? null,
-        watermarkBytes: arena._byteTotal ?? null,
-        capacityBytes: arena.maxBytes ?? null,
-        freeListBytes: freeBytes,
-        bytesPerSlot: 44,
-        bufferBytesEstimate: arena.maxBytes != null ? arena.maxBytes * 44 : null,
-    };
-}
-
-/**
  * Worker pool: per-worker UV-map caches scale with core count, so it is per-device.
  * @param {AppContext} ctx
  */
@@ -169,7 +143,6 @@ export default function registerMonitorCommands(router) {
         const heap = readHeap();
         const gpu = readRenderer(renderer);
         const atlas = readAtlas(ctx.atlas);
-        const arena = readArena(renderer);
         const workers = readWorkers(ctx);
         const scene = readScene(ctx);
 
@@ -191,7 +164,7 @@ export default function registerMonitorCommands(router) {
             slugCache = { available: false, error: err?.message || String(err) };
         }
 
-        const data = { heap, gpu, atlas, arena, workers, scene, caches: { slugCore: slugCache } };
+        const data = { heap, gpu, atlas, workers, scene, caches: { slugCore: slugCache } };
 
         const lines = [];
         lines.push(`heap:     ${heap.available ? `${fmtBytes(heap.used)} / ${fmtBytes(heap.limit)} cap` : '(not exposed by this browser)'}`);
@@ -202,7 +175,6 @@ export default function registerMonitorCommands(router) {
         lines.push('');
         lines.push(`atlas:    ${atlas.ready ? `${atlas.encodedGlyphs} glyphs · v${atlas.version} · ~${fmtBytes(atlas.textureBytes)} textures` : '(not ready)'}`);
         if (atlas.ready) lines.push(`          curve ${atlas.curveTexture ?? '—'} · glyphmap ${atlas.glyphMapTexture ?? '—'}`);
-        lines.push(`arena:    ${arena.ready ? `${arena.liveItems}/${arena.stagedItems} items · ${fmtBytes(arena.watermarkBytes)} of ${fmtBytes(arena.capacityBytes)} · ~${fmtBytes(arena.bufferBytesEstimate)} GPU` : '(not ready)'}`);
         lines.push(`workers:  ${workers.spawned ? `${workers.workers} spawned` : 'pool not built'} · ${workers.hardwareConcurrency ?? '—'} cores`);
         lines.push('');
         lines.push(`slug cache: ${slugCache.available
@@ -212,7 +184,7 @@ export default function registerMonitorCommands(router) {
 
         return { text: box('MONITOR', lines, 62) + '\nOK: monitor.stats', data };
     }, {
-        description: 'Resource readout: heap, GPU, atlas, arena, worker pool, caches, scene census',
+        description: 'Resource readout: heap, GPU, atlas, worker pool, caches, scene census',
         usage: '',
     });
 

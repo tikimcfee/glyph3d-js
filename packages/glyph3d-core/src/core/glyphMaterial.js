@@ -400,17 +400,18 @@ export const GLYPH_LOD_DEFAULTS = Object.freeze({
     soften: 0.45,
     minLo: 0.06,
     minHi: 0.20,
-    lodLo: 0.30,
-    lodHi: 0.60,
-    density: 0.035,
-    maxCov: 0.72,
-    lodAxisBias: 0,
-    farBias: 0,
-    ditherSpan: 0.02,
-    farLodMax: 6,
-    farMode: 0,
     greekMode: 0,
     greekOnsetPx: 0.0,
+});
+
+/** Each LOD param's shader uniform — the only keys setGlyphLodParam accepts. */
+const LOD_UNIFORMS = Object.freeze({
+    dilatePx: 'uDilatePx',
+    soften: 'uSoften',
+    minLo: 'uMinLo',
+    minHi: 'uMinHi',
+    greekMode: 'uGreekMode',
+    greekOnsetPx: 'uGreekOnsetPx',
 });
 
 export const GLYPH_WIDTH_COMPRESS_DEFAULT = 1.0;
@@ -420,25 +421,12 @@ const _currentLodParams = { ...GLYPH_LOD_DEFAULTS };
 let _currentWidthCompress = GLYPH_WIDTH_COMPRESS_DEFAULT;
 
 export function setGlyphLodParam(key, value) {
+    const uName = LOD_UNIFORMS[key];
+    if (!uName) throw new Error(`setGlyphLodParam: unknown param "${key}" (${Object.keys(LOD_UNIFORMS).join(', ')})`);
     if (!Number.isFinite(value)) return;
     _currentLodParams[key] = value;
-    const uniformMap = {
-        dilatePx: 'uDilatePx',
-        soften: 'uSoften',
-        minLo: 'uMinLo',
-        minHi: 'uMinHi',
-        greekMode: 'uGreekMode',
-        greekOnsetPx: 'uGreekOnsetPx',
-        uDilatePx: 'uDilatePx',
-        uSoften: 'uSoften',
-        uMinLo: 'uMinLo',
-        uMinHi: 'uMinHi',
-        uGreekMode: 'uGreekMode',
-        uGreekOnsetPx: 'uGreekOnsetPx',
-    };
-    const uName = uniformMap[key] || (key.startsWith('u') ? key : 'u' + key.charAt(0).toUpperCase() + key.slice(1));
     for (const mat of _activeMaterials) {
-        if (uName && mat.uniforms && mat.uniforms[uName]) {
+        if (mat.uniforms && mat.uniforms[uName]) {
             mat.uniforms[uName].value = value;
         }
     }
