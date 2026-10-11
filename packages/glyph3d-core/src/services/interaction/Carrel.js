@@ -262,9 +262,11 @@ export class Carrel extends THREE.Object3D {
      *
      * `opts.to` re-aims THIS release at a caller-computed pose instead of home
      * (window.drop lands the member camera-front) — mirrors CameraDock.release.
-     * A borrowed member ignores it: the rider owns the trip.
+     * `opts.inPlace` lands it where it is now (a drag lifting it off the desk): no
+     * position slide, only the scale eases home. A borrowed member ignores both: the
+     * rider owns the trip.
      * @param {string} id
-     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}}} [opts]
+     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}, inPlace?:boolean}} [opts]
      * @returns {boolean}
      */
     release(id, opts = {}) {
@@ -295,7 +297,12 @@ export class Carrel extends THREE.Object3D {
         e.quatTarget.copy(e.home.quat);
         this._releasing.set(id, e);
 
-        this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: this.animDur });
+        if (opts.inPlace) {
+            this.animator.cancelAll(e.grid);
+            e.home.pos = { x: e.grid.position.x, y: e.grid.position.y, z: e.grid.position.z };
+        } else {
+            this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: this.animDur });
+        }
         this.animator.animateTo(e.grid, 'scale', e.home.scale, {
             duration: this.animDur,
             onComplete: () => { this._releasing.delete(id); },
@@ -303,6 +310,27 @@ export class Carrel extends THREE.Object3D {
 
         this._relayout();
         return true;
+    }
+
+    /**
+     * Hand a member to another holder: drop its entry WITHOUT moving the window — it
+     * stays where it is (still parented here, unless borrowed) until the receiver
+     * attach()es it — and return its home record for the receiver to adopt. No
+     * homeward slide, so nothing fights the receiver's own seating animation.
+     * Mirrors CameraDock.handOff.
+     * @param {string} id
+     * @returns {{parent:Object|null,pos:{x,y,z},scale:number,quat:THREE.Quaternion,bounds:Object|null}|null}
+     */
+    handOff(id) {
+        const home = this.homeOf(id);
+        const e = this.entries.get(id);
+        if (!e) return null;
+        e.unsubscribeResize?.();
+        this.entries.delete(id);
+        this._releasing.delete(id);
+        if (e.grid.parent === this) this.animator.cancelAll(e.grid);
+        this._relayout();
+        return home;
     }
 
     /**

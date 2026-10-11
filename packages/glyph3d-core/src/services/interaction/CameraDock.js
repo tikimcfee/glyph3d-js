@@ -547,8 +547,12 @@ export class CameraDock extends THREE.Object3D {
      * window camera-front). Release-to-home is the special case where no
      * override is given. Fields replace the home record: parent (reparent
      * target), pos (in that parent's space), quat, scale.
+     *
+     * `opts.inPlace` lands the window WHERE IT IS NOW (a drag lifting it off the bar): it
+     * reparents world-preservingly with no position slide — only the scale eases back to
+     * its home placement — so the hand holding it keeps it.
      * @param {string} id
-     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}}} [opts]
+     * @param {{to?:{parent?:Object, pos?:{x:number,y:number,z:number}, quat?:Object, scale?:number}, inPlace?:boolean}} [opts]
      * @returns {boolean}
      */
     release(id, opts = {}) {
@@ -582,13 +586,63 @@ export class CameraDock extends THREE.Object3D {
         e.quatTarget.copy(e.home.quat);
         this._releasing.set(id, e);
 
-        this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: this.animDur });
+        if (opts.inPlace) {
+            this.animator.cancelAll(e.grid);
+            e.home.pos = { x: e.grid.position.x, y: e.grid.position.y, z: e.grid.position.z };
+        }
+        else this.animator.animateTo(e.grid, 'position', e.home.pos, { duration: this.animDur });
         this.animator.animateTo(e.grid, 'scale', e.home.scale, {
             duration: this.animDur,
             onComplete: () => { this._releasing.delete(id); },
         });
 
         this._relayout();
+        return true;
+    }
+
+    /**
+     * Hand a tile to another holder: drop the entry and the dock's chrome on it WITHOUT moving
+     * the window — it stays where it is (still parented here) until the receiver attach()es it.
+     * Returns the captured home record so the receiver adopts it (home chains residence →
+     * residence, never through this vehicle). Unlike release() there is no homeward slide to
+     * fight the receiver's own seating animation.
+     * @param {string} id
+     * @returns {{parent:Object|null,pos:{x,y,z},scale:number,quat:THREE.Quaternion,bounds:Object|null}|null}
+     */
+    handOff(id) {
+        const home = this.homeOf(id);
+        const e = this.entries.get(id);
+        if (!e) return null;
+        e.unsubscribeResize?.();
+        e.grid.setBorderFlag?.(BORDER_FLAGS.DOCKED, false);
+        this._disposeLabel(e);
+        this.entries.delete(id);
+        this._releasing.delete(id);
+        this.tiles.delete(e.grid);
+        if (this.paneTree?.has(id)) {
+            const next = this.paneTree.close(id);
+            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+            e.grid?.setControlActive?.('pin', false);
+        }
+        this.animator.cancelAll(e.grid);
+        this._relayout();
+        return home;
+    }
+
+    /**
+     * Replace a tile's home record — the window's RESIDENCE changed while it rides (a borrowed
+     * carrel member unseated from its desk: release must now land it at the desk's own home,
+     * not back in the seat it no longer has).
+     * @param {string} id
+     * @param {{parent:Object|null,pos:{x,y,z},scale:number,quat:THREE.Quaternion,bounds:Object|null}} home
+     * @returns {boolean}
+     */
+    rehome(id, home) {
+        const e = this.entries.get(id);
+        if (!e || !home) return false;
+        e.homeParent = home.parent || null;
+        e.home = { pos: { ...home.pos }, scale: home.scale, quat: home.quat.clone() };
+        e.homeBounds = home.bounds ? home.bounds.clone() : null;
         return true;
     }
 

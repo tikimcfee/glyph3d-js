@@ -10,6 +10,9 @@
 //   - a BORROWED member (parent elsewhere) is never touched; its return re-seats
 //   - dock → carrel adoption hands the HOME RECORD over (homeOf), so release
 //     from the carrel returns to the TREE, never to the bar
+//   - handOff passes a window between holders with NO homeward tween left running
+//     (one animator owns the window at a time); rehome retargets a ride's return
+//   - release({inPlace}) lands the window where it is (no slide), scale eases home
 //   - dissolve drains homeward slides before the desk dies
 //
 //   bun tools/carrel.test.mjs
@@ -267,6 +270,63 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     settle(carrel);
     ok(g.parent === treeNode, 'release from the carrel returns to the TREE, not the bar');
     near(g.position.x, 40, 1e-3, 'original home position restored through the handoff');
+}
+
+// ---- handOff: dock → carrel with one animator; borrowed seat; rehome; inPlace ----
+{
+    const scene = new THREE.Scene();
+    const treeNode = new THREE.Group();
+    scene.add(treeNode);
+    const g = makeGrid();
+    g.position.set(40, 12, -8);
+    treeNode.add(g);
+    const dock = new CameraDock({ atlas: HEADLESS_ATLAS });
+    scene.add(dock);
+    dock.lock('a', g);
+    dock.update(0.05, null);                                 // mid-slide: the bar's tween is live
+
+    const home = dock.handOff('a');
+    ok(home && home.parent === treeNode, 'handOff returns the captured home');
+    ok(!dock.has('a') && g.parent === dock, 'handOff drops the tile but leaves the window in place');
+    ok(!dock.animator.isAnimating, 'handOff leaves no dock tween writing to the window');
+
+    const carrel = new Carrel({ name: 'ho', radius: 15 });
+    scene.add(carrel);
+    ok(carrel.lock('a', g, { home }), 'carrel seats the handed-off window');
+    settle(carrel);
+    ok(g.parent === carrel, 'seated at the carrel');
+    const seat = g.position.clone();
+
+    // Borrow: docking a seated member captures the SEAT as the ride's home.
+    dock.lock('a', g);
+    for (let i = 0; i < 8; i++) { dock.update(0.05, null); carrel.update(0.05); }
+    ok(g.parent === dock && carrel.has('a'), 'docked member stays a (borrowed) carrel member');
+    dock.release('a');
+    for (let i = 0; i < 8; i++) { dock.update(0.05, null); carrel.update(0.05); }
+    ok(g.parent === carrel, 'undocking a borrowed member returns it to its seat');
+    near(g.position.distanceTo(seat), 0, 1e-3, 'back in the same seat');
+
+    // Rehome: unseat while borrowed → the ride's home becomes the desk's home (the tree).
+    dock.lock('a', g);
+    for (let i = 0; i < 8; i++) { dock.update(0.05, null); carrel.update(0.05); }
+    const deskHome = carrel.handOff('a');
+    ok(deskHome && deskHome.parent === treeNode, "a borrowed member's handOff yields the desk's home");
+    ok(dock.rehome('a', deskHome), 'rehome accepts the new home');
+    dock.release('a');
+    for (let i = 0; i < 8; i++) dock.update(0.05, null);
+    ok(g.parent === treeNode, 'release after rehome lands in the tree, not the old seat');
+    near(g.position.x, 40, 1e-3, 'at the original tree position');
+
+    // inPlace: lift off the dock where it hangs — no slide, scale eases home.
+    dock.lock('a', g);
+    for (let i = 0; i < 8; i++) dock.update(0.05, null);
+    const before = g.getWorldPosition(new THREE.Vector3());
+    dock.release('a', { inPlace: true });
+    for (let i = 0; i < 8; i++) dock.update(0.05, null);
+    const after = g.getWorldPosition(new THREE.Vector3());
+    ok(g.parent === treeNode, 'inPlace release reparents home');
+    near(after.distanceTo(before), 0, 1e-3, 'inPlace release does not slide the window');
+    near(g.scale.x, 1, 1e-3, 'inPlace release eases the scale back to its home placement');
 }
 
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
