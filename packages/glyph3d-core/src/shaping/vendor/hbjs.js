@@ -1491,9 +1491,10 @@ function hbjs(Module) {
   };
 }
 
-// Should be replaced with something more reliable
 try {
-  module.exports = hbjs;
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = hbjs;
+  }
 } catch (e) { }
 
 export default hbjs;

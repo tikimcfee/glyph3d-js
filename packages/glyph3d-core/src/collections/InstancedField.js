@@ -234,8 +234,12 @@ export default class InstancedField {
 
         const neededCapacity = Math.max(count, 1);
         if (!this._interleavedBuffer || this._interleavedBuffer.array.buffer !== slotBuffer.buffer || this._interleavedBuffer.count < neededCapacity) {
+            const hadOld = !!this._interleavedBuffer;
             this._interleavedBuffer = slotBuffer.createInterleavedBuffer();
             InstancedSlotBuffer.bindGeometryAttributes(this.geometry, this._interleavedBuffer);
+            if (hadOld && this.geometry) {
+                this.geometry.dispose();
+            }
         }
 
         this._interleavedBuffer.needsUpdate = true;
