@@ -27,7 +27,7 @@ in vec2 uv;
 // 32-byte RenderSlot instanced attributes
 in vec3 aPos;       // lanes 0..2: world pen origin (left edge, cell vertical center)
 in float aGlyphId;  // lane 3: global slot index into glyphMapTexture
-in float aColor;    // lane 4: packed RGBA8
+in float aColor;    // lane 4: packed RGB888 value (alpha comes from the group table)
 in float aGroupId;  // lane 5: group table row
 in vec2 aExtent;    // lanes 6..7: advance, height (world units)
 
