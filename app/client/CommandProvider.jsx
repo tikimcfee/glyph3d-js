@@ -155,18 +155,18 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     spatialManager: null,
 
     windowManager: null,
-    wsbridge: null,
+    /** @type {WebSocketBridge|null} */ wsbridge: null,
 
     // Camera-locked HUD bar of window tiles (CameraDock). Created in the effect
     // (needs scene + the shared AttentionManager) and ticked by <DockRunner/>.
     // dock.* verbs drive it; distinct from ctx.dock (the DOM dockview).
-    cameraDock: null,
+    /** @type {CameraDock|null} */ cameraDock: null,
 
     // World-anchored reading desks (Carrel) — the dock's mirror: rings of seated
     // windows around fixed tabletops. carrel.* verbs create/drive them; the same
     // runner that parks the dock ticks their animators. Keyed by carrel name.
     carrels: new Map(),
-    activeCarrel: null,
+    /** @type {string|null} the active carrel's NAME (a key of carrels) */ activeCarrel: null,
 
     // Holder protocol — unified holder membership. All holders (dock + carrels) join
     // this set on create/restore; holderOf(id) finds which one holds a surface id.
@@ -188,33 +188,33 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // Agent books — every agent's run bound as a book of page-pair spreads (description
     // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
     // book.* pages it. Created in the effect (needs the live ctx); ticked by <AgentRunner/>.
-    agentBooks: null,
+    /** @type {AgentBooks|null} */ agentBooks: null,
 
     // Delta books — before/after change sets (delta.* verbs): one sheet per changed
     // file, base verso / head recto. Created in the effect; ticked by <AgentRunner/>.
-    deltaBooks: null,
+    /** @type {import('@glyph3d/core/collections/DeltaBooks.js').default|null} */ deltaBooks: null,
 
     // The search book — a directory content search bound as a book (search.* verbs):
     // one sheet per matched file, hit list verso / the lit file recto. Results cache in
     // full; only one page-block of sheets is ever materialized. Created in the effect;
     // ticked by <AgentRunner/>.
-    searchBook: null,
+    /** @type {import('@glyph3d/core/collections/SearchBook.js').default|null} */ searchBook: null,
 
     // GPU glyph-picking system (material-swap ID pass on a dedicated render
     // layer). Created in the effect below once gl exists; canvas hover/click
     // resolves pixel-perfect picks through it. Null until then.
-    pickingSystem: null,
+    /** @type {PickingSystem|null} */ pickingSystem: null,
 
     // The file source. BASELINE = GitHubFileProvider: client-only GitHub browsing
     // that always works, no relay needed. The effect swaps in RemoteFileSystemProvider
     // (local fs over the relay) when the binary is serving a project. Same surface
     // either way (getFile / listTree / filterCodeFiles / getMultipleFiles), so
     // file.open / FileTree don't care which is active.
-    fileProvider: new GitHubFileProvider(),
+    /** @type {GitHubFileProvider|RemoteFileSystemProvider} */ fileProvider: new GitHubFileProvider(),
 
     annotations: new Map(),
     gridVisualState: new Map(),
-    _cancelCameraAnimation: null,
+    /** @type {(() => void)|null} */ _cancelCameraAnimation: null,
     spatialNav: null,
 
     mode: { state: 'explorer' },
@@ -223,6 +223,51 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // The HUD reflects it; the field.*/sheet.* verbs mutate it. Client-side, like SessionStore.
     workspace: new WorkspaceModel(),
     get attention() { return this.attentionManager.state; },
+
+    // Late-bound: wired after construction by the provider's effect, the dock panels,
+    // the canvas interaction components, loadTrace, and lazily by verbs. Declared here
+    // so AppContext carries every field (LSP refs + hover reach them); each stays
+    // null/false until its owner lights it up, which every reader already guards.
+    // sender/cid are written per dispatch by CommandRouter.
+    /** @type {import('@glyph3d/core/collections/WorldLayout.js').default|null} */ world: null,
+    /** @type {import('@glyph3d/core/collections/ContentTree.js').default|null} */ contentTree: null,
+    /** @type {import('@glyph3d/core/collections/ContentTreeMarkers.js').default|null} */ contentTreeMarkers: null,
+    /** @type {import('@glyph3d/core/collections/ContentTreeLabels.js').default|null} */ contentTreeLabels: null,
+    /** @type {import('@glyph3d/core/collections/ContentTreeArrows.js').default|null} */ contentTreeArrows: null,
+    /** @type {import('@glyph3d/core/collections/ContentTreeMotion.js').default|null} */ contentTreeMotion: null,
+    /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
+    /** @type {import('@glyph3d/core/services/visual/OcclusionCuller.js').default|null} */ occlusionCuller: null,
+    /** @type {(() => void)|null} */ syncCullCandidates: null,
+    /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
+    /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
+    /** @type {import('@glyph3d/core/services/orchestration/SourceStream.js').default|null} */ sourceStream: null,
+    /** @type {import('@glyph3d/core/hand/HandPresence.js').default|null} */ handPresence: null,
+    /** @type {import('@glyph3d/core/services/data/RemoteLspProvider.js').default|null} */ lsp: null,
+    /** @type {import('@glyph3d/core/services/interaction/LspNavigator.js').default|null} */ lspNavigator: null,
+    /** @type {import('@glyph3d/core/services/data/AgentSessionProvider.js').default|null} */ sessionProvider: null,
+    /** @type {((dy: number) => boolean)|null} */ tryScrollHovered: null,
+    /** @type {((dy: number) => boolean)|null} */ tryPageHovered: null,
+    /** @type {import('./SessionStore.js').default|null} */ session: null,
+    /** @type {{ components: string[], toJSON: () => Object, fromJSON: (layout: Object) => void, buildDefaults: Function }|null} */ dockLayout: null,
+    /** @type {{ open: (id: string) => ({open: boolean}|null), close: (id: string) => ({open: boolean}|null), toggle: (id: string) => ({open: boolean}|null), list: () => Array<{id: string, title: string, open: boolean}> }|null} */ dock: null,
+    _sessionRestored: false,
+    /** @type {number|null} */ loadBuildBudget: null,
+    /** @type {((x: number, y: number) => boolean)|null} */ isGripPress: null,
+    /** @type {{ grid: Object, edge: string, role: string }|null} */ handleHover: null,
+    /** @type {{ x: number, y: number }|null} */ handleHoverAt: null,
+    resizing: false,
+    /** @type {Set<Object>|null} */ _activeLoads: null,
+    /** @type {Object[]|null} */ loadTraces: null,
+    /** @type {Array<{ at: number, ms: number, during: string|null }>|null} */ frameTasks: null,
+    /** @type {Array<{ type: 'repo', ref: string }|{ type: 'local', dir: string }>|null} */ fieldSources: null,
+    /** @type {ReturnType<typeof setTimeout>|null} */ _carrelSweepTimer: null,
+    /** @type {Set<string>|null} */ _agentShelfSeen: null,
+    /** @type {string|null} */ sender: null,
+    cid: 0,
+    /** @type {import('@glyph3d/core/annotations/ConnectionRenderer.js').default|null} */ connectionRenderer: null,
+    /** @type {import('@glyph3d/core/services/tour/TourSequencer.js').default|null} */ _tourSequencer: null,
+    /** @type {ReturnType<typeof setInterval>|null} */ _handSimTimer: null,
+    /** @type {Map<string, import('@glyph3d/core/collections/TerminalGrid.js').default>|null} */ terminals: null,
   };
 }
 
