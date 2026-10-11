@@ -11,5 +11,5 @@
 
 ## 3. Core Engine Architecture & Embeddability
 - **Framework Agnosticism**: `@glyph3d/core` must have zero UI framework dependencies (no React, no DOM window globals where headless/Node/worker execution is possible).
-- **Self-Contained Bootstrapping**: Engine bootstrapping functions (`bootGlyphEngine`), defaults (`DEFAULT_ENGINE_OPTIONS`), and core ranges (`LARGE_CORE_RANGES`) belong in `@glyph3d/core`. `@glyph3d/r3f` is strictly a thin React wrapper that re-exports these from core.
+- **Self-Contained Bootstrapping**: Engine bootstrapping functions (`bootGlyphEngine`), defaults (`DEFAULT_ENGINE_OPTIONS`), and core ranges (`LARGE_CORE_RANGES`) belong in `@glyph3d/core`. `@glyph3d/r3f` is strictly a thin React wrapper over them — consumers import them from core (no re-exports).
 - **Single Source of Layout Metrics**: Never hardcode font/glyph dimensions or character pitch. Font advances and line pitches must derive from the font chain and HarfBuzz shaper at runtime via `deriveCharSize` / `computeCellMetrics`.

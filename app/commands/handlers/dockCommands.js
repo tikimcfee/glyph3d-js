@@ -13,26 +13,14 @@
  * fact, written only through ctx.holding.dock; the CameraDock is its live projection.
  */
 
-/** The live 3D dock, or null before it's built. @param {AppContext} ctx */
-function cameraDock(ctx) {
-    return ctx.holding?.dock.live ?? null;
-}
-
-/** Resolve a dock verb's address through the one holdable resolver. @param {AppContext} ctx */
-function target(ctx, arg) {
-    const r = ctx.holding?.resolve(arg);
-    if (!r) return { error: 'holding not ready' };
-    return r;
-}
-
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerDockCommands(router) {
     router.register('dock.lock', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (dock.has(r.id)) return { text: `OK: '${r.id}' already docked`, data: { id: r.id, docked: true } };
         // Order: an explicit hint, else the next bar slot from the model (the order authority —
@@ -44,9 +32,9 @@ export default function registerDockCommands(router) {
     }, { description: 'Dock a surface into the camera-locked HUD bar', usage: '<id|index> [order]', returns: '{ id, docked }' });
 
     router.register('dock.release', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
@@ -55,9 +43,9 @@ export default function registerDockCommands(router) {
     }, { description: 'Release a docked window home (a borrowed carrel member goes back to its seat)', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.toggle', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (dock.has(r.id)) {
             ctx.holding.dock.release(r.id);
@@ -68,7 +56,7 @@ export default function registerDockCommands(router) {
     }, { description: 'Dock a surface if loose, release it if docked', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.list', (_args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const tiles = dock.list();
         const summary = tiles.length
@@ -78,7 +66,7 @@ export default function registerDockCommands(router) {
     }, { description: 'List the docked tiles and the bar layout', returns: '{ tiles:[{id,slot}], layout }' });
 
     router.register('dock.layout', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const mode = String(args[0] ?? '').toLowerCase();
         if (!dock.setLayout(mode)) return { text: 'ERR: usage: dock.layout <linear|radial>', data: null };
@@ -86,9 +74,9 @@ export default function registerDockCommands(router) {
     }, { description: 'Set the dock tile arrangement', usage: '<linear|radial>', returns: '{ layout }' });
 
     router.register('dock.focus', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
@@ -103,9 +91,9 @@ export default function registerDockCommands(router) {
     }, { description: 'Release a docked surface and fly to frame it', usage: '<id|index>', returns: '{ id, docked }' });
 
     router.register('dock.spotlight', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const id = r.id;
         if (!dock.has(id)) return { text: `ERR: '${id}' is not docked`, data: null };
@@ -121,7 +109,7 @@ export default function registerDockCommands(router) {
     }, { description: 'Spotlight a docked tile (focus area) and focus it (keyboard-live for terminals)', usage: '<id|index>', returns: '{ id, spotlit }' });
 
     router.register('dock.clear', (_args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const n = dock.list().length;
         ctx.holding.dock.releaseAll();
@@ -129,7 +117,7 @@ export default function registerDockCommands(router) {
     }, { description: 'Release every docked surface', returns: '{ released }' });
 
     router.register('dock.set', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const key = String(args[0] ?? '');
         const value = parseFloat(args[1]);

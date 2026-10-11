@@ -329,5 +329,24 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     near(g.scale.x, 1, 1e-3, 'inPlace release eases the scale back to its home placement');
 }
 
+// ---- Carrel.release({inPlace}): lifted off the desk where it sits ----
+{
+    const scene = new THREE.Scene();
+    const treeNode = new THREE.Group();
+    scene.add(treeNode);
+    const g = makeGrid();
+    g.position.set(40, 12, -8);
+    treeNode.add(g);
+    const carrel = new Carrel({ name: 'ip', radius: 15 });
+    scene.add(carrel);
+    carrel.lock('a', g);
+    settle(carrel);
+    const before = g.getWorldPosition(new THREE.Vector3());
+    carrel.release('a', { inPlace: true });
+    settle(carrel);
+    ok(g.parent === treeNode, 'carrel inPlace release: home parent');
+    near(g.getWorldPosition(new THREE.Vector3()).distanceTo(before), 0, 1e-3, 'carrel inPlace release: no slide');
+}
+
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

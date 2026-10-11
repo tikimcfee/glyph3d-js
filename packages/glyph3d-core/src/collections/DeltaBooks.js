@@ -544,14 +544,16 @@ export default class DeltaBooks {
 
     // -- private: cluster layout ---------------------------------------------------------
 
+    /** Same grammar as AgentBooks._relayout: a pinned set is user-placed — its live
+     *  position rides across the scheme, and it has no say in the floor rest or footprint. */
     _relayout() {
         const scheme = LAYOUT_SCHEMES[this.cfg.layout] || LAYOUT_SCHEMES.packed;
-        scheme(this.root, this.cfg.layoutOpts);
+        const placed = [];
         for (const set of this.sets.values()) {
-            if (set.pinned && set.pinnedPos && set.book.parent === this.root) {
-                set.book.position.copy(set.pinnedPos);
-            }
+            if (set.pinned && set.book.parent === this.root) placed.push([set.book, set.book.position.clone()]);
         }
+        scheme(this.root, this.cfg.layoutOpts);
+        for (const [book, pos] of placed) book.position.copy(pos);
         this._restOnFloor();
         this._updateCovers();
         for (const cb of this._onRelayout) cb(this);
@@ -567,7 +569,7 @@ export default class DeltaBooks {
         target.makeEmpty();
         this.root.updateWorldMatrix(true, true);
         for (const set of this.sets.values()) {
-            if (set.book.parent !== this.root) continue;   // borrowed (seated elsewhere)
+            if (set.book.parent !== this.root || set.pinned) continue;   // borrowed elsewhere / user-placed
             const b = set.book.getBounds();
             if (b && !b.isEmpty()) target.union(b);
         }
@@ -575,12 +577,12 @@ export default class DeltaBooks {
     }
 
     /** The cluster's LOCAL content box — the WorldLayout measures the delta shelf as a
-     *  bounds-leaf beside the tree and the agent shelf. Borrowed books skipped. */
+     *  bounds-leaf beside the tree and the agent shelf. Borrowed and pinned books skipped. */
     localBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         const tmp = new THREE.Box3();
         for (const set of this.sets.values()) {
-            if (set.book.parent !== this.root) continue;
+            if (set.book.parent !== this.root || set.pinned) continue;
             set.book.updateMatrix();
             tmp.copy(set.book.layoutBounds()).applyMatrix4(set.book.matrix);
             target.union(tmp);

@@ -16,13 +16,10 @@
 const AXES = { h: 'x', x: 'x', horizontal: 'x', v: 'y', y: 'y', vertical: 'y' };
 const DIRS = ['left', 'right', 'up', 'down'];
 
-/** The live 3D dock whose view-frame the panes tile, or null before it's built. @param {AppContext} ctx */
-const cameraDock = (ctx) => ctx.holding?.dock.live ?? null;
-
 /** A pane address → its holdable registry id, or null. @param {AppContext} ctx */
 const paneId = (ctx, arg) => {
-    const r = ctx.holding?.resolve(arg);
-    return r && !('error' in r) ? r.id : null;
+    const r = ctx.holding.resolve(arg);
+    return 'error' in r ? null : r.id;
 };
 
 /**
@@ -30,7 +27,7 @@ const paneId = (ctx, arg) => {
  */
 export default function registerPaneCommands(router) {
     router.register('pane.split', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         if (!dock.paneTree || !dock.focusedPane) return { text: 'ERR: no framed pane to split — pin a window first', data: null };
         const axis = AXES[String(args[0] ?? '').toLowerCase()];
@@ -49,7 +46,7 @@ export default function registerPaneCommands(router) {
     }, { description: 'Split the active pane, tiling a window into the new leaf (h=side-by-side, v=stacked)', usage: '<h|v> <id|index>', returns: '{ id, axis }' });
 
     router.register('pane.focus', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const dir = String(args[0] ?? '').toLowerCase();
         if (!DIRS.includes(dir)) return { text: 'ERR: usage: pane.focus <left|right|up|down>', data: null };
@@ -62,7 +59,7 @@ export default function registerPaneCommands(router) {
     }, { description: 'Move pane focus to the geometric neighbor in a direction (hjkl-style)', usage: '<left|right|up|down>', returns: '{ id }' });
 
     router.register('pane.resize', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const axis = AXES[String(args[0] ?? '').toLowerCase()];
         const delta = parseFloat(args[1]);
@@ -73,7 +70,7 @@ export default function registerPaneCommands(router) {
     }, { description: 'Grow the active pane along an axis (proportional; siblings give up space)', usage: '<h|v> <delta>', returns: '{ axis, delta }' });
 
     router.register('pane.close', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const id = args[0] != null && args[0] !== '' ? paneId(ctx, args[0]) : dock.focusedPane;
         if (!id || !dock.isFramed(id)) return { text: `ERR: '${id ?? args[0]}' is not a framed pane`, data: null };
@@ -83,7 +80,7 @@ export default function registerPaneCommands(router) {
     }, { description: 'Un-frame a pane back to the bar (its sibling collapses up); defaults to the active pane', usage: '[id|index]', returns: '{ id }' });
 
     router.register('pane.swap', (args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const a = paneId(ctx, args[0]), b = paneId(ctx, args[1]);
         if (!a || !b) return { text: 'ERR: usage: pane.swap <idA> <idB>', data: null };
@@ -93,7 +90,7 @@ export default function registerPaneCommands(router) {
     }, { description: 'Exchange two panes in place (positions unchanged, windows swap)', usage: '<idA> <idB>', returns: '{ a, b }' });
 
     router.register('pane.list', (_args, ctx) => {
-        const dock = cameraDock(ctx);
+        const dock = ctx.holding.dock.live;
         if (!dock?.paneTree) return { text: 'OK: nothing framed', data: { panes: [] } };
         const panes = [...dock.paneTree.rects()].map(([id, rect]) => ({ id, rect, active: id === dock.focusedPane }));
         const summary = panes.map((p) => `${p.active ? '*' : ''}${p.id}`).join('  ');

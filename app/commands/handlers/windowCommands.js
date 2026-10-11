@@ -22,17 +22,15 @@
  * untouched — drop is the "bring it to me" alternative, not a replacement.
  *
  * window.lift takes a held window out of every holder right where it hangs — no slide,
- * its scale easing back to natural. A drag picking up a docked tile or a seated window
- * lifts it first, so the hand moves a free window.
+ * its scale easing back to natural — and PLACES it there through its own move verb (a
+ * book pins, a grid or terminal records its position), so whatever lays out its home
+ * frame leaves it be. A drag picking up a docked tile or a seated window lifts it first,
+ * so the hand moves a free window.
  */
 
 import * as THREE from 'three';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
-
-/** Resolve a window verb's address through the one holdable resolver. */
-function target(ctx, arg) {
-    return ctx.holding?.resolve(arg) ?? { error: 'holding not ready' };
-}
+import { moveVerbFor } from '../../client/surfaceInteractions.js';
 
 // Default view-height fraction a dropped window lands at (arg 2 overrides per call).
 const DROP_FILL = 0.45;
@@ -93,7 +91,7 @@ function parseZoom(arg) {
  */
 export default function registerWindowCommands(router) {
     router.register('window.scale', (args, ctx) => {
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (typeof r.grid.setZoom !== 'function') {
             return { text: `ERR: '${r.id}' is not scalable`, data: null };
@@ -107,8 +105,8 @@ export default function registerWindowCommands(router) {
         // zoom-applied in the focus area. setZoom moved `user`, so re-place the tile to fold
         // the new zoom back through: a bar tile stays box-fit, the spotlit tile free-grows.
         // Loose windows already updated via setZoom→resolve.
-        const dock = ctx.cameraDock;
-        if (dock?.has?.(r.id)) dock.reflowTile(r.id);
+        const dock = ctx.holding.dock.live;
+        if (dock?.has(r.id)) dock.reflowTile(r.id);
 
         const z = r.grid.zoom;
         // The model owns the zoom (the persisted decider; the grid's scaleModel is the live cache we
@@ -123,9 +121,9 @@ export default function registerWindowCommands(router) {
     });
 
     router.register('window.pin', (args, ctx) => {
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
-        const dock = ctx.cameraDock;
+        const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
         const id = r.id;
 
@@ -171,7 +169,7 @@ export default function registerWindowCommands(router) {
     });
 
     router.register('window.drop', (args, ctx) => {
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const cam = ctx.camera;
         if (!cam) return { text: 'ERR: camera not ready', data: null };
@@ -220,10 +218,15 @@ export default function registerWindowCommands(router) {
     });
 
     router.register('window.lift', (args, ctx) => {
-        const r = target(ctx, args[0]);
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const from = ctx.holding.lift(r.id, { inPlace: true });
         if (!from) return { text: `OK: '${r.id}' is not held`, data: { id: r.id, from: 'loose' } };
+        // Place it where it landed (home frame), or its home's layout re-slots it — a lifted
+        // book would snap into its cluster slot mid-drag.
+        const verb = moveVerbFor(ctx.registry.get(r.id));
+        const p = r.grid.position;
+        if (verb) router.execute([verb, r.id, String(p.x), String(p.y), String(p.z)]);
         ctx.session?.scheduleSave?.();
         return { text: `OK: lifted '${r.id}' out of the ${from.replace('+', ' and ')}`, data: { id: r.id, from } };
     }, {

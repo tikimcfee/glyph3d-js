@@ -64,14 +64,15 @@ class DockSide {
 
     /**
      * Dock a window (a seated one is borrowed, not unseated). Order: the hint, else the
-     * next bar slot from the model.
+     * next bar slot from the model. `pinAutoDocked` carries a pin's "unpin sends it home"
+     * through a ride that had to be re-locked.
      * @param {{id:string, grid:Object}} r
      */
-    lock(r, { order } = {}) {
+    lock(r, { order, pinAutoDocked = false } = {}) {
         const dock = this.live;
         if (!dock || dock.has(r.id)) return false;
         const o = Number.isFinite(order) ? order : (this.ctx.workspace?.nextDockOrder?.() ?? 0);
-        this._fact(r.id, { docked: true, dockOrder: o });
+        this._fact(r.id, pinAutoDocked ? { docked: true, dockOrder: o, pinAutoDocked } : { docked: true, dockOrder: o });
         return dock.lock(r.id, r.grid, { order: o });
     }
 
@@ -171,9 +172,12 @@ class CarrelSide {
         return desk.handOff(id);
     }
 
-    /** Clear every member's fact — the desk is folding (it sends them home itself). */
+    /** Clear every claim naming the desk — seated members and windows not yet live alike;
+     *  the desk is folding (it sends its members home itself). */
     forget(desk) {
-        for (const m of desk.list()) this._fact(m.id, null);
+        for (const s of this.ctx.workspace?.listCarreled?.() || []) {
+            if (s.view.carrel.name === desk.carrelName) this._fact(s.id, null);
+        }
     }
 
     /** A claim waiting on its desk: the desk stands, the window isn't seated yet. */
@@ -257,6 +261,7 @@ export default class Holding {
      * @returns {'seated'|'returned'|'already'|null}
      */
     seat(r, desk, { order, immediate } = {}) {
+        if (desk._dissolving) return null;                         // refuse BEFORE any handoff
         const owner = this.carrels.ownerOf(r.id);
         if (owner === desk) {
             if (!this.dock.has(r.id)) return 'already';
@@ -327,11 +332,14 @@ export default class Holding {
             const order = s.view.carrel.order;
             // Docked before its desk could seat it (it went live mid-restore): end the ride,
             // seat it, and dock it again — now borrowed, so undocking returns it to the seat.
-            const dockOrder = this.dock.has(s.id) ? ws.getSurface(s.id)?.view?.dockOrder : null;
-            const home = dockOrder != null ? this.dock.handOff(s.id) : this.carrels.handOff(s.id);
-            if (this.carrels.seat(r, desk, { order, immediate: true, home })) {
-                (this.ctx._agentShelfSeen ??= new Set()).add(s.id);   // the default shelf never re-offers
-                if (dockOrder != null) this.dock.lock(r, { order: dockOrder });
+            // The ride's dock-side state (slot, pin, frame occupancy) comes back with it.
+            const riding = this.dock.has(s.id);
+            const { dockOrder, pinAutoDocked } = ws.getSurface(s.id)?.view || {};
+            const framed = riding && !!this.dock.live.isFramed?.(s.id);
+            const home = riding ? this.dock.handOff(s.id) : this.carrels.handOff(s.id);
+            if (this.carrels.seat(r, desk, { order, immediate: true, home }) && riding) {
+                this.dock.lock(r, { order: dockOrder, pinAutoDocked: !!pinAutoDocked });
+                if (framed) this.dock.live.spotlight(s.id);
             }
         }
         this.dock.reconcile((id) => this.carrels.awaitingSeat(id));

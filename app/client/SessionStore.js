@@ -92,7 +92,7 @@ const SURFACE_PROJECTORS = {
     // the captured record it returns to). A seated terminal's .position is carrel-LOCAL, so a
     // world-space fact applied here would yank it out of the ring. applyView sets the LOCAL
     // geometry (position + grid + emulator) directly — no verb replay on the load path.
-    const held = !!store.ctx.holding?.holderOf(s.id);
+    const held = !!store.ctx.holding.holderOf(s.id);
     const changed = grid.applyView?.(s.view || {}, { skipPosition: held }) || {};
     // Readability zoom for a LOOSE terminal (held tiles get theirs from the holder's own
     // reconcile — the dock re-applies zoom + box-fit itself). Guarded like applyView:
@@ -762,7 +762,7 @@ export default class SessionStore {
       this.ctx.cameraDock?.setLayout?.(snap.dock3d.layout || 'linear');
       // The window that holds the root view-frame (pinned) — a dock-level fact, not a per-surface
       // flag. The dock reconcile re-raises it once it's a live tile (spotlight → frame-fit + Pin light).
-      if (this.ctx.holding) this.ctx.holding.dock.pendingFrame = snap.dock3d.focused || null;
+      this.ctx.holding.dock.pendingFrame = snap.dock3d.focused || null;
       snap.dock3d.tiles.forEach((t, i) => {
         if (!t?.id) return;
         // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
@@ -854,7 +854,7 @@ export default class SessionStore {
     }
     // Dock = f(model), additive (Holding.dock.reconcile): a window whose desk is still waiting
     // to seat it is skipped — the carrel sweep seats it, then docks it FROM the seat.
-    this.ctx.holding?.dock.reconcile((id) => this.ctx.holding.carrels.awaitingSeat(id));
+    this.ctx.holding.dock.reconcile((id) => this.ctx.holding.carrels.awaitingSeat(id));
   }
 
   // Public clear — wipe the saved snapshot on demand (the `session.clear` verb). Drops the loaded

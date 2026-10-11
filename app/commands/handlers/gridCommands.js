@@ -279,7 +279,7 @@ export default function registerGridCommands(router) {
 
         // A held grid (docked tile, carrel seat) lifts out where it hangs first: the coords
         // place it in its HOME frame, never the holder's.
-        if (ctx.holding?.holderOf(resolved.registryId)) ctx.holding.lift(resolved.registryId, { inPlace: true });
+        if (ctx.holding.holderOf(resolved.registryId)) ctx.holding.lift(resolved.registryId, { inPlace: true });
         resolved.grid.position.set(x, y, z);
 
         // Persist the move — the mover's law: any verb that repositions a grid

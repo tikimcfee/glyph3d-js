@@ -5,7 +5,7 @@
 // reload still carries the operator's intent. `terminal.move` obeys it (terminalCommands.js);
 // `window.drop` obeys it (windowCommands.js); `grid.move` — the one verb whose entire job is
 // moving — did not, so a dragged code grid's position reached the scene and nothing else. The
-// drag path is the same verb: ObjectDragger's pointerup fires `moveVerbFor(type)`, which is
+// drag path is the same verb: ObjectDragger's pointerup fires `moveVerbFor(entry)`, which is
 // `grid.move` for a code grid (surfaceInteractions.js).
 //
 // SCOPE: this asserts the model WRITE, which is what the verb owns. Pushing that fact back onto a
@@ -22,6 +22,7 @@ const { default: CommandRouter } =
   await import('../packages/glyph3d-core/src/services/orchestration/CommandRouter.js');
 const { default: registerGridCommands } = await import('../app/commands/handlers/gridCommands.js');
 const { default: WorkspaceModel } = await import('../app/client/WorkspaceModel.js');
+const { default: Holding } = await import('../app/client/Holding.js');
 
 let failures = 0;
 const ok = (c, m) => { console.log(`${c ? '✓' : '✗ FAIL'} ${m}`); if (!c) failures++; };
@@ -44,12 +45,14 @@ function makeCtx() {
     has: (id) => grids.has(id),
     getIdByGrid(g) { for (const [id, e] of grids) if (e.grid === g) return id; return null; },
   };
-  return {
+  const ctx = {
     registry, workspace,
     getGrids: () => [...grids.values()].map((e) => e.grid),
     session: { scheduleSave() { saves.push(Date.now); } },
     _saves: saves,
   };
+  ctx.holding = new Holding(ctx);
+  return ctx;
 }
 
 function drive() {

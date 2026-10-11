@@ -221,17 +221,20 @@ export default function registerBookCommands(router) {
         // A HELD book (seated at a desk, riding the dock) lifts out first, right where it
         // hangs — back in its cluster frame, easing to natural size — so the coords pin it
         // like any loose book. (A drag already lifted it at pickup: window.lift.)
-        const r = ctx.holding?.resolve(id);
-        if (r && !('error' in r) && ctx.holding.holderOf(r.id)) ctx.holding.lift(r.id, { inPlace: true });
+        const r = ctx.holding.resolve(id);
+        if (!('error' in r) && ctx.holding.holderOf(r.id)) ctx.holding.lift(r.id, { inPlace: true });
         // The agent shelf first, else a delta set — both pin in their own cluster frame;
-        // the resolvers keep the address spaces honest.
+        // the resolvers keep the address spaces honest. The search book has no cluster to
+        // flow around it: it just stands where it's put (ephemeral, like the search itself).
         const hit = books.resolveLane(id);
-        const ok = hit ? books.moveGroup(hit[0], x, y, z)
-                       : !!ctx.deltaBooks?.moveGroup?.(ctx.deltaBooks.resolveSet(id)?.[0], x, y, z);
+        let ok;
+        if (hit) ok = books.moveGroup(hit[0], x, y, z);
+        else if (!('error' in r) && r.kind === 'search') { r.grid.position.set(x, y, z); ok = true; }
+        else ok = !!ctx.deltaBooks?.moveGroup?.(ctx.deltaBooks.resolveSet(id)?.[0], x, y, z);
         return ok
             ? { text: `OK: moved ${id}`, data: { id, x: r2(x), y: r2(y), z: r2(z) } }
-            : { text: `ERR: no agent or delta book '${id}'`, data: null };
-    }, { description: 'Reposition (pin) an agent book — drag-release / CLI; a seated book lifts off its desk and stays put', usage: '<id> <x> <y> <z>' });
+            : { text: `ERR: no agent, delta, or search book '${id}'`, data: null };
+    }, { description: 'Reposition (pin) a book — drag-release / CLI; a held book lifts off its desk or the dock and stays put', usage: '<id> <x> <y> <z>' });
 
     router.register('book.config', (args, ctx) => {
         const books = ctx.agentBooks;

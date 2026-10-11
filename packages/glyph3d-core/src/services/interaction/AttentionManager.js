@@ -14,8 +14,6 @@
  *     primary: { id, entity, ts } | null  — sticky focus (reader mode, etc.)
  *     key:     { id, entity, ts } | null  — keystroke target; new in L1
  *   }
- *   docks = Map<id, { anchor, offset, ts }>  — stubbed empty until L2 lands
- *                                              CameraDock / dock.* verbs
  *
  * Notes on shape:
  *   - Slot values are either null (cleared) or a record with id + entity

@@ -95,6 +95,9 @@ async function resolveSessionEntry(provider, idOrPrefix) {
     const sessions = await provider.list();
     const exact = sessions.find((s) => s.id === idOrPrefix);
     if (exact) return exact;
+    // The lane id agent.sessions prints (and a book is named by) — the per-harness derivation.
+    const lane = sessions.filter((s) => agentIdForEntry(s) === idOrPrefix);
+    if (lane.length === 1) return lane[0];
     const norm = String(idOrPrefix).replace(/-/g, '');
     const hits = sessions.filter((s) => s.id.replace(/-/g, '').startsWith(norm));
     if (hits.length === 1) return hits[0];
@@ -290,7 +293,7 @@ export default function registerAgentCommands(router) {
         const rows = sessions.map((s) => {
             const isOpen = open.has(agentIdForEntry(s));
             const tag = s.harness === 'kimi' ? 'kimi   ' : '';
-            return `${s.id.replace(/-/g, '').slice(0, 8)}  ${tag}${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
+            return `${agentIdForEntry(s)}  ${tag}${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
         });
         return {
             text: `ARCHIVE (${sessions.length} session${sessions.length === 1 ? '' : 's'})\n` + (rows.length ? rows.join('\n') : '(none)'),

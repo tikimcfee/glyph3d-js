@@ -129,8 +129,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
 - **Frustum culling** is three's built-in per-object cull fed the real instance extent —
-  `GlyphField._updateGeometryBounds` writes `geometry.boundingBox/Sphere` after every
-  position/count mutation, so `frustumCulled = true` is safe. (The old `GridVirtualizer`
+  `InstancedField.setLayoutExtent` writes `geometry.boundingBox/Sphere` after every
+  layout mutation, so `frustumCulled = true` is safe. (The old `GridVirtualizer`
   class is deleted; culling covers draws, not GPU memory.)
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

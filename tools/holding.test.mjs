@@ -16,6 +16,10 @@
 //   - fold: a desk folding while a member is borrowed re-homes that ride to the tree
 //   - the carrel verbs accept every book form (B1: `carrel.release agent:<id>`)
 //   - grid.* verbs address grids only: `grid.close` refuses a terminal, a book, a card
+//   - a dissolving desk is refused BEFORE any handoff (the window stays where it was)
+//   - fold clears every claim naming the desk, windows not yet live included
+//   - the restore race keeps the ride's pin (pinAutoDocked) and frame occupancy
+//   - window.lift places what it lifts through the window's own move verb
 //
 // Real CameraDock + Carrel + WorkspaceModel over a mock registry; GPU-free.
 
@@ -30,6 +34,7 @@ import Holding from '../app/client/Holding.js';
 globalThis.window ??= { addEventListener() {} };
 const { default: registerCarrelCommands } = await import('../app/commands/handlers/carrelCommands.js');
 const { default: registerGridCommands } = await import('../app/commands/handlers/gridCommands.js');
+const { default: registerWindowCommands } = await import('../app/commands/handlers/windowCommands.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -237,8 +242,9 @@ function makeWorld() {
     ok(add.text.startsWith('OK') && A.has('agent:book:zz9'), `carrel.add agent:<id> seats the book under its registry id (got "${add.text}")`);
     const rel = handlers['carrel.release'](['agent:zz9'], w.ctx);
     ok(rel.text.startsWith('OK') && !A.has('agent:book:zz9'), `carrel.release agent:<id> releases it (got "${rel.text}")`);
+    w.registry.register('vol:/x', makeGrid(), { type: 'book', role: 'volume' });
     const bad = handlers['carrel.add'](['vol:/x', 'A'], w.ctx);
-    ok(bad.text.startsWith('ERR'), 'carrel.add refuses what resolve refuses');
+    ok(bad.text.startsWith('ERR') && /library volume/.test(bad.text), `carrel.add refuses what resolve refuses (got "${bad.text}")`);
 }
 
 // ── grid.* verbs address grids only ──
@@ -254,6 +260,61 @@ function makeWorld() {
         ok(r.text.startsWith('ERR') && /not a grid/.test(r.text), `grid.close refuses '${id}' (got "${r.text}")`);
         ok(w.registry.has(id), `grid.close left '${id}' alone`);
     }
+}
+
+// ── a dissolving desk is refused before any handoff ──
+{
+    const w = makeWorld();
+    const H = w.ctx.holding;
+    const g = w.file('/p/d.js');
+    const A = w.desk('A');
+    const r = H.resolve('/p/d.js');
+    H.dock.lock(r); w.tick();
+    A.dissolve();
+    ok(H.seat(r, A) === null, 'seat into a dissolving desk: refused');
+    ok(H.isDocked(r.id) && g.parent === w.ctx.cameraDock, 'refused seat: the window is still docked, untouched');
+    ok(w.ctx.workspace.getSurface(r.id).view.docked === true, 'refused seat: the ride fact stands');
+}
+
+// ── fold clears claims for windows not yet live ──
+{
+    const w = makeWorld();
+    const A = w.desk('A');
+    w.ctx.workspace.setSurfaceView('/p/later.js', undefined, { carrel: { name: 'A', order: 3 } });
+    w.ctx.holding.fold(A);
+    ok(w.ctx.workspace.getSurface('/p/later.js').view.carrel == null, 'fold: a not-yet-live claim on the folding desk is cleared');
+}
+
+// ── restore race keeps pin + frame ──
+{
+    const w = makeWorld();
+    const H = w.ctx.holding, ws = w.ctx.workspace;
+    const A = w.desk('A');
+    ws.setSurfaceView('/p/pin.js', undefined, { carrel: { name: 'A', order: 0 } });
+    const g = w.file('/p/pin.js');
+    H.dock.lock({ id: '/p/pin.js', grid: g }, { pinAutoDocked: true });
+    w.ctx.cameraDock.spotlight('/p/pin.js');           // pinned into the frame
+    w.tick();
+    H.reconcile();
+    w.tick();
+    ok(A.has('/p/pin.js') && H.isDocked('/p/pin.js'), 'race: seated and re-docked');
+    ok(ws.getSurface('/p/pin.js').view.pinAutoDocked === true, 'race: pinAutoDocked survives the re-lock');
+    ok(w.ctx.cameraDock.isFramed('/p/pin.js'), 'race: still occupies the view-frame');
+}
+
+// ── window.lift places what it lifts ──
+{
+    const w = makeWorld();
+    const handlers = {}, ran = [];
+    registerWindowCommands({ register: (n, fn) => { handlers[n] = fn; }, execute: (cmd) => { ran.push(cmd); } });
+    const g = w.file('/p/l.js');
+    const A = w.desk('A');
+    w.ctx.holding.seat(w.ctx.holding.resolve('/p/l.js'), A); w.tick();
+    const res = handlers['window.lift'](['/p/l.js'], w.ctx);
+    ok(res.data?.from === 'carrel' && g.parent === w.tree, `window.lift: out of the desk (got "${res.text}")`);
+    const mv = ran.find((c) => c[0] === 'grid.move');
+    ok(!!mv && mv[1] === '/p/l.js' && Math.abs(Number(mv[2]) - g.position.x) < 1e-6,
+       `window.lift: placed through grid.move at the landed position (ran ${JSON.stringify(ran)})`);
 }
 
 console.log(`\nholding.test: ${pass} passed, ${fail} failed`);

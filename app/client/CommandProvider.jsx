@@ -153,8 +153,10 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
 
     // Who carries a window (residence = carrel, vehicle = dock) and the one place that
     // changes it — the dock and carrel facts, their handoffs, the holdable resolver.
-    // Built in the effect beside the dock; it reads the holders lazily off this ctx.
-    /** @type {Holding|null} */ holding: null,
+    // Built on first use; it reads the holders lazily off this ctx, so it's never null.
+    /** @type {Holding|null} */ _holding: null,
+    /** @returns {Holding} */
+    get holding() { return (this._holding ??= new Holding(this)); },
 
     // Agent books — every agent's run bound as a book of page-pair spreads (description
     // verso, content recto), the one agent-viewing system. The agent.* verbs sink here;
@@ -225,7 +227,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {((x: number, y: number) => boolean)|null} */ isGripPress: null,
     /** @type {{ grid: Object, edge: string, role: string }|null} */ handleHover: null,
     /** @type {{ x: number, y: number }|null} */ handleHoverAt: null,
-    resizing: false,
+    /** A manipulation drag (resize grip, object move) owns the pointer: hover picking pauses and its release is no click. */
+    manipulating: false,
     /** @type {Set<Object>|null} */ _activeLoads: null,
     /** @type {Object[]|null} */ loadTraces: null,
     /** @type {Array<{ at: number, ms: number, during: string|null }>|null} */ frameTasks: null,
@@ -529,7 +532,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const cameraDock = new CameraDock({ atlas: state.ctx.atlas });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
-    state.ctx.holding = new Holding(state.ctx);
     // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
     // fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock');

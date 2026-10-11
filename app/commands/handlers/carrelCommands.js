@@ -39,16 +39,18 @@ function carrels(ctx) {
 }
 
 /**
- * Resolve a carrel by name, else the active one, else the most recently created.
+ * Resolve a carrel by name, else the active one, else the most recently created. A desk
+ * that's dissolving (folding while its members drain home) is already gone to the verbs.
  * @param {AppContext} ctx
  */
 function findCarrel(ctx, name) {
     const map = carrels(ctx);
     if (!map) return null;
-    if (name) return map.get(String(name)) || null;
-    if (ctx.activeCarrel && map.has(ctx.activeCarrel)) return map.get(ctx.activeCarrel);
+    const live = (c) => (c && !c._dissolving ? c : null);
+    if (name) return live(map.get(String(name)));
+    if (ctx.activeCarrel) { const c = live(map.get(ctx.activeCarrel)); if (c) return c; }
     let last = null;
-    for (const c of map.values()) last = c;
+    for (const c of map.values()) if (!c._dissolving) last = c;
     return last;
 }
 
@@ -176,7 +178,7 @@ export function scheduleCarrelSweep(ctx) {
  */
 export function carrelSweep(ctx) {
     const map = carrels(ctx);
-    if (!map || !ctx.scene || !ctx.holding) return;
+    if (!map || !ctx.scene) return;
     ctx.holding.reconcile();
     autoShelf(ctx, map);
 }
@@ -193,9 +195,15 @@ function autoShelf(ctx, map) {
     if (getSetting('book.autoShelf') === false) return;
 
     // Books are held by their registry id (lane.groupId) — the one key the dock uses too.
-    const newcomers = [...lanes.values()].filter((lane) =>
-        !seen.has(lane.groupId) && !lane.pinned && !ctx.holding.holderOf(lane.groupId)
-        && !ctx.workspace?.getSurface?.(lane.groupId)?.view?.carrel);
+    // A book that's already placed — held, claimed by a desk, or pinned by hand — is seen:
+    // the default is once per birth, never a leash, so letting it go later won't re-shelve it.
+    const newcomers = [];
+    for (const lane of lanes.values()) {
+        const id = lane.groupId;
+        if (seen.has(id)) continue;
+        if (lane.pinned || ctx.holding.holderOf(id) || ctx.workspace?.getSurface?.(id)?.view?.carrel) seen.add(id);
+        else newcomers.push(lane);
+    }
     if (!newcomers.length) return;
 
     const shelf = map.get(AGENT_SHELF) ?? (() => {
@@ -248,8 +256,7 @@ export default function registerCarrelCommands(router) {
                 ? `ERR: no carrel named '${carrelArg}' (have: ${have})`
                 : 'ERR: no carrel (carrel.create first)', data: null };
         }
-        const r = ctx.holding?.resolve(idArg);
-        if (!r) return { text: 'ERR: holding not ready', data: null };
+        const r = ctx.holding.resolve(idArg);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
 
         // The handoff (dock → desk, desk → desk, borrowed → back to its seat) is Holding's.
@@ -265,8 +272,7 @@ export default function registerCarrelCommands(router) {
     }, { description: 'Seat a window or whole book at a carrel (default: the active one); docked windows hand over cleanly, a borrowed one goes back to its seat', usage: '<id|index|book> [carrel]', returns: '{ id, carrel }' });
 
     router.register('carrel.release', (args, ctx) => {
-        const r = ctx.holding?.resolve(args[0]);
-        if (!r) return { text: 'ERR: holding not ready', data: null };
+        const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const id = r.id;
         // A borrowed (docked) member stays docked — its ride now ends at the desk's home.
@@ -303,7 +309,7 @@ export default function registerCarrelCommands(router) {
         const carrel = findCarrel(ctx, args[0]);
         if (!map || !carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const members = carrel.list();
-        ctx.holding?.fold(carrel);
+        ctx.holding.fold(carrel);
         ctx.registry?.unregister?.(`carrel:${carrel.carrelName}`); // out of the world spine now
         if (carrel.worldManaged) {
             // Leave the world row before folding — the scene holds the desk while

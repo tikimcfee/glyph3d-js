@@ -141,7 +141,7 @@ function hostableSections(ctx) {
     const entries = ctx?.registry?.list?.() || [];
     const hues = new Map((ctx?.agentBooks?.agents?.() || []).map((a) => [a.id, a.color]));
     const of = (...kinds) => entries
-        .filter((en) => kinds.includes(ctx?.holding?.holdableKind(en)))
+        .filter((en) => kinds.includes(ctx?.holding.holdableKind(en)))
         .map((en) => {
             const lane = en.role === 'agent' ? ctx.agentBooks?.resolveLane?.(en.id) : null;
             return { id: en.id, label: memberLabel(ctx, en.id), color: lane ? hues.get(lane[0]) : undefined };
@@ -277,7 +277,7 @@ export default function CarrelsPanel({ client }) {
 
             {menu && (() => {
                 const sections = hostableSections(client?.ctx);
-                const docked = (id) => !!client?.ctx?.holding?.isDocked(id);
+                const docked = (id) => !!client?.ctx?.holding.isDocked(id);
                 return (<>
                     <div style={S.backdrop} onClick={() => setMenu(null)}
                         onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />

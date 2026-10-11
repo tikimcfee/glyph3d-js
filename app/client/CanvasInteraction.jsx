@@ -214,9 +214,9 @@ export function CanvasPicker() {
 
     const onUp = (e) => {
       if (e.pointerType === 'touch') return; // TouchAdapter owns tap-to-select
-      // A resize drag (ResizeDragger) owns this release — never treat its tiny
-      // sub-DRAG_PX nudges as a click that would re-select / refocus.
-      if (client.ctx.resizing) return;
+      // A manipulation drag (ResizeDragger, ObjectDragger) owns this release — never
+      // treat it as a click that would re-select / refocus / toggle the dock.
+      if (client.ctx.manipulating) return;
       // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
       if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
       // Act on exactly what's highlighted (the grid-channel hover result the
@@ -227,7 +227,7 @@ export function CanvasPicker() {
     };
 
     const onDblClick = (e) => {
-      if (client.ctx.resizing) return;
+      if (client.ctx.manipulating) return;
       resolveGesture({ type: 'dblclick', target: s.hoverEntry }, gestureEnv);
     };
 
@@ -262,7 +262,7 @@ export function CanvasPicker() {
     // A resize drag is in progress (ResizeDragger): it owns the cursor + the
     // captured grip; pause hover picking so the two don't fight over the cursor
     // and we don't pick against a panel that's about to change size.
-    if (client.ctx.resizing) return;
+    if (client.ctx.manipulating) return;
     const c = camera;
     const dom = gl.domElement;
 
@@ -438,10 +438,6 @@ export function CanvasPicker() {
   return null;
 }
 
-/** Pointer travel (px) before a Ctrl-press becomes a drag — below it, it's a Ctrl-click
- *  (dock.toggle, via the gesture resolver), so nothing is lifted or moved. */
-const DRAG_SLOP_PX = 5;
-
 /**
  * Object dragging — Ctrl/Cmd + drag MOVES the window under the cursor
  * instead of panning the camera (the camera controller yields Ctrl-drag to us,
@@ -451,7 +447,7 @@ const DRAG_SLOP_PX = 5;
  * moment the drag starts (window.lift) — the hand moves a free window. The drag is
  * direct (60fps position writes); on release we persist the final spot through the
  * surface's move verb (the one the CLI uses), then nudge a session save. Surfaces
- * without a move verb (a book's pages) don't drag.
+ * without a move verb (a book's pages, cards included) don't drag.
  */
 export function ObjectDragger() {
   const { gl, camera } = useThree();
@@ -470,7 +466,7 @@ export function ObjectDragger() {
       // attention bus. Consistent with the outline the user sees.
       const hid = ctx.attentionManager?.get('hover')?.id;
       const entry = hid ? ctx.registry.get(hid) : null;
-      const verb = entry ? moveVerbFor(entry.role || entry.type) : null;
+      const verb = entry ? moveVerbFor(entry) : null;
       if (!verb) return;
       drag = { grid: entry.grid, id: entry.id, verb, startX: e.clientX, startY: e.clientY,
                lastX: e.clientX, lastY: e.clientY, moving: false };
@@ -483,10 +479,13 @@ export function ObjectDragger() {
     const onMove = (e) => {
       if (!drag) return;
       if (!drag.moving) {
-        if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_SLOP_PX) return;
+        // Below DRAG_PX it's still a Ctrl-click (dock.toggle, via the gesture resolver): nothing
+        // lifts or moves. Past it the drag owns the pointer — its release is never a click.
+        if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) <= DRAG_PX) return;
         drag.moving = true;
+        ctx.manipulating = true;
         drag.lastX = e.clientX; drag.lastY = e.clientY;
-        if (ctx.holding?.holderOf(drag.id)) router.execute(['window.lift', drag.id]);
+        if (ctx.holding.holderOf(drag.id)) router.execute(['window.lift', drag.id]);
         return;
       }
       const dx = e.clientX - drag.lastX;
@@ -519,6 +518,8 @@ export function ObjectDragger() {
       dom.style.cursor = 'default';
       dom.releasePointerCapture?.(e.pointerId);
       if (!moving) return;   // a Ctrl-click, not a drag — the gesture resolver owns it
+      // Hold the flag across THIS event dispatch so CanvasPicker's onUp skips its click.
+      queueMicrotask(() => { ctx.manipulating = false; });
       // Persist through the bus (CLI/session parity), then let the session store
       // capture the new layout. The per-surface move verb is one record per kind
       // (surfaceInteractions), not a type branch here.
@@ -533,6 +534,7 @@ export function ObjectDragger() {
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointermove', onMove);
       dom.removeEventListener('pointerup', onUp);
+      if (drag?.moving) ctx.manipulating = false; // unmounted mid-drag → never leave the shared flag stuck
     };
   }, [client, gl, camera]);
 
@@ -586,7 +588,7 @@ export function ResizeDragger() {
     // size and saves; pointercancel / lostpointercapture REVERT to the start size (the
     // live steps already re-gridded, so an interrupt must undo them). Either way the
     // shared flags reset, so an interrupted drag can never wedge the canvas (a stuck
-    // ctx.resizing kills hover picking + click-select until reload).
+    // ctx.manipulating kills hover picking + click-select until reload).
     const endDrag = (e, commit) => {
       if (!drag) return; // lostpointercapture also echoes after a normal up — ignore it
       const { id, mode, startCols, startRows, appliedCols, appliedRows, startZoom, appliedZoom } = drag;
@@ -595,9 +597,9 @@ export function ResizeDragger() {
       ctx.handleHover = null;   // drop the cached grip; next press must re-establish via a fresh pick
       ctx.handleHoverAt = null;
       if (e?.pointerId != null) dom.releasePointerCapture?.(e.pointerId);
-      // Hold ctx.resizing across THIS event dispatch so CanvasPicker's onUp (same
+      // Hold ctx.manipulating across THIS event dispatch so CanvasPicker's onUp (same
       // tick, listener-order-independent) skips its click-select; clear once drained.
-      queueMicrotask(() => { ctx.resizing = false; });
+      queueMicrotask(() => { ctx.manipulating = false; });
       if (mode === 'scale') {
         // SCALE grip: the live steps already applied window.scale (which saves). A
         // clean release just keeps it; an interrupt reverts to the start zoom.
@@ -668,7 +670,7 @@ export function ResizeDragger() {
       const id = ctx.registry.getIdByGrid(grid);
       if (!id) return;
       // Chrome splits by role: the click buttons (pin + dials) fire a verb on press and
-      // return — NO drag. ctx.resizing (drained the microtask after this press's trailing
+      // return — NO drag. ctx.manipulating (drained the microtask after this press's trailing
       // pointerup) suppresses the click-select so the press acts on the button, not the
       // panel behind it. The two drag grips fall through to the ResizeDragger setup below.
       if (token.role !== 'resize' && token.role !== 'scale') {
@@ -678,8 +680,8 @@ export function ResizeDragger() {
         // Suppress the trailing click-select so the press acts on the button, not the panel
         // behind it (drained the microtask after this press's pointerup). handleHover is left
         // intact — the hover loop clears the button's visual when the cursor leaves it.
-        ctx.resizing = true;
-        const drain = () => { queueMicrotask(() => { ctx.resizing = false; }); window.removeEventListener('pointerup', drain, true); };
+        ctx.manipulating = true;
+        const drain = () => { queueMicrotask(() => { ctx.manipulating = false; }); window.removeEventListener('pointerup', drain, true); };
         window.addEventListener('pointerup', drain, true);
         e.preventDefault();
         return;
@@ -710,7 +712,7 @@ export function ResizeDragger() {
         startReach: Math.max(1e-3, 0.5 * Math.hypot(
           startBounds.max.x - startBounds.min.x, startBounds.max.y - startBounds.min.y)),
       };
-      ctx.resizing = true; // CanvasPicker pauses hover + skips click-select while set
+      ctx.manipulating = true; // CanvasPicker pauses hover + skips click-select while set
       dom.style.cursor = mode === 'scale' ? 'nesw-resize' : 'nwse-resize';
       dom.setPointerCapture?.(e.pointerId);
       e.preventDefault();
@@ -779,7 +781,7 @@ export function ResizeDragger() {
       dom.removeEventListener('pointerup', onUp);
       dom.removeEventListener('pointercancel', onCancel);
       dom.removeEventListener('lostpointercapture', onCancel);
-      if (drag) ctx.resizing = false; // unmounted mid-drag → never leave the shared flag stuck
+      if (drag) ctx.manipulating = false; // unmounted mid-drag → never leave the shared flag stuck
       disarmClose();                  // clear any pending close-confirm timeout
     };
   }, [client, gl, camera]);

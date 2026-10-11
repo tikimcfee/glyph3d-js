@@ -23,8 +23,17 @@
  * @typedef {Object} SurfaceRecord
  * @property {(entry: Object, dy: number) => (string[]|null)} [wheelScroll] - command (array form,
  *   id may contain spaces) to scroll the surface by a wheel delta, or null if it doesn't scroll.
- * @property {string} moveVerb - the verb that repositions this surface (drag-to-move).
+ * @property {string} [moveVerb] - the verb that repositions this surface (drag-to-move);
+ *   absent = the surface doesn't drag.
+ * @property {(entry: Object) => boolean} [pinnedInPlace] - true when THIS instance is laid out
+ *   by something else (a page riding a book) and so doesn't drag even though its kind does.
  */
+
+/** The library volume a grid rides as a page, or null — any page of a book IS the book. */
+function volumeOf(grid) {
+  for (let n = grid; n; n = n.parent) if (n.userData?.isVolume && n.userData.path !== undefined) return n;
+  return null;
+}
 
 /** @type {Record<string, SurfaceRecord>} */
 const RECORDS = {
@@ -53,14 +62,13 @@ const RECORDS = {
     // turns the directory — one notch, one file, down dives deeper into the deck —
     // the same paging grammar as an agent book's cards. Plain wheel stays movement.
     wheelPage(entry, dy) {
-      for (let n = entry.grid; n; n = n.parent) {
-        if (n.userData?.isVolume && n.userData.path !== undefined) {
-          return ['book.scroll', n.userData.path, String(dy > 0 ? 1 : -1)];
-        }
-      }
-      return null;
+      const vol = volumeOf(entry.grid);
+      return vol ? ['book.scroll', vol.userData.path, String(dy > 0 ? 1 : -1)] : null;
     },
     moveVerb: 'grid.move',
+    // A page of a library volume is laid out by its book — dragging it out tore it from
+    // the deck and stretched the directory's bounds to wherever it landed.
+    pinnedInPlace: (entry) => !!volumeOf(entry.grid),
   },
   card: {
     // Any page of a book IS the book: SHIFT+wheel turns it from wherever you're
@@ -102,6 +110,11 @@ const RECORDS = {
     },
     moveVerb: 'book.move',
   },
+  search: {
+    // The search book's cover — drag it to stand the results somewhere else (paging rides
+    // its cards' records).
+    moveVerb: 'book.move',
+  },
   'delta-page': {
     // Any page of a delta book IS the book — SHIFT+wheel over a base/head grid turns
     // the file sheets from wherever you're reading.
@@ -139,13 +152,16 @@ export function wheelPageCommand(entry, dy) {
 }
 
 /**
- * The move verb (drag-to-reposition) for a surface kind (registry role || type). A kind with a
- * record but no moveVerb (a book's pages, a library volume) doesn't drag: null. A kind with no
- * record at all (a frame) moves as a grid.
- * @param {string} kind
+ * The move verb (drag-to-reposition) for a surface. A kind (registry role || type) with a record
+ * but no moveVerb (an agent book's cards, a library volume) doesn't drag, nor does an instance its
+ * record pins in place (a library volume's page): null. A kind with no record (a frame) moves as
+ * a grid.
+ * @param {Object} entry - a registry entry ({ id, type, role, grid })
  * @returns {string|null}
  */
-export function moveVerbFor(kind) {
-  const rec = RECORDS[kind];
-  return rec ? (rec.moveVerb ?? null) : 'grid.move';
+export function moveVerbFor(entry) {
+  const rec = RECORDS[entry.role || entry.type];
+  if (!rec) return 'grid.move';
+  if (rec.pinnedInPlace?.(entry)) return null;
+  return rec.moveVerb ?? null;
 }

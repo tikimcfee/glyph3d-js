@@ -102,8 +102,8 @@ This is why it isn't *already* a one-liner: the facts are smeared across copies,
 | **window placement** | `ScaleModel.placement`; `config.gridScale`; `DockEntry.home.scale` | — (recompute: home scale XOR dock fit) | **derive** |
 | **grid/terminal position** | scheme writes `leaf.position` (`packedLayout.js:112`); `CameraDock.home.pos`; file `entry.x/y/z` | `view.position` for terminals/manual moves only | **store (terminals/manual) / derive (tree grids)** — `file.open`'s `[x y z]` args are never consumed (`fileCommands.js:178`) |
 | **terminal depth / terminal.scale** | `TerminalGrid._depthMax` etc; `ScaleModel.placement` via `setScale` | `view.depth`, `view.scale` | **store (GAPs today)** |
-| **dock membership** | **4 + file**: `CameraDock.entries` · `AttentionManager.docks` (mislabeled "record of truth", `AM.js:70`) · `CameraDock.tiles` Set · scene parent · `dock3d` | `view.dock.member` (the rest become `apply()` outputs) | **store** |
-| **dock slot order** | `DockEntry.slot` (recomputed, `CameraDock.js:412`) + `docks[].offset.slot` | `view.dock.slotOrder` (relative order only) | **store order / derive the int** |
+| **dock membership** | `view.docked` / `dockOrder` (the model, written only through `ctx.holding.dock`) → projected onto `CameraDock.entries` (+ its `tiles` Set, scene parent); `dock3d` on disk | `view.docked` | **store** |
+| **dock slot order** | `view.dockOrder` (the model) → `DockEntry.slot` (recomputed dense rank) | `view.dock.slotOrder` (relative order only) | **store order / derive the int** |
 | **dock spotlight** | `CameraDock.focusedId` (`:109`) — set only by an explicit gesture, no re-derivation source, lost on reload | `view.dock.focused` | **store** — it can be lost, therefore it's intent, not derived |
 | **field source** | `ctx.fieldSources` — ONE home, a LIST (additive multi-root: `file.openDir` appends `{type:'local',dir}` per opened root; `repo.load` replaces with its single `{type:'repo',ref}`); `fileProvider._currentRepo` is the provider's own cache, not a decider | `field.sources` | **store** |
 | **ContentTree scheme** | `ContentTree.layout/layoutOpts` (`ContentTree.js:54`) — **persisted nowhere**; resets whole field to packed on reload | `field.layout` | **store (biggest GAP — governs every grid's position)** |
@@ -113,7 +113,6 @@ This is why it isn't *already* a one-liner: the facts are smeared across copies,
 ## 6. Dead / unwired (delete; don't model)
 
 - **Dead camera stack:** `camera/CameraController.js` + `camera/InputManager.js` (+ likely `Camera.js`) — zero `new` sites, reachable only via `index.js:58-59` barrel re-exports (the forwarder anti-pattern). Live controller is `services/camera/ViewerCameraController.js` (`ViewerCamera.jsx:44`). Also dead: VCC's DOM-slider glue (`ViewerCameraController.js:276-299,616-667` — targets `cam-speed`/`reset-camera`/`*-sensitivity` elements absent in `app/`).
-- **Null in the r3f client:** `SelectionManager`, `SpatialWindowManager`+`WindowGroup`, `FileStateManager`, `CodeColorManager`, `EntityInputRouter` (`CommandProvider.jsx:110-115`); `select.*`/`group.*` silently no-op; the `groups` localStorage blob is write-only. Don't model until groups actually ship.
 - **Dead writes:** registry `entry.cols/rows` + stale `meta.cols/rows`, `SceneRegistry.removeById` alias, `CodeGrid._markBoundsDirty()` stub, the `file-selected` CustomEvent (0 listeners), `WorkspaceModel`'s phantom `change:active` event (`:41`, never emitted), phantom camera settings (`rotateSensitivity`, `invertDragX/Y`).
 
 ## 7. Real bugs the audit found (shippable now, independent of the refactor)

@@ -5,6 +5,7 @@ import CodeGrid from '../packages/glyph3d-core/src/collections/CodeGrid.js';
 import FileRow from '../packages/glyph3d-core/src/collections/FileRow.js';
 import ViewerCameraController from '../packages/glyph3d-core/src/services/camera/ViewerCameraController.js';
 import registerCameraCommands from '../app/commands/handlers/cameraCommands.js';
+import Holding from '../app/client/Holding.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error(`  ✗ FAIL: ${m}`); } };
@@ -80,6 +81,7 @@ const mockAtlas = {
         THREE,
         getGrids: () => [row],
     };
+    ctx.holding = new Holding(ctx);
     const cc = new ViewerCameraController(ctx);
     const pose = cc.computeGridFocus(0);
     ok(pose !== null, 'computeGridFocus returned valid pose for FileRow');
@@ -118,6 +120,7 @@ const mockAtlas = {
             focusOnObject: () => true,
         },
     };
+    ctx.holding = new Holding(ctx);
 
     const handlers = {};
     registerCameraCommands({ register: (name, fn) => { handlers[name] = fn; } });

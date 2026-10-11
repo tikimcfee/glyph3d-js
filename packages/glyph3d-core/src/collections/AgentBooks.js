@@ -931,17 +931,22 @@ export default class AgentBooks {
      *
      * A book RIDDEN ELSEWHERE (seated at a carrel — its parent is not the root) is
      * BORROWED, the Carrel's own word for it: the cluster keeps its lane but takes its
-     * hands off the transform — no pin re-assert (pinnedPos is cluster-local; writing
-     * it into another frame teleports the book), and no say in the floor rest.
+     * hands off the transform, and it has no say in the floor rest.
+     *
+     * A PINNED book is user-placed: the scheme packs every child, so a pinned book's LIVE
+     * position is carried across it (a drag in flight included — re-asserting the last
+     * pinnedPos would yank it back under the cursor), and it has no say in the floor rest
+     * or the cluster's footprint either (resting on it dropped a lone dragged book to the
+     * floor). pinnedPos is the persisted record moveGroup writes.
      */
     _relayout() {
         const scheme = LAYOUT_SCHEMES[this.cfg.layout] || LAYOUT_SCHEMES.packed;
-        scheme(this.root, this.cfg.layoutOpts);
+        const placed = [];
         for (const lane of this.lanes.values()) {
-            if (lane.pinned && lane.pinnedPos && lane.book.parent === this.root) {
-                lane.book.position.copy(lane.pinnedPos);
-            }
+            if (lane.pinned && lane.book.parent === this.root) placed.push([lane.book, lane.book.position.clone()]);
         }
+        scheme(this.root, this.cfg.layoutOpts);
+        for (const [book, pos] of placed) book.position.copy(pos);
         this._restOnFloor();
         this._updateCovers();
         for (const cb of this._onRelayout) cb(this);
@@ -954,15 +959,15 @@ export default class AgentBooks {
         this.root.updateMatrixWorld(true);
     }
 
-    /** World-space AABB of the RESIDENT cluster — the union of every root-held book's
-     *  world box. Borrowed books (seated at a carrel) are the desk's extent, not the
-     *  cluster's — counting them dragged the floor rest toward wherever the desk
-     *  stands. @private */
+    /** World-space AABB of the LAID-OUT cluster — the union of every root-held, unpinned
+     *  book's world box. Borrowed books (seated at a carrel) are the desk's extent, not the
+     *  cluster's — counting them dragged the floor rest toward wherever the desk stands;
+     *  pinned books are where the user put them. @private */
     _worldBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         this.root.updateWorldMatrix(true, true);
         for (const lane of this.lanes.values()) {
-            if (lane.book.parent !== this.root) continue;
+            if (lane.book.parent !== this.root || lane.pinned) continue;
             const b = lane.book.getBounds();
             if (b && !b.isEmpty()) target.union(b);
         }
@@ -973,12 +978,13 @@ export default class AgentBooks {
      *  agent shelf as a bounds-leaf beside the file tree. Borrowed books are skipped:
      *  their matrices are another frame's, and the world must not space groupings
      *  around a phantom extent (the default shelf seats EVERY book — the cluster is
-     *  usually empty now). */
+     *  usually empty now). Pinned books are skipped too: placing one must not shove
+     *  the cluster (and it) across the floor. */
     localBounds(target = new THREE.Box3()) {
         target.makeEmpty();
         const tmp = new THREE.Box3();
         for (const lane of this.lanes.values()) {
-            if (lane.book.parent !== this.root) continue;
+            if (lane.book.parent !== this.root || lane.pinned) continue;
             lane.book.updateMatrix();
             tmp.copy(lane.book.layoutBounds()).applyMatrix4(lane.book.matrix);
             target.union(tmp);

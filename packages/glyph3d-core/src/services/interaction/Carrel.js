@@ -40,7 +40,7 @@
  * transform — home records chain residence → residence, never through a
  * vehicle.
  *
- * A member currently ridden elsewhere (docked, or parked by the virtualizer) is
+ * A member currently ridden elsewhere (docked) is
  * BORROWED: its parent is not this carrel, and the carrel keeps its entry but
  * takes its hands off the transform (no relayout placement, no yaw slerp) until
  * the object returns, at which point the next update() re-seats everyone.

@@ -41,7 +41,8 @@ function utf16ToCp(lineText, col) {
 async function jumpToLocation(ctx, router, loc) {
     let destId;
     try {
-        destId = await renderSheetGrid(ctx, canonicalPath(ctx, fromFileUri(loc.uri)));
+        // LSP locations are RFC 8089 URIs (percent-encoded); ours are raw — decode at this seam.
+        destId = await renderSheetGrid(ctx, canonicalPath(ctx, fromFileUri(decodeURIComponent(loc.uri))));
     } catch (e) {
         return { ok: false, text: `${loc.uri} (couldn't open: ${e?.message || e})` };
     }
