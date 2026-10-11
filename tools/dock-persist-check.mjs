@@ -105,6 +105,22 @@ function makeRouter() {
      'capture: terminal HOME comes from the model (100,200,300)');
 }
 
+// ---- 1b. pinAutoDocked round-trips: a pin that had to dock its window still unpins it home
+//          after a reload (only set flags ride along; an unpinned tile's record is unchanged) --
+{
+  const cap = makeCtx(makeRegistry(new Set(['p.js', 'q.js'])), makeCameraDock());
+  cap.workspace.setSurfaceView('p.js', 'grid', { docked: true, dockOrder: 0, zoom: 1, pinAutoDocked: true });
+  cap.workspace.setSurfaceView('q.js', 'grid', { docked: true, dockOrder: 1, zoom: 1 });
+  const snap = new SessionStore({ ctx: cap, router: makeRouter(), bridge: {} }).capture();
+  eq(snap.dock3d.tiles, [{ id: 'p.js', zoom: 1, pinAutoDocked: true }, { id: 'q.js', zoom: 1 }],
+     'capture: pinAutoDocked rides its tile; a plain tile stays {id, zoom}');
+  const res = makeCtx(makeRegistry(), makeCameraDock());
+  await new SessionStore({ ctx: res, router: makeRouter(), bridge: {} })
+    .restore({ version: 2, files: [], camera: null, terminals: [], dock3d: snap.dock3d });
+  ok(res.workspace.getSurface('p.js')?.view.pinAutoDocked === true, 'restore: pinAutoDocked back in the model');
+  ok(res.workspace.getSurface('q.js')?.view.pinAutoDocked === undefined, 'restore: no flag invented for a plain tile');
+}
+
 // ---- 2. restore: dock intent → the MODEL; reconcile locks LIVE tiles directly, defers absent ones --
 {
   const reg = makeRegistry(new Set(['a.js']));        // code grid back; term-1 not yet

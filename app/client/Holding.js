@@ -327,7 +327,19 @@ export default class Holding {
             const desk = desks.get(s.view.carrel.name);
             if (!desk || desk._dissolving || desk.has(s.id)) continue;
             const entry = this.ctx.registry?.get?.(s.id);
-            if (!this.holdableKind(entry)) continue;              // not live yet — a later change re-offers
+            if (!entry) {
+                // Claims are keyed by canonical ids. One whose address RESOLVES to a different
+                // canonical id (an agent book's bare lane id — books are held as agent:book:<lane>)
+                // is no claim of record: drop it, loudly. Anything else unresolved is residence
+                // memory for a window not open yet.
+                const r = this.resolve(s.id);
+                if (!('error' in r) && r.id !== s.id) {
+                    console.warn(`[holding] dropped carrel claim under non-canonical id '${s.id}' (that window is '${r.id}')`);
+                    this.carrels._fact(s.id, null);
+                }
+                continue;
+            }
+            if (!this.holdableKind(entry)) continue;
             const r = { id: entry.id, grid: entry.grid };
             const order = s.view.carrel.order;
             // Docked before its desk could seat it (it went live mid-restore): end the ride,

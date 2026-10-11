@@ -20,6 +20,8 @@
 //   - fold clears every claim naming the desk, windows not yet live included
 //   - the restore race keeps the ride's pin (pinAutoDocked) and frame occupancy
 //   - window.lift places what it lifts through the window's own move verb
+//   - a claim keyed by a non-canonical address (an agent book's bare lane id) is dropped,
+//     while a claim for a window simply not open yet is kept (residence memory)
 //
 // Real CameraDock + Carrel + WorkspaceModel over a mock registry; GPU-free.
 
@@ -315,6 +317,24 @@ function makeWorld() {
     const mv = ran.find((c) => c[0] === 'grid.move');
     ok(!!mv && mv[1] === '/p/l.js' && Math.abs(Number(mv[2]) - g.position.x) < 1e-6,
        `window.lift: placed through grid.move at the landed position (ran ${JSON.stringify(ran)})`);
+}
+
+// ── claims are keyed by canonical ids ──
+{
+    const w = makeWorld();
+    const ws = w.ctx.workspace;
+    const book = makeGrid();
+    w.tree.add(book);
+    w.lanes.set('ab12cd34', { groupId: 'agent:book:ab12cd34', book });
+    w.registry.register('agent:book:ab12cd34', book, { type: 'book', role: 'agent' });
+    w.desk('agents');
+    ws.setSurfaceView('ab12cd34', undefined, { carrel: { name: 'agents', order: 9 } });     // stale lane-id key
+    ws.setSurfaceView('/p/not-open-yet.js', undefined, { carrel: { name: 'agents', order: 1 } });
+    const warn = console.warn; console.warn = () => {};
+    w.ctx.holding.reconcile();
+    console.warn = warn;
+    ok(ws.getSurface('ab12cd34').view.carrel == null, 'a lane-id claim (non-canonical) is dropped');
+    ok(ws.getSurface('/p/not-open-yet.js').view.carrel?.name === 'agents', 'a claim for a window not open yet is kept');
 }
 
 console.log(`\nholding.test: ${pass} passed, ${fail} failed`);

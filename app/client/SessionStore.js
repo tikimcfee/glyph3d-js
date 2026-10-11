@@ -273,7 +273,12 @@ export default class SessionStore {
     let dock3d = null;
     const docked = ws?.listDocked ? ws.listDocked() : [];
     if (docked.length) {
-      const tiles = docked.map((s) => ({ id: s.id, zoom: (s.view || {}).zoom ?? 1 }));
+      // pinAutoDocked: pin had to dock this window, so unpin sends it home — a reversible
+      // toggle that must survive the reload between the pin and the unpin.
+      const tiles = docked.map((s) => {
+        const v = s.view || {};
+        return v.pinAutoDocked ? { id: s.id, zoom: v.zoom ?? 1, pinAutoDocked: true } : { id: s.id, zoom: v.zoom ?? 1 };
+      });
       // The active frame pane — persisted so a reload re-raises the single-occupant pin. (Multi-pane
       // split trees are re-framed as the active pane for now; full tree persistence is the next pass.)
       dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedPane || null };
@@ -767,7 +772,9 @@ export default class SessionStore {
         if (!t?.id) return;
         // kind undefined: don't clobber a terminal's 'terminal' kind (set by the loop above); a docked
         // code grid with no prior record becomes a generic 'surface' (the reconcile ignores kind).
-        this.ctx.workspace?.setSurfaceView?.(t.id, undefined, { docked: true, dockOrder: i, zoom: t.zoom ?? 1 });
+        const view = { docked: true, dockOrder: i, zoom: t.zoom ?? 1 };
+        if (t.pinAutoDocked === true) view.pinAutoDocked = true;
+        this.ctx.workspace?.setSurfaceView?.(t.id, undefined, view);
       });
     }
   }
