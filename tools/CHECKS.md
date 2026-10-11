@@ -307,9 +307,11 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   `impl`, `callers`, `callees`, `symbols <query>`, `outline <file>` via
   typescript-language-server. The same answers as Claude Code's LSP tool, for agents
   and sessions without it (cloud sessions don't start plugin language servers).
-  Positions are `file:line:col` or `file:line:name` (an rg hit + the identifier).
+  Positions are `file:symbol` (found in the file's outline, dotted for a member, so it
+  survives line drift), `file:line:name` (an rg hit + the identifier), or `file:line:col`.
+  A target that fails to resolve is reported and skipped; the rest still run.
   ```
-  bun tools/lsp.mjs refs packages/glyph3d-core/src/services/orchestration/CommandRouter.js:139:execute
+  bun tools/lsp.mjs refs packages/glyph3d-core/src/services/orchestration/CommandRouter.js:CommandRouter.execute
   bun tools/lsp.mjs hover app/commands/handlers/gridCommands.js:16:ctx
   bun tools/lsp.mjs symbols TerminalGrid
   ```

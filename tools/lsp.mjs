@@ -4,6 +4,7 @@
 // session that lacks that tool (cloud sessions don't start plugin language servers).
 //
 //   bun tools/lsp.mjs hover   app/client/CommandProvider.jsx:349:11
+//   bun tools/lsp.mjs refs    packages/glyph3d-core/src/services/orchestration/CommandRouter.js:CommandRouter.execute
 //   bun tools/lsp.mjs refs    packages/glyph3d-core/src/services/orchestration/CommandRouter.js:139:execute
 //   bun tools/lsp.mjs def     app/FileTree.jsx:336:execute
 //   bun tools/lsp.mjs callers packages/glyph3d-core/src/collections/CodeGrid.js:749:_relayout
@@ -12,10 +13,16 @@
 //   bun tools/lsp.mjs symbols TerminalGrid            (workspace search; --all keeps node_modules)
 //   bun tools/lsp.mjs outline app/client/settings.js
 //
-// A position is FILE:LINE:COL (1-based, as editors show) or FILE:LINE:NAME — the column of
-// NAME's first occurrence on that line, so an rg hit (file:line) plus the identifier is
-// enough. Several targets may follow one op (they share one server boot). --json prints the
-// raw LSP results.
+// A position is one of:
+//   FILE:SYMBOL        a declaration found by name in FILE's outline (`execute`, or dotted
+//                      `CommandRouter.execute` to pick the container) — line drift can't break it
+//   FILE:LINE:NAME     NAME's first occurrence on LINE, so an rg hit (file:line) plus the
+//                      identifier is enough
+//   FILE:LINE:COL      1-based, as editors show
+// Several targets may follow one op; they share one server boot, and a target that fails to
+// resolve is reported and skipped (exit 1) without sinking the rest. `refs` excludes the
+// declaration itself. Hover prints at most 30 lines (--full for all). --json prints the raw
+// LSP results.
 //
 // WARM-UP: tsserver answers BEFORE its project finishes loading, and those early answers are
 // partial (refs from only the open file, `ctx: any` for types that cross modules). The server
@@ -28,7 +35,7 @@
 // degrade types to any; rg remains the completeness check for dynamic call sites.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
@@ -39,9 +46,11 @@ const OPS = ['hover', 'def', 'refs', 'impl', 'callers', 'callees', 'symbols', 'o
 const argv = process.argv.slice(2);
 const json = argv.includes('--json');
 const all = argv.includes('--all');
+const full = argv.includes('--full');
+const HOVER_MAX_LINES = 30;
 const [op, ...targets] = argv.filter((a) => !a.startsWith('--'));
 if (!OPS.includes(op) || !targets.length) {
-    console.error(`usage: bun tools/lsp.mjs <${OPS.join('|')}> <file:line:col|file:line:name|query>... [--json] [--all]`);
+    console.error(`usage: bun tools/lsp.mjs <${OPS.join('|')}> <file:symbol|file:line:name|file:line:col|query>... [--json] [--all] [--full]`);
     process.exit(2);
 }
 if (spawnSync('typescript-language-server', ['--version']).error) {
@@ -105,10 +114,33 @@ const open = (file) => {
     notify('textDocument/didOpen', { textDocument: { uri: pathToFileURL(file).href, languageId, version: 1, text: readFileSync(file, 'utf8') } });
 };
 
-/** FILE:LINE:COL or FILE:LINE:NAME → { file, position } (LSP's 0-based UTF-16 coordinates). */
-function parsePosition(spec) {
+/** Depth-first search of a documentSymbol tree for a (possibly dotted) name; shallowest wins. */
+function findSymbol(symbols, parts, chain = []) {
+    let best = null;
+    for (const sym of symbols ?? []) {
+        const path_ = [...chain, sym.name];
+        const tail = path_.slice(-parts.length);
+        if (tail.length === parts.length && tail.every((n, i) => n === parts[i])
+            && (!best || path_.length < best.depth)) best = { sym, depth: path_.length };
+        const inner = findSymbol(sym.children, parts, path_);
+        if (inner && (!best || inner.depth < best.depth)) best = inner;
+    }
+    return best;
+}
+
+/** A target spec → { file, position } (LSP's 0-based UTF-16 coordinates). See the header. */
+async function resolveTarget(spec) {
+    const bySymbol = /^([^:]+):([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)$/.exec(spec);
+    if (bySymbol) {
+        const file = abs(bySymbol[1]);
+        open(file);
+        const syms = await request('textDocument/documentSymbol', { textDocument: { uri: pathToFileURL(file).href } });
+        const hit = findSymbol(syms, bySymbol[2].split('.'));
+        if (!hit) throw new Error(`no symbol "${bySymbol[2]}" in ${bySymbol[1]}'s outline (try FILE:LINE:NAME)`);
+        return { file, position: hit.sym.selectionRange.start };
+    }
     const m = /^(.+):(\d+):([^:]+)$/.exec(spec);
-    if (!m) throw new Error(`not a position: ${spec} (want file:line:col or file:line:name)`);
+    if (!m) throw new Error(`not a position: ${spec} (want file:symbol, file:line:name or file:line:col)`);
     const file = abs(m[1]), line = Number(m[2]) - 1;
     const text = linesOf(file)[line];
     if (text == null) throw new Error(`${m[1]} has no line ${m[2]}`);
@@ -148,12 +180,11 @@ await request('initialize', {
 notify('initialized', {});
 
 // The project loads on the first open document, so open one before waiting.
-let firstFile;
-try {
-    firstFile = op === 'symbols' ? path.join(ROOT, 'app/client/CommandProvider.jsx')
-        : op === 'outline' ? abs(targets[0]) : parsePosition(targets[0]).file;
-} catch (e) {
-    console.error(`lsp: ${e.message}`);
+// Any existing target file will do; a bad target is reported in the loop below, not here.
+const firstFile = op === 'symbols' ? path.join(ROOT, 'app/client/CommandProvider.jsx')
+    : targets.map((t) => abs(t.split(':')[0])).find((f) => existsSync(f));
+if (!firstFile) {
+    console.error(`lsp: none of the target files exist: ${targets.join(' ')}`);
     server.kill();
     process.exit(1);
 }
@@ -179,20 +210,23 @@ for (const target of targets) {
             if (json) console.log(JSON.stringify(syms, null, 2)); else printOutline(syms);
             continue;
         }
-        const { file, position } = parsePosition(target);
+        const { file, position } = await resolveTarget(target);
         open(file);
         const textDocument = { uri: pathToFileURL(file).href };
         if (op === 'hover') {
             const h = await request('textDocument/hover', { textDocument, position });
             if (json) { console.log(JSON.stringify(h, null, 2)); continue; }
             const v = h?.contents?.value ?? (Array.isArray(h?.contents) ? h.contents.map((c) => c.value ?? c).join('\n') : h?.contents);
-            console.log(v ? v.replace(/```typescript\n?|```/g, '').trim() : '(no hover)');
+            const text = v ? v.replace(/```typescript\n?|```/g, '').trim() : '(no hover)';
+            const lines = text.split('\n');
+            console.log(full || lines.length <= HOVER_MAX_LINES ? text
+                : `${lines.slice(0, HOVER_MAX_LINES).join('\n')}\n… (${lines.length - HOVER_MAX_LINES} more lines; --full)`);
         } else if (op === 'def' || op === 'refs' || op === 'impl') {
             const method = { def: 'textDocument/definition', refs: 'textDocument/references', impl: 'textDocument/implementation' }[op];
             const res = locations(await request(method, { textDocument, position, context: { includeDeclaration: false } }));
             if (json) { console.log(JSON.stringify(res, null, 2)); continue; }
             for (const l of res) console.log(at(l.uri, l.range));
-            if (op === 'refs') console.log(`${res.length} refs in ${new Set(res.map((l) => l.uri)).size} files`);
+            if (op === 'refs') console.log(`${res.length} refs in ${new Set(res.map((l) => l.uri)).size} files (declaration excluded)`);
             if (!res.length && op !== 'refs') console.log(`(no ${op})`);
         } else {
             const [item] = (await request('textDocument/prepareCallHierarchy', { textDocument, position })) ?? [];
