@@ -289,6 +289,32 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
 
 ## Headless checks (no browser)
 
+- **`type-imports-check.mjs`** — the JSDoc seam guard. tsc over `jsconfig.json` with
+  checkJs on, reporting ONLY the codes where a type silently degrades to `any`: a dead
+  `import('…')` path (TS2307), a typedef-only script that isn't a module (TS2306), a
+  missing export/typedef (TS2305/2614/2724/2694), a `.jsx` import without `"jsx"` in
+  jsconfig (TS6142). Baseline is zero, so any hit is a regression. ~4s.
+  ```
+  bun tools/type-imports-check.mjs
+  ```
+  Teeth, verified: a planted dead `CommandRouter.js` path, a missing typedef, and a
+  missing export each fail it; dropping `"jsx"` from jsconfig fails it 124 times.
+
+- **`lsp.mjs`** — one-shot code intelligence from a shell: `hover`, `def`, `refs`,
+  `impl`, `callers`, `callees`, `symbols <query>`, `outline <file>` via
+  typescript-language-server. The same answers as Claude Code's LSP tool, for agents
+  and sessions without it (cloud sessions don't start plugin language servers).
+  Positions are `file:line:col` or `file:line:name` (an rg hit + the identifier).
+  ```
+  bun tools/lsp.mjs refs packages/glyph3d-core/src/services/orchestration/CommandRouter.js:139:execute
+  bun tools/lsp.mjs hover app/commands/handlers/gridCommands.js:16:ctx
+  bun tools/lsp.mjs symbols TerminalGrid
+  ```
+  It waits for the server's project-load progress `end` before asking. Answers given
+  before that are partial: refs from only the open file, and `any` for types that
+  cross modules. `refs` follow types, so a call through an untyped receiver is
+  invisible; keep rg as the completeness check for dynamic call sites.
+
 - **`hand-source-check.mjs`** — the SENSOR PLANE end to end: a real relay binary, a
   real `SOURCE hand` handshake, real ARKit-shaped frames on the wire, feeding the
   real SourceStream → HandPresence → HandRenderer chain. No browser (the render path
