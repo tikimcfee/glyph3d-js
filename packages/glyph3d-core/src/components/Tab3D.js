@@ -43,10 +43,10 @@ export default class Tab3D extends FieldLabel {
      * @param {Function} [o.onClick=null]    (token) => … ; the wrapper wires this to `book.page`
      * @param {number}  [o.activeColor]      hex — the head tab's plate color (null = keep resting)
      */
-    constructor({ role = 'tab', onClick = null, activeColor = null, plate, ...fieldLabelArgs } = {}) {
+    constructor({ role = 'tab', onClick = null, activeColor = null, plate, textColor = { r: 1, g: 1, b: 1 }, ...fieldLabelArgs } = {}) {
         // A tab is always a plated label (the plate is the thumb-tab body);
-        // default one if the caller (book banding) didn't.
-        super({ plate: plate ?? { color: 0x8899aa, opacity: 0.85 }, ...fieldLabelArgs });
+        // default one if the caller (book banding) didn't. Tabs default to light/white text.
+        super({ plate: plate ?? { color: 0x8899aa, opacity: 0.85 }, textColor, ...fieldLabelArgs });
         this.userData.isTab = true;
         this.role = role;
         this.onClick = onClick;
@@ -78,13 +78,14 @@ export default class Tab3D extends FieldLabel {
 
     /** Rebind-time re-true of the resting facts (bindTabs diffs tabs in place —
      *  a tab rents substrate texels for its sheet's LIFETIME, never per relayout). */
-    retune({ plateColor, activeColor, plateOpacity } = {}) {
+    retune({ plateColor, activeColor, plateOpacity, textColor } = {}) {
         if (activeColor !== undefined) this._activeColor = activeColor;
         if (plateOpacity !== undefined) this._baseOpacity = plateOpacity;
         if (plateColor !== undefined) {
             this._restColor = plateColor;
             if (!this._active || this._activeColor == null) this.setPlateColor(plateColor);
         }
+        if (textColor !== undefined) this.setTextColor(textColor);
         this._refreshOpacity();
     }
 

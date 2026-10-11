@@ -495,9 +495,10 @@ export default class Book extends BoundedObject3D {
      *  The geometry dials — stagger, edge, lift — are the GLOBAL live `tab.*`
      *  settings (Tab3D's TAB_CONFIG), re-read by syncTabs every frame. */
     bindTabs({ atlas, keyOf = null, labelOf = null, hueOf = null,
-              lineHeight = 7, plateOpacity = 0.85, activeColor = 0x6ee7a0 } = {}) {
+              lineHeight = 7, plateOpacity = 0.85, activeColor = 0x6ee7a0,
+              textColor = { r: 1, g: 1, b: 1 } } = {}) {
         const prev = new Map((this.tabs ?? []).map((t) => [t.sheet, t]));
-        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor };
+        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor, textColor };
         this.tabs = this.sheets.map((sheet, i) => {
             const t = prev.get(sheet);
             if (!t) return this._makeTab(sheet);
@@ -506,7 +507,12 @@ export default class Book extends BoundedObject3D {
             const label = this._tabLabelOf(sheet);
             t.tab.setText(label);
             t.tab.setLineHeight(lineHeight);
-            t.tab.retune({ plateColor: this._tabHueOf(t.key), activeColor, plateOpacity });
+            t.tab.retune({
+                plateColor: this._tabHueOf(t.key),
+                activeColor,
+                plateOpacity,
+                textColor: this._tabOpts?.textColor ?? textColor,
+            });
             t.tab.name = `tab:${i}:${label}`;
             return t;
         });
@@ -526,6 +532,7 @@ export default class Book extends BoundedObject3D {
             lineHeight: o.lineHeight,
             plate: { color: this._tabHueOf(key), opacity: o.plateOpacity },
             activeColor: o.activeColor,
+            textColor: o.textColor ?? { r: 1, g: 1, b: 1 },
         });
         tab.name = `tab:${i}:${label}`;
         this.add(tab);

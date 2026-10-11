@@ -274,6 +274,7 @@ export default class InstancedField {
             worldScale: this.worldScale,
             color: options.color || this._defaultColor,
             targetBuffer: this.slotBuffer,
+            metrics: options.metrics || this.metrics,
             ...options,
         };
 
@@ -654,10 +655,13 @@ export default class InstancedField {
      * Set a range of glyphs to a uniform color.
      * @param {number} start
      * @param {number} count
-     * @param {{r:number, g:number, b:number, a?:number}} color
+     * @param {number|{r:number, g:number, b:number, a?:number}} color
      */
     setGlyphColorRange(start, count, color) {
-        const packed = packRgba8(color.r, color.g, color.b, color.a ?? 1.0);
+        const c = typeof color === 'number'
+            ? { r: ((color >> 16) & 0xFF) / 255, g: ((color >> 8) & 0xFF) / 255, b: (color & 0xFF) / 255, a: 1.0 }
+            : (color || this._defaultColor);
+        const packed = packRgba8(c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1.0);
         const end = Math.min(this._cachedGlyphCount, start + count);
         for (let i = start; i < end; i++) {
             this.slotBuffer.setColor(i, packed);
@@ -670,10 +674,13 @@ export default class InstancedField {
     /**
      * Set a single glyph color.
      * @param {number} slotIndex
-     * @param {{r:number, g:number, b:number, a?:number}} color
+     * @param {number|{r:number, g:number, b:number, a?:number}} color
      */
     setGlyphColor(slotIndex, color) {
-        const packed = packRgba8(color.r, color.g, color.b, color.a ?? 1.0);
+        const c = typeof color === 'number'
+            ? { r: ((color >> 16) & 0xFF) / 255, g: ((color >> 8) & 0xFF) / 255, b: (color & 0xFF) / 255, a: 1.0 }
+            : (color || this._defaultColor);
+        const packed = packRgba8(c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1.0);
         this.slotBuffer.setColor(slotIndex, packed);
         if (this._interleavedBuffer) {
             this._interleavedBuffer.needsUpdate = true;
@@ -765,13 +772,13 @@ export default class InstancedField {
             f32[b + 1] = positions ? positions[i * 3 + 1] : 0;
             f32[b + 2] = positions ? positions[i * 3 + 2] : 0;
             const gid = glyphIds ? glyphIds[i] : 0;
-            u32[b + 3] = gid >>> 0;
+            f32[b + 3] = gid;
             const cr = colors ? (colors[i * 3 + 0] * 255 + 0.5) | 0 : 255;
             const cg = colors ? (colors[i * 3 + 1] * 255 + 0.5) | 0 : 255;
             const cb = colors ? (colors[i * 3 + 2] * 255 + 0.5) | 0 : 255;
-            u32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16) | 0xff000000;
+            f32[b + 4] = (cr & 0xff) | ((cg & 0xff) << 8) | ((cb & 0xff) << 16);
             const grp = groupIds ? groupIds[i] : 0;
-            u32[b + 5] = grp >>> 0;
+            f32[b + 5] = grp;
             f32[b + 6] = sizes ? sizes[i * 2 + 0] : 1.0;
             f32[b + 7] = sizes ? sizes[i * 2 + 1] : 1.0;
         }
@@ -884,7 +891,10 @@ export default class InstancedField {
             } else if (item.text) {
                 const text = item.text;
                 const col = options.color || this._defaultColor;
-                const packedCol = packRgba8(col.r ?? 1, col.g ?? 1, col.b ?? 1, col.a ?? 1.0);
+                const c = typeof col === 'number'
+                    ? { r: ((col >> 16) & 0xFF) / 255, g: ((col >> 8) & 0xFF) / 255, b: (col & 0xFF) / 255, a: 1.0 }
+                    : col;
+                const packedCol = packRgba8(c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1.0);
                 const scale = options.scale ?? 1.0;
                 const charW = defaultCharW * scale;
                 const rowH = defaultRowH * scale;

@@ -55,7 +55,8 @@ const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
     // Anchor: centers text block
     near(l._anchor.scale.x, 7.5, 'anchor scales metrics pitch → lineHeight');
     near(l._anchor.position.x, -3.75, 'anchor centers the block (x)');
-    near(l._anchor.position.y, -1.5, 'anchor centers the block (y)');
+    near(l._anchor.position.y, 1.5, 'anchor centers the block (y)');
+    near(l._anchor.position.y + l._plateMesh.position.y * l._anchor.scale.y, 0, 'plate centered at y=0');
 
     // Plate geometry
     near(l._plateMesh.scale.x, 1.576, 'plate width');

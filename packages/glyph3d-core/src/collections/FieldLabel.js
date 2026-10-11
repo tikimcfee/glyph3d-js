@@ -6,6 +6,26 @@ import InstancedField from './InstancedField.js';
 // Plate overhang around the text block, in text-row units (a pill needs breathing room).
 const PLATE_PAD_X = 0.72, PLATE_PAD_Y = 0.42;
 
+function normalizeTextColor(c, plate) {
+    if (c != null) {
+        if (typeof c === 'number') {
+            return {
+                r: ((c >> 16) & 0xFF) / 255,
+                g: ((c >> 8) & 0xFF) / 255,
+                b: (c & 0xFF) / 255,
+                a: 1.0,
+            };
+        }
+        return {
+            r: c.r ?? 1,
+            g: c.g ?? 1,
+            b: c.b ?? 1,
+            a: c.a ?? 1,
+        };
+    }
+    return plate ? { r: 0.03, g: 0.04, b: 0.06 } : { r: 0.95, g: 0.95, b: 0.98 };
+}
+
 /**
  * FieldLabel — an editable, addressable text label using InstancedField and
  * panelMaterial in pure WebGL2.
@@ -16,13 +36,13 @@ export default class FieldLabel extends THREE.Object3D {
      * @param {Object} o.atlas            GlyphAtlas (metrics + shaping)
      * @param {string} [o.text='']        label text ('\n' stacks lines)
      * @param {number} [o.lineHeight=1]   world-unit row pitch at scale 1
-     * @param {Object} [o.textColor={r,g,b}] glyph color
+     * @param {number|Object} [o.textColor] glyph color (hex or {r,g,b})
      * @param {Object|null} [o.plate]     { color:hex, opacity:0..1, hairline:true } — backing pill
      */
-    constructor({ atlas, text = '', lineHeight = 1, textColor = { r: 0.03, g: 0.04, b: 0.06 }, plate = null } = {}) {
+    constructor({ atlas, text = '', lineHeight = 1, textColor = null, plate = null } = {}) {
         super();
         this.atlas = atlas;
-        this.textColor = textColor;
+        this.textColor = normalizeTextColor(textColor, plate);
         this.lineHeight = lineHeight;
         this._plateCfg = plate;
         this._plateAlpha = plate?.opacity ?? 0.85;
@@ -75,9 +95,9 @@ export default class FieldLabel extends THREE.Object3D {
     }
 
     setTextColor(color) {
-        this.textColor = color;
+        this.textColor = normalizeTextColor(color, this._plateCfg);
         if (this._instancedField) {
-            this._instancedField.setGlyphColorRange(0, this._instancedField.getGlyphCount(), color);
+            this._instancedField.setGlyphColorRange(0, this._instancedField.getGlyphCount(), this.textColor);
         }
     }
 
@@ -143,7 +163,7 @@ export default class FieldLabel extends THREE.Object3D {
         const { wu, rows } = this._block;
         const L = this._mLine;
         const s = this.lineHeight / L;
-        const cx = wu / 2, cy = L * (2 - rows) / 2;
+        const cx = wu / 2, cy = -rows * L / 2;
         this._anchor.scale.setScalar(s);
         this._anchor.position.set(-cx * s, -cy * s, 0);
 

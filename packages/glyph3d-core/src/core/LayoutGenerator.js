@@ -67,11 +67,11 @@ export function generateLayout(text, options = {}) {
     const axis = options.axis === 'z' ? 'z' : 'xy';
 
     const defaultColorPacked = typeof options.color === 'number'
-        ? (((options.color & 0xFF) << 16) | (options.color & 0xFF00) | ((options.color >> 16) & 0xFF))
+        ? ((((options.color & 0xFF) << 16) | (options.color & 0xFF00) | ((options.color >> 16) & 0xFF) | 0xFF000000) >>> 0)
         : packRgba8(
-            options.color?.r ?? 0.0,
+            options.color?.r ?? 1.0,
             options.color?.g ?? 1.0,
-            options.color?.b ?? 0.0,
+            options.color?.b ?? 1.0,
             options.color?.a ?? 1.0
         );
     const groupId = (options.groupId || 0) >>> 0;
