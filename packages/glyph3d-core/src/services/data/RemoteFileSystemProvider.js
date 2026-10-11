@@ -15,6 +15,7 @@
 
 import { FileSystemError } from './types.js';
 import { RepositoryAdapter } from './RepositoryAdapter.js';
+import { toFileUri } from '../../core/fileUri.js';
 
 // Shared filter logic — reuse RepositoryAdapter's blacklist
 const _filterProto = RepositoryAdapter.prototype.filterCodeFiles;
@@ -96,7 +97,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<Uint8Array>}
      */
     async getBytes(path, { maxBytes = Infinity, chunk = 1 << 20 } = {}) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const uri = toFileUri(path);
         const size = Math.min(chunk, maxBytes);
         const first = await this.readRange(uri, 0, size);
         const total = Math.min(first.totalSize, maxBytes);
@@ -199,7 +200,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<{ path: string, entries: {name:string,type:('file'|'directory'|'symlink'),size:number}[], truncated: boolean }>}
      */
     async readDir(path) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const uri = toFileUri(path);
         return this._rpc('fs/readDir', { uri });
     }
 
@@ -211,7 +212,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<{ root: string, added: boolean, extraRoots: string[] }>}
      */
     async addRoot(path) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const uri = toFileUri(path);
         const res = await this._rpc('fs/addRoot', { uri });
         if (this.rootInfo && Array.isArray(res?.extraRoots)) this.rootInfo.extraRoots = res.extraRoots;
         return res;
@@ -290,7 +291,7 @@ export class RemoteFileSystemProvider {
             const batch = paths.slice(i, i + concurrency);
             const settled = await Promise.allSettled(
                 batch.map(async (path) => {
-                    const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+                    const uri = toFileUri(path);
                     const fc = await this.readFile(uri);
                     return { path, content: fc.content };
                 })
@@ -319,7 +320,7 @@ export class RemoteFileSystemProvider {
         for (const file of files) {
             this._progress.current = file.path;
             try {
-                const uri = `file:///${file.path}`;
+                const uri = toFileUri(file.path);
                 const fc = await this.readFile(uri);
                 this._progress.loaded++;
                 yield { path: file.path, content: fc.content, size: file.size };
@@ -337,7 +338,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<string>}
      */
     async getFile(path) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const uri = toFileUri(path);
         const fc = await this.readFile(uri);
         return fc.content;
     }
@@ -352,7 +353,7 @@ export class RemoteFileSystemProvider {
      * @returns {Promise<{ content: string, mtime: number|null }>}
      */
     async getFileWithStat(path) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;   // strip leading slashes → canonical (matches file.open)
+        const uri = toFileUri(path);
         const fc = await this.readFile(uri);
         return { content: fc.content, mtime: fc.stat?.mtime ?? null };
     }

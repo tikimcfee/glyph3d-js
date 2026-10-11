@@ -41,6 +41,7 @@ import { gridTheme, getSetting } from '../../client/settings.js';
 import { unreadableReason, READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS } from '@glyph3d/core';
 import { classifyByExtension, classifyBytes } from '@glyph3d/core';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
+import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const SNIFF_BYTES = 4096;        // head window for the magic-bytes + UTF-8 probe (doubles as the hex block)
@@ -100,7 +101,7 @@ export function getDiskMtime(grid) {
 
 /** @param {AppContext} ctx */
 function prepFileRow(ctx, path, notRendered) {
-    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const uri = toFileUri(path);
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
     const row = new FileRow(ctx.scene, ctx.atlas, { name: path, worldScale: 0.025, ...gridTheme() });
     row.setSourcePath(uri); // so file.save / fs/didChange refresh can find it
@@ -231,7 +232,7 @@ export function materializeActor(ctx, id) {
  * @param {AppContext} ctx
  */
 function registerImageGrid(ctx, path, texture, width, height, kind) {
-    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const uri = toFileUri(path);
     if ((ctx.registry.findByMeta?.('sourcePath', uri) || []).length) return null;
     const aspect = (width > 0 && height > 0) ? width / height : 1;
     // cols:1, rows:1 — one quad samples the full-resolution texture. NEVER cols×rows = pixel dims.
@@ -268,7 +269,7 @@ async function registerBinaryGrid(ctx, path, bytes) {
  * @param {AppContext} ctx
  */
 export async function addClassifiedRow(ctx, path) {
-    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const uri = toFileUri(path);
     return classifySheetGrid(ctx, path, uri);
 }
 
@@ -285,7 +286,7 @@ export async function addClassifiedRow(ctx, path) {
  * @param {AppContext} ctx
  */
 export async function renderSheetGrid(ctx, path) {
-    const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+    const uri = toFileUri(path);
     const id = await classifySheetGrid(ctx, path, uri);
     // The one materialize boundary for single-file opens: rows upgrade, actors
     // and FrameGrids pass through untouched (materializeActor is idempotent).

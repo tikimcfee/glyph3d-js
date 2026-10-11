@@ -20,5 +20,6 @@ export { RENDER_ORDER } from './renderOrder.js';
 export { LAYER_BAND, getBandDistance } from './layerBands.js';
 export { READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS, unreadableReason } from './readability.js';
 export { extOf, mimeForFormat, classifyByExtension, sniffMagic, isProbablyUtf8, classifyBytes, partitionDirEntries } from './fileKind.js';
+export { toFileUri, fromFileUri } from './fileUri.js';
 export { PERF_THRESHOLDS, shouldDebugLog } from './constants.js';
 export { default as LayoutDescription } from './LayoutDescription.js';

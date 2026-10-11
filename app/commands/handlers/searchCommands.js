@@ -21,6 +21,7 @@
  */
 
 import { box, table, kvLines } from '../formatResponse.js';
+import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /** Split trailing flags off the query words. Flags are exact tokens, so a query
@@ -84,7 +85,7 @@ export default function registerSearchCommands(router) {
     router.register('search.in', (args, ctx) => {
         if (args.length < 2) return { text: 'ERR: usage: search.in <dir> <query> [-e] [-s] [-w]', data: null };
         const [dir, ...rest] = args;
-        const uri = dir.startsWith('file://') ? dir : `file://${dir.startsWith('/') ? '' : '/'}${dir}`;
+        const uri = dir.startsWith('file://') ? dir : toFileUri(dir);
         return runSearch(ctx, uri, rest);
     }, { description: 'Search file contents under a directory', usage: '<dir> <query> [-e] [-s] [-w]' });
 

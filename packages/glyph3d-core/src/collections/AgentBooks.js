@@ -44,6 +44,7 @@ import { VStack } from './layouts/StackContainer.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { classifyByExtension } from '../core/fileKind.js';
+import { toFileUri } from '../core/fileUri.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
 import { eventsToRecords } from '../workers/sessionParseJob.js';
 import { yieldToFrame } from '../utils/frameYield.js';
@@ -801,7 +802,7 @@ export default class AgentBooks {
     /** The in-memory content of `path` if it's currently open as a grid, else null.
      *  Matches file.open's path→uri convention. @private */
     _openGridContent(path) {
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+        const uri = toFileUri(path);
         const open = this.ctx.registry?.findByMeta?.('sourcePath', uri) || [];
         const g = open[0]?.grid;
         return (g && typeof g.content === 'string' && g.content.length) ? g.content : null;

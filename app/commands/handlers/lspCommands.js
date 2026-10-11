@@ -12,7 +12,8 @@
  */
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 import { renderSheetGrid } from './fileLoader.js';
-import { canonicalPath, fromFileUri } from './pathResolve.js';
+import { canonicalPath } from './pathResolve.js';
+import { fromFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const DEF_COLOR = { r: 0.3, g: 0.8, b: 1.0 }; // matches highlightCommands' 'blue'
@@ -29,7 +30,6 @@ function utf16ToCp(lineText, col) {
     return [...lineText.slice(0, col)].length;
 }
 
-/** file:///<path> → <path>, the form renderSheetGrid / the registry address files by. */
 /**
  * Open (or focus) the grid for an LSP location, highlight its range, and fly to it.
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).

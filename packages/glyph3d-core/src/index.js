@@ -49,6 +49,7 @@ export { PERF_THRESHOLDS, shouldDebugLog } from './core/constants.js';
 export { computeCellMetrics, deriveCharSize, LINE_PITCH, LETTER_SPACING } from './core/cellMetrics.js';
 export { READABLE_MAX_CHARS, READABLE_MAX_LINE_CHARS, unreadableReason } from './core/readability.js';
 export { extOf, mimeForFormat, classifyByExtension, sniffMagic, isProbablyUtf8, classifyBytes, partitionDirEntries } from './core/fileKind.js';
+export { toFileUri, fromFileUri } from './core/fileUri.js';
 
 // Observability
 export {

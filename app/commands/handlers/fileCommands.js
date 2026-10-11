@@ -24,7 +24,8 @@ import { snapshotLoadStats, diffLoadStats, loadStats } from '@glyph3d/core/core/
 import { FS_ERROR_CODES } from '@glyph3d/core/services/data';
 import { renderSheetGrid, addClassifiedRow, addFileRow, addUnfetchedRow, materializeActor, getDiskMtime, setDiskMtime } from './fileLoader.js';
 import { loadBakedIndex } from './bakedIndex.js';
-import { canonicalPath, toFileUri } from './pathResolve.js';
+import { canonicalPath } from './pathResolve.js';
+import { toFileUri, fromFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 /**
@@ -563,7 +564,7 @@ export default function registerFileCommands(router) {
             if (base != null) params.baseMtime = base;
         }
 
-        const shortUri = r.uri.replace(/^file:\/\//, '');
+        const shortUri = fromFileUri(r.uri);
         const forceHint = `file.save ${r.registryId ?? r.idx ?? ''} --force`.replace(/\s+/g, ' ').trim();
         ctx.status?.set(`Saving ${shortUri}…`);
         let result;

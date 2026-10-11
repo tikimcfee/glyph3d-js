@@ -11,7 +11,8 @@
  */
 import { box, table } from '../formatResponse.js';
 import { renderSheetGrid } from './fileLoader.js';
-import { canonicalPath, toFileUri } from './pathResolve.js';
+import { canonicalPath } from './pathResolve.js';
+import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 
 const dot = (s) => (s.focused ? '●' : s.rendered ? '◐' : '○');  // focused · rendered · open-only
 

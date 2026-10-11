@@ -12,6 +12,7 @@ import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { bytesToHexView } from '@glyph3d/core/memory/hexView.js';
 import { decorateMemoryGrid } from '@glyph3d/core/memory/memoryGridView.js';
 import { buildMemoryLegend } from '@glyph3d/core/memory/memoryLegend.js';
+import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -29,7 +30,7 @@ export default function registerMemoryCommands(router) {
         const length = Math.max(1, parseInt(args[2] ?? '512', 10) || 512);
         const cols = Math.max(1, parseInt(args[3] ?? '16', 10) || 16);
 
-        const uri = `file:///${String(path).replace(/^\/+/, '')}`;
+        const uri = toFileUri(path);
         let res;
         try {
             res = await ctx.fileProvider.readRange(uri, offset, length);

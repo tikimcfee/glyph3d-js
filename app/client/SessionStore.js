@@ -52,6 +52,7 @@
  */
 
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
+import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 import { openAgentSession } from '../commands/handlers/agentCommands.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
@@ -833,7 +834,7 @@ export default class SessionStore {
   }
 
   async _fileExists(path) {
-    try { await this.ctx.fileProvider.stat('file:///' + String(path).replace(/^\/+/, '')); return true; }
+    try { await this.ctx.fileProvider.stat(toFileUri(path)); return true; }
     catch { return false; }
   }
 
