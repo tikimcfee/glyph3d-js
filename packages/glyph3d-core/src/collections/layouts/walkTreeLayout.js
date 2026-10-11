@@ -17,6 +17,7 @@
 
 import { flowBoxes, squareWrap } from './flowBoxes.js';
 import { leafBox, partitionChildren } from './nodeUtils.js';
+/** @import * as THREE from 'three' */
 
 export const WALK_DEFAULTS = { margin: 16, gap: 60, zStep: 170, yStep: 70, minW: 50, minH: 30 };
 

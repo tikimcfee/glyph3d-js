@@ -1,3 +1,7 @@
+/** @import CodeGrid from '../collections/CodeGrid.js' */
+/** @import GlyphAtlas from '../GlyphAtlas.js' */
+/** @import * as THREE from 'three' */
+
 /**
  * SceneContext — shared reference bag for subsystems
  *
@@ -15,7 +19,7 @@ export class SceneContext {
      * @param {Object} refs.THREE - Three.js module
      * @param {THREE.Scene} refs.scene
      * @param {THREE.PerspectiveCamera} refs.camera
-     * @param {THREE.WebGLRenderer|THREE.WebGPURenderer} refs.renderer
+     * @param {THREE.WebGLRenderer|import('three/webgpu').WebGPURenderer} refs.renderer
      * @param {HTMLCanvasElement} refs.canvas
      * @param {GlyphAtlas} refs.atlas
      * @param {Function} refs.getGrids - () => CodeGrid[], returns live grids array

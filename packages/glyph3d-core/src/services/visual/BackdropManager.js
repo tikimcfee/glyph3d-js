@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
+/** @import { TreeNode } from '../../collections/HierarchicalLayoutManager.js' */
 
 /**
  * @typedef {Object} BackdropOptions

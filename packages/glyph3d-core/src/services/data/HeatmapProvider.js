@@ -1,3 +1,6 @@
+/** @import FileStateManager from '../state/FileStateManager.js' */
+/** @import SceneContext from '../SceneContext.js' */
+
 /**
  * HeatmapProvider — per-file heat metric computation
  *

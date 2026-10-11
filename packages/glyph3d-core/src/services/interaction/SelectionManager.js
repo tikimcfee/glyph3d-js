@@ -1,3 +1,6 @@
+/** @import FileStateManager from '../state/FileStateManager.js' */
+/** @import * as THREE from 'three' */
+
 /**
  * SelectionManager — canvas-based file selection with raycasting
  *
@@ -22,7 +25,7 @@ export const Z_POP_AMOUNT = 3;
 
 export class SelectionManager {
     /**
-     * @param {THREE} THREE - Three.js module
+     * @param {typeof import('three')} THREE - Three.js module
      * @param {FileStateManager} fileStateManager
      */
     constructor(THREE, fileStateManager) {

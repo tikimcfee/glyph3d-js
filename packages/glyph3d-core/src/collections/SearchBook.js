@@ -30,6 +30,7 @@
 
 import * as THREE from 'three';
 import Book from './Book.js';
+/** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import { VStack } from './layouts/StackContainer.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -74,7 +75,7 @@ const fmtHit = (m) => `L${m.line + 1}  ${m.text}`;
 
 export default class SearchBook {
     /**
-     * @param {Object} ctx - the scene context (scene, atlas, registry, pickingSystem, fileProvider, bridge)
+     * @param {BookHost} ctx - the host context (scene, atlas, registry, pickingSystem, fileProvider, wsbridge)
      * @param {Object} [opts] - overrides for SEARCH_BOOK_DEFAULTS
      */
     constructor(ctx, opts = {}) {

@@ -9,6 +9,7 @@
 
 import * as THREE from 'three';
 import { HAND_RENDERER_DEFAULTS } from './defaults.js';
+/** @import { SceneContext } from './HandData.js' */
 
 const FRUSTUM_COLOR = 0x335566;
 const FRUSTUM_OPACITY = 0.25;

@@ -15,6 +15,7 @@
 // Import builder for sync fallback (tree-shaken if unused)
 import { buildBatchBuffers } from './builders/index.js';
 import { shapeText } from '../shaping/shapeText.js';
+/** @import GlyphAtlas from '../GlyphAtlas.js' */
 
 /**
  * Check if Web Workers are supported

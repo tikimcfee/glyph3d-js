@@ -143,7 +143,6 @@ function MapGrid({ text, position, textColor, onStatus, quiet }) {
       grid.updateMatrixWorld(true);
       log('committed v2', {
         instanceCount: mesh?.geometry?.instanceCount, meshVisible: mesh?.visible, meshParent: mesh?.parent?.type,
-        pos0: `${P[0]?.toFixed(2)},${P[1]?.toFixed(2)},${P[2]?.toFixed(2)}`,
         size0: `${S[0]?.toFixed(3)}x${S[1]?.toFixed(3)}`,
         gridScale: grid.scale.toArray().join(','),
         rgScale: grid._rendererGroup?.scale?.toArray?.().join(','),
@@ -156,7 +155,7 @@ function MapGrid({ text, position, textColor, onStatus, quiet }) {
 
       onStatus?.({
         ok: true, glyphs: buffers.count, ensured,
-        detail: `pos0(${P[0]?.toFixed(1)},${P[1]?.toFixed(1)},${P[2]?.toFixed(1)}) size0(${S[0]?.toFixed(2)},${S[1]?.toFixed(2)}) ` +
+        detail: `size0(${S[0]?.toFixed(2)},${S[1]?.toFixed(2)}) ` +
           `iCount=${mesh?.geometry?.instanceCount} meshInScene=${!!mesh?.parent}`,
       });
     } catch (e) {

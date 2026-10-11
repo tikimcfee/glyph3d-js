@@ -52,6 +52,11 @@ import { registerAllCommands } from '../commands/handlers/index.js';
 // supplied yet," not "the handler is broken." Fields start null and light up as
 // the client grows toward the v1 tour slice.
 // ---------------------------------------------------------------------------
+/**
+ * @param {object} deps
+ * @param {import('@glyph3d/core/GlyphAtlas.js').default} deps.atlas
+ * @param {ReturnType<typeof useGridRegistry>} deps.registryBundle  the r3f glyph context (registry + grid helpers)
+ */
 function buildClientContext({ scene, camera, renderer, atlas, registryBundle, cameraControllerRef }) {
   // The registry is the ONE core SceneRegistry, provided by GlyphCanvas and
   // shared with the binding components (<CodeGrid> self-registers into it,

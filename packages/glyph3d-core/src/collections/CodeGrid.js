@@ -45,6 +45,7 @@ import {
     clearLineHighlight,
     clearAllHighlights,
 } from './grid/index.js';
+/** @import GlyphAtlas from '../GlyphAtlas.js' */
 
 class CodeGrid extends FramedGlyphField {
     /**

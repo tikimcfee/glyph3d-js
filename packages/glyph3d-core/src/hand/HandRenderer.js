@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { Joint, SKELETON_CONNECTIONS, JOINT_COUNT } from './HandData.js';
 import { HAND_RENDERER_DEFAULTS as DEFAULTS } from './defaults.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+/** @import { HandFrame } from './HandData.js' */
 
 // Shared geometries — created once, reused across all hands
 const BONE_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 6, 1);

@@ -293,12 +293,15 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   checkJs on, reporting ONLY the codes where a type silently degrades to `any`: a dead
   `import('…')` path (TS2307), a typedef-only script that isn't a module (TS2306), a
   missing export/typedef (TS2305/2614/2724/2694), a `.jsx` import without `"jsx"` in
-  jsconfig (TS6142). Baseline is zero, so any hit is a regression. ~4s.
+  jsconfig (TS6142), and a JSDoc type NAME the file never imports (TS2304/2552/2503, counted
+  only inside block comments; in code those codes are runtime globals). Baseline is zero,
+  so any hit is a regression. ~4s.
   ```
   bun tools/type-imports-check.mjs
   ```
-  Teeth, verified: a planted dead `CommandRouter.js` path, a missing typedef, and a
-  missing export each fail it; dropping `"jsx"` from jsconfig fails it 124 times.
+  Teeth, verified: a planted dead `CommandRouter.js` path, a missing typedef, a missing
+  export, and an un-imported `{CodeGrid}` / `{THREE.Vector3}` each fail it, while an unknown
+  runtime global does not; dropping `"jsx"` from jsconfig fails it 124 times.
 
 - **`lsp.mjs`** — one-shot code intelligence from a shell: `hover`, `def`, `refs`,
   `impl`, `callers`, `callees`, `symbols <query>`, `outline <file>` via

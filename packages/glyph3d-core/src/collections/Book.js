@@ -60,6 +60,24 @@ import { leafBox } from './layouts/nodeUtils.js';
 import { addPanelSurface, ownSurfaceMaterial, releasePanelPose } from './layouts/panelSurface.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
+/** @import GlyphAtlas from '../GlyphAtlas.js' */
+/** @import SceneRegistry from '../services/SceneRegistry.js' */
+/** @import { PickingSystem } from '../picking/PickingSystem.js' */
+/** @import WebSocketBridge from '../services/orchestration/WebSocketBridge.js' */
+
+/**
+ * What a books controller (AgentBooks / DeltaBooks / SearchBook) reads off its host
+ * context. Structural: a host's context satisfies it by shape, so core names only what
+ * it uses and never imports an app's context type.
+ * @typedef {Object} BookHost
+ * @property {THREE.Scene} scene
+ * @property {THREE.Camera} camera
+ * @property {GlyphAtlas} atlas
+ * @property {SceneRegistry} registry
+ * @property {{ getFile: (path: string) => Promise<any>, getBytes?: (path: string) => Promise<any> }} fileProvider
+ * @property {PickingSystem|null} pickingSystem
+ * @property {WebSocketBridge|null} [wsbridge]
+ */
 
 /** Page-face fallbacks when fit() is driven directly (a scheme passes its full merged
  *  opts; a bare verb may pass only page dims). */
@@ -730,7 +748,7 @@ export default class Book extends BoundedObject3D {
      *  splay: page-order m×n grid — columns centered on x, the first row's page
      *    centers at y = 0 and rows descend; the head floats `lift` forward. Splay
      *    needs the fitted page dims; an unfitted book falls back to the deck law.
-     *  @private @param {{x:number,y:number,z:number}} out @returns {typeof out} */
+     *  @private @param {{x:number,y:number,z:number}} out @returns {{x:number,y:number,z:number}} */
     _slotFor(i, out) {
         const n = this.sheets.length;
         const o = this._fitOpts;

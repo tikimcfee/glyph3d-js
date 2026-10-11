@@ -8,6 +8,7 @@
 
 import { Joint, landmarkDistance } from './HandData.js';
 import { GESTURE_DEFAULTS } from './defaults.js';
+/** @import { HandFrame } from './HandData.js' */
 
 class GestureDetector {
     /**

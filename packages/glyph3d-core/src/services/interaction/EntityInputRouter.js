@@ -35,6 +35,8 @@
 import * as THREE from 'three';
 import { screenToWorldDelta } from '../spatial/spatialMath.js';
 import { createLogger } from '../../utils/Logger.js';
+/** @import SceneRegistry from '../SceneRegistry.js' */
+/** @import SpatialWindowManager from '../spatial/SpatialWindowManager.js' */
 
 const log = createLogger('entityInputRouter', 0);
 const CLICK_THRESHOLD_PX = 5;

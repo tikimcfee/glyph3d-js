@@ -50,6 +50,7 @@ import InstancedField from './InstancedField.js';
 import { getWorkerBridge } from '../workers/WorkerBridge.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { subtreeContentBounds, visibleDepth } from './layouts/nodeUtils.js';
+/** @import InstancedField from './InstancedField.js' */
 
 export const LABEL_DEFAULTS = {
     fit: 0.65,         // the fraction of its container's width a label's name spans
@@ -233,7 +234,7 @@ export default class ContentTreeLabels {
         this.atlas = atlas;
         this.opts = { ...LABEL_DEFAULTS, ...opts };
         this.enabled = true;
-        /** @type {GlyphField|null} the one shared field — rebuilt per relayout */
+        /** @type {InstancedField|null} the one shared field — rebuilt per relayout */
         this._field = null;
         this._items = [];
         this._alphaQ = [];        // groupId → last quantized alpha written

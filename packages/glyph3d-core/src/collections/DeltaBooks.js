@@ -29,6 +29,7 @@
 
 import * as THREE from 'three';
 import Book from './Book.js';
+/** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FieldLabel from './FieldLabel.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
@@ -75,6 +76,7 @@ export const DELTA_BOOKS_DEFAULTS = {
 const basename = (p) => String(p).split('/').filter(Boolean).pop() || String(p);
 
 export default class DeltaBooks {
+    /** @param {BookHost} ctx */
     constructor(ctx, opts = {}) {
         this.ctx = ctx;
         this.scene = ctx.scene;

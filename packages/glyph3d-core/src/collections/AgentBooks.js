@@ -36,6 +36,7 @@
 
 import * as THREE from 'three';
 import Book from './Book.js';
+/** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
 import FieldLabel from './FieldLabel.js';
@@ -134,6 +135,7 @@ function fmtEntry(e) {
 const STATES = new Set(['active', 'idle', 'stalled', 'done']);
 
 export default class AgentBooks {
+    /** @param {BookHost} ctx */
     constructor(ctx, opts = {}) {
         this.ctx = ctx;
         this.scene = ctx.scene;

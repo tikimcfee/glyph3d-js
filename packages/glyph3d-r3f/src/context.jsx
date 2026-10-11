@@ -10,52 +10,60 @@ import SceneRegistry from '@glyph3d/core/services/SceneRegistry.js';
 // gone.) GlyphCanvas provides this; <CodeGrid>, <ViewerCamera>, and the app's
 // CommandCenter all consume the same instance.
 
+/**
+ * The glyph context value — its shape is glyphContextValue's return.
+ * @typedef {ReturnType<typeof glyphContextValue>} GlyphContextValue
+ */
+/** @type {React.Context<GlyphContextValue | null>} */
 const GlyphContext = createContext(null);
+
+/**
+ * @param {import('@glyph3d/core/GlyphAtlas.js').default} atlas
+ * @param {SceneRegistry} registry
+ */
+function glyphContextValue(atlas, registry) {
+  return {
+    atlas,
+    // The bare core SceneRegistry (full API: findByType, register, getIdByGrid…)
+    registry,
+    // Convenience used by binding components AND the command layer, so grid
+    // identity/typing is synthesized one way. Registration only — scene.add is
+    // the caller's job (the core CodeGrid ctor's scene.add is dead; see CodeGrid.jsx).
+    addGrid(grid, { id, type = 'grid', ...meta } = {}) {
+      const sourcePath = grid.getSourcePath?.() || null;
+      const filename = grid.getFilename?.() || grid.name || null;
+      const gid = id || sourcePath || filename
+        || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      if (!registry.getIdByGrid(grid)) {
+        registry.register(gid, grid, { type, sourcePath, filename, ...meta });
+      }
+      return gid;
+    },
+    removeGrid(grid) {
+      const gid = registry.getIdByGrid(grid);
+      return gid ? registry.unregister(gid) : null;
+    },
+    getGrids: () => registry.toArray('grid'),
+    // Every framed surface that occupies 3D space — code grids, terminals, AND captures.
+    // getGrids() is grid-INDEX-coupled (focusOnGrid/computeGridFocus read code-grid
+    // internals), so it stays grid-only; the camera's distance sampling + fit-all want
+    // ALL bounds-bearing windows so a terminal/capture slows the flythrough and frames like a file.
+    // Every bounds-bearing thing in the WORLD — the shared spine for dynamic-speed
+    // sampling, soft bounds, fit-all framing, and viewport-relative placement.
+    // Agent books (tag 'agent' — deck roots) and carrels are world citizens
+    // too: without them the camera's scaled-motion-velocity never brakes
+    // near a shelf or a desk. toArray is TAG-keyed, so 'grid' here is the
+    // loose grids — cards ride inside their decks' bounds.
+    getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'),
+                        ...registry.toArray('frame'), ...registry.toArray('agent'),
+                        ...registry.toArray('carrel')],
+  };
+}
 
 export function GlyphProvider({ atlas, children }) {
   const registryRef = useRef(null);
   if (!registryRef.current) registryRef.current = new SceneRegistry();
-
-  const value = useMemo(() => {
-    const registry = registryRef.current;
-    return {
-      atlas,
-      // The bare core SceneRegistry (full API: findByType, register, getIdByGrid…)
-      registry,
-      // Convenience used by binding components AND the command layer, so grid
-      // identity/typing is synthesized one way. Registration only — scene.add is
-      // the caller's job (the core CodeGrid ctor's scene.add is dead; see CodeGrid.jsx).
-      addGrid(grid, { id, type = 'grid', ...meta } = {}) {
-        const sourcePath = grid.getSourcePath?.() || null;
-        const filename = grid.getFilename?.() || grid.name || null;
-        const gid = id || sourcePath || filename
-          || `grid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        if (!registry.getIdByGrid(grid)) {
-          registry.register(gid, grid, { type, sourcePath, filename, ...meta });
-        }
-        return gid;
-      },
-      removeGrid(grid) {
-        const gid = registry.getIdByGrid(grid);
-        return gid ? registry.unregister(gid) : null;
-      },
-      getGrids: () => registry.toArray('grid'),
-      // Every framed surface that occupies 3D space — code grids, terminals, AND captures.
-      // getGrids() is grid-INDEX-coupled (focusOnGrid/computeGridFocus read code-grid
-      // internals), so it stays grid-only; the camera's distance sampling + fit-all want
-      // ALL bounds-bearing windows so a terminal/capture slows the flythrough and frames like a file.
-      // Every bounds-bearing thing in the WORLD — the shared spine for dynamic-speed
-      // sampling, soft bounds, fit-all framing, and viewport-relative placement.
-      // Agent books (tag 'agent' — deck roots) and carrels are world citizens
-      // too: without them the camera's scaled-motion-velocity never brakes
-      // near a shelf or a desk. toArray is TAG-keyed, so 'grid' here is the
-      // loose grids — cards ride inside their decks' bounds.
-      getSurfaces: () => [...registry.toArray('grid'), ...registry.toArray('terminal'),
-                          ...registry.toArray('frame'), ...registry.toArray('agent'),
-                          ...registry.toArray('carrel')],
-    };
-  }, [atlas]);
-
+  const value = useMemo(() => glyphContextValue(atlas, registryRef.current), [atlas]);
   return <GlyphContext.Provider value={value}>{children}</GlyphContext.Provider>;
 }
 

@@ -9,6 +9,7 @@
  */
 
 import { JOINT_COUNT } from './HandData.js';
+/** @import { HandFrame } from './HandData.js' */
 
 class MockHandSource {
     /**

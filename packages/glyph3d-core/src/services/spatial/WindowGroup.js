@@ -9,6 +9,7 @@
  */
 
 import * as THREE from 'three';
+/** @import SpatialAnimator from './SpatialAnimator.js' */
 
 // ──────────────────────────────────────────────────────────────
 //  Layout Functions (pure, module-private)

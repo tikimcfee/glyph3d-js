@@ -16,6 +16,7 @@
 
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+/** @import CodeGrid from './CodeGrid.js' */
 
 class SpiralLayoutManager {
     /**

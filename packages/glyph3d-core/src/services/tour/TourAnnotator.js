@@ -1,6 +1,7 @@
 // src/services/tour/TourAnnotator.js
 
 import CodeGrid from '../../collections/CodeGrid.js';
+/** @import { TourHost } from './TourSequencer.js' */
 
 /** Named color presets for tour annotations */
 const COLOR_PRESETS = {
@@ -17,6 +18,7 @@ const COLOR_PRESETS = {
  * Tracks highlighted lines per step so teardown can clear exactly what was applied.
  */
 export default class TourAnnotator {
+    /** @param {TourHost} ctx */
     constructor(ctx) {
         this._ctx = ctx;
 

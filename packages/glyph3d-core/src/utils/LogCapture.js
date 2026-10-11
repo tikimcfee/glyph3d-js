@@ -8,6 +8,7 @@
 import { getAllLoggers, LogLevelNames } from './Logger.js';
 import metrics from './Metrics.js';
 import errorTracker from './ErrorTracker.js';
+/** @import Logger from './Logger.js' */
 
 class LogCapture {
     constructor() {

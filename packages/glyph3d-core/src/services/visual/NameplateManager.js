@@ -10,6 +10,8 @@
 
 import * as THREE from 'three';
 import { CodeGrid } from '../../index.js';
+/** @import GlyphAtlas from '../../GlyphAtlas.js' */
+/** @import { TreeNode } from '../../collections/HierarchicalLayoutManager.js' */
 
 /**
  * @typedef {Object} NameplateOptions

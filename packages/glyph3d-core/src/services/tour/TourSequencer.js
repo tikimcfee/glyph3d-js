@@ -3,6 +3,20 @@
 import * as THREE from 'three';
 import TourResolver from './TourResolver.js';
 import TourAnnotator from './TourAnnotator.js';
+/** @import GlyphAtlas from '../../GlyphAtlas.js' */
+/** @import SceneRegistry from '../SceneRegistry.js' */
+/** @import ConnectionRenderer from '../../annotations/ConnectionRenderer.js' */
+
+/**
+ * What the tour reads off its host context (structural — core never imports an app's
+ * context type). The annotator reads scene/atlas/registry; the sequencer adds the
+ * connection overlay.
+ * @typedef {Object} TourHost
+ * @property {THREE.Scene} scene
+ * @property {GlyphAtlas} atlas
+ * @property {SceneRegistry} registry
+ * @property {ConnectionRenderer} [connectionRenderer]
+ */
 
 const TAG_PREFIX = 'tour';
 
@@ -46,7 +60,7 @@ const TAG_PREFIX = 'tour';
  */
 export default class TourSequencer {
     /**
-     * @param {Object} ctx - command context bag
+     * @param {TourHost} ctx - the host context
      * @param {Object} helpers - spatial helper functions (injected from app layer)
      * @param {Function} helpers.getWorldBounds - (grid) => {min, max, center}
      * @param {Function} helpers.resolveAnchor - (bounds, name) => {x, y, z}

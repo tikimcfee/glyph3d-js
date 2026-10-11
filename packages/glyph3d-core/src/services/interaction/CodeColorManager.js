@@ -1,3 +1,7 @@
+/** @import CodeGrid from '../../collections/CodeGrid.js' */
+/** @import FileStateManager from '../state/FileStateManager.js' */
+/** @import SceneContext from '../SceneContext.js' */
+
 /**
  * CodeColorManager — data → glyph visual mapping
  *

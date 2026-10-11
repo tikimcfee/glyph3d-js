@@ -14,6 +14,11 @@ import { WindowGroup } from './WindowGroup.js';
 import { Z_POP_AMOUNT } from '../interaction/SelectionManager.js';
 import { createLogger } from '../../utils/Logger.js';
 import { stateController } from '../state/StateController.js';
+/** @import CodeColorManager from '../interaction/CodeColorManager.js' */
+/** @import FileStateManager from '../state/FileStateManager.js' */
+/** @import SceneRegistry from '../SceneRegistry.js' */
+/** @import SelectionManager from '../interaction/SelectionManager.js' */
+/** @import SpatialAnimator from './SpatialAnimator.js' */
 
 const log = createLogger('spatial', 0); // TRACE level — capture everything
 

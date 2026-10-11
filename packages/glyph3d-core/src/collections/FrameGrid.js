@@ -29,6 +29,7 @@ import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { mimeForFormat } from '../core/fileKind.js';
+/** @import GlyphAtlas from '../GlyphAtlas.js' */
 
 class FrameGrid extends FramedGlyphField {
     /**

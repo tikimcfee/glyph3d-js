@@ -1,5 +1,6 @@
 import Button3D from '../../components/Button3D.js';
 import { computeCellGridLayout } from './GridBackground.js';
+/** @import * as THREE from 'three' */
 
 
 /**

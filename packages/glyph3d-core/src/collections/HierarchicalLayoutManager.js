@@ -15,6 +15,7 @@
  */
 
 import * as THREE from 'three';
+/** @import CodeGrid from './CodeGrid.js' */
 
 /**
  * @typedef {Object} TreeNode

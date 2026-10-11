@@ -9,6 +9,7 @@
 
 import { Joint, JOINT_COUNT } from './HandData.js';
 import { WEBCAM_SOURCE_DEFAULTS as DEFAULTS } from './defaults.js';
+/** @import { HandFrame } from './HandData.js' */
 
 const MEDIAPIPE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
 const VISION_BUNDLE_URL = `${MEDIAPIPE_CDN}/vision_bundle.mjs`;

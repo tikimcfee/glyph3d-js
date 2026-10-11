@@ -37,6 +37,7 @@ import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { stateController } from '../state/StateController.js';
 import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
 import { worldBounds } from '../spatial/sceneBounds.js';
+/** @import SceneContext from '../SceneContext.js' */
 
 const CAMERA_DEFAULTS = {
     cameraSpeed: 500,
