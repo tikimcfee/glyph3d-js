@@ -70,7 +70,6 @@ export async function initGlyph3D(): Promise<GlyphAtlas> {
     fontUrl: '/fonts/Cousine-Regular.ttf',
     wasmUrl: '/wasm/hb.wasm',
     fontSize: 48,
-    atlasSize: 2048,
     // Optional: in-memory buffers can also be provided directly:
     // fonts: [{ name: 'primary', buffer: fontArrayBuffer }],
     // wasmBinary: wasmArrayBuffer,

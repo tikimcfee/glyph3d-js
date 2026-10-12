@@ -81,7 +81,6 @@ export function createBackgroundMesh(config = {}, bgGap) {
         opacity: config.backgroundOpacity,
         side: THREE.DoubleSide,
         depthWrite: true,
-        layerBand: LAYER_BAND.GRID_BACKGROUND,
     });
 
     const mesh = new THREE.Mesh(geometry, panel.material);

@@ -32,7 +32,7 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); 
 // forced 'M' advance, emoji (cp ≥ 0x1F000) double, dx = dy = 0.
 const UPEM = 2048, CELL_AX = 1229, FONT_SIZE = 48, EM_HEIGHT = 1.1699, WORLD_SCALE = 0.025;
 const charSize = { width: Math.ceil(CELL_AX / UPEM * FONT_SIZE), height: EM_HEIGHT * FONT_SIZE };
-const metrics = { ...computeCellMetrics(charSize, WORLD_SCALE), worldScale: WORLD_SCALE, atlasSize: 2048 };
+const metrics = { ...computeCellMetrics(charSize, WORLD_SCALE), worldScale: WORLD_SCALE };
 
 function shape(text) {
   const lines = [];

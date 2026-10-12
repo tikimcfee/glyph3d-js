@@ -5,17 +5,11 @@ import {
   setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT,
 } from '@glyph3d/core';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
-export const LABEL_PILL_DEFAULTS = Object.freeze({ hairline: 0.22, hairlineWidth: 1.5 });
-const _labelPillStyle = { ...LABEL_PILL_DEFAULTS };
-function setLabelPillStyle({ hairline, hairlineWidth } = {}) {
-  if (hairline != null) _labelPillStyle.hairline = hairline;
-  if (hairlineWidth != null) _labelPillStyle.hairlineWidth = hairlineWidth;
-}
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
 import { FAR_LOD_DEFAULTS } from '@glyph3d/core/collections/GlyphFarLod.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
-import { LAYER_BAND, getLayerBandBias, setLayerBandBias, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
+import { LAYER_BAND, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
 import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
@@ -32,8 +26,8 @@ import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
 // camera already uses and the vanilla IDE persisted through.
 //
 // `apply(ctx, value)` pushes a live change to its subsystem. `reload: true` marks a
-// boot-time knob — the glyph atlas is built once at startup, so font/atlas changes
-// persist now and take hold on the next page load.
+// boot-time knob — the glyph engine derives its cell metrics once at startup, so a
+// font-size change persists now and takes hold on the next page load.
 
 /** apply() for a dock layout knob: push the value to CameraDock.setParam, which
  *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
@@ -53,11 +47,6 @@ const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
 /** apply() for a strata dial: push the bare param name (not the `strata.` key) to the global
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
 const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
-
-/** apply() for a layer-band bias dial: write the band's shared clip-z bias uniform —
- *  every material wearing the band (page faces / grid walls / the shared glyph
- *  material) renders with it next frame, no ctx needed (see core/layerBands.js). */
-const bandParam = (band) => (_ctx, v) => setLayerBandBias(band, v);
 
 /** apply() for the grid-background set-back dial: store the new band distance and nudge
  *  every live grid/terminal background by the z delta (no relayout).
@@ -166,9 +155,8 @@ const libraryParam = (param) => schemeParam('library', param);
 export const GROUPS = [
   { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance', columns: 2 },
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview', columns: 2 },
-  { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors', columns: 2 },
-  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control · far-LOD backdrops', columns: 2 },
-  { name: 'Layer bands',        subtitle: 'z-fight control — depth bias per layer · background set-backs' },
+  { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · set-back · cursor · focus / hover / input colors', columns: 2 },
+  { name: 'Display & glyph LOD', subtitle: 'font size, width compress · minify / flicker control · far-LOD backdrops', columns: 2 },
   { name: 'Code grids',         subtitle: 'the layout preset new grids are born with', columns: 2 },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
@@ -197,10 +185,6 @@ export const SETTINGS = [
   { key: 'tab.steps', label: 'Stagger (0 = left-to-right, ≥2 = slots)', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
   { key: 'tab.placement', label: 'Edge', group: 'Book tabs', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
   { key: 'tab.protrusion', label: 'Lift off edge', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
-  // Label pills (tabs + nameplates share the label panel field) — the resting
-  // hairline rim; interaction-state borders render full-strength regardless.
-  { key: 'label.hairline', label: 'Pill hairline strength', group: 'Tree & labels', type: 'number', default: LABEL_PILL_DEFAULTS.hairline, min: 0, max: 1, step: 0.01, apply: (_ctx, v) => setLabelPillStyle({ hairline: v }) },
-  { key: 'label.hairlineWidth', label: 'Pill hairline width (px)', group: 'Tree & labels', type: 'number', default: LABEL_PILL_DEFAULTS.hairlineWidth, min: 0, max: 8, step: 0.25, apply: (_ctx, v) => setLabelPillStyle({ hairlineWidth: v }) },
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
     type: 'number', default: 500, min: 1, max: 1000, step: 1,
@@ -367,10 +351,6 @@ export const SETTINGS = [
     key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display & glyph LOD',
     type: 'number', default: 48, min: 16, max: 96, step: 1, reload: true,
   },
-  {
-    key: 'atlas.size', label: 'Atlas texture (px)', group: 'Display & glyph LOD',
-    type: 'number', default: 2048, min: 512, max: 8192, step: 512, reload: true,
-  },
   // Width compression — condense glyph ink along x, in place, aligned to leading. A
   // live global shader dial (one uniform across every glyph material): the quad narrows
   // and re-anchors so its left edge stays at the cell anchor; layout advance, picking,
@@ -429,6 +409,9 @@ export const SETTINGS = [
     type: 'number', default: 0.96, min: 0, max: 1, step: 0.01,
     apply: (ctx, v) => themeAll(ctx, 'terminal', { opacity: v }),
   },
+  // How far a grid's / terminal's background wall sits behind its text. Live-nudges every
+  // on-screen background by the z delta (no relayout); new ones read it at birth.
+  { key: 'band.gridBgGap', label: 'Background set-back (behind text)', group: 'Theme & appearance', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
   // Terminal cursor — the block that marks where typing lands. Color + the focused (solid) fill +
   // the unfocused (hollow) outline width, each pushed live to every terminal. Defaults shared with
   // the TerminalGrid constructor (TERMINAL_CURSOR_DEFAULTS) so the panel and a fresh terminal agree.
@@ -751,22 +734,6 @@ export const SETTINGS = [
   { key: 'glyph.showGlyphsPx', label: 'Show glyphs from (px per row, 0 = always)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.showGlyphsPx, min: 0, max: 24, step: 0.25, apply: (ctx, v) => ctx.glyphFarLod?.setParam('showGlyphsPx', v) },
   { key: 'glyph.backdropGain', label: 'Far backdrop strength (× ink cover)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.backdropGain, min: 0, max: 4, step: 0.05, apply: (ctx, v) => ctx.glyphFarLod?.setParam('backdropGain', v) },
 
-
-  // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md).
-  // Each band's bias shifts its clip-z by a constant NDC fraction (clip.z += bias·w in
-  // the vertex stage); NEGATIVE pulls toward the camera. DEFAULTS ARE ZERO on purpose:
-  // a fixed NDC bias is distance-independent but the layer gaps aren't — at library
-  // vantages the cross-stack gaps shrink below any useful bias and rear text starts
-  // outranking front faces. With camera.nearPlane ≥ ~4 geometry resolves the order
-  // alone. The biases are a debugging PROBE: nudge one to force an ordering and watch
-  // a layer win/lose. Live by construction (one shared uniform per band — see
-  // core/layerBands.js).
-  { key: 'band.faceBias', label: 'Page face — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.PANEL_FACE), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.PANEL_FACE) },
-  { key: 'band.gridBgBias', label: 'Grid wall — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GRID_BACKGROUND), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GRID_BACKGROUND) },
-  { key: 'band.glyphBias', label: 'Glyphs — depth bias (NDC)', group: 'Layer bands', type: 'number', default: getLayerBandBias(LAYER_BAND.GLYPH), min: -0.005, max: 0.005, step: 0.00005, apply: bandParam(LAYER_BAND.GLYPH) },
-  // The geometric set-back the bias bands complement: how far a grid's background wall
-  // sits behind its text. Live-nudges every on-screen grid/terminal (no relayout).
-  { key: 'band.gridBgGap', label: 'Grid wall set-back (behind text)', group: 'Layer bands', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
   // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
   // is a SUBSET of the Books base below (it inherits the shared page face + cover) plus
   // these ADDITIVE agent-only knobs: page geometry, the deck, the card scales, and retention.
@@ -810,8 +777,8 @@ export const SETTINGS = [
   { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
   { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
   { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
-  // The face's geometric set-back behind its content — the gap the Layer bands offsets
-  // complement. Fans out like the other page dials (agent cfg faceDepth + library layout opt).
+  // The face's geometric set-back behind its content. Fans out like the other page dials
+  // (agent + delta cfg faceDepth + library layout opt).
   { key: 'books.surfaceDepth', label: 'Page face set-back', group: 'Books', scheme: 'library', type: 'number', default: 8, min: 0, max: 200, step: 1, apply: bookPageParam('faceDepth', 'surfaceDepth') },
   { key: 'books.cover', label: 'Directory boxes (covers)', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: coverParam('cover', 'cover') },
   { key: 'books.coverColor', label: 'Box tint (library)', group: 'Books', scheme: 'library', type: 'color', default: '#5a7ea8', apply: libraryParam('coverColor') },

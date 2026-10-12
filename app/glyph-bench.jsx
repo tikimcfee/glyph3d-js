@@ -110,7 +110,7 @@ function MapGrid({ text, position, textColor, onStatus, quiet }) {
       const metrics = {
         charWidth: cs.width * scale, charHeight: cs.height * scale,
         letterSpacing: cs.width * scale * 0.05, lineSpacing: cs.height * scale * 1.2,
-        worldScale: scale, atlasSize: atlas.getAtlasTexture().width,
+        worldScale: scale,
         pixelWidth: cs.width, pixelHeight: cs.height,
       };
       log('metrics built', metrics);
@@ -174,7 +174,7 @@ const overlay = {
 };
 
 function App() {
-  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN, fontSize: 48, atlasSize: 2048 });
+  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN, fontSize: 48 });
   console.log('[bench] App render', { atlas: !!atlas, stage, error: error ? String(error) : null });
   const [mapStatus, setMapStatus] = useState(null);
   const [sel, setSel] = useState(0);

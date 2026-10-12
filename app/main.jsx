@@ -75,12 +75,11 @@ function DockResizer({ width, setWidth }) {
 }
 
 function App() {
-  // Atlas is built once at boot, so font/atlas-size settings are read here (a
-  // change persists and takes hold on the next reload — the Settings panel says so).
+  // The engine derives its cell metrics once at boot, so the font-size setting is read
+  // here (a change persists and takes hold on the next reload — the Settings panel says so).
   const { atlas, stage, error } = useGlyphEngine({
     fontUrl, fonts: FONT_CHAIN,
     fontSize: getSetting('atlas.fontSize'),
-    atlasSize: getSetting('atlas.size'),
     // Base path for the prebaked slug-core asset, so a sub-path deploy (/ide/) fetches
     // /ide/slug-core/<key>.bin and not /slug-core/<key>.bin.
     coreAssetBase: import.meta.env.BASE_URL,

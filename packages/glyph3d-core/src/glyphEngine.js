@@ -30,7 +30,6 @@ export { LARGE_CORE_RANGES };
  * @property {ArrayBuffer|Uint8Array} [wasmBinary] - Raw WASM bytes for offline/embedded usage.
  * @property {string}   [fontFamily] - CSS font stack for the Canvas2D atlas.
  * @property {number}   [fontSize]   - Atlas glyph cell font size in px.
- * @property {number}   [atlasSize]  - Atlas texture dimension in px (square).
  * @property {Array<[number, number]>} [primeRanges] - Inclusive codepoint ranges to prime in shape cache.
  * @property {Array<[number, number]>} [encodeRanges] - Inclusive codepoint ranges to encode into Slug textures.
  * @property {(stage: string) => void} [onStage] - Progress callback.
@@ -42,7 +41,6 @@ export { LARGE_CORE_RANGES };
 export const DEFAULT_ENGINE_OPTIONS = {
   fontFamily: 'Cousine, Monaco, Menlo, Courier New, monospace',
   fontSize: 48,
-  atlasSize: 2048,
   primeRanges: LARGE_CORE_RANGES,
   encodeRanges: LARGE_CORE_RANGES,
 };
@@ -68,7 +66,7 @@ export async function bootGlyphEngine(options = {}) {
   const stage = opts.onStage ?? (() => {});
 
   stage('atlas');
-  const atlas = new GlyphAtlas(opts.fontFamily, opts.fontSize, opts.atlasSize);
+  const atlas = new GlyphAtlas(opts.fontFamily, opts.fontSize);
 
   stage('shaper');
   const fontSpecs = (opts.fonts && opts.fonts.length)

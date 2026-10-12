@@ -10,7 +10,7 @@ import './SettingsPanel.css';
 // writes through the bus (settings.set / reset), so a panel change and a CLI
 // `settings.set` are the same action. Persistence is client-only
 // (StateController/localStorage) — settings survive a reload with no relay.
-// Display knobs (font/atlas) are built at boot, so changing them flags a reload
+// Boot-time knobs (font size) are read once at startup, so changing them flags a reload
 // rather than pretending to apply live.
 
 // Which sections are open — view state, persisted with the rest of the settings

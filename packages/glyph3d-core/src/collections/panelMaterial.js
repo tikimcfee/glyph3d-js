@@ -75,11 +75,10 @@ export function setPanelStateColorDefaults({ hover, focus, input, capture } = {}
  * @param {number} [opts.opacity=1] - fill opacity (transparent flag tracks opacity<1)
  * @param {number} [opts.side=THREE.DoubleSide]
  * @param {boolean} [opts.depthWrite=true] - the panel occludes content behind it (dock stacks)
- * @param {string} [opts.layerBand]
  * @returns {{ material: THREE.ShaderMaterial, setFill, setBorder, setBorderFlag, getBorderFlags, setStateColors, getStateColors }}
  */
 export function createPanelMaterial({ color = 0x000000, opacity = 1,
-                                      side = THREE.DoubleSide, depthWrite = true, layerBand = null } = {}) {
+                                      side = THREE.DoubleSide, depthWrite = true } = {}) {
     const uFill = { value: new THREE.Color(color) };
     const uOpacity = { value: opacity };
     const uBorderColor = { value: new THREE.Color(0xffffff) }; // identity hue (DOCKED)

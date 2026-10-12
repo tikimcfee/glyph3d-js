@@ -1342,7 +1342,6 @@ export default class TerminalGrid extends FramedGlyphField {
             opacity: this._bgOpacity,
             side: THREE.DoubleSide,
             depthWrite: true,
-            layerBand: LAYER_BAND.GRID_BACKGROUND,   // one depth step in front of the page face
         });
 
         this._background = new THREE.Mesh(geometry, this._panel.material);

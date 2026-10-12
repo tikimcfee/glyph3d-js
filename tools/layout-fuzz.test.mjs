@@ -40,7 +40,7 @@ function rng(seed) {
 }
 
 const UPEM = 2048, CELL_AX = 1229;
-const metrics = { ...computeCellMetrics({ width: 29, height: 56.1552 }, 0.025), worldScale: 0.025, atlasSize: 2048 };
+const metrics = { ...computeCellMetrics({ width: 29, height: 56.1552 }, 0.025), worldScale: 0.025 };
 
 function randomText(r) {
   const lines = [];
