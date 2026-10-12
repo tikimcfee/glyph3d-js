@@ -1,7 +1,5 @@
 import * as THREE from 'three';
 
-const _origin = new THREE.Vector3(0, 0, 0);
-
 /**
  * BoundedObject3D — the bounds contract for grid primitives.
  *
@@ -21,15 +19,14 @@ const _origin = new THREE.Vector3(0, 0, 0);
  *   - getLocalBounds()  → local content AABB (in the object's OWN frame, no world
  *                         transform). Subclasses MUST implement this. It is the
  *                         orientation-stable box.
- *   - getBounds(target) → world AABB, derived here from getLocalBounds() applied by the
- *                         current matrixWorld. Provided by this base.
+ *   - getBounds(target) → world AABB, derived here from getLocalBounds() applied by
+ *                         matrixWorld as three last left it. Provided by this base.
  *   - layoutBounds()    → local box suited to composable layout containers. Optional;
  *                         subclass-provided where layout needs it.
  *
- * The Extent — a Three.js-standard `boundingBox` + `boundingSphere` in LOCAL space, so
- * every bounded object is a Three.js bounding-volume citizen: one bound, sourced from
- * getLocalBounds(). Note this is the OBJECT-level extent; the renderer culls off-screen
- * DRAWS via the field mesh's own `geometry.boundingSphere` (GlyphField.setLayoutExtent).
+ * three culls, depth-sorts, and raycasts the MESHES inside (a glyph field's stated
+ * `geometry.boundingBox/Sphere` — InstancedField.setLayoutExtent); this box is the
+ * object-level answer for layout, camera framing, and the minimap.
  *
  * @abstract getLocalBounds
  */
@@ -44,24 +41,6 @@ export default class BoundedObject3D extends THREE.Object3D {
         throw new Error(
             `${this.constructor.name} must implement getLocalBounds() — the Measurable contract`,
         );
-    }
-
-    /**
-     * Refresh the object's Three.js-standard Extent (`boundingBox` + `boundingSphere`)
-     * from getLocalBounds(). Local space — matching Three.js's geometry.boundingSphere
-     * convention (consumers apply matrixWorld for a world result, as getBounds does).
-     * @returns {THREE.Box3} the local Extent box (reused; do not hold across calls)
-     */
-    refreshExtent() {
-        const local = this.getLocalBounds();
-        const box = this._extentBox || (this._extentBox = new THREE.Box3());
-        const sphere = this._extentSphere || (this._extentSphere = new THREE.Sphere());
-        box.copy(local);
-        if (box.isEmpty()) sphere.set(_origin, 0);
-        else box.getBoundingSphere(sphere);
-        this.boundingBox = box;
-        this.boundingSphere = sphere;
-        return box;
     }
 
     /**
@@ -80,7 +59,7 @@ export default class BoundedObject3D extends THREE.Object3D {
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds(target = this._worldBoundsScratch || (this._worldBoundsScratch = new THREE.Box3())) {
-        target.copy(this.refreshExtent());
+        target.copy(this.getLocalBounds());
         if (!target.isEmpty()) target.applyMatrix4(this.matrixWorld);
         return target;
     }

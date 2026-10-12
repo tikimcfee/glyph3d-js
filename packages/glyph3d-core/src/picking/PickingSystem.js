@@ -381,14 +381,19 @@ export class PickingSystem {
             }
         }
 
+        // A pick tests what is ON SCREEN — the matrices the last main render drew with. three's
+        // render() would re-walk every matrixWorld first (once per channel pass); skip it.
+        const savedAutoMW = scene.matrixWorldAutoUpdate;
         try {
             camera.layers.set(channel.layer);
+            scene.matrixWorldAutoUpdate = false;
             this._renderer.setRenderTarget(this._target);
             this._renderer.setClearColor(0x000000, 0);
             this._renderer.clear();
             this._renderer.render(scene, camera);
             this._lastRenderMs = performance.now() - t0;
         } finally {
+            scene.matrixWorldAutoUpdate = savedAutoMW;
             camera.layers.mask = savedLayerMask;
             this._renderer.setRenderTarget(null);
             this._renderer.setClearColor(prevClearColor, prevClearAlpha);

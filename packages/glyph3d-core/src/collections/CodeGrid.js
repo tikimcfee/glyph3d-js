@@ -524,7 +524,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {THREE.Box3} Bounding box in local coordinates
      */
     getLocalBounds() {
-        const contentBounds = this._getContentBounds(); // local AABB, cached on content change
+        const contentBounds = this._getContentBounds(); // local AABB — the fold's closed-form extent
         if (!this._localBoundsCache) this._localBoundsCache = new THREE.Box3();
         const box = this._localBoundsCache;
         if (!contentBounds) { box.makeEmpty(); return box; }

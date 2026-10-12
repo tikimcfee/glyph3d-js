@@ -200,7 +200,6 @@ export default class FileRow extends BoundedObject3D {
     }
 
     _updateBackground() {
-        this._boundsCacheDirty = true;
         if (!this.config.showBackground) {
             if (this._background) this._background.visible = false;
             return;
