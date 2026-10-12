@@ -70,6 +70,7 @@ export default function Minimap({
     coneGeo.rotateX(Math.PI / 2);      // axis +Y → -Z (camera looks down local -Z)
     const cone = new THREE.Mesh(coneGeo, new THREE.MeshBasicMaterial({
       color: 0xff6ea0, transparent: true, opacity: 0.34, depthWrite: false, side: THREE.DoubleSide,
+      forceSinglePass: true,   // uniform color + depthWrite off → face order can't change a pixel
     }));
     const apex = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8),
       new THREE.MeshBasicMaterial({ color: 0xff6ea0 }));

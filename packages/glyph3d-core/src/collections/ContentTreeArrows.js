@@ -96,7 +96,9 @@ export default class ContentTreeArrows {
         // Pad hardware: ONE shared unit-disc geometry + material for every pin pad,
         // instance-colored, fading on the same opacity uniform as the traces.
         this._padGeo = new THREE.CircleGeometry(1, 16);
-        this._padMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, opacity: this.opts.opacity });
+        // forceSinglePass: one color per pad, depthWrite off — blending it twice is order-free,
+        // so three's back/front two-pass changes no pixel and only re-derives the program twice.
+        this._padMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, opacity: this.opts.opacity });
         this._offRelayout = tree.onRelayout(() => this.update());
         this.update();
     }

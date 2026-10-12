@@ -171,6 +171,7 @@ export class BackdropManager {
             transparent: true,
             opacity: opacity,
             side: THREE.DoubleSide,
+            forceSinglePass: true,   // a flat plane — see glyphMaterial
             depthWrite: false,
         });
 

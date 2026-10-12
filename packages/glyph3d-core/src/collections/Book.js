@@ -405,7 +405,8 @@ export default class Book extends BoundedObject3D {
         const o = { ...COVER_DEFAULTS, ...(this.cover?.opts ?? {}), ...opts };
         if (!this.cover) {
             const unit = coverUnit();
-            const fill = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+            // forceSinglePass: uniform color + depthWrite off → face order can't change a pixel.
+            const fill = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true });
             const edge = new THREE.LineBasicMaterial({ transparent: true, depthWrite: false });
             const mesh = new THREE.Mesh(unit.box, fill);
             mesh.userData = { isMarker: true, isBookCover: true };

@@ -884,7 +884,8 @@ export function SelectionIndicator() {
     // occludes glyphs; transparent so it sorts into the post-opaque pass.
     const mkFill = (color, renderOrder) => {
       const geo = new THREE.BoxGeometry(1, 1, 1);
-      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), depthTest: true, depthWrite: false, transparent: true, opacity: 0, side: THREE.DoubleSide });
+      // forceSinglePass: uniform color + depthWrite off → face order can't change a pixel.
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), depthTest: true, depthWrite: false, transparent: true, opacity: 0, side: THREE.DoubleSide, forceSinglePass: true });
       const m = new THREE.Mesh(geo, mat);
       m.visible = false;
       m.renderOrder = renderOrder;

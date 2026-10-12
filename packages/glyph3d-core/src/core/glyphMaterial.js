@@ -495,6 +495,7 @@ export function createGlyphMaterial(options = {}) {
         depthWrite: true,
         depthTest: true,
         side: THREE.DoubleSide,
+        forceSinglePass: true,   // planar quads: three's back/front two-pass would only re-derive the program twice per draw
     });
 
     _activeMaterials.add(material);

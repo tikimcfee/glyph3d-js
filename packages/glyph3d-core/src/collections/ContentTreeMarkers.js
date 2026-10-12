@@ -81,7 +81,9 @@ export default class ContentTreeMarkers {
         const color = new THREE.Color().lerpColors(new THREE.Color(o.colorA), new THREE.Color(o.colorB), t);
         const opacity = Math.max(o.opacity * Math.pow(o.opacityDecay, depth - 1), o.minOpacity);
         m = {
-            fill: new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide }),
+            // forceSinglePass: a uniform-color fill with depthWrite off blends the same in any face
+            // order, so three's back/front two-pass only costs two program re-derivations per draw.
+            fill: new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true }),
             edge: new THREE.LineBasicMaterial({ color, transparent: true, opacity: o.edgeOpacity, depthWrite: false }),
         };
         this._materialsByDepth.set(depth, m);

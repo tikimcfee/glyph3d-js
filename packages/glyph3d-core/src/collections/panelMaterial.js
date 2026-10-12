@@ -169,6 +169,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
         `,
         transparent: opacity < 1,
         side,
+        forceSinglePass: true,   // a flat panel: the back/front two-pass changes no pixel, only costs two program re-derivations
         depthWrite,
     });
 

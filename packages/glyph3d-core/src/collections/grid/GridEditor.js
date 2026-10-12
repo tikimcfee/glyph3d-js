@@ -191,6 +191,7 @@ export function createCaretMesh(options = {}) {
         transparent: true,
         opacity: options.opacity ?? 0.85,
         side: THREE.DoubleSide,
+        forceSinglePass: true,   // a flat quad — see glyphMaterial
         depthWrite: false,
     });
     const mesh = new THREE.Mesh(geo, mat);

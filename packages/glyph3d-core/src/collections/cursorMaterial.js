@@ -96,6 +96,7 @@ export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
+        forceSinglePass: true,   // a flat quad — see glyphMaterial
     });
 
     return {
