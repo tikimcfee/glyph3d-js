@@ -16,7 +16,6 @@ import { installKeyboardRouter } from './keyboardRouter.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
-import OcclusionCuller from '@glyph3d/core/services/visual/OcclusionCuller.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
@@ -210,8 +209,6 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/ContentTreeMotion.js').default|null} */ contentTreeMotion: null,
     /** @type {import('@glyph3d/core/collections/GlyphFarLod.js').default|null} */ glyphFarLod: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
-    /** @type {import('@glyph3d/core/services/visual/OcclusionCuller.js').default|null} */ occlusionCuller: null,
-    /** @type {(() => void)|null} */ syncCullCandidates: null,
     /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
     /** @type {import('@glyph3d/core/services/orchestration/SourceStream.js').default|null} */ sourceStream: null,
@@ -280,8 +277,6 @@ function DockRunner({ stateRef }) {
     const s = stateRef.current;
     const c = s?.ctx;
     c?.cameraDock?.update(dt, state.camera);
-    // Apply last pass's occlusion verdicts + refit query proxies for this pass.
-    c?.occlusionCuller?.update();
     // Carrels tick beside the dock (same animator discipline, no camera) — and a
     // dissolved desk that has drained its homeward slides gets swept out here.
     if (c?.carrels) {
@@ -542,35 +537,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted dock + root view-frame settings into the freshly-built dock — its
     // apply()s only fire on a user change, so without this a stored value would wait until next touch.
     applyGroupSettings(state.ctx, 'Dock & frame');
+    applyGroupSettings(state.ctx, 'Performance');  // the streamed-build budget and the hover pick rate
+
     // Removal cascade: however a window is closed (terminal.kill→close, grid.remove, scene clear),
     // its registry entry vanishes — and the holders self-heal off that single event. Attention
     // releases focus/keystroke-target from the gone id (else input routes to a corpse); the dock
     // dismisses its tile (orphan lifted, focus cleared, bar re-packed). One cascade, every close
     // path; no closer needs to know the window was focused or docked.
-    // Hardware occlusion-query culling (three's native occlusionTest seam): every world
-    // surface gets an invisible query proxy; candidates fully behind the OPAQUE occluder
-    // set (1.0 page faces, panels) go dark. Registry-driven membership; docked tiles are
-    // exempt (camera chrome is never occluded). Settings ▸ Culling arms it; cull.stats reads it.
-    const occlusionCuller = new OcclusionCuller({ renderer: state.ctx.renderer, scene });
-    occlusionCuller.shouldTest = (id) => !state.ctx.cameraDock?.has?.(id);
-    state.ctx.occlusionCuller = occlusionCuller;
-    // Tags (role||type): loose world citizens + agent deck roots. A card
-    // inside a book is its book's problem — the culler never reaches in.
-    const CULL_TAGS = new Set(['grid', 'terminal', 'frame', 'agent']);
-    const syncCullCandidates = () => {
-      for (const e of state.ctx.registry.list()) {
-        if (CULL_TAGS.has(e.role || e.type)) occlusionCuller.track(e.id, e.grid);
-      }
-      occlusionCuller.pruneMissing((id) => state.ctx.registry.has(id));
-    };
-    state.ctx.registry.addChangeListener(syncCullCandidates);
-    // Exposed for the cull.enabled setting: proxies exist only while culling is ON
-    // (a disabled culler's ~N proxy meshes were pure scene-walk cost), so flipping
-    // it on must re-track the current registry.
-    state.ctx.syncCullCandidates = syncCullCandidates;
-    syncCullCandidates();
-    applyGroupSettings(state.ctx, 'Culling & loading');  // + the streamed-build budget and the hover pick rate
-
     // Liveness is the registry alone — agent and delta books register their roots too.
     // `wasLive` tracks the previous change's id set, so a surface's durable facts drop only
     // when ITS window goes from live to gone (an explicit close): a restored claim whose
@@ -874,9 +847,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       }
       state.ctx.carrels.clear();
       state.ctx.activeCarrel = null;
-      state.ctx.registry.removeChangeListener(syncCullCandidates);
-      occlusionCuller.dispose();
-      state.ctx.occlusionCuller = null;
     };
   }, [relay]);
 

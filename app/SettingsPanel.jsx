@@ -66,7 +66,7 @@ const styles = {
   caret: { flex: '0 0 auto', width: 10, fontSize: 8 },
   groupNameWrap: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', lineHeight: 1.3 },
   // The section name wraps (not truncates) — a narrow panel folds "Theme &
-  // appearance" / "Culling & loading" to two lines instead of cutting at the
+  // appearance" / "Display & glyph LOD" to two lines instead of cutting at the
   // ellipsis. The wrap column carries the line height; the header row stays
   // vertically centered, so the caret + count track a wrapped title.
   groupName: { whiteSpace: 'normal', overflowWrap: 'break-word' },

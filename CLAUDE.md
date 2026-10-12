@@ -87,11 +87,9 @@ keeps a structured in-memory SQLite store of every browser log record — `log.q
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
 with live follow via `bun tools/buslog.mjs`. Page-side, `emitLogRecord` runs a storm
 brake: an identical error/warn signature past 5 is dropped + counted, with a
-`log-brake` summary warn every 500 (locked by `tools/log-storm-brake.test.mjs`). The
-occlusion culler carries the matching fault guard: a failed GPU query resolve logs
-once and disables culling instead of storming unhandled rejections per frame
-(`tools/occlusion-resolve-guard.test.mjs`). Device loss itself (VRAM exhaustion —
-a bulk load + resize churn can OOM the device) is a queued-reload recovery:
+`log-brake` summary warn every 500 (locked by `tools/log-storm-brake.test.mjs`).
+Device loss itself (VRAM exhaustion — a bulk load + resize churn can OOM the device)
+is a queued-reload recovery:
 `onDeviceLost` stops the loop, the layout engine suspends dispatches
 (`tools/device-loss-recovery.test.mjs`), and the page reloads once a minute at most
 (the loop guard lives in sessionStorage) so the substrate can re-seat the session.

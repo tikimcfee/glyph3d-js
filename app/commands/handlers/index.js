@@ -27,7 +27,6 @@ import registerLoadCommands from './loadCommands.js';
 import registerPanelCommands from './panelCommands.js';
 import registerDockCommands from './dockCommands.js';
 import registerCarrelCommands from './carrelCommands.js';
-import registerCullCommands from './cullCommands.js';
 import registerMonitorCommands from './monitorCommands.js';
 import registerHandCommands from './handCommands.js';
 import registerWindowCommands from './windowCommands.js';
@@ -78,7 +77,6 @@ export function registerAllCommands(router) {
     registerPanelCommands(router);
     registerDockCommands(router);
     registerCarrelCommands(router);
-    registerCullCommands(router);
     registerMonitorCommands(router);
     registerHandCommands(router);
     registerWindowCommands(router);

@@ -2,7 +2,7 @@
  * Monitor commands: monitor.stats, monitor.reset
  *
  * THE RESOURCE READOUT. Every other stat verb answers about one subsystem
- * (atlas.info, atlas.cache, cull.stats, load.stats); this one folds the ones that
+ * (atlas.info, atlas.cache, load.stats); this one folds the ones that
  * cost MEMORY or TIME into a single structured answer, so "load a repo and see
  * where the memory actually went" is one call instead of six.
  *

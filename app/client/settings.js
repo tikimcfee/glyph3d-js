@@ -175,7 +175,7 @@ export const GROUPS = [
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
-  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · hover pick rate · draw-call readout', columns: 2 },
+  { name: 'Performance',        subtitle: 'load build budget · hover pick rate · draw-call readout', columns: 2 },
   { name: 'Files',              subtitle: 'all-files browsing · hex dump depth', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
@@ -504,27 +504,10 @@ export const SETTINGS = [
   { key: 'carrel.tableFrac', label: 'Shadow overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
   { key: 'carrel.shadowSoft', label: 'Shadow edge softness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 1, step: 0.05, apply: carrelParam('shadowSoft') },
   { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
-  // Culling — hardware occlusion-query culling (three's native occlusionTest on WebGPU).
-  // On WebGL2, hardware occlusion queries are unsupported and culling stays disabled.
-  // A candidate fully behind the OPAQUE occluder set stops drawing after `hold` consecutive
-  // occluded frames; the first visible sample brings it back at once.
-  { key: 'cull.enabled', label: 'Occlusion culling', group: 'Culling & loading', type: 'bool', default: false, apply: (ctx, v) => { ctx.occlusionCuller?.setEnabled?.(v); if (v) ctx.syncCullCandidates?.(); } },
-  { key: 'cull.holdFrames', label: 'Cull after (frames dark)', group: 'Culling & loading', type: 'number', default: 8, min: 1, max: 120, step: 1, apply: (ctx, v) => { if (ctx.occlusionCuller) ctx.occlusionCuller.holdFrames = v; } },
-  // Live readout (type 'info' — not a knob): who is dark right now. The pulse that
-  // keeps the feature from being forgotten; cull.stats is the verb-side twin.
+  // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued
+  // last frame. monitor.stats / scene stats are the verb-side twins.
   {
-    key: 'cull.dark', label: 'Dark right now', group: 'Culling & loading', type: 'info',
-    read: (ctx) => {
-      if (ctx?.occlusionCuller && !ctx.occlusionCuller.isSupported()) return 'unsupported (WebGL2)';
-      const s = ctx?.occlusionCuller?.stats?.();
-      return s ? `${s.culled.length} / ${s.tracked}${s.enabled ? '' : '  (off)'}` : '—';
-    },
-  },
-  // The A/B instrument: submission cost, live. Toggle culling and watch this number —
-  // if it drops hard and the framerate doesn't, the frame is fragment-bound (translucent
-  // chrome / visible glyph shading), not submission-bound, and the next lever is overdraw.
-  {
-    key: 'cull.calls', label: 'Draw calls / frame', group: 'Culling & loading', type: 'info',
+    key: 'render.drawCalls', label: 'Draw calls / frame', group: 'Performance', type: 'info',
     read: (ctx) => {
       const r = ctx?.renderer?.info?.render;
       const n = r ? (r.drawCalls ?? r.calls) : null;
@@ -631,7 +614,7 @@ export const SETTINGS = [
   // under this per-frame budget (the camera stays live, the field arrives instead
   // of freezing); 0 = build everything in one tick (the old lockup, if you want it).
   {
-    key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Culling & loading',
+    key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Performance',
     type: 'number', default: 12, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { ctx.loadBuildBudget = v; },
   },
@@ -639,7 +622,7 @@ export const SETTINGS = [
   // one in flight, a new one as soon as it resolves and the cursor or camera has moved, so it
   // follows the display's own rate. A number caps it at that many picks per second.
   {
-    key: 'pick.hoverHz', label: 'Hover pick rate (Hz, 0 = every frame)', group: 'Culling & loading',
+    key: 'pick.hoverHz', label: 'Hover pick rate (Hz, 0 = every frame)', group: 'Performance',
     type: 'number', default: 0, min: 0, max: 1000, step: 5,
     apply: (ctx, v) => { ctx.hoverPickHz = v; },
   },
@@ -772,8 +755,7 @@ export const SETTINGS = [
   // LIBRARY-ONLY: agent + delta covers carry per-lane palette hues (identity) a global tint
   // must not clobber.
   // The page face: at 1.0 a page is FULLY OPAQUE — the face material depth-writes, so full
-  // alpha is a true occluder (the readability A/B AND the occlusion-culling occluder set —
-  // large repos in library mode are where the render time lives).
+  // alpha is a true occluder (the readability A/B).
   { key: 'books.surface', label: 'Page faces', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: bookPageParam('face', 'surface') },
   { key: 'books.surfaceColor', label: 'Page color', group: 'Books', scheme: 'library', type: 'color', default: '#0a0a1e', apply: bookPageParam('faceColor', 'surfaceColor') },
   { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
