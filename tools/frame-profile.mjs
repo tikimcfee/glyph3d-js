@@ -16,6 +16,7 @@
  *                               [--callers FN[,FN…]]   (who calls FN: self time by caller chain)
  *                               [--cmd 'verb args']…   (after the load + fit, before measuring)
  *                               [--eval 'js']          (page setup after --cmd, e.g. an A/B toggle)
+ *                               [--hitch MS]           (frames longer than MS: what ran in them; default 25)
  *
  * Needs Vite (:5173) and a PRIVATE relay serving a root you don't mind (session=off keeps
  * the page from autosaving, but the relay's root is where a save would land):
@@ -42,6 +43,7 @@ const OUT = arg('--json');
 const CALLERS = (arg('--callers') ?? '').split(',').filter(Boolean);
 const CMDS = process.argv.flatMap((a, i) => (a === '--cmd' ? [process.argv[i + 1]] : []));
 const EVAL = arg('--eval');
+const HITCH = Number(arg('--hitch', 25));
 
 const browser = await launchGpuBrowser({
     extraArgs: has('--uncapped') ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [],
@@ -103,23 +105,28 @@ try {
             try { cb(ts); } finally { frameWork.set(ts, (frameWork.get(ts) ?? 0) + performance.now() - t0); }
         });
 
-        // three's render (CPU submit) + GPU time around it.
-        const renders = [];
+        // three's render (CPU submit) + GPU time around it, per PASS — the main camera's
+        // render and any other (the minimap's) cost very differently, so never pool them.
+        const mainCam = window.__glyphClient.ctx.camera;
+        const passOf = (cam) => (cam === mainCam ? 'main' : (cam.name || cam.type));
+        const renders = new Map();
+        const gpuMs = new Map();
+        const push = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v); };
         const pending = [];
-        const gpuMs = [];
         const origRender = r.render.bind(r);
         r.render = (scene, cam) => {
+            const pass = passOf(cam);
             let q = null;
             if (tq && pending.length < 8) { q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); }
             const t0 = performance.now();
             const out = origRender(scene, cam);
-            renders.push(performance.now() - t0);
-            if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); pending.push(q); }
+            push(renders, pass, performance.now() - t0);
+            if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); pending.push({ q, pass }); }
             for (let i = pending.length - 1; i >= 0; i--) {
                 const p = pending[i];
-                if (gl.getQueryParameter(p, gl.QUERY_RESULT_AVAILABLE)) {
-                    if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) gpuMs.push(gl.getQueryParameter(p, gl.QUERY_RESULT) / 1e6);
-                    gl.deleteQuery(p); pending.splice(i, 1);
+                if (gl.getQueryParameter(p.q, gl.QUERY_RESULT_AVAILABLE)) {
+                    if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) push(gpuMs, p.pass, gl.getQueryParameter(p.q, gl.QUERY_RESULT) / 1e6);
+                    gl.deleteQuery(p.q); pending.splice(i, 1);
                 }
             }
             return out;
@@ -142,9 +149,14 @@ try {
             frames: gaps.length,
             gapMs: { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), worst: pct(gaps, 1) },
             mainThreadPerFrameMs: { p50: pct(work, 0.5), p95: pct(work, 0.95), mean: mean(work) },
-            renderCpuPerCallMs: { p50: pct(renders, 0.5), p95: pct(renders, 0.95), mean: mean(renders) },
-            renderCallsPerFrame: +(renders.length / Math.max(1, work.length)).toFixed(2),
-            gpuPerRenderMs: gpuMs.length ? { p50: pct(gpuMs, 0.5), p95: pct(gpuMs, 0.95), samples: gpuMs.length } : 'no timer samples',
+            passes: Object.fromEntries([...renders].map(([pass, cpu]) => {
+                const g = gpuMs.get(pass) ?? [];
+                return [pass, {
+                    perFrame: +(cpu.length / Math.max(1, work.length)).toFixed(2),
+                    renderCpuMs: { p50: pct(cpu, 0.5), p95: pct(cpu, 0.95), mean: mean(cpu) },
+                    gpuMs: g.length ? { p50: pct(g, 0.5), p95: pct(g, 0.95), samples: g.length } : (tq ? 'no timer samples' : 'no timer ext'),
+                }];
+            })),
         };
     }, MS);
 
@@ -228,9 +240,18 @@ try {
     const cdp = await app.page.context().newCDPSession(app.page);
     await cdp.send('Profiler.enable');
     await cdp.send('Profiler.setSamplingInterval', { interval: 200 });
+    // Frame stamps on the page clock, so samples can be binned into the frames they ran in
+    // (uncapped, the main thread never idles — a hitch isn't visible as a sample gap).
+    await app.evalPage(() => {
+        const st = (window.__fpStamps = []);
+        const tick = (ts) => { st.push(performance.now()); if (window.__fpStamps === st) requestAnimationFrame(tick); };
+        requestAnimationFrame(tick);
+    });
     await cdp.send('Profiler.start');
+    const pageT0 = await app.evalPage(() => performance.now());   // ≈ profile.startTime (±½ RTT)
     await app.waitFor(MS);
     const { profile } = await cdp.send('Profiler.stop');
+    const stamps = await app.evalPage(() => { const s = window.__fpStamps; window.__fpStamps = null; return s; });
     const self = new Map();
     const byId = new Map(profile.nodes.map((n) => [n.id, n]));
     const dt = profile.timeDeltas;
@@ -312,11 +333,40 @@ try {
         }
         callers[fn] = [...paths].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${v.toFixed(1)}ms  ← ${k}`);
     }
+    // Hitches: frames longer than HITCH ms, and the self time (with its call path) inside them.
+    const hitchWins = [];
+    for (let i = 1; i < stamps.length; i++) if (stamps[i] - stamps[i - 1] > HITCH) hitchWins.push([stamps[i - 1], stamps[i]]);
+    const inHitch = new Map();
+    let tSample = pageT0;
+    for (let i = 0, w = 0; i < profile.samples.length; i++) {
+        tSample += (dt[i] ?? 0) / 1000;
+        while (w < hitchWins.length && hitchWins[w][1] < tSample) w++;
+        if (w >= hitchWins.length) break;
+        if (tSample < hitchWins[w][0]) continue;
+        const n = byId.get(profile.samples[i]);
+        if (n.callFrame.functionName === '(idle)' || n.callFrame.functionName === '(program)') continue;
+        const chain = [frameName(n)];
+        let below = chain[0];
+        for (let p = parentOf.get(n.id); p != null && chain.length < 5; p = parentOf.get(p)) {
+            const f = frameName(byId.get(p));
+            if (f !== below && !/^\(root\)/.test(f)) chain.push(f);
+            below = f;
+        }
+        const k = chain.join(' ← ');
+        inHitch.set(k, (inHitch.get(k) ?? 0) + (dt[i] ?? 0) / 1000);
+    }
+    const hitchMs = hitchWins.map(([a, b]) => b - a);
     const pctOf = (ms) => `${(100 * ms / Math.max(total, 1e-9)).toFixed(1)}%`;
     result.profile = {
         busyMsInWindow: +total.toFixed(1), windowMs: MS,
         buckets: Object.fromEntries(Object.entries(buckets).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, `${v.toFixed(1)}ms ${pctOf(v)}`])),
         ...(CALLERS.length ? { callers } : {}),
+        hitches: {
+            overMs: HITCH, count: hitchWins.length, frames: stamps.length,
+            worstMs: hitchMs.length ? +Math.max(...hitchMs).toFixed(1) : 0,
+            totalMs: +hitchMs.reduce((a, b) => a + b, 0).toFixed(1),
+            top: [...inHitch].sort((a, b) => b[1] - a[1]).slice(0, TOP).map(([k, v]) => `${v.toFixed(1)}ms  ${k}`),
+        },
         topSelf: [...fns].sort((a, b) => b[1] - a[1]).slice(0, TOP).map(([k, v]) => `${v.toFixed(1)}ms ${pctOf(v)}  ${k}`),
     };
 

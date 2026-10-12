@@ -124,13 +124,18 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   - which SCENES render each frame → wrap `renderer.render` and collect `scene.name` (the minimap lives in a second scene)
 
 - **`frame-profile.mjs`** — where a steady-state WebGL2 frame goes, in three passes so the
-  instrumentation never skews the timings: TIMING (frame gaps, main-thread rAF work split
-  into three's `render()` vs the rest, GPU ms per render via `EXT_disjoint_timer_query_webgl2`),
+  instrumentation never skews the timings: TIMING (frame gaps, main-thread rAF work, and per
+  render PASS — the main camera vs the minimap vs a pick — CPU ms in three's `render()` and
+  GPU ms via `EXT_disjoint_timer_query_webgl2`),
   CENSUS (draws per frame by program, GL calls by name, upload bytes per frame, scene census),
   PROFILE (CDP sampling, bucketed three.js / webgl driver submit / core / app / react — Vite's
   dep chunks mapped back to packages; `--callers FN` attributes a hot leaf to its call paths).
-  `--cmd` / `--eval` set up the view or an A/B toggle. Found three's transparent+DoubleSide
-  two-pass re-deriving 126 programs a frame (b231d6c) and our per-frame matrix walks.
+  `--hitch MS` lists what ran inside frames longer than MS (samples binned by page-clock
+  frame stamps). `--cmd` / `--eval` set up the view or an A/B toggle. Found three's
+  transparent+DoubleSide two-pass re-deriving 126 programs a frame (b231d6c) and our
+  per-frame matrix walks. Caveats: `--uncapped` render-CPU numbers carry GPU-process
+  backpressure (a per-frame fence alone moved them 4×), and a busy machine swings runs 3×
+  — for small A/Bs interleave the conditions in ONE page and compare medians.
   ```
   bun tools/frame-profile.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src --uncapped
   bun tools/frame-profile.mjs … --cmd 'camera.focus /scratch/root/src/a.js' --callers updateWorldMatrix
