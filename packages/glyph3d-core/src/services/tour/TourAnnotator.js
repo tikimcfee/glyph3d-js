@@ -125,6 +125,7 @@ export default class TourAnnotator {
         void grid.loadText(text);
 
         // Position label above the referenced grid
+        resolved.grid.updateWorldMatrix?.(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const bounds = resolved.grid.getBounds?.();
         if (bounds) {
             grid.position.set(bounds.min.x, bounds.max.y + 2, bounds.min.z - 1);

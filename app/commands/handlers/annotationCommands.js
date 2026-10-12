@@ -350,6 +350,7 @@ export default function registerAnnotationCommands(router) {
         if (resolved.error) return { text: resolved.error, data: null };
         const idx = resolved.idx;
         const grid = resolved.grid;
+        grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const bounds = grid.getBounds();
 
         // Compute center of the grid's bounding box

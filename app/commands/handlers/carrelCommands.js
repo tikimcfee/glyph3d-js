@@ -300,6 +300,7 @@ export default function registerCarrelCommands(router) {
         const carrel = findCarrel(ctx, args[0]);
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         ctx.activeCarrel = carrel.carrelName;
+        carrel.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const framed = !!ctx.cameraController?.focusOnBox?.(carrel.getBounds());
         return { text: `OK: focused carrel '${carrel.carrelName}'`, data: { name: carrel.carrelName, framed } };
     }, { description: 'Make a carrel active and fly the camera to frame it', usage: '<name>', returns: '{ name, framed }' });

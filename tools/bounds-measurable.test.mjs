@@ -3,11 +3,16 @@
 //   bun tools/bounds-measurable.test.mjs
 //
 // BoundedObject3D is the on-demand bounds base: getBounds() recomputes the WORLD
-// AABB fresh on every call (local content box × current matrixWorld) — no validity
-// cache, no dirty flag, no transform observation. This test pins exactly that contract:
-// every transform / content change is reflected on the NEXT getBounds() with zero
-// staleness, and the world box always equals the reference formula
-// getLocalBounds().clone().applyMatrix4(matrixWorld). Pure three — no WebGPU.
+// AABB on every call — the local content box × matrixWorld AS THREE LAST LEFT IT. No
+// validity cache, no dirty flag, and NO ancestor walk: three refreshes every matrixWorld
+// once per frame in render(), and a caller that moved something this tick refreshes it
+// itself (updateWorldMatrix). This test pins that contract:
+//   - a CONTENT change lands on the next getBounds() (the local box is read every call);
+//   - a TRANSFORM change lands once three's matrix pass has run (settle) — and NOT before:
+//     a hidden walk in the getter is the per-frame cost this contract removed (three extra
+//     full-tree walks a frame through the minimap and the camera's soft bounds);
+//   - after the pass, the world box equals getLocalBounds().clone().applyMatrix4(matrixWorld).
+// Pure three — no GPU.
 
 import * as THREE from 'three';
 import BoundedObject3D from '../packages/glyph3d-core/src/collections/BoundedObject3D.js';
@@ -22,6 +27,9 @@ const boxEq = (a, b, msg) => ok(
   Math.abs(a.max.x - b.max.x) < EPS && Math.abs(a.max.y - b.max.y) < EPS && Math.abs(a.max.z - b.max.z) < EPS,
   `${msg}\n      got  min=${JSON.stringify(a.min)} max=${JSON.stringify(a.max)}\n      want min=${JSON.stringify(b.min)} max=${JSON.stringify(b.max)}`,
 );
+
+// three's per-frame matrix pass (what WebGLRenderer.render runs on the scene root).
+const settle = (obj) => { let r = obj; while (r.parent) r = r.parent; r.updateMatrixWorld(); };
 
 // Independent oracle — NOT the implementation. The reference formula a consumer would
 // write by hand: take the object's current local box and apply its current matrixWorld.
@@ -46,26 +54,47 @@ class MutableBounded extends BoundedObject3D {
   getLocalBounds() { return this._local; }
 }
 
-// ── 1. position change reflected on the NEXT call (no staleness) ──────────────────────
+// ── 1. position change: read as of the last matrix pass, exact once it runs ───────────
 {
   const m = new MutableBounded([-2, -2, -2], [2, 2, 2]);
+  settle(m);
   const before = m.getBounds().clone();                      // box at origin
   m.position.set(10, 0, 0);                                  // move — no invalidation call
-  const after = m.getBounds().clone();
+  const unsettled = m.getBounds().clone();
   ok(Math.abs(before.min.x - (-2)) < EPS, 'position: initial world box at origin');
+  ok(Math.abs(unsettled.min.x - (-2)) < EPS,
+     'position: getBounds() does NOT walk — before the matrix pass it reads the last matrixWorld');
+  settle(m);
+  const after = m.getBounds().clone();
   ok(Math.abs(after.min.x - 8) < EPS && Math.abs(after.max.x - 12) < EPS,
-     'position: next getBounds() reflects the move immediately (no cache)');
+     'position: after the matrix pass getBounds() reflects the move (no cache)');
   boxEq(after, oracle(m, m.getLocalBounds()), 'position: world box == oracle after move');
+}
+
+// ── 1b. the per-frame shape: a child under a MOVED PARENT — no walk until the pass ────
+{
+  const root = new THREE.Group(), parent = new THREE.Group();
+  const m = new MutableBounded([-1, -1, -1], [1, 1, 1]);
+  root.add(parent); parent.add(m);
+  settle(m);
+  parent.position.set(0, 50, 0);
+  ok(Math.abs(m.getBounds().min.y - (-1)) < EPS, 'parent moved: no ancestor walk before the matrix pass');
+  m.updateWorldMatrix(true, false);                          // a caller that needs it NOW refreshes (three's call)
+  ok(Math.abs(m.getBounds().min.y - 49) < EPS, 'parent moved: caller refresh → exact');
+  parent.position.set(0, 0, 0); settle(m);
+  ok(Math.abs(m.getBounds().min.y - (-1)) < EPS, 'parent moved back: matrix pass → exact');
 }
 
 // ── 2. scale change reflected immediately ─────────────────────────────────────────────
 {
   const m = new MutableBounded([-1, -1, -1], [1, 1, 1]);
+  settle(m);
   m.getBounds();                                             // prime (would seed a cache if one existed)
   m.scale.set(3, 1, 1);
+  settle(m);
   const after = m.getBounds().clone();
   ok(Math.abs(after.min.x - (-3)) < EPS && Math.abs(after.max.x - 3) < EPS,
-     'scale: next getBounds() reflects the scale immediately');
+     'scale: after the matrix pass getBounds() reflects the scale');
   boxEq(after, oracle(m, m.getLocalBounds()), 'scale: world box == oracle after scale');
 }
 
@@ -73,11 +102,12 @@ class MutableBounded extends BoundedObject3D {
 {
   const m = new MutableBounded([-1, -1, -1], [1, 1, 1]);
   m.position.set(5, 0, 0);
+  settle(m);
   m.getBounds();                                             // prime
-  m.setLocal([-4, -1, -1], [4, 1, 1]);                      // content grew along x
+  m.setLocal([-4, -1, -1], [4, 1, 1]);                      // content grew along x — NO matrix pass
   const after = m.getBounds().clone();
   ok(Math.abs(after.min.x - 1) < EPS && Math.abs(after.max.x - 9) < EPS,
-     'content: next getBounds() reflects the local-box change immediately');
+     'content: next getBounds() reflects the local-box change immediately (no pass needed)');
   boxEq(after, oracle(m, m.getLocalBounds()), 'content: world box == oracle after content change');
 }
 
@@ -87,6 +117,7 @@ class MutableBounded extends BoundedObject3D {
   m.position.set(7, -3, 2);
   m.rotation.set(0.3, -0.6, 1.1);
   m.scale.set(2, 0.5, 4);
+  settle(m);
   const got = m.getBounds().clone();
   boxEq(got, oracle(m, m.getLocalBounds()), 'reference formula: world box == local × matrixWorld under full TRS');
 }
@@ -141,6 +172,7 @@ class MutableBounded extends BoundedObject3D {
   }
   const t = new TerminalLike(80, 24);
   t.position.set(4, -2, 1); t.rotation.set(0.2, 0.5, -0.3); t.scale.set(2, 2, 1);
+  settle(t);
   boxEq(t.getBounds(), oracle(t, t.getLocalBounds()), 'TerminalGrid swap: inherited world box == old hand-rolled formula (full TRS)');
   t.cols = 120; t._dirty = true;                              // resize → local-cache dirty
   boxEq(t.getBounds(), oracle(t, t.getLocalBounds()), 'TerminalGrid swap: resize reflected on next getBounds() (no staleness)');
@@ -162,6 +194,7 @@ class MutableBounded extends BoundedObject3D {
   }
   const f = new FrameLike(6, 1.5);
   f.position.set(-3, 5, 0); f.rotation.set(0, 0.7, 0); f.scale.set(1.5, 1.5, 1);
+  settle(f);
   boxEq(f.getBounds(), oracle(f, f.getLocalBounds()), 'FrameGrid swap: inherited world box == old fresh-box formula (full TRS)');
   const height = f.getBounds().max.y - f.getBounds().min.y;   // two getBounds() on one instance → shared scratch
   const ref = oracle(f, f.getLocalBounds());

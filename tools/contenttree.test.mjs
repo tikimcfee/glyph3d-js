@@ -797,6 +797,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   ok(Math.abs(r2(t.getWorldBounds().min.y)) <= 0.01, 'fitted field rests on the floor by its pages');
   t.setLayout(walkTreeLayout, {});
   t.relayout();
+  t.root.updateMatrixWorld();   // the frame's matrix pass — getBounds reads matrixWorld as last updated
   const bk = t.bookAt('solo/a.js');
   bk.getBounds().getSize(size);
   ok(size.x < 20 - 0.01, 'dissolved: book bounds shrink back to the content');

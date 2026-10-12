@@ -472,6 +472,7 @@ export class CameraDock extends THREE.Object3D {
         // animate back to on release. Content EXTENT (height + center offset) is NOT captured
         // here — it's derived live from grid.getLocalBounds() each time it's needed (_extentOf),
         // so a resize can never desync a cached copy.
+        grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const b = grid.getBounds?.();
         const hasBounds = b && !b.isEmpty?.();
         const resolvedScale = grid.scale.x || 1;

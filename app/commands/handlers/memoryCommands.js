@@ -80,6 +80,7 @@ export default function registerMemoryCommands(router) {
         legendGrid.position.set(0, 0, 0);
         legendGrid.updateMatrixWorld(true);
         const lb = legendGrid.getBounds();
+        grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const mb = grid.getBounds();
         const gap = Math.max(2, (mb.max.x - mb.min.x) * 0.05);
         legendGrid.position.set(mb.min.x - gap - lb.max.x, mb.max.y - lb.max.y, grid.position.z);

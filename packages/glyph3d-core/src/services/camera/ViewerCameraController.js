@@ -979,6 +979,7 @@ export class ViewerCameraController {
         const plane = this._planeOf(grid);
         if (!plane) {
             // Defensive fallback: no local bounds → old axis-aligned AABB framing, head-on.
+            grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
             const b = grid.getBounds?.();
             if (!b || b.isEmpty?.()) return null;
             const size = new THREE.Vector3(); b.getSize(size);
@@ -1024,7 +1025,7 @@ export class ViewerCameraController {
         // is framed head-on (true width/height), never an edge-on sliver. Falls back to the AABB
         // path only when the object exposes no local bounds (no orientation to read).
         const plane = this._planeOf(obj);
-        if (!plane) return this.focusOnBox(obj?.getBounds?.());
+        if (!plane) { obj?.updateWorldMatrix?.(true, false); return this.focusOnBox(obj?.getBounds?.()); }
         const pose = this._billboardPose({
             center: plane.center, normal: plane.normal, up: plane.up,
             width: plane.width, height: plane.height, depth: plane.depth,
@@ -1074,6 +1075,7 @@ export class ViewerCameraController {
         // exactly like a terminal. (The gate used to name a terminals-only method, so a grid was
         // refused here for a reason that had nothing to do with placing it.)
         if (!camera || typeof obj?.getBounds !== 'function' || !obj?.position) return false;
+        obj.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const bounds = obj.getBounds();
         if (!bounds || bounds.isEmpty?.()) return false;
 
@@ -1123,6 +1125,7 @@ export class ViewerCameraController {
             bounds = new THREE.Box3();
             for (const g of surfaces) {
                 if (dockTiles?.has(g)) continue;
+                g.updateWorldMatrix?.(true, false);   // fresh: getBounds reads matrixWorld as three last left it
                 const b = g.getBounds?.();
                 if (b && !b.isEmpty()) bounds.union(b);
             }

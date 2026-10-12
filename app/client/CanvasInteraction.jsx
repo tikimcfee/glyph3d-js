@@ -689,6 +689,7 @@ export function ResizeDragger() {
       // The two drag grips: 'scale' (red) zooms the Object3D, 'resize' (green) reshapes
       // cols/rows. Press authority is identical; only the drag math differs.
       const mode = token.role === 'scale' ? 'scale' : 'resize';
+      grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
       const startBounds = grid.getBounds().clone();
       drag = {
         grid, id, mode,

@@ -65,9 +65,13 @@ export default class BoundedObject3D extends THREE.Object3D {
     }
 
     /**
-     * World-space AABB of this object's content: the local Extent through the current
-     * `matrixWorld`. matrixWorld is refreshed first because getBounds is called from
-     * pointer / useFrame paths that run before r3f renders.
+     * World-space AABB of this object's content: the local Extent through `matrixWorld` AS
+     * THREE LAST LEFT IT — no ancestor walk. three refreshes every matrixWorld once per frame
+     * inside render(), so a read after the render is exact and a per-frame read before it is
+     * one frame old (fine for a camera leash, a minimap). A caller that MOVED something this
+     * tick and needs its bounds now refreshes it first — `obj.updateWorldMatrix(true, false)`,
+     * three's own call. (The walk used to live here; per-frame unions over every surface paid
+     * it once per object, three times a frame.)
      *
      * The default target is a reusable scratch Box3 — callers must not hold the returned
      * box across calls. Pass your own `target` to opt out.
@@ -76,7 +80,6 @@ export default class BoundedObject3D extends THREE.Object3D {
      * @returns {THREE.Box3} Bounding box in world coordinates
      */
     getBounds(target = this._worldBoundsScratch || (this._worldBoundsScratch = new THREE.Box3())) {
-        this.updateWorldMatrix(true, false);
         target.copy(this.refreshExtent());
         if (!target.isEmpty()) target.applyMatrix4(this.matrixWorld);
         return target;

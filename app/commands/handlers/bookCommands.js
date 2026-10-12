@@ -105,6 +105,7 @@ export default function registerBookCommands(router) {
             if (!hit) return { text: `ERR: no book at "${args[0]}"`, data: null };
             const bk = hit.book;
             const f = bk.fitInfo;
+            bk.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
             const b = bk.getBounds();
             const h = bk.headState();
             const record = {

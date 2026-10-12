@@ -203,6 +203,7 @@ export class Carrel extends THREE.Object3D {
         this._orderSeq = Math.max(this._orderSeq, order + 1);
 
         const h = opts.home || null;
+        grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
         const b = h ? null : grid.getBounds?.();
         const hasBounds = b && !b.isEmpty?.();
         const resolvedScale = grid.scale.x || 1;
@@ -757,12 +758,11 @@ export class Carrel extends THREE.Object3D {
 
     /**
      * World AABB of the desk's airspace — what carrel.focus frames and a selection
-     * box would draw.
+     * box would draw. Reads matrixWorld as three last left it (see BoundedObject3D.getBounds).
      * @param {Object} [target] THREE.Box3
      * @returns {Object} THREE.Box3
      */
     getBounds(target = new THREE.Box3()) {
-        this.updateWorldMatrix(true, false);
         return this.localBounds(target).applyMatrix4(this.matrixWorld);
     }
 
