@@ -523,8 +523,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Fold the persisted Books (shared face + cover base) and Delta Books (page geometry
     // + deck) settings into both shelves now that agent + delta both exist — their
     // apply()s otherwise fire only on a user change. 'Books' fans to agent + delta +
-    // library; 'Delta Books' is delta-only. (The agent-only page geometry + deck knobs
-    // were already folded above by the 'Agent Books' pass.)
+    // library and sets the global edge-tab dials; 'Delta Books' is delta-only. (The
+    // agent-only page geometry + deck knobs were already folded above by the
+    // 'Agent Books' pass.)
     applyGroupSettings(state.ctx, 'Books');
     applyGroupSettings(state.ctx, 'Delta Books');
 

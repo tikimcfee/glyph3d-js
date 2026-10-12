@@ -34,8 +34,8 @@ import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
 const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 
 /** apply() for a carrel knob: push it onto EVERY live desk. New desks pick the stored
- *  values up at birth (carrel.create runs applyGroupSettings(ctx, 'Carrel')), so these
- *  are both the live dial and the defaults; carrel.set <name> stays the per-desk verb. */
+ *  values up at birth (buildCarrel reads each carrel.* setting), so these are both the
+ *  live dial and the defaults; carrel.set <name> stays the per-desk verb. */
 const carrelParam = (param) => (ctx, v) => {
   for (const c of ctx.carrels?.values?.() || []) c.setParam?.(param, v);
 };
@@ -157,7 +157,7 @@ export const GROUPS = [
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview', columns: 2 },
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · set-back · cursor · focus / hover / input colors', columns: 2 },
   { name: 'Display & glyph LOD', subtitle: 'font size, width compress · minify / flicker control · far-LOD backdrops', columns: 2 },
-  { name: 'Code grids',         subtitle: 'the layout preset new grids are born with', columns: 2 },
+  { name: 'Code grids',         subtitle: 'default fold for new grids · tab width · syntax re-color pause', columns: 2 },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
     subs: [
@@ -168,10 +168,9 @@ export const GROUPS = [
   { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade', columns: 2 },
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane', columns: 2 },
   { name: 'Carrel',             subtitle: 'world-anchored reading desks', columns: 2 },
+  { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes · edge tabs', columns: 2 },
   { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention', columns: 2 },
-  { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes', columns: 2 },
   { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck', columns: 2 },
-  { name: 'Book tabs',          subtitle: 'edge tabs · stagger mode · lift off edge' },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
@@ -181,10 +180,6 @@ export const GROUPS = [
 ];
 
 export const SETTINGS = [
-  // Book tabs — live edge-tab geometry (Book.syncTabs re-reads these every frame).
-  { key: 'tab.steps', label: 'Stagger (0 = left-to-right, ≥2 = slots)', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
-  { key: 'tab.placement', label: 'Edge', group: 'Book tabs', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
-  { key: 'tab.protrusion', label: 'Lift off edge', group: 'Book tabs', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
   {
     key: 'camera.speed', label: 'Move speed', group: 'Camera',
     type: 'number', default: 500, min: 1, max: 1000, step: 1,
@@ -718,7 +713,7 @@ export const SETTINGS = [
   { key: 'glyph.backdropGain', label: 'Far backdrop strength (× ink cover)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.backdropGain, min: 0, max: 4, step: 0.05, apply: (ctx, v) => ctx.glyphFarLod?.setParam('backdropGain', v) },
 
   // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
-  // is a SUBSET of the Books base below (it inherits the shared page face + cover) plus
+  // is a SUBSET of the Books base (it inherits the shared page face + cover) plus
   // these ADDITIVE agent-only knobs: page geometry, the deck, the card scales, and retention.
   // Every dial re-fits the live shelf via applyScales (cards re-scale, sheets re-fit,
   // over-cap sheets shed, the cluster re-flows). Ranges are deliberately WIDE — a small
@@ -768,6 +763,11 @@ export const SETTINGS = [
   { key: 'books.coverEdgeOpacity', label: 'Box edge opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.22, min: 0, max: 1, step: 0.01, apply: coverParam('coverEdgeOpacity', 'coverEdgeOpacity') },
   { key: 'books.coverPad', label: 'Box padding (XY)', group: 'Books', scheme: 'library', type: 'number', default: 16, min: 0, max: 400, step: 1, apply: coverParam('coverPad', 'coverPad') },
   { key: 'books.coverZPad', label: 'Box padding (Z / depth)', group: 'Books', scheme: 'library', type: 'number', default: 24, min: 0, max: 800, step: 2, apply: coverParam('coverZPad', 'coverZPad') },
+  // Edge tabs — one per sheet on a bound library volume (Book.bindTabs). Live geometry:
+  // Book.syncTabs re-reads these every frame.
+  { key: 'tab.steps', label: 'Tab stagger (0 = left-to-right, ≥2 = slots)', group: 'Books', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
+  { key: 'tab.placement', label: 'Tab edge', group: 'Books', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
+  { key: 'tab.protrusion', label: 'Tab lift off edge', group: 'Books', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
   // Delta Books — the delta shelf (each changeset as a book of before/after spreads). A
   // delta book is the same SUBSET relationship: it inherits the Books base (page face +
   // cover) plus these ADDITIVE delta-only knobs — its OWN page geometry + deck (wider code
