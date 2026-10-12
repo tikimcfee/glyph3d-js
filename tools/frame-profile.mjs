@@ -14,6 +14,8 @@
  *   bun tools/frame-profile.mjs [--dir ABS] [--relay 8099] [--url URL] [--ms 3000]
  *                               [--uncapped] [--width W --height H] [--top N] [--json OUT]
  *                               [--callers FN[,FN…]]   (who calls FN: self time by caller chain)
+ *                               [--cmd 'verb args']…   (after the load + fit, before measuring)
+ *                               [--eval 'js']          (page setup after --cmd, e.g. an A/B toggle)
  *
  * Needs Vite (:5173) and a PRIVATE relay serving a root you don't mind (session=off keeps
  * the page from autosaving, but the relay's root is where a save would land):
@@ -38,6 +40,8 @@ const TOP = Number(arg('--top', 18));
 const W = Number(arg('--width', 1600)), H = Number(arg('--height', 1000));
 const OUT = arg('--json');
 const CALLERS = (arg('--callers') ?? '').split(',').filter(Boolean);
+const CMDS = process.argv.flatMap((a, i) => (a === '--cmd' ? [process.argv[i + 1]] : []));
+const EVAL = arg('--eval');
 
 const browser = await launchGpuBrowser({
     extraArgs: has('--uncapped') ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [],
@@ -76,6 +80,14 @@ try {
         await app.cmd('camera.fitall');
         await app.waitFor(4000);
     }
+
+    for (const v of CMDS) {
+        const r = await app.cmd(v);
+        console.log(`[cmd] ${v} → ${(r.text ?? r.error ?? '').replace(/\s+/g, ' ').slice(0, 90)}`);
+        await app.waitFor(2500);
+    }
+    if (EVAL) console.log(`[eval] ${JSON.stringify(await app.evalPage(EVAL))}`);
+    if (CMDS.length || EVAL) await app.waitFor(1000);
 
     // ── 1. TIMING ───────────────────────────────────────────────────────────
     result.timing = await app.evalPage(async (ms) => {

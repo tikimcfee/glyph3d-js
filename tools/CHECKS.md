@@ -123,13 +123,26 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   - big uniform bindings → wrap `renderer.backend.updateBinding`
   - which SCENES render each frame → wrap `renderer.render` and collect `scene.name` (the minimap lives in a second scene)
 
-- **`frame-anatomy.mjs`** — attribute a steady-state frame: FPS percentiles, per-render-
-  call triangle/draw-call deltas, scene/mesh census, and the
-  CPU/GPU split (the floor has a name). Found the transparent+DoubleSide double pass
-  (62M→31M tris) and the minimap's ~3000-draw proxy pool.
+- **`frame-profile.mjs`** — where a steady-state WebGL2 frame goes, in three passes so the
+  instrumentation never skews the timings: TIMING (frame gaps, main-thread rAF work split
+  into three's `render()` vs the rest, GPU ms per render via `EXT_disjoint_timer_query_webgl2`),
+  CENSUS (draws per frame by program, GL calls by name, upload bytes per frame, scene census),
+  PROFILE (CDP sampling, bucketed three.js / webgl driver submit / core / app / react — Vite's
+  dep chunks mapped back to packages; `--callers FN` attributes a hot leaf to its call paths).
+  `--cmd` / `--eval` set up the view or an A/B toggle. Found three's transparent+DoubleSide
+  two-pass re-deriving 126 programs a frame (b231d6c) and our per-frame matrix walks.
   ```
-  bun tools/frame-anatomy.mjs                    # against :5173 + scratch relay :8099
-  ANATOMY_URL=http://localhost:5174/ bun tools/frame-anatomy.mjs
+  bun tools/frame-profile.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src --uncapped
+  bun tools/frame-profile.mjs … --cmd 'camera.focus /scratch/root/src/a.js' --callers updateWorldMatrix
+  ```
+
+- **`glyph-cull-truth.mjs`** — three culls by each field's STATED bounds; this checks every
+  live quad, built the way the vertex shader builds it (emoji width, the width dial), against
+  its mesh's `geometry.boundingBox` — across a dir load, every layout preset, an arranged grid,
+  and an in-page terminal (fed bytes; no tmux), at width-dial 1 and 3. Run after touching
+  `setLayoutExtent`, any extent producer, or the glyph vertex shader.
+  ```
+  bun tools/glyph-cull-truth.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src
   ```
 
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
