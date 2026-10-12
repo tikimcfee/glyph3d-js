@@ -17,6 +17,7 @@ import { BOUNDS_Z_PAD } from '../core/constants.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { resolveLayoutParams, DEFAULT_LAYOUT } from '../workers/builders/index.js';
 import LayoutDescription from '../core/LayoutDescription.js';
+import { SLOT_FLOATS, LANE_POS_X, LANE_POS_Y, LANE_POS_Z } from '../core/InstancedSlotBuffer.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import InstancedField from './InstancedField.js';
 import { analyzeGrid, buildGridSemantics, buildGridSemanticsSync } from '../parsing/SyntaxColorizer.js';
@@ -164,6 +165,10 @@ class CodeGrid extends FramedGlyphField {
         //     own — an ABSOLUTE decoration, re-applied only on content change by the colorizer.)
         this._arrangers   = [];
         this._decorations = [];
+        // This fold's pre-arrangement positions (stride 3) + sizes, captured once before the
+        // arrangers write — null when no arranger ran. And the extent the arrangers stated.
+        this._fold = null;
+        this._arrangedExtent = null;
         // The caret is a decoration: re-painted from the (now buffer-backed) layout after
         // every fold, exactly like an external overlay. _updateCaretMesh guards on cursor.
         this._decorations.push({ name: 'caret', apply: (g) => g._updateCaretMesh() });
@@ -172,17 +177,14 @@ class CodeGrid extends FramedGlyphField {
     // ── Relayout pipeline: registries + stages ───────────────────────────────────
 
     /**
-     * Register an arranger — a footprint-changing participant re-applied INSIDE every
-     * fold (before bounds). NOT SUPPORTED on the byte pipeline yet — displacement tables
-     * are indexed by codepoint slot and the byte pipeline is byte-indexed; until arrangers
-     * are re-based, registration throws loudly rather than arranging wrong.
+     * Register an arranger — a footprint-changing participant re-applied INSIDE every fold
+     * (before bounds): `arrange(grid, fold)` reads the fold and states its move through
+     * setDisplacements. Optional `foldLayout` constrains the fold (see _foldLayout).
+     * @param {{arrange: (grid: CodeGrid, fold: {positions: Float32Array, sizes: Float32Array, count: number}) => void, foldLayout?: Object}} a
      */
-
-    /** Register an arranger. NOT SUPPORTED on the byte pipeline yet — displacement tables
-     *  are indexed by codepoint slot and the byte pipeline is byte-indexed; until arrangers
-     *  are re-based, registration throws loudly rather than arranging wrong. */
     registerArranger(a) {
-        throw new Error('CodeGrid.registerArranger: arrangers are not on the byte pipeline yet (deferred — see the Layer 2 wiring plan, M5)');
+        if (typeof a?.arrange !== 'function') throw new Error('CodeGrid.registerArranger: an arranger needs arrange(grid, fold)');
+        if (!this._arrangers.includes(a)) this._arrangers.push(a);
     }
     /** Remove a previously-registered arranger. */
     unregisterArranger(a) { const i = this._arrangers.indexOf(a); if (i >= 0) this._arrangers.splice(i, 1); }
@@ -193,13 +195,74 @@ class CodeGrid extends FramedGlyphField {
     unregisterDecoration(d) { const i = this._decorations.indexOf(d); if (i >= 0) this._decorations.splice(i, 1); }
 
     /**
-     * The ARRANGE stage. No-op (and zero cost) when nothing is registered — and nothing can
-     * register until arrangers are byte-native (registerArranger throws).
+     * The ARRANGE stage. No-op (and zero cost) when nothing is registered. Captures the fold
+     * once, BEFORE any arranger writes, so every arranger — and every re-apply between folds
+     * (a live dial) — measures against the same flow positions.
      * @private
      */
     _applyArrangers() {
-        if (!this._arrangers.length || !this._renderer) return;
-        for (const a of this._arrangers) a.arrange?.(this);
+        this._fold = null;
+        this._arrangedExtent = null;
+        if (!this._arrangers.length || !this._renderer || !this._layout) return;
+        this._fold = this._readFold();
+        for (const a of this._arrangers) a.arrange(this, this._fold);
+    }
+
+    /**
+     * The fold an arranger measures against: this fold's pre-arrangement capture when an
+     * arranger ran, else the slot buffer as laid (flow).
+     * @returns {{positions: Float32Array, sizes: Float32Array, count: number}|null}
+     */
+    foldSnapshot() {
+        return this._fold ?? this._readFold();
+    }
+
+    /** @private */
+    _readFold() {
+        const r = this._renderer, L = this._layout;
+        if (!r || !L?.sizes) return null;
+        const count = r.getGlyphCount();
+        const f32 = r.slotBuffer.f32;
+        const positions = new Float32Array(count * 3);
+        for (let s = 0; s < count; s++) {
+            const b = s * SLOT_FLOATS;
+            positions[s * 3]     = f32[b + LANE_POS_X];
+            positions[s * 3 + 1] = f32[b + LANE_POS_Y];
+            positions[s * 3 + 2] = f32[b + LANE_POS_Z];
+        }
+        return { positions, sizes: L.sizes, count };
+    }
+
+    /**
+     * An arranger's move for this fold: per-slot [dx,dy,dz] deltas onto the fold, plus the
+     * extent the arrangement occupies (the arranger authored the move, so it states the box
+     * rather than having it measured back out). Writes fold + delta into the slot buffer
+     * (absolute, so re-applying is idempotent), hands the table to the layout description
+     * so the caret rides the moved glyphs, and makes the extent the content bounds — cull
+     * box and panel. The next fold starts from flow again.
+     * @param {Float32Array} D - flat [dx,dy,dz] per slot
+     * @param {{min:{x:number,y:number,z:number}, max:{x:number,y:number,z:number}}} extent
+     */
+    setDisplacements(D, extent) {
+        const r = this._renderer, L = this._layout;
+        const fold = this.foldSnapshot();
+        if (!r || !L || !fold) return;
+        if (!(D instanceof Float32Array) || D.length < fold.count * 3) {
+            throw new Error(`CodeGrid.setDisplacements: need ${fold.count * 3} deltas, got ${D?.length}`);
+        }
+        const P = fold.positions;
+        for (let s = 0; s < fold.count; s++) {
+            const i = s * 3;
+            r.writePosition(s, P[i] + D[i], P[i + 1] + D[i + 1], P[i + 2] + D[i + 2]);
+        }
+        L.displacements = D;
+        const { min, max } = extent;
+        this._arrangedExtent = {
+            min: { ...min }, max: { ...max },
+            width: max.x - min.x, height: max.y - min.y, depth: max.z - min.z,
+        };
+        r.setLayoutExtent(this._arrangedExtent);
+        this._updateBackground();
     }
 
     /**
@@ -1271,7 +1334,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
     _getContentBounds() {
-        let cb = this._layout?.extent() ?? null;
+        let cb = this._arrangedExtent ?? this._layout?.extent() ?? null;
         if (!cb && this._seedExtent) {
             cb = this._seedExtent;
         }
@@ -1280,8 +1343,8 @@ class CodeGrid extends FramedGlyphField {
             const m = this.metrics;
             const fnW = this.filename.length * m.charWidth;
             const fnH = m.charHeight;
-            const fnMinY = -fnH;
-            const fnMaxY = 0;
+            const fnMinY = -fnH / 2;   // the filename's row 0 centers ON y = 0
+            const fnMaxY = fnH / 2;
             if (cb) {
                 const minX = Math.min(cb.min.x, 0);
                 const maxX = Math.max(cb.max.x, fnW);

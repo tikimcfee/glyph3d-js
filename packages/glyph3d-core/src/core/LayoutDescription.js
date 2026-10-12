@@ -41,7 +41,7 @@ export default class LayoutDescription {
      * @param {number} [p.advance] - nominal per-glyph advance (fallback when sizes is absent)
      * @param {number} [p.scrollOffset] - visual rows the fold is scrolled (the conveyor)
      * @param {Float32Array|null} [p.displacements] - arranger displacements, flat [dx,dy,dz]
-     *   per field-global slot — the SAME CPU-authored table the kernel adds post-fold
+     *   per slot — the SAME table CodeGrid.setDisplacements writes into the slot buffer
      * @param {number} [p.totalRows]    - visual rows the item occupies (layout scan output)
      * @param {number} [p.maxRowExtent] - widest visual row's world width (layout scan output)
      * @param {number} [p.maxSegs]      - deepest wrap segment index (layout scan output)
@@ -88,8 +88,8 @@ export default class LayoutDescription {
      * itself being rebuilt.
      *
      * Arranger displacements are NOT folded in: an arranger AUTHORS its displacement table
-     * and therefore states its own extent (CodeGrid.setDisplacements) rather than having it
-     * measured back out.
+     * and therefore states its own extent (CodeGrid.setDisplacements, which CodeGrid's
+     * content bounds prefer) rather than having it measured back out.
      *
      * @returns {{min:{x,y,z}, max:{x,y,z}, width:number, height:number, depth:number}|null}
      */
@@ -185,7 +185,7 @@ export default class LayoutDescription {
 
         // The conveyor: content shifts up by scrollOffset rows, so screenRow = visualRow −
         // scrollOffset. The page fold then reads that integer row — the SAME gate and the
-        // SAME division the kernel runs, so a boundary row can't land a page apart.
+        // SAME division LayoutGenerator runs, so a boundary row can't land a page apart.
         const screenRow = this.lineStartRow[line] + segRow - this.scrollOffset;
         const shift = pageShift(screenRow, this.page);
         let px = x + shift.dx;
@@ -194,7 +194,8 @@ export default class LayoutDescription {
         // is additive on top, so the staircase survives pagination exactly as in the buffer.
         let pz = this.originZ - segRow * this.zStep + shift.dz;
 
-        // Arranger displacement — the same CPU-authored table the kernel adds post-fold.
+        // Arranger displacement — the same table CodeGrid.setDisplacements writes into the
+        // slot buffer.
         // An EOL caret rides the LAST glyph's displacement (the glyph whose right edge it
         // sits on); an empty line has no glyph and no displacement.
         const D = this.displacements;

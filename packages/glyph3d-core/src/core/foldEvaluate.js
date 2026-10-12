@@ -16,13 +16,12 @@
 import { pageShift } from './foldGeometry.js';
 
 /**
- * Min/max extent of a contiguous slot range over an explicit position source — an
- * evaluateFold scratch (stride 3). This is the measurement primitive behind arranger block
+ * Min/max extent of a contiguous slot range over an explicit position source — a fold
+ * snapshot (CodeGrid.foldSnapshot) or an evaluateFold scratch, both stride 3. This is the measurement primitive behind arranger block
  * sizing and strata boxes: an arranger measuring the SUB-RANGE it is about to move is
  * authoring, not bounds-of-the-scene, so a walk is the right tool here and only here.
  * A whole item's extent is never measured — it is closed form (core/foldGeometry.foldExtent).
- * Never feed this a live instancePosition attribute array: those are stride-4 and, on an
- * engine field, GPU-owned (the CPU copy stays zero).
+ * Never feed this the slot buffer itself: its stride is SLOT_FLOATS, not 3.
  * @param {Float32Array} pos - stride-3 positions
  * @param {Float32Array} sizes - stride-2 [advance, height] per slot
  * @param {number} startSlot inclusive

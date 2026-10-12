@@ -308,6 +308,17 @@ Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
   bun tools/layout-generator-fold.test.mjs
   ```
 
+- **`arrangers.test.mjs`** — the structural arrangers (`structure.grid` /
+  `structure.strata`) on the slot buffer: a headless `CodeGrid` with a hand-built
+  SemanticModel. Blocks move rigidly and don't overlap, stray glyphs hide, the content
+  bounds and cull box are the arranged extent, the caret lands on moved glyphs, a re-fold
+  or live strata dial never compounds, strata boxes center on their rows, and reset hands
+  back the grid's own (paged) layout. Run after touching `StructureLayout`, `StrataLayout`,
+  or `CodeGrid`'s arranger seam (`_applyArrangers` / `setDisplacements` / `foldSnapshot`).
+  ```
+  bun tools/arrangers.test.mjs
+  ```
+
 - **`layout-fuzz.test.mjs`** — adversarial randomized parity over the same three evaluators:
   random texts (empty-line runs, emoji at wrap boundaries, 300-col lines), random params
   (wrap widths ON line-length boundaries, page heights AT row-count boundaries, both axes),

@@ -224,6 +224,15 @@ export class InstancedSlotBuffer {
     }
 
     /**
+     * Update the cell height of a slot. Height 0 draws and picks nothing.
+     * @param {number} index
+     * @param {number} height
+     */
+    setHeight(index, height) {
+        this.f32[index * SLOT_FLOATS + LANE_HEIGHT] = height;
+    }
+
+    /**
      * Update position of a slot.
      * @param {number} index
      * @param {number} x

@@ -13,7 +13,7 @@ import { measureSlotSpan } from '../core/foldEvaluate.js';
  *
  * It registers into the grid's relayout pipeline like StructureLayout, so it can never go
  * stale: `arrange` runs INSIDE every fold (CodeGrid._applyArrangers), re-deriving the Z
- * offsets + boxes from the AST on the freshly-folded buffer. Unlike StructureLayout (a
+ * offsets + boxes from the AST on the fresh fold. Unlike StructureLayout (a
  * LENS that grids one kind and hides the rest), StrataLayout keeps EVERY glyph visible and
  * only moves Z — it's a depth reading of the whole file, not a selection.
  *
@@ -80,9 +80,6 @@ export class StrataLayout {
         this._healing = false;
         this._boxMesh = null;
         this._boxGeo = null;
-        // Engine-capable (the only kind there is): arrange() speaks displacement
-        // (dz onto the fold) — CodeGrid.registerArranger rejects anything that can't.
-        this.engineCapable = true;
         this._boxMat = null;
         this._opacityU = null;
     }
@@ -112,35 +109,31 @@ export class StrataLayout {
         _activeInstances.delete(this);
         this._grid.unregisterArranger?.(this);
         this._clearBoxes();
-        // Engine mode parked its planes in the displacement table — drop it (and the
-        // arranged extent with it) so the re-fold below re-dispatches flat.
-        this._grid.setDisplacements?.(null);
         if (was) await this._grid._relayoutInPlace?.();
         return { ok: true };
     }
 
     /**
      * ARRANGE hook (CodeGrid._applyArrangers, inside every fold). Re-derives Z-by-depth +
-     * boxes from the AST on the freshly-folded (flow) buffer. Idempotent per fold.
+     * boxes from the AST on the fresh (flow) fold. Idempotent per fold.
      * @param {import('./CodeGrid.js').default} grid
+     * @param {{positions: Float32Array, sizes: Float32Array, count: number}|null} fold
      */
-    arrange(grid) {
+    arrange(grid, fold) {
         const r = this._renderer();
-        if (!r || !this._active) return;
+        if (!r || !this._active || !fold) return;
         // An edit invalidates the content-identity AST cache. Prefer a synchronous re-parse
-        // (engine is warm once active) so we re-derive in THIS fold — no flow flash.
+        // (the parser is warm once active) so we re-derive in THIS fold — no flow flash.
         const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
         if (!model) { this._healLater(grid); return; }
 
-        // One engine, one arrangement. No CPU position buffer exists — measure against a
-        // TRANSIENT fold scratch (evaluateFold) and write the DISPLACEMENT table instead
-        // (dz = wanted absolute plane − the fold's own z), then re-dispatch. The glyphs
-        // land on their AST plane and the caret mirror agrees (it adds the same table).
-        const pos = grid._engineFoldScratch?.();
-        if (!pos) return;
-        const total = r.instanceMesh?.geometry?.instanceCount ?? 0;
+        // State the planes as a DISPLACEMENT table onto the fold (dz = wanted absolute
+        // plane − the fold's own z). The glyphs land on their AST plane and the caret
+        // agrees (CodeGrid.setDisplacements hands it the same table).
+        const pos = fold.positions;
+        const total = fold.count;
 
-        const unit  = grid.metrics?.lineSpacing ?? grid.metrics?.charHeight ?? 1;
+        const unit  = grid.metrics.lineSpacing;
         const zStep = unit * this.cfg.zStepFactor;
         const pad   = unit * this.cfg.padFactor;
 
@@ -151,9 +144,7 @@ export class StrataLayout {
         //    the parent's for the glyphs they share — each glyph lands on its DEEPEST scope.
         //    The parent's own direct glyphs (its header/footer, the gaps between children)
         //    keep the parent's plane.
-        const prev = r._layoutDisplacements;
-        const D = (prev && prev.length >= total * 3) ? prev : new Float32Array(total * 3);
-        D.fill(0);   // idempotent per arrange — stale planes never linger
+        const D = new Float32Array(total * 3);   // fresh per arrange — stale planes never linger
         const boxes = [];
         for (const { node, depth } of nodes) {
             const range = this._slotRange(node, total);
@@ -164,18 +155,19 @@ export class StrataLayout {
         }
         // The arranged extent is the flow footprint pushed forward by the planes — stated
         // with the table, in one call, because this arranger AUTHORED both.
-        const flow = measureSlotSpan(pos, r.getInstanceSizes?.(), 0, total);
+        const flow = measureSlotSpan(pos, fold.sizes, 0, total);
+        if (!flow) return;   // no glyphs laid → nothing to lift
         let maxPlane = 0;
         for (const b of boxes) if (b.z > maxPlane) maxPlane = b.z;
-        grid.setDisplacements(D, flow ? {
+        grid.setDisplacements(D, {
             min: { x: flow.min.x, y: flow.min.y, z: Math.min(flow.min.z, 0) },
             max: { x: flow.max.x, y: flow.max.y, z: Math.max(flow.max.z, maxPlane) },
-        } : grid.getContentBounds());
+        });
 
-        // 2) Boxes — measure each node's X/Y bounds from the fold scratch (z differs from
-        //    the arranged planes there, but boxes draw at the node's OWN plane, so only
-        //    X/Y are read), a flat rectangle per node.
-        this._rebuildBoxes(r, boxes, pad, pos);
+        // 2) Boxes — measure each node's X/Y bounds from the fold (z differs from the
+        //    arranged planes there, but boxes draw at the node's OWN plane, so only X/Y
+        //    are read), a flat rectangle per node.
+        this._rebuildBoxes(r, boxes, pad, fold);
     }
 
     // ---- internals ----
@@ -183,9 +175,10 @@ export class StrataLayout {
     _renderer() { return this._grid.getRenderer?.() ?? this._grid._renderer ?? null; }
 
     /** Re-derive on the current fold without a full re-fold — the displacement table is
-     *  rewritten and boxes rebuilt fresh, so a live param change applies in place. */
+     *  rewritten against the fold's pre-arrangement capture and boxes rebuilt fresh, so a
+     *  live param change applies in place. */
     _reapply() {
-        if (this._active) this.arrange(this._grid);
+        if (this._active) this.arrange(this._grid, this._grid.foldSnapshot());
     }
 
     /** Pre-order list of every tree node with its depth (roots = 0). */
@@ -250,13 +243,12 @@ export class StrataLayout {
         return minX === Infinity ? null : minX;
     }
 
-    /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node. `pos` is the
-     *  fold scratch (evaluateFold, stride 3) — one measurement path, read from `pos`. */
-    _rebuildBoxes(r, boxes, pad, pos) {
+    /** Rebuild the batched box LineSegments — 4 edges (8 verts) per node, measured off the
+     *  fold — one measurement path. */
+    _rebuildBoxes(r, boxes, pad, fold) {
         if (!boxes.length) { this._clearBoxes(); return; }
         const bright = this.cfg.boxBrightness;
-        const siz = r.getInstanceSizes?.();           // glyph cell heights — for the centering fix
-        if (!pos || !siz) { this._clearBoxes(); return; }
+        const pos = fold.positions, siz = fold.sizes;
         const cap = boxes.length * 8;                 // 4 edges × 2 verts
         const posArr = new Float32Array(cap * 3);
         const colArr = new Float32Array(cap * 3);
@@ -264,19 +256,13 @@ export class StrataLayout {
         for (const b of boxes) {
             const bb = measureSlotSpan(pos, siz, b.start, b.count);
             if (!bb) continue;
-            // The glyph quad is CENTER-anchored in Y (worldPos.y = iPos.y ± iSize.y/2), but
-            // measureSlotSpan reports min.y = iPos.y / max.y = iPos.y + iSize.y (corner-style),
-            // so its Y reads half a glyph too HIGH — the box floats up into the node above (the
-            // overlap). Shift down by half a cell to hug the actual glyphs. (X is left-aligned via
-            // alignOffset = iSize.x/2, so its corner-style bounds already match the visible cell.)
-            const half = (siz ? (siz[b.start * 2 + 1] || 0) : 0) * 0.5;
             // Clip the left edge to the scope's leading-most CONTENT (its indentation), not to
             // column 0 — every indented body line's leading spaces are glyphs at col 0, so the raw
             // bounds drag the box all the way left. _contentLeftX takes the min over the node's
             // lines of the first non-whitespace glyph's x. Falls back to the raw bounds if unknown.
             const leftX = this.cfg.clipLeadingWhitespace ? this._contentLeftX(b.node, pos) : null;
-            const x0 = (leftX != null ? leftX : bb.min.x) - pad, y0 = bb.min.y - half - pad;
-            const x1 = bb.max.x + pad, y1 = bb.max.y - half + pad;
+            const x0 = (leftX != null ? leftX : bb.min.x) - pad, y0 = bb.min.y - pad;
+            const x1 = bb.max.x + pad, y1 = bb.max.y + pad;
             const z = b.z;
             const c = DEPTH_COLORS[b.depth % DEPTH_COLORS.length];
             const cr = c[0] * bright, cg = c[1] * bright, cb = c[2] * bright;
@@ -327,7 +313,7 @@ export class StrataLayout {
         this._boxMesh = null; this._boxGeo = null; this._boxMat = null;
     }
 
-    /** Cold-engine fallback: re-fold once the model rebuilds (brief flow flash between). */
+    /** Cold-parser fallback: re-fold once the model rebuilds (brief flow flash between). */
     _healLater(grid) {
         if (this._healing) return;
         this._healing = true;

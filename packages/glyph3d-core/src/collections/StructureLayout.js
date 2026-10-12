@@ -19,13 +19,13 @@ const SINGLE_COLUMN = Object.freeze({ pageHeight: 0, pagesWide: 1 });
  * SEMANTIC ENTITY (the AST), registered into the grid's relayout pipeline.
  *
  * Each AST node of a chosen kind is a contiguous glyph slot range (slots are
- * source-order). The arranger measures each block's bounds against the transient fold
- * scratch, packs the blocks with the shared box-packer, and writes the move into the
- * DISPLACEMENT table (deltas onto the fold) — instanceSize height=0 parks everything
- * else inside the arranged extent (a height-0 glyph renders + picks nothing). The
- * kernel re-dispatches with the table, and the footprint, the frustum-cull bounds, and
- * the fold-mirror `positionAt` (caret, picking) all agree — the fold + table is the
- * single source of truth.
+ * source-order). The arranger measures each block's bounds against the fold CodeGrid
+ * hands it, packs the blocks with the shared box-packer, and states the move as a
+ * DISPLACEMENT table (deltas onto the fold) through CodeGrid.setDisplacements — every
+ * other glyph is parked inside the arranged extent with its height zeroed (a height-0
+ * glyph renders + picks nothing). The slot buffer, the frustum-cull bounds, and the
+ * caret's `positionAt` all take the same table — the fold + table is the single source
+ * of truth.
  *
  * Crucially, `arrange` runs INSIDE every fold (CodeGrid._applyArrangers), re-deriving
  * from stable anchors (the SemanticModel's node ranges). So an arrangement can never go
@@ -49,9 +49,6 @@ export class StructureLayout {
         /** @type {{kind:string, scheme:string, count:number}|null} */
         this._scheme = null;
         this._healing = false;
-        // Engine-capable (the only kind there is): arrange() speaks displacement
-        // (block moves + park as deltas onto the fold) — registerArranger rejects less.
-        this.engineCapable = true;
     }
 
     /** The active arrangement, or null when the grid is in its normal flow. */
@@ -72,9 +69,8 @@ export class StructureLayout {
         if (!model) return { ok: false, reason: 'semantic model not ready' };
 
         // Probe for matching blocks up front, so an empty result is a clean error (with
-        // the available kinds) rather than a silently-flat grid. Engine fields have no
-        // buffer to measure — probe against the transient fold scratch.
-        const probe = this._blocks(model, kind, r, this._grid._engineFoldScratch?.());
+        // the available kinds) rather than a silently-flat grid.
+        const probe = this._blocks(model, kind, this._grid.foldSnapshot());
         if (!probe.length) {
             const available = [...new Set((model.flat ?? []).map((n) => n.kind))].filter(Boolean);
             return { ok: false, reason: kind ? `no ${kind} blocks` : 'no functions or methods', available };
@@ -95,66 +91,54 @@ export class StructureLayout {
         this._kind = null;
         this._scheme = null;
         this._grid.unregisterArranger?.(this);
-        // Engine mode parked the lens in the displacement table — drop it so the re-fold
-        // dispatches flow (the adapter arms setDisplacements(null) at the next sync).
-        this._grid.setDisplacements?.(null);
         if (wasActive) await this._grid._relayoutInPlace?.(); // fold with config.layout → flow
         return { ok: true };
     }
 
     /**
      * The ARRANGE stage hook (called by CodeGrid._applyArrangers inside every fold).
-     * Re-derives the packing from the AST and writes it into the displacement table on
-     * the fresh fold. Idempotent: each fold re-dispatches flow first, then this
+     * Re-derives the packing from the AST against the fresh fold and states it as a
+     * displacement table. Idempotent: each fold lays out flow first, then this
      * re-measures + re-packs.
      * @param {import('./CodeGrid.js').default} grid
+     * @param {{positions: Float32Array, sizes: Float32Array, count: number}|null} fold
      */
-    arrange(grid) {
+    arrange(grid, fold) {
         const r = this._renderer();
-        if (!r || !this._active) return;
+        if (!r || !this._active || !fold) return;
         // An edit invalidates the AST cache (content-identity). Prefer a SYNCHRONOUS re-parse
-        // (the engine is warm once arranged) so we re-derive in THIS fold — no flow flicker.
-        // Only if the engine is cold (can't happen for an already-arranged grid) do we fall
+        // (the parser is warm once arranged) so we re-derive in THIS fold — no flow flicker.
+        // Only if the parser is cold (can't happen for an already-arranged grid) do we fall
         // back to the async heal, which re-folds once the model rebuilds.
         const model = grid.getSemantics?.() || grid.refreshSemanticsSync?.();
         if (!model) { this._healLater(grid); return; }
 
-        // One engine, one arrangement (the strata pattern): measure against the TRANSIENT
-        // fold scratch and write the displacement table, then re-dispatch. The caret
-        // mirror rides the same table.
-        const scratch = grid._engineFoldScratch?.();
-        if (!scratch) return;
-
-        const blocks = this._blocks(model, this._kind, r, scratch);
+        const blocks = this._blocks(model, this._kind, fold);
         if (!blocks.length) return; // nothing matches in the new content → leave this fold as flow
 
         // Smallest surface-area first, packed into a roughly-square grid. The grid takes its
         // natural shape; the command re-fits the scene (a tree relayout) around the footprint.
         blocks.sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height);
         const sizes = blocks.map((b) => ({ w: b.bounds.width, h: b.bounds.height }));
-        const margin = (grid.metrics?.lineSpacing ?? grid.metrics?.charHeight ?? 1) * 1.6;
+        const margin = grid.metrics.lineSpacing * 1.6;
         const { slots } = flowBoxes(sizes, { margin, wrapWidth: squareWrap(sizes, margin) });
 
-        this._bake(r, blocks, slots, grid, scratch);
+        this._bake(r, blocks, slots, grid, fold);
     }
 
     /**
      * Bake the packing into the displacement table: each block's slot range moves by a
      * per-block offset (a delta onto the fold), and every other glyph is hidden by
-     * zeroing its size height and parking it inside the arranged extent (a height-0
-     * glyph renders + picks nothing, and parked inside the box it never inflates the
-     * footprint).
+     * zeroing its height and parking it inside the arranged extent (a height-0 glyph
+     * renders + picks nothing, and parked inside the box it never inflates the footprint).
+     * The fold's next layout writes the heights back.
      * @private
      */
-    _bake(r, blocks, slots, grid, scratch) {
-        const pos = scratch;
-        const siz = r.getInstanceSizes();
-        if (!pos || !siz) return;
-        const total = this._glyphCount(r);
+    _bake(r, blocks, slots, grid, fold) {
+        const pos = fold.positions;
+        const total = fold.count;
         const isBlock = new Uint8Array(total);
-        const prev = r._layoutDisplacements;
-        const D = (prev && prev.length >= total * 3) ? prev : new Float32Array(total * 3);
-        D.fill(0);
+        const D = new Float32Array(total * 3);
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         let minZ = 0, maxZ = 0;   // blocks keep their fold z (the wrap staircase)
@@ -182,16 +166,13 @@ export class StructureLayout {
         for (let s = 0; s < total; s++) {
             if (isBlock[s]) continue;
             // Park = a displacement to the box corner; hide = HEIGHT-only zero. The
-            // advance lane must stay pristine — the kernel's xOffsets rebuild reads it,
-            // and the fold the displacements were computed against must remain the fold
-            // that dispatches.
+            // advance lane stays as laid — the caret reads advances off the fold.
             D[s * 3]     = parkX - pos[s * 3];
             D[s * 3 + 1] = parkY - pos[s * 3 + 1];
             D[s * 3 + 2] = -pos[s * 3 + 2];
-            siz[s * 2 + 1] = 0;
+            r.slotBuffer.setHeight(s, 0);
         }
 
-        r.markInstanceTransformsDirty();   // sizes upload (positions are GPU-owned)
         // The packing box IS the arranged extent — exact, no walk. Parked glyphs sit at its
         // corner by construction; z spans the blocks' own fold staircase. Stated with the
         // table, in one call, because this arranger AUTHORED both.
@@ -231,7 +212,7 @@ export class StructureLayout {
             const c = this._grid.getCharForSlot?.(slot);
             return c ? { at: `${c.line}:${c.col}`, ch: (lines[c.line] ?? '')[c.col] ?? '' } : null;
         };
-        const blocks = this._blocks(model, kind, r, this._grid._engineFoldScratch?.()).map((b) => {
+        const blocks = this._blocks(model, kind, this._grid.foldSnapshot()).map((b) => {
             const s = b.node.start, e = b.node.end;
             return {
                 kind: b.node.kind, name: b.node.name,
@@ -250,8 +231,6 @@ export class StructureLayout {
 
     _renderer() { return this._grid.getRenderer?.() ?? this._grid._renderer ?? null; }
 
-    _glyphCount(r) { return r.instanceMesh?.geometry?.instanceCount ?? 0; }
-
     /**
      * Outermost nodes matching the kind → [{node, startSlot, count, bounds}].
      * Don't descend into a match (so a block's nested functions stay part of it, and
@@ -259,7 +238,7 @@ export class StructureLayout {
      * "callable units" — functions + methods wherever they nest, so a class's methods grid
      * just as cleanly as a file's free functions.
      */
-    _blocks(model, kind, r, scratch = null) {
+    _blocks(model, kind, fold) {
         const match = kind ? (n) => n.kind === kind : (n) => LEAF_SCOPES.has(n.kind);
         const picked = [];
         const visit = (nodes) => {
@@ -270,11 +249,8 @@ export class StructureLayout {
         };
         visit(model.roots ?? (model.outline ? model.outline() : []));
 
-        // Measurement source: the transient fold scratch (engine fields have no CPU
-        // buffer — measureSlotSpan over the stride-3 scratch is the math).
-        if (!scratch) return [];
-        const sizes = r.getInstanceSizes?.();
-        const measure = (start, count) => measureSlotSpan(scratch, sizes, start, count);
+        if (!fold) return [];
+        const measure = (start, count) => measureSlotSpan(fold.positions, fold.sizes, start, count);
 
         const out = [];
         for (const n of picked) {
