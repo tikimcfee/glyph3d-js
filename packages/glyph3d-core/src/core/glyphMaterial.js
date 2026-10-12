@@ -417,6 +417,8 @@ const LOD_UNIFORMS = Object.freeze({
 export const GLYPH_WIDTH_COMPRESS_DEFAULT = 1.0;
 
 const _activeMaterials = new Set();
+/** Called after the width dial moves — a quad's width scales with it, so fields restate extent. */
+const _widthCompressListeners = new Set();
 const _currentLodParams = { ...GLYPH_LOD_DEFAULTS };
 let _currentWidthCompress = GLYPH_WIDTH_COMPRESS_DEFAULT;
 
@@ -444,6 +446,17 @@ export function setGlyphWidthCompress(value) {
             mat.uniforms.uWidthCompress.value = value;
         }
     }
+    for (const fn of _widthCompressListeners) fn(value);
+}
+
+/**
+ * Observe the width dial (setGlyphWidthCompress).
+ * @param {(value: number) => void} fn
+ * @returns {() => void} unsubscribe
+ */
+export function onGlyphWidthCompress(fn) {
+    _widthCompressListeners.add(fn);
+    return () => { _widthCompressListeners.delete(fn); };
 }
 
 export function getGlyphWidthCompress() {

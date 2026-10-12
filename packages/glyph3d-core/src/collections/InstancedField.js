@@ -7,8 +7,8 @@
  */
 
 import * as THREE from 'three';
-import { InstancedSlotBuffer, packRgba8 } from '../core/InstancedSlotBuffer.js';
-import { createGlyphMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
+import { InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT } from '../core/InstancedSlotBuffer.js';
+import { createGlyphMaterial, GROUP_STRIDE, onGlyphWidthCompress } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
@@ -81,7 +81,15 @@ export default class InstancedField {
 
         this.instanceMesh = new THREE.Mesh(this.geometry, this.material);
         this.instanceMesh.userData.glyphField = this;
-        this.instanceMesh.frustumCulled = options.frustumCulled === true;
+        // three culls by geometry.boundingSphere, which setLayoutExtent states (three can't
+        // compute it — an InstancedBufferGeometry's own bounds are the base quad's).
+        this.instanceMesh.frustumCulled = options.frustumCulled !== false;
+        /** @private the extent as laid out (pen + advance), before the shader's overdraw */
+        this._layoutBounds = null;
+        /** @private widest quad any slot can draw (max of advance and height lanes) */
+        this._maxQuad = 0;
+        /** @private */
+        this._unWidth = onGlyphWidthCompress(() => this._stateExtent());
 
         if (this.scene) {
             this.scene.add(this.instanceMesh);
@@ -289,14 +297,36 @@ export default class InstancedField {
     }
 
     /**
-     * Update geometry bounding box & sphere for Three.js frustum culling.
+     * State this field's extent to three — geometry.boundingBox + boundingSphere, which three
+     * frustum-culls, depth-sorts, and raycasts by. `bounds` is the extent as LAID OUT (pens +
+     * advances, cell-center y ± height/2). The vertex shader can draw past it on the right: an
+     * emoji quad is `height` wide, and every quad scales by uWidthCompress. So the stated box
+     * adds one widest-quad × max(compress, 1) to max.x — a quad never extends further than that
+     * past the last pen. Call after the slots are written (the widest quad is read off them).
      * @param {{ min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number} }} bounds
      */
     setLayoutExtent(bounds) {
         if (!bounds) return;
+        this._layoutBounds = { min: { ...bounds.min }, max: { ...bounds.max } };
+        const f32 = this.slotBuffer.f32, n = this.slotBuffer.count;
+        let widest = 0;
+        for (let s = 0; s < n; s++) {
+            const b = s * SLOT_FLOATS;
+            const w = Math.max(f32[b + LANE_ADVANCE], f32[b + LANE_HEIGHT]);
+            if (w > widest) widest = w;
+        }
+        this._maxQuad = widest;
+        this._stateExtent();
+    }
+
+    /** @private Write the layout extent + the shader's right-side overdraw into the geometry. */
+    _stateExtent() {
+        const L = this._layoutBounds;
+        if (!L) return;
+        const overdraw = this._maxQuad * Math.max(this.widthCompress, 1);
         if (!this.geometry.boundingBox) this.geometry.boundingBox = new THREE.Box3();
-        this.geometry.boundingBox.min.set(bounds.min.x, bounds.min.y, bounds.min.z);
-        this.geometry.boundingBox.max.set(bounds.max.x, bounds.max.y, bounds.max.z);
+        this.geometry.boundingBox.min.set(L.min.x, L.min.y, L.min.z);
+        this.geometry.boundingBox.max.set(L.max.x + overdraw, L.max.y, L.max.z);
 
         if (!this.geometry.boundingSphere) this.geometry.boundingSphere = new THREE.Sphere();
         this.geometry.boundingBox.getBoundingSphere(this.geometry.boundingSphere);
@@ -938,6 +968,7 @@ export default class InstancedField {
 
     /** Dispose GPU and buffer resources */
     dispose() {
+        this._unWidth?.();
         if (this.atlas?._live && typeof this.atlas._live.unregisterField === 'function') {
             this.atlas._live.unregisterField(this);
         }

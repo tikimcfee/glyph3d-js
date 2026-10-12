@@ -228,6 +228,23 @@ console.log('Testing LayoutGenerator...');
     eq(field._highlightTexture.image.data[2], 0, 'Highlight B=0');
     eq(field._highlightTexture.image.data[3], Math.round(0.8 * 255), 'Highlight Fill=0.8');
 
+    // Stated cull bounds: layout extent + the shader's right-side overdraw, restated live
+    // when the width dial moves (and the listener dies with the field).
+    {
+        const { setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT } = await import('../packages/glyph3d-core/src/core/glyphMaterial.js');
+        const L = field._layoutBounds, box = field.geometry.boundingBox;
+        ok(field.instanceMesh.frustumCulled === true, 'glyph fields are frustum-culled by default');
+        ok(field._maxQuad > 0, 'widest quad read off the slots');
+        close(box.max.x, L.max.x + field._maxQuad, 'cull box max.x = layout max.x + one widest quad (compress 1)');
+        close(box.min.x, L.min.x, 'cull box min.x = layout min.x (quads only overdraw rightward)');
+        setGlyphWidthCompress(3);
+        close(field.geometry.boundingBox.max.x, L.max.x + 3 * field._maxQuad, 'width dial 3 restates max.x');
+        ok(field.geometry.boundingSphere.containsPoint(new THREE.Vector3(L.max.x + 2.9 * field._maxQuad, (L.min.y + L.max.y) / 2, L.min.z)),
+            'restated sphere covers the widened quads');
+        setGlyphWidthCompress(GLYPH_WIDTH_COMPRESS_DEFAULT);
+        close(field.geometry.boundingBox.max.x, L.max.x + field._maxQuad, 'dial back to 1 restates max.x');
+    }
+
     field.dispose();
 }
 

@@ -85,7 +85,6 @@ export function createBackgroundMesh(config = {}, bgGap) {
     });
 
     const mesh = new THREE.Mesh(geometry, panel.material);
-    mesh.frustumCulled = false;
     mesh.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
     mesh.position.z = -(bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND));
     mesh.visible = config.showBackground ?? true;

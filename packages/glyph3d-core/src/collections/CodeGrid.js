@@ -1089,7 +1089,6 @@ class CodeGrid extends FramedGlyphField {
             slugData: this.config.slugData,
             shaper: this.config.shaper,
             defaultColor: this.config.textColor,
-            frustumCulled: false,
         });
         this._rendererGroup.add(this._renderer.instanceMesh);
         this._applyGlyphAlpha();
@@ -1297,7 +1296,6 @@ class CodeGrid extends FramedGlyphField {
                 slugData: this.config.slugData || this.atlas?._slugData,
                 shaper: this.config.shaper || this.atlas?._shapeCache || this.atlas?._shaper,
                 defaultColor: this.config.filenameColor,
-                frustumCulled: false,
             });
             this._rendererGroup.add(this._filenameField.instanceMesh);
         }

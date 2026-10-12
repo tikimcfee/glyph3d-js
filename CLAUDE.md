@@ -129,10 +129,13 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (`tools/layout-generator-fold.test.mjs` binds them).
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
   grid channels) — the single source of truth for hover/click resolution.
-- **Frustum culling** is three's built-in per-object cull fed the real instance extent —
-  `InstancedField.setLayoutExtent` writes `geometry.boundingBox/Sphere` after every
-  layout mutation, so `frustumCulled = true` is safe. (The old `GridVirtualizer`
-  class is deleted; culling covers draws, not GPU memory.)
+- **Frustum culling** is three's built-in per-object cull, on by default for glyph fields
+  and panels. three can't compute an instanced field's bounds (it sees only the base quad),
+  so each field STATES them: `InstancedField.setLayoutExtent` takes the laid-out extent and
+  adds the shader's right-side overdraw (emoji quads, the width dial) before writing
+  `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
+  `tools/glyph-cull-truth.mjs` checks every live quad against it. (Fields moved through the
+  group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.

@@ -86,7 +86,6 @@ export default class FileRow extends BoundedObject3D {
                 slugData: this.atlas?._slugData,
                 shaper: this.atlas?._shapeCache || this.atlas?._shaper,
                 defaultColor: this.config.textColor,
-                frustumCulled: false,
             });
             this.add(this._renderer.instanceMesh);
         }
@@ -222,7 +221,6 @@ export default class FileRow extends BoundedObject3D {
                 depthWrite: true,
             });
             this._background = new THREE.Mesh(geo, this._panel.material);
-            this._background.frustumCulled = false;
             this.add(this._background);
             if (this._pickingSystem) {
                 this._pickingSystem.register('grid', this._background, this);

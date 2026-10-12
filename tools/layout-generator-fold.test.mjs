@@ -51,9 +51,10 @@ for (const [name, preset] of Object.entries(LAYOUT_PRESETS)) {
     const f0 = grid._renderer.slotBuffer.f32;
     ok(near(f0[LANE_POS_Y], 0) && near(f0[LANE_POS_X], 0), `${name}: row 0 anchors on the origin (got ${f0[LANE_POS_X]}, ${f0[LANE_POS_Y]})`);
 
-    // The drawn ink (the generator's bounds, each cell ± h/2 — what setLayoutExtent hands
-    // the frustum cull) inside the description's extent.
-    const ink = grid._renderer.geometry.boundingBox;
+    // The laid-out ink (the generator's bounds, each cell ± h/2 — what setLayoutExtent is
+    // handed, before it adds the shader's right-side overdraw for three's cull box) inside
+    // the description's extent.
+    const ink = grid._renderer._layoutBounds;
     const e = d.extent(), eps = 1e-3;
     ok(ink.min.x >= e.min.x - eps && ink.max.x <= e.max.x + eps && ink.min.y >= e.min.y - eps
         && ink.max.y <= e.max.y + eps && ink.min.z >= e.min.z - eps && ink.max.z <= e.max.z + eps,

@@ -183,7 +183,11 @@ export function computeTerminalSizes(sizes, totalCount, charWidth, charHeight) {
 }
 
 /**
- * Calculate the bounding extent for terminal glyphs in local space.
+ * Calculate the bounding extent for terminal glyphs in local space — the hull of every
+ * cell's ink, mirroring computeTerminalPositions. Positions are the glyph anchor (pen origin
+ * x, cell-center y), so a cell spans [x, x + charWidth] × [y ± charHeight/2]: live rows'
+ * centers run 0 … −(rows−1)·lineSpacing, history pages rise to pages·depthYStep and recede
+ * to −pages·depthZStep. three culls by this box (InstancedField.setLayoutExtent).
  *
  * @param {number} cols
  * @param {number} rows
@@ -196,16 +200,19 @@ export function computeTerminalSizes(sizes, totalCount, charWidth, charHeight) {
 export function computeTerminalGlyphExtent(cols, rows, depthMax, metrics, depthYStep, depthZStep) {
     const strideX = metrics.charWidth + metrics.letterSpacing;
     const strideY = metrics.lineSpacing;
+    const half = metrics.charHeight / 2;
     const pages = depthMax > 0 ? Math.ceil(depthMax / rows) : 0;
+    // History's lowest center is page 0's bottom row: depthYStep − (rows−1)·strideY.
+    const lowest = -(rows - 1) * strideY + (pages > 0 ? Math.min(0, depthYStep) : 0);
     return {
         min: {
             x: 0,
-            y: -(rows - 1) * strideY,
+            y: lowest - half,
             z: -pages * depthZStep,
         },
         max: {
             x: (cols - 1) * strideX + metrics.charWidth,
-            y: pages * depthYStep + metrics.charHeight,
+            y: Math.max(0, pages * depthYStep) + half,
             z: 0,
         },
     };
