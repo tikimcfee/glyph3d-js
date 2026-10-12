@@ -116,10 +116,8 @@ export default function TouchAdapter() {
       const ps = ctx.pickingSystem;
       if (!ps || entry?.type !== 'grid' || !pendingTapPos) return Promise.resolve(false);
       const rect = dom.getBoundingClientRect();
-      ps.setMousePosition(pendingTapPos.x - rect.left, pendingTapPos.y - rect.top);
-      ps.markDirty(); // channels share one _needsPick latch — mandatory before this pass
-      return ps.pickAsync('glyph', camera, scene).then((hit) => {
-        const slot = resolveGlyphHitFor(entry.grid, hit);
+      return ps.pick(['glyph'], camera, scene, pendingTapPos.x - rect.left, pendingTapPos.y - rect.top).then(({ glyph }) => {
+        const slot = resolveGlyphHitFor(entry.grid, glyph);
         if (slot == null) return false; // missed, or another grid's glyphs
         const pos = entry.grid.getCharForSlot?.(slot);
         if (!pos) return false;
@@ -151,23 +149,17 @@ export default function TouchAdapter() {
       const ps = ctx.pickingSystem;
       if (!ps) return Promise.resolve(null);
       const rect = dom.getBoundingClientRect();
-      ps.setMousePosition(clientX - rect.left, clientY - rect.top);
-      ps.markDirty();
-      return ps.pickAsync('grid', camera, scene).then((hit) => {
+      return ps.pick(['grid', 'group'], camera, scene, clientX - rect.left, clientY - rect.top).then(({ grid, group }) => {
         // Instanced panel-field hit resolves through ownerOf (same convention as
         // CanvasPicker's grid-channel resolve).
-        const hitToken = (hit && typeof hit.token?.ownerOf === 'function')
-          ? hit.token.ownerOf(hit.slotIndex)
-          : hit?.token;
+        const hitToken = (grid && typeof grid.token?.ownerOf === 'function')
+          ? grid.token.ownerOf(grid.slotIndex)
+          : grid?.token;
         const gridEntry = hitToken ? entryForGrid(registry, hitToken) : null;
         if (gridEntry) return gridEntry;
-        // No grid under the tap → try the group channel (corridor/container
-        // boxes). Lowest precedence, so it only wins in empty interior.
-        ps.markDirty();
-        return ps.pickAsync('group', camera, scene).then(
-          (g) => (g?.token ? entryForGrid(registry, g.token) : null),
-          () => null,
-        );
+        // No grid under the tap → the group channel (corridor/container boxes).
+        // Lowest precedence, so it only wins in empty interior.
+        return group?.token ? entryForGrid(registry, group.token) : null;
       }).catch(() => null);
     };
 

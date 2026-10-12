@@ -3,10 +3,11 @@
  *
  * Each channel is a self-contained pickable set: its own THREE render layer, its
  * own first-fit ID space (so IDs never collide across channels), and its own
- * picking material kind. The ID pass for a channel renders ONLY that channel's
- * layer to an offscreen target and reads the pixel under the cursor — a
- * pixel-perfect spatial mirror of the visible render, ID-encoded. No raycasting,
- * no bounds: the buffer is the single source of truth for "what's under here".
+ * picking material kind. A pick renders ONLY each asked channel's layer, through a
+ * camera narrowed to the one canvas pixel under the point, into one pixel per
+ * channel — a pixel-perfect mirror of the visible render at that spot, ID-encoded —
+ * and reads them back together without blocking (pick()). No raycasting, no
+ * bounds: the ID pixel is the single source of truth for "what's under here".
  *
  * Built-in channels:
  *   - 'glyph' (layer 7, kind 'glyph') — instanced glyph quads, ID = base +
@@ -150,15 +151,12 @@ void main() {
 export class PickingSystem {
     /**
      * @param {THREE.WebGLRenderer} threeRenderer
-     * @param {Object} [options]
-     * @param {number} [options.resolutionScale=1.0]
      */
-    constructor(threeRenderer, options = {}) {
+    constructor(threeRenderer) {
         if (!threeRenderer) {
             throw new Error('[PickingSystem] a renderer is required');
         }
         this._renderer = threeRenderer;
-        this._scale = options.resolutionScale ?? 1.0;
 
         // Channels: name -> { layer, kind, entries: [{ mesh, material, startId, endId, token }] }
         this._channels = new Map();
@@ -166,17 +164,14 @@ export class PickingSystem {
             this.defineChannel(name, def);
         }
 
-        // Picking target
+        // The ID target: one PIXEL per channel of a pick, side by side (see pick()).
         this._target = null;
+        this._pickCamera = null;
         this._sizeVec = new THREE.Vector2(); // reusable for getSize()
+        this._clearColor = new THREE.Color();
 
-        // Mouse position in target-pixel coordinates
-        this._mousePixel = { x: -1, y: -1 };
-
-        this._needsPick = false;
-        this._lastResult = new Map(); // channel -> last resolved hit | null
-
-        this._createTarget();
+        this._lastRenderMs = 0;
+        this._lastReadMs = 0;
     }
 
     // -------------------------------------------------------------------------
@@ -204,42 +199,36 @@ export class PickingSystem {
     // Target management
     // -------------------------------------------------------------------------
 
-    /** @private */
-    _createTarget() {
-        const size = this._renderer.getSize(new THREE.Vector2());
-        const dpr = this._renderer.getPixelRatio ? this._renderer.getPixelRatio() : 1;
-        const w = Math.max(1, Math.floor(size.x * dpr * this._scale));
-        const h = Math.max(1, Math.floor(size.y * dpr * this._scale));
-        if (this._target) this._target.dispose();
-        const RenderTargetClass = THREE.WebGLRenderTarget || THREE.RenderTarget;
-        this._target = new RenderTargetClass(w, h, {
+    /** @private — an N×1 ID target, grown to the widest pick asked for. */
+    _ensureTarget(columns) {
+        if (this._target && this._target.width >= columns) return this._target;
+        this._target?.dispose();
+        this._target = new THREE.WebGLRenderTarget(columns, 1, {
             minFilter: THREE.NearestFilter,
             magFilter: THREE.NearestFilter,
             type: THREE.UnsignedByteType,
         });
-        this._target.isWebGLRenderTarget = true;
+        return this._target;
     }
 
-    onResize() {
-        this._createTarget();
-    }
-
-    // -------------------------------------------------------------------------
-    // Mouse position
-    // -------------------------------------------------------------------------
-
-    setMousePosition(cssX, cssY) {
-        const dpr = this._renderer.getPixelRatio ? this._renderer.getPixelRatio() : 1;
-        const newX = Math.floor(cssX * dpr * this._scale);
-        const newY = Math.floor(cssY * dpr * this._scale);
-        if (newX !== this._mousePixel.x || newY !== this._mousePixel.y) {
-            this._mousePixel = { x: newX, y: newY };
-            this._needsPick = true;
+    /**
+     * @private — a camera that sees only the canvas pixel at (cssX, cssY): the view camera's
+     * projection narrowed by setViewOffset to that one pixel. three frustum-culls against it,
+     * so a pass draws only what overlaps the cursor, not the whole view.
+     */
+    _pixelCamera(camera, cssX, cssY, cssW, cssH) {
+        if (camera.view?.enabled) {
+            throw new Error('[PickingSystem] the view camera already has a view offset; a pick cannot compose with it');
         }
-    }
-
-    markDirty() {
-        this._needsPick = true;
+        if (!this._pickCamera || this._pickCamera.constructor !== camera.constructor) {
+            this._pickCamera = new camera.constructor();
+            this._pickCamera.matrixWorldAutoUpdate = false; // the view camera's world matrix, as drawn
+        }
+        const pc = this._pickCamera;
+        pc.copy(camera, false);
+        pc.matrixWorldAutoUpdate = false;
+        pc.setViewOffset(cssW, cssH, cssX - 0.5, cssY - 0.5, 1, 1);
+        return pc;
     }
 
     // -------------------------------------------------------------------------
@@ -342,21 +331,15 @@ export class PickingSystem {
     // Render pass + read
     // -------------------------------------------------------------------------
 
-    _renderChannelPass(channel, camera, scene) {
-        const size = this._renderer.getSize(this._sizeVec);
-        const dpr = this._renderer.getPixelRatio ? this._renderer.getPixelRatio() : 1;
-        const tw = Math.max(1, Math.floor(size.x * dpr * this._scale));
-        const th = Math.max(1, Math.floor(size.y * dpr * this._scale));
-        if (!this._target || this._target.width !== tw || this._target.height !== th) {
-            this._createTarget();
-        }
-
-        const t0 = performance.now();
-
-        const prevClearColor = new THREE.Color();
-        const prevClearAlpha = this._renderer.getClearAlpha();
-        this._renderer.getClearColor(prevClearColor);
-        const savedLayerMask = camera.layers.mask;
+    /** @private — draw one channel's ID pass into pixel column `column` of the target. */
+    _renderChannelPass(channel, camera, scene, column) {
+        const target = this._target;
+        target.viewport.set(column, 0, 1, 1);
+        target.scissor.set(column, 0, 1, 1);
+        target.scissorTest = true;
+        this._renderer.setRenderTarget(target);
+        this._renderer.clear();   // an empty channel still clears its pixel: no stale id
+        if (channel.entries.length === 0) return;
 
         for (const entry of channel.entries) {
             const mesh = entry.mesh;
@@ -381,22 +364,10 @@ export class PickingSystem {
             }
         }
 
-        // A pick tests what is ON SCREEN — the matrices the last main render drew with. three's
-        // render() would re-walk every matrixWorld first (once per channel pass); skip it.
-        const savedAutoMW = scene.matrixWorldAutoUpdate;
         try {
             camera.layers.set(channel.layer);
-            scene.matrixWorldAutoUpdate = false;
-            this._renderer.setRenderTarget(this._target);
-            this._renderer.setClearColor(0x000000, 0);
-            this._renderer.clear();
             this._renderer.render(scene, camera);
-            this._lastRenderMs = performance.now() - t0;
         } finally {
-            scene.matrixWorldAutoUpdate = savedAutoMW;
-            camera.layers.mask = savedLayerMask;
-            this._renderer.setRenderTarget(null);
-            this._renderer.setClearColor(prevClearColor, prevClearAlpha);
             for (const entry of channel.entries) {
                 const mesh = entry.mesh;
                 if (!mesh || !entry._savedMaterial) continue;
@@ -404,38 +375,61 @@ export class PickingSystem {
                 entry._savedMaterial = null;
             }
         }
-
-        return t0;
     }
 
-    async readPixelAsync(t0) {
-        const { x, y } = this._mousePixel;
-        const pixel = new Uint8Array(4);
-        if (this._target && x >= 0 && y >= 0 && x < this._target.width && y < this._target.height) {
-            // WebGL coordinate system: Y is bottom-up
-            const glY = this._target.height - 1 - y;
-            this._renderer.readRenderTargetPixels(this._target, x, glY, 1, 1, pixel);
-        }
-        if (t0 !== undefined) {
-            const tRead = performance.now();
-            this._lastReadMs = tRead - (t0 + (this._lastRenderMs ?? 0));
-            this._lastTotalMs = tRead - t0;
-        }
-        return pixel;
-    }
+    /**
+     * What is under one canvas point, across channels — in ONE readback.
+     *
+     * Each channel renders into its own pixel of an N×1 target, through a camera narrowed to
+     * the cursor's pixel (so frustum culling drops everything not under it), and the N pixels
+     * come back through three's fenced, non-blocking readRenderTargetPixelsAsync — the CPU
+     * never waits on the GPU. The passes are issued and the read is queued synchronously, so
+     * concurrent picks can share the target: each read is ordered behind its own passes.
+     *
+     * A pick tests what is ON SCREEN — the matrices the last main render drew with; three's
+     * render() would otherwise re-walk every matrixWorld once per channel pass.
+     *
+     * @param {string[]} channelNames
+     * @param {THREE.Camera} camera - the view camera
+     * @param {THREE.Object3D} scene
+     * @param {number} cssX - canvas-relative CSS px
+     * @param {number} cssY
+     * @returns {Promise<Record<string, {token: any, slotIndex: number}|null>>} hit (or null) per channel
+     */
+    async pick(channelNames, camera, scene, cssX, cssY) {
+        const channels = channelNames.map((name) => this._channel(name));
+        const hits = Object.fromEntries(channelNames.map((name) => [name, null]));
+        const size = this._renderer.getSize(this._sizeVec);
+        if (!(cssX >= 0 && cssY >= 0 && cssX < size.x && cssY < size.y)) return hits;
+        if (channels.every((ch) => ch.entries.length === 0)) return hits;
 
-    async pickAsync(channelName, camera, scene) {
-        const ch = this._channel(channelName);
-        if (!ch || ch.entries.length === 0) return null;
-        if (!this._needsPick) return this._lastResult.get(channelName) ?? null;
-        this._needsPick = false;
+        const t0 = performance.now();
+        const target = this._ensureTarget(channels.length);
+        const pc = this._pixelCamera(camera, cssX, cssY, size.x, size.y);
+        const prevTarget = this._renderer.getRenderTarget();
+        const prevAlpha = this._renderer.getClearAlpha();
+        this._renderer.getClearColor(this._clearColor);
+        const savedAutoMW = scene.matrixWorldAutoUpdate;
+        let read;
+        try {
+            scene.matrixWorldAutoUpdate = false;
+            this._renderer.setClearColor(0x000000, 0);
+            channels.forEach((ch, i) => this._renderChannelPass(ch, pc, scene, i));
+            read = this._renderer.readRenderTargetPixelsAsync(target, 0, 0, channels.length, 1, new Uint8Array(4 * channels.length));
+        } finally {
+            scene.matrixWorldAutoUpdate = savedAutoMW;
+            this._renderer.setRenderTarget(prevTarget);
+            this._renderer.setClearColor(this._clearColor, prevAlpha);
+        }
+        const t1 = performance.now();
+        const px = await read;
+        this._lastRenderMs = t1 - t0;
+        this._lastReadMs = performance.now() - t1;
 
-        const t0 = this._renderChannelPass(ch, camera, scene);
-        const pixel = await this.readPixelAsync(t0);
-        const id = pixel[3] * 0x1000000 + ((pixel[0] << 16) | (pixel[1] << 8) | pixel[2]);
-        const hit = this.resolve(channelName, id);
-        this._lastResult.set(channelName, hit);
-        return hit;
+        channelNames.forEach((name, i) => {
+            hits[name] = this.resolve(name, PickingSystem.decodePickingId(px.subarray(4 * i, 4 * i + 4)));
+        });
+        return hits;
     }
 
     // -------------------------------------------------------------------------
@@ -481,9 +475,6 @@ export class PickingSystem {
     }
 
     getStats() {
-        const target = this._target;
-        const targetBytes = target ? target.width * target.height * 4 : 0;
-
         const channels = {};
         let totalEntries = 0, totalIds = 0;
         for (const [name, ch] of this._channels) {
@@ -498,13 +489,9 @@ export class PickingSystem {
             channels,
             totalEntries,
             totalIds,
-            targetWidth: target?.width ?? 0,
-            targetHeight: target?.height ?? 0,
-            targetBytes,
-            resolutionScale: this._scale,
-            lastRenderMs: this._lastRenderMs ?? 0,
-            lastReadMs: this._lastReadMs ?? 0,
-            lastTotalMs: this._lastTotalMs ?? 0,
+            targetWidth: this._target?.width ?? 0,
+            lastRenderMs: this._lastRenderMs,
+            lastReadMs: this._lastReadMs,
         };
     }
 

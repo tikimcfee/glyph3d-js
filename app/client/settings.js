@@ -186,7 +186,7 @@ export const GROUPS = [
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
-  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · draw-call readout', columns: 2 },
+  { name: 'Culling & loading',  subtitle: 'occlusion culling · build budget · hover pick rate · draw-call readout', columns: 2 },
   { name: 'Files',              subtitle: 'all-files browsing · hex dump depth', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
@@ -650,6 +650,14 @@ export const SETTINGS = [
     key: 'load.buildBudget', label: 'Load build budget (ms/frame, 0=one tick)', group: 'Culling & loading',
     type: 'number', default: 12, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { ctx.loadBuildBudget = v; },
+  },
+  // Hover picking — the cursor's ID pass (PickingSystem.pick). 0 = as fast as picks land:
+  // one in flight, a new one as soon as it resolves and the cursor or camera has moved, so it
+  // follows the display's own rate. A number caps it at that many picks per second.
+  {
+    key: 'pick.hoverHz', label: 'Hover pick rate (Hz, 0 = every frame)', group: 'Culling & loading',
+    type: 'number', default: 0, min: 0, max: 1000, step: 5,
+    apply: (ctx, v) => { ctx.hoverPickHz = v; },
   },
   // Files — all-files mode relaxes directory opens from "known code files" to every file:
   // extension stays the fast-path hint, unknown types sniff magic bytes / UTF-8, binaries

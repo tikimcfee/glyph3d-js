@@ -128,7 +128,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `LayoutDescription` answers caret / pick / extent queries with
   (`tools/layout-generator-fold.test.mjs` binds them).
 - **GPU picking** (`picking/`) is a multi-channel ID render pass (separate glyph and
-  grid channels) — the single source of truth for hover/click resolution.
+  grid channels) — the single source of truth for hover/click resolution. `pick(channels,
+  camera, scene, x, y)` draws each channel into one pixel through a camera narrowed to the
+  cursor's pixel (`setViewOffset`, so culling drops all but what's under it) and reads them
+  back together with three's fenced `readRenderTargetPixelsAsync` — the main thread never
+  waits on the GPU. Hover picks run as fast as they land unless `pick.hoverHz` caps them.
 - **Frustum culling** is three's built-in per-object cull, on by default for glyph fields
   and panels. three can't compute an instanced field's bounds (it sees only the base quad),
   so each field STATES them: `InstancedField.setLayoutExtent` takes the laid-out extent and

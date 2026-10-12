@@ -120,12 +120,9 @@ export default async ({ app, assert }) => {
   const tint = await app.evalPage(`(() => {
     const g = window.__glyphClient.ctx.registry.get(${JSON.stringify(FILE)}).grid;
     const slot = g.getSlotForChar(${t3.line}, ${t3.col});
-    // The renderer is a mega-field VIEW: the shared highlight lane is the
-    // instanceHighlight ATTRIBUTE, addressed by ABSOLUTE arena slot.
-    const r = g.getRenderer();
-    const d = r.mega.field.instanceMesh.geometry.attributes.instanceHighlight.array;
-    const abs = r.slotBase + slot;
-    return { slot, lit: d[abs * 4] + d[abs * 4 + 1] + d[abs * 4 + 2] > 0 };
+    // The field's highlight texture: one RGBA texel per slot (setGlyphHighlight).
+    const d = g.getRenderer()._highlightTexture?.image.data;
+    return { slot, lit: !!d && d[slot * 4] + d[slot * 4 + 1] + d[slot * 4 + 2] > 0 };
   })()`);
   assert.ok(tint.slot >= 0 && tint.lit, `hover tint lit at slot ${tint.slot}`);
 

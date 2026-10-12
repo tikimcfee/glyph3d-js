@@ -224,6 +224,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {{ open: (id: string) => ({open: boolean}|null), close: (id: string) => ({open: boolean}|null), toggle: (id: string) => ({open: boolean}|null), list: () => Array<{id: string, title: string, open: boolean}> }|null} */ dock: null,
     _sessionRestored: false,
     /** @type {number|null} */ loadBuildBudget: null,
+    /** @type {number} picks per second (pick.hoverHz); 0 = as fast as picks land */ hoverPickHz: 0,
     /** @type {((x: number, y: number) => boolean)|null} */ isGripPress: null,
     /** @type {{ grid: Object, edge: string, role: string }|null} */ handleHover: null,
     /** @type {{ x: number, y: number }|null} */ handleHoverAt: null,

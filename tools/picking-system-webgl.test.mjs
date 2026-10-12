@@ -16,10 +16,17 @@ function assert(condition, message) {
 
 console.log('Testing WebGL2 PickingSystem...');
 
-// Mock WebGLRenderer sufficient for PickingSystem bookkeeping & material creation
+// Mock WebGLRenderer sufficient for PickingSystem bookkeeping, material creation, and a pick:
+// it records each pass (which target column, which layer, which camera view) and answers the
+// readback with an id per column from `idForLayer`.
 class MockWebGLRenderer {
     constructor() {
         this.domElement = {};
+        this.passes = [];
+        this.clears = [];
+        this.reads = [];
+        this.idForLayer = new Map();
+        this._target = null;
     }
     getSize(vec) {
         vec.set(800, 600);
@@ -29,22 +36,31 @@ class MockWebGLRenderer {
         return 1.0;
     }
     getClearAlpha() {
-        return 0;
+        return 0.5;
     }
     getClearColor(c) {
-        c.set(0x000000);
+        c.set(0x336699);
         return c;
     }
-    setRenderTarget() {}
-    setClearColor() {}
-    clear() {}
-    render() {}
-    readRenderTargetPixels(target, x, y, w, h, buf) {
-        // Mock reading ID 1
-        buf[0] = 0;
-        buf[1] = 0;
-        buf[2] = 1;
-        buf[3] = 0;
+    getRenderTarget() { return this._target; }
+    setRenderTarget(t) { this._target = t; }
+    setClearColor(c, a) { this.lastClear = [typeof c === 'number' ? c : c.getHex(), a]; }
+    clear() { this.clears.push(this._target.viewport.x); }
+    render(scene, camera) {
+        const layer = Math.log2(camera.layers.mask);
+        this.passes.push({
+            column: this._target.viewport.x, layer, view: { ...camera.view },
+            sceneAutoMW: scene.matrixWorldAutoUpdate,
+        });
+    }
+    async readRenderTargetPixelsAsync(target, x, y, w, h, buf) {
+        this.reads.push({ x, y, w, h });
+        for (const p of this.passes) {
+            const id = this.idForLayer.get(p.layer) ?? 0;
+            const o = 4 * p.column;
+            buf[o] = (id >> 16) & 0xff; buf[o + 1] = (id >> 8) & 0xff; buf[o + 2] = id & 0xff; buf[o + 3] = (id >> 24) & 0xff;
+        }
+        return buf;
     }
 }
 
@@ -52,9 +68,7 @@ const renderer = new MockWebGLRenderer();
 const ps = new PickingSystem(renderer);
 
 assert(ps !== null, 'PickingSystem constructor accepts WebGL renderer');
-assert(ps.renderTarget !== null, 'PickingSystem creates renderTarget');
-assert(ps.renderTarget.width === 800, 'RenderTarget width matches');
-assert(ps.renderTarget.height === 600, 'RenderTarget height matches');
+assert(ps.renderTarget === null, 'no ID target until the first pick');
 
 // Test decodePickingId
 {
@@ -130,16 +144,41 @@ assert(ps.renderTarget.height === 600, 'RenderTarget height matches');
     assert(hitSlotOOB === null, 'Glyph slot 50+ out of bounds is null');
 }
 
-// Test pickAsync with mock
+// pick(): one pixel per channel, one readback, a 1×1 view offset at the point
 {
     const camera = new THREE.PerspectiveCamera();
+    camera.layers.set(0);
     const scene = new THREE.Scene();
-    ps.markDirty();
-    ps.setMousePosition(100, 100);
-    const hitPromise = ps.pickAsync('glyph', camera, scene);
-    assert(hitPromise instanceof Promise, 'pickAsync returns Promise');
-    const hit = await hitPromise;
-    assert(hit !== null, 'pickAsync returns hit');
+    const gridMesh = [...ps._channels.get('grid').entries].find((e) => e.startId === 2).mesh;
+    const gridMat = gridMesh.material;
+    renderer.idForLayer.set(8, 2);    // grid layer → mesh2's id
+    renderer.idForLayer.set(7, 26);   // glyph layer → slot 25
+
+    const hits = await ps.pick(['grid', 'handle', 'glyph'], camera, scene, 100.25, 40);
+    assert(renderer.passes.length === 2, `two passes: the empty handle channel draws nothing (got ${renderer.passes.length})`);
+    assert(renderer.clears.join() === '0,1,2', `every column is cleared, the empty one too (got ${renderer.clears})`);
+    assert(renderer.passes[0].column === 0 && renderer.passes[0].layer === 8, 'grid renders into column 0 on its layer');
+    assert(renderer.passes[1].column === 2 && renderer.passes[1].layer === 7, 'glyph renders into column 2 on its layer');
+    const v = renderer.passes[0].view;
+    assert(v.enabled && v.fullWidth === 800 && v.fullHeight === 600 && v.width === 1 && v.height === 1,
+        'the pass camera sees one canvas pixel of the full view');
+    assert(v.offsetX === 99.75 && v.offsetY === 39.5, `the pixel is centered on the point (got ${v.offsetX},${v.offsetY})`);
+    assert(renderer.passes.every((p) => p.sceneAutoMW === false), 'passes reuse the drawn frame\'s matrices');
+    assert(renderer.reads.length === 1 && renderer.reads[0].w === 3 && renderer.reads[0].h === 1, 'one readback of all three pixels');
+    assert(ps.renderTarget.width === 3 && ps.renderTarget.height === 1, 'the ID target is one pixel per channel');
+    assert(hits.grid?.token?.name === 'grid2' && hits.grid.slotIndex === 0, 'grid hit resolves to mesh2');
+    assert(hits.handle === null, 'empty channel → null');
+    assert(hits.glyph?.slotIndex === 25, 'glyph hit resolves to slot 25');
+    assert(camera.view === null && camera.layers.mask === 1, 'the view camera is untouched');
+    assert(scene.matrixWorldAutoUpdate === true, 'scene auto-update restored');
+    assert(gridMesh.material === gridMat, 'pick materials swapped back');
+    assert(renderer.getRenderTarget() === null && renderer.lastClear[0] === 0x336699 && renderer.lastClear[1] === 0.5,
+        'render target + clear color restored');
+
+    renderer.passes = []; renderer.reads = [];
+    const off = await ps.pick(['grid', 'glyph'], camera, scene, 900, 40);
+    assert(off.grid === null && off.glyph === null && renderer.passes.length === 0 && renderer.reads.length === 0,
+        'a point off the canvas picks nothing and draws nothing');
 }
 
 ps.dispose();

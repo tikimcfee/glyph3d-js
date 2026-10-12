@@ -180,10 +180,8 @@ export function CanvasPicker() {
       const ps = client.ctx.pickingSystem;
       if (!ps || entry?.type !== 'grid') return Promise.resolve(false);
       const rect = dom.getBoundingClientRect();
-      ps.setMousePosition(s.x - rect.left, s.y - rect.top);
-      ps.markDirty(); // channels share one _needsPick latch — mandatory before this pass
-      return ps.pickAsync('glyph', camera, scene).then((hit) => {
-        const slot = resolveGlyphHitFor(entry.grid, hit);
+      return ps.pick(['glyph'], camera, scene, s.x - rect.left, s.y - rect.top).then(({ glyph }) => {
+        const slot = resolveGlyphHitFor(entry.grid, glyph);
         if (slot == null) return false; // missed, or another grid's glyphs
         const pos = entry.grid.getCharForSlot?.(slot);
         if (!pos) return false;
@@ -314,10 +312,13 @@ export function CanvasPicker() {
     const camMoved =
       c.position.x !== s.px || c.position.y !== s.py || c.position.z !== s.pz ||
       c.quaternion.x !== s.qx || c.quaternion.y !== s.qy || c.quaternion.z !== s.qz || c.quaternion.w !== s.qw;
-    if (!cursorMoved && !camMoved) return;
-    s.lx = s.x; s.ly = s.y; s.lin = s.in;
-    s.px = c.position.x; s.py = c.position.y; s.pz = c.position.z;
-    s.qx = c.quaternion.x; s.qy = c.quaternion.y; s.qz = c.quaternion.z; s.qw = c.quaternion.w;
+    if (cursorMoved || camMoved) {
+      s.lx = s.x; s.ly = s.y; s.lin = s.in;
+      s.px = c.position.x; s.py = c.position.y; s.pz = c.position.z;
+      s.qx = c.quaternion.x; s.qy = c.quaternion.y; s.qz = c.quaternion.z; s.qw = c.quaternion.w;
+      s.pickWanted = true;   // latched: a move during an in-flight pick is picked up after it lands
+    }
+    if (!s.pickWanted) return;
 
     const ps = client.ctx.pickingSystem;
     // If the PickingSystem instance was swapped (dev HMR of CommandProvider),
@@ -325,109 +326,86 @@ export function CanvasPicker() {
     if (ps !== s.lastPs) { s.lastPs = ps; s.gpuOk = false; s.gpuWarned = false; }
 
     if (ps && s.in) {
-      // Feed the cursor (canvas-relative); force a pick on camera-move (no pointer
-      // event fires then). One pick in flight at a time. useFrame runs before r3f's
-      // main render, so the offscreen ID pass is safe here.
+      // One pick in flight at a time; its readback lands a frame or so later. The rate is
+      // the hover-pick setting: 0 = as fast as picks land (every frame), else a Hz ceiling.
+      if (s.pickPending) return;
+      const now = performance.now();
+      const hz = client.ctx.hoverPickHz ?? 0;
+      if (hz > 0 && now - (s.lastPickTime ?? 0) < 1000 / hz) return;
+      s.pickWanted = false;
+      s.lastPickTime = now;
+      s.pickPending = true;
       const rect = dom.getBoundingClientRect();
       const sx = s.x, sy = s.y; // the pixel THIS pick samples — stamped onto handleHoverAt
-      ps.setMousePosition(sx - rect.left, sy - rect.top);
-      if (camMoved) ps.markDirty();
-      const now = performance.now();
-      if (!s.lastPickTime) s.lastPickTime = 0;
-      if (!s.pickPending && ps._needsPick && (now - s.lastPickTime >= 33)) {
-        s.lastPickTime = now;
-        s.pickPending = true;
-        ps.pickAsync('grid', c, scene).then((hit) => {
-          // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
-          // An instanced panel-field hit resolves through ownerOf(slot) — the grid
-          // channel's mirror of the glyph channel's resolveSlot convention.
-          const hitToken = (hit && typeof hit.token?.ownerOf === 'function')
-            ? hit.token.ownerOf(hit.slotIndex)
-            : hit?.token;
-          const gridEntry = (s.in && hitToken) ? entryForGrid(client.ctx.registry, hitToken) : null;
-          if (gridEntry && !s.gpuOk) {
-            s.gpuOk = true;
-            console.log(`[CanvasPicker] grid picking confirmed → ${gridEntry.id}`);
-          }
-          // Second channel, SAME frame: the window-control grips/buttons. markDirty() is
-          // MANDATORY — both passes share one _needsPick latch, so without it the handle
-          // pass no-ops and hands back the prior frame's hit. The handle stage swallows its
-          // own error (→ null) so a handle-pass hiccup never clears a good grid hover.
-          ps.markDirty();
-          return ps.pickAsync('handle', c, scene).then(
-            (h) => (s.in ? (h?.token ?? null) : null),
-            () => null,
-          ).then((handleToken) => {
-            // CROSS-CHANNEL PRIORITY. The channels don't share a depth buffer, so when both a
-            // grid and a control land under the cursor we decide which is in front here. A
-            // window's OWN control is always in front of its own panel; for different objects
-            // it's closest-to-camera wins — a cheap object-distance tiebreak, good enough until
-            // a per-pixel case needs real GPU depth. The loser is dropped so it neither hovers
-            // nor takes the click (the depth ordering a raycast gets for free).
-            let hoverEntry = gridEntry;
-            let activeHandle = handleToken;
-            if (handleToken && gridEntry && handleToken.grid !== gridEntry.grid && handleToken.button) {
-              const dHandle = c.position.distanceTo(handleToken.button.getWorldPosition(_pickWorld));
-              const dGrid = c.position.distanceTo(gridEntry.grid.getWorldPosition(_pickWorld));
-              if (dHandle <= dGrid) hoverEntry = null;   // control nearer → it occludes the grid behind
-              else activeHandle = null;                  // grid nearer → the control is hidden, ignore it
-            } else if (handleToken) {
-              hoverEntry = null;                         // same-window control (or empty grid) wins
-            }
-            // CONTAINER channel (corridor boxes) — LOWEST precedence. A grid/card or handle hover
-            // beats it, so over a card you select the card and the box only catches clicks in the
-            // EMPTY interior (→ drag the corridor); over empty space the box wins. The override
-            // (Alt → s.preferContainer, set in onMove) FLIPS it so the container wins even over a
-            // card — the canvas-editor "hold-a-key drags the canvas" idiom.
-            ps.markDirty();
-            return ps.pickAsync('group', c, scene).then(
-              (g) => (s.in ? (g?.token ?? null) : null),
-              () => null,
-            ).then((groupToken) => {
-              if (groupToken) {
-                const groupEntry = entryForGrid(client.ctx.registry, groupToken);
-                // Container is LOWEST precedence: it wins only in the EMPTY interior (no card/handle).
-                // PARKED: an Alt override to force container ≻ card even over a card plugs in here
-                // (`|| s.preferContainer`, set from a held modifier) once we work out why the held
-                // key wasn't reaching the resolve on this setup — see the picking memory.
-                if (groupEntry && !hoverEntry && !activeHandle) {
-                  hoverEntry = groupEntry;
-                  activeHandle = null;
-                }
-              }
-              applyHandleHover(activeHandle, sx, sy);
-              applyHover(hoverEntry);
-              // Glyph channel: caret-preview on the doc being EDITED. Gated to the key-target
-              // grid (the glyph pass renders every instance) and never under a control.
-              const entry = hoverEntry;
-              const keyId = client.ctx.attentionManager?.get('key')?.id;
-              if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
-                applyGlyphHover(null, null);
-                return;
-              }
-              ps.markDirty();
-              return ps.pickAsync('glyph', c, scene).then((gh) => {
-                const slot = s.in ? resolveGlyphHitFor(entry.grid, gh) : null;
-                if (slot != null) applyGlyphHover(entry.grid.getRenderer(), slot);
-                else applyGlyphHover(null, null);
-              }, () => applyGlyphHover(null, null));
-            });
-          });
-        }).then(() => {
-          s.pickPending = false;
-        }).catch((err) => {
-          s.pickPending = false;
-          if (!s.gpuWarned) {
-            s.gpuWarned = true;
-            console.warn('[CanvasPicker] grid pick failed', err);
-          }
-          applyHover(null);
-          applyHandleHover(null);
+      // Glyph channel: caret-preview on the doc being EDITED — asked only when there is one.
+      const keyId = client.ctx.attentionManager?.get('key')?.id;
+      const channels = keyId ? ['grid', 'handle', 'group', 'glyph'] : ['grid', 'handle', 'group'];
+      ps.pick(channels, c, scene, sx - rect.left, sy - rect.top).then((hits) => {
+        // Guard on s.in: a pick resolving AFTER the cursor left must clear hover.
+        // An instanced panel-field hit resolves through ownerOf(slot) — the grid
+        // channel's mirror of the glyph channel's resolveSlot convention.
+        const hit = hits.grid;
+        const hitToken = (hit && typeof hit.token?.ownerOf === 'function')
+          ? hit.token.ownerOf(hit.slotIndex)
+          : hit?.token;
+        const gridEntry = (s.in && hitToken) ? entryForGrid(client.ctx.registry, hitToken) : null;
+        if (gridEntry && !s.gpuOk) {
+          s.gpuOk = true;
+          console.log(`[CanvasPicker] grid picking confirmed → ${gridEntry.id}`);
+        }
+        const handleToken = s.in ? (hits.handle?.token ?? null) : null;
+        // CROSS-CHANNEL PRIORITY. The channels don't share a depth buffer, so when both a
+        // grid and a control land under the cursor we decide which is in front here. A
+        // window's OWN control is always in front of its own panel; for different objects
+        // it's closest-to-camera wins — a cheap object-distance tiebreak, good enough until
+        // a per-pixel case needs real GPU depth. The loser is dropped so it neither hovers
+        // nor takes the click (the depth ordering a raycast gets for free).
+        let hoverEntry = gridEntry;
+        let activeHandle = handleToken;
+        if (handleToken && gridEntry && handleToken.grid !== gridEntry.grid && handleToken.button) {
+          const dHandle = c.position.distanceTo(handleToken.button.getWorldPosition(_pickWorld));
+          const dGrid = c.position.distanceTo(gridEntry.grid.getWorldPosition(_pickWorld));
+          if (dHandle <= dGrid) hoverEntry = null;   // control nearer → it occludes the grid behind
+          else activeHandle = null;                  // grid nearer → the control is hidden, ignore it
+        } else if (handleToken) {
+          hoverEntry = null;                         // same-window control (or empty grid) wins
+        }
+        // CONTAINER channel (corridor boxes) — LOWEST precedence. A grid/card or handle hover
+        // beats it, so over a card you select the card and the box only catches clicks in the
+        // EMPTY interior (→ drag the corridor); over empty space the box wins.
+        // PARKED: an Alt override to force container ≻ card even over a card plugs in here
+        // (`|| s.preferContainer`, set from a held modifier) once we work out why the held
+        // key wasn't reaching the resolve on this setup — see the picking memory.
+        const groupToken = s.in ? (hits.group?.token ?? null) : null;
+        if (groupToken) {
+          const groupEntry = entryForGrid(client.ctx.registry, groupToken);
+          if (groupEntry && !hoverEntry && !activeHandle) hoverEntry = groupEntry;
+        }
+        applyHandleHover(activeHandle, sx, sy);
+        applyHover(hoverEntry);
+        // Caret preview: only on the key-target grid, never under a control.
+        const entry = hoverEntry;
+        if (!entry || entry.type !== 'grid' || entry.id !== keyId) {
           applyGlyphHover(null, null);
-        });
-      }
+          return;
+        }
+        const slot = s.in ? resolveGlyphHitFor(entry.grid, hits.glyph) : null;
+        if (slot != null) applyGlyphHover(entry.grid.getRenderer(), slot);
+        else applyGlyphHover(null, null);
+      }).catch((err) => {
+        if (!s.gpuWarned) {
+          s.gpuWarned = true;
+          console.warn('[CanvasPicker] pick failed', err);
+        }
+        applyHover(null);
+        applyHandleHover(null);
+        applyGlyphHover(null, null);
+      }).finally(() => {
+        s.pickPending = false;
+      });
       return;
     }
+    s.pickWanted = false;
 
     // No picking system yet, or cursor outside the canvas → clear hover + grip flag.
     applyHover(null);
