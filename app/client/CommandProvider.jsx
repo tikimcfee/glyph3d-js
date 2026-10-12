@@ -24,6 +24,7 @@ import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.j
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
+import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -207,6 +208,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/ContentTreeLabels.js').default|null} */ contentTreeLabels: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeArrows.js').default|null} */ contentTreeArrows: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeMotion.js').default|null} */ contentTreeMotion: null,
+    /** @type {import('@glyph3d/core/collections/GlyphFarLod.js').default|null} */ glyphFarLod: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
     /** @type {import('@glyph3d/core/services/visual/OcclusionCuller.js').default|null} */ occlusionCuller: null,
     /** @type {(() => void)|null} */ syncCullCandidates: null,
@@ -269,7 +271,8 @@ function AgentRunner({ stateRef }) {
  * DockRunner — the camera-coupled per-frame systems: parks the camera-locked dock
  * ahead of the active camera and advances its tile animations, drives the
  * container labels' approach fade + hover grow (the hovered entity's ancestor
- * containers swell their names), and advances the relayout glide.
+ * containers swell their names), advances the relayout glide, and runs the
+ * glyph far-LOD.
  * Logic-only (returns null); guarded so it's a no-op until the effect wires the ctx.
  */
 function DockRunner({ stateRef }) {
@@ -299,6 +302,8 @@ function DockRunner({ stateRef }) {
     // camera. Pull, not push: devices stream at their own rate and the scene
     // samples once per rendered frame.
     c?.handPresence?.update(state.camera);
+    // Far-LOD last: every system above has moved what it moves this frame.
+    c?.glyphFarLod?.update(state.camera, state.size.height);
   });
   return null;
 }
@@ -428,6 +433,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // reports active, the ownership lines and label anchors refresh so the by-value
     // overlays track the gliding nodes). layout.motion dials it.
     state.ctx.contentTreeMotion = new ContentTreeMotion(contentTree);
+
+    // Far-LOD: a glyph field whose rows are under a pixel on screen stops drawing its glyphs;
+    // one backdrop quad of its mean ink stands in (<DockRunner/> ticks it; Display & glyph LOD dials it).
+    state.ctx.glyphFarLod = new GlyphFarLod(scene);
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns

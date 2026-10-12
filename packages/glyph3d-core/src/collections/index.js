@@ -3,6 +3,7 @@
  */
 
 export { default as CodeGrid } from './CodeGrid.js';
+export { default as GlyphFarLod, FAR_LOD_DEFAULTS } from './GlyphFarLod.js';
 export { default as Book } from './Book.js';
 export { default as AgentBooks } from './AgentBooks.js';
 export { default as DeltaBooks } from './DeltaBooks.js';

@@ -150,6 +150,23 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/glyph-cull-truth.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src
   ```
 
+- **`glyph-far-lod.test.mjs`** (headless) — GlyphFarLod's near/far decision exactly at the
+  threshold (perspective + orthographic, world scale), the nearest-point rule (a long file you
+  stand at the end of keeps its glyphs), the backdrop quad over the laid-out box, the tint
+  (mean LINEAR ink through the group tint, cover × group alpha, cached on buffer versions),
+  opt-outs, hidden ancestors, a grow past capacity, dispose.
+
+- **`far-lod-check.mjs`** — does a far file READ the same as glyphs or as its backdrop? Renders
+  the live scene FULL (every glyph) / LOD / BARE (backdrops at gain 0) at fit-all and three
+  closer poses, compares mean linear light over the TRANSITION BAND (far fields within 2× of the
+  threshold — the swap you'd see happen), sweeps the gain for the band's best fit, and fails if
+  a pixel outside the far rects moves or the backdrop reads no closer than bare panels. Deeper
+  fields are reported, not fitted: there FULL is the raster lottery (a fit-to-page 2,400-line
+  file draws near-black), the backdrop the truer picture.
+  ```
+  bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
+  ```
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —

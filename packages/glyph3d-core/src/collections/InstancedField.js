@@ -7,11 +7,24 @@
  */
 
 import * as THREE from 'three';
-import { InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT } from '../core/InstancedSlotBuffer.js';
+import {
+    InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID,
+} from '../core/InstancedSlotBuffer.js';
 import { createGlyphMaterial, GROUP_STRIDE, onGlyphWidthCompress } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
+
+/** Every live field, in creation order — what the far-LOD pass (GlyphFarLod) walks each frame. */
+const _liveFields = new Set();
+
+/** The live fields, in creation order. */
+export function liveInstancedFields() {
+    return _liveFields;
+}
+
+/** sRGB byte → linear, the shader's pow(c, 2.2) decode. */
+const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, k) => Math.pow(k / 255, 2.2));
 
 export default class InstancedField {
     /**
@@ -88,8 +101,14 @@ export default class InstancedField {
         this._layoutBounds = null;
         /** @private widest quad any slot can draw (max of advance and height lanes) */
         this._maxQuad = 0;
+        /** @private tallest cell any slot draws (the height lane's max) */
+        this._rowHeight = 0;
         /** @private */
         this._unWidth = onGlyphWidthCompress(() => this._stateExtent());
+        /** @private farTint()'s cache, keyed by the slot + group buffer versions it folded */
+        this._farTint = null;
+
+        _liveFields.add(this);
 
         if (this.scene) {
             this.scene.add(this.instanceMesh);
@@ -309,13 +328,16 @@ export default class InstancedField {
         if (!bounds) return;
         this._layoutBounds = { min: { ...bounds.min }, max: { ...bounds.max } };
         const f32 = this.slotBuffer.f32, n = this.slotBuffer.count;
-        let widest = 0;
+        let widest = 0, tallest = 0;
         for (let s = 0; s < n; s++) {
             const b = s * SLOT_FLOATS;
-            const w = Math.max(f32[b + LANE_ADVANCE], f32[b + LANE_HEIGHT]);
+            const h = f32[b + LANE_HEIGHT];
+            const w = Math.max(f32[b + LANE_ADVANCE], h);
             if (w > widest) widest = w;
+            if (h > tallest) tallest = h;
         }
         this._maxQuad = widest;
+        this._rowHeight = tallest;
         this._stateExtent();
     }
 
@@ -330,6 +352,65 @@ export default class InstancedField {
 
         if (!this.geometry.boundingSphere) this.geometry.boundingSphere = new THREE.Sphere();
         this.geometry.boundingBox.getBoundingSphere(this.geometry.boundingSphere);
+    }
+
+    /**
+     * What this field's glyphs average to from far away — the far-LOD backdrop's tint
+     * (glyph3d-rs `seg_tint`): the mean LINEAR ink colour of the drawn glyphs (each slot's
+     * colour through its group's tint, decoded as the shader does) and the ink cover, the
+     * share of the laid-out box their cells fill × the mean group alpha. Cached until the
+     * slots or the group table change (their buffer versions — every writer bumps them, or
+     * the GPU wouldn't see the write either).
+     * @returns {{ r: number, g: number, b: number, cover: number }|null} null before layout
+     */
+    farTint() {
+        const L = this._layoutBounds;
+        if (!L) return null;
+        const slotV = this._interleavedBuffer?.version ?? 0, groupV = this._groupTexture.version;
+        const c = this._farTint;
+        if (c && c.slotBuffer === this._interleavedBuffer && c.slotV === slotV && c.groupV === groupV) return c.tint;
+
+        const f32 = this.slotBuffer.f32, n = this.slotBuffer.count, G = this._groupData, gs = GROUP_STRIDE * 4;
+        let r = 0, g = 0, b = 0, cells = 0, area = 0, alpha = 0;
+        for (let s = 0; s < n; s++) {
+            const o = s * SLOT_FLOATS;
+            const h = f32[o + LANE_HEIGHT];
+            if (!(h > 0)) continue;                                 // height 0 draws nothing
+            const row = Math.round(f32[o + LANE_GROUP_ID]);
+            if (row < 0 || row >= this.maxGroups) continue;
+            const gb = row * gs;
+            const ga = G[gb + 11];
+            if (ga <= 0.01) continue;                               // the vertex stage culls these
+            const v = Math.round(f32[o + LANE_COLOR]);
+            const gr = G[gb + 8], gg = G[gb + 9], gB = G[gb + 10], blend = G[gb + 15];
+            if (gr === 1 && gg === 1 && gB === 1 && blend === 0) {
+                r += SRGB_TO_LINEAR[v & 0xff]; g += SRGB_TO_LINEAR[(v >> 8) & 0xff]; b += SRGB_TO_LINEAR[(v >> 16) & 0xff];
+            } else {                                                 // vColor = mix(iColor·g, g, blend)
+                const cr = (v & 0xff) / 255 * gr, cg = ((v >> 8) & 0xff) / 255 * gg, cb = ((v >> 16) & 0xff) / 255 * gB;
+                r += Math.pow(cr + (gr - cr) * blend, 2.2);
+                g += Math.pow(cg + (gg - cg) * blend, 2.2);
+                b += Math.pow(cb + (gB - cb) * blend, 2.2);
+            }
+            cells++;
+            area += f32[o + LANE_ADVANCE] * h;
+            alpha += ga;
+        }
+        const boxArea = Math.max((L.max.x - L.min.x) * (L.max.y - L.min.y), 1e-6);
+        const tint = cells === 0
+            ? { r: 0, g: 0, b: 0, cover: 0 }
+            : { r: r / cells, g: g / cells, b: b / cells, cover: Math.min(area / boxArea, 1) * (alpha / cells) };
+        this._farTint = { slotBuffer: this._interleavedBuffer, slotV, groupV, tint };
+        return tint;
+    }
+
+    /** The extent as laid out (pen + advance, no overdraw), in the field's own frame; null before layout. */
+    get layoutBounds() {
+        return this._layoutBounds;
+    }
+
+    /** The tallest glyph cell any slot draws — what one row of this field measures on screen. */
+    get rowHeight() {
+        return this._rowHeight;
     }
 
     /** Number of active rendered glyphs */
@@ -968,6 +1049,7 @@ export default class InstancedField {
 
     /** Dispose GPU and buffer resources */
     dispose() {
+        _liveFields.delete(this);
         this._unWidth?.();
         if (this.atlas?._live && typeof this.atlas._live.unregisterField === 'function') {
             this.atlas._live.unregisterField(this);

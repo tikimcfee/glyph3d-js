@@ -13,6 +13,7 @@ function setLabelPillStyle({ hairline, hairlineWidth } = {}) {
 }
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
+import { FAR_LOD_DEFAULTS } from '@glyph3d/core/collections/GlyphFarLod.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { LAYER_BAND, getLayerBandBias, setLayerBandBias, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
@@ -166,7 +167,7 @@ export const GROUPS = [
   { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance', columns: 2 },
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview', columns: 2 },
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · cursor · focus / hover / input colors', columns: 2 },
-  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control', columns: 2 },
+  { name: 'Display & glyph LOD', subtitle: 'font, atlas, width compress · minify / flicker control · far-LOD backdrops', columns: 2 },
   { name: 'Layer bands',        subtitle: 'z-fight control — depth bias per layer · background set-backs' },
   { name: 'Code grids',         subtitle: 'the layout preset new grids are born with', columns: 2 },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
@@ -744,6 +745,11 @@ export const SETTINGS = [
   { key: 'glyph.soften', label: 'Minify soften', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
   { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
   { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
+  // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest point
+  // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
+  // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.
+  { key: 'glyph.showGlyphsPx', label: 'Show glyphs from (px per row, 0 = always)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.showGlyphsPx, min: 0, max: 24, step: 0.25, apply: (ctx, v) => ctx.glyphFarLod?.setParam('showGlyphsPx', v) },
+  { key: 'glyph.backdropGain', label: 'Far backdrop strength (× ink cover)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.backdropGain, min: 0, max: 4, step: 0.05, apply: (ctx, v) => ctx.glyphFarLod?.setParam('backdropGain', v) },
 
 
   // Layer bands — the z-fight playground (docs/plans/z-order-transparency-reorg.md).

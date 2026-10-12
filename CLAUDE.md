@@ -140,6 +140,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
   `tools/glyph-cull-truth.mjs` checks every live quad against it. (Fields moved through the
   group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
+- **Far-LOD** (`collections/GlyphFarLod.js`): a culled field whose tallest row measures under
+  `glyph.showGlyphsPx` (default 1 px, at its box's point nearest the camera) stops drawing its
+  glyphs — it leaves the view camera's layer 0, so `visible` keeps its owners — and one
+  instanced quad of its mean ink colour (`InstancedField.farTint`; alpha = ink cover ×
+  `glyph.backdropGain`) stands in. All backdrops are one draw. Gates:
+  `tools/glyph-far-lod.test.mjs` (the decision + tint) and `tools/far-lod-check.mjs` (pixels).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.
