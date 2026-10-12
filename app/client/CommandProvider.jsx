@@ -427,14 +427,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // reports active, the ownership lines and label anchors refresh so the by-value
     // overlays track the gliding nodes). layout.motion dials it.
     state.ctx.contentTreeMotion = new ContentTreeMotion(contentTree);
-    applyGroupSettings(state.ctx, 'Tree');   // fold persisted file/dir-line toggles in at boot
-    applyGroupSettings(state.ctx, 'Labels'); // fold persisted container-label dials in at boot
-    applyGroupSettings(state.ctx, 'Motion'); // fold the persisted relayout-glide dials in at boot
-    applyGroupSettings(state.ctx, 'Loading'); // fold the streamed-build budget in at boot
-    applyGroupSettings(state.ctx, 'Appearance'); // set the configured interaction colors as the panel default before any window spawns
-    applyGroupSettings(state.ctx, 'Glyph LOD');  // fold persisted minification/LOD dials into the global glyph uniforms at boot
-    applyGroupSettings(state.ctx, 'Display & glyph LOD');
-    applyGroupSettings(state.ctx, 'Grid');       // set the configured default fold before any grid spawns (file.open / session restore)
+    applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
+    applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
+    applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns
+    applyGroupSettings(state.ctx, 'Display & glyph LOD'); // fold persisted minification/LOD dials into the global glyph uniforms at boot
+    applyGroupSettings(state.ctx, 'Code grids');         // set the configured default fold before any grid spawns (file.open / session restore)
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the
     // arrows anchor relative to each footprint origin — a debug instrument, toggle off when done.
@@ -532,11 +529,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const cameraDock = new CameraDock({ atlas: state.ctx.atlas });
     scene.add(cameraDock);
     state.ctx.cameraDock = cameraDock;
-    // Fold the persisted Dock settings into the freshly-built dock — its apply()s only
-    // fire on a user change, so without this a stored value would wait until next touch.
-    applyGroupSettings(state.ctx, 'Dock');
-    // Same boot-fold for the root view-frame knobs (Settings ▸ Frame) → CameraDock.setParam.
-    applyGroupSettings(state.ctx, 'Frame');
+    // Fold the persisted dock + root view-frame settings into the freshly-built dock — its
+    // apply()s only fire on a user change, so without this a stored value would wait until next touch.
+    applyGroupSettings(state.ctx, 'Dock & frame');
     // Removal cascade: however a window is closed (terminal.kill→close, grid.remove, scene clear),
     // its registry entry vanishes — and the holders self-heal off that single event. Attention
     // releases focus/keystroke-target from the gone id (else input routes to a corpse); the dock
@@ -564,7 +559,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // it on must re-track the current registry.
     state.ctx.syncCullCandidates = syncCullCandidates;
     syncCullCandidates();
-    applyGroupSettings(state.ctx, 'Culling');
+    applyGroupSettings(state.ctx, 'Culling & loading');  // + the streamed-build budget and the hover pick rate
 
     // Liveness is the registry alone — agent and delta books register their roots too.
     // `wasLive` tracks the previous change's id set, so a surface's durable facts drop only

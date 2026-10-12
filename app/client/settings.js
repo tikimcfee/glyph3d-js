@@ -973,8 +973,10 @@ export function schemeSettingsOpts(scheme) {
  * @param {AppContext} ctx @param {string} group
  */
 export function applyGroupSettings(ctx, group) {
-  for (const def of SETTINGS) {
-    if (def.group === group && !def.reload) def.apply?.(ctx, getSetting(def.key));
+  const defs = SETTINGS.filter((def) => def.group === group);
+  if (defs.length === 0) throw new Error(`applyGroupSettings: no setting is in group "${group}"`);
+  for (const def of defs) {
+    if (!def.reload) def.apply?.(ctx, getSetting(def.key));
   }
 }
 
