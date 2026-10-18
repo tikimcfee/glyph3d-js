@@ -134,8 +134,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **Frustum culling** is three's built-in per-object cull, on by default for glyph fields
   and panels. three can't compute an instanced field's bounds (it sees only the base quad),
   so each field STATES them: `InstancedField.setLayoutExtent` takes the laid-out extent and
-  adds the shader's right-side overdraw (emoji quads, the width dial) before writing
-  `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
+  adds the shader's right-side overdraw (an emoji quad is as wide as it is tall) before
+  writing `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
   `tools/glyph-cull-truth.mjs` checks every live quad against it. (Fields moved through the
   group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
 - **Far-LOD** (`collections/GlyphFarLod.js`): a culled field whose tallest row measures under

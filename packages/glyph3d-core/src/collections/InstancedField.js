@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import {
     InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID,
 } from '../core/InstancedSlotBuffer.js';
-import { createGlyphMaterial, GROUP_STRIDE, onGlyphWidthCompress } from '../core/glyphMaterial.js';
+import { createGlyphMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
@@ -103,8 +103,6 @@ export default class InstancedField {
         this._maxQuad = 0;
         /** @private tallest cell any slot draws (the height lane's max) */
         this._rowHeight = 0;
-        /** @private */
-        this._unWidth = onGlyphWidthCompress(() => this._stateExtent());
         /** @private farTint()'s cache, keyed by the slot + group buffer versions it folded */
         this._farTint = null;
 
@@ -319,9 +317,9 @@ export default class InstancedField {
      * State this field's extent to three — geometry.boundingBox + boundingSphere, which three
      * frustum-culls, depth-sorts, and raycasts by. `bounds` is the extent as LAID OUT (pens +
      * advances, cell-center y ± height/2). The vertex shader can draw past it on the right: an
-     * emoji quad is `height` wide, and every quad scales by uWidthCompress. So the stated box
-     * adds one widest-quad × max(compress, 1) to max.x — a quad never extends further than that
-     * past the last pen. Call after the slots are written (the widest quad is read off them).
+     * emoji quad is `height` wide. So the stated box adds one widest quad to max.x — a quad never
+     * extends further than that past the last pen. Call after the slots are written (the widest
+     * quad is read off them).
      * @param {{ min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number} }} bounds
      */
     setLayoutExtent(bounds) {
@@ -345,7 +343,7 @@ export default class InstancedField {
     _stateExtent() {
         const L = this._layoutBounds;
         if (!L) return;
-        const overdraw = this._maxQuad * Math.max(this.widthCompress, 1);
+        const overdraw = this._maxQuad;
         if (!this.geometry.boundingBox) this.geometry.boundingBox = new THREE.Box3();
         this.geometry.boundingBox.min.set(L.min.x, L.min.y, L.min.z);
         this.geometry.boundingBox.max.set(L.max.x + overdraw, L.max.y, L.max.z);
@@ -428,10 +426,6 @@ export default class InstancedField {
 
     get groupTexture() {
         return this._groupTexture;
-    }
-
-    get widthCompress() {
-        return this.material?.uniforms?.uWidthCompress?.value || 1.0;
     }
 
     /** Clear all glyphs */
@@ -828,10 +822,6 @@ export default class InstancedField {
         return this._slugData?.glyphMapTexture?.image?.width || 1024;
     }
 
-    get widthCompress() {
-        return this.material?.uniforms?.uWidthCompress?.value || 1.0;
-    }
-
     static encodeHighlightAlpha(fillOpacity) {
         return fillOpacity > 0 ? Math.min(255, Math.max(1, (fillOpacity * 255 + 0.5) | 0)) : 0;
     }
@@ -1050,7 +1040,6 @@ export default class InstancedField {
     /** Dispose GPU and buffer resources */
     dispose() {
         _liveFields.delete(this);
-        this._unWidth?.();
         if (this.atlas?._live && typeof this.atlas._live.unregisterField === 'function') {
             this.atlas._live.unregisterField(this);
         }

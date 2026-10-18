@@ -9,7 +9,7 @@
  *
  * gridBackground: how far a grid's / terminal's wall sits behind its text — read by
  * CodeGrid / TerminalGrid / GridBackground at build, set live by the
- * `band.gridBgGap` setting (which also nudges every on-screen background).
+ * `appearance.backgroundSetBack` setting (which also nudges every on-screen background).
  */
 
 /** Band names — pass these to getBandDistance / setBandDistance. */

@@ -11,9 +11,7 @@ export {
     setGlyphLodParam,
     getGlyphLodParams,
     GLYPH_LOD_DEFAULTS,
-    setGlyphWidthCompress,
-    getGlyphWidthCompress,
-    GLYPH_WIDTH_COMPRESS_DEFAULT,
+    GLYPH_GREEK_MODES,
 } from './glyphMaterial.js';
 export { computeCellMetrics, deriveCharSize, LINE_PITCH, LETTER_SPACING } from './cellMetrics.js';
 export { RENDER_ORDER } from './renderOrder.js';

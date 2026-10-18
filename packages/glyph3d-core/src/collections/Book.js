@@ -81,7 +81,7 @@ import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
 
 /** Page-face fallbacks when fit() is driven directly (a scheme passes its full merged
  *  opts; a bare verb may pass only page dims). */
-const PAGE_FACE_DEFAULTS = { surface: true, surfacePad: 0, surfaceDepth: 8 };
+export const PAGE_FACE_DEFAULTS = Object.freeze({ surface: true, surfacePad: 0, surfaceDepth: 8 });
 
 /** Deck (rolodex) defaults — multi-sheet books only; a one-sheet book never moves.
  *  `order` is the wrap DIRECTION: −1 reads by RECENCY (an agent book — newer sheets
@@ -677,7 +677,7 @@ export default class Book extends BoundedObject3D {
         const out = new THREE.Box3();
         const o = this._fitOpts;
         if (!o) return out;
-        const zPad = (o.surfaceDepth ?? 8) + 2;
+        const zPad = (o.surfaceDepth ?? PAGE_FACE_DEFAULTS.surfaceDepth) + 2;
         const tmpMin = new THREE.Vector3(), tmpMax = new THREE.Vector3();
         for (const sheet of this.sheets) {
             const sides = (sheet.verso ? 1 : 0) + (sheet.recto ? 1 : 0);

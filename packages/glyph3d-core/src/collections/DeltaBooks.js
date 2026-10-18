@@ -28,7 +28,7 @@
  */
 
 import * as THREE from 'three';
-import Book from './Book.js';
+import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FieldLabel from './FieldLabel.js';
@@ -45,7 +45,7 @@ export const DELTA_BOOKS_DEFAULTS = {
     face: true,                 // render the page faces behind the content
     faceColor: 0x0a0a1e,        // page-face fill
     faceOpacity: 0.85,
-    faceDepth: 6,
+    faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth,
     // -- the deck (rolodex) --------------------------------------------------------
     zPitch: 90,                 // deck pitch between file sheets
     pagerLerp: 9,

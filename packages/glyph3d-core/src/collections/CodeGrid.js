@@ -1136,10 +1136,10 @@ class CodeGrid extends FramedGlyphField {
     }
 
     /**
-     * Live nudge of the background's set-back behind the text (the `band.gridBgGap`
-     * dial). The plane always sits at (base − gap) — base 0 for the fixed path, the
-     * content zMin for the auto-sized path — so a gap change is a pure z shift by the
-     * delta; no relayout.
+     * Live nudge of the background's set-back behind the text (the
+     * `appearance.backgroundSetBack` dial). The plane always sits at (base − gap) — base 0 for
+     * the fixed path, the content zMin for the auto-sized path — so a gap change is a pure z
+     * shift by the delta; no relayout.
      */
     refreshBackground(gap) {
         if (!this._background) return;

@@ -142,10 +142,10 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
 
 - **`glyph-cull-truth.mjs`** — three culls by each field's STATED bounds; this checks every
-  live quad, built the way the vertex shader builds it (emoji width, the width dial), against
-  its mesh's `geometry.boundingBox` — across a dir load, every layout preset, an arranged grid,
-  and an in-page terminal (fed bytes; no tmux), at width-dial 1 and 3. Run after touching
-  `setLayoutExtent`, any extent producer, or the glyph vertex shader.
+  live quad, built the way the vertex shader builds it (emoji width), against its mesh's
+  `geometry.boundingBox` — across a dir load, every layout preset, an arranged grid, and an
+  in-page terminal (fed bytes; no tmux). Run after touching `setLayoutExtent`, any extent
+  producer, or the glyph vertex shader.
   ```
   bun tools/glyph-cull-truth.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src
   ```

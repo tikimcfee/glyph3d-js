@@ -47,8 +47,6 @@ uniform int glyphMapWidth;
 uniform sampler2D groupTexture;
 uniform int maxGroups;
 
-uniform float uWidthCompress;
-
 // Optional per-glyph highlight: RGBA8 DataTexture (1024 wide, wrapped)
 uniform sampler2D highlightTexture;
 uniform int hasHighlight;
@@ -77,11 +75,10 @@ void main() {
 
     // Quad sizing: bitmap emoji get square quad (height x height); outline gets advance
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
-    float kW = uWidthCompress > 0.0 ? uWidthCompress : 1.0;
 
     // Local quad: pen origin is at left edge (x=0) and cell vertical center (y=0)
     // uv runs [0..1, 0..1]
-    vec3 aligned = vec3(uv.x * quadW * kW, (uv.y - 0.5) * aExtent.y, 0.0) + aPos;
+    vec3 aligned = vec3(uv.x * quadW, (uv.y - 0.5) * aExtent.y, 0.0) + aPos;
 
     // Group transform lookup via texelFetch
     int grow = clamp(int(aGroupId + 0.5), 0, maxGroups - 1);
@@ -152,8 +149,8 @@ uniform int emojiCols;
 uniform int emojiRows;
 
 // Greeking & LOD dials
-uniform int uGreekMode;       // 0 = disabled, 1 = smooth blend, 2 = pure hard bypass
-uniform float uGreekOnsetPx;  // on-screen glyph px/em onset (default: 10.0)
+uniform int uGreekMode;       // index into GLYPH_GREEK_MODES: 0 off, 1 smooth, 2 hard
+uniform float uGreekOnsetPx;  // on-screen quad height (px) below which a glyph greeks
 uniform float uDilatePx;      // 0.75 — stroke fattening half-width at full zoom-out
 uniform float uSoften;        // 0.45 — AA ramp widening factor
 uniform float uMinLo;         // 0.06 — fuzz onset (footprint)
@@ -401,8 +398,15 @@ export const GLYPH_LOD_DEFAULTS = Object.freeze({
     minLo: 0.06,
     minHi: 0.20,
     greekMode: 0,
-    greekOnsetPx: 0.0,
+    greekOnsetPx: 10.0,
 });
+
+/**
+ * Greeking — a small glyph drawn as a bar where its ink would be. `smooth` blends coverage
+ * toward the bar from `greekOnsetPx` down to 0.45 × it; `hard` swaps to the bar outright below
+ * it. A fully greeked glyph skips the curve loop. The `greekMode` param indexes this list.
+ */
+export const GLYPH_GREEK_MODES = Object.freeze(['off', 'smooth', 'hard']);
 
 /** Each LOD param's shader uniform — the only keys setGlyphLodParam accepts. */
 const LOD_UNIFORMS = Object.freeze({
@@ -414,13 +418,8 @@ const LOD_UNIFORMS = Object.freeze({
     greekOnsetPx: 'uGreekOnsetPx',
 });
 
-export const GLYPH_WIDTH_COMPRESS_DEFAULT = 1.0;
-
 const _activeMaterials = new Set();
-/** Called after the width dial moves — a quad's width scales with it, so fields restate extent. */
-const _widthCompressListeners = new Set();
 const _currentLodParams = { ...GLYPH_LOD_DEFAULTS };
-let _currentWidthCompress = GLYPH_WIDTH_COMPRESS_DEFAULT;
 
 export function setGlyphLodParam(key, value) {
     const uName = LOD_UNIFORMS[key];
@@ -436,31 +435,6 @@ export function setGlyphLodParam(key, value) {
 
 export function getGlyphLodParams() {
     return { ..._currentLodParams };
-}
-
-export function setGlyphWidthCompress(value) {
-    if (!Number.isFinite(value)) return;
-    _currentWidthCompress = value;
-    for (const mat of _activeMaterials) {
-        if (mat.uniforms && mat.uniforms.uWidthCompress) {
-            mat.uniforms.uWidthCompress.value = value;
-        }
-    }
-    for (const fn of _widthCompressListeners) fn(value);
-}
-
-/**
- * Observe the width dial (setGlyphWidthCompress).
- * @param {(value: number) => void} fn
- * @returns {() => void} unsubscribe
- */
-export function onGlyphWidthCompress(fn) {
-    _widthCompressListeners.add(fn);
-    return () => { _widthCompressListeners.delete(fn); };
-}
-
-export function getGlyphWidthCompress() {
-    return _currentWidthCompress;
 }
 
 /**
@@ -488,11 +462,10 @@ export function createGlyphMaterial(options = {}) {
         emojiTexture: { value: emojiTex },
         emojiCols: { value: options.emojiCols || 16 },
         emojiRows: { value: options.emojiRows || 16 },
-        uWidthCompress: { value: _currentWidthCompress },
         highlightTexture: { value: null },
         hasHighlight: { value: 0 },
-        uGreekMode: { value: _currentLodParams.greekMode ?? 0 },
-        uGreekOnsetPx: { value: _currentLodParams.greekOnsetPx ?? 0.0 },
+        uGreekMode: { value: _currentLodParams.greekMode },
+        uGreekOnsetPx: { value: _currentLodParams.greekOnsetPx },
         uDilatePx: { value: _currentLodParams.dilatePx },
         uSoften: { value: _currentLodParams.soften },
         uMinLo: { value: _currentLodParams.minLo },

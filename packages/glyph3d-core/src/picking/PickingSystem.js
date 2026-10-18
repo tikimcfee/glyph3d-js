@@ -78,7 +78,6 @@ uniform highp usampler2D glyphMapTexture;
 uniform int glyphMapWidth;
 uniform sampler2D groupTexture;
 uniform int maxGroups;
-uniform float uWidthCompress;
 uniform int uBasePickingId;
 
 flat out int vPickingId;
@@ -95,9 +94,7 @@ void main() {
     }
 
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
-    float kW = uWidthCompress > 0.0 ? uWidthCompress : 1.0;
-
-    vec3 aligned = vec3(uv.x * quadW * kW, (uv.y - 0.5) * aExtent.y, 0.0) + aPos;
+    vec3 aligned = vec3(uv.x * quadW, (uv.y - 0.5) * aExtent.y, 0.0) + aPos;
 
     int grow = int(aGroupId + 0.5);
     if (grow < 0 || grow >= maxGroups) {
@@ -251,7 +248,6 @@ export class PickingSystem {
                 maxGroups: { value: gf?.maxGroups || 1 },
                 glyphMapTexture: { value: gf?.glyphMapTexture || dummyGlyphMap },
                 glyphMapWidth: { value: gf?.glyphMapWidth || 1 },
-                uWidthCompress: { value: gf?.widthCompress || 1.0 },
             },
             side: THREE.DoubleSide,
             depthWrite: true,
@@ -355,7 +351,6 @@ export class PickingSystem {
                     if (gf?.maxGroups) entry.material.uniforms.maxGroups.value = gf.maxGroups;
                     if (gf?.glyphMapTexture) entry.material.uniforms.glyphMapTexture.value = gf.glyphMapTexture;
                     if (gf?.glyphMapWidth) entry.material.uniforms.glyphMapWidth.value = gf.glyphMapWidth;
-                    if (gf?.widthCompress != null) entry.material.uniforms.uWidthCompress.value = gf.widthCompress;
                 }
             } else {
                 if (entry.material?.uniforms?.uBasePickingId) {

@@ -19,9 +19,7 @@ export {
     setGlyphLodParam,
     getGlyphLodParams,
     GLYPH_LOD_DEFAULTS,
-    setGlyphWidthCompress,
-    getGlyphWidthCompress,
-    GLYPH_WIDTH_COMPRESS_DEFAULT,
+    GLYPH_GREEK_MODES,
 } from './core/glyphMaterial.js';
 
 // Collections - batched text abstractions

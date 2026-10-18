@@ -1,8 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import {
-  setGlyphLodParam, GLYPH_LOD_DEFAULTS,
-  setGlyphWidthCompress, GLYPH_WIDTH_COMPRESS_DEFAULT,
+  setGlyphLodParam, GLYPH_LOD_DEFAULTS, GLYPH_GREEK_MODES,
 } from '@glyph3d/core';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
@@ -12,6 +11,7 @@ import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/cor
 import { LAYER_BAND, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
 import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
+import { PAGE_FACE_DEFAULTS } from '@glyph3d/core/collections/Book.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
@@ -343,17 +343,8 @@ export const SETTINGS = [
   { key: 'env.majorCell', label: 'Major cell size', group: 'Environment', type: 'number', default: 2000, min: 100, max: 20000, step: 100 },
   { key: 'env.fadeFar', label: 'Grid extent (fade)', group: 'Environment', type: 'number', default: 7000, min: 500, max: 30000, step: 500 },
   {
-    key: 'atlas.fontSize', label: 'Font size (px)', group: 'Display & glyph LOD',
+    key: 'glyph.fontSize', label: 'Font size (px)', group: 'Display & glyph LOD',
     type: 'number', default: 48, min: 16, max: 96, step: 1, reload: true,
-  },
-  // Width compression — condense glyph ink along x, in place, aligned to leading. A
-  // live global shader dial (one uniform across every glyph material): the quad narrows
-  // and re-anchors so its left edge stays at the cell anchor; layout advance, picking,
-  // and carets are untouched. 1 = off. A feel-test knob for condensed reading.
-  {
-    key: 'glyph.widthCompress', label: 'Width compress', group: 'Display & glyph LOD',
-    type: 'number', default: GLYPH_WIDTH_COMPRESS_DEFAULT, min: 0.1, max: 3, step: 0.05,
-    apply: (_ctx, v) => setGlyphWidthCompress(v),
   },
   {
     key: 'relay.autoConnect', label: 'Auto-connect to relay on load', group: 'Connection',
@@ -406,7 +397,7 @@ export const SETTINGS = [
   },
   // How far a grid's / terminal's background wall sits behind its text. Live-nudges every
   // on-screen background by the z delta (no relayout); new ones read it at birth.
-  { key: 'band.gridBgGap', label: 'Background set-back (behind text)', group: 'Theme & appearance', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
+  { key: 'appearance.backgroundSetBack', label: 'Background set-back (behind text)', group: 'Theme & appearance', type: 'number', default: getBandDistance(LAYER_BAND.GRID_BACKGROUND), min: 0, max: 50, step: 0.1, apply: gridBgGapParam },
   // Terminal cursor — the block that marks where typing lands. Color + the focused (solid) fill +
   // the unfocused (hollow) outline width, each pushed live to every terminal. Defaults shared with
   // the TerminalGrid constructor (TERMINAL_CURSOR_DEFAULTS) so the panel and a fresh terminal agree.
@@ -706,6 +697,10 @@ export const SETTINGS = [
   { key: 'glyph.soften', label: 'Minify soften', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
   { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
   { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
+  // Greeking — below the onset size a glyph draws as a bar where its ink would be (smooth blends
+  // into it, hard swaps outright). Onset = the glyph quad's on-screen height in px.
+  { key: 'glyph.greek', label: 'Greeking', group: 'Display & glyph LOD', type: 'enum', options: [...GLYPH_GREEK_MODES], default: GLYPH_GREEK_MODES[GLYPH_LOD_DEFAULTS.greekMode], apply: (_ctx, v) => setGlyphLodParam('greekMode', GLYPH_GREEK_MODES.indexOf(v)) },
+  { key: 'glyph.greekOnsetPx', label: 'Greek below (px tall)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.greekOnsetPx, min: 0, max: 96, step: 0.5, apply: lodParam('greekOnsetPx') },
   // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest point
   // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
   // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.
@@ -756,7 +751,7 @@ export const SETTINGS = [
   { key: 'books.surfaceOpacity', label: 'Page opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.85, min: 0, max: 1, step: 0.05, apply: bookPageParam('faceOpacity', 'surfaceOpacity') },
   // The face's geometric set-back behind its content. Fans out like the other page dials
   // (agent + delta cfg faceDepth + library layout opt).
-  { key: 'books.surfaceDepth', label: 'Page face set-back', group: 'Books', scheme: 'library', type: 'number', default: 8, min: 0, max: 200, step: 1, apply: bookPageParam('faceDepth', 'surfaceDepth') },
+  { key: 'books.surfaceDepth', label: 'Page face set-back', group: 'Books', scheme: 'library', type: 'number', default: PAGE_FACE_DEFAULTS.surfaceDepth, min: 0, max: 200, step: 1, apply: bookPageParam('faceDepth', 'surfaceDepth') },
   { key: 'books.cover', label: 'Directory boxes (covers)', group: 'Books', scheme: 'library', type: 'bool', default: true, apply: coverParam('cover', 'cover') },
   { key: 'books.coverColor', label: 'Box tint (library)', group: 'Books', scheme: 'library', type: 'color', default: '#5a7ea8', apply: libraryParam('coverColor') },
   { key: 'books.coverOpacity', label: 'Box fill opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.06, min: 0, max: 1, step: 0.01, apply: coverParam('coverOpacity', 'coverOpacity') },

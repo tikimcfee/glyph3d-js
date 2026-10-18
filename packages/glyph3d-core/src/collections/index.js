@@ -4,7 +4,7 @@
 
 export { default as CodeGrid } from './CodeGrid.js';
 export { default as GlyphFarLod, FAR_LOD_DEFAULTS } from './GlyphFarLod.js';
-export { default as Book } from './Book.js';
+export { default as Book, PAGE_FACE_DEFAULTS } from './Book.js';
 export { default as AgentBooks } from './AgentBooks.js';
 export { default as DeltaBooks } from './DeltaBooks.js';
 export { default as SearchBook, SEARCH_BOOK_DEFAULTS } from './SearchBook.js';

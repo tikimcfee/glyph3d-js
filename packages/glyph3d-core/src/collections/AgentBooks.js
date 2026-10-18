@@ -35,7 +35,7 @@
  */
 
 import * as THREE from 'three';
-import Book from './Book.js';
+import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
@@ -58,7 +58,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     face: true,                 // render the page faces behind the content
     faceColor: 0x0a0a1e,        // page-face fill (the dark window wall)
     faceOpacity: 0.85,          // page-face opacity
-    faceDepth: 6,               // how far behind the content each face sits
+    faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth, // how far behind the content each face sits
     // -- the deck (rolodex) --------------------------------------------------------
     zPitch: 90,                 // deck pitch between sheets (time depth) — fly-through room
     pagerLerp: 9,               // per-sheet z-slot easing rate (higher = snappier)

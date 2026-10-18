@@ -5,14 +5,13 @@
  * extent (InstancedField.setLayoutExtent). A quad drawn outside that box can be culled while
  * on screen. This walks every glyph mesh in the live scene and tests every slot's ACTUAL quad,
  * built the way the vertex shader builds it (glyphMaterial: mode-1 emoji quads are height
- * wide, every quad × uWidthCompress, y = center ± height/2), against geometry.boundingBox.
+ * wide, y = center ± height/2), against geometry.boundingBox.
  *
- *   bun tools/glyph-cull-truth.mjs --dir ABS [--file ABS] [--url URL] [--relay 8099] [--compress K,K,…]
+ *   bun tools/glyph-cull-truth.mjs --dir ABS [--file ABS] [--url URL] [--relay 8099]
  *
  * Scenes: the --dir load (FileRows in the content tree), one opened CodeGrid per layout
  * preset, an arranged grid (structure.grid), and a TerminalGrid fed bytes in-page (no relay
- * terminal — nothing touches tmux). Each check runs at every --compress value (default 1,3:
- * the dial's default and its max).
+ * terminal — nothing touches tmux).
  *
  * Needs Vite + a PRIVATE relay serving a scratch root (see tools/frame-profile.mjs).
  * Exit 1 if any quad escapes its mesh's bounds.
@@ -25,7 +24,6 @@ const arg = (k, d = null) => { const i = process.argv.indexOf(k); return i > 0 ?
 const URL = arg('--url', 'http://localhost:5173/');
 const RELAY = Number(arg('--relay', 8099));
 const DIR = arg('--dir');
-const COMPRESS = (arg('--compress', '1,3')).split(',').map(Number);
 if (!DIR) { console.error('--dir ABS is required (inside the relay root)'); process.exit(2); }
 const FILE = arg('--file', resolve(dirname(DIR), 'mixed/emoji_tabs_wide.txt'));
 const JSFILE = arg('--js', resolve(DIR, 'collections/StrataLayout.js'));
@@ -73,52 +71,47 @@ try {
             if (/^ERR|error/i.test(t)) console.log(`  [${v.split(' ')[0]}] ${t.slice(0, 110)}`);
             await app.waitFor(1500);
         }
-        for (const k of COMPRESS) {
-            await app.cmd(`settings.set glyph.widthCompress ${k}`);
-            const r = await app.evalPage(async (k) => {
-                const c = window.__glyphClient;
-                await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
-                const meshes = [];
-                c.ctx.scene.traverse((o) => { if (o.userData?.glyphField && o.geometry?.instanceCount > 0) meshes.push(o); });
-                let slots = 0, escaped = 0, worst = null, noBox = 0, culledOn = 0;
-                const byKind = {};
-                const kindOf = (m) => { for (let p = m.parent; p; p = p.parent) if (/Grid|FileRow|FieldLabel|Book|Labels/.test(p.constructor.name)) return p.constructor.name; return m.parent?.constructor?.name ?? '?'; };
-                for (const m of meshes) {
-                    const f = m.userData.glyphField;
-                    if (m.frustumCulled) culledOn++;
-                    const box = m.geometry.boundingBox;
-                    if (!box && !m.frustumCulled) continue;   // three won't cull it — no claim to check
-                    if (!box) { noBox++; byKind[`${kindOf(m)}(no bounds)`] = (byKind[`${kindOf(m)}(no bounds)`] ?? 0) + 1; continue; }
-                    const map = f.glyphMapTexture?.image?.data, mapW = f.glyphMapWidth;
-                    const kW = m.material.uniforms.uWidthCompress?.value || 1;
-                    const f32 = f.slotBuffer.f32, n = m.geometry.instanceCount;
-                    for (let s = 0; s < n; s++) {
-                        const b = s * 8, x = f32[b], y = f32[b + 1], z = f32[b + 2];
-                        const gid = Math.round(f32[b + 3]), adv = f32[b + 6], h = f32[b + 7];
-                        if (h === 0) continue;   // hidden (arranger park): draws nothing
-                        const mode = map ? map[(gid % mapW + Math.floor(gid / mapW) * mapW) * 4 + 2] : 0;
-                        const w = (mode === 1 ? h : adv) * kW;
-                        slots++;
-                        const eps = 1e-3;
-                        const out = Math.max(box.min.x - x, x + w - box.max.x, box.min.y - (y - h / 2), (y + h / 2) - box.max.y, box.min.z - z, z - box.max.z);
-                        if (out > eps) {
-                            escaped++;
-                            const kk = kindOf(m); byKind[kk] = (byKind[kk] ?? 0) + 1;
-                            if (!worst || out > worst.by) {
-                                const axis = ['-x', '+x', '-y', '+y', '-z', '+z'][[box.min.x - x, x + w - box.max.x, box.min.y - (y - h / 2), (y + h / 2) - box.max.y, box.min.z - z, z - box.max.z].indexOf(out)];
-                                worst = { by: +out.toFixed(3), axis, mesh: kindOf(m), slot: s, mode, h: +h.toFixed(3), box: [box.min.y.toFixed(2), box.max.y.toFixed(2), box.min.z.toFixed(2), box.max.z.toFixed(2)].join('|'), at: [x, y, z].map((v) => +v.toFixed(2)) };
-                            }
+        const r = await app.evalPage(async () => {
+            const c = window.__glyphClient;
+            await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+            const meshes = [];
+            c.ctx.scene.traverse((o) => { if (o.userData?.glyphField && o.geometry?.instanceCount > 0) meshes.push(o); });
+            let slots = 0, escaped = 0, worst = null, noBox = 0, culledOn = 0;
+            const byKind = {};
+            const kindOf = (m) => { for (let p = m.parent; p; p = p.parent) if (/Grid|FileRow|FieldLabel|Book|Labels/.test(p.constructor.name)) return p.constructor.name; return m.parent?.constructor?.name ?? '?'; };
+            for (const m of meshes) {
+                const f = m.userData.glyphField;
+                if (m.frustumCulled) culledOn++;
+                const box = m.geometry.boundingBox;
+                if (!box && !m.frustumCulled) continue;   // three won't cull it — no claim to check
+                if (!box) { noBox++; byKind[`${kindOf(m)}(no bounds)`] = (byKind[`${kindOf(m)}(no bounds)`] ?? 0) + 1; continue; }
+                const map = f.glyphMapTexture?.image?.data, mapW = f.glyphMapWidth;
+                const f32 = f.slotBuffer.f32, n = m.geometry.instanceCount;
+                for (let s = 0; s < n; s++) {
+                    const b = s * 8, x = f32[b], y = f32[b + 1], z = f32[b + 2];
+                    const gid = Math.round(f32[b + 3]), adv = f32[b + 6], h = f32[b + 7];
+                    if (h === 0) continue;   // hidden (arranger park): draws nothing
+                    const mode = map ? map[(gid % mapW + Math.floor(gid / mapW) * mapW) * 4 + 2] : 0;
+                    const w = mode === 1 ? h : adv;
+                    slots++;
+                    const eps = 1e-3;
+                    const out = Math.max(box.min.x - x, x + w - box.max.x, box.min.y - (y - h / 2), (y + h / 2) - box.max.y, box.min.z - z, z - box.max.z);
+                    if (out > eps) {
+                        escaped++;
+                        const kk = kindOf(m); byKind[kk] = (byKind[kk] ?? 0) + 1;
+                        if (!worst || out > worst.by) {
+                            const axis = ['-x', '+x', '-y', '+y', '-z', '+z'][[box.min.x - x, x + w - box.max.x, box.min.y - (y - h / 2), (y + h / 2) - box.max.y, box.min.z - z, z - box.max.z].indexOf(out)];
+                            worst = { by: +out.toFixed(3), axis, mesh: kindOf(m), slot: s, mode, h: +h.toFixed(3), box: [box.min.y.toFixed(2), box.max.y.toFixed(2), box.min.z.toFixed(2), box.max.z.toFixed(2)].join('|'), at: [x, y, z].map((v) => +v.toFixed(2)) };
                         }
                     }
                 }
-                return { meshes: meshes.length, culledOn, slots, escaped, noBox, worst, byKind };
-            }, k);
-            const ok = r.escaped === 0 && r.noBox === 0;
-            if (!ok) failed++;
-            console.log(`${ok ? '✓' : '✗'} ${stage.name.padEnd(28)} compress ${String(k).padEnd(4)} meshes ${r.meshes} (culled ${r.culledOn}) · ${r.slots} quads · ${r.escaped} escape${r.noBox ? ` · ${r.noBox} with NO bounds` : ''}${r.escaped || r.noBox ? ` · by kind ${JSON.stringify(r.byKind)}` : ''}${r.worst ? `\n      worst ${JSON.stringify(r.worst)}` : ''}`);
-        }
+            }
+            return { meshes: meshes.length, culledOn, slots, escaped, noBox, worst, byKind };
+        });
+        const ok = r.escaped === 0 && r.noBox === 0;
+        if (!ok) failed++;
+        console.log(`${ok ? '✓' : '✗'} ${stage.name.padEnd(28)} meshes ${r.meshes} (culled ${r.culledOn}) · ${r.slots} quads · ${r.escaped} escape${r.noBox ? ` · ${r.noBox} with NO bounds` : ''}${r.escaped || r.noBox ? ` · by kind ${JSON.stringify(r.byKind)}` : ''}${r.worst ? `\n      worst ${JSON.stringify(r.worst)}` : ''}`);
     }
-    await app.cmd('settings.reset glyph.widthCompress');
     if (app.errors.length) console.log('page errors:', JSON.stringify(app.errors.slice(0, 3)));
 } finally {
     await browser.close();

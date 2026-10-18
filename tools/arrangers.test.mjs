@@ -163,9 +163,9 @@ console.log('StructureLayout');
     ok(cb === grid._arrangedExtent || (near(cb.min.x, grid._arrangedExtent.min.x) && near(cb.max.y, grid._arrangedExtent.max.y)),
         'content bounds are the arranged extent');
     // three's cull box = the arranged extent + the shader's right-side overdraw (one widest
-    // quad × max(widthCompress, 1) — InstancedField.setLayoutExtent).
+    // quad — InstancedField.setLayoutExtent).
     const cull = grid._renderer.geometry.boundingBox;
-    const r = grid._renderer, overdraw = r._maxQuad * Math.max(r.widthCompress, 1);
+    const r = grid._renderer, overdraw = r._maxQuad;
     ok(overdraw > 0 && near(cull.min.x, cb.min.x) && near(cull.max.x, cb.max.x + overdraw) && near(cull.min.y, cb.min.y) && near(cull.max.y, cb.max.y),
         `cull box is the arranged extent + overdraw (max.x ${cull.max.x.toFixed(2)} vs ${(cb.max.x + overdraw).toFixed(2)})`);
     inkInside(grid, cb, 'structure');

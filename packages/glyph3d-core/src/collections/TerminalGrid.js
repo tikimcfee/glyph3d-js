@@ -1371,8 +1371,9 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Live nudge of the background's set-back behind the text (the `band.gridBgGap`
-     * dial) — a pure z shift by the delta; no relayout. See CodeGrid.refreshBackground.
+     * Live nudge of the background's set-back behind the text (the
+     * `appearance.backgroundSetBack` dial) — a pure z shift by the delta; no relayout. See
+     * CodeGrid.refreshBackground.
      */
     refreshBackground(gap) {
         if (!this._background) return;

@@ -29,7 +29,7 @@
  */
 
 import * as THREE from 'three';
-import Book from './Book.js';
+import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import { VStack } from './layouts/StackContainer.js';
@@ -47,7 +47,7 @@ export const SEARCH_BOOK_DEFAULTS = {
     face: true,
     faceColor: 0x0a0a1e,
     faceOpacity: 0.85,
-    faceDepth: 6,
+    faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth,
     // -- the deck --------------------------------------------------------------------
     zPitch: 90,
     pagerLerp: 9,
