@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import InstancedField from './InstancedField.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
+import { enrollPanel } from './PanelBatch.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { mimeForFormat } from '../core/fileKind.js';
 /** @import GlyphAtlas from '../GlyphAtlas.js' */
@@ -395,7 +396,7 @@ class FrameGrid extends FramedGlyphField {
         // behind), regardless of which face of the capture the viewer sees. (TerminalGrid writes
         // depth because its panel IS a solid backing; a capture's content is the cells.)
         this._panel = createPanelMaterial({ color: this._bgColor, opacity: this._bgOpacity, side: THREE.DoubleSide, depthWrite: false });
-        this._background = new THREE.Mesh(geometry, this._panel.material);
+        this._background = enrollPanel(new THREE.Mesh(geometry, this._panel.material));
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         this._background.userData.entityType = 'frame'; // gesture dispatch resolves background → capture id
         this.add(this._background);

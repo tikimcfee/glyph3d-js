@@ -26,6 +26,7 @@
 
 import * as THREE from 'three';
 import { createPanelMaterial, BORDER_FLAGS } from '../panelMaterial.js';
+import { enrollPanel } from '../PanelBatch.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
 
 export const PANEL_SURFACE_DEFAULTS = {
@@ -119,10 +120,8 @@ function curvedSegment(r, thetaC, half, yTop, yBot, seg) {
  *   (topY, ≤ 0 down the face), and the panel's width/height
  * @param {object} opts merged JELLYFISH opts (surface* fields), plus optional `material` — a
  *   caller-owned face material (ownSurfaceMaterial) used instead of the shared singleton
- * @returns {THREE.Mesh|{isPanelFace: true, slot: number, release: () => void}|null}
- *   A FLAT face on the mega-field's PanelField comes back as a slot HANDLE, not a
- *   mesh — release() frees the instance. Warp faces (curved geometry) and
- *   caller-owned-material faces stay meshes.
+ * @returns {THREE.Mesh|null} the face. A flat face (the unit plane) is enrolled with
+ *   PanelBatch and draws as an instance; a warp face (its own curved geometry) draws itself.
  */
 export function addPanelSurface(panel, spec, opts) {
     if (!opts.surface) return null;
@@ -139,7 +138,7 @@ export function addPanelSurface(panel, spec, opts) {
     } else {
         const b = spec.box;
         if (!b || b.isEmpty()) return null;
-        mesh = new THREE.Mesh(unitPlane(), opts.material || surfaceMaterial(opts));
+        mesh = enrollPanel(new THREE.Mesh(unitPlane(), opts.material || surfaceMaterial(opts)));
         mesh.scale.set((b.max.x - b.min.x) + 2 * pad, (b.max.y - b.min.y) + 2 * pad, 1);
         mesh.position.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, b.min.z - depth);
     }

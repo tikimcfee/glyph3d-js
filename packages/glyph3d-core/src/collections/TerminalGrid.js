@@ -46,6 +46,7 @@ import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
+import { enrollPanel } from './PanelBatch.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 
@@ -1344,7 +1345,7 @@ export default class TerminalGrid extends FramedGlyphField {
             depthWrite: true,
         });
 
-        this._background = new THREE.Mesh(geometry, this._panel.material);
+        this._background = enrollPanel(new THREE.Mesh(geometry, this._panel.material));
         this._background.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         // Tagged so gesture dispatch can resolve background → terminal id
         // without a reverse-lookup through the registry.

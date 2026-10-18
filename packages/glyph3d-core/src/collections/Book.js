@@ -836,14 +836,10 @@ export default class Book extends BoundedObject3D {
         if (face) sheet.faces.push(face);
     }
 
-    /** @private drop a sheet's page faces — panel-field slot handles release,
-     *  meshes detach (shared plane geometry stays alive). The sheet node's pose
-     *  RENTAL survives here on purpose: faces re-create per fit, and a released
-     *  group id retires forever — the rental dies with the sheet (removeSheet /
-     *  dispose call releasePanelPose). */
+    /** @private drop a sheet's page faces — each detaches (and so leaves PanelBatch);
+     *  the shared plane geometry stays alive, a warp face's own geometry is freed. */
     _dropFaces(sheet) {
         for (const face of sheet.faces) {
-            if (face.isPanelFace) { face.release(); continue; }
             sheet.node.remove(face);
             if (face.userData.disposeGeometry) face.geometry.dispose();
         }

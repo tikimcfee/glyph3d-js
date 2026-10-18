@@ -23,16 +23,13 @@ export function setTabParam(vals) { Object.assign(TAB_CONFIG, vals); }
  *   FieldLabel— live glyphs, inert  (dynamic addressable text: lane labels)
  *   Tab3D     — live glyphs, picks  (THIS: book edge tabs)
  *
- * FieldLabel (real glyphs on the shared substrates — the plate is a PanelField
- * slot, the text an arena item) + Button3D's interaction role: a role + onClick
- * and default/hover/active visual states, all of which are lane writes (hover
- * pop = node scale through the pose sweep, opacity boost = the plate's fill
- * alpha byte, active recolor = a fill write). No meshes, no draw calls.
+ * FieldLabel (a glyph field over a plate, which PanelBatch draws as an instance)
+ * + Button3D's interaction role: a role + onClick and default/hover/active visual
+ * states (hover pop = node scale, opacity boost = the plate's fill alpha, active
+ * recolor = a fill write).
  *
- * Picking is not wired yet (it never was): the panel block's future 'handle'
- * registration resolves a hit to this tab via ownerOf(slot), and the central
- * press router (CanvasInteraction) fires onClick + drives setHovered, exactly
- * as it does for Button3D. setActive marks the head sheet's tab — the "you are
+ * Picking is not wired yet: nothing registers a tab, so the central press router
+ * (CanvasInteraction) never fires onClick or drives setHovered for one. setActive marks the head sheet's tab — the "you are
  * here" tab.
  */
 export default class Tab3D extends FieldLabel {

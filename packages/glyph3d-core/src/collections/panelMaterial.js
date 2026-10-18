@@ -28,6 +28,9 @@
  * One material per panel (each grid keeps its own, preserving the per-grid `transparent`/`depthWrite`
  * the dock-stacking occlusion depends on); the node graph is identical across them, so the renderer
  * reuses one compiled pipeline.
+ *
+ * An enrolled panel (PanelBatch.enrollPanel) is drawn by PanelBatch as an instance: its shader is
+ * this fragment with the uniforms read per instance — change one, change the other.
  */
 
 import * as THREE from 'three';

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { BORDER_FLAGS, createPanelMaterial } from './panelMaterial.js';
+import { enrollPanel } from './PanelBatch.js';
 import InstancedField from './InstancedField.js';
 
 // Plate overhang around the text block, in text-row units (a pill needs breathing room).
@@ -213,7 +214,7 @@ export default class FieldLabel extends THREE.Object3D {
             if (this._plateCfg.hairline !== false) {
                 this._platePanel.setBorderFlag(BORDER_FLAGS.EDGE, true);
             }
-            this._plateMesh = new THREE.Mesh(geo, this._platePanel.material);
+            this._plateMesh = enrollPanel(new THREE.Mesh(geo, this._platePanel.material));
             this._anchor.add(this._plateMesh);
         }
 

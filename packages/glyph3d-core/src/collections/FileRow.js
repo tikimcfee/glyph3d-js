@@ -18,6 +18,7 @@ import { analyzeGrid } from '../parsing/SyntaxColorizer.js';
 import InstancedField from './InstancedField.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { createPanelMaterial } from './panelMaterial.js';
+import { enrollPanel } from './PanelBatch.js';
 
 export default class FileRow extends BoundedObject3D {
     /**
@@ -219,7 +220,7 @@ export default class FileRow extends BoundedObject3D {
                 side: THREE.DoubleSide,
                 depthWrite: true,
             });
-            this._background = new THREE.Mesh(geo, this._panel.material);
+            this._background = enrollPanel(new THREE.Mesh(geo, this._panel.material));
             this.add(this._background);
             if (this._pickingSystem) {
                 this._pickingSystem.register('grid', this._background, this);

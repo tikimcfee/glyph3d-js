@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { createPanelMaterial } from '../panelMaterial.js';
+import { enrollPanel } from '../PanelBatch.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
 import { LAYER_BAND, getBandDistance } from '../../core/layerBands.js';
 
@@ -83,7 +84,7 @@ export function createBackgroundMesh(config = {}, bgGap) {
         depthWrite: true,
     });
 
-    const mesh = new THREE.Mesh(geometry, panel.material);
+    const mesh = enrollPanel(new THREE.Mesh(geometry, panel.material));
     mesh.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
     mesh.position.z = -(bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND));
     mesh.visible = config.showBackground ?? true;

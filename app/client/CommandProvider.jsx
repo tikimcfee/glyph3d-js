@@ -24,6 +24,7 @@ import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
 import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
+import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -208,6 +209,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/ContentTreeArrows.js').default|null} */ contentTreeArrows: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeMotion.js').default|null} */ contentTreeMotion: null,
     /** @type {import('@glyph3d/core/collections/GlyphFarLod.js').default|null} */ glyphFarLod: null,
+    /** @type {import('@glyph3d/core/collections/PanelBatch.js').default|null} */ panelBatch: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
     /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
@@ -432,6 +434,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Far-LOD: a glyph field whose rows are under a pixel on screen stops drawing its glyphs;
     // one backdrop quad of its mean ink stands in (<DockRunner/> ticks it; Display & glyph LOD dials it).
     state.ctx.glyphFarLod = new GlyphFarLod(scene);
+    // Panels (window backgrounds, page faces, label plates) draw as instances of a few meshes,
+    // refreshed from scene.onBeforeRender — not one draw each.
+    state.ctx.panelBatch = new PanelBatch(scene);
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns
@@ -820,6 +825,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
+      state.ctx.panelBatch?.dispose();     // unhooks scene.onBeforeRender — a second boot must not chain a second batch
+      state.ctx.panelBatch = null;
+      state.ctx.glyphFarLod?.dispose();
+      state.ctx.glyphFarLod = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
       state.ctx.deltaBooks?.dispose();

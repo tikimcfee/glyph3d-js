@@ -167,6 +167,22 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
 
+- **`panel-batch.test.mjs`** (headless) — PanelBatch: enrollPanel refuses what it can't batch,
+  membership follows add/remove/material dispose, the refresh runs for view cameras and never
+  pick passes, an instance carries the panel's uniforms + eye-relative world matrix, hidden
+  ancestors draw nothing, buckets split (and re-split) by render state, a translucent bucket
+  sorts exactly as three sorts objects, real producers (GridBackground, flat page faces) enroll
+  and warp faces don't, grow, dispose.
+- **`panel-batch-check.mjs`** — the batched frame against every panel drawing itself, at
+  fit-all and three closer poses: draw calls and render CPU (interleaved medians) before →
+  after; BATCHED vs SHIFTED (own draws at the bucket's half-step order) must match to 1% of
+  what removing the panels changes — the instancing's correctness; BATCHED vs OWN is the
+  deliberate look change (panels no longer interleave by depth with the non-panels of their
+  band), reported for a human. `--shots DIR` writes each frame as PNG.
+  ```
+  bun tools/panel-batch-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
+  ```
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —
