@@ -10,6 +10,8 @@
 //   - buckets split by render state; a bucket draws half a step before its render order
 //   - a translucent bucket sorts the way three sorts objects (projected depth far→near, id)
 //   - real producers: GridBackground and a flat page face enroll, a warp face doesn't
+//   - box fills and box outlines: colour × opacity per instance, a fill draws before its outline,
+//     outlines draw as lines; under fog they draw themselves
 //   - a grow past capacity, another scene's panels, dispose
 
 import * as THREE from 'three';
@@ -45,7 +47,11 @@ function panel(parent, { x = 0, y = 0, z = 0, w = 4, h = 2, opacity = 0.5, color
 // ── enrollPanel fails loud on what it can't batch ───────────────────────────────────────
 {
     const mat = createPanelMaterial().material;
-    throws(() => enrollPanel(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)), /PlaneGeometry/, 'a box is refused');
+    throws(() => enrollPanel(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)), /MeshBasicMaterial/, 'a box in a panel material is refused');
+    throws(() => enrollPanel(new THREE.Mesh(new THREE.BoxGeometry(2, 1, 1), new THREE.MeshBasicMaterial())), /1×1×1/, 'a 2×1×1 box is refused');
+    throws(() => enrollPanel(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ map: new THREE.Texture() }))), /map/, 'a textured box is refused');
+    throws(() => enrollPanel(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 2, 1)), new THREE.LineBasicMaterial())), /unit BoxGeometry/, 'the edges of a non-unit box are refused');
+    throws(() => enrollPanel(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)), new THREE.MeshBasicMaterial())), /LineBasicMaterial/, 'edges in a mesh material are refused');
     throws(() => enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(2, 1), mat)), /1×1/, 'a 2×1 plane is refused');
     throws(() => enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(1, 1, 4, 1), mat)), /single-segment/, 'a segmented plane is refused');
     throws(() => enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial())), /createPanelMaterial/, 'a non-panel material is refused');
@@ -104,8 +110,7 @@ scene.updateMatrixWorld();
     close(at.aMisc.getX(i), 0.75, 'border intensity'); close(at.aMisc.getY(i), BORDER_FLAGS.FOCUSED, 'flags');
     close(at.aHover.getX(i), u.uHoverColor.value.r, 'hover r'); close(at.aFocus.getY(i), u.uFocusColor.value.g, 'focus g');
     close(at.aInput.getZ(i), u.uInputColor.value.b, 'input b'); close(at.aCapture.getX(i), u.uCaptureColor.value.r, 'capture r');
-    const mi = new THREE.Matrix4();
-    im.getMatrixAt(i, mi);
+    const mi = new THREE.Matrix4().fromArray(at.aInstance.array, i * 16);
     const world = new THREE.Matrix4().multiplyMatrices(im.matrixWorld, mi);
     let maxErr = 0;
     for (let k = 0; k < 16; k++) maxErr = Math.max(maxErr, Math.abs(world.elements[k] - a.mesh.matrixWorld.elements[k]));
@@ -113,7 +118,7 @@ scene.updateMatrixWorld();
     close(mi.elements[12], a.mesh.matrixWorld.elements[12] - camera.position.x, 'instance translation is eye-relative (x)');
     close(im.matrixWorld.elements[13], camera.position.y, 'the bucket mesh sits at the eye (y)');
     ok(im.renderOrder === -0.5, `a render-order-0 bucket draws at -0.5 (got ${im.renderOrder})`);
-    ok(im.count === 1 && im.visible, 'one instance, visible');
+    ok(im.geometry.instanceCount === 1 && im.visible, 'one instance, visible');
 }
 
 // ── visibility: the mesh, every ancestor, the material ─────────────────────────────────
@@ -134,7 +139,19 @@ scene.updateMatrixWorld();
     ok(batch.stats.drawn === 1, 'all visible again: drawn');
     const b = [...batch._buckets.values()].find((x) => x.members.includes(a.mesh));
     root.visible = false; batch.update(camera); root.visible = true;
-    ok(!b.mesh.visible && b.mesh.count === 0, 'an emptied bucket draws nothing');
+    ok(!b.mesh.visible && b.mesh.geometry.instanceCount === 0, 'an emptied bucket draws nothing');
+}
+
+// ── frustum: an instance outside the view is culled, as three culls the object ──────────
+{
+    const off = panel(root, { x: 0, y: 0, z: 800, opacity: 0.5 });   // behind the camera
+    const wide = panel(root, { x: 3000, y: 0, z: -5, w: 8000, h: 2, opacity: 0.5 });   // centre far off-screen, its span crosses the view
+    scene.updateMatrixWorld();
+    batch.update(camera);
+    const inBatch = (m) => [...batch._buckets.values()].some((x) => x.members.includes(m));
+    ok(!inBatch(off.mesh) && batch.stats.culled >= 1 && !viewOn(off.mesh), 'a panel behind the camera is culled (and stays off layer 0)');
+    ok(inBatch(wide.mesh), 'a panel centred off-screen whose span crosses the view is kept');
+    root.remove(off.mesh); root.remove(wide.mesh);
 }
 
 // ── buckets split by render state ───────────────────────────────────────────────────────
@@ -189,8 +206,8 @@ scene.updateMatrixWorld();
     scene.updateMatrixWorld();
     batch.update(camera);
     const b = [...batch._buckets.values()].find((x) => x.members.includes(extra[0]));
-    ok(b.capacity >= b.members.length && b.mesh.count === b.members.length, `grown: ${b.mesh.count} instances in capacity ${b.capacity}`);
-    ok(b.mesh.parent === scene && scene.children.filter((c) => c === b.mesh).length === 1, 'the grown mesh replaced the old one in the scene');
+    ok(b.capacity >= b.members.length && b.mesh.geometry.instanceCount === b.members.length, `grown: ${b.mesh.geometry.instanceCount} instances in capacity ${b.capacity}`);
+    ok(b.mesh.parent === scene && scene.children.filter((c) => c.name === b.mesh.name && c.renderOrder === b.mesh.renderOrder && c.material === b.material).length === 1, 'the grown mesh replaced the old one in the scene');
     for (const m of extra) root.remove(m);
 }
 
@@ -210,6 +227,48 @@ scene.updateMatrixWorld();
     ok(!viewOn(flat) && viewOn(warp), 'the batch takes the flat face off layer 0 and leaves the warp face drawing itself');
 }
 
+// ── box fills and outlines ───────────────────────────────────────────────────────────────
+const unitBox = new THREE.BoxGeometry(1, 1, 1), unitEdges = new THREE.EdgesGeometry(unitBox);
+const box = enrollPanel(new THREE.Mesh(unitBox, new THREE.MeshBasicMaterial({ color: 0x5a7ea8, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide })));
+const outline = enrollPanel(new THREE.LineSegments(unitEdges, new THREE.LineBasicMaterial({ color: 0x5a7ea8, transparent: true, opacity: 0.22, depthWrite: false })));
+box.add(outline);
+box.scale.set(40, 30, 20); box.position.set(5, 5, -15);
+box.renderOrder = outline.renderOrder = RENDER_ORDER.BACKDROP_BASE;
+root.add(box);
+scene.updateMatrixWorld();
+{
+    batch.update(camera);
+    const bucketOf = (m) => [...batch._buckets.values()].find((x) => x.members.includes(m));
+    const bf = bucketOf(box), be = bucketOf(outline);
+    ok(bf && be && bf !== be, 'a box fill and its outline draw in their own buckets');
+    ok(!viewOn(box) && !viewOn(outline), 'both leave layer 0');
+    ok(bf.mesh.isMesh && be.mesh.isLineSegments, 'the fill bucket draws a mesh, the outline bucket lines');
+    close(bf.mesh.renderOrder, RENDER_ORDER.BACKDROP_BASE - 0.4, 'a fill bucket draws at band − 0.4 (after the band\'s panels)');
+    close(be.mesh.renderOrder, RENDER_ORDER.BACKDROP_BASE - 0.3, 'an outline bucket at band − 0.3 (after its fills)');
+    const i = bf.members.indexOf(box), c = bf.mesh.geometry.attributes.aColor;
+    close(c.getX(i), box.material.color.r, 'fill colour r'); close(c.getW(i), 0.06, 'fill opacity');
+    const j = be.members.indexOf(outline), ce = be.mesh.geometry.attributes.aColor;
+    close(ce.getW(j), 0.22, 'outline opacity');
+    const mi = new THREE.Matrix4().fromArray(be.mesh.geometry.attributes.aInstance.array, j * 16);
+    const world = new THREE.Matrix4().multiplyMatrices(be.mesh.matrixWorld, mi);
+    close(world.elements[0], outline.matrixWorld.elements[0], 'the outline rides its box\'s scale');
+    ok(bf.mesh.geometry.index && be.mesh.geometry.attributes.position.count === 24, 'unit geometries: an indexed box, 12 edges');
+    box.material.opacity = 0.3;
+    batch.update(camera);
+    close(bf.mesh.geometry.attributes.aColor.getW(bf.members.indexOf(box)), 0.3, 'an opacity write lands next frame');
+    // fog: the basic shader draws none, so fills + outlines draw themselves while it's set
+    const warn = console.warn; let warned = 0; console.warn = () => { warned++; };
+    scene.fog = new THREE.Fog(0x000000, 1, 1000);
+    batch.update(camera); batch.update(camera);
+    ok(viewOn(box) && viewOn(outline) && batch.stats.own >= 2, 'under fog, fills and outlines draw themselves');
+    ok(!viewOn(a.mesh), '…panels stay batched');
+    ok(warned === 1, `the fog fallback says why, once (${warned})`);
+    console.warn = warn;
+    scene.fog = null;
+    batch.update(camera);
+    ok(!viewOn(box) && !viewOn(outline), 'fog cleared: batched again');
+}
+
 // ── another scene's panels are not this batch's ────────────────────────────────────────
 {
     const other = new THREE.Scene();
@@ -221,11 +280,12 @@ scene.updateMatrixWorld();
 
 // ── dispose hands every panel back its own draw ─────────────────────────────────────────
 {
-    const meshes = scene.children.filter((c) => c.name === 'panel-batch');
+    const meshes = scene.children.filter((c) => c.name.startsWith('panel-batch'));
     ok(meshes.length === batch._buckets.size, `one instanced mesh per bucket in the scene (${meshes.length})`);
     batch.dispose();
     ok(viewOn(a.mesh) && viewOn(opaque.mesh) && viewOn(back.mesh), 'every panel is back on layer 0');
-    ok(!scene.children.some((c) => c.name === 'panel-batch'), 'the instanced meshes are gone');
+    ok(!scene.children.some((c) => c.name.startsWith('panel-batch')), 'the batch meshes are gone');
+    ok(viewOn(box) && viewOn(outline), 'fills and outlines too');
     const before = a.mesh.layers.mask;
     scene.onBeforeRender(null, scene, camera, null);
     ok(a.mesh.layers.mask === before, 'the hook is unhooked: a render no longer touches panels');

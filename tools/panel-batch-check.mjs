@@ -6,8 +6,8 @@
  * layer 0. This renders the live scene three ways at each pose and reads the pixels back in
  * the same turn:
  *   BATCHED — the app's frame (the batch refreshed from scene.onBeforeRender)
- *   SHIFTED — the batch's hook bypassed, its meshes hidden, every batched panel back on layer 0
- *             drawing itself at the bucket's order (its render order − 0.5)
+ *   SHIFTED — the batch's hook bypassed, its meshes hidden, every batched object back on layer 0
+ *             drawing itself at its bucket's order (its render order − 0.5, + 0.1 fills, + 0.2 edges)
  *   OWN     — the same at the panels' own render order: the frame before batching
  *   BARE    — batched panels hidden entirely (the teeth: what "no panels" looks like)
  * BATCHED vs SHIFTED is the instancing's correctness: the same draws in the same order, so it
@@ -73,18 +73,18 @@ try {
             };
             const batched = grab();
             const stats = { ...c.panelBatch.stats };
-            const buckets = scene.children.filter((o) => o.name === 'panel-batch');
-            const panels = [];
-            scene.traverse((o) => { if (o.isMesh && o.material?.uniforms?.uFill && o.name !== 'panel-batch' && !o.layers.isEnabled(0)) panels.push(o); });
+            const buckets = scene.children.filter((o) => o.name.startsWith('panel-batch'));
+            const panels = [...c.panelBatch._buckets.values()].flatMap((b) => [...b.members]);
             const hook = scene.onBeforeRender;
             scene.onBeforeRender = () => {};
             const shown = buckets.map((b) => b.visible);
             for (const b of buckets) b.visible = false;
             for (const p of panels) p.layers.enable(0);
             const own = grab();
-            for (const p of panels) p.renderOrder -= 0.5;
+            const keep = panels.map((p) => p.renderOrder);
+            for (const b of c.panelBatch._buckets.values()) for (const p of b.members) p.renderOrder = b.mesh.renderOrder;
             const shifted = grab();
-            for (const p of panels) p.renderOrder += 0.5;
+            panels.forEach((p, i) => { p.renderOrder = keep[i]; });
             for (const p of panels) p.layers.disable(0);
             const bare = grab();
             buckets.forEach((b, i) => { b.visible = shown[i]; });

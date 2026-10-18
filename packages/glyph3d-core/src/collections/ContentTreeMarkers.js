@@ -24,6 +24,7 @@
 import * as THREE from 'three';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { subtreeContentBounds } from './layouts/nodeUtils.js';
+import { enrollPanel } from './PanelBatch.js';
 
 export const MARKER_DEFAULTS = {
     pad: 10,            // XY inflation beyond the subtree's content bounds
@@ -128,10 +129,10 @@ export default class ContentTreeMarkers {
 
             let prism = this._prisms.get(path);
             if (!prism) {
-                const mesh = new THREE.Mesh(this._unitBox, mats.fill);
+                const mesh = enrollPanel(new THREE.Mesh(this._unitBox, mats.fill));
                 mesh.name = `prism:${path}`;
                 mesh.userData = { isMarker: true, path };
-                const edges = new THREE.LineSegments(this._unitEdges, mats.edge);
+                const edges = enrollPanel(new THREE.LineSegments(this._unitEdges, mats.edge));
                 edges.userData = { isMarker: true };
                 mesh.add(edges);                        // edges inherit the mesh's transform
                 prism = { mesh, edges };

@@ -59,6 +59,7 @@ import BoundedObject3D from './BoundedObject3D.js';
 import { leafBox } from './layouts/nodeUtils.js';
 import { addPanelSurface, ownSurfaceMaterial, releasePanelPose } from './layouts/panelSurface.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { enrollPanel } from './PanelBatch.js';
 import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
 /** @import GlyphAtlas from '../GlyphAtlas.js' */
 /** @import SceneRegistry from '../services/SceneRegistry.js' */
@@ -408,9 +409,9 @@ export default class Book extends BoundedObject3D {
             // forceSinglePass: uniform color + depthWrite off → face order can't change a pixel.
             const fill = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true });
             const edge = new THREE.LineBasicMaterial({ transparent: true, depthWrite: false });
-            const mesh = new THREE.Mesh(unit.box, fill);
+            const mesh = enrollPanel(new THREE.Mesh(unit.box, fill));
             mesh.userData = { isMarker: true, isBookCover: true };
-            const edges = new THREE.LineSegments(unit.edges, edge);
+            const edges = enrollPanel(new THREE.LineSegments(unit.edges, edge));
             edges.userData = { isMarker: true };
             mesh.add(edges);   // edges inherit the mesh's scale/position
             this.add(mesh);

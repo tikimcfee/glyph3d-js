@@ -144,13 +144,14 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   instanced quad of its mean ink colour (`InstancedField.farTint`; alpha = ink cover ×
   `glyph.backdropGain`) stands in. All backdrops are one draw. Gates:
   `tools/glyph-far-lod.test.mjs` (the decision + tint) and `tools/far-lod-check.mjs` (pixels).
-- **Panel batching** (`collections/PanelBatch.js`): every flat panel — window backgrounds, page
-  faces, label plates — stays a real mesh its owner poses, paints (`createPanelMaterial`) and
-  registers for picking, but is drawn as an instance: `enrollPanel(mesh)` marks it, and a
-  `PanelBatch` refreshes from `scene.onBeforeRender` (this frame's matrices; never on pick passes)
-  into one InstancedMesh per render state, taking each panel off the view camera's layer 0.
-  A bucket draws half a step before its panels' render order and sorts translucent instances as
-  three sorts objects. Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-check.mjs`.
+- **Panel batching** (`collections/PanelBatch.js`): the backdrop surfaces — flat panels (window
+  backgrounds, page faces, label plates), box fills and box outlines (book covers, directory
+  prisms) — stay real objects their owners pose, paint and register for picking, but draw as
+  instances: `enrollPanel(obj)` marks one, and a `PanelBatch` refreshes from `scene.onBeforeRender`
+  (this frame's matrices; never on pick passes) into one draw per kind × render state, taking each
+  object off the view camera's layer 0. Buckets cull per instance, sort translucent instances as
+  three sorts objects, and draw just before their render-order band (panels, then fills, then
+  outlines). Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-check.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.
