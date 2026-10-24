@@ -3,6 +3,7 @@ import { computeCellMetrics } from '../core/cellMetrics.js';
 import { BORDER_FLAGS, createPanelMaterial } from './panelMaterial.js';
 import { enrollPanel } from './PanelBatch.js';
 import InstancedField from './InstancedField.js';
+import { enrollGlyphField } from './GlyphBatch.js';
 
 // Plate overhang around the text block, in text-row units (a pill needs breathing room).
 const PLATE_PAD_X = 0.72, PLATE_PAD_Y = 0.42;
@@ -182,12 +183,15 @@ export default class FieldLabel extends THREE.Object3D {
     _restage() {
         this._measure();
         if (!this._instancedField) {
-            this._instancedField = new InstancedField(null, this.atlas, {
+            // A label is tens of glyphs: start small (the slot buffer grows on write), and draw
+            // from the GlyphBatch arena rather than a draw of its own.
+            this._instancedField = enrollGlyphField(new InstancedField(null, this.atlas, {
+                maxInstances: 256,
                 worldScale: 0.025,
                 slugData: this.atlas?._slugData,
                 shaper: this.atlas?._shapeCache || this.atlas?._shaper,
                 defaultColor: this.textColor,
-            });
+            }));
             this._anchor.add(this._instancedField.instanceMesh);
         }
 

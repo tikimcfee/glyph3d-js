@@ -157,6 +157,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   object off the view camera's layer 0. Buckets cull per instance, sort translucent instances as
   three sorts objects, and draw just before their render-order band (panels, then fills, then
   outlines). Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-check.mjs`.
+- **Glyph batching** (`collections/GlyphBatch.js`): labels (every FieldLabel — book tabs,
+  nameplates, dock titles) stay real InstancedFields their owners write and pose, but draw from
+  ONE arena field: `enrollGlyphField(field)` marks one; a `GlyphBatch` refreshes from
+  `scene.onBeforeRender`, copies each label's glyphs into a range (in three's far → near order;
+  recopied only when text, colour, membership or that order changes) with its own group-table
+  row, writes each row's pose from the label mesh's matrixWorld (camera-relative) every frame,
+  and zeroes the alpha of hidden or off-frustum labels. A sheared pose or a glyph outside group 0
+  draws itself; batched labels skip far-LOD. Gates: `tools/glyph-batch.test.mjs`,
+  `tools/glyph-batch-check.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.

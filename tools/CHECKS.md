@@ -167,6 +167,21 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
 
+- **`glyph-batch.test.mjs`** (headless) — GlyphBatch: enrolment refusals, membership follows
+  add/remove, each label's range in its own group row with every other lane verbatim, THE POSE (a
+  batched glyph lands where its own mesh puts it, rotated, scaled, far from the origin), hidden
+  and off-frustum labels go dark, ranges run in three's far → near order (and re-sort when it
+  flips), repack only on a text/colour change, refusals (a glyph outside group 0, a sheared pose)
+  draw themselves, far-LOD leaves batched fields alone, pick passes don't refresh, dispose.
+- **`glyph-batch-check.mjs`** — the batched frame against every label drawing itself at the
+  arena's render order (SHIFTED) and at its own (OWN), and with no labels (BARE), at fit-all and
+  three closer poses; reports draws + render CPU. The SHIFTED compare is 3×3-blurred and counted
+  past 24/255: the arena's transform order lands glyph edges a few hundredths of a pixel from their
+  own draw's, which no eye sees but a raw diff counts. A planted neighbour-pose bug fails 3 of 4
+  poses, a 2% scale error the closest. Fails when no pose has a visible label (vacuous).
+  ```
+  bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
+  ```
 - **`panel-batch.test.mjs`** (headless) — PanelBatch: enrollPanel refuses what it can't batch,
   membership follows add/remove/material dispose, the refresh runs for view cameras and never
   pick passes, an instance carries the panel's uniforms + eye-relative world matrix, hidden

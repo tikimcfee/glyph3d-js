@@ -29,6 +29,7 @@
 
 import * as THREE from 'three';
 import { liveInstancedFields } from './InstancedField.js';
+import { isBatchedGlyphField } from './GlyphBatch.js';
 
 export const FAR_LOD_DEFAULTS = Object.freeze({
     /** px per row at or above which a field draws its glyphs; 0 = always draw them */
@@ -168,6 +169,7 @@ export default class GlyphFarLod {
         for (const field of liveInstancedFields()) {
             const mesh = field.instanceMesh;
             const L = field.layoutBounds;
+            if (isBatchedGlyphField(field)) continue;   // GlyphBatch owns its layer and draws it
             if (!mesh || !mesh.frustumCulled || !L || !(field.rowHeight > 0)) {
                 if (mesh && !mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.enable(VIEW_LAYER);
                 continue;
@@ -222,6 +224,7 @@ export default class GlyphFarLod {
     dispose() {
         for (const field of liveInstancedFields()) {
             const mesh = field.instanceMesh;
+            if (isBatchedGlyphField(field)) continue;
             if (mesh && !mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.enable(VIEW_LAYER);
         }
         this.mesh?.parent?.remove(this.mesh);
