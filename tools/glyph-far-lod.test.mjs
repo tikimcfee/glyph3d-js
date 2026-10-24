@@ -2,9 +2,10 @@
 // glyph-far-lod — GlyphFarLod's near/far decision, its backdrop stream, and the backdrop tint
 // (InstancedField.farTint), headless: real fields and real three math, no GL context.
 //
-//   - the threshold: a field's tallest row in px at its box's NEAREST point (perspective and
-//     orthographic), exactly at the boundary; 0 = glyphs always
-//   - a long field the camera stands at the end of keeps its glyphs (nearest point, not centre)
+//   - the threshold: a field's tallest row in px at its box's nearest view DEPTH (perspective
+//     and orthographic), exactly at the boundary; 0 = glyphs always
+//   - a long field the camera stands at the end of keeps its glyphs (nearest depth, not centre)
+//   - off-axis: a field at the view's edge measures as it projects (depth, not distance)
 //   - far: the view layer leaves the mesh, `visible` is untouched, one backdrop quad is staged
 //     over the laid-out box through the field's world matrix
 //   - the tint: mean LINEAR ink colour (the shader's decode, through the group tint), ink cover
@@ -41,7 +42,7 @@ function eq(a, b, m) { ok(a === b, `${m} (got ${a}, want ${b})`); }
 const viewOn = (f) => f.instanceMesh.layers.isEnabled(0);
 const cx = (L.min.x + L.max.x) / 2, cy = (L.min.y + L.max.y) / 2;
 
-// ── the boundary: rowPx = row · pxPerUnit / distance-to-nearest-point ────────────────────
+// ── the boundary: rowPx = row · pxPerUnit / nearest view depth ───────────────────────────
 {
     const atPx = (px) => row * pxPerUnit / px;          // the distance at which a row measures px
     lookFrom(cx, cy, L.max.z + atPx(1) * 0.999);        // a hair nearer than 1 px/row
@@ -92,6 +93,19 @@ const cx = (L.min.x + L.max.x) / 2, cy = (L.min.y + L.max.y) / 2;
     ok(viewOn(long), '…but the nearest point measures 1.5 px/row: the long file keeps its glyphs');
     long.dispose();
     ok(!liveInstancedFields().has(long), 'a disposed field leaves the live set');
+}
+
+// ── off-axis: depth, not distance — what a flat screen draws ─────────────────────────────
+{
+    // The field 32° off the view axis, at a view depth where its rows project to 1.1 px:
+    // its distance is depth / cos 32° (0.94 px by distance), its pixels say 1.1.
+    const depth = row * pxPerUnit / 1.1, side = depth * Math.tan(THREE.MathUtils.degToRad(32));
+    camera.position.set(cx - side, cy, L.max.z + depth); camera.lookAt(cx - side, cy, 0); camera.updateMatrixWorld();
+    const a = new THREE.Vector3(cx, cy, L.max.z).project(camera), b = new THREE.Vector3(cx, cy + row, L.max.z).project(camera);
+    const projected = (b.y - a.y) * H / 2;
+    close(projected, 1.1, 'the off-axis field projects at 1.1 px/row', 1e-3);
+    ok(row * pxPerUnit / camera.position.distanceTo(new THREE.Vector3(cx, cy, L.max.z)) < 1, 'by distance it would measure under a pixel');
+    ok(lod.update(camera, H).far === 0 && viewOn(field), 'it keeps its glyphs: the measure is the projected size');
 }
 
 // ── scale through the world matrix ────────────────────────────────────────────────────────

@@ -138,12 +138,13 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   writing `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
   `tools/glyph-cull-truth.mjs` checks every live quad against it. (Fields moved through the
   group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
-- **Far-LOD** (`collections/GlyphFarLod.js`): a culled field whose tallest row measures under
-  `glyph.showGlyphsPx` (default 1 px, at its box's point nearest the camera) stops drawing its
-  glyphs — it leaves the view camera's layer 0, so `visible` keeps its owners — and one
-  instanced quad of its mean ink colour (`InstancedField.farTint`; alpha = ink cover ×
-  `glyph.backdropGain`) stands in. All backdrops are one draw. Gates:
-  `tools/glyph-far-lod.test.mjs` (the decision + tint) and `tools/far-lod-check.mjs` (pixels).
+- **Far-LOD** (`collections/GlyphFarLod.js`): a culled field whose tallest row measures
+  under `glyph.showGlyphsPx` (default 1 px, at its box's nearest view DEPTH — what the row
+  projects to, not its distance) stops drawing its glyphs — it leaves the view camera's
+  layer 0, so `visible` keeps its owners — and one instanced quad of its mean ink colour
+  (`InstancedField.farTint`; alpha = ink cover × `glyph.backdropGain`) stands in. All
+  backdrops are one draw. Gates: `tools/glyph-far-lod.test.mjs` (the decision + tint) and
+  `tools/far-lod-check.mjs` (pixels).
 - **Panel batching** (`collections/PanelBatch.js`): the backdrop surfaces — flat panels (window
   backgrounds, page faces, label plates), box fills and box outlines (book covers, directory
   prisms) — stay real objects their owners pose, paint and register for picking, but draw as

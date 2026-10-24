@@ -701,7 +701,7 @@ export const SETTINGS = [
   // into it, hard swaps outright). Onset = the glyph quad's on-screen height in px.
   { key: 'glyph.greek', label: 'Greeking', group: 'Display & glyph LOD', type: 'enum', options: [...GLYPH_GREEK_MODES], default: GLYPH_GREEK_MODES[GLYPH_LOD_DEFAULTS.greekMode], apply: (_ctx, v) => setGlyphLodParam('greekMode', GLYPH_GREEK_MODES.indexOf(v)) },
   { key: 'glyph.greekOnsetPx', label: 'Greek below (px tall)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.greekOnsetPx, min: 0, max: 96, step: 0.5, apply: lodParam('greekOnsetPx') },
-  // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest point
+  // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest depth
   // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
   // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.
   { key: 'glyph.showGlyphsPx', label: 'Show glyphs from (px per row, 0 = always)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.showGlyphsPx, min: 0, max: 24, step: 0.25, apply: (ctx, v) => ctx.glyphFarLod?.setParam('showGlyphsPx', v) },

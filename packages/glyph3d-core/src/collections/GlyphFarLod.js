@@ -8,8 +8,11 @@
  * exactly that: the field's laid-out box, in its own frame, tinted by `InstancedField.farTint()`
  * (mean linear ink colour; alpha = ink cover × `backdropGain`). Every backdrop is one draw.
  *
- * The test is the size of the field's TALLEST row at the point of its box NEAREST the camera,
- * not its centre — a long file a camera stands at the end of keeps its glyphs (no pop).
+ * The test is the size of the field's TALLEST row at its box's nearest DEPTH along the view
+ * direction, not its centre — a long file a camera stands at the end of keeps its glyphs (no
+ * pop). Depth, not distance: a flat screen draws a row at `row × focal / depth`, so an
+ * off-axis field is larger on screen than its distance says (at the corner of a 70° view,
+ * distance would call a row 1.7× smaller than it draws).
  *
  * Only fields whose bounds are truthful take part: three frustum-culls them by their stated
  * extent (`frustumCulled`); fields moved through their group table opt out of both.
@@ -66,6 +69,9 @@ void main() {
 
 const _box = new THREE.Box3();
 const _eye = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _c = new THREE.Vector3();
+const _h = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _fit = new THREE.Matrix4();
 
@@ -154,6 +160,8 @@ export default class GlyphFarLod {
             ? viewportHeightPx / (2 * Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV()) / 2))
             : viewportHeightPx * camera.zoom / Math.max(camera.top - camera.bottom, 1e-9);
         const eye = camera.getWorldPosition(_eye);
+        const fwd = camera.getWorldDirection(_fwd);
+        const near = camera.isPerspectiveCamera ? Math.max(camera.near, 1e-3) : 0;
 
         let fields = 0, far = 0, backdrops = 0;
         for (const field of liveInstancedFields()) {
@@ -168,8 +176,12 @@ export default class GlyphFarLod {
             if (minPx > 0 && field.getGlyphCount() > 0) {
                 _box.copy(field.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
                 const rowWorld = field.rowHeight * mesh.matrixWorld.getMaxScaleOnAxis();
+                // the box's nearest view depth: its centre's depth less its half-extent along fwd
+                _box.getCenter(_c).sub(eye);
+                _box.getSize(_h).multiplyScalar(0.5);
+                const depth = _c.dot(fwd) - (Math.abs(fwd.x) * _h.x + Math.abs(fwd.y) * _h.y + Math.abs(fwd.z) * _h.z);
                 const rowPx = camera.isPerspectiveCamera
-                    ? rowWorld * pxPerUnit / Math.max(_box.distanceToPoint(eye), 1e-3)
+                    ? rowWorld * pxPerUnit / Math.max(depth, near)
                     : rowWorld * pxPerUnit;
                 isFar = rowPx < minPx;
             }
