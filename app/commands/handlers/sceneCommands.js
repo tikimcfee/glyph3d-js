@@ -44,8 +44,9 @@ export default function registerSceneCommands(router) {
     }, { description: 'Show scene details' });
 
     // The world-matrix walk: what the last frame's walk visited and recomputed, then a check of
-    // every world matrix against a recompute from scratch. A stale node is a pose write the walk
-    // never saw (a hand-written .matrix without matrixWorldNeedsUpdate = true).
+    // every world matrix against a recompute from scratch. A stale node is a change the walk never
+    // saw — matrixAutoUpdate switched off, a pivot set or Object3D.copy onto a node already in the
+    // scene, or a quaternion write that skips three's hook (SceneTransforms' header lists them).
     router.register('scene.transforms', (args, ctx) => {
         const st = ctx.sceneTransforms;
         if (!st) throw new Error('scene.transforms: no SceneTransforms on this scene');

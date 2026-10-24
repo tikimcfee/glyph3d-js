@@ -29,6 +29,7 @@
  */
 
 import * as THREE from 'three';
+import { rootOf, isShown, isTracked } from './SceneTransforms.js';
 import InstancedField from './InstancedField.js';
 import { GROUP_STRIDE } from '../core/glyphMaterial.js';
 import { SLOT_FLOATS, LANE_GROUP_ID } from '../core/InstancedSlotBuffer.js';
@@ -117,13 +118,14 @@ export default class GlyphBatch {
     constructor(scene, atlas) {
         if (!scene?.isScene) throw new Error('GlyphBatch: needs a THREE.Scene (it hooks scene.onBeforeRender)');
         if (!atlas) throw new Error('GlyphBatch: needs the GlyphAtlas its labels shape with');
+        if (!isTracked(scene)) throw new Error('GlyphBatch: the scene needs a SceneTransforms first (rootOf / isShown read its marks)');
         this.scene = scene;
         this.atlas = atlas;
         /** @type {InstancedField|null} */
         this.arena = null;
         /** @type {{ mesh: THREE.Mesh, field: InstancedField, version: number, count: number, depth: number }[]} in slot order; member i is group i + 1 */
         this._members = [];
-        /** @type {WeakMap<InstancedField, string>} fields refused, keyed to the slot version they were refused at */
+        /** @type {WeakMap<InstancedField, { version: number, count: number }>} fields refused, keyed to the slot version and count they were refused at */
         this._refused = new WeakMap();
         this._generation = -1;
         /** Last refresh: fields drawn from the arena, hidden, outside the view frustum, drawing
@@ -199,16 +201,14 @@ export default class GlyphBatch {
         let own = 0, elsewhere = 0;
         const next = [];
         for (const mesh of _meshes) {
-            let o = mesh;
-            while (o.parent) o = o.parent;
-            if (o !== this.scene) { elsewhere++; continue; }
+            if (rootOf(mesh) !== this.scene) { elsewhere++; continue; }
             const field = mesh.userData.glyphField;
             const version = field._interleavedBuffer?.version ?? 0, count = field.getGlyphCount();
-            const key = `${version}:${count}`;
-            if (this._refused.get(field) === key) { own++; continue; }
+            const was = this._refused.get(field);
+            if (was && was.version === version && was.count === count) { own++; continue; }
             const why = count ? refusal(field) : null;
             if (why) {
-                this._refused.set(field, key);
+                this._refused.set(field, { version, count });
                 console.warn(`GlyphBatch: a field draws itself — ${why}`);
                 if (!mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.enable(VIEW_LAYER);
                 own++;
@@ -240,9 +240,7 @@ export default class GlyphBatch {
             const { mesh, field } = m;
             if (mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.disable(VIEW_LAYER);
             const r = (i + 1) * ROW;
-            let shown = m.count > 0;
-            for (let o = mesh; o && shown; o = o.parent) if (!o.visible) shown = false;
-            if (!shown) { G[r + 11] = 0; hidden++; return; }
+            if (m.count === 0 || !isShown(mesh)) { G[r + 11] = 0; hidden++; return; }
             const bs = field.geometry.boundingSphere;
             if (bs) {
                 _sphere.copy(bs).applyMatrix4(mesh.matrixWorld);

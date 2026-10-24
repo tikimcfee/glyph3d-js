@@ -13,6 +13,7 @@
 //   - opt-outs (frustumCulled false), hidden ancestors, a grow past capacity, dispose
 
 import * as THREE from 'three';
+import SceneTransforms from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
 import InstancedField, { liveInstancedFields } from '../packages/glyph3d-core/src/collections/InstancedField.js';
 import GlyphFarLod, { FAR_LOD_DEFAULTS } from '../packages/glyph3d-core/src/collections/GlyphFarLod.js';
 import { packRgba8 } from '../packages/glyph3d-core/src/core/InstancedSlotBuffer.js';
@@ -26,6 +27,7 @@ const FOV = 50;
 const pxPerUnit = H / (2 * Math.tan(THREE.MathUtils.degToRad(FOV) / 2));
 
 const scene = new THREE.Scene();
+new SceneTransforms(scene);   // the batches read its visibility / structure marks
 const lod = new GlyphFarLod(scene);
 const camera = new THREE.PerspectiveCamera(FOV, 1.6, 0.1, 1e7);
 const lookFrom = (x, y, z) => { camera.position.set(x, y, z); camera.lookAt(x, y, 0); camera.updateMatrixWorld(); };

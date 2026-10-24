@@ -27,12 +27,28 @@
  * Three shapes are handed to three's own `updateMatrixWorld(true)` every walk, as three's walk
  * treated every node: a node whose class overrides it (a camera keeps its inverse there), a node
  * with `matrixAutoUpdate` off (its `.matrix` is written by hand), and a node with a `pivot`. Each
- * is judged as it joins; switching `matrixAutoUpdate` off or setting a pivot on a node already in
- * the scene isn't seen. `verifyTransforms(scene)` recomputes every world matrix from scratch and
- * names the nodes that disagree — a write the walk never saw (`scene.transforms`).
+ * is judged as it joins.
+ *
+ * What the walk doesn't see, on a node already in the scene: `matrixAutoUpdate` switched off (or
+ * `matrixWorldAutoUpdate` back on), a pivot set, `matrixWorldNeedsUpdate = true` (three's own
+ * updateMatrix raises it every compose, so it can't mark), `Object3D.copy` onto the node (it copies
+ * the world matrix too), and quaternion writes that skip three's hook (`setFromEuler(e, false)`,
+ * `_x` …). Set those before the node joins, or write the pose. `verifyTransforms(scene)` recomputes
+ * every world matrix from scratch and names the nodes that disagree (`scene.transforms`).
+ *
+ * A TrackedVector3 reports Vector3 as its constructor (r3f's applyProps copies into a vector only
+ * when the constructors match; three's clone paths then make plain vectors), but its components
+ * are accessors: a spread, Object.keys or structuredClone of one sees no x, y, z — JSON does.
  *
  * Pick passes and anything else that turns `scene.matrixWorldAutoUpdate` off skip the walk, as
  * they skip three's.
+ *
+ * The same marks answer "is this object in the scene, and shown?" without walking its ancestors
+ * every frame: `rootOf(obj)` / `isShown(obj)` walk once and keep the answer until the SHOW
+ * GENERATION moves — any node's `visible` flipping, or any tracked node gaining or losing a child.
+ * To see `visible` flip, this module makes `Object3D.prototype.visible` an accessor when it loads
+ * (three's constructor sets it through the setter, so every object keeps one shape); an object
+ * made before that carries its own `visible` and is converted as it joins the scene.
  */
 
 import * as THREE from 'three';
@@ -48,12 +64,64 @@ const QX = Symbol('qx'), QY = Symbol('qy'), QZ = Symbol('qz'), QW = Symbol('qw')
 
 const BASE_UPDATE_MATRIX_WORLD = THREE.Object3D.prototype.updateMatrixWorld;
 
+// `visible` as a prototype accessor. Its value lives under a string key, not a symbol: read from
+// sites that see many classes (three's projectObject), a symbol-keyed getter costs ~4× a plain
+// property, a string-keyed one ~2×. A hot reload re-running this module keeps the same key.
+const VISIBLE = '_visibleFlag';
+const REACH_GEN = Symbol('reachGeneration'), REACH_ROOT = Symbol('reachRoot'), REACH_SHOWN = Symbol('reachShown');
+let _showGeneration = 0;
+Object.defineProperty(THREE.Object3D.prototype, 'visible', {
+    get() { return this[VISIBLE]; },
+    set(v) {
+        const was = this[VISIBLE];
+        this[VISIBLE] = v;
+        if (was !== v && was !== undefined) _showGeneration++;
+    },
+    enumerable: true,
+    configurable: true,
+});
+
+/** Moves whenever any object's `visible` flips or any tracked node gains or loses a child. */
+export function showGeneration() { return _showGeneration; }
+
+/** @param {any} obj - an Object3D carrying the reach marks */
+function reach(obj) {
+    if (obj[REACH_GEN] === _showGeneration) return obj;
+    let shown = true, o = obj;
+    for (; o.parent !== null; o = o.parent) if (!o.visible) shown = false;
+    obj[REACH_GEN] = _showGeneration;
+    obj[REACH_ROOT] = o;
+    obj[REACH_SHOWN] = shown && o.visible;
+    return obj;
+}
+
+/**
+ * The root `obj` hangs under (the scene, when it's in one) — walked once per show generation.
+ * @param {THREE.Object3D} obj
+ * @returns {THREE.Object3D}
+ */
+export function rootOf(obj) { return reach(obj)[REACH_ROOT]; }
+
+/**
+ * Whether `obj`, every ancestor and its root are visible — walked once per show generation.
+ * @param {THREE.Object3D} obj
+ */
+export function isShown(obj) { return reach(obj)[REACH_SHOWN]; }
+
+/**
+ * Whether a SceneTransforms tracks this scene — the structure marks `rootOf` / `isShown` rely on.
+ * @param {THREE.Object3D} scene
+ */
+export function isTracked(scene) { return /** @type {any} */ (scene)[TRACKED] === true; }
+
+/** @param {any} o - a tracked node */
 function mark(o) {
     if (o[DIRTY]) return;            // its ancestors are flagged already
     o[DIRTY] = true;
     flagUp(o.parent);
 }
 
+/** @param {any} p - a tracked node, or null past the root */
 function flagUp(p) {
     for (; p !== null && !p[SUB]; p = p.parent) p[SUB] = true;
 }
@@ -64,25 +132,43 @@ export class TrackedVector3 extends THREE.Vector3 {
     /** Vector3's own signature (three makes vectors as `new v.constructor(x, y, z)`). */
     constructor(x = 0, y = 0, z = 0) {
         super(x, y, z);              // through the setters, before there's an owner to mark
+        // (declared again for the type checker; the setters already stored them)
+        /** @type {number} */ this[X] = x;
+        /** @type {number} */ this[Y] = y;
+        /** @type {number} */ this[Z] = z;
+        /** @type {THREE.Object3D|undefined} */
         this[OWNER] = undefined;
     }
 
-    /** A copy is a plain vector: it belongs to no node. */
+    /**
+     * A copy is a plain vector: it belongs to no node.
+     * @returns {any} a THREE.Vector3 (three types clone() as returning `this`)
+     */
     clone() { return new THREE.Vector3(this[X], this[Y], this[Z]); }
 
+    // three declares x / y / z as fields; here they are accessors
+    // @ts-expect-error
     get x() { return this[X]; }
-    set x(v) { if (this[X] !== v) { this[X] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
+    /** @param {number} v */
+    set x(v) { if (!Object.is(this[X], v)) { this[X] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
+    // @ts-expect-error
     get y() { return this[Y]; }
-    set y(v) { if (this[Y] !== v) { this[Y] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
+    /** @param {number} v */
+    set y(v) { if (!Object.is(this[Y], v)) { this[Y] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
+    // @ts-expect-error
     get z() { return this[Z]; }
-    set z(v) { if (this[Z] !== v) { this[Z] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
+    /** @param {number} v */
+    set z(v) { if (!Object.is(this[Z], v)) { this[Z] = v; if (this[OWNER] !== undefined) mark(this[OWNER]); } }
 
     /** The components live under symbols; serialize as a plain vector does. */
     toJSON() { return { x: this[X], y: this[Y], z: this[Z] }; }
 }
+// a tracked vector passes for a Vector3 wherever constructors are compared (r3f's applyProps)
+TrackedVector3.prototype.constructor = THREE.Vector3;
 
 // three calls a quaternion's / euler's change hook as a method, on every write. Its own sync
 // runs first, so either way the quaternion — what the matrix composes — holds the result.
+/** @this {any} a tracked quaternion or euler */
 function onRotate() {
     this[PREV]();
     const o = this[OWNER], q = o.quaternion;
@@ -92,12 +178,14 @@ function onRotate() {
     }
 }
 
+/** @param {any} r - a node's quaternion or rotation  @param {any} o - the node */
 function trackRotation(r, o) {
     r[OWNER] = o;
     r[PREV] = r._onChangeCallback;
     r._onChange(onRotate);
 }
 
+/** @param {any} o  @param {'position'|'scale'} key */
 function swapVector(o, key) {
     const old = o[key], v = new TrackedVector3(old.x, old.y, old.z);
     v[OWNER] = o;
@@ -105,14 +193,18 @@ function swapVector(o, key) {
     Object.freeze(old);
 }
 
+/** @param {any} e - three's childadded event */
 function onChildAdded(e) {
     const child = e.child;
     track(child);
     child[DIRTY] = true;             // a new parent: its world, and its subtree's, are new
     flagUp(child.parent);
+    _showGeneration++;
 }
 
-/** Instrument a node and its subtree (once per node). */
+function onChildRemoved() { _showGeneration++; }
+
+/** Instrument a node and its subtree (once per node).  @param {any} o */
 function track(o) {
     if (!o[TRACKED]) {
         o[TRACKED] = true;
@@ -125,7 +217,14 @@ function track(o) {
         swapVector(o, 'scale');
         trackRotation(q, o);
         trackRotation(o.rotation, o);
+        if (Object.prototype.hasOwnProperty.call(o, 'visible')) {
+            // made before this module loaded: its own `visible` would hide flips from the accessor
+            const v = o.visible;
+            delete o.visible;
+            o.visible = v;
+        }
         o.addEventListener('childadded', onChildAdded);
+        o.addEventListener('childremoved', onChildRemoved);
     }
     const ch = o.children;
     for (let i = 0; i < ch.length; i++) track(ch[i]);
@@ -145,7 +244,7 @@ export default class SceneTransforms {
         /** Last walk: nodes visited, nodes whose world matrix it recomputed, nodes handed to three. */
         this.stats = { visited: 0, recomputed: 0, three: 0 };
         track(scene);
-        scene[ALWAYS] = false;       // the root is the walk's own
+        /** @type {any} */ (scene)[ALWAYS] = false;   // the root is the walk's own
         scene.updateMatrixWorld = (force) => this.update(force);
     }
 
@@ -162,11 +261,14 @@ export default class SceneTransforms {
 
     /** Hand the scene's matrix update back to three. Tracked nodes stay tracked (a mark is harmless). */
     dispose() {
-        delete this.scene.updateMatrixWorld;
+        delete /** @type {any} */ (this.scene).updateMatrixWorld;
     }
 }
 
-/** three's updateMatrixWorld, entering only flagged subtrees. */
+/**
+ * three's updateMatrixWorld, entering only flagged subtrees.
+ * @param {any} o  @param {boolean} force  @param {{ visited: number, recomputed: number, three: number }} s
+ */
 function walk(o, force, s) {
     s.visited++;
     if (o[ALWAYS]) {
@@ -206,8 +308,10 @@ const _local = new THREE.Matrix4();
  * @returns {{ checked: number, stale: { name: string, type: string, path: string, maxErr: number }[] }}
  */
 export function verifyTransforms(root) {
+    /** @type {{ name: string, type: string, path: string, maxErr: number }[]} */
     const stale = [];
     let checked = 0;
+    /** @param {THREE.Object3D} o  @param {THREE.Matrix4|null} parentWorld */
     const visit = (o, parentWorld) => {
         let world;
         if (o.matrixWorldAutoUpdate !== true) {
@@ -232,7 +336,7 @@ export function verifyTransforms(root) {
             for (let i = 0; i < 16; i++) maxErr = Math.max(maxErr, Math.abs(a[i] - b[i]));
             if (maxErr > 0) {
                 const path = [];
-                for (let p = o; p; p = p.parent) path.push(p.name || p.type);
+                for (let p = /** @type {THREE.Object3D|null} */ (o); p; p = p.parent) path.push(p.name || p.type);
                 stale.push({ name: o.name, type: o.type, path: path.reverse().join(' > '), maxErr });
             }
         }

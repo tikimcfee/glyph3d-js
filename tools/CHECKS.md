@@ -187,7 +187,9 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   detached moves, a subtree built off-scene, a hand-written matrix, a camera, a pivot) every world
   matrix equals three's forced walk over an untracked clone, bit for bit; at rest the walk visits
   the root only, a write its chain; unchanged writes (position, rotation, quaternion) aren't
-  changes; a vector held from before its node joined throws; clones are plain Vector3s; force,
+  changes; a vector held from before its node joined throws; clones are plain Vector3s; rootOf /
+  isShown follow visible flips (ancestor, root, an own `visible` converted at join) and the tree's
+  shape, while poses and walks leave the show generation alone; force,
   serialization, dispose. Each hook was removed in turn and the test failed. In the app,
   `./glyph3d-cli --port 8099 scene.transforms` verifies the live scene the same way.
 - **`panel-batch.test.mjs`** (headless) — PanelBatch: enrollPanel refuses what it can't batch,

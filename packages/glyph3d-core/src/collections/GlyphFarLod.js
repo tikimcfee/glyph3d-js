@@ -28,6 +28,7 @@
  */
 
 import * as THREE from 'three';
+import { isShown, isTracked } from './SceneTransforms.js';
 import { liveInstancedFields } from './InstancedField.js';
 import { isBatchedGlyphField } from './GlyphBatch.js';
 
@@ -76,17 +77,12 @@ const _h = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _fit = new THREE.Matrix4();
 
-/** Whether `obj` and every ancestor are visible — a hidden book's far files get no backdrop. */
-function shown(obj) {
-    for (let o = obj; o; o = o.parent) if (!o.visible) return false;
-    return true;
-}
-
 export default class GlyphFarLod {
     /**
      * @param {THREE.Object3D} scene - where the backdrop mesh lives
      */
     constructor(scene) {
+        if (!isTracked(scene)) throw new Error('GlyphFarLod: the scene needs a SceneTransforms first (isShown reads its marks)');
         this.params = { ...FAR_LOD_DEFAULTS };
         this.scene = scene;
         this._geometry = new THREE.PlaneGeometry(1, 1).translate(0.5, 0.5, 0);
@@ -191,7 +187,8 @@ export default class GlyphFarLod {
             if (isFar) {
                 far++;
                 if (mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.disable(VIEW_LAYER);
-                if (shown(mesh) && this._stage(backdrops, field, L, mesh)) backdrops++;
+                // a hidden book's far files get no backdrop
+                if (isShown(mesh) && this._stage(backdrops, field, L, mesh)) backdrops++;
             } else if (!mesh.layers.isEnabled(VIEW_LAYER)) {
                 mesh.layers.enable(VIEW_LAYER);
             }

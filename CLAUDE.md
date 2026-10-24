@@ -172,8 +172,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   from before throws) and hooked quaternion/rotation; a write that changes a value marks the node
   and flags its ancestors, and the scene's `updateMatrixWorld` (taken over) enters only flagged
   subtrees. At rest it visits the root and stops. Cameras, `matrixAutoUpdate = false` nodes (a
-  hand-written `.matrix`) and pivots are handed to three's forced update every walk; switching
-  `matrixAutoUpdate` off or setting a pivot on a node already in the scene isn't seen.
+  hand-written `.matrix`) and pivots are handed to three's forced update every walk, judged as they
+  join (the module header lists the changes the walk can't see on a node already in the scene).
+  The same marks answer "in this scene, and shown?": `Object3D.prototype.visible` is an accessor
+  (loaded with the module), and `rootOf(obj)` / `isShown(obj)` re-walk an object's ancestors only
+  when the show generation moves (a `visible` flip, a tracked node gaining or losing a child) —
+  PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
   recompute. Gate: `tools/scene-transforms.test.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via

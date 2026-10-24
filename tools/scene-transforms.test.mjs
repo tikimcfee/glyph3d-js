@@ -10,10 +10,12 @@
 //   - a node with a hand-written matrix (or a camera, or a pivot) is three's every walk;
 //     verifyTransforms names matrixAutoUpdate switched off on a node already in the scene
 //   - a vector held from before its node joined throws on write
+//   - reach: rootOf / isShown follow visible flips (an ancestor's, the root's, an own `visible`
+//     converted at join) and the tree's shape; poses and walks leave the show generation alone
 //   - force recomputes everything; dispose hands the walk back; a tracked vector serializes
 
 import * as THREE from 'three';
-import SceneTransforms, { verifyTransforms, TrackedVector3 } from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
+import SceneTransforms, { verifyTransforms, TrackedVector3, rootOf, isShown, isTracked, showGeneration } from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error(`FAIL: ${m}`); } };
@@ -220,6 +222,46 @@ for (const [name, write] of Object.entries(writes)) {
     agrees('pivot moved');
 }
 
+// ── reach: in the scene, and shown — walked once per show generation ─────────────────────
+{
+    ok(isTracked(scene) && !isTracked(new THREE.Scene()), 'isTracked: the scene a SceneTransforms serves');
+    const leaf = nodes.find((o) => depthOf(o) >= 5 && o.children.length === 0);
+    const mid = leaf.parent.parent;
+    ok(rootOf(leaf) === scene && isShown(leaf), 'a leaf in the scene is shown');
+    const g0 = showGeneration();
+    scene.updateMatrixWorld(); leaf.position.x += 1; scene.updateMatrixWorld();
+    ok(showGeneration() === g0, 'walks and pose writes leave the show generation alone');
+    leaf.visible = leaf.visible;
+    ok(showGeneration() === g0, 'an unchanged visible is not a change');
+    mid.visible = false;
+    ok(showGeneration() > g0 && !isShown(leaf), 'an ancestor hidden: the leaf is not shown');
+    mid.visible = true;
+    ok(isShown(leaf), 'and shown again');
+    scene.visible = false;
+    ok(!isShown(leaf), 'the root counts too');
+    scene.visible = true;
+    ok(isShown(leaf) && rootOf(leaf) === scene, 'shown, in the scene (cached)');
+    const parent = mid.parent;
+    parent.remove(mid);
+    ok(rootOf(leaf) === mid, `removed from the tree: its root is the detached subtree's (${rootOf(leaf).type})`);
+    parent.add(mid);
+    ok(rootOf(leaf) === scene && isShown(leaf), 'added back: in the scene again');
+    // an object carrying its own `visible` (made before the module loaded) is converted as it joins
+    const old = new THREE.Group();
+    Object.defineProperty(old, 'visible', { value: true, writable: true, enumerable: true, configurable: true });
+    const kid = new THREE.Group(); old.add(kid);
+    pick().add(old);
+    ok(!Object.prototype.hasOwnProperty.call(old, 'visible') && old.visible === true, 'an own `visible` is converted as it joins');
+    ok(isShown(kid), 'its child is shown');
+    old.visible = false;
+    ok(!isShown(kid), 'and its flip is seen');
+    const g1 = showGeneration();
+    const off = new THREE.Group(); off.add(new THREE.Group());
+    ok(showGeneration() === g1, 'building outside the scene is not a show change');
+    pick().add(off);
+    ok(showGeneration() > g1, 'joining is');
+}
+
 // ── force, serialization, dispose ────────────────────────────────────────────────────────
 {
     const total = all().length;
@@ -234,6 +276,10 @@ for (const [name, write] of Object.entries(writes)) {
     c.x += 9;
     scene.updateMatrixWorld();
     ok(st.stats.recomputed === 0, `writing the clone moves nothing (recomputed ${st.stats.recomputed})`);
+    ok(n.position.constructor === THREE.Vector3, 'a tracked vector reports Vector3 as its constructor (r3f copies into it)');
+    const z = pick(); z.position.x = 0; scene.updateMatrixWorld();
+    z.position.x = -0;
+    ok(Object.is(z.position.x, -0), 'writing -0 over 0 lands');
     const made = new TrackedVector3(1, 2, 3);
     ok(made.x === 1 && made.y === 2 && made.z === 3, 'TrackedVector3 takes Vector3\'s (x, y, z)');
     ok(n.position.toArray().join() === [n.position.x, n.position.y, n.position.z].join() && n.position.distanceTo(c) === 9, 'a tracked vector still does Vector3 math');

@@ -15,6 +15,7 @@
 //   - a grow past capacity, another scene's panels, dispose
 
 import * as THREE from 'three';
+import SceneTransforms from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
 import PanelBatch, { enrollPanel, enrolledPanels } from '../packages/glyph3d-core/src/collections/PanelBatch.js';
 import { createPanelMaterial, BORDER_FLAGS } from '../packages/glyph3d-core/src/collections/panelMaterial.js';
 import { createBackgroundMesh } from '../packages/glyph3d-core/src/collections/grid/GridBackground.js';
@@ -27,6 +28,7 @@ const close = (a, b, m, eps = 1e-5) => ok(Math.abs(a - b) <= eps * Math.max(1, M
 const throws = (fn, re, m) => { try { fn(); ok(false, `${m} (did not throw)`); } catch (e) { ok(re.test(e.message), `${m} (${e.message})`); } };
 
 const scene = new THREE.Scene();
+new SceneTransforms(scene);   // the batches read its visibility / structure marks
 const camera = new THREE.PerspectiveCamera(50, 1.6, 0.1, 1e6);
 camera.position.set(1000, 2000, 500);
 camera.lookAt(1000, 2000, 0);

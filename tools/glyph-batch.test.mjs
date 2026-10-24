@@ -13,6 +13,7 @@
 //   - GlyphFarLod leaves batched fields' layers alone; pick passes don't refresh; dispose
 
 import * as THREE from 'three';
+import SceneTransforms from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
 import InstancedField from '../packages/glyph3d-core/src/collections/InstancedField.js';
 import GlyphBatch, { enrollGlyphField, enrolledGlyphFields, isBatchedGlyphField } from '../packages/glyph3d-core/src/collections/GlyphBatch.js';
 import GlyphFarLod from '../packages/glyph3d-core/src/collections/GlyphFarLod.js';
@@ -26,6 +27,7 @@ const ROW = GROUP_STRIDE * 4;
 
 const atlas = {};   // the arena takes its slug data from the atlas; none headless
 const scene = new THREE.Scene();
+new SceneTransforms(scene);   // the batches read its visibility / structure marks
 const camera = new THREE.PerspectiveCamera(50, 1.6, 0.1, 1e7);
 const look = (x, y, z, tx = x, ty = y, tz = 0) => { camera.position.set(x, y, z); camera.lookAt(tx, ty, tz); camera.updateMatrixWorld(); };
 

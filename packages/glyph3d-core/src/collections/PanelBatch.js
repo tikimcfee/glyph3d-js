@@ -9,7 +9,9 @@
  * leaves the view camera's layer 0 — the pick channels are their own layers, so picking still
  * draws it — and the batch draws an instance in its place, read off the object every frame:
  * matrixWorld, the material's colours and render state, and the visibility of the object and
- * every ancestor. Owners keep writing the object; nothing else changes.
+ * every ancestor (SceneTransforms' isShown: walked again only when some `visible` or the tree's
+ * shape changes, so the scene needs a SceneTransforms). Owners keep writing the object; nothing
+ * else changes.
  *
  * Three kinds, each one unit geometry and one shader:
  *   panel — a 1×1 PlaneGeometry in a createPanelMaterial (fill, border, flags, state colours)
@@ -31,6 +33,7 @@
  */
 
 import * as THREE from 'three';
+import { rootOf, isShown, isTracked } from './SceneTransforms.js';
 
 /** The view camera renders layer 0; an enrolled object leaves it while a batch draws it. */
 const VIEW_LAYER = 0;
@@ -418,6 +421,7 @@ export default class PanelBatch {
      */
     constructor(scene) {
         if (!scene?.isScene) throw new Error('PanelBatch: needs a THREE.Scene (it hooks scene.onBeforeRender)');
+        if (!isTracked(scene)) throw new Error('PanelBatch: the scene needs a SceneTransforms first (rootOf / isShown read its marks)');
         this.scene = scene;
         /** @type {Map<Kind, THREE.BufferGeometry>} each kind's unit geometry */
         this._units = new Map();
@@ -460,9 +464,7 @@ export default class PanelBatch {
             console.warn('PanelBatch: the scene has fog, which the box fill/edge shader does not draw — those objects draw themselves (one draw each) while it is set');
         }
         for (const p of _panels) {
-            let shown = true, o = p;
-            for (; o.parent; o = o.parent) if (!o.visible) shown = false;
-            if (o !== this.scene) { elsewhere++; continue; }
+            if (rootOf(p) !== this.scene) { elsewhere++; continue; }
             const kind = _kindOf.get(p), m = p.material;
             if (!kind.accepts(m) || (fogged && kind.fogless)) {
                 // re-materialled into something the batch can't draw, or fogged: it draws itself
@@ -471,7 +473,7 @@ export default class PanelBatch {
                 continue;
             }
             if (p.layers.isEnabled(VIEW_LAYER)) p.layers.disable(VIEW_LAYER);
-            if (!shown || !o.visible || !m.visible) { hidden++; continue; }
+            if (!isShown(p) || !m.visible) { hidden++; continue; }
             // three's per-object cull, kept: the unit geometry's sphere through the world matrix
             const e = p.matrixWorld.elements;
             _sphere.center.set(e[12], e[13], e[14]);
