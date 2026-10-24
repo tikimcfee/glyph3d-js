@@ -1,26 +1,27 @@
 /**
- * far-lod-check.mjs — does a far file READ the same with its glyphs as with its backdrop?
+ * far-lod-check.mjs — does a far file SHOW as its backdrop, and does nothing else move?
  *
  * GlyphFarLod swaps a field whose rows are under `showGlyphsPx` for one quad of its mean ink
- * colour (alpha = ink cover × gain). This renders the live scene three ways at each pose and
- * reads the pixels back in the same turn:
+ * colour (alpha = ink cover × gain): far away you see the simple version of the file, a
+ * clearly visible box — not a match for the sub-pixel glyphs, which add next to no light.
+ * This renders the live scene three ways at each pose and reads the pixels back in the
+ * same turn:
  *   FULL — showGlyphsPx 0 (every glyph drawn)
  *   LOD  — the default threshold, at each backdrop gain swept (and the configured one)
  *   BARE — far fields hidden, backdrops at gain 0 (the panels alone: the teeth)
- * Compared inside the screen rects of the TRANSITION BAND — far fields whose rows measure
- * between half the threshold and the threshold, where the swap is what you'd see happen —
- * by mean LINEAR light (what the eye averages at a distance; glyph3d-rs fitted its
- * backdrop_gain the same way). Deeper fields are reported, not fitted: there the FULL render
- * is the raster lottery (quads that miss every pixel centre draw nothing — a fit-to-page
- * 2,400-line file renders near-black) and the backdrop is the truer picture. Outside the far
- * rects nothing may change. Reports draw calls FULL vs LOD, and the band's best-fit gain.
+ * Compared inside the far fields' screen rects by mean LINEAR light: the backdrops must
+ * add at least VISIBLE_PTS (percent of FULL's light) over BARE, and outside the far rects
+ * nothing may change. Reports draw calls FULL vs LOD and, for the TRANSITION BAND (far
+ * fields whose rows measure between half the threshold and the threshold), how LOD and BARE
+ * read against the glyphs plus the gain that would match them (glyph3d-rs's backdrop_gain
+ * fit) — information, not a verdict.
  *
  *   bun tools/far-lod-check.mjs --url http://127.0.0.1:5174/ --relay 8099 --dir /abs/dir
  *                               [--cmd 'layout.scheme library']… [--width W --height H]
  *
  * Needs Vite and a PRIVATE relay serving a scratch root that can reach --dir (frame-profile's
  * setup). Exits 1 when a pose has no far field (vacuous), when pixels outside the far rects
- * move, or when the configured gain reads further from FULL than BARE does.
+ * move, or when the backdrops add under VISIBLE_PTS of light over bare panels.
  */
 
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
@@ -30,6 +31,8 @@ const URL = arg('--url', 'http://localhost:5173/');
 const RELAY = Number(arg('--relay', 8099));
 const DIR = arg('--dir');
 const W = Number(arg('--width', 1600)), H = Number(arg('--height', 1000));
+/** Backdrops must lift the far rects' mean linear light this many % of FULL above BARE. */
+const VISIBLE_PTS = 5;
 const CMDS = process.argv.flatMap((a, i) => (a === '--cmd' ? [process.argv[i + 1]] : []));
 if (!DIR) { console.error('usage: --dir /abs/dir (inside the relay root or its --reach)'); process.exit(2); }
 
@@ -81,6 +84,7 @@ try {
             const mask = new Uint8Array(w * h), band = new Uint8Array(w * h);
             const fov = cam.getEffectiveFOV?.() ?? 50, ppu = Hc / (2 * Math.tan(fov * Math.PI / 360));
             const eye = cam.getWorldPosition(cam.position.clone());
+            const fwd = cam.getWorldDirection(cam.position.clone());
             let bandFields = 0;
             const V = cam.position.constructor;
             const corners = Array.from({ length: 8 }, () => new V());
@@ -102,11 +106,13 @@ try {
                 if (X1 < X0 || Y1 < Y0) continue;
                 farRects++;
                 for (let y = Y0; y <= Y1; y++) mask.fill(1, y * w + X0, y * w + X1 + 1);
-                // this field's rows on screen, by the far-LOD's own measure (nearest point)
-                for (let k = 0; k < 8; k++) corners[k].set(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(o.matrixWorld);
-                const lo = corners.reduce((a, p) => a.min(p), corners[0].clone()), hi = corners.reduce((a, p) => a.max(p), corners[0].clone());
-                const near = Math.hypot(Math.max(lo.x - eye.x, 0, eye.x - hi.x), Math.max(lo.y - eye.y, 0, eye.y - hi.y), Math.max(lo.z - eye.z, 0, eye.z - hi.z));
-                const rowPx = f.rowHeight * o.matrixWorld.getMaxScaleOnAxis() * ppu / Math.max(near, 1e-3);
+                // this field's rows on screen, by the far-LOD's own measure (nearest view depth)
+                let near = Infinity;
+                for (let k = 0; k < 8; k++) {
+                    const p = corners[k].set(k & 1 ? b.max.x : b.min.x, k & 2 ? b.max.y : b.min.y, k & 4 ? b.max.z : b.min.z).applyMatrix4(o.matrixWorld);
+                    near = Math.min(near, p.sub(eye).dot(fwd));
+                }
+                const rowPx = f.rowHeight * o.matrixWorld.getMaxScaleOnAxis() * ppu / Math.max(near, cam.near);
                 if (rowPx >= keep.showGlyphsPx / 2) {
                     bandFields++;
                     for (let y = Y0; y <= Y1; y++) band.fill(1, y * w + X0, y * w + X1 + 1);
@@ -163,13 +169,14 @@ try {
         const problems = [];
         if (!r.far.backdrops) problems.push('no far field at this pose — vacuous');
         if (r.absDiffPerChannel.lod.outsidePixelsChanged) problems.push(`${r.absDiffPerChannel.lod.outsidePixelsChanged} pixels changed OUTSIDE the far rects`);
-        if (r.bandFields && Math.abs(r.bandVsFullPct.lod) >= Math.abs(r.bandVsFullPct.bare)) problems.push('in the transition band the backdrop reads no closer to the glyphs than bare panels do');
+        const lift = r.allFarVsFullPct.lod - r.allFarVsFullPct.bare;
+        if (lift < VISIBLE_PTS) problems.push(`the backdrops lift the far rects ${lift.toFixed(1)}% over bare panels (< ${VISIBLE_PTS}%): they don't show`);
         for (const p of problems) console.log(`  ✗ ${p}`);
         if (!problems.length) {
             const band = r.bandFields
-                ? `band (${r.bandFields} fields): backdrops ${r.bandVsFullPct.lod}% vs glyphs, bare ${r.bandVsFullPct.bare}%, best gain ${r.gain.bestFit} (${r.gain.bestFitPct}%)`
+                ? `band (${r.bandFields} fields): backdrops ${r.bandVsFullPct.lod}% vs glyphs, bare ${r.bandVsFullPct.bare}%, glyph-matching gain ${r.gain.bestFit}`
                 : 'no field in the transition band at this pose';
-            console.log(`  ✓ ${band}; all far: ${r.allFarVsFullPct.lod}%; draws ${r.draws.full} → ${r.draws.lod}`);
+            console.log(`  ✓ backdrops lift the far rects ${lift.toFixed(1)}% over bare; ${band}; draws ${r.draws.full} → ${r.draws.lod}`);
         }
         failed += problems.length ? 1 : 0;
     }

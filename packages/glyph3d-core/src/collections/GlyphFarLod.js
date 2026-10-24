@@ -55,8 +55,8 @@ void main() {
 }
 `;
 
-// The glyph shader's output convention: linear colour, premultiplied, through three's
-// normal blending — so a backdrop composites the way the glyphs it replaces did.
+// Linear colour, premultiplied — the material says so (premultipliedAlpha), so three blends
+// it ONE, ONE_MINUS_SRC_ALPHA: the page behind keeps (1 − a) and the tint adds rgb × a.
 const BACKDROP_FS = `
 precision highp float;
 in vec4 vTint;
@@ -95,6 +95,7 @@ export default class GlyphFarLod {
             fragmentShader: BACKDROP_FS,
             uniforms: { uGain: { value: this.params.backdropGain } },
             transparent: true,
+            premultipliedAlpha: true,
             depthWrite: true,      // as the glyphs do: a nearer backdrop must hide what's behind it
             depthTest: true,
             side: THREE.DoubleSide,

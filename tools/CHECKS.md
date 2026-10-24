@@ -156,13 +156,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   (mean LINEAR ink through the group tint, cover × group alpha, cached on buffer versions),
   opt-outs, hidden ancestors, a grow past capacity, dispose.
 
-- **`far-lod-check.mjs`** — does a far file READ the same as glyphs or as its backdrop? Renders
-  the live scene FULL (every glyph) / LOD / BARE (backdrops at gain 0) at fit-all and three
-  closer poses, compares mean linear light over the TRANSITION BAND (far fields within 2× of the
-  threshold — the swap you'd see happen), sweeps the gain for the band's best fit, and fails if
-  a pixel outside the far rects moves or the backdrop reads no closer than bare panels. Deeper
-  fields are reported, not fitted: there FULL is the raster lottery (a fit-to-page 2,400-line
-  file draws near-black), the backdrop the truer picture.
+- **`far-lod-check.mjs`** — does a far file SHOW as its backdrop, and does nothing else move?
+  Renders the live scene FULL (every glyph) / LOD / BARE (backdrops at gain 0) at fit-all and
+  three closer poses; fails if a pixel outside the far rects moves or the backdrops lift the far
+  rects' mean linear light under 5% (of FULL) over bare panels — the box must be visible, not a
+  match for sub-pixel glyphs that add next to no light (the old straight-alpha backdrop lifted
+  1–2% and fails here). Reports the TRANSITION BAND (far fields within 2× of the threshold) LOD
+  and BARE against the glyphs, and the gain that would match them, as information.
   ```
   bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
