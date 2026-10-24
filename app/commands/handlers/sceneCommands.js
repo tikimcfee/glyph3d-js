@@ -1,9 +1,10 @@
 /**
- * Scene commands: scene.info, scene.clear_grids
+ * Scene commands: scene.info, scene.transforms, scene.clear_grids
  * Uses registry as source of truth for scene object counts.
  */
 
 import { box, kvLines } from '../formatResponse.js';
+import { verifyTransforms } from '@glyph3d/core/collections/SceneTransforms.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -41,6 +42,27 @@ export default function registerSceneCommands(router) {
             }
         };
     }, { description: 'Show scene details' });
+
+    // The world-matrix walk: what the last frame's walk visited and recomputed, then a check of
+    // every world matrix against a recompute from scratch. A stale node is a pose write the walk
+    // never saw (a hand-written .matrix without matrixWorldNeedsUpdate = true).
+    router.register('scene.transforms', (args, ctx) => {
+        const st = ctx.sceneTransforms;
+        if (!st) throw new Error('scene.transforms: no SceneTransforms on this scene');
+        const last = st.stats;
+        st.update();
+        const { checked, stale } = verifyTransforms(ctx.scene);
+        const lines = kvLines({
+            'last walk': `${last.visited} visited · ${last.recomputed} recomputed · ${last.three} by three`,
+            'verified': `${checked} world matrices`,
+            'stale': String(stale.length),
+        });
+        const list = stale.slice(0, 20).map((n) => `  ${n.path}  (off by ${n.maxErr.toExponential(2)})`).join('\n');
+        return {
+            text: box('TRANSFORMS', lines, 60) + (stale.length ? `\n${list}\nFAIL: ${stale.length} stale world matrices` : '\nOK: every world matrix current'),
+            data: { last, checked, stale },
+        };
+    }, { description: 'World-matrix walk stats, and a check of every world matrix against a fresh recompute' });
 
     // Clear all CONTENT grids (the open code files). Leaves terminals alone — those
     // are live/owned and torn down explicitly (terminal.kill). Reuses ctx.removeGrid

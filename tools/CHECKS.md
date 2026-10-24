@@ -182,6 +182,14 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
+- **`scene-transforms.test.mjs`** (headless) — SceneTransforms on a random 400-node tree: after
+  every kind of pose write (vector writes, rotations, three's transform helpers, attach / add /
+  detached moves, a subtree built off-scene, a hand-written matrix, a camera, a pivot) every world
+  matrix equals three's forced walk over an untracked clone, bit for bit; at rest the walk visits
+  the root only, a write its chain; unchanged writes (position, rotation, quaternion) aren't
+  changes; a vector held from before its node joined throws; clones are plain Vector3s; force,
+  serialization, dispose. Each hook was removed in turn and the test failed. In the app,
+  `./glyph3d-cli --port 8099 scene.transforms` verifies the live scene the same way.
 - **`panel-batch.test.mjs`** (headless) — PanelBatch: enrollPanel refuses what it can't batch,
   membership follows add/remove/material dispose, the refresh runs for view cameras and never
   pick passes, an instance carries the panel's uniforms + eye-relative world matrix, hidden

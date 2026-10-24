@@ -166,6 +166,16 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   and zeroes the alpha of hidden or off-frustum labels. A sheared pose or a glyph outside group 0
   draws itself; batched labels skip far-LOD. Gates: `tools/glyph-batch.test.mjs`,
   `tools/glyph-batch-check.mjs`.
+- **Scene transforms** (`collections/SceneTransforms.js`): world matrices are recomputed where
+  something moved, not across the whole tree every frame. A node joining the scene gets
+  `TrackedVector3` position/scale (its old vectors are frozen — a write through a reference held
+  from before throws) and hooked quaternion/rotation; a write that changes a value marks the node
+  and flags its ancestors, and the scene's `updateMatrixWorld` (taken over) enters only flagged
+  subtrees. At rest it visits the root and stops. Cameras, `matrixAutoUpdate = false` nodes (a
+  hand-written `.matrix`) and pivots are handed to three's forced update every walk; switching
+  `matrixAutoUpdate` off or setting a pivot on a node already in the scene isn't seen.
+  `scene.transforms` reports the last walk and checks every world matrix against a fresh
+  recompute. Gate: `tools/scene-transforms.test.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.

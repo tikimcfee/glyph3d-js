@@ -26,6 +26,7 @@ import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
 import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
 import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
 import GlyphBatch from '@glyph3d/core/collections/GlyphBatch.js';
+import SceneTransforms from '@glyph3d/core/collections/SceneTransforms.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -212,6 +213,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/GlyphFarLod.js').default|null} */ glyphFarLod: null,
     /** @type {import('@glyph3d/core/collections/PanelBatch.js').default|null} */ panelBatch: null,
     /** @type {import('@glyph3d/core/collections/GlyphBatch.js').default|null} */ glyphBatch: null,
+    /** @type {import('@glyph3d/core/collections/SceneTransforms.js').default|null} */ sceneTransforms: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
     /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
@@ -396,6 +398,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // via setPickingSystem).
     const pickingSystem = new PickingSystem(gl);
     state.ctx.pickingSystem = pickingSystem;
+
+    // World matrices: a pose write marks its node, and the per-frame walk enters only what was
+    // marked — not every node of the tree, every frame (scene.transforms reports and verifies it).
+    state.ctx.sceneTransforms = new SceneTransforms(scene);
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
     // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node
@@ -835,6 +841,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.panelBatch = null;
       state.ctx.glyphFarLod?.dispose();
       state.ctx.glyphFarLod = null;
+      state.ctx.sceneTransforms?.dispose();   // hands scene.updateMatrixWorld back — a second boot takes it over again
+      state.ctx.sceneTransforms = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
       state.ctx.deltaBooks?.dispose();
