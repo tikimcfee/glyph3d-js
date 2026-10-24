@@ -338,12 +338,12 @@ void main() {
     float outAlpha = max(cov, vFillAmount) * vGroupAlpha;
     if (outAlpha <= 0.0 && vBgColor.a <= 0.0) discard;
 
-    // Highlight composition
+    // Highlight composition, in straight colour: the ink plus its additive tint, or (a fill)
+    // the ink over the fill colour by coverage. Coverage enters ONCE, as alpha, below.
     bool isFill = vFillAmount > 0.0;
-    float addK = isFill ? (1.0 - cov) : 1.0;
-    vec3 compositeRgb = clamp(vColor * cov + vAddedColor * addK, 0.0, 1.0);
+    vec3 compositeRgb = isFill ? mix(vAddedColor, vColor, cov) : clamp(vColor + vAddedColor, 0.0, 1.0);
 
-    // Linear sRGB decode
+    // Linear sRGB decode, premultiplied (the material blends ONE, ONE_MINUS_SRC_ALPHA)
     vec3 rgb = pow(compositeRgb, vec3(2.2)) * outAlpha;
 
     if (vBgColor.a <= 0.0) {
@@ -478,6 +478,7 @@ export function createGlyphMaterial(options = {}) {
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         transparent: true,
+        premultipliedAlpha: true,   // the fragment writes linear rgb × alpha
         depthWrite: true,
         depthTest: true,
         side: THREE.DoubleSide,
