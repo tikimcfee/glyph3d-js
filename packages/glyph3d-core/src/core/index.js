@@ -8,10 +8,9 @@ export { InstancedSlotBuffer, packRgba8, unpackRgba8 } from './InstancedSlotBuff
 export { generateLayout } from './LayoutGenerator.js';
 export {
     createGlyphMaterial,
-    setGlyphLodParam,
-    getGlyphLodParams,
-    GLYPH_LOD_DEFAULTS,
-    GLYPH_GREEK_MODES,
+    setGlyphGreekPx,
+    getGlyphGreekPx,
+    GLYPH_GREEK_PX_DEFAULT,
 } from './glyphMaterial.js';
 export { computeCellMetrics, deriveCharSize, LINE_PITCH, LETTER_SPACING } from './cellMetrics.js';
 export { RENDER_ORDER } from './renderOrder.js';

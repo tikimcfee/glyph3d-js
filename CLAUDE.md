@@ -138,6 +138,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   writing `geometry.boundingBox/Sphere` — the box three culls, depth-sorts, and raycasts by.
   `tools/glyph-cull-truth.mjs` checks every live quad against it. (Fields moved through the
   group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
+- **Glyph tiers** by on-screen size, nothing in between: exact Slug coverage (counted once,
+  premultiplied); under `glyph.greekPx` (default 8 px tall) a glyph is a bar through the
+  x-height where its ink would be (`core/glyphMaterial.js`, about as much light as the text);
+  under far-LOD's size, one box per file.
 - **Far-LOD** (`collections/GlyphFarLod.js`): a culled field whose tallest row measures
   under `glyph.showGlyphsPx` (default 1 px, at its box's nearest view DEPTH — what the row
   projects to, not its distance) stops drawing its glyphs — it leaves the view camera's

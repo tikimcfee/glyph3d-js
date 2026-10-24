@@ -6,7 +6,7 @@
  * - 32-byte RenderSlot vertex input (pos, glyph_id, color, group_id, advance, height).
  * - Dobbie / Lengyel "Slug" quadratic Bézier analytic winding coverage with stable roots.
  * - Near-horizontal line guard to eliminate vertical line artifacts.
- * - Greeking syntax bar for minified LOD (smooth blend & hard bypass).
+ * - Greeking: under GLYPH_GREEK_PX_DEFAULT px tall a glyph is a bar where its ink would be.
  * - Full rigid TRS group transforms (offset, quaternion rotation, scale, clip).
  * - Deterministic, flicker-free rendering in standard WebGL2 (THREE.ShaderMaterial).
  */
@@ -142,19 +142,16 @@ precision highp float;
 precision highp int;
 
 #define MAX_CURVES 256
+#define GREEK_BAR_LO 0.27
+#define GREEK_BAR_HI 0.47
 
 uniform highp usampler2D curveTexture;
 uniform sampler2D emojiTexture;
 uniform int emojiCols;
 uniform int emojiRows;
 
-// Greeking & LOD dials
-uniform int uGreekMode;       // index into GLYPH_GREEK_MODES: 0 off, 1 smooth, 2 hard
-uniform float uGreekOnsetPx;  // on-screen quad height (px) below which a glyph greeks
-uniform float uDilatePx;      // 0.75 — stroke fattening half-width at full zoom-out
-uniform float uSoften;        // 0.45 — AA ramp widening factor
-uniform float uMinLo;         // 0.06 — fuzz onset (footprint)
-uniform float uMinHi;         // 0.20 — fuzz full (footprint)
+// Greeking: a glyph whose quad is under this many px tall on screen draws as a bar (0 = never)
+uniform float uGreekPx;
 
 flat in int vCurveStart;
 flat in int vCurveCount;
@@ -176,7 +173,7 @@ vec2 rot90(vec2 v) {
 }
 
 // Analytic quadratic Bézier coverage along +X ray with stable root solving
-float computeCoverage(float invDiameter, float dilate, vec2 p0, vec2 p1, vec2 p2) {
+float computeCoverage(float invDiameter, vec2 p0, vec2 p1, vec2 p2) {
     if ((p0.y > 0.0 && p1.y > 0.0 && p2.y > 0.0) || (p0.y < 0.0 && p1.y < 0.0 && p2.y < 0.0)) {
         return 0.0;
     }
@@ -224,11 +221,11 @@ float computeCoverage(float invDiameter, float dilate, vec2 p0, vec2 p1, vec2 p2
     if (solvable) {
         if (t0 >= 0.0 && t0 < 1.0) {
             float x = (a.x * t0 - 2.0 * b.x) * t0 + c.x;
-            result += clamp(x * invDiameter + 0.5 + dilate, 0.0, 1.0);
+            result += clamp(x * invDiameter + 0.5, 0.0, 1.0);
         }
         if (t1 >= 0.0 && t1 < 1.0) {
             float x = (a.x * t1 - 2.0 * b.x) * t1 + c.x;
-            result -= clamp(x * invDiameter + 0.5 - dilate, 0.0, 1.0);
+            result -= clamp(x * invDiameter + 0.5, 0.0, 1.0);
         }
     }
     return result;
@@ -285,28 +282,25 @@ void main() {
     if (vCurveCount == 0 && vFillAmount <= 0.0 && vBgColor.a <= 0.0) discard;
 
     vec2 fw = fwidth(vGlyphUV);
-    float emPx = 1.0 / max(fw.y, 1e-4);
 
-    // Greeking calculation
-    float greek = 0.0;
-    if (uGreekMode == 1) {
-        float onset = uGreekOnsetPx;
-        float full = onset * 0.45;
-        float t = clamp((onset - emPx) / max(onset - full, 0.01), 0.0, 1.0);
-        greek = t * t * (3.0 - 2.0 * t);
-    } else if (uGreekMode == 2) {
-        if (emPx <= uGreekOnsetPx) greek = 1.0;
-    }
+    // The tiers: under uGreekPx tall on screen a glyph is a bar where its ink would be (continuous
+    // across a word, the full cell wide); above it, exact coverage. The bar is a band through the
+    // x-height, GREEK_BAR_LO..HI of the cell — as much ink as code text carries, so the swap
+    // keeps the page's brightness.
+    bool greek = uGreekPx > 0.0 && 1.0 / max(fw.y, 1e-4) < uGreekPx;
 
     float cov = 0.0;
-    if (greek < 1.0) {
-        float fwMax = max(fw.x, fw.y);
-        float m = clamp((fwMax - uMinLo) / max(uMinHi - uMinLo, 1e-4), 0.0, 1.0);
-        m = m * m * (3.0 - 2.0 * m); // smoothstep
-
-        float dilate = m * uDilatePx;
-        vec2 invD = (vec2(1.0) / fw) * (1.0 - m * uSoften);
-
+    if (greek) {
+        float dy = max(fw.y, 1e-4);
+        float yCov = clamp((vGlyphUV.y - GREEK_BAR_LO) / dy + 0.5, 0.0, 1.0)
+                   - clamp((vGlyphUV.y - GREEK_BAR_HI) / dy + 0.5, 0.0, 1.0);
+        float dx = max(fw.x, 1e-4);
+        float xCov = clamp((vGlyphUV.x - 0.0) / dx + 0.5, 0.0, 1.0)
+                   - clamp((vGlyphUV.x - 1.0) / dx + 0.5, 0.0, 1.0);
+        cov = clamp(xCov * yCov, 0.0, 1.0);
+    } else {
+        // Fractional winding along +X and +Y rays, each scaled to one pixel's footprint.
+        vec2 invD = vec2(1.0) / fw;
         float coverage = 0.0;
         int n = min(vCurveCount, MAX_CURVES);
         for (int i = 0; i < n; i++) {
@@ -318,21 +312,10 @@ void main() {
             vec2 p1 = vec2(float(t0.z), float(t0.w)) / 65535.0 - vGlyphUV;
             vec2 p2 = vec2(float(t1.x), float(t1.y)) / 65535.0 - vGlyphUV;
 
-            coverage += computeCoverage(invD.x, dilate, p0, p1, p2);
-            coverage += computeCoverage(invD.y, dilate, rot90(p0), rot90(p1), rot90(p2));
+            coverage += computeCoverage(invD.x, p0, p1, p2);
+            coverage += computeCoverage(invD.y, rot90(p0), rot90(p1), rot90(p2));
         }
         cov = clamp(coverage * 0.5, 0.0, 1.0);
-    }
-
-    if (greek > 0.0) {
-        float dy = max(fw.y, 1e-4);
-        float yCov = clamp((vGlyphUV.y - 0.20) / dy + 0.5, 0.0, 1.0)
-                   - clamp((vGlyphUV.y - 0.75) / dy + 0.5, 0.0, 1.0);
-        float dx = max(fw.x, 1e-4);
-        float xCov = clamp((vGlyphUV.x - 0.0) / dx + 0.5, 0.0, 1.0)
-                   - clamp((vGlyphUV.x - 1.0) / dx + 0.5, 0.0, 1.0);
-        float barCov = clamp(xCov * yCov, 0.0, 1.0);
-        cov = mix(cov, barCov, greek);
     }
 
     float outAlpha = max(cov, vFillAmount) * vGroupAlpha;
@@ -392,49 +375,25 @@ function makePlaceholderRGBATexture() {
     return tex;
 }
 
-export const GLYPH_LOD_DEFAULTS = Object.freeze({
-    dilatePx: 0.75,
-    soften: 0.45,
-    minLo: 0.06,
-    minHi: 0.20,
-    greekMode: 0,
-    greekOnsetPx: 10.0,
-});
-
 /**
- * Greeking — a small glyph drawn as a bar where its ink would be. `smooth` blends coverage
- * toward the bar from `greekOnsetPx` down to 0.45 × it; `hard` swaps to the bar outright below
- * it. A fully greeked glyph skips the curve loop. The `greekMode` param indexes this list.
+ * Greeking — a glyph whose quad is under this many px tall on screen draws as a bar where its
+ * ink would be, and skips the curve loop. Glyphs above it draw exact; fields whose rows are under
+ * a pixel are GlyphFarLod's (one box each). 0 = never greek.
  */
-export const GLYPH_GREEK_MODES = Object.freeze(['off', 'smooth', 'hard']);
-
-/** Each LOD param's shader uniform — the only keys setGlyphLodParam accepts. */
-const LOD_UNIFORMS = Object.freeze({
-    dilatePx: 'uDilatePx',
-    soften: 'uSoften',
-    minLo: 'uMinLo',
-    minHi: 'uMinHi',
-    greekMode: 'uGreekMode',
-    greekOnsetPx: 'uGreekOnsetPx',
-});
+export const GLYPH_GREEK_PX_DEFAULT = 8;
 
 const _activeMaterials = new Set();
-const _currentLodParams = { ...GLYPH_LOD_DEFAULTS };
+let _greekPx = GLYPH_GREEK_PX_DEFAULT;
 
-export function setGlyphLodParam(key, value) {
-    const uName = LOD_UNIFORMS[key];
-    if (!uName) throw new Error(`setGlyphLodParam: unknown param "${key}" (${Object.keys(LOD_UNIFORMS).join(', ')})`);
-    if (!Number.isFinite(value)) return;
-    _currentLodParams[key] = value;
-    for (const mat of _activeMaterials) {
-        if (mat.uniforms && mat.uniforms[uName]) {
-            mat.uniforms[uName].value = value;
-        }
-    }
+/** Set the greeking size live on every glyph material (and those created after). */
+export function setGlyphGreekPx(px) {
+    if (!Number.isFinite(px) || px < 0) throw new Error(`setGlyphGreekPx: want a size ≥ 0 px, got ${px}`);
+    _greekPx = px;
+    for (const mat of _activeMaterials) mat.uniforms.uGreekPx.value = px;
 }
 
-export function getGlyphLodParams() {
-    return { ..._currentLodParams };
+export function getGlyphGreekPx() {
+    return _greekPx;
 }
 
 /**
@@ -464,12 +423,7 @@ export function createGlyphMaterial(options = {}) {
         emojiRows: { value: options.emojiRows || 16 },
         highlightTexture: { value: null },
         hasHighlight: { value: 0 },
-        uGreekMode: { value: _currentLodParams.greekMode },
-        uGreekOnsetPx: { value: _currentLodParams.greekOnsetPx },
-        uDilatePx: { value: _currentLodParams.dilatePx },
-        uSoften: { value: _currentLodParams.soften },
-        uMinLo: { value: _currentLodParams.minLo },
-        uMinHi: { value: _currentLodParams.minHi },
+        uGreekPx: { value: _greekPx },
     };
 
     const material = new THREE.RawShaderMaterial({

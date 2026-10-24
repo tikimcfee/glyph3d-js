@@ -440,7 +440,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns
-    applyGroupSettings(state.ctx, 'Display & glyph LOD'); // fold persisted minification/LOD dials into the global glyph uniforms at boot
+    applyGroupSettings(state.ctx, 'Display & glyph LOD'); // fold the persisted greek size into the global glyph uniforms at boot
     applyGroupSettings(state.ctx, 'Code grids');         // set the configured default fold before any grid spawns (file.open / session restore)
 
     // Diagnostic: origin-vs-content-anchor dots per dir (layout.probes). Reveals where the

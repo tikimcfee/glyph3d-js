@@ -1,7 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import {
-  setGlyphLodParam, GLYPH_LOD_DEFAULTS, GLYPH_GREEK_MODES,
+  setGlyphGreekPx, GLYPH_GREEK_PX_DEFAULT,
 } from '@glyph3d/core';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
@@ -39,10 +39,6 @@ const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 const carrelParam = (param) => (ctx, v) => {
   for (const c of ctx.carrels?.values?.() || []) c.setParam?.(param, v);
 };
-
-/** apply() for a glyph minification/LOD dial: push the bare dial name (not the `glyph.` key) to the
- *  global GlyphField LOD uniform — live across every glyph material, no ctx subsystem needed. */
-const lodParam = (param) => (_ctx, v) => setGlyphLodParam(param, v);
 
 /** apply() for a strata dial: push the bare param name (not the `strata.` key) to the global
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
@@ -156,7 +152,7 @@ export const GROUPS = [
   { name: 'Camera',             subtitle: 'flight speed · proximity auto-slow · soft bounds · draw distance', columns: 2 },
   { name: 'Environment',        subtitle: 'sky, grid floor, axes · minimap overview', columns: 2 },
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · set-back · cursor · focus / hover / input colors', columns: 2 },
-  { name: 'Display & glyph LOD', subtitle: 'font size, width compress · minify / flicker control · far-LOD backdrops', columns: 2 },
+  { name: 'Display & glyph LOD', subtitle: 'font size · greeking · far-LOD backdrops', columns: 2 },
   { name: 'Code grids',         subtitle: 'default fold for new grids · tab width · syntax re-color pause', columns: 2 },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
@@ -690,17 +686,9 @@ export const SETTINGS = [
   { key: 'layout.splayGapY', label: 'Splay row gap', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayGapY, min: 0, max: 600, step: 4, apply: libraryParam('splayGapY') },
   { key: 'layout.splayAspect', label: 'Splay grid shape (w ≈ a×h)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayAspect, min: 0.2, max: 6, step: 0.1, apply: libraryParam('splayAspect') },
   { key: 'layout.splayLift', label: 'Splay head lift (bookmark)', group: 'Layout', scheme: 'library', type: 'number', default: LIBRARY_DEFAULTS.splayLift, min: 0, max: 400, step: 5, apply: libraryParam('splayLift') },
-  // Glyph minify — the Slug coverage shader fattens and softens strokes as text shrinks, to
-  // keep sub-pixel strokes from flickering. Footprints are fwidth(glyphUV): bigger = smaller on
-  // screen; the fuzz ramps in between minLo and minHi. Tune live in motion; defaults mirror the shader.
-  { key: 'glyph.dilatePx', label: 'Minify dilate (px)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.dilatePx, min: 0, max: 3, step: 0.05, apply: lodParam('dilatePx') },
-  { key: 'glyph.soften', label: 'Minify soften', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.soften, min: 0, max: 1, step: 0.05, apply: lodParam('soften') },
-  { key: 'glyph.minLo', label: 'Fuzz onset (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minLo, min: 0.01, max: 0.5, step: 0.01, apply: lodParam('minLo') },
-  { key: 'glyph.minHi', label: 'Fuzz full (footprint)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.minHi, min: 0.02, max: 0.6, step: 0.01, apply: lodParam('minHi') },
-  // Greeking — below the onset size a glyph draws as a bar where its ink would be (smooth blends
-  // into it, hard swaps outright). Onset = the glyph quad's on-screen height in px.
-  { key: 'glyph.greek', label: 'Greeking', group: 'Display & glyph LOD', type: 'enum', options: [...GLYPH_GREEK_MODES], default: GLYPH_GREEK_MODES[GLYPH_LOD_DEFAULTS.greekMode], apply: (_ctx, v) => setGlyphLodParam('greekMode', GLYPH_GREEK_MODES.indexOf(v)) },
-  { key: 'glyph.greekOnsetPx', label: 'Greek below (px tall)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LOD_DEFAULTS.greekOnsetPx, min: 0, max: 96, step: 0.5, apply: lodParam('greekOnsetPx') },
+  // The glyph tiers by on-screen size: exact glyphs; under the greek size, a bar where each
+  // glyph's ink would be (live on every glyph material); under the far-LOD size, one box per file.
+  { key: 'glyph.greekPx', label: 'Greek below (px tall, 0 = never)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_GREEK_PX_DEFAULT, min: 0, max: 96, step: 0.5, apply: (_ctx, v) => setGlyphGreekPx(v) },
   // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest depth
   // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
   // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.

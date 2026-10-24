@@ -40,7 +40,7 @@ export const STRATA_DEFAULTS = Object.freeze({
 });
 
 /** LIVE params — mutable copy every instance reads. setStrataParam mutates this + pushes
- *  the change to active instances, so a slider scrubs the live view (mirrors GLYPH_LOD). */
+ *  the change to active instances, so a slider scrubs the live view. */
 export const STRATA_PARAMS = { ...STRATA_DEFAULTS };
 
 /** Active instances, so a param change can re-apply to every on-screen strata view. */

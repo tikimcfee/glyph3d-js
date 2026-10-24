@@ -16,10 +16,9 @@ export { InstancedSlotBuffer, packRgba8, unpackRgba8 } from './core/InstancedSlo
 export { generateLayout } from './core/LayoutGenerator.js';
 export {
     createGlyphMaterial,
-    setGlyphLodParam,
-    getGlyphLodParams,
-    GLYPH_LOD_DEFAULTS,
-    GLYPH_GREEK_MODES,
+    setGlyphGreekPx,
+    getGlyphGreekPx,
+    GLYPH_GREEK_PX_DEFAULT,
 } from './core/glyphMaterial.js';
 
 // Collections - batched text abstractions
