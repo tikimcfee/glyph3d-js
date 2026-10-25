@@ -63,6 +63,15 @@ const gridBgGapParam = (ctx, v) => {
  *  these additive agent-specific knobs. */
 const agentBookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
 
+/** apply() for a desk's ring knob: push it to that desk live (its owner dresses the same
+ *  value at its next pass, and a desk not built yet takes it at birth); a world-placed desk
+ *  is re-placed so its new size doesn't overlap its neighbors. */
+const deskParam = (desk, param) => (ctx, v) => {
+  const c = ctx.carrels?.get(desk);
+  if (!c || !Number.isFinite(v) || !c.setParam(param, v)) return;
+  if (c.worldManaged) ctx.world?.relayout();
+};
+
 /** apply() for a DELTA-book knob: push the value to DeltaBooks.cfg (the bare param name,
  *  not the `delta.` key) and re-apply — every sheet re-fits, the shelf re-flows. Mirrors
  *  agentBookParam; delta's page face + cover ride the shared Books base. */
@@ -707,18 +716,22 @@ export const SETTINGS = [
   // autoShelf has no apply: the carrel sweep's auto-shelf pass reads this at each lane
   // birth (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
   // the next agent event.
-  // gomuxai — read by GomuxHub at each tree push (no apply: the next push converges).
+  // gomuxai — read by GomuxHub at each tree push (the next push converges; the ring knobs
+  // also apply live, so they answer while no agent is running).
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.autoScreens', label: "Open each live agent's screen beside its book", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.screenGap', label: "Gap between a book and its agent's screen", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 2000, step: 2 },
   { key: 'gomux.hubForm', label: "The hub's form: ring (a cylinder around you) or grid (a wall)", group: 'gomuxai', type: 'enum', options: ['ring', 'grid'], default: 'ring' },
-  { key: 'gomux.radius', label: "Hub ring's least radius (it widens to fit)", group: 'gomuxai', type: 'number', default: 900, min: 50, max: 50000, step: 50 },
-  { key: 'gomux.ringRows', label: 'Hub ring rows (the radius widens to fit them)', group: 'gomuxai', type: 'number', default: 1, min: 1, max: 20, step: 1 },
+  { key: 'gomux.radius', label: "Hub ring's least radius (it widens to fit)", group: 'gomuxai', type: 'number', default: 900, min: 50, max: 50000, step: 50, apply: deskParam('gomux', 'radius') },
+  { key: 'gomux.ringMaxRows', label: 'Hub ring: most rows stacked before it widens around you', group: 'gomuxai', type: 'number', default: 3, min: 1, max: 20, step: 1, apply: deskParam('gomux', 'ringMaxRows') },
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: 'Space between books / teams (world units)', group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },
   { key: 'gomux.historyHours', label: 'Show finished agents from the last (h, 0 = all)', group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
+  // The agents desk is a cylinder like the gomuxai hub — the carrel sweep dresses it.
+  { key: 'book.shelfRadius', label: "Agents desk ring's least radius (it widens to fit)", group: 'Agent Books', type: 'number', default: 900, min: 50, max: 50000, step: 50, apply: deskParam('agents', 'radius') },
+  { key: 'book.shelfMaxRows', label: 'Agents desk: most rows stacked before it widens around you', group: 'Agent Books', type: 'number', default: 3, min: 1, max: 20, step: 1, apply: deskParam('agents', 'ringMaxRows') },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
   // the deck pitch / page-turn easing. These are the agent card's dims (delta books

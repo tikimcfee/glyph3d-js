@@ -23,7 +23,8 @@ import { getSetting } from './settings.js';
  *                    or their own teams) in spawn order. Nesting is as deep as the tree.
  *
  * The hub is a CYLINDER by default (`gomux.hubForm`: a natural-seat ring — every book and
- * team at its own size around you, so seeing them is a turn of the camera, not a flight);
+ * team at its own size around you, so seeing them is a turn of the camera, not a flight;
+ * rows stack up to `gomux.ringMaxRows`, then the ring widens);
  * team desks are flat walls standing on it. Each desk wears a title (the hub: `gomuxai`; a
  * team: `<name> · N helpers`), and the hub's desks space their members `gomux.gap` apart —
  * books are seated by the room they draw in (Book.getSeatBounds: nameplate, tabs, cover,
@@ -340,9 +341,9 @@ export default class GomuxHub {
             desk.setMode(ring ? 'ring' : 'grid');
             if (ring) {
                 desk.setSeat('natural');
-                const r = Number(getSetting('gomux.radius')), rows = Number(getSetting('gomux.ringRows'));
+                const r = Number(getSetting('gomux.radius')), rows = Number(getSetting('gomux.ringMaxRows'));
                 if (Number.isFinite(r) && r > 0 && desk.radius !== r) desk.setParam('radius', r);
-                if (Number.isFinite(rows) && rows >= 1 && desk.ringRows !== rows) desk.setParam('ringRows', rows);
+                if (Number.isFinite(rows) && rows >= 1 && desk.ringMaxRows !== rows) desk.setParam('ringMaxRows', rows);
             }
         }
         const gap = Number(getSetting('gomux.gap'));

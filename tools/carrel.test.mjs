@@ -391,7 +391,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
 // ---- a NATURAL ring: members at their own size, wrapped on a cylinder that widens to fit ----
 {
     const scene = new THREE.Scene();
-    const ring = new Carrel({ name: 'cyl', radius: 10, boxH: 9, mode: 'ring', seat: 'natural', ringRows: 2, gapFrac: 0.5 });
+    const ring = new Carrel({ name: 'cyl', radius: 10, boxH: 9, mode: 'ring', seat: 'natural', ringMaxRows: 2, gapFrac: 0.5 });
     scene.add(ring);
     const ms = [];
     for (let i = 0; i < 12; i++) { const g = makeGrid(30, 20); ms.push(g); ring.lock(`m${i}`, g); }
@@ -399,8 +399,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(ms.every((g) => Math.abs(g.scale.x - 1) < 1e-6), 'natural seats keep every member at its own size');
     const R = ring._ringR;
     ok(R > 10, `the ring widened past its radius to fit (R ${R.toFixed(1)})`);
-    const run = 12 * (30 + 4.5);
-    near(R, run / (2 * 300 * Math.PI / 180), 1e-6, 'R fits the members in ringRows rows');
+    near(R, (6 * 30 + 5 * 4.5) / (300 * Math.PI / 180), 1e-4, 'R is the least that fits the members in ringMaxRows rows');
     ring.updateWorldMatrix(true, true);
     const c = new THREE.Vector3();
     const dists = ms.map((g) => { g.updateWorldMatrix(true, false); g.getBounds().getCenter(c); return Math.hypot(c.x, c.z); });
@@ -416,6 +415,28 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     uni.lock('g', g0);
     settle(uni);
     ok(g0.scale.x < 0.5, 'a uniform ring still contain-fits its seats');
+}
+
+// ---- ringMaxRows is a CAP: rows stack at the least radius as members arrive, then it widens ----
+{
+    const arc = 300 * Math.PI / 180;
+    const R0 = (4 * 30 + 3 * 4.5) / arc;   // the least radius seats exactly four 30-wide members a row
+    const seatN = (n, widths = () => 30) => {
+        const ring = new Carrel({ name: `cap${n}`, radius: R0 + 1e-6, boxH: 9, mode: 'ring', seat: 'natural', ringMaxRows: 3, gapFrac: 0.5 });
+        new THREE.Scene().add(ring);
+        const ms = Array.from({ length: n }, (_, i) => { const g = makeGrid(widths(i), 20); ring.lock(`m${i}`, g); return g; });
+        settle(ring, 20);
+        return { R: ring._ringR, rows: ring._rows, ms };
+    };
+    const one = seatN(4);
+    ok(one.rows === 1 && Math.abs(one.R - R0) < 1e-3, `four members: one row at the least radius (rows ${one.rows}, R ${one.R.toFixed(2)})`);
+    const three = seatN(11);
+    ok(three.rows === 3 && Math.abs(three.R - R0) < 1e-3, `eleven members: three rows, still the least radius (rows ${three.rows}, R ${three.R.toFixed(2)})`);
+    const wide = seatN(20);
+    ok(wide.rows === 3 && wide.R > R0 + 1, `twenty members: capped at three rows, the ring widened (rows ${wide.rows}, R ${wide.R.toFixed(2)})`);
+    // Uneven widths pack greedily — solving R from the total run would spill a fourth row.
+    const uneven = seatN(17, (i) => (i % 3 === 0 ? 70 : 12));
+    ok(uneven.rows <= 3, `uneven widths never spill past the cap (rows ${uneven.rows})`);
 }
 
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);

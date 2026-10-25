@@ -118,9 +118,9 @@ export class Carrel extends THREE.Object3D {
      * @param {'uniform'|'natural'} [opts.seat='uniform'] - the RING's seats: uniform contain-fit
      *   boxes (the dock's grammar), or members at their natural size wrapped along the arc (the
      *   tree's grammar bent into a cylinder — stand at the center and everything is a turn
-     *   away). A natural ring widens its radius so the members fit in `ringRows` rows. (The
-     *   grid is always natural.)
-     * @param {number} [opts.ringRows=2] - rows a natural ring aims for (its radius grows to fit)
+     *   away). A natural ring keeps its radius and wraps into more rows as members arrive, up
+     *   to `ringMaxRows`; past that it widens. (The grid is always natural.)
+     * @param {number} [opts.ringMaxRows=2] - most rows a natural ring stacks before its radius grows
      * @param {'in'|'out'} [opts.facing='in'] - members face the center (stand inside) or outward
      * @param {number} [opts.tableFrac=1.25] - base-shadow overhang: the shadow reaches this
      *   fraction of `radius` beyond the member footprint (1 = flush)
@@ -132,7 +132,7 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
-                  growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringRows = 2,
+                  growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringMaxRows = 2,
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
@@ -147,7 +147,7 @@ export class Carrel extends THREE.Object3D {
         this.maxArcDeg = maxArcDeg;
         this.mode = mode === 'grid' ? 'grid' : 'ring';
         this.seat = seat === 'natural' ? 'natural' : 'uniform';
-        this.ringRows = ringRows;
+        this.ringMaxRows = ringMaxRows;
         /** the radius the last layout used — a natural ring grows past `radius` to fit */
         this._ringR = radius;
         this.facing = facing === 'out' ? 'out' : 'in';
@@ -423,11 +423,11 @@ export class Carrel extends THREE.Object3D {
 
     /**
      * Tune a layout/chrome parameter live and re-seat. Keys: radius, boxH, boxAspect,
-     * gapFrac, maxArcDeg, tableFrac, shadowSoft, glowStrength, animDur, yawRate.
+     * gapFrac, growCap, maxArcDeg, ringMaxRows, tableFrac, shadowSoft, glowStrength, animDur, yawRate.
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringRows', 'tableFrac',
+        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'tableFrac',
               'shadowSoft', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
@@ -613,10 +613,22 @@ export class Carrel extends THREE.Object3D {
                 })
                 : live.map(() => ({ w: boxW, h: boxH }));
 
-            // A natural ring widens until its members fit in ringRows rows along the arc.
+            // A natural ring keeps its radius while its members wrap into up to ringMaxRows
+            // rows; past that it widens. The greedy wrap packs unevenly, so the radius is
+            // searched against the real wrap (rows only fall as the arc lengthens) — solving it
+            // from the total run can spill a row past the cap.
             if (!grid && natural) {
-                const run = boxes.reduce((sum, b) => sum + b.w + gap, 0);
-                R = Math.max(R, run / (Math.max(1, this.ringRows) * this.maxArcDeg * DEG2RAD));
+                const arc = this.maxArcDeg * DEG2RAD, cap = Math.max(1, Math.floor(this.ringMaxRows));
+                const rowsAt = (r) => flowBoxes(boxes, { margin: gap, wrapWidth: Math.max(arc * r, boxW + 1e-3) }).rows;
+                if (rowsAt(R) > cap) {
+                    let lo = R;
+                    let hi = Math.max(R, boxes.reduce((sum, b) => sum + b.w + gap, 0) / arc);   // one row fits here
+                    for (let i = 0; i < 24; i++) {
+                        const mid = (lo + hi) / 2;
+                        if (rowsAt(mid) > cap) lo = mid; else hi = mid;
+                    }
+                    R = hi;
+                }
             }
             const wrapN = Math.max(live.length, this._expected);
             let wrapWidth, W;
@@ -873,7 +885,7 @@ export class Carrel extends THREE.Object3D {
             params: {
                 radius: this.radius, boxH: this.boxH, boxAspect: this.boxAspect,
                 gapFrac: this.gapFrac, growCap: this.growCap, maxArcDeg: this.maxArcDeg,
-                seat: this.seat, ringRows: this.ringRows,
+                seat: this.seat, ringMaxRows: this.ringMaxRows,
                 mode: this.mode, facing: this.facing,
                 tableFrac: this.tableFrac, shadowSoft: this.shadowSoft,
                 glowColor: this.glowColor, glowStrength: this.glowStrength,

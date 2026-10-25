@@ -187,9 +187,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
   hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
   without its result yet is held until the result lands). The tree is desks: the world-managed
-  `gomux` carrel — a CYLINDER by default (`gomux.hubForm`: a natural-seat ring, one row,
-  widening to fit; everything around you is a camera turn away); an agent with helpers gets a
-  flat `gomux/<name>` team carrel seated in its parent's
+  `gomux` carrel — a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
+  stack up to `gomux.ringMaxRows` before it widens; everything around you is a camera turn
+  away); an agent with helpers gets a flat `gomux/<name>` team carrel seated in its parent's
   desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —

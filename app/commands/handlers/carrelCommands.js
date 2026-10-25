@@ -13,8 +13,8 @@
  * and a desk, go through the shared Holding (ctx.holding): a carrel is a
  * RESIDENCE, the dock a VEHICLE, and docking a seated window borrows it.
  *
- * Agent books are born onto the 'agents' shelf — a grid-mode desk auto-created
- * on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
+ * Agent books are born onto the 'agents' shelf — a cylinder like the gomuxai hub,
+ * auto-created on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
  * AgentBooks.onChange). Settings ▸ Agent Books `book.autoShelf` turns it off.
  *
  * Desks PERSIST: SessionStore captures each carrel's serialize() (pose, knobs,
@@ -164,7 +164,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
  *    seat. Unserved claims persist as residence memory: a window reopened much
  *    later still comes home to its desk.
  * 2. AUTO-SHELF (the default residence): every NEW agent book seats at the
- *    'agents' desk, a grid-mode desk auto-created on first need. Once per lane
+ *    'agents' desk, a cylinder auto-created on first need (and re-dressed each pass). Once per lane
  *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
  *    user put them. Settings ▸ Agent Books `book.autoShelf` off disarms this pass.
  * @param {AppContext} ctx
@@ -196,6 +196,8 @@ export function carrelSweep(ctx) {
 function autoShelf(ctx, map) {
     const lanes = ctx.agentBooks?.lanes;
     if (!lanes) return;
+    const existing = map.get(AGENT_SHELF);
+    if (existing) dressShelf(ctx, existing);
     const seen = (ctx._agentShelfSeen ??= new Set());
     for (const id of [...seen]) if (!ctx.registry?.has?.(id)) seen.delete(id);   // cleared books may be reborn
     if (getSetting('book.autoShelf') === false) return;
@@ -212,17 +214,31 @@ function autoShelf(ctx, map) {
     }
     if (!newcomers.length) return;
 
-    const shelf = map.get(AGENT_SHELF) ?? (() => {
-        const c = buildCarrel(ctx, AGENT_SHELF, { managed: true });   // a world sibling of the tree
-        c.setMode('grid');
-        return c;
-    })();
+    const shelf = existing ?? dressShelf(ctx, buildCarrel(ctx, AGENT_SHELF, { managed: true }));   // a world sibling of the tree
     if (shelf._dissolving) return;   // folding — the newcomers keep their cluster spots
 
     for (const lane of newcomers) {
         seen.add(lane.groupId);
         ctx.holding.seat({ id: lane.groupId, grid: lane.book }, shelf);
     }
+}
+
+/**
+ * The agents desk is a cylinder like the gomuxai hub: members at their own size around
+ * you, rows stacking to book.shelfMaxRows before the ring widens. Dressed every sweep, so
+ * a desk restored from a save (where it was a grid) stands back up as a ring. A changed
+ * shape re-places it in the world, so a grown ring doesn't overlap its neighbors.
+ * @param {AppContext} ctx @param {Carrel} shelf @returns {Carrel}
+ */
+function dressShelf(ctx, shelf) {
+    let changed = false;
+    if (shelf.mode !== 'ring') changed = shelf.setMode('ring');
+    changed = shelf.setSeat('natural') || changed;
+    const r = Number(getSetting('book.shelfRadius')), rows = Number(getSetting('book.shelfMaxRows'));
+    if (Number.isFinite(r) && r > 0 && shelf.radius !== r) changed = shelf.setParam('radius', r) || changed;
+    if (Number.isFinite(rows) && rows >= 1 && shelf.ringMaxRows !== rows) changed = shelf.setParam('ringMaxRows', rows) || changed;
+    if (changed) worldTouch(ctx, shelf);
+    return shelf;
 }
 
 /**
