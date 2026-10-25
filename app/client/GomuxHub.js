@@ -4,7 +4,7 @@
 
 import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
-import { parseClaudeSession } from '@glyph3d/core/collections/sessionAdapter.js';
+import { parseSession, SESSION_HARNESSES } from '@glyph3d/core/collections/sessionAdapter.js';
 import { buildCarrel } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
 
@@ -45,11 +45,6 @@ const teamDesk = (name) => `${GOMUX_HUB}/${name}`;
 
 /** gomuxai status → the book's lifecycle. */
 const LIFECYCLE = { processing: 'active', waiting: 'active', idle: 'idle', error: 'stalled', exited: 'done', unknown: 'idle' };
-
-/** Live-follow parsers by harness (raw adapter events; hydrate normalizes them). */
-const FOLLOW_PARSE = {
-    claude: (text) => parseClaudeSession(text).events,
-};
 
 /** A held-back pending tool stops holding once the re-read window passes this — a
  *  call that never resolves (an interrupted run) must not pin the cursor forever. */
@@ -116,7 +111,7 @@ export default class GomuxHub {
         const shown = this._shown(snap);
         this.nodes = new Map(shown.map((a) => [a.name, a]));
         for (const a of shown) {
-            if (!a.transcript) continue;
+            if (!a.transcript || !a.harness) continue;   // no record a dialect reads (aider, custom)
             const hl = this.lanes.get(a.name);
             if (!hl) this._open(a);
             else if (hl.phase === 'open' && (a.transcriptSize ?? 0) > hl.cursor) this._follow(a.name);
@@ -130,7 +125,7 @@ export default class GomuxHub {
     /** Open an agent's book: the transcript's tail, through the archive's one open path. */
     async _open(a) {
         const books = this.ctx.agentBooks;
-        const harness = a.harness || 'claude';
+        const harness = a.harness;
         /** @type {HubLane} */
         const hl = { name: a.name, phase: 'opening', cursor: 0, skip: 0, reading: false, again: false, harness, desk: null };
         this.lanes.set(a.name, hl);
@@ -164,19 +159,21 @@ export default class GomuxHub {
         const hl = this.lanes.get(name);
         if (!hl || hl.phase !== 'open') return;
         if (hl.reading) { hl.again = true; return; }
-        const parse = FOLLOW_PARSE[hl.harness];
-        if (!parse) {
-            console.warn(`[gomux] ${name}: no live-follow parser for harness '${hl.harness}' — the book shows its open-time tail`);
+        if (!SESSION_HARNESSES.includes(hl.harness)) {
+            console.warn(`[gomux] ${name}: no parser for harness '${hl.harness}' — the book shows its open-time tail`);
             hl.phase = 'failed';
             return;
         }
+        const node = this.nodes.get(name);
         hl.reading = true;
         try {
             const r = await this.provider.read(name, { fromOffset: hl.cursor });
             const last = r.bytes.lastIndexOf(0x0A);
             if (last < 0) return;                                   // no complete line yet
             const end = r.offset + last + 1;
-            const events = parse(new TextDecoder().decode(r.bytes.subarray(0, last + 1)));
+            // Raw adapter events (hydrate normalizes them), in the harness's own dialect.
+            const { events } = parseSession(new TextDecoder().decode(r.bytes.subarray(0, last + 1)),
+                { harness: hl.harness, cwd: node?.cwd || null });
             const pending = events.findIndex((e) => e.kind === 'tool' && e.response == null);
             const hold = pending >= 0 && end - r.offset < MAX_PENDING_BYTES;
             const upto = hold ? pending : events.length;
@@ -184,7 +181,6 @@ export default class GomuxHub {
             if (hold) { hl.cursor = r.offset; hl.skip = upto; }
             else { hl.cursor = end; hl.skip = 0; }
             if (fresh.length && !this._disposed) {
-                const node = this.nodes.get(name);
                 await this.ctx.agentBooks.hydrate(name, fresh, { agentType: hl.harness, cwd: node?.cwd || '' });
                 if (node) this._status(node);   // hydrate rests the book at idle; the agent's own status wins
             }
