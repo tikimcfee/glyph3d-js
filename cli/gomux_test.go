@@ -96,8 +96,14 @@ func TestGomuxSnapshot_TreeAcrossStores(t *testing.T) {
 		[]byte("claude\t/elsewhere/first.jsonl\nclaude\t"+childT+"\n"), 0o644)
 
 	w := newGomuxTestWatcher(t, home, a, b)
+	reached := map[string]int{}
+	w.SetReachHook(func(dir string) { reached[dir]++ })
 	w.discover()
 	w.refresh()
+	w.refresh()
+	if reached["/w/coord"] != 1 || reached["/w/old"] != 1 || len(reached) != 2 {
+		t.Errorf("each agent's cwd is handed to reach once: %v", reached)
+	}
 	s := w.Snapshot()
 	got := gomuxByName(s)
 

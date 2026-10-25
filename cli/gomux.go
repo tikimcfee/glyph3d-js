@@ -123,6 +123,10 @@ type GomuxWatcher struct {
 	sessEnv  map[string]string      // tmux session → discovered data dir ("" = none)
 	snap     gomuxSnapshot
 	notify   func(method string, params any)
+	// reach, if set, widens the file handler's reach to an agent's working dir — its
+	// books' snapshots read the files it touched, which live in ITS repo, not ours.
+	reach    func(dir string)
+	reached  map[string]bool
 	tmuxBin  string // "" = no tmux: nothing is attached, no session discovery
 	agentBin string // the `agent` on PATH ("" = none): its store is always watched
 	home     string
@@ -150,6 +154,10 @@ func NewGomuxWatcher(dirs []string) *GomuxWatcher {
 	}
 	return w
 }
+
+// SetReachHook wires the file handler's reach: each agent's spawn cwd is handed
+// over once, so its book's file snapshots can load.
+func (w *GomuxWatcher) SetReachHook(fn func(dir string)) { w.reach = fn }
 
 // SetNotifyHook wires the display push channel (gomux/changed).
 func (w *GomuxWatcher) SetNotifyHook(fn func(method string, params any)) { w.notify = fn }
@@ -370,6 +378,18 @@ func (w *GomuxWatcher) refresh() {
 		}
 		return agents[i].Name < agents[j].Name
 	})
+
+	if w.reach != nil {
+		for _, a := range agents {
+			if a.Cwd != "" && !w.reached[a.Cwd] {
+				if w.reached == nil {
+					w.reached = map[string]bool{}
+				}
+				w.reached[a.Cwd] = true
+				w.reach(a.Cwd)
+			}
+		}
+	}
 
 	w.mu.Lock()
 	changed := !reflect.DeepEqual(agents, w.snap.Agents) || !reflect.DeepEqual(dirs, w.snap.Dirs)

@@ -1113,6 +1113,11 @@ func (r *Relay) wireFS(h *FSHandler) {
 	r.lsp.SetNotifyHook(r.NotifyDisplayRPC)
 	if h.gomux != nil {
 		h.gomux.SetNotifyHook(r.NotifyDisplayRPC)
+		h.gomux.SetReachHook(func(dir string) {
+			if resolved := evalRootOrEmpty(dir); resolved != "" && h.addRoot(resolved) {
+				log.Printf("[gomux] reach += %s (an agent's working dir)", resolved)
+			}
+		})
 		h.gomux.Start(context.Background())
 	}
 }
