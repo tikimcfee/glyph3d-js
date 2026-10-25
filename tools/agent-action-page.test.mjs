@@ -70,6 +70,19 @@ const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
     ok(w.split('\n').every((r) => [...r].length <= 12), 'rows fit the column count');
     ok(w.replace(/\s+/g, '') === src.replace(/\s+/g, ''), 'every character kept');
     ok(w.split('\n')[0] === 'alpha beta', `breaks at whitespace when it can (got ${JSON.stringify(w.split('\n')[0])})`);
+
+    // A path longer than a row breaks after its separators, never mid-name; it starts on
+    // the row it stands on when its first piece fits.
+    const say = "I've written the report to `/home/user/dev/gomuxai-wt/survey/REPORT.md`. The notes are in `/home/user/dev/gomuxai-wt/survey/notes/`.";
+    const rows = wrapText(say, 38).split('\n');
+    ok(rows.every((r) => [...r].length <= 38), 'path rows fit the column count');
+    ok(rows.join('').replace(/\s+/g, '') === say.replace(/\s+/g, ''), 'every character of the paths kept');
+    ok(!rows.some((r) => /surve$|^y\//.test(r)), `a path never splits mid-name (got ${JSON.stringify(rows)})`);
+    ok(rows.every((r, i) => i === rows.length - 1 || !/[A-Za-z0-9]$/.test(r) || /\s/.test(say[say.indexOf(r) + r.length] ?? ' ')),
+        `every row ends at a space or after a separator (got ${JSON.stringify(rows)})`);
+    ok(rows[0].startsWith("I've written the report to `/"), `the path starts where it stands (got ${JSON.stringify(rows[0])})`);
+    ok(wrapText('see fooo/barr', 10) === 'see\nfooo/barr', 'a word that fits a row still moves whole');
+    ok(wrapText('abcdefghijklmnop', 6) === 'abcdef\nghijkl\nmnop', 'a run with no separator still breaks at the column');
 }
 
 // ── snapshotWindow ──

@@ -214,9 +214,15 @@ export function snapshotWindow(meta, total, { context, maxRows }) {
     return { first: Math.max(0, first), last };
 }
 
-/** Word-wrap `text` to `cols` codepoints per row, breaking inside a word only when the
- *  word alone is wider; the whitespace a row breaks at becomes the break. Wraps, never
- *  cuts — every word's every codepoint stays. Pure. */
+/** A word longer than a row breaks after these (a path's `/`, a URL's `?&=`, `snake_case`,
+ *  `kebab-case`, `a.b.c`) before it ever breaks mid-run. */
+const WORD_BREAKS = /[^/\\\-_.,;:?&=|]*[/\\\-_.,;:?&=|]+|[^/\\\-_.,;:?&=|]+$/g;
+
+/** Word-wrap `text` to `cols` codepoints per row; the whitespace a row breaks at becomes
+ *  the break. A word that fits a row moves whole to the next. A word longer than a row
+ *  (a path, a URL) starts where it stands and breaks after its separators (WORD_BREAKS),
+ *  inside a run only when the run alone is wider than a row. Wraps, never cuts — every
+ *  word's every codepoint stays. Pure. */
 export function wrapText(text, cols) {
     const c = Math.max(1, Math.floor(cols));
     const out = [];
@@ -225,12 +231,17 @@ export function wrapText(text, cols) {
         let row = [];
         for (const tok of line.split(/(\s+)/)) {
             if (!tok) continue;
-            let t = [...tok];
+            const t = [...tok];
             if (row.length + t.length <= c) { row.push(...t); continue; }
             if (!/\S/.test(tok)) { flush(row); row = []; continue; }
-            if (row.length) { flush(row); row = []; }
-            while (t.length > c) { out.push(t.slice(0, c).join('')); t = t.slice(c); }
-            row = t;
+            if (t.length <= c) { flush(row); row = t; continue; }
+            for (const piece of tok.match(WORD_BREAKS) ?? [tok]) {
+                let p = [...piece];
+                if (row.length + p.length <= c) { row.push(...p); continue; }
+                if (row.length) { flush(row); row = []; }
+                while (p.length > c) { out.push(p.slice(0, c).join('')); p = p.slice(c); }
+                row = p;
+            }
         }
         flush(row);
     }
