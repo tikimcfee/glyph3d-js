@@ -18,7 +18,8 @@
 //   - a stream's events land in its own book (a subagent's stream in the subagent's; an old
 //     transcript's sidechain records in a book named by their agent); a redacted thought says so;
 //   - the sliding-window history pages back by `at` over `agentEvents/read` windows (the
-//     first from the start: exact numbers + a line-start index; later ones windowed by it),
+//     last ~historySliceBytes before each oldest record, past it by the overlap; exact numbers
+//     once the start is reached),
 //     and an update for a record waiting in a buffer replaces it there.
 // (The open/follow path that feeds books from the relay is tools/session-books.test.mjs.)
 
@@ -437,20 +438,18 @@ for (const c of CASES.keys()) {
     full.push(stream.map(J).join('\n') + '\n');
     const all = full.records();
     const end = K * size;
-    // The relay's agentEvents/read (gomuxai's `agent transcript --from --until` window): the
-    // lines AFTER the line at `from`, before byte `until`; `tail`: the lines at or after
-    // size - tail. The session line opens every window.
+    // The relay's agentEvents/read: the lines before byte `until` (the end when omitted) that
+    // start at or after `until - tail` (all of them without a tail). The session line opens
+    // every window.
     const reads = [];
-    const read = ({ from, until, tail } = {}) => {
-        reads.push({ from, until, tail });
-        let lo = -1, hi = end;
-        if (tail > 0) lo = Math.max(-1, end - tail - 1);
-        if (from != null) lo = from;
-        if (until != null) hi = Math.min(end, until);
+    const read = ({ until, tail } = {}) => {
+        reads.push({ until, tail });
+        const hi = until != null ? Math.min(end, until) : end;
+        const lo = tail > 0 ? Math.max(-1, hi - tail - 1) : -1;
         const out = [stream[0], ...stream.slice(1).filter((f) => f.at > lo && f.at < hi)];
         return Promise.resolve({ lines: out.map(J), size: end });
     };
-    const books = newBooks({ maxSheets: 6, historyOverlapBytes: 2500, historyTurns: 6, historyLead: 2 });
+    const books = newBooks({ maxSheets: 6, historySliceBytes: 3000, historyOverlapBytes: 2500, historyTurns: 6, historyLead: 2 });
     const tail = await read({ tail: 2 * size });
     const first = parseEventSlice(tail.lines, { cap: 6 });
     await books.hydrate('h', first.records, { agentType: 'claude', seqBase: all.length - 6, seqExact: false });
@@ -464,10 +463,9 @@ for (const c of CASES.keys()) {
     lane.book.pageTo(1);
     await settle();
     ok(lane.older.length > 0 && lane.entries.length === 6, `paging near the oldest sheet prefetches older records (buffer ${lane.older.length})`);
-    ok(lane.seqExact && books.headState('h').sheets === all.length, 'the first page back counts the sheets before it: exact');
-    ok(reads.length === 1 && reads[0].from === undefined && reads[0].until === edge + 2500,
-        `the first page back reads from the transcript's start to historyOverlapBytes past the window (${J(reads)})`);
-    ok(Array.isArray(lane.history.starts) && lane.history.starts.length > 0, 'and leaves an index of the line starts before the window');
+    ok(!lane.seqExact, 'a page back short of the start leaves the sheet numbers an estimate');
+    ok(reads.length >= 1 && reads.every((w) => w.until === edge + 2500 && w.tail > 0 && w.tail < edge),
+        `the first page back reads the last ~historySliceBytes before the window, historyOverlapBytes past it — never the whole prefix (${J(reads)})`);
     // An update for a record that waits in the OLDER buffer replaces it there.
     const waiting = lane.older.at(-1).record;
     const upd = { type: 'event', id: waiting.id, op: 'update', seq: 9999, at: end + 10, line: 9999, ts: '2026-10-21T00:00:00.000Z',
@@ -485,9 +483,9 @@ for (const c of CASES.keys()) {
     lane.book.scroll(-500);
     await settle();
     eq(window().map((r) => r.id), all.slice(0, 6).map((r) => r.id), 'slid back to the stream\'s first events');
-    ok(reads.length > 1 && reads.slice(0, -1).every((w) => Number.isFinite(w.from) && Number.isFinite(w.until)),
-        `later pages read windows by the line-start index, not from the start (${reads.length} reads)`);
-    ok(lane.history.done && books.headState('h').sheet === 1, 'the start: history done, sheet 1');
+    ok(reads.length > 1 && reads.every((w) => Number.isFinite(w.until) && w.tail > 0),
+        `every page reads a bounded window (until + tail) (${reads.length} reads)`);
+    ok(lane.history.done && books.headState('h').sheet === 1 && lane.seqExact, 'the start: history done, sheet 1, numbers exact');
     const seen = [];
     for (let guard = 0; guard < 200; guard++) {
         seen.push(lane.entries[lane.book.head].record);

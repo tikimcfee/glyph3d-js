@@ -131,7 +131,8 @@ export const AGENT_BOOKS_DEFAULTS = {
                                 // a transcript costs its readable tail, not its full history)
     // -- history (paging back past the resident sheets) --------------------------------
     historyLead: 3,             // paging to within this many sheets of the window's oldest one prefetches older records
-    historyTurns: 20,           // records one older read brings into the buffer
+    historyTurns: 20,           // records one older read brings into the buffer, at least (its window grows until it holds them)
+    historySliceBytes: 256 * 1024, // first span an older read asks for (agentEvents/read {until, tail}; doubles until it holds historyTurns)
     historyOverlapBytes: 256 * 1024, // bytes read PAST the window's end so its last tool calls pair with their results
     historyBuffer: 400,         // parsed records a book keeps BESIDE its window (older + newer) — no GPU cost; past it the far ones drop (re-readable)
     // -- identity ------------------------------------------------------------------
@@ -523,33 +524,47 @@ export default class AgentBooks {
      * lane's block inflates the others' wall times). The batch flag stays HELD across the
      * yields: no mid-build relayout, no half-built book visible — and a live event landing
      * mid-hydrate just batches into the same closing relayout.
+     * The records past the cap (the window's older ones) wait in the lane's older buffer,
+     * as their window folded them — paging back slides them in without a read, carrying the
+     * results that landed later in the window. `orphans` (parseEventSlice's: updates whose
+     * call lies before the window) are held until that call pages in (adoptOrphans).
      * @param {string} agentId
      * @param {Object[]} records - event records (eventRecord's shape), oldest first
      * @param {{agentType?:string, sessionId?:string|null, meta?:Object|null, limit?:number, budgetMs?:number,
-     *          seqBase?:number, seqExact?:boolean}} [opts] seqBase = records of the session that
-     *        precede `records` (the tail the read skipped) — a fresh lane numbers its sheets from
-     *        there, so a sheet's number is its place in the whole run; seqExact false = the read
-     *        never reached the record's start, so that count is a floor
+     *          seqBase?:number, seqExact?:boolean, orphans?:Map<string, Object>}} [opts] seqBase =
+     *        records of the session that precede the kept ones (what the read skipped, plus
+     *        what the cap leaves in the older buffer) — a fresh lane numbers its sheets from
+     *        there, so a sheet's number is its place in the whole run; seqExact false = the
+     *        read never reached the record's start, so that count is a floor
      * @returns {Promise<number>} sheets added
      */
     async hydrate(agentId, records, { agentType = 'claude', sessionId = null, meta = null, limit, budgetMs = 8,
-                                     seqBase = 0, seqExact = true } = {}) {
+                                     seqBase = 0, seqExact = true, orphans = null } = {}) {
         const lane = this.ensure(agentId, agentType);
+        const fresh = lane.seq === 0 && !lane.entries.length;
         if (lane.seq === 0) { lane.seq = Math.max(0, Math.floor(seqBase) || 0); lane.seqExact = seqExact; }
         if (sessionId) lane.sessionId = sessionId;
         if (meta) {
             lane.meta = { ...(lane.meta || {}), ...meta };
             if (meta.cwd) lane.cwd = meta.cwd;
         }
+        if (orphans) for (const [id, r] of orphans) if (!lane.orphans?.has(id)) (lane.orphans ??= new Map()).set(id, r);
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
         const slice = records.length > cap ? records.slice(-cap) : records;
+        if (fresh && slice.length < records.length) {
+            // The window's older records: the buffer just behind the window (seqs just before it).
+            const older = records.slice(0, records.length - slice.length);
+            const base = lane.seq - older.length;
+            this._keepOlder(lane, older.map((r, j) => ({ record: this._adopt(lane, r), seq: base + j })));
+        }
         this._batch = true;
         let added = 0;
         let slice0 = performance.now();
         try {
-            for (const rec of slice) {
+            for (const r of slice) {
+                const rec = this._adopt(lane, r);
                 this.activity(agentId, agentType, rec);
                 this._noteEventTime(lane, rec);
                 added++;
@@ -580,7 +595,8 @@ export default class AgentBooks {
      *             the head and the deck unmoved — or its record replaced where it waits in
      *             a buffer (a tool's result landing, a provisional reply confirmed). An add
      *             of an id a book already holds (a resumed stream re-sending its last line)
-     *             is an update too. An update of an event no book holds any more is dropped;
+     *             is an update too. An update of a call the book doesn't hold (it lies
+     *             before everything read) is kept for when that call pages in (_adopt);
      *   session → the stream's lane meta (title, model, cwd, branch, the parent link) — a
      *             stream is one session's, so its session lines describe its own book.
      * A stream's events are its book's (eventLane: only an old Claude transcript's sidechain
@@ -611,8 +627,14 @@ export default class AgentBooks {
                 const id = eventLane(c.event, streamLane, !!this.lanes.get(streamLane)?.meta?.parentSession);
                 const held = this.lanes.get(id);
                 if (held && this._replaceRecord(held, rec)) { updated++; touched.add(held); continue; }
-                if (c.op !== 'add') continue;
-                const lane = this.activity(id, held?.agentType || agentType, rec);
+                if (c.op !== 'add') {
+                    // An update of a call this book doesn't hold (it lies before everything
+                    // read so far — a background call's result, megabytes later): held for
+                    // when that call pages in.
+                    if (held) (held.orphans ??= new Map()).set(rec.id, rec);
+                    continue;
+                }
+                const lane = this.activity(id, held?.agentType || agentType, this._adopt(held, rec));
                 this._noteEventTime(lane, rec);
                 added++;
                 touched.add(lane);
@@ -653,6 +675,20 @@ export default class AgentBooks {
             if (item) { item.record = { ...rec, at: item.record.at }; return true; }
         }
         return false;
+    }
+
+    /**
+     * A record entering the book (hydrated, paged in, buffered, added live) takes the state
+     * of an update this lane holds for it — one read or followed BEFORE its call was (reads
+     * go newest → oldest, so a result far from its call is always seen first). That update is
+     * newer than anything the call's own window said; the record keeps its call's position
+     * (`at`). @private
+     */
+    _adopt(lane, rec) {
+        const o = lane?.orphans?.get(rec.id);
+        if (!o) return rec;
+        lane.orphans.delete(rec.id);
+        return { ...o, at: rec.at };
     }
 
     /** A lane's age is its newest event's own timestamp (an event record's `ts`). @private */
@@ -746,6 +782,7 @@ export default class AgentBooks {
             state: lane.state,
             status: gx?.status || lane.state,
             beacon: lane.beacon,
+            notice: lane.notice ?? null,
             verb, head,
             action: [verb, head].filter(Boolean).join('  '),
             step: lane.seq,
@@ -782,7 +819,7 @@ export default class AgentBooks {
         const action = prose ? r.verb : r.action;
         const age = r.age ? (r.age === 'now' ? 'now' : `${r.age} ago`) : null;
         const row1 = [r.status, r.step ? `step ${r.step}` : null, age,
-            r.beacon ? `needs you: ${r.beacon}` : null].filter(Boolean).join(' · ');
+            r.beacon ? `needs you: ${r.beacon}` : null, r.notice].filter(Boolean).join(' · ');
         return { name: r.name, status: [row1, action, r.where].filter(Boolean).join('\n') };
     }
 
@@ -822,6 +859,21 @@ export default class AgentBooks {
         const lane = this.lanes.get(agentId);
         if (!lane || !lane.beacon) return false;
         lane.beacon = null;
+        this._refreshNameplate(lane);
+        this._emitChange();
+        return true;
+    }
+
+    /**
+     * A note about the BOOK itself (not the agent): where its content stands — "not live:
+     * <why>" when its follow failed, "open failed: <why>" — shown on the nameplate's status
+     * row and the Agents panel row. null clears it.
+     * @param {string} agentId @param {string|null} text
+     */
+    setNotice(agentId, text) {
+        const lane = this.lanes.get(agentId);
+        if (!lane || (lane.notice ?? null) === (text ?? null)) return false;
+        lane.notice = text ?? null;
         this._refreshNameplate(lane);
         this._emitChange();
         return true;
@@ -913,7 +965,7 @@ export default class AgentBooks {
         const base = lane.sheetBase || 0, h = lane.history;
         return { agentId: hit[0], ...s, sheet: seq != null ? seq + base + 1 : 0, sheets: lane.seq + base, exact: lane.seqExact === true,
                  turn: turn ? turn.index : null, turnId: turn?.id ?? null, turnDerived: !!turn?.derived,
-                 older: !!h && (!h.done || (lane.older?.length ?? 0) > 0), loading: !!h?.loading, newer: lane.newer?.length ?? 0 };
+                 older: !!h && (!h.done || (lane.older?.length ?? 0) > 0), loading: !!h?.loading, failed: h?.failed != null, newer: lane.newer?.length ?? 0 };
     }
 
     /**
@@ -955,6 +1007,7 @@ export default class AgentBooks {
                 type: l.agentType,
                 state: l.state,
                 beacon: l.beacon,
+                notice: l.notice ?? null,
                 sessionId: l.sessionId,
                 meta: l.meta || null,
                 count: l.book.sheets.length,
@@ -1332,18 +1385,17 @@ export default class AgentBooks {
      * While the window is held away from the live end, live sheets join the newer buffer —
      * the book never shifts under the reader.
      * @param {string} agentId
-     * @param {{read: (window:{from?:number, until?:number}) => Promise<{lines:string[], size?:number}>, sealed?: boolean}} source
-     *        `agentEvents/read` for the book's session: the lines AFTER the line starting at
-     *        `from` (from the start when omitted — `from` must be a line start, an event's
-     *        `at`) and before byte `until` (to the end when omitted). `sealed`: the book's
-     *        older sheets came from ANOTHER session (an agent that moved on to a new one), whose
-     *        offsets this source can't read — nothing older is read, and what was buffered
-     *        from before stays the end of the book.
+     * @param {{read: (window:{until:number, tail:number}) => Promise<{lines:string[], size?:number}>, sealed?: boolean}} source
+     *        `agentEvents/read` for the book's session: the lines of about the last `tail`
+     *        bytes before byte `until`. `sealed`: the book's older sheets came from ANOTHER
+     *        session (an agent that moved on to a new one), whose offsets this source can't
+     *        read — nothing older is read, and what was buffered from before stays the end of
+     *        the book.
      */
     setHistory(agentId, source) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
-        lane.history = { read: source.read, loading: null, done: !!source.sealed, starts: null };
+        lane.history = { read: source.read, loading: null, done: !!source.sealed, failed: null };
         lane.older ??= [];
         lane.newer ??= [];
         lane.book.onPage = (head, asked) => this._onPage(lane, head, asked);
@@ -1442,10 +1494,12 @@ export default class AgentBooks {
         const from = oldest?.record?.at;
         if (!Number.isFinite(from)) return Promise.resolve(0);   // a live-born record knows no byte offset
         if (from <= 0) { this._reachedStart(lane, oldest.seq); return Promise.resolve(0); }
+        if (h.failed === from) return Promise.resolve(0);   // this page's read failed: not again on every page
         h.loading = this._readOlder(lane, oldest.record, oldest.seq).catch((e) => {
-            // Said once per failed read, with the request's anchor: a relay-side window bug
-            // reads as itself, not as a book whose history quietly ends.
-            console.warn(`[AgentBooks] ${lane.agentId}: reading the records before byte ${from} failed —`, e?.message || e);
+            // Said once per failed page, with the request's anchor: a relay-side window bug
+            // reads as itself, not as a book whose history quietly ends (headState.failed).
+            h.failed = from;
+            console.warn(`[AgentBooks] ${lane.agentId}: reading the records before byte ${from} failed — that page stays unread:`, e?.message || e);
             return 0;
         }).finally(() => {
             h.loading = null;
@@ -1459,40 +1513,39 @@ export default class AgentBooks {
     }
 
     /**
-     * Read the records before `oldest` (seq fromSeq) into the older buffer.
-     *
-     * A read names line starts (`from` must be an event's `at`), so the FIRST read goes
-     * from the transcript's start: every record before the window, which makes the sheet
-     * numbers exact (the count before it) and leaves an index of the line starts there
-     * (`history.starts`). Later reads window by that index — the lines of the
-     * historyTurns records before the oldest known one. Every window reads
-     * historyOverlapBytes PAST its end, so a call near the edge pairs with its result;
-     * what's kept is what comes before the oldest known record (by id — one line can hold
-     * several events). @private
+     * Read the records before `oldest` (seq fromSeq) into the older buffer: `read {until,
+     * tail}` — the last ~historySliceBytes before the oldest known record, doubling until
+     * the window holds historyTurns records or reaches the transcript's start. Every window
+     * reads historyOverlapBytes PAST its end, so a call near the edge pairs with its result;
+     * a result farther than that was read (or followed) before its call, is held as an
+     * orphan, and is adopted here. What's kept is everything before the oldest known record
+     * (by id — one line can hold several events), as the window folded it. Reaching the start
+     * makes the sheet numbers exact. @private
      */
     async _readOlder(lane, oldest, fromSeq) {
         const h = lane.history, c = this.cfg;
         const from = oldest.at;
         const until = from + Math.max(1, c.historyOverlapBytes);
-        const starts = h.starts;
-        let before = 0;
-        if (starts) while (before < starts.length && starts[before] < from) before++;
-        const windowed = !!starts && before > c.historyTurns;
-        const r = await h.read(windowed ? { from: starts[before - c.historyTurns - 1], until } : { until });
-        const out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise });
-        const k = out.records.findIndex((x) => x.id === oldest.id);
-        const recs = k >= 0 ? out.records.slice(0, k) : out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
+        let span = Math.max(1, c.historySliceBytes), out, recs, start;
+        for (;;) {
+            const r = await h.read({ until, tail: span });
+            out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise });
+            const k = out.records.findIndex((x) => x.id === oldest.id);
+            recs = k >= 0 ? out.records.slice(0, k) : out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
+            start = span >= until;
+            if (start || recs.length >= c.historyTurns || span >= 1 << 30) break;
+            span *= 2;
+        }
         // The book moved on while we read (closed, or the oldest known record changed): drop it.
         const now = lane.older[0]?.record ?? lane.entries[0]?.record;
         if (this.lanes.get(lane.agentId) !== lane || now?.id !== oldest.id) return 0;
-        if (!windowed) {
-            h.starts = [...new Set(recs.map((x) => x.at).filter(Number.isFinite))].sort((a, b) => a - b);
-            if (!lane.seqExact) this._setSheetBase(lane, recs.length - fromSeq);
-        }
-        const take = recs.slice(-c.historyTurns);
-        lane.older.unshift(...take.map((record, j) => ({ record, seq: fromSeq - take.length + j })));
-        if (!windowed && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
-        return take.length;
+        // Updates whose calls lie further back still: held, unless a newer read holds one already.
+        for (const [id, r] of out.orphans) if (!lane.orphans?.has(id)) (lane.orphans ??= new Map()).set(id, r);
+        lane.older.unshift(...recs.map((record, j) => ({ record: this._adopt(lane, record), seq: fromSeq - recs.length + j })));
+        const max = Math.max(0, c.historyBuffer);
+        if (lane.older.length > max) lane.older.splice(0, lane.older.length - max);   // the far ones re-read later
+        if (start && lane.older.length && lane.older[0].seq === fromSeq - recs.length) this._reachedStart(lane, fromSeq - recs.length);
+        return recs.length;
     }
 
     /** The oldest record is the run's first (seq minSeq): sheet numbers become exact. @private */

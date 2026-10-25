@@ -62,7 +62,6 @@ export const GOMUX_HUB = 'gomux';
  * @typedef {Object} HubLane
  * @property {string} name     the agent (and its book's lane id)
  * @property {string} session  the session its book follows (a session id, or a transcript path)
- * @property {{size: number|null}|null} failed  its open failed (at this transcript size)
  */
 
 export default class GomuxHub {
@@ -122,7 +121,7 @@ export default class GomuxHub {
         const hl = this.lanes.get(name);
         if (!hl) return null;
         const st = this.sessionBooks.streams.get(hl.session);
-        return st && st.lane === name ? st.phase : hl.failed ? 'failed' : 'closed';
+        return st && st.lane === name ? st.phase : 'closed';
     }
 
     /**
@@ -144,8 +143,6 @@ export default class GomuxHub {
             else if (hl.session !== session && this.ctx.agentBooks.lanes.has(a.name)) {
                 this.sessionBooks.close(hl.session);        // the agent moved on to a new session: same book
                 this._open(a, session);
-            } else if (hl.failed && hl.failed.size !== (a.transcriptSize ?? null)) {
-                this._open(a, session);                     // its open failed; the transcript moved since — again
             }
         }
         this._layout();
@@ -156,13 +153,17 @@ export default class GomuxHub {
 
     /** Open an agent's book from its session (SessionBooks: tail read → hydrate → follow). @private */
     _open(a, session) {
-        /** @type {HubLane} */
-        const hl = { name: a.name, session, failed: null };
-        this.lanes.set(a.name, hl);
-        const opening = this.sessionBooks.open(session, { lane: a.name, agentType: a.harness || a.backend });
+        this.lanes.set(a.name, { name: a.name, session });
+        // A follower only for an agent that runs (the relay caps followers); a departed one's
+        // book is its record. A failed open retries in SessionBooks, its book saying why.
+        const opening = this.sessionBooks.open(session, { lane: a.name, agentType: a.harness || a.backend, follow: this._runs(a) });
         this._layout();   // the book was born just now: seat it before the auto-shelf sweep looks
-        // SessionBooks said why, with the session; the hub tries again once the transcript moves.
-        opening.catch(() => { hl.failed = { size: this.nodes.get(a.name)?.transcriptSize ?? null }; });
+        opening.catch(() => { /* SessionBooks said it, and retries */ });
+    }
+
+    /** Whether an agent runs now — its book follows only then. @private */
+    _runs(a) {
+        return !!a.live && a.status !== 'exited';
     }
 
     /** SessionBooks' events for the hub's books: once open, status + screen; after a live
@@ -247,6 +248,7 @@ export default class GomuxHub {
             status: a.live ? (a.status || 'unknown') : 'exited', detail: a.detail || '', tool: a.tool || '',
             live: a.live, attached: a.attached, statusAt: a.statusAt || null,
         };
+        this.sessionBooks.setLive(this.lanes.get(a.name)?.session, this._runs(a));
         const prev = lane.meta?.gomux;
         if (!prev || Object.keys(g).some((k) => prev[k] !== g[k])) books.setLaneMeta(a.name, { gomux: g });
         const life = LIFECYCLE[g.status] ?? 'idle';

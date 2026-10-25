@@ -83,6 +83,7 @@ const S = {
     aharness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
     astate: (c) => ({ flex: '0 0 auto', color: c, fontSize: 10 }),
     abeacon: { flex: '0 0 auto', color: '#f2a25c', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '35%', whiteSpace: 'nowrap' },
+    anotice: { flex: '0 0 auto', color: '#e8908a', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '45%', whiteSpace: 'nowrap' },
     acount: { flex: '0 0 auto', color: '#7c8596', fontSize: 11 },
     alive: { flex: '0 0 auto', color: '#7ad79a', fontSize: 11 },
     aage: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 26, textAlign: 'right' },
@@ -298,6 +299,7 @@ export default function AgentsPanel({ client }) {
                                     {a.following && <span style={S.alive}>live</span>}
                                     <span style={S.aage}>{a.wallTs != null ? wallAgo(a.wallTs) : ago(a.lastTs)}</span>
                                     {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
+                                    {a.notice && <span style={S.anotice} title={a.notice}>{a.notice}</span>}
                                     {a.action && <span style={S.anow}>{a.action}</span>}
                                 </div>
                             </div>
