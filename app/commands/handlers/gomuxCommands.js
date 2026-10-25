@@ -106,6 +106,7 @@ export default function registerGomuxCommands(router) {
         if (!name) return { text: 'ERR: usage: gomux.detach <name>', data: null };
         const id = hub.screenId(name);
         if (!ctx.registry?.get(id)) return { text: `ERR: '${name}' has no screen open`, data: null };
+        hub.declineScreen(name);   // closed on purpose: autoScreens won't reopen it
         return router.execute(['terminal.kill', id]);
     }, { description: "Close an agent's screen terminal (the agent's own session is untouched)", usage: '<name>' });
 

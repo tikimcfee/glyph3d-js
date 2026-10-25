@@ -709,6 +709,7 @@ export const SETTINGS = [
   // the next agent event.
   // gomuxai — read by GomuxHub at each tree push (no apply: the next push converges).
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
+  { key: 'gomux.autoScreens', label: "Open each live agent's screen beside its book", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: 'Space between books / teams (world units)', group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },
   { key: 'gomux.historyHours', label: 'Show finished agents from the last (h, 0 = all)', group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },

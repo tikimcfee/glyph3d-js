@@ -686,7 +686,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // The gomuxai tree (the relay watches the orchestrator's stores): every agent it runs
     // as a book at the hub desk, helpers at their parent's team desk — GomuxHub. Pushes keep
     // it current; each connect pulls the whole tree.
-    state.ctx.gomuxHub = new GomuxHub(state.ctx, new GomuxProvider(bridge));
+    state.ctx.gomuxHub = new GomuxHub(state.ctx, new GomuxProvider(bridge), { exec: (cmd) => state.router.execute(cmd) });
     state.bridge = bridge;
     // Auto-dial only where a relay is plausibly present (resolveRelay's host gate) AND
     // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise

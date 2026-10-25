@@ -41,6 +41,10 @@ import { getSetting } from './settings.js';
  * its lifecycle maps onto the book's (processing → active, idle → idle, error → stalled,
  * exited or cleaned up → done), and `waiting` (blocked on a person) raises the book's hand.
  *
+ * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
+ * (gomux.attach — a read-only terminal) seated beside its book as soon as the book is open.
+ * Detaching one (gomux.detach) is remembered: the hub won't reopen it.
+ *
  * Read-only by construction: nothing here types into, starts, or stops an agent.
  */
 
@@ -71,10 +75,14 @@ export default class GomuxHub {
     /**
      * @param {AppContext} ctx
      * @param {GomuxProvider} provider
+     * @param {{exec?: (cmd: string|string[]) => Promise<any>}} [opts] exec runs a verb (screens)
      */
-    constructor(ctx, provider) {
+    constructor(ctx, provider, { exec = null } = {}) {
         this.ctx = ctx;
         this.provider = provider;
+        this._exec = exec;
+        /** Agents whose screen the hub asked for (or that were detached) — asked once. */
+        this._screens = new Set();
         /** @type {GomuxSnapshot|null} */
         this.snapshot = null;
         /** @type {Map<string, GomuxAgent>} */
@@ -123,7 +131,25 @@ export default class GomuxHub {
         }
         this._layout();
         for (const a of shown) this._status(a);
+        this._autoScreens(shown);
     }
+
+    /** Open each live, attached agent's screen beside its open book — once per agent. */
+    _autoScreens(shown) {
+        if (!this._exec || getSetting('gomux.autoScreens') === false || !this.ctx.wsbridge?.connected) return;
+        for (const a of shown) {
+            if (!a.live || !a.attached || this._screens.has(a.name)) continue;
+            if (this.lanes.get(a.name)?.phase !== 'open') continue;
+            this._screens.add(a.name);
+            if (this.ctx.registry?.get(this.screenId(a.name))) continue;   // already up (a reload re-adopted it)
+            Promise.resolve(this._exec(['gomux.attach', a.name])).then((r) => {
+                if (String(r?.text ?? '').startsWith('ERR')) console.warn(`[gomux] ${a.name}: screen —`, r.text);
+            }).catch((e) => console.warn(`[gomux] ${a.name}: screen failed —`, e?.message || e));
+        }
+    }
+
+    /** The agent's screen was closed on purpose — don't reopen it. */
+    declineScreen(name) { this._screens.add(name); }
 
     // ── books ────────────────────────────────────────────────────────────────
 
@@ -157,6 +183,7 @@ export default class GomuxHub {
             const node = this.nodes.get(a.name);
             if (node) {
                 this._status(node);
+                this._autoScreens([node]);
                 if ((node.transcriptSize ?? 0) > hl.cursor) this._follow(a.name);
             }
         } catch (e) {

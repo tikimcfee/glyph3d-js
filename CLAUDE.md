@@ -194,6 +194,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>` shows the agent's live tmux
   screen as terminal `gx-<name>`, seated beside its book: a READ-ONLY, `ignore-size` tmux client
   on gomuxai's server, nested inside our own terminal session (`gomux.detach` closes only ours).
+  With `gomux.autoScreens` (default on) every live agent's screen opens beside its book; a
+  detached one stays closed.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
 - **Books** (`collections/Book.js`) — library volumes, agent runs, delta sets: a deck of
