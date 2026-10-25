@@ -354,7 +354,7 @@ rather than hand-rolling the socket.
 ## Agent sessions + events (relay side)
 
 `cd cli && go test -run 'AgentEvents|TailFrom'` drives `cli/agentevents.go` against a fake
-`agent` script (sessions from a file; `transcript --follow` behaving by session name): one
+`agent` script (sessions from a file; `transcript --follow` behaving by the path's name): one
 follower shared by two displays and stopped only when the last unsubscribes (no ended for an
 unfollow); a display leaving drops its subscriptions; following again from another byte
 swaps the follower (`--from`); 2000 burst lines arrive whole and in order, no push over the
@@ -366,8 +366,14 @@ re-statement); read windows (`--until` clamped to the size seen, an unlisted ses
 with no transcript fails loud, a new session found by asking again, the output cap); the
 session poll pushes only changes, keeps the last good list through a failing run, and stops
 with the last display; and one run through a real relay socket (follow → lines → close the
-socket → follower killed). Mutation-checked (no pre-flush on the batch cap; no stop at zero
-subscribers). `go test -run Children`: a helper relay process (the export watcher + a
+socket → follower killed); the one resolver (exact id, path, a workgroup name's newest
+non-subagent session, a unique prefix; ambiguous / unknown / no-transcript errors; a miss
+re-polls once, an ambiguity doesn't); follow resolving first (an unknown name starts nothing;
+two names for one transcript share its follower, each hearing its own name); `{until, tail}`
+reads the last bytes before until; the session poll pushes on arrive / leave / a shown field,
+never on size/mtime/status_at or order alone; `ended` (stall or exit) waits with no deadline.
+Mutation-checked (no pre-flush on the batch cap; no stop at zero subscribers; push on any
+change; tail against the size, not until; no re-poll on a miss; ended with a deadline). `go test -run Children`: a helper relay process (the export watcher + a
 follower, started as the relay starts them) SIGKILLed takes its `agent` children with it
 (Linux, Pdeathsig — fails with Pdeathsig off), and the SIGINT/SIGTERM path's
 `killChildren` stops and forgets them.

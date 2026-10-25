@@ -21,7 +21,7 @@ D="$(dirname "$0")"
 case "$1" in
 export) echo '{"type":"snapshot","stores":[],"agents":[]}'; echo $$ > "$D/export.pid"; exec sleep 600 ;;
 transcript) echo $$ > "$D/transcript.pid"; exec sleep 600 ;;
-sessions) echo '[]' ;;
+sessions) printf '[{"session_id":"s","path":"%s/s.jsonl"}]\n' "$D" ;;
 esac
 `
 
@@ -94,7 +94,7 @@ func TestChildren_HelperRelay(t *testing.T) {
 	a.bin = bin
 	a.push = func(uint64, string, any, time.Duration) error { return nil }
 	a.DisplayConnected(1)
-	if err := a.Follow(1, "s", -1); err != nil {
+	if err := a.Follow(context.Background(), 1, "s", -1); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Minute)
