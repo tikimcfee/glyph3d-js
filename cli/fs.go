@@ -368,7 +368,7 @@ type writeFileResult struct {
 type writeFn func(data []byte)
 
 // writeBinFn sends a BINARY frame to the display — the RPC binary result plane.
-// Content-bearing RPCs (fs/readFile, fs/readRange, agentSessions/read) answer
+// Content-bearing RPCs (fs/readFile, fs/readRange) answer
 // binary-opted requests with one raw frame instead of a JSON-escaped string:
 // no base64, no 30MB json.Marshal walk server-side, no 31MB JSON.parse in the
 // browser — the payload crosses as bytes and decodes client-side via TextDecoder.
@@ -408,24 +408,6 @@ func sendRPCBinaryResult(writeBin writeBinFn, id json.RawMessage, hdr any, paylo
 type FSHandler struct {
 	root string // absolute path, symlinks resolved
 
-	// sessionsDir is the Claude Code transcript directory derived from the
-	// served root (~/.claude/projects/<encoded-root> — see sessions.go). ""
-	// when the home directory is unknown, and it may simply not exist; the
-	// agentSessions/* methods treat an absent dir as empty, never an error.
-	sessionsDir string
-
-	// kimiIndex is the Kimi Code session index path (~/.kimi-code/
-	// session_index.jsonl) — the second harness's archive, matched to the
-	// served root by workDir. "" when home is unknown; a missing file is an
-	// empty archive, same philosophy as sessionsDir.
-	kimiIndex string
-
-	// agyHome is the Antigravity CLI state dir (~/.gemini/antigravity-cli) —
-	// the third harness's archive, matched to the served root through agy's own
-	// history + subagent index files (sessions.go). "" when home is unknown; a
-	// missing dir is an empty archive.
-	agyHome string
-
 	// extraRoots are additional absolute, symlink-resolved directories the
 	// handler may reach OUTSIDE the project root. Seeded at construction from
 	// the temp dirs (/tmp, /var/tmp, $TMPDIR) plus the --reach flag, and widened
@@ -455,6 +437,10 @@ type FSHandler struct {
 	// gomux, if non-nil, watches the gomuxai stores (the agent orchestrator's
 	// tree) and serves gomux/* — see gomux.go. Set by serveCmd before wiring.
 	gomux *GomuxWatcher
+
+	// agents, if non-nil, serves agentSessions/* and agentEvents/* from gomuxai's
+	// `agent sessions` / `agent transcript` — see agentevents.go. Set by serveCmd.
+	agents *AgentEvents
 }
 
 // SetNotifyHook wires the FSHandler to the relay's display push channel.
@@ -501,7 +487,7 @@ func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 		extra = append(extra, r)
 	}
 
-	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved), kimiIndex: kimiSessionIndexPath(), agyHome: agyHomeDir()}, nil
+	return &FSHandler{root: resolved, extraRoots: extra}, nil
 }
 
 // evalRootOrEmpty resolves a candidate reach directory to its absolute,
@@ -591,7 +577,9 @@ func evalSymlinksOrSelf(p string) string {
 // Runs the handler in a goroutine with a timeout so it never blocks
 // the WebSocket read loop. Text writes go through write; content-bearing
 // methods may answer binary-opted requests through writeBin instead.
-func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, write writeFn, writeBin writeBinFn) {
+// display is the relay's id for the display that sent it (agentEvents/*
+// subscriptions are that display's).
+func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.RawMessage, write writeFn, writeBin writeBinFn, display uint64) {
 	go func() {
 		done := make(chan struct{})
 		go func() {
@@ -623,12 +611,14 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleSearchCancel(write, rawID, params)
 			case "agentSessions/list":
 				h.handleAgentSessionsList(write, rawID, params)
-			case "agentSessions/read":
-				h.handleAgentSessionsRead(write, writeBin, rawID, params)
+			case "agentEvents/follow":
+				h.handleAgentEventsFollow(write, rawID, params, display)
+			case "agentEvents/unfollow":
+				h.handleAgentEventsUnfollow(write, rawID, params, display)
+			case "agentEvents/read":
+				h.handleAgentEventsRead(write, rawID, params)
 			case "gomux/list":
 				h.handleGomuxList(write, rawID, params)
-			case "gomux/read":
-				h.handleGomuxRead(write, writeBin, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}

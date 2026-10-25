@@ -200,7 +200,8 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   the hand, cleaned up → done). Mutation-checked (no hold; cursor past the torn line). The relay
   side is `cd cli && go test -run Gomux` (export's snapshot / spawned / changed / removed /
   store / host lines folded into the tree, a live agent beating a departed namesake, a real
-  follower process, the transcript allow-list, gomux/read's window).
+  follower process); the transcript wire is `go test -run 'AgentEvents|TailFrom'` (Agent
+  sessions + events, below).
 - **`desk-tuning.test.mjs`** (headless) — per-instance knobs (client/tuning.js): a Settings ▸
   Carrel default reaches only desks born after it; `carrel.set` tunes one desk, `carrel.get`
   reads value · born · own, `default` returns to what the desk was born as; the gomuxai hub's
@@ -312,6 +313,32 @@ each terminal's tmux scrollback into its depth-history ring via `terminal.depth.
 A JS harness that genuinely needs JS (a Playwright page, a simulated display/sensor)
 dials through **`tools/lib/relay.mjs`** (`dialRelay(port)` → `request(line)` / `close()`)
 rather than hand-rolling the socket.
+
+## Agent sessions + events (relay side)
+
+`cd cli && go test -run 'AgentEvents|TailFrom'` drives `cli/agentevents.go` against a fake
+`agent` script (sessions from a file; `transcript --follow` behaving by session name): one
+follower shared by two displays and stopped only when the last unsubscribes (no ended for an
+unfollow); a display leaving drops its subscriptions; following again from another byte
+swaps the follower (`--from`); 2000 burst lines arrive whole and in order, no push over the
+batch cap, a line longer than the cap alone; the follower cap fails loud and frees on
+unfollow; a follower exiting pushes its lines, then `ended` with its exit code and stderr
+(also logged); a stalled display is unsubscribed with `ended` code -1, not buffered;
+`tailFrom`'s line-start rule (table + 300 random files across the scan chunk against a plain
+re-statement); read windows (`--until` clamped to the size seen, an unlisted session or one
+with no transcript fails loud, a new session found by asking again, the output cap); the
+session poll pushes only changes, keeps the last good list through a failing run, and stops
+with the last display; and one run through a real relay socket (follow → lines → close the
+socket → follower killed). Mutation-checked (no pre-flush on the batch cap; no stop at zero
+subscribers).
+
+Live, against the real `agent`: a scratch relay (`CLAUDE_CONFIG_DIR=<scratch>/claude
+./glyph3d-cli serve --relay-only --port 8199 --tmux-socket glyphd-scratch-cutover <dir>`,
+killed by PID after) with a real transcript copied under `<scratch>/claude/projects/<p>/`,
+a bun DISPLAY that follows it while the rest of the original is appended (lines split
+across writes): the pushed event lines equal `agent transcript <copy>`'s; `read {tail}` then
+`follow {from: last at}` equals the matching one-shot windows. Kill any orphaned
+`agent export` the scratch relay leaves (by PID).
 
 ## Log store (relay SQLite)
 

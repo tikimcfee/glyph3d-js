@@ -3,7 +3,6 @@
 // Server side:
 //
 //	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--tmux-socket glyphd]
-//	glyph3d-cli hook [--kimi] [--debug]     (harness hook ingress: claude default, --kimi for Kimi Code)
 //	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
 //	glyph3d-cli version
 //
@@ -52,9 +51,6 @@ func main() {
 		switch os.Args[1] {
 		case "serve":
 			serveCmd()
-			return
-		case "hook":
-			hookCmdEntry()
 			return
 		case "attach":
 			attachCmd()
@@ -133,7 +129,7 @@ func clientUsage() {
        glyph3d-cli [flags] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
        glyph3d-cli [flags] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
        glyph3d-cli [flags]                          REPL, or one line per stdin line
-       glyph3d-cli serve | hook | attach | fullsnapshot | version
+       glyph3d-cli serve | attach | fullsnapshot | version
 
 Log verbs render their records: log.search / log.errors / log.tail as lines,
 log.query as a table, log.stats as a summary (--json prints the raw data).
@@ -191,9 +187,14 @@ func serveCmd() {
 	flagSet.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
 	var gomuxDirs stringListFlag
 	flagSet.Var(&gomuxDirs, "gomuxai", "Extra gomuxai store to watch: a .gomuxai dir, the dir holding one, or an `agent` binary (repeatable). The PATH agent's store and every live agent session's are found on their own.")
-	noGomux := flagSet.Bool("no-gomuxai", false, "Don't watch gomuxai stores")
+	noGomux := flagSet.Bool("no-gomuxai", false, "Don't use gomuxai: no agent hub tree, no agent sessions or events")
+	sessionsInterval := flagSet.Duration("sessions-interval", 10*time.Second, "How often 'agent sessions --json' re-runs while a display is connected (agentSessions/changed)")
+	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
 	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
 	flagSet.Parse(os.Args[2:])
+	if *sessionsInterval <= 0 || *maxFollowers <= 0 {
+		log.Fatalf("[serve] --sessions-interval and --max-followers must be positive (got %s, %d)", *sessionsInterval, *maxFollowers)
+	}
 
 	// Project path: positional arg or cwd
 	projectPath := "."
@@ -209,6 +210,7 @@ func serveCmd() {
 		}
 		if !*noGomux {
 			fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
+			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
 		if err := RunRelay(*listen, *p, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
@@ -223,6 +225,7 @@ func serveCmd() {
 	}
 	if !*noGomux {
 		fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
+		fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 	}
 
 	cfg := ServerConfig{

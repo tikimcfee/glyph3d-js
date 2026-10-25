@@ -32,7 +32,10 @@ type Relay struct {
 	displayWrite  chan displayMsg // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
 	displayBytes  chan []byte     // terminal OUTPUT binary frames (blocking send = lossless backpressure)
 	displayFrames chan []byte     // sensor frames (drop-oldest — freshness beats completeness)
+	displayEvents chan []byte     // agentEvents/* pushes (lossless, waits for room up to a deadline)
 	displayDone   chan struct{}   // closed on display teardown — unblocks writer + blocked byte senders
+	displayGen    uint64          // the connected display's id (agentEvents subscriptions are per display)
+	nextDisplay   uint64          // display id source (guarded by mu)
 	controllers   map[string]*websocket.Conn
 	sources       map[string]*sourceConn
 	nextID        atomic.Int64
@@ -48,7 +51,7 @@ type Relay struct {
 }
 
 // displayMsg is one queued write to the display WebSocket. binary marks RPC binary
-// result frames (fs/sessions content) as opposed to the usual JSON text control.
+// result frames (fs content) as opposed to the usual JSON text control.
 type displayMsg struct {
 	data   []byte
 	binary bool
@@ -107,7 +110,7 @@ func (r *Relay) sendToDisplay(data []byte) {
 }
 
 // sendBinToDisplay enqueues a BINARY frame for the display writer — the RPC binary
-// result plane (fs/sessions content). Unlike text control this is a BLOCKING send:
+// result plane (fs content). Unlike text control this is a BLOCKING send:
 // a dropped RPC response hangs the client's promise until timeout, so the handler
 // goroutine briefly backpressures instead. Cancellable on display teardown.
 func (r *Relay) sendBinToDisplay(data []byte) {
@@ -179,13 +182,40 @@ func (r *Relay) sendFrameToDisplay(data []byte) bool {
 	return false
 }
 
-// startDisplayWriter serializes all writes to the one display WebSocket, draining three
+// pushAgentEvent sends one agentEvents/* notification to a display on the events plane:
+// lossless and in order, waiting at most `wait` for room. errDisplayGone when that display
+// is no longer the connected one; errDisplayStalled when the wait ran out (the display
+// isn't keeping up — the caller drops its subscription rather than buffer).
+func (r *Relay) pushAgentEvent(display uint64, method string, params any, wait time.Duration) error {
+	msg, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	ch, done, cur := r.displayEvents, r.displayDone, r.displayGen
+	r.mu.RUnlock()
+	if ch == nil || cur != display {
+		return errDisplayGone
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case ch <- msg:
+		return nil
+	case <-done:
+		return errDisplayGone
+	case <-t.C:
+		return errDisplayStalled
+	}
+}
+
+// startDisplayWriter serializes all writes to the one display WebSocket, draining four
 // queues with CONTROL PRIORITY: control (JSON responses + RPC binary result frames) is
-// always flushed before bulk terminal bytes or sensor frames, so a flood of output never
-// head-of-line blocks interactive control traffic. Exits when the display tears down
+// always flushed before bulk terminal bytes, sensor frames or agent-event lines, so a
+// flood of output never head-of-line blocks interactive control traffic. Exits when the display tears down
 // (`done`) or a write fails. The data channels are never closed (abandoned to GC) so a
 // controller blocked in sendBytesToDisplay can't hit a send-on-closed panic.
-func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, framesCh chan []byte, done chan struct{}) {
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, framesCh chan []byte, eventsCh chan []byte, done chan struct{}) {
 	write := func(m displayMsg) bool {
 		mt := websocket.TextMessage
 		if m.binary {
@@ -224,6 +254,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 					log.Printf("[relay] display frame-write error: %v", err)
 					return
 				}
+			case data := <-eventsCh:
+				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("[relay] display event-write error: %v", err)
+					return
+				}
 			case <-done:
 				return
 			}
@@ -245,6 +280,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 
 	var role string
 	var clientID string
+	var displayGen uint64 // this connection's display id, once it says DISPLAY
 
 	for {
 		msgType, msg, err := ws.ReadMessage()
@@ -287,11 +323,16 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				// worst-case lag between a real hand and its rendered pose. Four
 				// frames at 30fps is ~130ms; deeper would just buffer staleness.
 				framesCh := make(chan []byte, 4)
+				eventsCh := make(chan []byte, 16) // agentEvents batches (≤256 KB each)
 				done := make(chan struct{})
+				r.nextDisplay++
+				displayGen = r.nextDisplay
 				r.displayWrite = ch
 				r.displayBytes = bytesCh
 				r.displayFrames = framesCh
+				r.displayEvents = eventsCh
 				r.displayDone = done
+				r.displayGen = displayGen
 				role = "display"
 
 				// Collect controller IDs
@@ -303,7 +344,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.mu.Unlock()
 
 				// Start the single writer goroutine for this display connection
-				r.startDisplayWriter(ws, ch, bytesCh, framesCh, done)
+				r.startDisplayWriter(ws, ch, bytesCh, framesCh, eventsCh, done)
+				if r.fs != nil && r.fs.agents != nil {
+					r.fs.agents.DisplayConnected(displayGen)
+				}
 
 				log.Printf("[relay] display connected from %s", ws.RemoteAddr())
 				// Initial ack goes through the channel
@@ -475,7 +519,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 						r.sendJSONRPCError(rpc.ID, -32003, "LSP not enabled (start relay with --root)")
 					}
 				case r.fs != nil:
-					r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay, r.sendBinToDisplay)
+					r.fs.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay, r.sendBinToDisplay, displayGen)
 				default:
 					r.sendJSONRPCError(rpc.ID, -32003, "filesystem not enabled (start relay with --root)")
 				}
@@ -543,7 +587,9 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		r.displayWrite = nil
 		r.displayBytes = nil
 		r.displayFrames = nil
+		r.displayEvents = nil
 		r.displayDone = nil
+		r.displayGen = 0
 		r.mu.Unlock()
 		// Close `done` (never sent on) to stop the writer and unblock any controller
 		// parked in sendBytesToDisplay. The data channels are left for GC, not closed,
@@ -556,6 +602,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		// would land on the NEXT display as orphans of a run it never started.
 		if r.fs != nil {
 			r.fs.cancelAllSearches()
+		}
+		// Its transcript subscriptions go with it; a follower nobody holds stops.
+		if r.fs != nil && r.fs.agents != nil {
+			r.fs.agents.DisplayGone(displayGen)
 		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {
@@ -1131,7 +1181,7 @@ func (r *Relay) NotifyDisplayRPC(method string, params any) {
 }
 
 // wireFS connects the filesystem handler's server-initiated pushes (writes,
-// LSP diagnostics, the gomuxai tree) to the display, and starts the watchers
+// LSP diagnostics, the gomuxai tree, agent sessions and events) to the display, and starts the watchers
 // that produce them.
 func (r *Relay) wireFS(h *FSHandler) {
 	h.SetNotifyHook(r.NotifyDisplayRPC)
@@ -1145,6 +1195,10 @@ func (r *Relay) wireFS(h *FSHandler) {
 			}
 		})
 		h.gomux.Start(context.Background())
+	}
+	if h.agents != nil {
+		h.agents.push = r.pushAgentEvent
+		h.agents.notify = r.NotifyDisplayRPC
 	}
 }
 

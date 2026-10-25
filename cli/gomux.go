@@ -17,12 +17,8 @@ package main
 // departed namesake, then the newest run).
 //
 // RPCs (fs.go dispatch):
-//   gomux/list  {}                                  → snapshot
-//   gomux/read  {name, tailBytes?|fromOffset?, maxBytes?, binary?}
-//               → the agent's transcript window, agentSessions/read's shape.
-//               Only a path the tree names for that agent is served, and only
-//               under the harness homes (~/.claude/projects,
-//               ~/.gemini/antigravity-cli/brain).
+//   gomux/list  {}  → snapshot
+// An agent's events come from agentEvents/* (agentevents.go), never from here.
 
 import (
 	"bufio"
@@ -140,7 +136,6 @@ type GomuxWatcher struct {
 	stores0 []string // operator-supplied stores (--gomuxai), passed as --store
 	tmuxBin string   // "" = no tmux: screens can't be drawn
 	agent   string   // the `agent` binary export runs from ("" = look it up on PATH)
-	home    string
 	// paneSizes: each screened agent's pane size as last seen or set (watchPaneSizes)
 	paneSizes map[string][2]int
 }
@@ -148,14 +143,12 @@ type GomuxWatcher struct {
 // NewGomuxWatcher builds a watcher whose export also reads `dirs` (each a .gomuxai dir,
 // the dir holding one, or an agent binary — export's --store). No I/O until Start.
 func NewGomuxWatcher(dirs []string) *GomuxWatcher {
-	home, _ := os.UserHomeDir()
 	tmuxBin, _ := exec.LookPath("tmux")
 	return &GomuxWatcher{
 		agents:  map[string]exportAgent{},
 		reached: map[string]bool{},
 		stores0: dirs,
 		tmuxBin: tmuxBin,
-		home:    home,
 	}
 }
 
@@ -350,8 +343,7 @@ func exportPrefer(a, b exportAgent) bool {
 	return parseTime(a.CreatedAt).After(parseTime(b.CreatedAt))
 }
 
-// toNode maps export's agent to the display's node, dropping a transcript outside the
-// harness homes (it would never be served).
+// toNode maps export's agent to the display's node.
 func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
 	n := gomuxAgent{
 		Name: a.Name, Host: a.Host, Parent: a.Parent, Backend: a.Backend, Session: a.Session,
@@ -366,13 +358,9 @@ func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
 	if t := parseTime(a.TranscriptMtime); !t.IsZero() {
 		n.TranscriptMtime = t.UnixMilli()
 	}
-	if n.Transcript != "" && !w.transcriptAllowed(n.Transcript) {
-		log.Printf("[gomux] %s: transcript outside the harness homes, not served: %s", a.Name, n.Transcript)
-		n.Transcript = ""
-	}
 	// Claude names a transcript by its session id (<projects>/<cwd-slug>/<uuid>.jsonl);
 	// export's session_id stays empty until gomuxai's hooks report one. The display
-	// keys its dedupe on it (the project hook books the same session by its id).
+	// joins an agent to its `agent sessions` entry (and its agentEvents follow) by it.
 	if n.SessionID == "" && n.Harness == "claude" && n.Transcript != "" {
 		n.SessionID = strings.TrimSuffix(filepath.Base(n.Transcript), ".jsonl")
 	}
@@ -440,23 +428,6 @@ func (w *GomuxWatcher) tmux(args ...string) (string, error) {
 	cmd.Env = out
 	b, err := cmd.Output()
 	return string(b), err
-}
-
-// transcriptAllowed: only the harness homes are served, symlinks resolved.
-func (w *GomuxWatcher) transcriptAllowed(p string) bool {
-	if w.home == "" || !filepath.IsAbs(p) {
-		return false
-	}
-	rp := evalSymlinksOrSelf(filepath.Clean(p))
-	for _, root := range []string{
-		filepath.Join(w.home, ".claude", "projects"),
-		filepath.Join(w.home, ".gemini", "antigravity-cli", "brain"),
-	} {
-		if isUnder(rp, evalSymlinksOrSelf(root)) {
-			return true
-		}
-	}
-	return false
 }
 
 // agentByName returns the served node for a name.
@@ -534,18 +505,6 @@ func (w *GomuxWatcher) Snapshot() gomuxSnapshot {
 	return w.snap
 }
 
-// transcriptOf resolves an agent name to its served transcript path.
-func (w *GomuxWatcher) transcriptOf(name string) (gomuxAgent, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, a := range w.snap.Agents {
-		if a.Name == name {
-			return a, a.Transcript != ""
-		}
-	}
-	return gomuxAgent{}, false
-}
-
 // ---- RPC handlers ----
 
 func (h *FSHandler) handleGomuxList(write writeFn, id json.RawMessage, _ json.RawMessage) {
@@ -554,29 +513,6 @@ func (h *FSHandler) handleGomuxList(write writeFn, id json.RawMessage, _ json.Ra
 		return
 	}
 	h.sendRPCResult(write, id, h.gomux.Snapshot())
-}
-
-type gomuxReadParams struct {
-	Name string `json:"name"`
-	transcriptWindow
-}
-
-func (h *FSHandler) handleGomuxRead(write writeFn, writeBin writeBinFn, id json.RawMessage, raw json.RawMessage) {
-	if h.gomux == nil {
-		h.sendRPCError(write, id, -32000, "gomuxai watcher not running", nil)
-		return
-	}
-	var p gomuxReadParams
-	if err := json.Unmarshal(raw, &p); err != nil {
-		h.sendRPCError(write, id, -32602, "invalid params", nil)
-		return
-	}
-	a, ok := h.gomux.transcriptOf(p.Name)
-	if !ok {
-		h.sendRPCError(write, id, errFileNotFound, "no transcript for gomuxai agent: "+p.Name, map[string]string{"name": p.Name})
-		return
-	}
-	h.serveTranscriptWindow(write, writeBin, id, p.Name, a.Transcript, a.Cwd, "", p.transcriptWindow)
 }
 
 // ---- the agent's live screen ----

@@ -4,8 +4,8 @@
 // detail string with spaces/quotes/backslashes (a bash command, a grep pattern) can't ride
 // a plain command line. `call <base64-json>` is the escape hatch: it decodes to the same
 // [name, ...args] vector and re-dispatches. This locks that the hatch round-trips a corpus
-// of gnarly inputs BYTE-IDENTICAL — it's the regression guard for cli/hook.go's activity
-// transport (see the field-visitor system + the call-bundle-hatch memory).
+// of gnarly inputs BYTE-IDENTICAL — it's the regression guard for the CLI's one-shot
+// bundles (cli/client.go oneShotLine; see the call-bundle-hatch memory).
 //
 // Built to DISCRIMINATE, not rubber-stamp: it also asserts the naive plain-line path
 // genuinely corrupts spaced/quoted inputs. If that stops being true (someone makes the bus

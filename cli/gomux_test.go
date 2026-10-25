@@ -10,12 +10,11 @@ import (
 	"time"
 )
 
-// newGomuxTestWatcher: home pinned so the transcript allow-list is the test's.
-func newGomuxTestWatcher(t *testing.T, home string) *GomuxWatcher {
+// newGomuxTestWatcher: no tmux, so no screens are asked about.
+func newGomuxTestWatcher(t *testing.T) *GomuxWatcher {
 	t.Helper()
 	w := NewGomuxWatcher(nil)
 	w.tmuxBin = ""
-	w.home = home
 	return w
 }
 
@@ -34,11 +33,10 @@ func mustApply(t *testing.T, w *GomuxWatcher, line string) {
 	}
 }
 
-// exportFixture: a home with two claude transcripts, and export lines over two stores.
-func exportFixture(t *testing.T) (home, coordT, childT string) {
+// exportFixture: two claude transcripts for export lines to name.
+func exportFixture(t *testing.T) (coordT, childT string) {
 	t.Helper()
-	home = t.TempDir()
-	proj := filepath.Join(home, ".claude", "projects", "-p")
+	proj := filepath.Join(t.TempDir(), ".claude", "projects", "-p")
 	os.MkdirAll(proj, 0o755)
 	coordT = filepath.Join(proj, "c.jsonl")
 	childT = filepath.Join(proj, "t1.jsonl")
@@ -53,8 +51,8 @@ func agentJSON(fields map[string]any) string {
 }
 
 func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
-	home, coordT, childT := exportFixture(t)
-	w := newGomuxTestWatcher(t, home)
+	coordT, childT := exportFixture(t)
+	w := newGomuxTestWatcher(t)
 	var pushes []gomuxSnapshot
 	w.SetNotifyHook(func(method string, params any) {
 		if method == "gomux/changed" {
@@ -82,8 +80,8 @@ func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
 		c.TranscriptMtime != time.Date(2026, 10, 25, 1, 30, 0, 5e8, time.UTC).UnixMilli() {
 		t.Errorf("coord = %+v", c)
 	}
-	if o := got["old"]; o.Live || o.Status != "exited" || o.Harness != "agy" || o.Transcript != "" || o.EndedAt == "" {
-		t.Errorf("old = %+v (departed: exited; a transcript outside the harness homes isn't served)", o)
+	if o := got["old"]; o.Live || o.Status != "exited" || o.Harness != "agy" || o.Transcript != "/etc/passwd" || o.EndedAt == "" {
+		t.Errorf("old = %+v (departed: exited; export's transcript passes through)", o)
 	}
 	if s.Agents[0].Name != "old" || len(pushes) != 1 || len(s.Dirs) != 1 {
 		t.Errorf("order/pushes/dirs: %v %d %v", s.Agents, len(pushes), s.Dirs)
@@ -144,7 +142,7 @@ func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
 }
 
 func TestGomuxExport_LiveBeatsDepartedNamesake(t *testing.T) {
-	w := newGomuxTestWatcher(t, t.TempDir())
+	w := newGomuxTestWatcher(t)
 	mustApply(t, w, `{"type":"snapshot","stores":[{"dir":"/a"},{"dir":"/b"}],"agents":[`+
 		`{"name":"x","store":"/a","created_at":"2026-10-25T03:00:00Z","live":false},`+
 		`{"name":"x","store":"/b","created_at":"2026-10-25T01:00:00Z","live":true,"status":"idle"}]}`)
@@ -154,17 +152,17 @@ func TestGomuxExport_LiveBeatsDepartedNamesake(t *testing.T) {
 }
 
 // A claude agent's session id: export's when it reports one, else the transcript's name
-// (Claude names it by the session) — only for a transcript the relay serves.
+// (Claude names it by the session); never guessed for another harness.
 func TestGomuxExport_SessionIDFromTranscript(t *testing.T) {
-	home, coordT, childT := exportFixture(t)
-	w := newGomuxTestWatcher(t, home)
+	coordT, childT := exportFixture(t)
+	w := newGomuxTestWatcher(t)
 	mustApply(t, w, `{"type":"snapshot","stores":[{"dir":"/s"}],"agents":[`+
 		agentJSON(map[string]any{"name": "said", "store": "/s", "live": true, "session_id": "sid", "transcript": coordT, "dialect": "claude"})+`,`+
 		agentJSON(map[string]any{"name": "named", "store": "/s", "live": true, "transcript": childT, "dialect": "claude"})+`,`+
 		agentJSON(map[string]any{"name": "outside", "store": "/s", "live": true, "transcript": "/etc/x.jsonl", "dialect": "claude"})+`,`+
 		agentJSON(map[string]any{"name": "gem", "store": "/s", "live": true, "transcript": childT, "dialect": "agy"})+`]}`)
 	got := gomuxByName(w.Snapshot())
-	for name, want := range map[string]string{"said": "sid", "named": "t1", "outside": "", "gem": ""} {
+	for name, want := range map[string]string{"said": "sid", "named": "t1", "outside": "x", "gem": ""} {
 		if got[name].SessionID != want {
 			t.Errorf("%s: sessionId %q, want %q", name, got[name].SessionID, want)
 		}
@@ -181,7 +179,7 @@ func TestGomuxExport_FollowsAProcess(t *testing.T) {
 		`echo '{"type":"changed","store":"/a","reason":"status","agent":{"name":"p","store":"/a","live":true,"status":"processing"}}'` + "\n" +
 		"sleep 30\n"
 	os.WriteFile(script, []byte(body), 0o755)
-	w := newGomuxTestWatcher(t, t.TempDir())
+	w := newGomuxTestWatcher(t)
 	w.agent = script
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -196,36 +194,12 @@ func TestGomuxExport_FollowsAProcess(t *testing.T) {
 	t.Errorf("the follower never applied the change: %+v", w.Snapshot())
 }
 
-func TestGomuxRead_ServesOnlyTheNamedTranscript(t *testing.T) {
-	home := t.TempDir()
-	proj := filepath.Join(home, ".claude", "projects", "-p")
-	os.MkdirAll(proj, 0o755)
-	tp := filepath.Join(proj, "s.jsonl")
-	os.WriteFile(tp, []byte("{\"a\":1}\n{\"b\":2}\n"), 0o644)
+func TestGomuxList_ServesTheTree(t *testing.T) {
 	h, _, _ := newTestHandler(t)
-	h.gomux = newGomuxTestWatcher(t, home)
-	mustApply(t, h.gomux, `{"type":"snapshot","stores":[{"dir":"/a"}],"agents":[{"name":"a","store":"/a","live":true,"transcript":`+
-		string(mustJSON(t, tp))+`,"dialect":"claude"}]}`)
-
+	h.gomux = newGomuxTestWatcher(t)
+	mustApply(t, h.gomux, `{"type":"snapshot","stores":[{"dir":"/a"}],"agents":[{"name":"a","store":"/a","live":true}]}`)
 	write, c := captureRPC(t)
-	h.handleGomuxRead(write, func([]byte) {}, json.RawMessage("1"), json.RawMessage(`{"name":"a","tailBytes":9}`))
-	if c.Error != nil {
-		t.Fatalf("read: %s", c.Error.Message)
-	}
-	var r agentSessionsReadResult
-	json.Unmarshal(c.Result, &r)
-	if r.ID != "a" || r.Content != "{\"b\":2}\n" || !r.Truncated || r.Offset != 8 {
-		t.Errorf("window = %+v", r)
-	}
-
-	write, c = captureRPC(t)
-	h.handleGomuxRead(write, func([]byte) {}, json.RawMessage("2"), json.RawMessage(`{"name":"nobody"}`))
-	if c.Error == nil || !strings.Contains(c.Error.Message, "nobody") {
-		t.Errorf("unknown agent should fail loud, got %+v", c)
-	}
-
-	write, c = captureRPC(t)
-	h.handleGomuxList(write, json.RawMessage("3"), json.RawMessage(`{}`))
+	h.handleGomuxList(write, json.RawMessage("1"), json.RawMessage(`{}`))
 	var s gomuxSnapshot
 	json.Unmarshal(c.Result, &s)
 	if len(s.Agents) != 1 || s.Agents[0].Name != "a" {
