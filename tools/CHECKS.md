@@ -192,6 +192,25 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   edge pairs with its result (the overlap read); the first page back makes numbers exact; live
   turns while held wait beyond the window; `live` slides to the end and resumes following; the
   run's start ends history. Mutation-checked (no evict, no freeze, no pending slide).
+- **`agent-events.test.mjs`** (headless) — agent books fed by gomuxai's event stream
+  (`collections/agentEvents.js` → `AgentBooks.applyEvents`), driven from gomuxai's conformance
+  corpus (`$GOMUXAI_DIR/internal/transcript/testdata/corpus/**/*.events.jsonl`, default
+  `~/dev/gomuxai`; FAILS when it is missing). The reader folds any chunking (1-byte, mid-codepoint)
+  to the same events, one per id, an update replacing its event and keeping the add's position;
+  off-contract frames throw. One sheet per event (noise hidden unless `book.showNoise`), live ==
+  hydrated; prompts of every origin are sheets tagged by whose words they are, in the prompt hue;
+  a tool's pending → result rebuilds its sheet in place (count, index, deck node, head unchanged —
+  also across a resumed reader that never saw the add); statuses, an errored file action's error,
+  a provisional final reply confirmed; turn ids/indexes on every sheet and in `headState`; a
+  subagent's events land in its own book; a redacted thought says so; the sliding-window history
+  pages back by `at` over a long corpus-derived stream (every paged record equals the full fold —
+  results paired across slice edges), and updates to buffered records replace them there.
+  Mutation-checked (12 mutants: no in-place replace, position lost, generic tag, no subagent
+  routing, orphan update as add, no overlap read, turn dropped, buffered update ignored, …).
+  ```
+  bun tools/agent-events.test.mjs
+  GOMUXAI_DIR=/path/to/gomuxai bun tools/agent-events.test.mjs
+  ```
 - **`gomux-hub.test.mjs`** (headless) — the gomuxai hub's live follow over a growing mock
   transcript: the cursor stops past the last complete line (a line mid-write arrives whole on the
   next read); a tool call whose result isn't written yet holds — nothing at or after it commits —

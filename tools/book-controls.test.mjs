@@ -97,7 +97,7 @@ const card = second.entries[2].action;   // a card riding sheet 2 of the SECOND 
         `bare book.page prev pages the FOCUSED card's book, not the first lane (${r.text})`);
     r = handlers['book.scroll'](['-3'], ctx);
     eq(second.book.head, 1, 'bare book.scroll -3 turns the focused book three sheets');
-    ok(/turn ~2\/6/.test(r.text), `the verb reports the open sheet's turn in the run, ~ for a floor (${r.text})`);
+    ok(/run ~2\/6/.test(r.text), `the verb reports the open sheet's place in the run, ~ for a floor (${r.text})`);
     handlers['book.page'](['last'], ctx);
     ok(second.book.following, 'book.page last resumes live-follow');
     slots.primary = null;
@@ -130,7 +130,7 @@ eq(key('.', { ctrlKey: true }), null, 'keys: a modified chord is not a book key'
     const lifted = second.book.tabs[1].tab.position.y, rest = second.book.tabs[0].tab.position.y;
     ok(lifted > rest, 'timeline: the open sheet\'s tab stands raised');
     const hs = books.headState('second');
-    eq([hs.turn, hs.turns, hs.exact], [5, 7, false], 'headState: the open sheet\'s turn; a live-born lane\'s count is a floor');
+    eq([hs.sheet, hs.sheets, hs.exact, hs.turn], [5, 7, false, null], 'headState: the open sheet\'s place in the run; a live-born lane\'s count is a floor; a record no event carried has no turn');
 }
 
 // ── 7. hydration numbers turns from the run's start ─────────────────────────────
@@ -140,7 +140,7 @@ eq(key('.', { ctrlKey: true }), null, 'keys: a modified chord is not a book key'
     await b2.hydrate('h', recs, { seqBase: 40, seqExact: false });
     eq(b2.lanes.get('h').book.tabs.map((t) => t.tab.text), ['41', '42', '43'], 'hydrate: tabs count from the skipped tail');
     const hs = b2.headState('h');
-    eq([hs.turn, hs.turns, hs.exact], [43, 43, false], 'hydrate: a tail read reports a floor (exact false)');
+    eq([hs.sheet, hs.sheets, hs.exact], [43, 43, false], 'hydrate: a tail read reports a floor (exact false)');
     await b2.hydrate('w', recs, { seqBase: 0, seqExact: true });
     eq(b2.headState('w').exact, true, 'hydrate: a whole-record read is exact');
 }

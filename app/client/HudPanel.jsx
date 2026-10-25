@@ -321,8 +321,9 @@ export default function HudPanel({ client }) {
             </div>
           )}
           {/* The agent/delta book in play: turn its pages, ride live, and READ where you
-              are — the open sheet's turn in the whole run (~ = a floor: the read began
-              mid-record), the sheet among those kept, live vs held. */}
+              are — the turn the open sheet belongs to (its event's prompt), the sheet's
+              place in the whole run (~ = a floor: the read began mid-record), the sheet
+              among those kept, live vs held. */}
           {f.book && (
             <div style={S.row} data-g3d-book>
               <Btn onClick={() => fire('book.page', f.book.addr, 'prev')}>◂</Btn>
@@ -332,7 +333,8 @@ export default function HudPanel({ client }) {
                 {f.book.following ? 'live ●' : 'live ○'}
               </Toggle>
               <span style={S.readout} title={`${f.book.addr} — sheet ${f.book.head + 1} of ${f.book.count} kept`}>
-                {f.book.turn ? `turn ${f.book.exact ? '' : '~'}${f.book.turn}/${f.book.turns} · ` : ''}
+                {f.book.turn != null ? `turn ${f.book.turn} · ` : ''}
+                {f.book.sheet ? `sheet ${f.book.exact ? '' : '~'}${f.book.sheet}/${f.book.sheets} · ` : ''}
                 {f.book.head + 1}/{f.book.count} · {f.book.following ? 'live' : 'held'}
                 {f.book.loading ? ' · loading older…' : ''}
                 {f.book.newer ? ` · +${f.book.newer} newer (live reloads)` : ''}

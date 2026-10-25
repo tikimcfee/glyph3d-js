@@ -296,6 +296,7 @@ const ACTION_KIND = {
     bash: 'run', task: 'run',
     ask: 'ask', fetch: 'fetch',
     say: 'say', send: 'say', think: 'think',
+    prompt: 'prompt',
     system: 'system',
 };
 
@@ -316,6 +317,7 @@ export const ACTION_HUES = {
     fetch:  { r: 0.45, g: 0.82, b: 0.78 },   // teal — reaching out to the network
     say:    { r: 0.92, g: 0.94, b: 0.98 },   // near-white — the agent SPEAKING (its reply to you)
     think:  { r: 0.58, g: 0.52, b: 0.78 },   // dim violet — interior REASONING (the thinking turns)
+    prompt: { r: 0.96, g: 0.42, b: 0.78 },   // rose — a message INTO the agent (yours, queued, delivered, a notification)
     system: { r: 0.80, g: 0.74, b: 0.52 },   // muted sand — the HARNESS speaking (system messages, compaction)
     other:  { r: 0.62, g: 0.64, b: 0.68 },
 };

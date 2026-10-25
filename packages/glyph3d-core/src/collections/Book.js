@@ -290,6 +290,40 @@ export default class Book extends BoundedObject3D {
     }
 
     /**
+     * Swap sheet `i`'s sides for new ones IN PLACE: the sheet keeps its node, its place in
+     * the deck (pose included — nothing eases or cuts), its tab (re-labelled and re-hued
+     * from the new meta), and the head and live-follow stay exactly as they were. The old
+     * contents detach and return to the caller's care, as removeSheet's do. While fitted
+     * the sheet re-fits at once.
+     * @param {number} i
+     * @param {{verso?:THREE.Object3D|null, recto?:THREE.Object3D|null, meta?:Object|null}} sides
+     * @returns {{verso:THREE.Object3D|null, recto:THREE.Object3D|null}|null} the detached sides
+     */
+    replaceSheet(i, { verso = null, recto = null, meta = null } = {}) {
+        const sheet = this.sheets[i];
+        if (!sheet) return null;
+        const old = { verso: sheet.verso, recto: sheet.recto };
+        if (old.verso) sheet.versoMount.remove(old.verso);
+        if (old.recto) sheet.rectoMount.remove(old.recto);
+        sheet.verso = verso;
+        sheet.recto = recto;
+        sheet.meta = meta;
+        if (verso) sheet.versoMount.add(verso);
+        if (recto) sheet.rectoMount.add(recto);
+        if (this._fitOpts) this._fitSheet(sheet, this._fitOpts);
+        else sheet.fit = {};
+        const t = this.tabs?.[i];
+        if (t && this._tabOpts) {
+            t.key = this._tabKeyOf(sheet);
+            const label = this._tabLabelOf(sheet);
+            t.tab.setText(label);
+            t.tab.retune({ plateColor: this._tabHueOf(t.key) });
+            t.tab.name = `tab:${i}:${label}`;
+        }
+        return old;
+    }
+
+    /**
      * The content box of the OPEN sheet in the BOOK's local frame — each side's layout
      * box carried through its own transform, mount, and sheet node. Released, with a
      * single bare sheet, this is exactly what bounds consumers saw when the leaf sat
