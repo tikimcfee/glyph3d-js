@@ -140,6 +140,17 @@ flags (before the verb):
 	flag.PrintDefaults()
 }
 
+// relayDebug turns on debugf lines (serve --debug).
+var relayDebug bool
+
+// debugf logs a line only under serve --debug: costs worth seeing while tuning, too
+// frequent for the default log (an agentSessions/changed push's size, every change).
+func debugf(format string, args ...any) {
+	if relayDebug {
+		log.Printf(format, args...)
+	}
+}
+
 func versionCmd() {
 	fmt.Printf("glyph3d-cli %s\n", Version)
 	fmt.Printf("  built:    %s\n", BuildDate)
@@ -191,10 +202,13 @@ func serveCmd() {
 	sessionsInterval := flagSet.Duration("sessions-interval", 10*time.Second, "How often 'agent sessions --json' re-runs while a display is connected (agentSessions/changed)")
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
 	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
+	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.Parse(os.Args[2:])
 	if *sessionsInterval <= 0 || *maxFollowers <= 0 {
 		log.Fatalf("[serve] --sessions-interval and --max-followers must be positive (got %s, %d)", *sessionsInterval, *maxFollowers)
 	}
+	// The `agent` children (gomuxai export, sessions, transcripts) go when the relay goes.
+	watchShutdown()
 
 	// Project path: positional arg or cwd
 	projectPath := "."

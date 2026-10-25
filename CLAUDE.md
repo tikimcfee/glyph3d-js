@@ -88,7 +88,10 @@ displays) dials through `tools/lib/relay.mjs`.
 (`agent sessions --json`, `agent transcript … --follow`) and moves its lines to the display
 (`cli/agentevents.go`); nothing in this repo reads a harness transcript. `serve
 --sessions-interval` (10s) paces the session list, `--max-followers` (64) caps live
-followers, `--no-gomuxai` turns all of it off.
+followers, `--no-gomuxai` turns all of it off, `--debug` logs each session-list push's size.
+Every `agent` child dies with the relay (`cli/children.go`): Pdeathsig on Linux, however the
+relay dies; elsewhere the SIGINT/SIGTERM handler kills them (a SIGKILLed relay off Linux
+still orphans its `agent export`).
 
 ## Command bus
 

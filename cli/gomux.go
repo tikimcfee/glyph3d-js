@@ -199,9 +199,10 @@ func (w *GomuxWatcher) follow(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startChild(cmd); err != nil {
 		return errMsg("start " + bin + " export: " + err.Error())
 	}
+	defer childExited(cmd)
 	log.Printf("[gomux] following %s %s", bin, strings.Join(args, " "))
 	sc := bufio.NewScanner(out)
 	sc.Buffer(make([]byte, 64*1024), 64*1024*1024)

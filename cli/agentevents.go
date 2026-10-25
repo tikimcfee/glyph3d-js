@@ -274,7 +274,7 @@ func (a *AgentEvents) startLocked(key followKey) (*follower, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout, cmd.Stderr = outW, errW
-	err = cmd.Start()
+	err = startChild(cmd)
 	outW.Close()
 	errW.Close()
 	if err != nil {
@@ -334,6 +334,7 @@ func (a *AgentEvents) run(f *follower, stderr *os.File) {
 	f.out.Close()
 	<-errDone
 	err := f.cmd.Wait()
+	childExited(f.cmd)
 	f.cancel()
 
 	a.mu.Lock()
@@ -493,14 +494,20 @@ func (a *AgentEvents) runSessions(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "sessions", "--json", "-q")
+	var stdout bytes.Buffer
 	var stderr strings.Builder
+	cmd.Stdout = &stdout
 	cmd.Stderr = &limitedWriter{w: &stderr, n: 4096}
-	out, err := cmd.Output()
+	err = startChild(cmd)
+	if err == nil {
+		err = cmd.Wait()
+		childExited(cmd)
+	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		return nil, errMsg(bin + " sessions --json: " + err.Error() + orEmpty(" — "+msg, msg != ""))
 	}
-	return bytes.TrimSpace(out), nil
+	return bytes.TrimSpace(stdout.Bytes()), nil
 }
 
 func (a *AgentEvents) applySessionsLocked(raw []byte) error {
@@ -525,6 +532,7 @@ func (a *AgentEvents) applySessionsLocked(raw []byte) error {
 	}
 	a.polled, a.sessRaw, a.paths = true, raw, paths
 	a.sessions = agentSessionsList{Gen: a.sessions.Gen + 1, Sessions: raw}
+	debugf("[agent-sessions] changed: gen %d, %d sessions, %d bytes pushed", a.sessions.Gen, len(ss), len(raw))
 	if a.notify != nil {
 		a.notify("agentSessions/changed", a.sessions)
 	}
@@ -633,7 +641,7 @@ func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentE
 	if err != nil {
 		return agentEventsReadResult{}, err
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startChild(cmd); err != nil {
 		return agentEventsReadResult{}, errMsg("start " + bin + " transcript: " + err.Error())
 	}
 	res := agentEventsReadResult{Lines: []string{}, Size: size}
@@ -656,6 +664,7 @@ func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentE
 	}
 	io.Copy(io.Discard, out)
 	werr := cmd.Wait()
+	childExited(cmd)
 	if readErr != nil {
 		return agentEventsReadResult{}, readErr
 	}

@@ -330,15 +330,19 @@ with no transcript fails loud, a new session found by asking again, the output c
 session poll pushes only changes, keeps the last good list through a failing run, and stops
 with the last display; and one run through a real relay socket (follow → lines → close the
 socket → follower killed). Mutation-checked (no pre-flush on the batch cap; no stop at zero
-subscribers).
+subscribers). `go test -run Children`: a helper relay process (the export watcher + a
+follower, started as the relay starts them) SIGKILLed takes its `agent` children with it
+(Linux, Pdeathsig — fails with Pdeathsig off), and the SIGINT/SIGTERM path's
+`killChildren` stops and forgets them.
 
 Live, against the real `agent`: a scratch relay (`CLAUDE_CONFIG_DIR=<scratch>/claude
 ./glyph3d-cli serve --relay-only --port 8199 --tmux-socket glyphd-scratch-cutover <dir>`,
 killed by PID after) with a real transcript copied under `<scratch>/claude/projects/<p>/`,
 a bun DISPLAY that follows it while the rest of the original is appended (lines split
 across writes): the pushed event lines equal `agent transcript <copy>`'s; `read {tail}` then
-`follow {from: last at}` equals the matching one-shot windows. Kill any orphaned
-`agent export` the scratch relay leaves (by PID).
+`follow {from: last at}` equals the matching one-shot windows. Then `kill -9` (and,
+separately, `kill -TERM`) the scratch relay's PID: its `agent export` and `agent transcript`
+children are gone a second later.
 
 ## Log store (relay SQLite)
 
