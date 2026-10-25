@@ -2,9 +2,9 @@
 //
 //   bun tools/sessionAdapter.test.mjs
 //
-// parseClaudeSession(text) → { events, cwd, firstTs, lastTs } is the seam both the replay
-// (tools/agent-replay.mjs) and any future bulk loader read a session through, so a regression here
-// silently reshapes every replayed book. Pure (no THREE/DOM) — tested directly on a synthetic
+// parseClaudeSession(text) → { events, cwd, firstTs, lastTs } is the seam every archive read of a
+// session goes through (agent.open, the gomuxai hub's history), so a regression here silently
+// reshapes every hydrated book. Pure (no THREE/DOM) — tested directly on a synthetic
 // transcript that exercises the real shapes: tool_use/tool_result pairing across distance, the
 // three response-merge branches, assistant prose blocks, sidechain/malformed/non-message skips.
 

@@ -1,12 +1,20 @@
-// glyph3d-cli — standalone WebSocket CLI for glyph3d-js viewer.
+// glyph3d-cli — the glyph3d-js single binary: the server, and the one relay client.
 //
-// Modes:
+// Server side:
 //
-//	Relay:     glyph3d-cli serve [--port 8080] [--listen 0.0.0.0]
-//	Hook:      glyph3d-cli hook [--kimi] [--debug]     (harness hook ingress: claude default, --kimi for Kimi Code)
-//	One-shot:  glyph3d-cli [--host url] <command...>
-//	REPL:      glyph3d-cli [--host url]
-//	Pipe:      echo "grid.list" | glyph3d-cli
+//	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--tmux-socket glyphd]
+//	glyph3d-cli hook [--kimi] [--debug]     (harness hook ingress: claude default, --kimi for Kimi Code)
+//	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
+//	glyph3d-cli version
+//
+// Client side — global flags go BEFORE the verb or client command:
+//
+//	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot
+//	glyph3d-cli [...] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
+//	glyph3d-cli [...] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
+//	glyph3d-cli [...] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
+//	glyph3d-cli [...]                       REPL (interactive stdin)
+//	echo "grid.list" | glyph3d-cli          pipe: one command line per input line
 //
 // Build:
 //
@@ -15,9 +23,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -25,8 +30,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // Build-time version info (set via -ldflags)
@@ -39,23 +42,12 @@ var (
 var (
 	host     = flag.String("host", "ws://localhost:8080", "WebSocket relay URL")
 	port     = flag.Int("port", 0, "Shorthand: ws://localhost:<port>")
-	jsonMode = flag.Bool("json", false, "Output raw JSON data")
+	jsonMode = flag.Bool("json", false, "Output raw JSON data (log.follow: one record per line)")
 	timeout  = flag.Duration("timeout", 5*time.Second, "Command response timeout")
 )
 
-// b64Commands are commands whose first text argument should be base64-encoded.
-var b64Commands = map[string]bool{
-	"grid.create":    true,
-	"grid.text":      true,
-	"label.create":   true,
-	"scene.annotate": true,
-	"terminal.input": true,
-	"tour.load":      true,
-	"tour.load.text": true,
-}
-
 func main() {
-	// Check for subcommands before flag parsing
+	// Server-side subcommands own their flags.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "serve":
@@ -63,9 +55,6 @@ func main() {
 			return
 		case "hook":
 			hookCmdEntry()
-			return
-		case "screenshot":
-			screenshotCmd()
 			return
 		case "attach":
 			attachCmd()
@@ -79,6 +68,7 @@ func main() {
 		}
 	}
 
+	flag.Usage = clientUsage
 	flag.Parse()
 
 	url := *host
@@ -86,243 +76,68 @@ func main() {
 		url = fmt.Sprintf("ws://localhost:%d", *port)
 	}
 
-	conn, err := connect(url)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
-	defer conn.Close()
-
 	args := flag.Args()
 	if len(args) > 0 {
-		// One-shot mode
-		cmd := buildCommand(args)
-		resp, err := sendCommand(conn, cmd)
-		if err != nil {
-			log.Fatalf("send: %v", err)
+		switch args[0] {
+		case "screenshot":
+			os.Exit(screenshotCmd(url, args[1:]))
+		case "log.follow":
+			os.Exit(logFollowCmd(url, args[1:]))
+		case "seed-history":
+			os.Exit(seedHistoryCmd(url, args[1:]))
 		}
-		printResponse(resp)
-		if strings.HasPrefix(resp.Text, "ERR:") {
+	}
+
+	conn := mustConnect(url)
+	defer conn.Close()
+
+	switch {
+	case len(args) > 0:
+		// One-shot: the shell already split the argv — ship it as a `call` bundle so
+		// every argument reaches its handler byte-identical.
+		resp, err := sendArgv(conn, args, *timeout)
+		if err != nil {
+			log.Fatalf("%s: %v", args[0], err)
+		}
+		printResponse(args[0], resp)
+		if resp.failed() {
 			os.Exit(1)
 		}
-	} else if isInteractive() {
-		// REPL mode
+	case isInteractive():
 		repl(conn)
-	} else {
-		// Pipe mode
+	default:
 		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ".") {
 				continue
 			}
-			resp, err := sendCommand(conn, line)
+			resp, err := sendLine(conn, line, *timeout)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 				continue
 			}
-			printResponse(resp)
+			printResponse(verbOf(line), resp)
 		}
 	}
 }
 
-// --- Connection ---
+func clientUsage() {
+	fmt.Fprint(os.Stderr, `usage: glyph3d-cli [flags] <verb args...>      run one verb (try: help)
+       glyph3d-cli [flags] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
+       glyph3d-cli [flags] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
+       glyph3d-cli [flags] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
+       glyph3d-cli [flags]                          REPL, or one line per stdin line
+       glyph3d-cli serve | hook | attach | fullsnapshot | version
 
-func connect(url string) (*websocket.Conn, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", url, err)
-	}
+Log verbs render their records: log.search / log.errors / log.tail as lines,
+log.query as a table, log.stats as a summary (--json prints the raw data).
+log.query/search/errors/stats/dump answer relay-side, with no page attached.
 
-	// Handshake: send "ping", receive "OK: connected as ctrl-N", receive "pong"
-	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("handshake ping: %w", err)
-	}
-
-	// Read ack
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("handshake ack: %w", err)
-	}
-	ack := string(msg)
-	if !strings.HasPrefix(ack, "OK:") {
-		conn.Close()
-		return nil, fmt.Errorf("unexpected ack: %s", ack)
-	}
-	fmt.Fprintf(os.Stderr, "%s\n", ack)
-
-	// Read pong
-	_, _, err = conn.ReadMessage()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("handshake pong: %w", err)
-	}
-
-	return conn, nil
-}
-
-// --- Command Building ---
-
-func buildCommand(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-
-	cmdName := args[0]
-	cmdArgs := args[1:]
-
-	// Auto base64-encode text argument for known commands
-	if b64Commands[cmdName] && len(cmdArgs) > 0 {
-		cmdArgs[0] = base64.StdEncoding.EncodeToString([]byte(cmdArgs[0]))
-	}
-
-	if len(cmdArgs) == 0 {
-		return cmdName
-	}
-	return cmdName + " " + strings.Join(cmdArgs, " ")
-}
-
-// --- Send/Receive ---
-
-type Response struct {
-	Text string          `json:"response"`
-	Data json.RawMessage `json:"data"`
-}
-
-func sendCommand(conn *websocket.Conn, cmd string) (*Response, error) {
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(cmd)); err != nil {
-		return nil, fmt.Errorf("write: %w", err)
-	}
-
-	conn.SetReadDeadline(time.Now().Add(*timeout))
-	_, msg, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
-	}
-
-	raw := string(msg)
-
-	// Try parsing as JSON response
-	var resp Response
-	if err := json.Unmarshal(msg, &resp); err == nil && resp.Text != "" {
-		return &resp, nil
-	}
-
-	// Plain text response
-	return &Response{Text: raw}, nil
-}
-
-// --- Output ---
-
-func printResponse(resp *Response) {
-	if *jsonMode && len(resp.Data) > 0 && string(resp.Data) != "null" {
-		var pretty bytes.Buffer
-		if json.Indent(&pretty, resp.Data, "", "  ") == nil {
-			fmt.Println(pretty.String())
-		} else {
-			fmt.Println(string(resp.Data))
-		}
-	} else {
-		fmt.Println(resp.Text)
-	}
-}
-
-// --- REPL ---
-
-func repl(conn *websocket.Conn) {
-	fmt.Println("glyph3d-cli REPL. Type 'help' for commands, '.exit' to quit.")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Print("glyph3d> ")
-		if !scanner.Scan() {
-			break
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		// Meta commands
-		switch line {
-		case ".exit", ".quit":
-			return
-		case ".json on":
-			*jsonMode = true
-			fmt.Println("JSON mode on")
-			continue
-		case ".json off":
-			*jsonMode = false
-			fmt.Println("JSON mode off")
-			continue
-		case ".help":
-			fmt.Println("  .exit / .quit   Exit REPL")
-			fmt.Println("  .json on/off    Toggle JSON output")
-			fmt.Println("  .help           This help")
-			fmt.Println("  Any other input is sent as a command to the viewer.")
-			continue
-		}
-
-		resp, err := sendCommand(conn, line)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue
-		}
-		printResponse(resp)
-	}
-}
-
-// screenshotCmd captures the 3D canvas and saves to a PNG file.
-func screenshotCmd() {
-	fs := flag.NewFlagSet("screenshot", flag.ExitOnError)
-	out := fs.String("o", "/tmp/glyph-screenshot.png", "Output PNG file path")
-	wsURL := fs.String("host", "ws://localhost:8080", "WebSocket relay URL")
-	p := fs.Int("port", 0, "Shorthand port")
-	fs.Parse(os.Args[2:])
-
-	url := *wsURL
-	if *p > 0 {
-		url = fmt.Sprintf("ws://localhost:%d", *p)
-	}
-
-	conn, err := connect(url)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
-	defer conn.Close()
-
-	resp, err := sendCommand(conn, "screenshot")
-	if err != nil {
-		log.Fatalf("screenshot: %v", err)
-	}
-
-	if strings.HasPrefix(resp.Text, "ERR:") {
-		fmt.Fprintln(os.Stderr, resp.Text)
-		os.Exit(1)
-	}
-
-	// Extract base64 image from response data
-	var data struct {
-		Width  int    `json:"width"`
-		Height int    `json:"height"`
-		Image  string `json:"image"`
-	}
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		log.Fatalf("parse response: %v", err)
-	}
-
-	imgBytes, err := base64.StdEncoding.DecodeString(data.Image)
-	if err != nil {
-		log.Fatalf("decode image: %v", err)
-	}
-
-	if err := os.WriteFile(*out, imgBytes, 0644); err != nil {
-		log.Fatalf("write file: %v", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Saved %dx%d screenshot to %s (%d bytes)\n", data.Width, data.Height, *out, len(imgBytes))
+flags (before the verb):
+`)
+	flag.PrintDefaults()
 }
 
 func versionCmd() {

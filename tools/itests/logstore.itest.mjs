@@ -10,49 +10,18 @@
 // Covers when live: page→relay ingest (a grid.list dispatch record lands with scope
 // 'command'), log.search (FTS + --scope/--limit), log.query (SELECT gate), log.stats.
 // Does NOT cover: log.follow push, log.dump, repeat-coalescing, --since windows —
-// those are exercised by hand via tools/buslog.mjs (see tools/CHECKS.md).
+// those are exercised by hand via `glyph3d-cli log.follow` / `log.dump` (see tools/CHECKS.md).
+
+import { dialRelay } from '../lib/relay.mjs';
 
 const RELAY_PORT = 8080;
-
-// Raw controller dial — handshake is: send "ping" → "OK: connected as ctrl-N" → "pong".
-function dialRelay(port, handshakeMs = 1500) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${port}`);
-    const inbox = [];
-    const waiters = [];
-    const take = () => new Promise((res) => { inbox.length ? res(inbox.shift()) : waiters.push(res); });
-    const fail = (why) => { try { ws.close(); } catch { /* already closed */ } reject(new Error(why)); };
-    const timer = setTimeout(() => fail('relay handshake timeout'), handshakeMs);
-    ws.onmessage = (e) => { const raw = String(e.data); const w = waiters.shift(); w ? w(raw) : inbox.push(raw); };
-    ws.onerror = () => { clearTimeout(timer); fail(`no relay answering on ws://localhost:${port}`); };
-    ws.onopen = async () => {
-      ws.send('ping');
-      const hello = await take(); // 'OK: connected as ctrl-N'
-      const pong = await take();  // 'pong'
-      clearTimeout(timer);
-      if (!hello.startsWith('OK:') || pong !== 'pong') return fail(`unexpected handshake: ${hello} / ${pong}`);
-      resolve({
-        async request(cmd, ms = 8000) {
-          ws.send(cmd);
-          const raw = await Promise.race([
-            take(),
-            new Promise((_, rj) => setTimeout(() => rj(new Error(`no reply to '${cmd}' in ${ms}ms`)), ms)),
-          ]);
-          try { const m = JSON.parse(raw); return { text: m.response ?? null, data: m.data ?? null }; }
-          catch { return { text: raw, data: null }; }
-        },
-        close: () => ws.close(),
-      });
-    };
-  });
-}
 
 export default async ({ app, assert, url }) => {
   assert.ok(app.booted, 'booted');
 
   // (a) relay probe — skip loudly when the dev loop isn't up.
   let ctrl;
-  try { ctrl = await dialRelay(RELAY_PORT); }
+  try { ctrl = await dialRelay(RELAY_PORT, { handshakeMs: 1500 }); }
   catch (e) {
     console.log(`      ⤷ SKIP logstore: ${e.message} — start tools/dev.sh; this run exercised NOTHING`);
     return;

@@ -103,7 +103,7 @@ only past 4 GB, or when per-shard eviction is wanted for its own sake.
 ```
 ./glyph3d-cli serve --local --port 8099 .
 bun tools/loadcurve.mjs --dir examples/word-wall/generated_dictionary/dictgen-output --relay 8099 --url http://localhost:8099/
-bun tools/buslog.mjs --port 8099 q "SELECT count(*) FROM logs WHERE msg LIKE '%ordinal wall%'"
+./glyph3d-cli --port 8099 log.query "SELECT count(*) FROM logs WHERE msg LIKE '%ordinal wall%'"
 ```
 
 The arena itself is reachable in-page at `ctx.renderer.glyphPipelineArena`

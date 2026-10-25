@@ -76,7 +76,11 @@ bundles its deps at build (no importmap). `make all` cross-compiles all platform
 
 **Drive it from the CLI** — the same command bus the UI uses:
 `./glyph3d-cli grid.list`, `./glyph3d-cli file.open path/to/file.js`. Global flags go
-*before* the subcommand (e.g. `--port 8099`).
+*before* the subcommand (e.g. `--port 8099`). It is the ONE relay client: a one-shot's
+argv rides the `call` bundle (handlers take raw text — no per-verb base64), log replies
+render as records, and `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
+`seed-history` are its client commands. JS that genuinely needs JS (Playwright, simulated
+displays) dials through `tools/lib/relay.mjs`.
 
 ## Command bus
 
@@ -85,7 +89,7 @@ Every action is a verb. `CommandRouter.execute(input)` dispatches to a handler i
 truth). The relay forwards CLI commands to the browser display over WebSocket, and
 keeps a structured in-memory SQLite store of every browser log record — `log.query` /
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
-with live follow via `bun tools/buslog.mjs`. Page-side, `emitLogRecord` runs a storm
+with live follow via `./glyph3d-cli log.follow` (the CLI renders log replies as records). Page-side, `emitLogRecord` runs a storm
 brake: an identical error/warn signature past 5 is dropped + counted, with a
 `log-brake` summary warn every 500 (locked by `tools/log-storm-brake.test.mjs`).
 Device loss itself (VRAM exhaustion — a bulk load + resize churn can OOM the device)

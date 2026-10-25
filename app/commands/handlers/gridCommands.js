@@ -7,7 +7,6 @@ import { box, table, kvLines } from '../formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { LAYOUT_PRESETS } from '@glyph3d/core/workers/builders/index.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -187,11 +186,10 @@ export default function registerGridCommands(router) {
 
     router.register('grid.create', async (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: grid.create <base64-text> [name]', data: null };
+            return { text: 'ERR: usage: grid.create <text> [name]', data: null };
         }
 
-        let text;
-        try { text = decodeBase64(args[0]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        const text = args[0];
         const name = args[1] || null;
 
         const grid = new CodeGrid(ctx.scene, ctx.atlas, {
@@ -295,13 +293,12 @@ export default function registerGridCommands(router) {
     }, { description: 'Move a grid in 3D space', usage: '<id|index> <x> <y> <z>' });
 
     router.register('grid.text', async (args, ctx) => {
-        if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <base64-text>', data: null };
+        if (args.length < 2) return { text: 'ERR: usage: grid.text <id|index> <text>', data: null };
 
         const resolved = resolveGridByIdOrIndex(ctx, args[0], 'grid', { actor: true, gridsOnly: true });
         if (resolved.error) return { text: resolved.error, data: null };
 
-        let text;
-        try { text = decodeBase64(args[1]); } catch { return { text: 'ERR: invalid base64 content', data: null }; }
+        const text = args[1];
         await resolved.grid.loadText(text);
         return {
             text: `OK: grid #${resolved.idx} text updated (${resolved.grid.getGlyphCount()} glyphs, ${resolved.grid.getLineCount()} lines)`,

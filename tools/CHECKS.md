@@ -34,19 +34,21 @@ after editing core, `make dev-status` to check.
   bun tools/loadcurve.mjs --dir static/app/views --relay 8099
   ```
 
-- **`glance.mjs`** — one-shot screenshot of the **LIVE** display (the window a human is
-  watching), not a fresh browser. Dials the running relay over WS, optionally issues bus
-  verb(s), then sends the bus-native `screenshot` verb and writes the returned PNG. This
-  is how a headless agent (a plain Bash tool) closes its own pixel loop: it can SEE its
-  WebGPU/dock/layout work instead of verifying by math + asking the human. One-shot by
-  design (connect → command(s) → capture → exit) so the harness can't reap it mid-run.
+- **`glyph3d-cli screenshot`** — one-shot screenshot of the **LIVE** display (the window a
+  human is watching), not a fresh browser. Dials the running relay, optionally runs verb
+  line(s) in order on the one connection, lets them settle, then sends the bus-native
+  `screenshot` verb and writes the returned PNG (and warns when it is suspiciously small —
+  a blank canvas). This is how a headless agent (a plain Bash tool) closes its own pixel
+  loop: it can SEE its WebGPU/dock/layout work instead of verifying by math + asking the
+  human. One-shot by design (connect → command(s) → capture → exit) so the harness can't
+  reap it mid-run. Global flags (`--port`, `--json`, `--timeout`) go before `screenshot`.
   ```
-  bun tools/glance.mjs --shot /tmp/glance.png                    # capture current scene
-  bun tools/glance.mjs --cmd 'dock.list' --shot /tmp/glance.png  # issue a verb, then capture
-  bun tools/glance.mjs --cmd 'camera.frame all' --wait 500 --shot /tmp/x.png
+  ./glyph3d-cli screenshot -o /tmp/shot.png                          # capture current scene
+  ./glyph3d-cli screenshot --cmd 'dock.list' -o /tmp/shot.png        # run a verb, then capture
+  ./glyph3d-cli --port 8199 --json screenshot --cmd 'camera.fitall' --wait 500ms -o /tmp/x.png
   ```
   Contrast `smoke.mjs`, which launches its OWN headless browser (an empty display) — use
-  `glance` when you need to see what's actually on screen right now.
+  `glyph3d-cli screenshot` when you need to see what's actually on screen right now.
 
 - **`capture.mjs`** — cinematic/media capture (per-frame CDP screenshots → ffmpeg loop).
 - **`cdp-shot.mjs`** + **`web-preview.sh`** — attach to an already-running browser via
@@ -292,29 +294,48 @@ Note: tests that `repo.load` reach GitHub (network). A relay-served local projec
 that — prefer it for deterministic CI once wired.
 
 
+## Relay client
+
+**`glyph3d-cli`** is the one client for "dial the relay, run verbs, render the results".
+Global flags (`--port N` / `--host url`, `--json`, `--timeout`) go before the verb. A
+one-shot's argv rides the `call` bundle, so every argument reaches its handler
+byte-identical — `./glyph3d-cli grid.create "two words" notes.txt` needs no quoting
+discipline or base64; REPL and piped lines go as typed. Client commands beside the verbs:
+`screenshot` (above), `log.follow` (below), and `seed-history [--lines 300] [id ...]` —
+each terminal's tmux scrollback into its depth-history ring via `terminal.depth.seed`
+(the ring is in-memory: re-run after a reload).
+
+A JS harness that genuinely needs JS (a Playwright page, a simulated display/sensor)
+dials through **`tools/lib/relay.mjs`** (`dialRelay(port)` → `request(line)` / `close()`)
+rather than hand-rolling the socket.
+
 ## Log store (relay SQLite)
 
 The relay keeps every browser log record in an in-memory SQLite store (FTS5-indexed).
-**`buslog.mjs`** is the client. Store verbs answer **page-less** — only the relay needs
-to be up — while `log.tail` / `log.level` are ring verbs living in the page (reach those
-via `./glyph3d-cli`, or `--level-set` from buslog).
+**`glyph3d-cli`** is the client: it renders log replies — records as
+`HH:MM:SS.mmm level [scope] msg ×N` lines, `log.query` as a table, `log.stats` as a
+summary (the reply's count line goes to stderr; `--json` prints the raw data). Store
+verbs answer **page-less** — only the relay needs to be up — while `log.tail` /
+`log.level` are ring verbs living in the page.
 
 Three-command smoke (relay on :8080):
 ```
-bun tools/buslog.mjs errors                            # recent error/warn records
-bun tools/buslog.mjs search <expr> --since 5m          # FTS5 (LIKE under 3 chars)
-bun tools/buslog.mjs q "SELECT level, count(*) FROM logs GROUP BY level"
+./glyph3d-cli log.errors --since 10m                   # recent error/warn records
+./glyph3d-cli log.search <expr> --since 5m             # FTS5 (LIKE under 3 chars); --level --scope --page --limit
+./glyph3d-cli log.query "SELECT level, count(*) FROM logs GROUP BY level"
 ```
 
 Live follow — a push subscription (lossless, no polling), "tail -f for the app":
 ```
-bun tools/buslog.mjs                                   # everything, rendered
-bun tools/buslog.mjs --filter attention --level debug,trace
-bun tools/buslog.mjs --json                            # raw records as JSONL
+./glyph3d-cli log.follow                               # everything, rendered
+./glyph3d-cli log.follow --filter attention --level debug,trace
+./glyph3d-cli log.follow --level-set DEBUG             # also raise the page's verbosity once
+./glyph3d-cli --json log.follow                        # raw records as JSONL
 ```
 
-Also: `stats` (store shape), `dump [path]` (VACUUM INTO snapshot, default
-`/tmp/glyph3d/logs-<ts>.db`), `search <expr> --fuzzy <query>` (client-side fzf rank).
+Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, default
+`/tmp/glyph3d/logs-<ts>.db`). Fuzzy-rank a wide search by piping the rendered lines:
+`./glyph3d-cli log.search <expr> --limit 500 | fzf -f <query>`.
 `tools/itests/logstore.itest.mjs` locks in ingest + search/query/stats end-to-end
 (skips loudly when no relay answers on :8080).
 

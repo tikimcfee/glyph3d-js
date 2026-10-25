@@ -18,7 +18,6 @@ import {
     frameBounds, animateCamera, resolveSiblingAdjacencies,
 } from './spatialHelpers.js';
 import { zDistanceForFit } from '@glyph3d/core/services/spatial/spatialMath.js';
-import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { canonicalPath } from './pathResolve.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -383,18 +382,15 @@ export default function registerNavigationCommands(router) {
     });
 
     // ================================================================
-    //  tour.create <base64-name>
+    //  tour.create <name>
     // ================================================================
 
     router.register('tour.create', (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: tour.create <base64-name>', data: null };
+            return { text: 'ERR: usage: tour.create <name>', data: null };
         }
 
-        let name;
-        try { name = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 name', data: null };
-        }
+        const name = args[0];
 
         if (tours.has(name)) {
             return { text: `ERR: tour "${name}" already exists. Use tour.clear first.`, data: null };
@@ -408,25 +404,22 @@ export default function registerNavigationCommands(router) {
         };
     }, {
         description: 'Create a named tour (ordered list of camera stops)',
-        usage: '<base64-name>',
+        usage: '<name>',
     });
 
     // ================================================================
-    //  tour.stop <base64-tour-name> <grid-index> [base64-annotation] [duration-ms]
+    //  tour.stop <tour-name> <grid-index> [annotation] [duration-ms]
     // ================================================================
 
     router.register('tour.stop', (args, ctx) => {
         if (args.length < 2) {
             return {
-                text: 'ERR: usage: tour.stop <base64-tour-name> <grid-index> [base64-annotation] [duration-ms]',
+                text: 'ERR: usage: tour.stop <tour-name> <grid-index> [annotation] [duration-ms]',
                 data: null,
             };
         }
 
-        let tourName;
-        try { tourName = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 tour name', data: null };
-        }
+        const tourName = args[0];
 
         const tour = tours.get(tourName);
         if (!tour) {
@@ -436,12 +429,7 @@ export default function registerNavigationCommands(router) {
         const resolved = resolveGridByIdOrIndex(ctx, args[1], 'grid');
         if (resolved.error) return { text: resolved.error, data: null };
 
-        let annotation = null;
-        if (args.length >= 3 && args[2] !== '-') {
-            try { annotation = decodeBase64(args[2]); } catch {
-                return { text: 'ERR: invalid base64 annotation', data: null };
-            }
-        }
+        const annotation = args.length >= 3 && args[2] !== '-' ? args[2] : null;
 
         let duration = 3000;
         if (args.length >= 4) {
@@ -475,11 +463,11 @@ export default function registerNavigationCommands(router) {
         };
     }, {
         description: 'Add a stop to a tour',
-        usage: '<base64-tour-name> <grid-index> [base64-annotation] [duration-ms]',
+        usage: '<tour-name> <grid-index> [annotation] [duration-ms]',
     });
 
     // ================================================================
-    //  tour.play <base64-tour-name>
+    //  tour.play <tour-name>
     //
     //  Async: animates camera through each stop sequentially.
     //  The CommandRouter supports async handlers, so this blocks the
@@ -488,13 +476,10 @@ export default function registerNavigationCommands(router) {
 
     router.register('tour.play', async (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: tour.play <base64-tour-name>', data: null };
+            return { text: 'ERR: usage: tour.play <tour-name>', data: null };
         }
 
-        let tourName;
-        try { tourName = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 tour name', data: null };
-        }
+        const tourName = args[0];
 
         const tour = tours.get(tourName);
         if (!tour) {
@@ -580,7 +565,7 @@ export default function registerNavigationCommands(router) {
         };
     }, {
         description: 'Play a tour: animate camera through stops with annotations',
-        usage: '<base64-tour-name>',
+        usage: '<tour-name>',
     });
 
     // ================================================================

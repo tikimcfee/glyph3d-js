@@ -106,7 +106,7 @@ status() {
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
   echo "logs  $LOG_DIR/{vite,relay}.log"
-  echo "      structured app logs: bun tools/buslog.mjs  (live follow / search / q / errors / stats)"
+  echo "      structured app logs: ./glyph3d-cli log.follow  (and log.search / log.query / log.errors / log.stats)"
 }
 
 case "${1:-refresh}" in

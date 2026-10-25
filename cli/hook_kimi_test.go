@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -66,20 +65,12 @@ func drainMsgs(msgs <-chan string, wait time.Duration) []string {
 	}
 }
 
-// decodeCall unwraps the `call <base64(argvJSON)>` framing sendTool/sendMessage/
-// sendAgentMeta/sendKimiWire share.
+// decodeCall unwraps the `call` bundle framing sendCall gives every hook command.
 func decodeCall(t *testing.T, msg string) []string {
 	t.Helper()
-	if !strings.HasPrefix(msg, "call ") {
+	argv, ok := parseCallLine(msg)
+	if !ok {
 		t.Fatalf("not a call frame: %q", msg)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(msg, "call "))
-	if err != nil {
-		t.Fatalf("call b64: %v", err)
-	}
-	var argv []string
-	if err := json.Unmarshal(raw, &argv); err != nil {
-		t.Fatalf("call argv: %v", err)
 	}
 	return argv
 }
@@ -269,7 +260,7 @@ func TestForwardKimiWire_ShipsRawLinesThenStop(t *testing.T) {
 
 	event := &HookEvent{SessionID: sid, EventName: "PostToolUse", CWD: "/proj"}
 
-	// First sight REPLAYS the existing wire line raw, base64'd, under the mirrored lane id.
+	// First sight REPLAYS the existing wire line raw under the mirrored lane id.
 	forwardKimiWire(conn, event)
 	got := drainMsgs(msgs, 300*time.Millisecond)
 	if len(got) != 1 {
@@ -279,11 +270,11 @@ func TestForwardKimiWire_ShipsRawLinesThenStop(t *testing.T) {
 	if len(argv) != 3 || argv[0] != "agent.kimi-wire" || argv[1] != "474cf46e" {
 		t.Fatalf("first-sight agent.kimi-wire argv: %v", argv)
 	}
-	if raw, _ := base64.StdEncoding.DecodeString(argv[2]); string(raw) != `{"type":"metadata"}` {
-		t.Fatalf("first-sight payload: %q", raw)
+	if argv[2] != `{"type":"metadata"}` {
+		t.Fatalf("first-sight payload: %q", argv[2])
 	}
 
-	// A new wire line ships raw, base64'd, under the mirrored lane id.
+	// A new wire line ships raw under the mirrored lane id.
 	f, _ := os.OpenFile(wire, os.O_APPEND|os.O_WRONLY, 0o600)
 	f.WriteString("{\"type\":\"tool.call\",\"n\":1}\n")
 	f.Close()
@@ -296,9 +287,8 @@ func TestForwardKimiWire_ShipsRawLinesThenStop(t *testing.T) {
 	if len(argv) != 3 || argv[0] != "agent.kimi-wire" || argv[1] != "474cf46e" {
 		t.Fatalf("agent.kimi-wire argv: %v", argv)
 	}
-	raw, err := base64.StdEncoding.DecodeString(argv[2])
-	if err != nil || string(raw) != "{\"type\":\"tool.call\",\"n\":1}" {
-		t.Fatalf("wire payload: %q err=%v", raw, err)
+	if argv[2] != "{\"type\":\"tool.call\",\"n\":1}" {
+		t.Fatalf("wire payload: %q", argv[2])
 	}
 
 	// Stop: final flush (nothing new here) + plain-text agent.stop on the same lane.

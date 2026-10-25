@@ -812,8 +812,16 @@ var relayVerbs = map[string]bool{
 
 // splitRelayVerb splits a raw controller command into (verb, rest) when the
 // first token is a relay-resident verb. rest keeps the argument string
-// (for log.query, the SQL).
+// (for log.query, the SQL). A `call` bundle naming a relay verb is answered
+// here too — its argv joins back into the same rest a typed line carries;
+// a bundle naming any other verb is forwarded to the display untouched.
 func splitRelayVerb(raw string) (verb, rest string, ok bool) {
+	if argv, isCall := parseCallLine(raw); isCall {
+		if !relayVerbs[argv[0]] {
+			return "", "", false
+		}
+		return argv[0], strings.TrimSpace(strings.Join(argv[1:], " ")), true
+	}
 	verb, rest, _ = strings.Cut(raw, " ")
 	if !relayVerbs[verb] {
 		return "", "", false

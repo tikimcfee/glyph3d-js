@@ -7,8 +7,8 @@
  * loaded CodeGrids, applies highlights and connection lines, and animates the camera.
  *
  * Commands:
- *   tour.load <base64-json>        Load tour from base64-encoded JSON
- *   tour.load.text <base64-text>   Parse raw text with parseAuto, wrap as single-step tour
+ *   tour.load <json>               Load tour from JSON (non-JSON falls back to parseAuto)
+ *   tour.load.text <text>          Parse raw text with parseAuto, wrap as single-step tour
  *   tour.next                      Advance to next step
  *   tour.prev                      Go to previous step
  *   tour.goto <step-index>         Jump to a specific step (0-based)
@@ -19,7 +19,6 @@
 import ConnectionRenderer from '@glyph3d/core/annotations/ConnectionRenderer.js';
 import { parseAuto } from '@glyph3d/core/parsing/index.js';
 import TourSequencer from '@glyph3d/core/services/tour/TourSequencer.js';
-import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { getWorldBounds, resolveAnchor, animateCamera, frameBounds } from './spatialHelpers.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -63,18 +62,15 @@ function serializeStep(step) {
 export default function registerTourCommands(router) {
 
     // ================================================================
-    //  tour.load <base64-json>
+    //  tour.load <json>
     // ================================================================
 
     router.register('tour.load', (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: tour.load <base64-json>', data: null };
+            return { text: 'ERR: usage: tour.load <json>', data: null };
         }
 
-        let decoded;
-        try { decoded = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 input', data: null };
-        }
+        const decoded = args[0];
 
         let data;
         try {
@@ -121,24 +117,21 @@ export default function registerTourCommands(router) {
             data: result,
         };
     }, {
-        description: 'Load a tour from base64-encoded JSON (falls back to parseAuto for non-JSON)',
-        usage: '<base64-json>',
+        description: 'Load a tour from JSON (falls back to parseAuto for non-JSON)',
+        usage: '<json>',
     });
 
     // ================================================================
-    //  tour.load.text <base64-text>
+    //  tour.load.text <text>
     //  Explicit raw-text path: always runs parseAuto, always wraps in single-step tour.
     // ================================================================
 
     router.register('tour.load.text', (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: tour.load.text <base64-text>', data: null };
+            return { text: 'ERR: usage: tour.load.text <text>', data: null };
         }
 
-        let decoded;
-        try { decoded = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 input', data: null };
-        }
+        const decoded = args[0];
 
         const parseResult = parseAuto(decoded);
         const fileRefs = parseResult.refs.filter(pr => pr.ref.filePath);
@@ -169,7 +162,7 @@ export default function registerTourCommands(router) {
         };
     }, {
         description: 'Parse raw text for file references and load as single-step tour',
-        usage: '<base64-text>',
+        usage: '<text>',
     });
 
     // ================================================================
@@ -273,20 +266,17 @@ export default function registerTourCommands(router) {
     }, { description: 'Show current tour state' });
 
     // ================================================================
-    //  tour.show <base64-text>
+    //  tour.show <text>
     //  One-shot: parse → resolve → highlight all → connect → frame camera.
     //  No steps, no sequencing. Just illuminate and let the user explore.
     // ================================================================
 
     router.register('tour.show', async (args, ctx) => {
         if (args.length < 1) {
-            return { text: 'ERR: usage: tour.show <base64-text-or-json>', data: null };
+            return { text: 'ERR: usage: tour.show <text-or-json>', data: null };
         }
 
-        let decoded;
-        try { decoded = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 input', data: null };
-        }
+        const decoded = args[0];
 
         // Parse: auto-detect format
         const parseResult = parseAuto(decoded);
@@ -325,6 +315,6 @@ export default function registerTourCommands(router) {
         };
     }, {
         description: 'Parse text, highlight all referenced files, draw connections, frame camera',
-        usage: '<base64-text>',
+        usage: '<text>',
     });
 }

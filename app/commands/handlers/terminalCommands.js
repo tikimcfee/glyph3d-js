@@ -23,7 +23,7 @@
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import { terminalTheme } from '../../client/settings.js';
-import { encodeBase64, decodeBase64 } from '@glyph3d/core/utils/encoding.js';
+import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -308,7 +308,7 @@ export default function registerTerminalCommands(router) {
         }
 
         // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the dock
-        // state — so a live grip-drag streams its steps through log.search/buslog and the resize↔dock
+        // state — so a live grip-drag streams its steps through log.search/log.follow and the resize↔dock
         // interplay is visible. No-op steps never reach here (the dragger fires only on an integer step).
         const from = `${grid.cols}x${grid.rows}`;
         const dock = ctx.cameraDock;
@@ -458,26 +458,23 @@ export default function registerTerminalCommands(router) {
     }, { description: 'Toggle/scale scrollback-into-depth for a terminal (on|off, or a line count)', usage: '<id> [on|off|<lines>]' });
 
     // ------------------------------------------------------------------
-    // terminal.depth.seed <id> <base64-scrollback>
+    // terminal.depth.seed <id> <scrollback>
     //   Back-fill a terminal's depth-history from external scrollback (tmux
     //   capture-pane), so the history that ALREADY exists shows receding in space —
     //   forward-capture only sees lines that scroll off from now on. Payload is the
-    //   base64 of the raw scrollback text, oldest→newest (capture-pane order); the
-    //   ring wants newest-first, so we reverse here. Re-run after a reload to restore
-    //   (the ring is in-memory; tmux is the durable source). See tools/seed-history.mjs.
+    //   raw scrollback text (multi-line: it rides the `call` bundle), oldest→newest
+    //   (capture-pane order); the ring wants newest-first, so we reverse here. Re-run
+    //   after a reload to restore (the ring is in-memory; tmux is the durable source).
+    //   `glyph3d-cli seed-history` drives it for every live terminal.
     // ------------------------------------------------------------------
     router.register('terminal.depth.seed', (args, ctx) => {
         const id = args[0];
-        if (!id) return { text: 'ERR: usage: terminal.depth.seed <id> <base64-scrollback>', data: null };
+        if (!id) return { text: 'ERR: usage: terminal.depth.seed <id> <scrollback>', data: null };
 
         const grid = getTerminals(ctx).get(id);
         if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
 
-        let text;
-        try { text = decodeBase64(args[1] || ''); }
-        catch (e) { return { text: 'ERR: bad base64 payload', data: null }; }
-
-        const lines = text.split('\n');
+        const lines = (args[1] || '').split('\n');
         if (lines.length && lines[lines.length - 1] === '') lines.pop(); // trailing newline
         lines.reverse();                                                 // → newest-first
 
@@ -489,7 +486,7 @@ export default function registerTerminalCommands(router) {
             text: `OK: seeded ${shown} of ${lines.length} scrollback line(s) into '${id}' (alt=${grid._altActive})`,
             data: { id, lines: lines.length, shown, alt: grid._altActive },
         };
-    }, { description: "Back-fill a terminal's depth-history from scrollback (base64, oldest→newest)", usage: '<id> <base64-scrollback>' });
+    }, { description: "Back-fill a terminal's depth-history from scrollback (oldest→newest)", usage: '<id> <scrollback>' });
 
     // ------------------------------------------------------------------
     // terminal.close <id>

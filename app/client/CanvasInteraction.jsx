@@ -532,7 +532,7 @@ export function ObjectDragger() {
  * terminal.resize, so the panel re-grids under the cursor (the grip tracks your
  * hand) and the PTY reflows as you go, exactly as a real terminal window does.
  * Every step is the same bus verb the CLI uses, so each one lands as a logged
- * command record — drag and watch them stream via log.search / buslog. A clean
+ * command record — drag and watch them stream via log.search / log.follow. A clean
  * release just saves the session; an interrupt (pointercancel / lostpointercapture)
  * reverts to the size the drag started at. The verb moves grid + emulator + the
  * adapter's PTY (pty.Setsize → SIGWINCH) in lockstep, and a docked tile's

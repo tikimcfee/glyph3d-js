@@ -6,7 +6,7 @@
 // Locks:
 //   - agent.meta <id> <json>: ensures the lane (type from meta.harness), merges meta,
 //     rebakes the nameplate
-//   - agent.kimi-wire <id> <b64line>: raw wire lines → shared dialect → tool/message
+//   - agent.kimi-wire <id> <line>: raw wire lines → shared dialect → tool/message
 //     sheets (debounced batch), provenance (model/title/cwd) forwarded to the lane
 //   - agent.activity target attribution: EXACT canonical-path lookup against the
 //     registry — '/a/b.js' never lands on an open '/a/b.jsx'; an open file's target
@@ -22,7 +22,6 @@ import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 globalThis.window ??= { addEventListener() {} };
 
 const { default: AgentBooks } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
-const { encodeBase64 } = await import('../packages/glyph3d-core/src/utils/encoding.js');
 const { default: registerAgentCommands } = await import('../app/commands/handlers/agentCommands.js');
 
 let pass = 0, fail = 0;
@@ -57,7 +56,7 @@ const ctx = { agentBooks: books, sessionProvider: null };
     const realActivity = books.activity.bind(books);
     books.activity = (id, type, rec) => { sunk.push({ id, type, rec }); };
 
-    const wire = (obj) => encodeBase64(JSON.stringify(obj));
+    const wire = (obj) => JSON.stringify(obj);
     const id = 'deadbeef';
     const lines = [
         { type: 'llm.request', model: 'k3', modelAlias: 'kimi-code/k3', provider: 'kimi', time: 1 },
@@ -85,7 +84,7 @@ const ctx = { agentBooks: books, sessionProvider: null };
         `live provenance forwarded (model=${lane.meta?.model} title=${lane.meta?.title})`);
     ok(lane.label.text.includes('k3') && lane.label.text.includes('fix the pairing bug'),
         `nameplate shows live provenance (got "${lane.label.text}")`);
-    const bad = handlers['agent.kimi-wire']([id, '!!!notb64!!!'], ctx);
+    const bad = handlers['agent.kimi-wire']([id, '{not json'], ctx);
     ok(bad.text.startsWith('OK') && bad.text.includes('dropped'), 'malformed wire line drops quietly');
 }
 

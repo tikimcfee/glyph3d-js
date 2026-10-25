@@ -97,7 +97,7 @@ export default function registerLoadCommands(router) {
 
     // Every [load] line also lands in the relay log store — point the operator there.
     router.register('load.log', async (_args, _ctx) => ({
-        text: 'OK: [load] lines live in the relay log store — `log.search load` (CLI, page-less) or `bun tools/buslog.mjs` to follow live',
+        text: 'OK: [load] lines live in the relay log store — `glyph3d-cli log.search load` (page-less) or `glyph3d-cli log.follow` to follow live',
         data: null,
     }), {
         description: 'Where the [load] trace lines land (the relay log store) and how to query them',

@@ -12,11 +12,11 @@
  *
  * ONE entry per tool, all of a tool's knowledge co-located — add a tool = add a TOOLS entry; remove
  * one = delete it; an unmapped tool falls through to a tolerant generic so it still says something.
- * BOTH ingress paths forward the RAW event and call this — the live Go hook (`agent.tool`) and the
- * offline replay (`tools/agent-replay.mjs`) — so there is no second copy of this knowledge anywhere
- * (the hook is pure transport). `normalizeToolCall` returns null for noise tools the caller drops.
+ * EVERY ingress path forwards the RAW event and calls this — the live Go hook (`agent.tool`) and the
+ * archive parse (sessionAdapter, for hydrated books) — so there is no second copy of this knowledge
+ * anywhere (the hook is pure transport). `normalizeToolCall` returns null for noise tools the caller drops.
  *
- * Pure: plain `{ r, g, b }` colors, no THREE / DOM — so the bun replay and the unit tests import it.
+ * Pure: plain `{ r, g, b }` colors, no THREE / DOM — so workers and the unit tests import it.
  *
  * A TOOLS entry's fields (all optional):
  *   action          normalized verb (read/edit/…); defaults to the lowercased tool name.

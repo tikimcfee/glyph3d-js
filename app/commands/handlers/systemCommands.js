@@ -4,20 +4,7 @@
  */
 
 import { box, kvLines } from '../formatResponse.js';
-
-/**
- * Decode a base64 string to a UTF-8 JS string. `atob` alone yields a binary string that
- * mangles multibyte sequences (paths/commands with unicode, emoji) — round-trip the bytes
- * through TextDecoder so the bundle survives intact. Tolerates base64url (-/_) too.
- * @param {string} b64
- * @returns {string}
- */
-function b64ToUtf8(b64) {
-    const norm = b64.replace(/-/g, '+').replace(/_/g, '/');
-    const bin = atob(norm);
-    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-}
+import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -188,7 +175,7 @@ export default function registerSystemCommands(router) {
         }
         let spec;
         try {
-            spec = JSON.parse(b64ToUtf8(args[0]));
+            spec = JSON.parse(decodeBase64(args[0]));
         } catch (e) {
             return { text: `ERR: call payload must be base64-encoded JSON: ${e.message}`, data: null };
         }

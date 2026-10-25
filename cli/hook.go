@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -199,12 +198,7 @@ func sendTool(conn *websocket.Conn, id, typ, name string, input, response json.R
 	for len(argv) > 4 && argv[len(argv)-1] == "" {
 		argv = argv[:len(argv)-1]
 	}
-	payload, err := json.Marshal(argv)
-	if err != nil {
-		dbg("tool marshal error: %v", err)
-		return
-	}
-	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+	sendCall(conn, argv)
 }
 
 // transcriptLine is the slice of a Claude Code transcript line we care about: an assistant message's
@@ -336,16 +330,11 @@ func forwardConversation(conn *websocket.Conn, event *HookEvent) {
 //
 //	agent.message <id> <type> <kind> <text>
 //
-// text rides the `call` bundle (base64) so its newlines/quotes survive the bus tokenizer, exactly
+// text rides the `call` bundle so its newlines/quotes survive the bus tokenizer, exactly
 // like sendTool's input/response. kind is the transcript block type ('text'|'thinking'); the JS
 // registry maps it to a say/think moment.
 func sendMessage(conn *websocket.Conn, id, typ, kind, text string) {
-	payload, err := json.Marshal([]string{"agent.message", id, typ, kind, text})
-	if err != nil {
-		dbg("message marshal error: %v", err)
-		return
-	}
-	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+	sendCall(conn, []string{"agent.message", id, typ, kind, text})
 }
 
 // agentMeta is the session provenance pushed to a LIVE lane (archived lanes get the
@@ -422,12 +411,7 @@ func sendAgentMeta(conn *websocket.Conn, id string, meta agentMeta) {
 		dbg("meta marshal error: %v", err)
 		return
 	}
-	payload, err := json.Marshal([]string{"agent.meta", id, string(js)})
-	if err != nil {
-		dbg("meta marshal error: %v", err)
-		return
-	}
-	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+	sendCall(conn, []string{"agent.meta", id, string(js)})
 }
 
 // --- Kimi Code mode (--kimi) ---
@@ -572,18 +556,13 @@ func tailWireLines(cursorPath, path string, send func(line []byte)) {
 
 // sendKimiWire ships one raw wire line to the lane:
 //
-//	agent.kimi-wire <laneId> <b64 line>
+//	agent.kimi-wire <laneId> <line>
 //
-// The line base64s into the `call` bundle so its quotes/commas survive both the bus
-// tokenizer and the argv JSON; the verb's handler feeds it through the shared
-// wire-line translator and emits agent.tool/agent.message into the lane.
+// The line rides the `call` bundle as one argv string, so its quotes/commas survive the
+// bus tokenizer; the verb's handler feeds it through the shared wire-line translator and
+// emits agent.tool/agent.message into the lane.
 func sendKimiWire(conn *websocket.Conn, laneID string, line []byte) {
-	payload, err := json.Marshal([]string{"agent.kimi-wire", laneID, base64.StdEncoding.EncodeToString(line)})
-	if err != nil {
-		dbg("kimi wire marshal error: %v", err)
-		return
-	}
-	sendCmd(conn, "call "+base64.StdEncoding.EncodeToString(payload))
+	sendCall(conn, []string{"agent.kimi-wire", laneID, string(line)})
 }
 
 // handleKimiStop flushes the wire tail one last time (the turn's trailing lines that
@@ -610,6 +589,16 @@ func sanitizeID(s string) string {
 		}
 		return '-'
 	}, s)
+}
+
+// sendCall ships argv as a `call` bundle (see call.go).
+func sendCall(conn *websocket.Conn, argv []string) {
+	line, err := callLine(argv)
+	if err != nil {
+		dbg("%v", err)
+		return
+	}
+	sendCmd(conn, line)
 }
 
 func sendCmd(conn *websocket.Conn, cmd string) {

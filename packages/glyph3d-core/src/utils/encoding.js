@@ -10,13 +10,13 @@
  */
 
 /**
- * Decode a base64 string to UTF-8 text.
+ * Decode a base64 string to UTF-8 text. Tolerates base64url (`-`/`_`) too.
  * @param {string} b64 - base64-encoded string
  * @returns {string} decoded UTF-8 text
  * @throws {Error} if input is not valid base64
  */
 export function decodeBase64(b64) {
-    const binary = atob(b64);
+    const binary = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i);

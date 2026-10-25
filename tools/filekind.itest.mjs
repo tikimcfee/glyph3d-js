@@ -22,7 +22,7 @@ ck('ext unknown → null (probe)', classifyByExtension('/tmp/scratch') === null,
 ck('ext wasm → null (probe)', classifyByExtension('a.wasm') === null, classifyByExtension('a.wasm'));
 
 // -- magic stage (real PNG if available) --
-const pngPath = ['/tmp/trail_baseline.png', '/tmp/glance.png'].find((p) => fs.existsSync(p));
+const pngPath = ['/tmp/trail_baseline.png', '/tmp/glyph-screenshot.png'].find((p) => fs.existsSync(p));
 const png = pngPath
     ? new Uint8Array(fs.readFileSync(pngPath)).subarray(0, 64)
     : new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]);

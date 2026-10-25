@@ -15,7 +15,6 @@ import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
 import { COLORS } from './colorConstants.js';
 import { saveGridState, restoreGridState, restoreAllGridStates } from './gridVisualState.js';
 import { animateCamera, getWorldBounds, resolveGridByIdOrIndex } from './spatialHelpers.js';
-import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -23,18 +22,15 @@ import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 export default function registerAnnotationCommands(router) {
 
     // ================================================================
-    //  label.create <base64-text> <x> <y> <z> [r g b]
+    //  label.create <text> <x> <y> <z> [r g b]
     // ================================================================
 
     router.register('label.create', (args, ctx) => {
         if (args.length < 4) {
-            return { text: 'ERR: usage: label.create <base64-text> <x> <y> <z> [r g b]', data: null };
+            return { text: 'ERR: usage: label.create <text> <x> <y> <z> [r g b]', data: null };
         }
 
-        let text;
-        try { text = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 content', data: null };
-        }
+        const text = args[0];
 
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) {
@@ -81,16 +77,16 @@ export default function registerAnnotationCommands(router) {
         };
     }, {
         description: 'Create a floating text label at a position',
-        usage: '<base64-text> <x> <y> <z> [r g b]'
+        usage: '<text> <x> <y> <z> [r g b]'
     });
 
     // ================================================================
-    //  label.set <id> <base64-text> — rewrite a label's text live
+    //  label.set <id> <text> — rewrite a label's text live
     // ================================================================
 
     router.register('label.set', (args, ctx) => {
         if (args.length < 2) {
-            return { text: 'ERR: usage: label.set <id> <base64-text>', data: null };
+            return { text: 'ERR: usage: label.set <id> <text>', data: null };
         }
 
         const id = args[0];
@@ -99,10 +95,7 @@ export default function registerAnnotationCommands(router) {
             return { text: `ERR: no label with id "${id}"`, data: null };
         }
 
-        let text;
-        try { text = decodeBase64(args[1]); } catch {
-            return { text: 'ERR: invalid base64 content', data: null };
-        }
+        const text = args[1];
 
         entry.grid.setText(text); // the field rebuilds synchronously — the edit is live NOW
         entry.text = text;
@@ -115,16 +108,16 @@ export default function registerAnnotationCommands(router) {
         };
     }, {
         description: 'Rewrite a label\'s text live — the agent/dev scratchpad write path',
-        usage: '<id> <base64-text>'
+        usage: '<id> <text>'
     });
 
     // ================================================================
-    //  label.append <id> <base64-text> — add line(s) to a label
+    //  label.append <id> <text> — add line(s) to a label
     // ================================================================
 
     router.register('label.append', (args, ctx) => {
         if (args.length < 2) {
-            return { text: 'ERR: usage: label.append <id> <base64-text>', data: null };
+            return { text: 'ERR: usage: label.append <id> <text>', data: null };
         }
 
         const id = args[0];
@@ -133,10 +126,7 @@ export default function registerAnnotationCommands(router) {
             return { text: `ERR: no label with id "${id}"`, data: null };
         }
 
-        let text;
-        try { text = decodeBase64(args[1]); } catch {
-            return { text: 'ERR: invalid base64 content', data: null };
-        }
+        const text = args[1];
 
         const next = entry.text ? `${entry.text}\n${text}` : text;
         entry.grid.setText(next);
@@ -149,7 +139,7 @@ export default function registerAnnotationCommands(router) {
         };
     }, {
         description: 'Append line(s) to a label — notes accumulate in place',
-        usage: '<id> <base64-text>'
+        usage: '<id> <text>'
     });
 
     // ================================================================
@@ -379,18 +369,15 @@ export default function registerAnnotationCommands(router) {
     });
 
     // ================================================================
-    //  scene.annotate <base64-text> <x> <y> <z> [r g b]
+    //  scene.annotate <text> <x> <y> <z> [r g b]
     // ================================================================
 
     router.register('scene.annotate', (args, ctx) => {
         if (args.length < 4) {
-            return { text: 'ERR: usage: scene.annotate <base64-text> <x> <y> <z> [r g b]', data: null };
+            return { text: 'ERR: usage: scene.annotate <text> <x> <y> <z> [r g b]', data: null };
         }
 
-        let text;
-        try { text = decodeBase64(args[0]); } catch {
-            return { text: 'ERR: invalid base64 content', data: null };
-        }
+        const text = args[0];
 
         const [x, y, z] = args.slice(1, 4).map(Number);
         if ([x, y, z].some(isNaN)) {
@@ -439,7 +426,7 @@ export default function registerAnnotationCommands(router) {
         };
     }, {
         description: 'Create a text annotation with background box',
-        usage: '<base64-text> <x> <y> <z> [r g b]'
+        usage: '<text> <x> <y> <z> [r g b]'
     });
 
     // ================================================================

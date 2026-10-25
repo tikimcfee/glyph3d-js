@@ -9,7 +9,7 @@
  *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
  *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think sheet
  *   agent.meta     <id> <json>                      provenance metadata (slug/title/model/cwd/…) → lane + nameplate
- *   agent.kimi-wire <id> <b64line>                  one raw kimi wire.jsonl line → shared dialect → tool/message events
+ *   agent.kimi-wire <id> <line>                     one raw kimi wire.jsonl line → shared dialect → tool/message events
  *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
  *       (detail/result/text with spaces ride the `call` base64 hatch)
  *   agent.spawn    <id> [type]                      summon an empty book (request an instance)
@@ -34,7 +34,6 @@ import { agentIdForEntry, SESSION_HARNESSES,
     from '@glyph3d/core/collections/sessionAdapter.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
 import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
-import { decodeBase64 } from '@glyph3d/core/utils/encoding.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
@@ -285,15 +284,15 @@ export default function registerAgentCommands(router) {
     router.register('agent.kimi-wire', (args, ctx) => {
         const books = ctx.agentBooks;
         if (!books) return noBooks;
-        if (args.length < 2) return { text: 'ERR: usage: agent.kimi-wire <id> <b64line>', data: null };
+        if (args.length < 2) return { text: 'ERR: usage: agent.kimi-wire <id> <line>', data: null };
         // Live kimi ingress: the Go hook (--kimi) tails the session's wire.jsonl on each
         // harness poke and ships RAW lines here — the ONE dialect implementation
         // (kimiWireLineToEvents, shared with the archive parse) translates them, so live
         // and archive can never drift. The lane id was derived Go-side (lockstep mirror
         // of kimiAgentIdForSession); the lane is ensured with the kimi type.
-        const [id, b64] = args;
+        const [id, line] = args;
         let obj;
-        try { obj = JSON.parse(decodeBase64(b64)); }
+        try { obj = JSON.parse(line); }
         catch { return { text: 'OK: wire line dropped (malformed)', data: null }; }
         books.ensure(id, 'kimi');
         let lane = kimiWireLanes.get(id);
@@ -307,7 +306,7 @@ export default function registerAgentCommands(router) {
         // batch before normalizing means live sheets carry the responses the archive would.
         if (!lane.timer) lane.timer = setTimeout(() => flushKimiWireLane(ctx, books, id, lane), 0);
         return { text: `OK: ${id} wire`, data: { id } };
-    }, { description: 'One raw kimi wire.jsonl line → shared dialect → tool/message events (live kimi ingress)', usage: '<id> <b64line>' });
+    }, { description: 'One raw kimi wire.jsonl line → shared dialect → tool/message events (live kimi ingress)', usage: '<id> <line>' });
 
     router.register('agent.sessions', async (_args, ctx) => {
         const provider = ctx.sessionProvider;

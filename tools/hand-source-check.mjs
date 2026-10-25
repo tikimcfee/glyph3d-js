@@ -22,6 +22,7 @@
 import * as THREE from 'three';
 import SourceStream from '../packages/glyph3d-core/src/services/orchestration/SourceStream.js';
 import HandPresence from '../packages/glyph3d-core/src/hand/HandPresence.js';
+import { dialRelay } from './lib/relay.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
@@ -33,19 +34,10 @@ const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); } else { fai
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const open = (ws) => new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error(`cannot reach relay at ${URL_} — start one: ./glyph3d-cli serve --local --port ${PORT} .`)); });
 
-
 /** Ask a relay-resident verb (source.list) over a throwaway controller socket. */
-function relayVerb(cmd) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(URL_);
-    const timer = setTimeout(() => { ws.close(); reject(new Error(`${cmd} timed out`)); }, 4000);
-    ws.onopen = () => ws.send(cmd);
-    ws.onmessage = (e) => {
-      let m; try { m = JSON.parse(e.data); } catch { return; }   // skip the plain-text connect ack
-      if (m && 'data' in m) { clearTimeout(timer); ws.close(); resolve(m.data); }
-    };
-    ws.onerror = () => { clearTimeout(timer); reject(new Error('relay socket error')); };
-  });
+async function relayVerb(cmd) {
+  const relay = await dialRelay(PORT);
+  try { return (await relay.request(cmd, 4000)).data; } finally { relay.close(); }
 }
 
 // ── the display side, wired exactly as CommandProvider wires it ──────────────
