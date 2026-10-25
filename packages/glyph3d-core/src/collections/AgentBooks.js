@@ -618,6 +618,7 @@ export default class AgentBooks {
         const lane = this.lanes.get(agentId);
         if (!lane || !lane.beacon) return false;
         lane.beacon = null;
+        this._refreshNameplate(lane);
         this._emitChange();
         return true;
     }

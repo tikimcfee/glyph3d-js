@@ -384,7 +384,7 @@ export default function AgentsPanel({ client }) {
                             onClick={() => openSession(s)}
                             title={`${s.id} — open as a lane (agent.open)`}>
                             <span style={S.sessId}>{agentIdForEntry(s)}</span>
-                            {s.harness === 'kimi' && <span style={S.sessHarness}>kimi</span>}
+                            {s.harness && s.harness !== 'claude' && <span style={S.sessHarness}>{s.harness}</span>}
                             <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
                             <span style={S.sessSize}>{humanSize(s.size)}</span>
                         </div>
