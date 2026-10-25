@@ -830,7 +830,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   eq([bk.scale.x, verso.scale.x, recto.scale.x], [1, 1, 1], 'sheets: fit lands on mounts only');
 }
 
-// 42c. the rolodex deck: head is the only nav state; slots derive; following rides
+// 42c. the deck: head is the only nav state; slots derive; following rides
 //      appends and paging back holds; layoutBounds spans the spread and the deck.
 {
   const t = buildLibrary(['solo/a.js'], { pageW: 20, pageH: 30 });
@@ -844,7 +844,7 @@ const buildLibrary = (paths, opts = {}, order = paths) => {
   eq([slotZ(bk, 2), slotZ(bk, 1), slotZ(bk, 0)], [0, -50, -100], 'deck: older sheets recede by zPitch');
   bk.pageTo(1);
   eq(bk.headState(), { head: 1, count: 3, following: false }, 'deck: paging back holds (live-follow off)');
-  eq([slotZ(bk, 1), slotZ(bk, 0), slotZ(bk, 2)], [0, -50, -100], 'deck: scrolled-past newest wraps to the back');
+  eq([slotZ(bk, 1), slotZ(bk, 0), slotZ(bk, 2)], [0, -50, -100], 'deck: the turned newest lies at the deck\'s back (the turned block)');
   bk.scroll(+1);
   ok(bk.following, 'deck: landing on the newest resumes live-follow');
   // The deck animator eases nodes toward their slots (dt clamps at 0.1 per step).

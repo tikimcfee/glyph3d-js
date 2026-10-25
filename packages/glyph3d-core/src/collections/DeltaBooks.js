@@ -28,7 +28,7 @@
  */
 
 import * as THREE from 'three';
-import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
+import Book, { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FieldLabel from './FieldLabel.js';
@@ -46,9 +46,11 @@ export const DELTA_BOOKS_DEFAULTS = {
     faceColor: 0x0a0a1e,        // page-face fill
     faceOpacity: 0.85,
     faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth,
-    // -- the deck (rolodex) --------------------------------------------------------
+    // -- the deck --------------------------------------------------------------------
     zPitch: 90,                 // deck pitch between file sheets
     pagerLerp: 9,
+    turnedPitch: DECK_DEFAULTS.turned, // the turned block's pitch, × zPitch (pressed pages)
+    turnSlide: DECK_DEFAULTS.slide,    // how far a turn visibly slides the deck (pitches; the rest cuts)
     // -- the delta rendering -------------------------------------------------------
     artifactWorldScale: 0.025,  // worldScale of the base/head grids (fine print you fly into)
     view: 'condensed',          // 'condensed' (hunks + context) | 'full' (whole files aligned) —
@@ -126,6 +128,8 @@ export default class DeltaBooks {
             book.userData = { ...book.userData, name: setId, isDir: false };   // a layout LEAF
             book.deck.zPitch = this.cfg.zPitch;
             book.deck.lerp = this.cfg.pagerLerp;
+            book.deck.turned = this.cfg.turnedPitch;
+            book.deck.slide = this.cfg.turnSlide;
             this.root.add(book);
             const hueIdx = this.sets.size;
             const hue = this.cfg.palette[hueIdx % this.cfg.palette.length];
@@ -388,6 +392,8 @@ export default class DeltaBooks {
         for (const set of this.sets.values()) {
             set.book.deck.zPitch = this.cfg.zPitch;
             set.book.deck.lerp = this.cfg.pagerLerp;
+            set.book.deck.turned = this.cfg.turnedPitch;
+            set.book.deck.slide = this.cfg.turnSlide;
             set.book.fit(this._pageOpts(set));
         }
         this._relayout();

@@ -12,11 +12,11 @@
  * of three sorted arrangements:
  *
  *   stack 'z' — the VOLUME: the directory BOUND as one pageable Book — its files ride
- *               as recto sheets on Book's rolodex deck (the same engine agent books
+ *               as recto sheets on Book's deck (the same engine agent books
  *               run), `gap` deep per page. The wheel and book.page turn it; the open
  *               page survives relayouts on the dir node. A volume additionally carries
  *               a per-dir FORM (node.userData.volumeForm, set by book.form): 'deck'
- *               (the closed rolodex) or 'splay' — the book laid open as an m×n page
+ *               (the closed deck) or 'splay' — the book laid open as an m×n page
  *               grid (Book.splayGrid), the overview of a many-file directory. The
  *               footprint honestly changes with the form, so a form flip re-lays the
  *               tree; the head stays the bookmark (lifted forward while splayed), and
@@ -39,7 +39,7 @@
  * measure post-order / place pre-order.
  */
 
-import Book from '../Book.js';
+import Book, { DECK_DEFAULTS } from '../Book.js';
 import { flowBoxes } from './flowBoxes.js';
 import { partitionChildren } from './nodeUtils.js';
 import { PANEL_SURFACE_DEFAULTS } from './panelSurface.js';
@@ -54,6 +54,8 @@ export const LIBRARY_DEFAULTS = {
     reverse: false,    // flip the stack order
     maxUpscale: 4,     // contain-fit may enlarge small files up to this — caps the one-liner giant
     deckLerp: 9,       // a volume's page-turn easing rate (1/s) — higher snaps, lower glides
+    turnedPitch: DECK_DEFAULTS.turned, // a volume's turned-page block pitch, × gap (pressed pages)
+    turnSlide: DECK_DEFAULTS.slide,    // how far a turn visibly slides the deck (pitches; the rest cuts)
     cover: true,       // bind a cover around each volume — the wheel/drag body of the book
     coverColor: 0x5a7ea8, // cover tint — a lifted kin of the prism ramp's shallow end
     coverOpacity: 0.06,   // translucent fill — identity, never occlusion
@@ -121,7 +123,7 @@ function orderedPack(sizes, gap, aspect) {
 }
 
 /** Bind a directory's books as recto sheets of ONE pageable VOLUME — the dir as a
- *  literal book, paged by book.page/the wheel (Book's rolodex deck, the same engine
+ *  literal book, paged by book.page/the wheel (Book's deck, the same engine
  *  agent books run). Rebuilt fresh each pass (a layout artifact — _normalize dissolves
  *  it, re-homing the file books); the OPEN PAGE survives on the dir node
  *  (volumeHead/volumeFollowing, persisted at dissolve). */
@@ -135,6 +137,8 @@ function buildVolume(node, books, o) {
     vol.deck.zPitch = o.gap;
     vol.deck.lerp = o.deckLerp;
     vol.deck.order = 1;      // page order: 1, 2, 3 recede in sequence (not agent recency)
+    vol.deck.turned = o.turnedPitch;
+    vol.deck.slide = o.turnSlide;
     vol.setForm(node.userData.volumeForm === 'splay' ? 'splay' : 'deck', {
         cols: o.splayCols, gapX: o.splayGapX, gapY: o.splayGapY,
         aspect: o.splayAspect, lift: o.splayLift,

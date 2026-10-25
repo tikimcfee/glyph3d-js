@@ -23,8 +23,9 @@
  * tool, session}); when present its name/status/detail win.
  *
  * The book live-follows its newest sheet — work appends pages and the open spread rides
- * forward; page back to inspect history and the head holds (Book's rolodex deck: the
- * open sheet fronts at z = 0, the rest recede). Paging never moves the camera.
+ * forward; page back to inspect history and the head holds (Book's deck: the open sheet
+ * fronts at z = 0, older ones recede, the newer ones paged past lie pressed at the back).
+ * Paging never moves the camera.
  *
  * PER-TURN SNAPSHOTS (not dedup): each action renders its OWN copy of the file's
  * content AS IT WAS at that moment — a re-read after an edit shows the new content, so
@@ -48,7 +49,7 @@
  */
 
 import * as THREE from 'three';
-import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
+import Book, { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
@@ -73,9 +74,11 @@ export const AGENT_BOOKS_DEFAULTS = {
     faceColor: 0x0a0a1e,        // page-face fill (the dark window wall)
     faceOpacity: 0.85,          // page-face opacity
     faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth, // how far behind the content each face sits
-    // -- the deck (rolodex) --------------------------------------------------------
+    // -- the deck --------------------------------------------------------------------
     zPitch: 90,                 // deck pitch between sheets (time depth) — fly-through room
     pagerLerp: 9,               // per-sheet z-slot easing rate (higher = snappier)
+    turnedPitch: DECK_DEFAULTS.turned, // the turned block's pitch, × zPitch (pressed pages)
+    turnSlide: DECK_DEFAULTS.slide,    // how far a turn visibly slides the deck (pitches; the rest cuts)
     // -- the description page (verso): WORLD sizes, never shrunk by long content ---------
     pageMargin: 16,             // inset of the verso's cards from the page edge
     rowGap: 10,                 // verso gap between headline → call body → info rows
@@ -305,6 +308,8 @@ export default class AgentBooks {
             book.userData = { ...book.userData, name: agentId, isDir: false };
             book.deck.zPitch = this.cfg.zPitch;
             book.deck.lerp = this.cfg.pagerLerp;
+            book.deck.turned = this.cfg.turnedPitch;
+            book.deck.slide = this.cfg.turnSlide;
             this.root.add(book);
             const hueIdx = this.lanes.size;
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
@@ -844,6 +849,8 @@ export default class AgentBooks {
             this._trimLane(lane);
             lane.book.deck.zPitch = this.cfg.zPitch;
             lane.book.deck.lerp = this.cfg.pagerLerp;
+            lane.book.deck.turned = this.cfg.turnedPitch;
+            lane.book.deck.slide = this.cfg.turnSlide;
             for (const e of lane.entries) {
                 this._resizeVerso(lane, e);
                 if (e.snapScaleKey && typeof e.snapshot?.setScale === 'function') {

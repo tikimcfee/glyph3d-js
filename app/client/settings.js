@@ -11,7 +11,7 @@ import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/cor
 import { LAYER_BAND, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
 import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
-import { PAGE_FACE_DEFAULTS } from '@glyph3d/core/collections/Book.js';
+import { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from '@glyph3d/core/collections/Book.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
@@ -712,7 +712,7 @@ export const SETTINGS = [
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
-  // the rolodex deck pitch / page-turn easing. These are the agent card's dims (delta books
+  // the deck pitch / page-turn easing. These are the agent card's dims (delta books
   // and library volumes carry their OWN page geometry); they live here, not in Books, so a
   // shared-base dial isn't mistaken for one that resizes every shelf at once.
   { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageW, min: 10, max: 5000, step: 10, apply: agentBookParam('pageW') },
@@ -773,6 +773,12 @@ export const SETTINGS = [
   { key: 'books.coverEdgeOpacity', label: 'Box edge opacity', group: 'Books', scheme: 'library', type: 'number', default: 0.22, min: 0, max: 1, step: 0.01, apply: coverParam('coverEdgeOpacity', 'coverEdgeOpacity') },
   { key: 'books.coverPad', label: 'Box padding (XY)', group: 'Books', scheme: 'library', type: 'number', default: 16, min: 0, max: 400, step: 1, apply: coverParam('coverPad', 'coverPad') },
   { key: 'books.coverZPad', label: 'Box padding (Z / depth)', group: 'Books', scheme: 'library', type: 'number', default: 24, min: 0, max: 800, step: 2, apply: coverParam('coverZPad', 'coverZPad') },
+  // The deck's turn (Book's slot law, every carrier): turned sheets lie pressed in a
+  // block at the deck's back, `turnedPitch` × the deck pitch apart; a turn CUTS the
+  // sheets changing sides and slides the reading deck at most `turnSlide` pitches
+  // (0 = a pure cut, no slide at all).
+  { key: 'books.turnedPitch', label: 'Turned pages pressed (× pitch)', group: 'Books', scheme: 'library', type: 'number', default: DECK_DEFAULTS.turned, min: 0.01, max: 1, step: 0.01, apply: bookPageParam('turnedPitch', 'turnedPitch') },
+  { key: 'books.turnSlide', label: 'Turn slide (pitches, 0 = cut)', group: 'Books', scheme: 'library', type: 'number', default: DECK_DEFAULTS.slide, min: 0, max: 100, step: 0.25, apply: bookPageParam('turnSlide', 'turnSlide') },
   // Edge tabs — one per sheet on a bound library volume (Book.bindTabs). Live geometry:
   // Book.syncTabs re-reads these every frame.
   { key: 'tab.steps', label: 'Tab stagger (0 = left-to-right, ≥2 = slots)', group: 'Books', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },

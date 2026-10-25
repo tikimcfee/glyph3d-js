@@ -34,8 +34,15 @@
  * A multi-sheet book presents in one of two FORMS — the form is a slot law (where does
  * sheet i rest?), and update(dt) eases every sheet toward its slot either way:
  *
- *   'deck' (default) — the ROLODEX: the sheet at `head` fronts the book at z = 0 and
- *     the rest recede by deck.zPitch — scrolled-past newer sheets wrap to the back.
+ *   'deck' (default) — the open sheet at `head` fronts the book at z = 0; the sheets
+ *     still AHEAD in reading order recede behind it by deck.zPitch (the reading deck),
+ *     and the sheets already TURNED past lie pressed together at the deck's back (the
+ *     turned block, deck.turned × zPitch apart, the first-turned deepest) — a real
+ *     book's read stack, kept inside the same box: the deck's extent never depends on
+ *     where it's open. A turn is a CUT, not a flight: a sheet changing sides is set
+ *     down on its new side directly (no path through the other pages), and the
+ *     reading deck slides as one rigid body, at most deck.slide pitches — a jump of
+ *     fifty pages lands like a jump of one.
  *   'splay' — the book LAID OPEN: every page at once in an m×n grid in PAGE ORDER
  *     (cols from an aspect target unless fixed), the head floating `lift` forward as
  *     the visible bookmark. The overview form: "a lot of files here — show me all
@@ -84,12 +91,14 @@ import Tab3D, { TAB_CONFIG } from '../components/Tab3D.js';
  *  opts; a bare verb may pass only page dims). */
 export const PAGE_FACE_DEFAULTS = Object.freeze({ surface: true, surfacePad: 0, surfaceDepth: 8 });
 
-/** Deck (rolodex) defaults — multi-sheet books only; a one-sheet book never moves.
- *  `order` is the wrap DIRECTION: −1 reads by RECENCY (an agent book — newer sheets
- *  front, older recede; scrolled-past newer ones wrap to the back), +1 reads by PAGE
- *  ORDER (a library volume — page 1, 2, 3 recede in sequence; turned pages wrap to
- *  the back in turn order). */
-const DECK_DEFAULTS = { zPitch: 90, lerp: 9, order: -1 };
+/** Deck defaults — multi-sheet books only; a one-sheet book never moves.
+ *  `order` is the READING direction: −1 reads by RECENCY (an agent book — the newest
+ *  fronts, older sheets recede; paging back turns the newer ones onto the block), +1
+ *  reads by PAGE ORDER (a library volume — page 1, 2, 3 recede in sequence; turned
+ *  pages press onto the block). `turned` is the turned block's pitch as a fraction of
+ *  zPitch (pressed pages, distinct from the spaced reading deck); `slide` caps how
+ *  far, in pitches, the reading deck visibly slides on a turn — the rest is a cut. */
+export const DECK_DEFAULTS = Object.freeze({ zPitch: 90, lerp: 9, order: -1, turned: 0.25, slide: 1 });
 
 /** Splay (m×n grid) defaults. cols 0 derives the column count from the aspect target
  *  (grid w/h ≈ aspect); lift is the head page's forward float — the bookmark you can
@@ -133,7 +142,7 @@ export default class Book extends BoundedObject3D {
         this.head = 0;
         /** @type {boolean} live-follow: ride each appended sheet to the front */
         this.following = true;
-        /** @type {{zPitch:number, lerp:number}} rolodex knobs (multi-sheet books) */
+        /** @type {{zPitch:number, lerp:number, order:number, turned:number, slide:number}} deck knobs (multi-sheet books) */
         this.deck = { ...DECK_DEFAULTS };
         /** @type {'deck'|'splay'} the presentation form — the slot law sheets ease to */
         this.form = 'deck';
@@ -317,8 +326,10 @@ export default class Book extends BoundedObject3D {
     }
 
     // -- forms: head is the only nav state; each sheet's pose is a derived slot --------------------
-    //    deck: slot(i) = (order · (i − head)) mod n along z. splay: page-order m×n grid,
-    //    head lifted. One easer (update) serves both — a form change is slot reassignment.
+    //    deck: the reading deck (rank = order·(i − head) ≥ 0) at z = −rank·zPitch, the
+    //    turned block pressed at the back. splay: page-order m×n grid, head lifted. One
+    //    easer (update) serves both — a form change is slot reassignment; a turn
+    //    (pageTo) additionally CUTS the sheets that change sides (_turnDeck).
 
     /** The splay's grid shape for `n` pages: cols from the aspect target (grid w/h ≈
      *  aspect) unless fixed, rows to cover. The ONE home for the arithmetic — the slot
@@ -373,12 +384,16 @@ export default class Book extends BoundedObject3D {
     }
 
     /** Move the head to a sheet index (0 = oldest, clamped). Landing on the newest resumes
-     *  live-following; anywhere else holds. The sheets ease to their new slots in update(dt). */
+     *  live-following; anywhere else holds. In deck form the turn is laid down by
+     *  _turnDeck (side-changers cut, the reading deck slides ≤ deck.slide pitches); the
+     *  sheets then ease the remainder in update(dt). */
     pageTo(index) {
         const n = this.sheets.length;
         if (!n) return false;
+        const from = Math.min(Math.max(0, this.head), n - 1);
         this.head = Math.min(Math.max(0, Math.round(index)), n - 1);
         this.following = this.head === n - 1;
+        if (this.form === 'deck' && this.head !== from) this._turnDeck(from);
         return true;
     }
 
@@ -501,7 +516,7 @@ export default class Book extends BoundedObject3D {
     // -- tabs: per-sheet edge labels, banded by a content key ------------------------
     //    One Tab3D per sheet (exact page navigation), staggered along the deck's own
     //    Z-recede — each tab rides its sheet's LIVE slot (mid-ease), so the deck's
-    //    rolodex cascade IS the thumb-index stagger for free — and banded UP the cover
+    //    cascade IS the thumb-index stagger for free — and banded UP the cover
     //    edge by a per-book content key (files → first letter, agent moments → action
     //    kind) so the deck reads as stable groups. syncTabs() repositions every frame
     //    like syncCover does for the nameplate. Picking stays the wrapper's job (a
@@ -745,8 +760,14 @@ export default class Book extends BoundedObject3D {
     // -- private --------------------------------------------------------
 
     /** Where sheet `i` RESTS in the book's local frame — the form IS the slot law.
-     *  deck: slot(i) = (order · (i − head)) mod n along −z; order −1 recovers the
-     *    recency rolodex (head − i), +1 reads in page order.
+     *  deck: rank = order · (i − head). The READING deck (rank ≥ 0 — the open sheet
+     *    and those still ahead) sits at z = −rank·zPitch. The TURNED block (rank < 0)
+     *    is pressed at the deck's back: the first-turned sheet (the far end of the
+     *    order: the newest for a recency deck, page 1 for a volume) anchors at
+     *    z = −(n−1)·zPitch and each later turn lands turned·zPitch in front of the
+     *    last. So the box is always [−(n−1)·zPitch, 0] wherever the head is, a block
+     *    sheet never moves while others turn, and at least a full pitch separates the
+     *    block from the reading deck (the split reads as a gap).
      *  splay: page-order m×n grid — columns centered on x, the first row's page
      *    centers at y = 0 and rows descend; the head floats `lift` forward. Splay
      *    needs the fitted page dims; an unfitted book falls back to the deck law.
@@ -766,9 +787,61 @@ export default class Book extends BoundedObject3D {
             return out;
         }
         const head = Math.min(Math.max(0, this.head), n - 1);
-        const slot = n ? (((this.deck.order ?? -1) * (i - head)) % n + n) % n : 0;
-        out.x = 0; out.y = 0; out.z = -slot * this.deck.zPitch;
+        const order = this.deck.order === 1 ? 1 : -1;
+        const pitch = this.deck.zPitch;
+        const rank = order * (i - head);
+        out.x = 0; out.y = 0;
+        if (rank >= 0) {
+            out.z = -rank * pitch;
+        } else {
+            // Position inside the block, counted from its anchored back: the far end of
+            // the reading order is 0 — independent of head, so a block sheet stays put.
+            const fromBack = order === 1 ? i : n - 1 - i;
+            out.z = -(n - 1) * pitch + fromBack * pitch * this.deck.turned;
+        }
         return out;
+    }
+
+    /** True when sheet `i` is on the READING deck (the open sheet or ahead of it) under
+     *  `head` — false once it's turned. @private */
+    _onReadingDeck(i, head) { return (this.deck.order === 1 ? 1 : -1) * (i - head) >= 0; }
+
+    /**
+     * Lay a deck turn down (pageTo → here, head already moved from `from`). The sheets
+     * that change sides are CUT — set down at their new slot directly, never eased
+     * through the pages between (the old wrap flew the newest sheet through every other
+     * translucent page). The reading deck moves as ONE rigid body: each of its sheets
+     * keeps its live offset from its new slot, capped at deck.slide pitches, and a
+     * sheet joining it from the block takes the same offset as its neighbours — so a
+     * turn reads as the deck sliding one notch (and a long jump as a cut plus that
+     * same one-notch settle), and no two sheets ever cross. x/y are left alone so a
+     * form glide in flight keeps gliding. @private @param {number} from the prior head
+     */
+    _turnDeck(from) {
+        const n = this.sheets.length;
+        if (n < 2) return;
+        const head = this.head;
+        const cap = Math.max(0, this.deck.slide) * this.deck.zPitch;
+        const clamp = (v) => Math.min(Math.max(v, -cap), cap);
+        // The deck's carried offset, read off a sheet that is on the reading deck under
+        // BOTH heads (the nearer end always is); the nominal one-turn offset if unseated.
+        const ref = this._onReadingDeck(from, head) ? from : head;
+        const refAt = this.sheets[ref]._at;
+        const nominal = (this.deck.order === 1 ? 1 : -1) * (from - head) * this.deck.zPitch;
+        const carried = clamp(refAt ? refAt.z - this._slotFor(ref, _slotOut).z : nominal);
+        for (let i = 0; i < n; i++) {
+            const sheet = this.sheets[i];
+            if (!sheet._at) continue;   // unseated (released) — update() seats it
+            const was = this._onReadingDeck(i, from), is = this._onReadingDeck(i, head);
+            const z = this._slotFor(i, _slotOut).z;
+            if (!is) {
+                if (was) sheet._at.z = z;                       // turned: cut onto the block
+                else continue;                                  // already on the block: stays put
+            } else {
+                sheet._at.z = z + (was ? clamp(sheet._at.z - z) : carried);
+            }
+            sheet.node.position.z = sheet._at.z;
+        }
     }
 
     /** Seat sheet `i` directly at its slot (no easing) — a new sheet appears in place. @private */
