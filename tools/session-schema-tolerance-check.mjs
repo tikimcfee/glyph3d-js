@@ -1,7 +1,8 @@
 // session-schema-tolerance-check.mjs — Slice 0 of the state-consolidation migration.
 // Asserts SessionStore.restore is FORWARD-ADDITIVE (a current OR future-version blob is NOT
-// wiped — only the v1 cliff is), that a saved agent book reopens through the harness it names
-// (agy) while an unknown harness quarantines the section, and that WorkspaceModel.clear()
+// wiped — only the v1 cliff is), that a saved agent book reopens through the one open path
+// under its session's lane (a workgroup agent's name, else its session id) with the session's
+// harness while a failed open quarantines the section, and that WorkspaceModel.clear()
 // empties sheets + resets fields.
 // SessionStore/WorkspaceModel are import-free, so this needs no browser/relay.
 //
@@ -75,40 +76,34 @@ function makeStore(writes) {
   ok(writes.length === 1 && writes[0].version === 2, 'v1 blob is wiped to an empty v2 snapshot');
 }
 
-// ---- 2b. agent books: an agy entry restores through its OWN harness; an unknown harness
-//          quarantines the section (fails loud) instead of parsing as claude ----
+// ---- 2b. agent books: an entry reopens through the one open path under its session's lane
+//          and harness; a failed open quarantines the section (fails loud) ----
 {
-  const agyLine = (o) => JSON.stringify({ source: 'MODEL', status: 'DONE', created_at: '2026-10-25T00:00:00Z', ...o });
-  const bytes = new TextEncoder().encode([
-    agyLine({ step_index: 0, type: 'USER_INPUT', content: '<USER_REQUEST>\nhi\n</USER_REQUEST>' }),
-    agyLine({ step_index: 1, type: 'PLANNER_RESPONSE', content: 'hello', tool_calls: [{ name: 'view_file', args: { AbsolutePath: '/w/a.js' } }] }),
-    agyLine({ step_index: 2, type: 'GENERIC', content: 'Showing lines 1-1 of 1\n1: x' }),
-  ].join('\n') + '\n');
-  const hydrated = [];
-  const reads = [];
+  const opens = [];
   const ctx = makeCtx();
-  ctx.sessionProvider = {
-    list: async () => [],
-    read: async (id, opts) => { reads.push({ id, ...opts }); return { bytes: bytes.slice(), offset: 0, size: bytes.length, cwd: '/w', title: 'Agy Title' }; },
+  const agy = { session_id: '83d95154-d7a6-496b-a811-2496b2c39a84', harness: 'agy', workgroup: null };
+  const wg = { session_id: 'aaaa0000-0000-4000-8000-000000000000', harness: 'claude', workgroup: { name: 'builder' } };
+  const bad = { session_id: 'ffff0000-0000-4000-8000-000000000000', harness: 'kimi', workgroup: null };
+  ctx.sessionProvider = { latest: null, sessions: [], list: async () => ({ gen: 1, sessions: [agy, wg, bad] }) };
+  ctx.sessionBooks = {
+    open: async (session, opts) => {
+      opens.push({ session, ...opts });
+      if (session === bad.session_id) throw new Error('transcript unreadable');
+      return { lane: opts.lane, session, added: 1, total: 1, whole: true, reads: 1, ms: 0 };
+    },
   };
-  ctx.agentBooks = {
-    cfg: { tailReadBytes: 1 << 20, headMetaBytes: 0 },
-    lanes: new Map(),
-    capForHydration: () => 50,
-    hydrate: async (agentId, records, opts) => { hydrated.push({ agentId, records, opts }); return records.length; },
-  };
+  ctx.agentBooks = { lanes: new Map() };
   const ss = new SessionStore({ ctx, router: { execute: async () => ({ text: 'OK' }) }, bridge: { rpcRequest: async () => ({}) } });
   await ss._restoreAgents({ agents: [
-    { session: '83d95154-d7a6-496b-a811-2496b2c39a84', harness: 'agy', following: true },
-    { session: 'ffff0000-0000-4000-8000-000000000000', harness: 'gemini', following: true },
+    { session: agy.session_id, following: true, limit: 7 },
+    { session: wg.session_id, following: true },
+    { session: bad.session_id, following: true },
   ] });
-  const h = hydrated[0];
-  ok(hydrated.length === 1 && h.agentId === '83d95154' && h.opts.agentType === 'agy',
-     'agy entry: hydrated under the claude-rule lane id with agentType agy');
-  ok(reads.length === 1 && reads[0].harness === 'agy', 'agy entry: the archive read names the agy harness');
-  ok(h && h.records.map((r) => r.action).join(',') === 'say,read' && h.opts.meta?.title === 'Agy Title',
-     'agy entry: records through the agy dialect; the index title rides the meta');
-  ok(ss._failedSections.has('agents'), 'unknown harness entry: the agents section is quarantined (loud), not parsed as claude');
+  const o = Object.fromEntries(opens.map((x) => [x.session, x]));
+  ok(o[agy.session_id]?.lane === agy.session_id && o[agy.session_id].agentType === 'agy' && o[agy.session_id].limit === 7,
+     'a local session reopens under its session id, with its harness and saved limit');
+  ok(o[wg.session_id]?.lane === 'builder', "a workgroup agent's session reopens under its name");
+  ok(ss._failedSections.has('agents'), 'a failed open: the agents section is quarantined (loud), not saved over');
 }
 
 // ---- 3. WorkspaceModel.clear() empties sheets + resets fields, and emits once ----

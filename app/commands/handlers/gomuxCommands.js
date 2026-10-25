@@ -64,9 +64,9 @@ export default function registerGomuxCommands(router) {
             a.detail && `detail   ${a.detail}`,
             a.tool && `tool     ${a.tool}`,
             a.toolInput && `pending  ${a.toolInput}`,
-            `book     ${hub.lanes.get(a.name)?.phase ?? '(none)'}`,
+            `book     ${hub.phase(a.name) ?? '(none)'}`,
         ].filter(Boolean);
-        return { text: lines.join('\n'), data: { ...a, book: hub.lanes.get(a.name)?.phase ?? null } };
+        return { text: lines.join('\n'), data: { ...a, book: hub.phase(a.name) } };
     }, { description: "One gomuxai agent's node — status, the tool in flight, a pending permission prompt", usage: '<name>' });
 
     router.register('gomux.attach', async (args, ctx) => {

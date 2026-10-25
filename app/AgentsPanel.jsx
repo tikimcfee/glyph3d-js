@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
+import { laneForSession } from './client/SessionBooks.js';
 /** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
@@ -12,11 +12,13 @@ import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
  * sheets (oldest → newest) — and CLOSES via its ✕. One lane expanded at a time;
  * expanding a row folds whichever was open.
  *
- * Below the open books, separated by a slim divider, sit the relay's ARCHIVED
- * session transcripts (ctx.sessionProvider — both harnesses, kimi tagged): id
- * prefix, age, size. Clicking one pages it in as a lane (agent.open) and expands
- * it; sessions already open are not listed twice — their lane row above IS their
- * row. The archive group exists only when a session provider is connected.
+ * Below the open books, separated by a slim divider, sits the ARCHIVE: every other agent
+ * session on the host (the relay's session list, ctx.sessionProvider — pushed as it
+ * changes; every harness, non-claude tagged): its name (title, else agent name, else
+ * project), workgroup, age, size. Clicking one opens it as a book (agent.open — the
+ * recent tail, then live) and expands it; sessions already open are not listed twice —
+ * their lane row above IS their row. The archive group exists only when a session
+ * provider is connected.
  *
  * It owns no agent state; it reads agents()/getStream() and fires the same command bus
  * the 3D shelf obeys (the [[project_2d_companion_views]] model: the book owns the deck,
@@ -31,7 +33,7 @@ import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
  *   ⏮ ◀ ▶ ⏭            → book.page first|prev|next|last
  *   keep [n] / ↺       → book.limit <agent> <n|default>   (this book's kept-turns cap;
  *                        0 keeps everything, ↺ follows the shelf default again)
- *   click an archive row → agent.open <session-id>   (page a past session in as a lane)
+ *   click an archive row → agent.open <session-id>   (open that session as a book)
  *
  * Identity dots come from getStream()'s per-row `color` — the live hue table in
  * AgentBooks.cfg.hues (seeded from the tool registry's ONE action-hue home), so the 2D
@@ -133,15 +135,11 @@ const S = {
         display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
         cursor: 'pointer',
     },
-    sessId: { flex: '0 0 auto', color: '#8a92a0', minWidth: 70 },
+    sessId: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     sessHarness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
-    sessAge: { flex: '1 1 auto', textAlign: 'right', color: '#5a616c', fontSize: 11 },
+    sessAge: { flex: '0 0 auto', textAlign: 'right', color: '#5a616c', fontSize: 11, minWidth: 26 },
     sessSize: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 38, textAlign: 'right' },
 };
-
-// Archive list poll cadence (ms) — deliberately slower than the 1s roster tick;
-// the archive is disk-backed and only moves when a session file grows or appears.
-const ARCHIVE_POLL_MS = 10_000;
 
 function ago(ts) {
     if (!ts) return '';
@@ -149,7 +147,7 @@ function ago(ts) {
     return s < 1 ? 'now' : s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
 }
 
-// Wall-clock age (archive mtimes are unix ms, not performance.now() ticks) — days-scale.
+// Wall-clock age (unix ms, not performance.now() ticks) — days-scale.
 function wallAgo(ms) {
     if (!ms) return '';
     const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -204,27 +202,18 @@ export default function AgentsPanel({ client }) {
         setStream(expanded && b ? (b.getStream?.(expanded) || []) : []);
     }, [expanded, agents, client]);
 
-    // Archive: the relay's stored session list. Its own slow poll — the 1s roster tick
-    // above is liveness for in-memory lanes; this one is a disk listing over RPC.
-    const refreshArchive = useCallback(async () => {
-        const p = client?.ctx?.sessionProvider;
-        if (!p) { if (aliveRef.current) setSessions(null); return; }
-        try {
-            const list = await p.list();
-            if (aliveRef.current) setSessions(Array.isArray(list) ? list : []);
-        } catch {
-            // A transient list failure (relay reconnecting, a mid-reload window) must not
-            // UNMOUNT the archive — that reads as the group randomly vanishing. Keep the
-            // last-good listing; only an ABSENT provider hides it.
-        }
-    }, [client]);
-
+    // Archive: the relay's session list, pushed as it changes (agentSessions/changed). A
+    // list failure (relay reconnecting, a mid-reload window) keeps the last-good listing —
+    // only an ABSENT provider hides the group.
     useEffect(() => {
         aliveRef.current = true;
-        refreshArchive();
-        const t = setInterval(refreshArchive, ARCHIVE_POLL_MS);
-        return () => { aliveRef.current = false; clearInterval(t); };
-    }, [refreshArchive]);
+        const p = client?.ctx?.sessionProvider;
+        if (!p) { setSessions(null); return () => { aliveRef.current = false; }; }
+        const off = p.onSessions((list) => { if (aliveRef.current) setSessions(list.sessions); });
+        if (p.latest) setSessions(p.sessions);
+        else p.list().catch(() => { /* the provider said it; pushes fill the list when the relay has one */ });
+        return () => { aliveRef.current = false; off(); };
+    }, [client]);
 
     const sel = agents.find((a) => a.id === expanded) || null;
 
@@ -256,20 +245,19 @@ export default function AgentsPanel({ client }) {
         after(['book.limit', expanded, String(Math.floor(n))]);
     }, [capDraft, expanded, after]);
 
-    // Page a past session in as a lane (fire-and-forget — the book arrives when the
-    // adapter feeds it), expand its row, and re-list so it leaves the archive group.
+    // Open a session as a book (fire-and-forget — the book is born at once and fills as its
+    // tail read lands) and expand its row; it leaves the archive group as its lane appears.
     const openSession = useCallback((s) => {
-        exec(['agent.open', s.id]);
-        setExpanded(agentIdForEntry(s));
-        refreshArchive();
-    }, [exec, refreshArchive]);
+        exec(['agent.open', s.session_id]);
+        setExpanded(laneForSession(s));
+    }, [exec]);
 
     const atFirst = !sel || sel.head <= 0;
     const atLast = !sel || sel.head >= (sel.count - 1);
     const anyDone = agents.some((a) => a.state === 'done');
     // Sessions already open as lanes are not listed again — their lane row IS their row.
     const openLanes = new Set(agents.map((a) => a.id));
-    const archived = (sessions || []).filter((s) => !openLanes.has(agentIdForEntry(s)));
+    const archived = (sessions || []).filter((s) => !openLanes.has(laneForSession(s)));
 
     return (
         <div style={S.content}>
@@ -380,12 +368,13 @@ export default function AgentsPanel({ client }) {
                         <span style={S.dividerHint}>click to open</span>
                     </div>
                     {archived.map((s) => (
-                        <div key={s.id} style={S.sessRow}
+                        <div key={s.session_id} style={S.sessRow}
                             onClick={() => openSession(s)}
-                            title={`${s.id} — open as a lane (agent.open)`}>
-                            <span style={S.sessId}>{agentIdForEntry(s)}</span>
+                            title={`${s.session_id}${s.cwd ? '\n' + s.cwd : ''}${s.status ? '\n' + s.status : ''} — open as a book (agent.open)`}>
+                            <span style={S.sessId}>{s.title || s.agent_name || s.project || s.session_id}</span>
+                            {s.workgroup && <span style={S.sessHarness}>{s.workgroup.name}</span>}
                             {s.harness && s.harness !== 'claude' && <span style={S.sessHarness}>{s.harness}</span>}
-                            <span style={S.sessAge}>{wallAgo(s.mtime)}</span>
+                            <span style={S.sessAge}>{wallAgo(Date.parse(s.mtime))}</span>
                             <span style={S.sessSize}>{humanSize(s.size)}</span>
                         </div>
                     ))}

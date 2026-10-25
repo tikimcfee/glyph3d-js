@@ -3,7 +3,7 @@
  *
  * colorize(text, descriptor) → { palette, packed, parseMs }.
  *
- * Two backends behind the ONE result shape (the SessionParsePool discipline):
+ * Two backends behind the ONE result shape:
  *   - a demand-driven POOL of SyntaxParseWorkers (production): jobs are pure
  *     (text + descriptor in, palette bytes out — no shared state), so any
  *     worker takes any job; results transfer back zero-copy. A bulk load's

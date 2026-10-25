@@ -2,122 +2,58 @@
  * Agent commands — the addressable surface over AgentBooks (every agent's run, bound
  * as a book of page-pair spreads on the field).
  *
- * The Claude Code hook drives these automatically via `agent.tool` (the raw tool event
- * → the shared tool registry), but they're plain commands first: you can spawn and page
- * agents by typing them, which is how this whole spine is verified.
+ * A book's content is its session's event stream (gomuxai is the one reader of agent
+ * transcripts; SessionBooks opens and follows it). The gomuxai hub and the agents desk open
+ * books by themselves; these verbs open any other session, and drive a book by hand:
  *
- *   agent.tool     <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]  raw tool event → normalized record
- *   agent.message  <id> <type> <kind> <text>         a conversation block (text/thinking) → say/think sheet
- *   agent.meta     <id> <json>                      provenance metadata (slug/title/model/cwd/…) → lane + nameplate
- *   agent.kimi-wire <id> <line>                     one raw kimi wire.jsonl line → shared dialect → tool/message events
- *   agent.activity <id> <type> <action> [target] [detail] [result]   the normalized record directly (manual/CLI/tests)
+ *   agent.sessions                                   every agent session on the host (the relay's list)
+ *   agent.open     <session|prefix|name> [limit]     open a session as a book (tail → hydrate → follow)
+ *   agent.activity <id> <type> <action> [target] [detail] [result]   a record directly (manual/CLI/tests)
  *       (detail/result/text with spaces ride the `call` base64 hatch)
  *   agent.spawn    <id> [type]                      summon an empty book (request an instance)
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
- *   agent.clear    <id|all|done>                    remove agent book(s) from the field
+ *   agent.clear    <id|all|done>                    remove agent book(s) from the field (stops following)
  *   agent.request  <id> [message...]                raise a hand ("needs you")
  *
  * Paging/tuning the books themselves is the book.* family (bookCommands) — paging is a
  * BOOK capability, not an agent one. Framing a book is the ordinary camera verb on its
  * registry id: `camera.focus agent:book:<id>`.
  *
- * To populate a book without a live agent, drive the verb by hand, e.g.:
+ * To populate a book without an agent, drive the verb by hand, e.g.:
  *   agent.activity dev claude read app/main.jsx
  *   agent.activity dev claude bash "npm test" "" "5 passing"
  */
 
 import { canonicalPath } from './pathResolve.js';
-import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { agentIdForEntry, SESSION_HARNESSES,
-         createKimiWireState, kimiWireLineToEvents }
-    from '@glyph3d/core/collections/sessionAdapter.js';
-import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
-import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
+import { laneForSession, resolveSession } from '../../client/SessionBooks.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
+/** @import { AgentSession } from '@glyph3d/core/services/data/AgentSessionProvider.js' */
 
 const noBooks = { text: 'ERR: agent books not wired', data: null };
+const noSessions = { text: 'ERR: no agent sessions (the session list is a relay feature)', data: null };
 
 /**
- * Open a stored agent session as a book: fetch the harness's own record (the durable
- * state — raw BYTES over the binary result plane), decode + parse it through the
- * codec stage (the session parse pool — OFF the main thread, one dialect
- * implementation), and bulk-hydrate a lane whose id matches the harness's
- * derivation — for claude that's the live hook's, so a still-running session's
- * stream converges on the same book. The ONE open path: the agent.open verb and
- * session restore both ride it. Hydrate itself is frame-sliced, so a deep history
- * streams in over a few frames instead of one long task.
+ * Open a session as a book — the one open path (SessionBooks) under the one lane rule
+ * (laneForSession: a workgroup agent's name, else the session id). agent.open, the Agents
+ * panel's archive and session restore ride it.
  * @param {AppContext} ctx
- * @param {string} sessionId full session id (the record's filename stem)
- * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
- *        becomes the book's retention override; omitted → the book's cap (its override,
- *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi' | 'agy').
- * @returns {Promise<{agentId: string, added: number, total: number, bytes: number,
- *   offset: number, ms: {read: number, parse: number, hydrate: number}}>}
- * `bytes` is the window size parsed, `total` the events in it, `offset` the absolute
- * byte the window starts at (0 = the whole record was read); `ms` splits the open into
- * its three stages so the restore lane (and agent.open's data) can answer "why is this
- * slow" — read/parse scale with the WINDOW, hydrate with the cap.
+ * @param {AgentSession} session a row of the relay's session list
+ * @param {{limit?: number}} [opts] limit = records to keep (0 = all) — becomes the book's cap
  */
-export async function openAgentSession(ctx, sessionId, { limit, harness = 'claude' } = {}) {
-    const provider = ctx.sessionProvider;
-    if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
-    if (!ctx.agentBooks) throw new Error('agent books not wired');
-    const r1 = (n) => Math.round(n * 10) / 10;
-    if (!SESSION_HARNESSES.includes(harness)) {
-        throw new Error(`unknown session harness '${harness}' (want ${SESSION_HARNESSES.join('|')})`);
-    }
-    const agentId = agentIdForEntry({ id: sessionId, harness });
-    const agentType = harness;   // the lane's type IS the harness that wrote its record
-
-    // Transport: TAIL-GROW over the binary result plane — the relay line-aligns
-    // the final tailReadBytes, and the window doubles until it holds the book's
-    // quota (a monster transcript costs its readable tail, not its history).
-    // Codec: the parse pool — decode + dialect + cap-slice OFF the main thread,
-    // so only the event tail the book will materialize clones back. The cap
-    // mirrors hydrate's rule, which re-derives and re-slices identically.
-    const cap = ctx.agentBooks.capForHydration(agentId, limit);
-    const r = await readSessionTail(provider, sessionId, {
-        harness: agentType, cap,
-        startBytes: ctx.agentBooks.cfg.tailReadBytes,
-        headMetaBytes: ctx.agentBooks.cfg.headMetaBytes,
-        parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
-    });
-    const t2 = performance.now();
-    // The kept tail's place in the whole run: the events the cap sliced off this window
-    // precede it (turn numbers count from there). Exact only when nothing was skipped —
-    // a window short of the record's start, or skipped events (which may hold noise the
-    // records drop), make the count a floor.
-    const skipped = Number.isFinite(cap) ? Math.max(0, r.total - cap) : 0;
-    const added = await ctx.agentBooks.hydrate(agentId, r.records, {
-        agentType, sessionId, cwd: r.cwd, meta: r.meta, limit,
-        seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
-    });
-    // History: paging back past the kept turns reads older slices of the same record.
-    ctx.agentBooks.setHistory(agentId, {
-        read: (window) => provider.read(sessionId, { ...window, harness: agentType }),
-        parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
-        harness: agentType, cwd: r.cwd ?? null,
-    });
-    const t3 = performance.now();
-    return { agentId, added, total: r.total, bytes: r.bytes, offset: r.offset,
-             ms: { read: r1(r.readMs), parse: r1(r.parseMs), hydrate: r1(t3 - t2) } };
+export function openSession(ctx, session, { limit } = {}) {
+    if (!ctx.sessionBooks) return Promise.reject(new Error('no session books (relay offline — sessions are a relay feature)'));
+    return ctx.sessionBooks.open(session.session_id, { lane: laneForSession(session), agentType: session.harness, limit });
 }
 
-/** Resolve a session id or unique prefix against the archive listing (dash-insensitive).
- *  Returns the full entry {id, harness} — the harness tags which adapter opens it. */
-async function resolveSessionEntry(provider, idOrPrefix) {
-    const sessions = await provider.list();
-    const exact = sessions.find((s) => s.id === idOrPrefix);
-    if (exact) return exact;
-    // The lane id agent.sessions prints (and a book is named by) — the per-harness derivation.
-    const lane = sessions.filter((s) => agentIdForEntry(s) === idOrPrefix);
-    if (lane.length === 1) return lane[0];
-    const norm = String(idOrPrefix).replace(/-/g, '');
-    const hits = sessions.filter((s) => s.id.replace(/-/g, '').startsWith(norm));
-    if (hits.length === 1) return hits[0];
-    if (hits.length > 1) throw new Error(`ambiguous session '${idOrPrefix}' (${hits.length} matches)`);
-    throw new Error(`no session '${idOrPrefix}'`);
+/**
+ * The session list — the provider's latest, else asked for.
+ * @param {AppContext} ctx @returns {Promise<AgentSession[]>}
+ */
+export async function sessionList(ctx) {
+    const p = ctx.sessionProvider;
+    if (!p) throw new Error('no session provider');
+    return p.latest ? p.sessions : (await p.list()).sessions;
 }
 
 const fmtAge = (ms) => {
@@ -126,61 +62,12 @@ const fmtAge = (ms) => {
 };
 const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + 'M' : b >= 1024 ? Math.round(b / 1024) + 'K' : b + 'B');
 
-/** Canonicalize a record's target against the live registry (an open file's registry id
- *  is its canonical path — an exact lookup, so `/a/b.js` never lands on an open `b.jsx`),
- *  then sink the record into the books. The shared sink for the manual `agent.activity`
- *  verb and the raw `agent.tool`/`agent.message` ingress.
- * @param {AppContext} ctx
- */
-function emitActivity(ctx, books, id, type, { action, target, detail, result, meta }) {
-    let label = target || null;
-    if (target) {
-        const key = canonicalPath(ctx, target);
-        if (ctx.registry?.has?.(key)) label = key;
-    }
-    books.activity(id, type, { action, target: label, detail, result, meta });
-    return label;
-}
-
 /** A `call`-hatch arg that may be a parsed object, a JSON string, or empty → object | null. */
 function parseJSONArg(a) {
     if (a && typeof a === 'object') return a;
     if (typeof a === 'string' && a.trim()) { try { return JSON.parse(a); } catch { /* malformed */ } }
     return null;
 }
-
-/** Live kimi ingress state per lane. Entries are tiny and bounded by session count; a
- *  cleared lane's entry just goes quiet (the Go-side cursor is the real memory). */
-const kimiWireLanes = new Map();   // laneId -> { state, pending: [], timer, metaSent: {} }
-
-/** Sink a kimi lane's translated batch: normalize each event through the ONE registry and
- *  page it in, then forward any newly-appeared provenance (llm.request model, first
- *  turn.prompt title, cwd…) to the lane — setLaneMeta merges and rebakes the nameplate.
- * @param {AppContext} ctx
- */
-function flushKimiWireLane(ctx, books, id, lane) {
-    lane.timer = null;
-    const events = lane.pending;
-    lane.pending = [];
-    for (const ev of events) {
-        if (ev.kind === 'tool') {
-            const rec = normalizeToolCall(ev.name, ev.input, ev.response, lane.state.cwd || '');
-            if (rec) emitActivity(ctx, books, id, 'kimi', rec);
-        } else if (ev.kind === 'message') {
-            const rec = normalizeMessage(ev.mtype, ev.text);
-            if (rec) emitActivity(ctx, books, id, 'kimi', rec);
-        }
-    }
-    const s = lane.state, meta = {};
-    for (const k of ['cwd', 'title', 'model', 'modelAlias', 'provider', 'createdAt', 'firstTs', 'lastTs']) {
-        if (s[k] != null && lane.metaSent[k] !== s[k]) { meta[k] = s[k]; lane.metaSent[k] = s[k]; }
-    }
-    if (Object.keys(meta).length) books.setLaneMeta(id, { harness: 'kimi', ...meta });
-}
-
-/** A hook event for a Claude session gomuxai's hub already books (GomuxHub.follows):
- *  the hub reads that transcript itself, so the hook's copy draws nothing. */
-const followed = (id, agent) => ({ text: `OK: ${id} — gomuxai's ${agent} follows this session`, data: { id, followedBy: agent } });
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -194,7 +81,7 @@ export default function registerAgentCommands(router) {
         }
         // Positional record. Fields that carry spaces/quotes (detail, result) arrive intact
         // via the `call` hatch (base64'd arg vector); a bare typed line still works for the
-        // simple <id> <type> <action> <target> case. (Live agents arrive via agent.tool instead.)
+        // simple <id> <type> <action> <target> case.
         const [id, type, action] = args;
         const target = args[3] || '';
         const detail = args[4] || '';
@@ -203,7 +90,14 @@ export default function registerAgentCommands(router) {
         // hatch coerces non-string args to strings, so meta rides as a JSON STRING; accept
         // that or a direct object. A bare typed line just omits it.
         const meta = parseJSONArg(args[6]);
-        const label = emitActivity(ctx, books, id, type, { action, target, detail, result, meta });
+        // An open file's registry id is its canonical path — an exact lookup, so `/a/b.js`
+        // never lands on an open `b.jsx`.
+        let label = target || null;
+        if (target) {
+            const key = canonicalPath(ctx, target);
+            if (ctx.registry?.has?.(key)) label = key;
+        }
+        books.activity(id, type, { action, target: label, detail, result, meta });
         const echo = [label, detail, result].filter(Boolean).join('  ');
         return {
             text: `OK: ${id} ${action}${echo ? ' ' + echo : ''}`,
@@ -211,146 +105,46 @@ export default function registerAgentCommands(router) {
         };
     }, { description: "Agent acted — page a sheet into its book", usage: '<id> <type> <action> [target] [detail] [result]' });
 
-    router.register('agent.tool', (args, ctx) => {
-        const books = ctx.agentBooks;
-        if (!books) return noBooks;
-        if (args.length < 3) {
-            return { text: 'ERR: usage: agent.tool <id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]', data: null };
-        }
-        // The RAW tool event — both the live Go hook and the replay forward it here and let the
-        // ONE tool registry derive action/target/detail/result/meta. input/response ride as JSON
-        // strings (the `call` hatch String-coerces objects), parsed back here.
-        const [id, type, name] = args;
-        const input = parseJSONArg(args[3]) || {};
-        const response = parseJSONArg(args[4]);
-        const cwd = typeof args[5] === 'string' ? args[5] : '';
-        const rec = normalizeToolCall(name, input, response, cwd);
-        if (!rec) return { text: `OK: ${name} dropped (noise)`, data: { dropped: name } };   // TodoWrite/ToolSearch/…
-        // The delta lane taps the SAME normalized record (before the label rewrite —
-        // it needs the cwd-relative target to key files on disk); unwatched ids fall through.
-        ctx.deltaBooks?.ingestTool?.(id, rec, cwd);
-        const follower = ctx.gomuxHub?.follows(id);
-        if (follower) return followed(id, follower);
-        const label = emitActivity(ctx, books, id, type, rec);
-        return {
-            text: `OK: ${id} ${rec.action}${label ? ' ' + label : ''}`,
-            data: { id, action: rec.action, target: label, detail: rec.detail },
-        };
-    }, { description: 'Agent tool call (raw event) — normalized via the tool registry, then paged in', usage: '<id> <type> <ToolName> [inputJSON] [responseJSON] [cwd]' });
-
-    router.register('agent.message', (args, ctx) => {
-        const books = ctx.agentBooks;
-        if (!books) return noBooks;
-        if (args.length < 4) {
-            return { text: 'ERR: usage: agent.message <id> <type> <kind> <text>', data: null };
-        }
-        // A conversation turn — the agent's prose, not a tool call. The hook reads
-        // `text`/`thinking` blocks off the transcript and forwards them here (same
-        // pure-transport contract as agent.tool): the ONE registry maps kind→action
-        // (say/think). text rides the `call` hatch so its newlines/quotes survive the
-        // tokenizer. A whitespace-only block drops (normalizeMessage → null).
-        const [id, type, kind] = args;
-        const follower = ctx.gomuxHub?.follows(id);
-        if (follower) return followed(id, follower);
-        const text = typeof args[3] === 'string' ? args[3] : String(args[3] ?? '');
-        const rec = normalizeMessage(kind, text);
-        if (!rec) return { text: `OK: ${kind} dropped (empty)`, data: { dropped: kind } };
-        emitActivity(ctx, books, id, type, rec);
-        return {
-            text: `OK: ${id} ${rec.action}`,
-            data: { id, action: rec.action },
-        };
-    }, { description: 'Agent conversation turn (text/thinking) → a say/think sheet in its book', usage: '<id> <type> <kind> <text>' });
-
-    router.register('agent.meta', (args, ctx) => {
-        const books = ctx.agentBooks;
-        if (!books) return noBooks;
-        if (args.length < 2) return { text: 'ERR: usage: agent.meta <id> <json>', data: null };
-        // Provenance push from the Go hook (claude) — slug/title/model/cwd/gitBranch, sent
-        // once per session on the first transcript flush. Merges onto the lane and rebakes
-        // its nameplate. The lane may not exist yet (meta can beat the first tool event).
-        const [id] = args;
-        const follower = ctx.gomuxHub?.follows(id);
-        if (follower) return followed(id, follower);
-        const meta = parseJSONArg(args[1]);
-        if (!meta) return { text: 'ERR: agent.meta needs a JSON object', data: null };
-        books.ensure(id, typeof meta.harness === 'string' ? meta.harness : 'agent');
-        const ok = books.setLaneMeta(id, meta);
-        return ok
-            ? { text: `OK: ${id} meta`, data: { id, meta } }
-            : { text: `ERR: no agent '${id}'`, data: null };
-    }, { description: 'Agent provenance metadata (slug/title/model/cwd/…) → lane + nameplate', usage: '<id> <json>' });
-
-    router.register('agent.kimi-wire', (args, ctx) => {
-        const books = ctx.agentBooks;
-        if (!books) return noBooks;
-        if (args.length < 2) return { text: 'ERR: usage: agent.kimi-wire <id> <line>', data: null };
-        // Live kimi ingress: the Go hook (--kimi) tails the session's wire.jsonl on each
-        // harness poke and ships RAW lines here — the ONE dialect implementation
-        // (kimiWireLineToEvents, shared with the archive parse) translates them, so live
-        // and archive can never drift. The lane id was derived Go-side (lockstep mirror
-        // of kimiAgentIdForSession); the lane is ensured with the kimi type.
-        const [id, line] = args;
-        let obj;
-        try { obj = JSON.parse(line); }
-        catch (e) {
-            // Dropped, not fatal — but said: a dialect change upstream would otherwise go dark.
-            console.warn(`[agent.kimi-wire] ${id}: malformed wire line dropped (${e.message}): ${line}`);
-            return { text: 'OK: wire line dropped (malformed)', data: null };
-        }
-        books.ensure(id, 'kimi');
-        let lane = kimiWireLanes.get(id);
-        if (!lane) {
-            lane = { state: createKimiWireState(), pending: [], timer: null, metaSent: {} };
-            kimiWireLanes.set(id, lane);
-        }
-        lane.pending.push(...kimiWireLineToEvents(obj, lane.state));
-        // Sink on a 0ms debounce: a tool.call emits with response null and its tool.result
-        // (a later line in the SAME poke's flush) fills it in place — translating the whole
-        // batch before normalizing means live sheets carry the responses the archive would.
-        if (!lane.timer) lane.timer = setTimeout(() => flushKimiWireLane(ctx, books, id, lane), 0);
-        return { text: `OK: ${id} wire`, data: { id } };
-    }, { description: 'One raw kimi wire.jsonl line → shared dialect → tool/message events (live kimi ingress)', usage: '<id> <line>' });
-
     router.register('agent.sessions', async (_args, ctx) => {
-        const provider = ctx.sessionProvider;
-        if (!provider) return { text: 'ERR: no session provider (the archive is a relay feature)', data: null };
+        if (!ctx.sessionProvider) return noSessions;
         let sessions;
-        try { sessions = await provider.list(); }
-        catch (e) { return { text: `ERR: archive list failed — ${e?.message || e}`, data: null }; }
+        try { sessions = await sessionList(ctx); }
+        catch (e) { return { text: `ERR: session list failed — ${e?.message || e}`, data: null }; }
         const open = new Set([...(ctx.agentBooks?.lanes.keys() ?? [])]);
         const rows = sessions.map((s) => {
-            const isOpen = open.has(agentIdForEntry(s));
-            const tag = s.harness && s.harness !== 'claude' ? s.harness.padEnd(7) : '';
-            return `${agentIdForEntry(s)}  ${tag}${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
+            const lane = laneForSession(s);
+            const who = s.workgroup ? `${s.workgroup.name} (workgroup)` : s.title || s.agent_name || s.project || '';
+            return `${s.session_id}  ${String(s.harness || '').padEnd(6)} ${String(s.status || '').padEnd(10)} `
+                + `${fmtAge(Date.parse(s.mtime)).padStart(4)}  ${fmtSize(s.size || 0).padStart(6)}  ${who}${open.has(lane) ? '  · open' : ''}`;
         });
         return {
-            text: `ARCHIVE (${sessions.length} session${sessions.length === 1 ? '' : 's'})\n` + (rows.length ? rows.join('\n') : '(none)'),
-            data: { sessions: sessions.map((s) => ({ id: s.id, mtime: s.mtime, size: s.size, harness: s.harness || 'claude', open: open.has(agentIdForEntry(s)) })) },
+            text: `SESSIONS (${sessions.length})\n` + (rows.length ? rows.join('\n') : '(none)'),
+            data: { sessions: sessions.map((s) => ({
+                id: s.session_id, lane: laneForSession(s), harness: s.harness, status: s.status, mtime: s.mtime, size: s.size,
+                title: s.title || null, workgroup: s.workgroup?.name || null, parent: s.parent_session?.session_id || null,
+                open: open.has(laneForSession(s)),
+            })) },
         };
-    }, { description: 'List the stored agent session records (the archive)', returns: '{ sessions:[{id,mtime,size,open}] }' });
+    }, { description: 'List every agent session on the host (workgroup and local) — the relay\'s session list', returns: '{ sessions:[{id,lane,harness,status,mtime,size,title,workgroup,parent,open}] }' });
 
     router.register('agent.open', async (args, ctx) => {
-        const provider = ctx.sessionProvider;
-        if (!provider) return { text: 'ERR: no session provider (the archive is a relay feature)', data: null };
+        if (!ctx.sessionProvider || !ctx.sessionBooks) return noSessions;
         if (!ctx.agentBooks) return noBooks;
         const [idArg, limitArg] = args;
-        if (!idArg) return { text: 'ERR: usage: agent.open <sessionId|prefix> [limit]', data: null };
+        if (!idArg) return { text: 'ERR: usage: agent.open <session|prefix|name> [limit]', data: null };
         try {
-            const entry = await resolveSessionEntry(provider, idArg);
+            const s = resolveSession(await sessionList(ctx), idArg);
             const limit = limitArg != null ? Number(limitArg) : undefined;
-            const r = await openAgentSession(ctx, entry.id, { limit, harness: entry.harness });
-            // offset > 0 = a tail window (the record is deeper than what was read);
-            // an offset-0 open can still be capped by the book's quota.
-            const capped = r.offset > 0 ? ' (tail)' : r.added < r.total ? ` (of ${r.total} — tail)` : '';
+            const r = await openSession(ctx, s, { limit });
+            const capped = r.whole ? (r.added < r.total ? ` (of ${r.total} — tail)` : '') : ' (tail)';
             return {
-                text: `OK: opened ${entry.id.slice(0, 8)} as ${r.agentId} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}`,
-                data: { sessionId: entry.id, harness: entry.harness || 'claude', ...r },
+                text: `OK: opened ${s.session_id} as ${r.lane} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}, following`,
+                data: { sessionId: s.session_id, harness: s.harness, ...r },
             };
         } catch (e) {
             return { text: `ERR: ${e?.message || e}`, data: null };
         }
-    }, { description: 'Open a stored session as an agent book (hydrates via the adapter; a live stream converges). limit = turns to keep (0 = all) — sets the book\'s cap', usage: '<sessionId|prefix> [limit]' });
+    }, { description: 'Open an agent session as a book (its event stream: the recent tail, then live). limit = records to keep (0 = all) — sets the book\'s cap', usage: '<session|prefix|name> [limit]' });
 
     router.register('agent.spawn', (args, ctx) => {
         const books = ctx.agentBooks;
@@ -394,7 +188,7 @@ export default function registerAgentCommands(router) {
         return ok
             ? { text: `OK: cleared ${target}`, data: { id: target } }
             : { text: `ERR: no agent '${target}'`, data: null };
-    }, { description: "Remove an agent's book, or all/done ('done' books persist until cleared)", usage: '<id|all|done>' });
+    }, { description: "Remove an agent's book, or all/done ('done' books persist until cleared) — its stream stops following", usage: '<id|all|done>' });
 
     router.register('agent.request', (args, ctx) => {
         const books = ctx.agentBooks;

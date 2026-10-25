@@ -26,7 +26,7 @@
  * forward; page back to inspect history and the head holds (Book's deck: the open sheet
  * fronts at z = 0, older ones recede, the newer ones paged past lie pressed at the back).
  * Paging never moves the camera. A tab per sheet across the top edge is the TIMELINE:
- * the sheet's turn number in the whole run, hued by action kind, the open one raised.
+ * the sheet's number in the whole run, hued by action kind, the open one raised.
  *
  * PER-TURN SNAPSHOTS (not dedup): each action renders its OWN copy of the file's
  * content AS IT WAS at that moment — a re-read after an edit shows the new content, so
@@ -39,9 +39,20 @@
  * the root registers as a world grouping beside the ContentTree — the agent stream is
  * a peer layout target to the file tree. A dragged book pins where you put it.
  *
- * The hook stream carries both TOOL CALLS and CONVERSATION — `text` blocks page in as
- * `say` sheets, `thinking` blocks as `think` sheets — so a book reads as a faithful
- * forward of the run: reasoning, speech, and action interleaved in time.
+ * A book's content is gomuxai's EVENT STREAM for its session (agentEvents.js — gomuxai
+ * is the one reader of transcripts; the app's SessionBooks opens it: hydrate from a tail
+ * read, then applyEvents as the follow pushes lines). One sheet per EVENT, 1:1 and never
+ * grouped, so a book reads as a faithful forward of the run: every message INTO the agent
+ * is a `prompt` sheet as first-class as a file read — tagged by whose words it is
+ * (`[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
+ * `[harness]`), its words set in the prompt hue — beside `think` (a redacted block says
+ * so), `say` (a final reply marked), tool and `system` sheets; a call the tool table calls
+ * noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt
+ * it belongs to: id + index; the HUD reads the open sheet's) so a later layer may group by
+ * it. An event
+ * that changes (a tool's result landing, a provisional reply confirmed) arrives again
+ * under its id and its sheet is rebuilt IN PLACE: same index, same number, the deck and
+ * the head unmoved.
  *
  * Lifecycle rides the lane, not the scene: active → stalled after a quiet spell
  * (cfg.stallMs), done on agent.stop — and PERSISTS until agent.clear (small fast
@@ -61,8 +72,9 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { toFileUri } from '../core/fileUri.js';
-import { decorateForAction, kindForAction, ACTION_HUES, cssHue, normalizeToolCall, normalizeMessage } from './toolRegistry.js';
-import { eventsToRecords } from '../workers/sessionParseJob.js';
+import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from './toolRegistry.js';
+import { eventRecord, eventFacts, eventLane, sessionMeta, parseEventSlice } from './agentEvents.js';
+/** @import { EventChange } from './agentEvents.js' */
 import { yieldToFrame } from '../utils/frameYield.js';
 
 export const AGENT_BOOKS_DEFAULTS = {
@@ -93,12 +105,15 @@ export const AGENT_BOOKS_DEFAULTS = {
     // -- the content page (recto) -------------------------------------------------------
     snapContextRows: 8,         // file snapshot: rows of context above/below the touched range
     snapMaxRows: 60,            // file snapshot: window height in rows (a longer file is framed, 0 = whole file)
-    // -- the timeline tabs (one per sheet: turn number, hued by action kind) ----------
+    // -- the timeline tabs (one per sheet: its number in the run, hued by action kind) ----------
     tabs: true,                 // bind the per-sheet tabs across each book's top edge
     tabLine: 0.018,             // tab text row height, × pageH
     artifactWorldScale: 0.025,  // worldScale of file-snapshot / output cards (fine print you fly into)
-    messageScale: 0.05,         // worldScale of say/think prose — its OWN knob (prose reads bigger)
-    proseWrapCols: 72,          // say/think prose word-wraps to this many columns (a page-shaped column, not a 200-wide strip; 0 = the fold's default)
+    messageScale: 0.05,         // worldScale of prose (prompt/say/think/system) — its OWN knob (prose reads bigger)
+    proseWrapCols: 72,          // prose (prompt/say/think/system) word-wraps to this many columns (a page-shaped column, not a 200-wide strip; 0 = the fold's default)
+    promptTextLift: 0.6,        // a prompt's words: the prompt hue lifted toward white (0 = hue, 1 = white) — whose words they are reads at a glance
+    showNoise: true,            // tool calls the tool table calls noise (ToolSearch, TodoWrite…): true gives each its sheet, set quietly (1:1 events); false hides them (new events)
+    noiseTextLift: 0.15,        // a noise sheet's headline + output: the dim noise hue lifted this far toward white (0 = hue) — kept low so it reads as background
     snapshotImageWidth: 40,     // world width of an image recto (height follows aspect)
     highlightFillOpacity: 0.22, // decorate FILL bar opacity (0 falls back to additive tint)
     // -- the cluster ---------------------------------------------------------------
@@ -107,22 +122,18 @@ export const AGENT_BOOKS_DEFAULTS = {
     floorY: 0,                  // world floor the cluster's bottom rests on (the file tree's convention)
     // -- lifecycle -----------------------------------------------------------------
     stallMs: 12000,             // active → stalled after this quiet spell
-    maxSheets: 20,              // newest turns a book keeps IN SPACE (sheets are GPU objects) —
+    maxSheets: 20,              // newest sheets a book keeps IN SPACE (sheets are GPU objects) —
                                 // live growth sheds its oldest past this, a session hydration
                                 // materializes only this tail; 0 = unbounded. Per-book override:
                                 // book.limit / agent.open's limit arg (lane.maxSheets).
-    tailReadBytes: 512 * 1024,  // first transcript tail window a hydration requests (bytes);
+    tailReadBytes: 512 * 1024,  // first transcript tail an open asks for (agentEvents/read {tail}, bytes);
                                 // doubles until the window holds maxSheets events (tail-grow —
                                 // a transcript costs its readable tail, not its full history)
-    // -- history (paging back past the resident turns) --------------------------------
+    // -- history (paging back past the resident sheets) --------------------------------
     historyLead: 3,             // paging to within this many sheets of the window's oldest one prefetches older records
     historyTurns: 20,           // records one older read brings into the buffer
-    historySliceBytes: 256 * 1024, // first byte span read for an older slice (doubles until it holds historyTurns)
-    historyOverlapBytes: 256 * 1024, // bytes read PAST the cursor so a slice's last tool calls pair with their results
+    historyOverlapBytes: 256 * 1024, // bytes read PAST the window's end so its last tool calls pair with their results
     historyBuffer: 400,         // parsed records a book keeps BESIDE its window (older + newer) — no GPU cost; past it the far ones drop (re-readable)
-    headMetaBytes: 64 * 1024,   // head window re-harvesting the provenance a tail can't see
-                                // (ai-title/agent-name/turn.prompt sit near the file's start);
-                                // read only when the tail's meta lacks a title. 0 disables.
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds
@@ -172,7 +183,7 @@ function fmtMeta(meta, sep = ' · ') {
  * @returns {{verb:string, head:string, rest:string}}
  */
 export function actionCall(rec) {
-    const verb = rec?.action || 'act';
+    const verb = rec?.tag || rec?.action || 'act';
     const splitFirst = (s) => {
         const lines = String(s).split('\n');
         const i = lines.findIndex((l) => l.trim());
@@ -181,9 +192,18 @@ export function actionCall(rec) {
     };
     if (rec?.target) return { verb, head: rec.target, rest: String(rec.detail || '') };
     if (rec?.detail) return { verb, ...splitFirst(rec.detail) };
-    if (verb === 'say' || verb === 'think') return { verb, head: splitFirst(rec?.result || '').head, rest: '' };
+    if (PROSE_ACTIONS.has(rec?.action)) return { verb, head: splitFirst(rec?.result || '').head, rest: '' };
     return { verb, head: '', rest: '' };
 }
+
+/** The actions whose content IS prose — a message in (prompt), the agent's speech and
+ *  reasoning (say/think), the harness speaking (system): set at message scale, wrapped to a
+ *  page column, and named by their verb alone on the nameplate. */
+const PROSE_ACTIONS = new Set(['prompt', 'say', 'think', 'system']);
+
+/** A sheet's info rows: the tool table's numeric meta, then the event's own facts (its
+ *  turn, a call's status, a final reply…). */
+const infoOf = (record) => [fmtMeta(record.meta, '\n'), ...eventFacts(record)].filter(Boolean).join('\n');
 
 /**
  * Where a file snapshot's window sits: the touched runs (meta.range — a partial read's
@@ -375,7 +395,8 @@ export default class AgentBooks {
 
     /**
      * One activity record → a SHEET (description verso, content recto) paged into the
-     * agent's book. The shared sink for agent.activity / agent.tool / agent.message.
+     * agent's book. The shared sink for the event stream (applyEvents, hydrate) and the
+     * manual agent.activity verb.
      * @param {string} agentId
      * @param {string} agentType
      * @param {{action:string, target?:string, detail?:string, result?:string, meta?:Object}} record
@@ -389,7 +410,7 @@ export default class AgentBooks {
         if (!this._batch) lane.wallTs = Date.now();   // a hydration replays history — its age is meta.lastTs
 
         if (lane.newer?.length || (lane.history && !lane.book.following && lane.entries.length)) {
-            // The window is held away from the live end (you're reading back): a live turn
+            // The window is held away from the live end (you're reading back): a live sheet
             // waits as a record beyond the window — the book doesn't shift under you. Paging
             // past the newest sheet (or `live`) slides it in.
             (lane.newer ??= []).push({ record, seq: lane.seq++ });
@@ -400,7 +421,7 @@ export default class AgentBooks {
         const { sides, entry } = this._buildSheet(lane, record, seq);
         lane.book.addSheet(sides);
         lane.entries.push(entry);
-        this._trimLane(lane);   // past the cap, the oldest turn leaves as the newest lands
+        this._trimLane(lane);   // past the cap, the oldest sheet leaves as the newest lands
         if (!this._batch) { this._refreshNameplate(lane); this._relayout(); this._emitChange(); }
         return lane;
     }
@@ -408,13 +429,15 @@ export default class AgentBooks {
     /**
      * Build one record's sheet — the verso (the action call, composed at world size) and
      * the recto (its content) — without placing it. activity appends it; an older slice
-     * paged in from history inserts it at the front. @private
+     * paged in from history inserts it at the front; an event's update rebuilds it in
+     * place as revision `rev` (its own card ids — a card of the replaced build that loads
+     * late finds no sheet and stays out of the registry). @private
      * @returns {{sides: {verso:Object, recto:Object|null, meta:{seq:number, kind:string}}, entry: Object}}
      */
-    _buildSheet(lane, record, seq) {
+    _buildSheet(lane, record, seq, rev = 0) {
         const agentId = lane.agentId;
         const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
-        const sheetId = `agent:${agentId}:${seq}`;
+        const sheetId = rev ? `agent:${agentId}:${seq}~${rev}` : `agent:${agentId}:${seq}`;
         const actionId = `${sheetId}:action`;
         const bodyId = `${sheetId}:body`;
         const infoId = `${sheetId}:info`;
@@ -424,12 +447,12 @@ export default class AgentBooks {
         // VERSO — the description page, composed at world size: the headline (`[verb]` +
         // the call's first line), the call's remaining lines, then its numeric meta.
         const call = actionCall(record);
-        const infoText = fmtMeta(record.meta, '\n');
+        const infoText = infoOf(record);
         const sz = this._versoSizes(call, infoText);
         const action = this._card(`[${call.verb}]`, wrapText(call.head, sz.head.cols), {
             worldScale: CARD_WORLD_SCALE, gridScale: sz.head.gridScale,
             layout: { wrapWidth: sz.head.cols, zWrapSpacing: 0 },
-            filenameColor: hue, textColor: liftHue(hue, this.cfg.callTextLift),
+            filenameColor: hue, textColor: liftHue(hue, record.action === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
         }, { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         let body = null;
         if (call.rest) {
@@ -450,9 +473,10 @@ export default class AgentBooks {
         // RECTO — the content page: the file as-of now / the output / the prose / the image.
         // One home each: the verso holds the action's INPUT; the result lives here. A file's
         // content IS its snapshot; a no-target action's output (bash/grep/say/think) rides the
-        // record raw — EPHEMERAL, no path to re-read. Ships RAW; the fit frames it.
+        // record raw — EPHEMERAL, no path to re-read. A file action that carries a result
+        // (it failed: the error is the content) shows that instead. Ships RAW; the fit frames it.
         let recto = null, hasSnapPick = false, snapScaleKey = null;
-        if (record.target) {
+        if (record.target && !record.result) {
             const kind = classifyByExtension(record.target);
             if (kind?.kind === 'image') {
                 recto = this._imageSnapshot(record.target, kind.format, lane, sheetId);
@@ -464,7 +488,7 @@ export default class AgentBooks {
             }
         } else if (record.result) {
             recto = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
-            snapScaleKey = (record.action === 'say' || record.action === 'think') ? 'messageScale' : 'artifactWorldScale';
+            snapScaleKey = PROSE_ACTIONS.has(record.action) ? 'messageScale' : 'artifactWorldScale';
             hasSnapPick = true;
         }
 
@@ -475,19 +499,19 @@ export default class AgentBooks {
                 call, infoText, window: null,   // window: the snapshot's framed line range, once loaded
                 pickMeta: meta,                 // the cards' shared registry meta (agentId, seq, sheetId, record)
                 actionId, bodyId: body ? bodyId : null, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null,
-                record, ts: this._now(),
+                record, rev, ts: this._now(),
             },
         };
     }
 
     /**
-     * Bulk-hydrate a lane from a session record's events (the sessionAdapter's output) —
-     * restoration reads the harness's OWN record back through the same normalize path the
-     * live hook takes, so a restored book and that session's still-live stream converge on
-     * one lane. One layout pass for the whole read (the batch discipline): per-event
-     * relayouts are suppressed while building and a single flow lands at the end.
+     * Bulk-hydrate a lane from a window of its session's event records (parseEventSlice over
+     * an `agentEvents/read`) — the open's first read, before the follow takes over through
+     * applyEvents; both build sheets through activity(), so a hydrated book and a live-fed
+     * one hold the same records. One layout pass for the whole read (the batch discipline):
+     * per-record relayouts are suppressed while building and a single flow lands at the end.
      *
-     * Only the newest turns materialize — the lane's retention cap (its override, else
+     * Only the newest sheets materialize — the lane's retention cap (its override, else
      * cfg.maxSheets) bounds hydration exactly as it bounds live growth: sheets are GPU
      * objects, and a monster transcript opens as its readable tail. An explicit `limit`
      * BECOMES the book's override (n>0 caps it, 0 unbounded — the whole record), so a
@@ -497,22 +521,19 @@ export default class AgentBooks {
      * yielding a frame between them — a deep history no longer lands as one long task that
      * starves every await queued behind it (the restore lanes run CONCURRENTLY, so one
      * lane's block inflates the others' wall times). The batch flag stays HELD across the
-     * yields: no mid-build relayout, no half-built book visible — and a live hook event
-     * landing mid-hydrate just batches into the same closing relayout.
+     * yields: no mid-build relayout, no half-built book visible — and a live event landing
+     * mid-hydrate just batches into the same closing relayout.
      * @param {string} agentId
-     * @param {Array} events - raw adapter events ({kind:'tool'|'message', …}) OR
-     *        pre-normalized records ({action, target, …}) — the codec normalizes in the
-     *        worker, so what arrives here is usually records already; either way
-     *        eventsToRecords interprets each entry in exactly one place
-     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number,
+     * @param {Object[]} records - event records (eventRecord's shape), oldest first
+     * @param {{agentType?:string, sessionId?:string|null, meta?:Object|null, limit?:number, budgetMs?:number,
      *          seqBase?:number, seqExact?:boolean}} [opts] seqBase = records of the session that
-     *        precede `events` (the tail the read skipped) — a fresh lane numbers its turns from
-     *        there, so a sheet's turn is its place in the whole run; seqExact false = the read
+     *        precede `records` (the tail the read skipped) — a fresh lane numbers its sheets from
+     *        there, so a sheet's number is its place in the whole run; seqExact false = the read
      *        never reached the record's start, so that count is a floor
      * @returns {Promise<number>} sheets added
      */
-    async hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', meta = null, limit, budgetMs = 8,
-                                    seqBase = 0, seqExact = true } = {}) {
+    async hydrate(agentId, records, { agentType = 'claude', sessionId = null, meta = null, limit, budgetMs = 8,
+                                     seqBase = 0, seqExact = true } = {}) {
         const lane = this.ensure(agentId, agentType);
         if (lane.seq === 0) { lane.seq = Math.max(0, Math.floor(seqBase) || 0); lane.seqExact = seqExact; }
         if (sessionId) lane.sessionId = sessionId;
@@ -523,14 +544,14 @@ export default class AgentBooks {
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
-        const slice = events.length > cap ? events.slice(-cap) : events;
-        const records = eventsToRecords(slice, cwd);   // records pass through; noise drops
+        const slice = records.length > cap ? records.slice(-cap) : records;
         this._batch = true;
         let added = 0;
         let slice0 = performance.now();
         try {
-            for (const rec of records) {
+            for (const rec of slice) {
                 this.activity(agentId, agentType, rec);
+                this._noteEventTime(lane, rec);
                 added++;
                 if (performance.now() - slice0 > budgetMs) {
                     await yieldToFrame();
@@ -541,7 +562,8 @@ export default class AgentBooks {
             this._batch = false;
         }
         // A hydrated book renders a RECORD, not a live process — it rests at 'idle'
-        // (never stall-demoted) until a live hook event lands and marks it active.
+        // (never stall-demoted) until a live event lands and marks it active (or its
+        // owner says what the session is doing).
         this._setState(lane, 'idle');
         this._refreshNameplate(lane);   // once, after the batch — not per record
         this._relayout();
@@ -550,10 +572,128 @@ export default class AgentBooks {
     }
 
     /**
-     * agent.meta / agent.kimi-wire: merge session metadata onto a lane and restage its
-     * nameplate. Live lanes learn their title/cwd/model this way (archived ones get it
-     * through hydrate's opts.meta); an orchestrator's fields ride `meta.gomux`. Unknown
-     * lane → false.
+     * The agent event stream's changes (AgentEventReader.push) onto the books — one sheet
+     * per event, in stream order, nothing grouped:
+     *   add     → a sheet appended (held away from the live end, it waits in the newer
+     *             buffer like any live record);
+     *   update  → the event's sheet REBUILT IN PLACE — same index, same place in the run,
+     *             the head and the deck unmoved — or its record replaced where it waits in
+     *             a buffer (a tool's result landing, a provisional reply confirmed). An add
+     *             of an id a book already holds (a resumed stream re-sending its last line)
+     *             is an update too. An update of an event no book holds any more is dropped;
+     *   session → the stream's lane meta (title, model, cwd, branch, the parent link) — a
+     *             stream is one session's, so its session lines describe its own book.
+     * A stream's events are its book's (eventLane: only an old Claude transcript's sidechain
+     * records, another agent's, land in a book of their own). A lane's age is its newest
+     * event's own timestamp. One nameplate restage and one relayout for the whole batch.
+     * @param {string} streamLane the book this stream feeds
+     * @param {EventChange[]} changes
+     * @param {{agentType?:string}} [opts] agentType for a lane born here (else the session's harness)
+     * @returns {{added:number, updated:number}}
+     */
+    applyEvents(streamLane, changes, { agentType = 'claude' } = {}) {
+        let added = 0, updated = 0;
+        const touched = new Set();
+        const outer = this._batch;
+        this._batch = true;
+        try {
+            for (const c of changes) {
+                if (c.op === 'session') {
+                    const lane = this.ensure(streamLane, c.session.harness || agentType);
+                    lane.meta = { ...(lane.meta || {}), ...sessionMeta(c.session) };
+                    if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
+                    if (c.session.session_id) lane.sessionId = c.session.session_id;
+                    touched.add(lane);
+                    continue;
+                }
+                const rec = eventRecord(c.event, c.pos, { showNoise: this.cfg.showNoise });
+                if (!rec) continue;
+                const id = eventLane(c.event, streamLane, !!this.lanes.get(streamLane)?.meta?.parentSession);
+                const held = this.lanes.get(id);
+                if (held && this._replaceRecord(held, rec)) { updated++; touched.add(held); continue; }
+                if (c.op !== 'add') continue;
+                const lane = this.activity(id, held?.agentType || agentType, rec);
+                this._noteEventTime(lane, rec);
+                added++;
+                touched.add(lane);
+            }
+        } finally {
+            this._batch = outer;
+        }
+        if (!touched.size || outer) return { added, updated };
+        for (const lane of touched) this._refreshNameplate(lane);
+        this._relayout();
+        this._emitChange();
+        return { added, updated };
+    }
+
+    /**
+     * Replace the record with `rec.id` wherever this lane holds it: a resident sheet is
+     * rebuilt in place (Book.replaceSheet — its index, place in the run and deck pose kept),
+     * a buffered record is swapped. The record keeps the POSITION it was added at (`at`) —
+     * an update carries the offset of the line that changed it, and the book pages back by
+     * where the event began. @private
+     * @returns {boolean} whether the lane held it
+     */
+    _replaceRecord(lane, rec) {
+        const i = lane.entries.findIndex((e) => e.record.id === rec.id);
+        if (i >= 0) {
+            const old = lane.entries[i];
+            const next = { ...rec, at: old.record.at };
+            if (JSON.stringify(next) === JSON.stringify(old.record)) return true;
+            const seq = lane.book.sheets[i].meta.seq;
+            this._disposeEntry(old);
+            const { sides, entry } = this._buildSheet(lane, next, seq, (old.rev || 0) + 1);
+            lane.book.replaceSheet(i, sides);
+            lane.entries[i] = entry;
+            return true;
+        }
+        for (const buf of [lane.newer, lane.older]) {
+            const item = buf?.find((x) => x.record.id === rec.id);
+            if (item) { item.record = { ...rec, at: item.record.at }; return true; }
+        }
+        return false;
+    }
+
+    /** A lane's age is its newest event's own timestamp (an event record's `ts`). @private */
+    _noteEventTime(lane, rec) {
+        const t = Date.parse(rec.ts);
+        if (Number.isFinite(t) && !(lane.wallTs >= t)) lane.wallTs = t;
+    }
+
+    /**
+     * Drop a book's provisional replies (a Stop hook's reply ahead of the transcript) —
+     * what a reader does before it resumes a stream (EVENTS.md, `say`): one whose copy
+     * hasn't landed is sent again, and one whose copy landed meanwhile comes back as that
+     * copy, which a kept provisional sheet would duplicate. Resident sheets leave the deck
+     * (the deck closes up behind them); buffered records leave their buffer.
+     * @param {string} agentId
+     * @returns {number} records dropped
+     */
+    dropProvisional(agentId) {
+        const lane = this.lanes.get(agentId);
+        if (!lane) return 0;
+        let n = 0;
+        for (let i = lane.entries.length - 1; i >= 0; i--) {
+            if (!lane.entries[i].record.provisional) continue;
+            this._evict(lane, i);
+            n++;
+        }
+        for (const key of ['newer', 'older']) {
+            const buf = lane[key];
+            if (!buf?.length) continue;
+            const kept = buf.filter((x) => !x.record.provisional);
+            n += buf.length - kept.length;
+            lane[key] = kept;
+        }
+        if (n) { this._refreshNameplate(lane); this._relayout(); this._emitChange(); }
+        return n;
+    }
+
+    /**
+     * Merge metadata onto a lane and restage its nameplate — an orchestrator's fields ride
+     * `meta.gomux` (GomuxHub); a session's own provenance arrives with its stream's session
+     * lines (applyEvents) and hydrate's opts.meta. Unknown lane → false.
      * @param {string} id lane id
      * @param {Object} meta partial metadata — merged over what the lane already holds
      * @returns {boolean}
@@ -636,7 +776,10 @@ export default class AgentBooks {
      */
     nameplateText(lane) {
         const r = this.readout(lane);
-        const action = r.verb === 'say' || r.verb === 'think' ? r.verb : r.action;
+        const newest = lane.entries.length ? lane.entries[lane.entries.length - 1].record : null;
+        const gx = lane.meta?.gomux;
+        const prose = !(gx && (gx.tool || gx.detail)) && PROSE_ACTIONS.has(newest?.action);
+        const action = prose ? r.verb : r.action;
         const age = r.age ? (r.age === 'now' ? 'now' : `${r.age} ago`) : null;
         const row1 = [r.status, r.step ? `step ${r.step}` : null, age,
             r.beacon ? `needs you: ${r.beacon}` : null].filter(Boolean).join(' · ');
@@ -755,17 +898,21 @@ export default class AgentBooks {
         return hit ? hit[1].book.pageTo(index) : false;
     }
 
-    /** A book's head state (for panels/verbs), or null if it has no lane — with the
-     *  open sheet's TURN (1-based place in the whole run, not the index among kept
-     *  sheets), the run's turns so far, and whether those counts are exact. */
+    /** A book's head state (for panels/verbs), or null if it has no lane — with the open
+     *  sheet's place in the whole RUN (`sheet`, 1-based — not the index among kept sheets),
+     *  the run's sheets so far and whether those counts are exact, and the TURN the open
+     *  sheet belongs to (its event's prompt: `turn` = the turn's index, `turnId`,
+     *  `turnDerived`; null for a record no event carried). */
     headState(agentId) {
         const hit = this.resolveLane(agentId);
         if (!hit) return null;
         const lane = hit[1];
         const s = lane.book.headState();
         const seq = lane.book.sheets[s.head]?.meta?.seq;
-        const base = lane.turnBase || 0, h = lane.history;
-        return { agentId: hit[0], ...s, turn: seq != null ? seq + base + 1 : 0, turns: lane.seq + base, exact: lane.seqExact === true,
+        const turn = lane.entries[s.head]?.record?.turn ?? null;
+        const base = lane.sheetBase || 0, h = lane.history;
+        return { agentId: hit[0], ...s, sheet: seq != null ? seq + base + 1 : 0, sheets: lane.seq + base, exact: lane.seqExact === true,
+                 turn: turn ? turn.index : null, turnId: turn?.id ?? null, turnDerived: !!turn?.derived,
                  older: !!h && (!h.done || (lane.older?.length ?? 0) > 0), loading: !!h?.loading, newer: lane.newer?.length ?? 0 };
     }
 
@@ -812,7 +959,7 @@ export default class AgentBooks {
                 meta: l.meta || null,
                 count: l.book.sheets.length,
                 limit: l.maxSheets,                        // retention override (null → shelf default)
-                cap: Number.isFinite(cap) ? cap : 0,       // effective kept-turns cap (0 = unbounded)
+                cap: Number.isFinite(cap) ? cap : 0,       // effective kept-sheets cap (0 = unbounded)
                 hueIdx: l.hueIdx,
                 color: '#' + ((pal[l.hueIdx % pal.length] >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
                 head: l.book.head,
@@ -839,7 +986,7 @@ export default class AgentBooks {
                 action: e.record?.action || 'act',
                 kind,
                 color: cssHue(this.cfg.hues[kind] || this.cfg.hues.other),
-                label: [e.record?.target, e.record?.detail].filter(Boolean).join(' · '),
+                label: [e.record?.tag, e.record?.target, e.record?.detail].filter(Boolean).join(' · '),
                 ts: e.ts,
                 focused: j === head,
             };
@@ -869,7 +1016,7 @@ export default class AgentBooks {
     // -- scale / config --------------------------------------------------------------
 
     /**
-     * Cap ONE book's kept turns — the book.limit verb's engine (a hydration's explicit
+     * Cap ONE book's kept sheets — the book.limit verb's engine (a hydration's explicit
      * limit sets the same field). n > 0 caps this lane, 0 makes it unbounded, null/NaN
      * clears the override back to the shelf default (cfg.maxSheets). Over-cap sheets
      * shed immediately, oldest first.
@@ -1050,9 +1197,10 @@ export default class AgentBooks {
             { nameLh, statusLh });
     }
 
-    /** The timeline tabs' Book.bindTabs opts: a tab per sheet labelled with its TURN
-     *  number, set in a ruler across the open page's top edge (oldest left → newest
-     *  right), banded + plated in its action kind's hue (dark numerals); the open
+    /** The timeline tabs' Book.bindTabs opts: a tab per sheet labelled with its NUMBER in
+     *  the run (an event's place — the turn it belongs to is the HUD's), set in a ruler
+     *  across the open page's top edge (oldest left → newest right), banded + plated in
+     *  its action kind's hue (dark numerals); the open
      *  sheet's tab keeps its hue and stands raised + brighter — "you are here" in the
      *  run (Book.syncTabs lifts the head's tab). @private */
     _tabOpts(lane) {
@@ -1060,7 +1208,7 @@ export default class AgentBooks {
         return {
             atlas: this.atlas,
             keyOf: (sheet) => sheet.meta?.kind ?? 'other',
-            labelOf: (sheet) => (sheet.meta?.seq != null ? String(sheet.meta.seq + (lane.turnBase || 0) + 1) : ''),
+            labelOf: (sheet) => (sheet.meta?.seq != null ? String(sheet.meta.seq + (lane.sheetBase || 0) + 1) : ''),
             hueOf: (kind) => hex(this.cfg.hues[kind] || this.cfg.hues.other),
             lineHeight: this.cfg.pageH * this.cfg.tabLine,
             plateOpacity: 0.85,
@@ -1080,7 +1228,12 @@ export default class AgentBooks {
     _card(filename, body, opts, pick, lane, sheetId) {
         const grid = this._makeGrid(filename, opts);
         grid.loadFile(filename, body)
-            .then(() => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); this._settle(lane, sheetId); })
+            .then(() => {
+                // A sheet shed (or rebuilt by an event's update) while its card loaded: the
+                // card is disposed, and registering it would leave a dead entry behind.
+                if (pick && lane.entries.some((e) => e.sheetId === sheetId)) this._wireCardPick(grid, pick.id, pick.meta);
+                this._settle(lane, sheetId);
+            })
             .catch(() => { /* render best-effort */ });
         return grid;
     }
@@ -1113,10 +1266,8 @@ export default class AgentBooks {
     /**
      * The cap a hydration of this lane WOULD apply — hydrate's rule (an explicit
      * limit wins, else the lane's override, else the shelf default) without
-     * mutating anything. The parse pool pre-slices the event tail in the worker
-     * to this count, so only what the book will materialize clones back to the
-     * main thread. hydrate re-derives + re-slices identically — the slice here
-     * is transport hygiene, not semantics.
+     * mutating anything: the quota an open's tail read grows until it holds.
+     * hydrate re-derives + re-slices identically.
      * @param {string} agentId @param {number} [limit] @returns {number} cap (Infinity = unbounded)
      */
     capForHydration(agentId, limit) {
@@ -1127,7 +1278,7 @@ export default class AgentBooks {
 
     /** Shed a lane's oldest sheets past its cap. Entries and deck stay parallel arrays;
      *  each evicted sheet's cards fully release (registry, picking, GPU) and the deck
-     *  closes up behind them. A book with a history keeps each shed turn's RECORD in its
+     *  closes up behind them. A book with a history keeps each shed sheet's RECORD in its
      *  older buffer, so paging back slides it in without a read. @private @returns {number} sheets shed */
     _trimLane(lane) {
         const cap = this._capFor(lane);
@@ -1171,23 +1322,28 @@ export default class AgentBooks {
     // -- history: a sliding window over the whole run ------------------------------------
 
     /**
-     * Give a lane its HISTORY — where its older turns come from. The book is a fixed-size
+     * Give a lane its HISTORY — where its older sheets come from. The book is a fixed-size
      * WINDOW (its cap of sheets) sliding over the run: pushing past its oldest sheet slides
-     * it one turn back (the older turn materializes at the front, the newest leaves for
-     * the newer buffer), pushing past its newest slides it forward; turns outside the
+     * it one sheet back (the older sheet materializes at the front, the newest leaves for
+     * the newer buffer), pushing past its newest slides it forward; sheets outside the
      * window wait as parsed records, not GPU objects. Paging near the oldest sheet
-     * prefetches older records from the transcript (by each record's byte offset, `at`)
-     * so a slide never waits on a read. While the window is held away from the live end,
-     * live turns join the newer buffer — the book never shifts under the reader.
+     * prefetches older records from the session's event stream (`agentEvents/read`
+     * windows keyed by each record's byte offset, `at`) so a slide never waits on a read.
+     * While the window is held away from the live end, live sheets join the newer buffer —
+     * the book never shifts under the reader.
      * @param {string} agentId
-     * @param {{read: (window:{fromOffset?:number, maxBytes?:number, tailBytes?:number}) => Promise<{bytes:Uint8Array, offset:number}>,
-     *          parse: (bytes:Uint8Array, opts:Object) => Promise<{records:Array, count?:number}>,
-     *          harness: string, cwd?: string|null}} source
+     * @param {{read: (window:{from?:number, until?:number}) => Promise<{lines:string[], size?:number}>, sealed?: boolean}} source
+     *        `agentEvents/read` for the book's session: the lines AFTER the line starting at
+     *        `from` (from the start when omitted — `from` must be a line start, an event's
+     *        `at`) and before byte `until` (to the end when omitted). `sealed`: the book's
+     *        older sheets came from ANOTHER session (an agent that moved on to a new one), whose
+     *        offsets this source can't read — nothing older is read, and what was buffered
+     *        from before stays the end of the book.
      */
     setHistory(agentId, source) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
-        lane.history = { ...source, loading: null, done: false };
+        lane.history = { read: source.read, loading: null, done: !!source.sealed, starts: null };
         lane.older ??= [];
         lane.newer ??= [];
         lane.book.onPage = (head, asked) => this._onPage(lane, head, asked);
@@ -1204,12 +1360,12 @@ export default class AgentBooks {
     }
 
     /**
-     * Slide a book's window by `delta` turns (− older, + newer), keeping its size: each
-     * step materializes one turn at the leading edge and returns the trailing edge's turn
-     * to its buffer. The head lands on the leading edge (the turn you paged to). Sliding
+     * Slide a book's window by `delta` sheets (− older, + newer), keeping its size: each
+     * step materializes one sheet at the leading edge and returns the trailing edge's sheet
+     * to its buffer. The head lands on the leading edge (the sheet you paged to). Sliding
      * back past what's buffered waits for the read in flight and goes on.
      * @param {string} agentId @param {number} delta
-     * @returns {number} turns slid
+     * @returns {number} sheets slid
      */
     slide(agentId, delta) {
         const lane = this.lanes.get(agentId);
@@ -1286,8 +1442,12 @@ export default class AgentBooks {
         const from = oldest?.record?.at;
         if (!Number.isFinite(from)) return Promise.resolve(0);   // a live-born record knows no byte offset
         if (from <= 0) { this._reachedStart(lane, oldest.seq); return Promise.resolve(0); }
-        if (!lane.seqExact && !h.counting) h.counting = this._countBefore(lane, from, oldest.seq);
-        h.loading = this._readOlder(lane, from, oldest.seq).finally(() => {
+        h.loading = this._readOlder(lane, oldest.record, oldest.seq).catch((e) => {
+            // Said once per failed read, with the request's anchor: a relay-side window bug
+            // reads as itself, not as a book whose history quietly ends.
+            console.warn(`[AgentBooks] ${lane.agentId}: reading the records before byte ${from} failed —`, e?.message || e);
+            return 0;
+        }).finally(() => {
             h.loading = null;
             const pend = h.pendingBack || 0;
             h.pendingBack = 0;
@@ -1298,53 +1458,52 @@ export default class AgentBooks {
         return h.loading;
     }
 
-    /** @private */
-    async _readOlder(lane, from, fromSeq) {
+    /**
+     * Read the records before `oldest` (seq fromSeq) into the older buffer.
+     *
+     * A read names line starts (`from` must be an event's `at`), so the FIRST read goes
+     * from the transcript's start: every record before the window, which makes the sheet
+     * numbers exact (the count before it) and leaves an index of the line starts there
+     * (`history.starts`). Later reads window by that index — the lines of the
+     * historyTurns records before the oldest known one. Every window reads
+     * historyOverlapBytes PAST its end, so a call near the edge pairs with its result;
+     * what's kept is what comes before the oldest known record (by id — one line can hold
+     * several events). @private
+     */
+    async _readOlder(lane, oldest, fromSeq) {
         const h = lane.history, c = this.cfg;
-        let span = c.historySliceBytes, recs = [], start = 0;
-        for (;;) {
-            const want = Math.max(0, from - span);
-            const r = await h.read({ fromOffset: want, maxBytes: from - want + c.historyOverlapBytes });
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, base: r.offset });
-            recs = out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
-            start = r.offset;
-            if (recs.length >= c.historyTurns || start === 0 || span >= 64 * 1024 * 1024) break;
-            span *= 2;
-        }
+        const from = oldest.at;
+        const until = from + Math.max(1, c.historyOverlapBytes);
+        const starts = h.starts;
+        let before = 0;
+        if (starts) while (before < starts.length && starts[before] < from) before++;
+        const windowed = !!starts && before > c.historyTurns;
+        const r = await h.read(windowed ? { from: starts[before - c.historyTurns - 1], until } : { until });
+        const out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise });
+        const k = out.records.findIndex((x) => x.id === oldest.id);
+        const recs = k >= 0 ? out.records.slice(0, k) : out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
         // The book moved on while we read (closed, or the oldest known record changed): drop it.
-        const oldest = lane.older[0]?.record ?? lane.entries[0]?.record;
-        if (this.lanes.get(lane.agentId) !== lane || oldest?.at !== from) return 0;
+        const now = lane.older[0]?.record ?? lane.entries[0]?.record;
+        if (this.lanes.get(lane.agentId) !== lane || now?.id !== oldest.id) return 0;
+        if (!windowed) {
+            h.starts = [...new Set(recs.map((x) => x.at).filter(Number.isFinite))].sort((a, b) => a - b);
+            if (!lane.seqExact) this._setSheetBase(lane, recs.length - fromSeq);
+        }
         const take = recs.slice(-c.historyTurns);
         lane.older.unshift(...take.map((record, j) => ({ record, seq: fromSeq - take.length + j })));
-        if (start === 0 && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
+        if (!windowed && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
         return take.length;
     }
 
-    /** Count the records before byte `from` (off-thread, records not cloned back) and make
-     *  the lane's turn numbers exact: the record at `from` (seq fromSeq) is turn count+1.
-     *  Once per lane — until it lands, numbers are the open's estimate (shown `~`). @private */
-    async _countBefore(lane, from, fromSeq) {
-        const h = lane.history;
-        try {
-            const r = await h.read({ fromOffset: 0, maxBytes: from });
-            if (r.offset !== 0) return;   // the relay's read bound kept the END — can't count from the start
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, countOnly: true });
-            if (this.lanes.get(lane.agentId) !== lane) return;
-            this._setTurnBase(lane, out.count - fromSeq);
-        } catch (e) {
-            console.warn(`[AgentBooks] ${lane.agentId}: counting the turns before the window failed — numbers stay estimates:`, e?.message || e);
-        }
-    }
-
-    /** The oldest record is the run's first (seq minSeq): turn numbers become exact. @private */
+    /** The oldest record is the run's first (seq minSeq): sheet numbers become exact. @private */
     _reachedStart(lane, minSeq) {
         lane.history.done = true;
-        this._setTurnBase(lane, -minSeq);
+        this._setSheetBase(lane, -minSeq);
     }
 
-    /** Exact turn numbers from here: turn = seq + base + 1; tabs re-label in place. @private */
-    _setTurnBase(lane, base) {
-        lane.turnBase = base;
+    /** Exact sheet numbers from here: sheet = seq + base + 1; tabs re-label in place. @private */
+    _setSheetBase(lane, base) {
+        lane.sheetBase = base;
         lane.seqExact = true;
         if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));
         this._refreshNameplate(lane);
@@ -1373,16 +1532,27 @@ export default class AgentBooks {
         catch (e) { console.warn('[AgentBooks] card pick register failed', e); }
     }
 
-    /** A no-target action's OUTPUT as the recto: command result / say-think prose. Ships RAW —
-     *  the fit frames it; nothing is truncated here. Prose word-wraps to cfg.proseWrapCols
-     *  (a page-shaped column reads at a far larger fit than a 200-column strip). */
+    /** A no-target action's OUTPUT as the recto: command result / prose (a prompt, a
+     *  say/think, the harness's words). Ships RAW — the fit frames it; nothing is truncated
+     *  here. Prose word-wraps to cfg.proseWrapCols (a page-shaped column reads at a far
+     *  larger fit than a 200-column strip). A prompt's words are set in the prompt hue
+     *  (lifted by cfg.promptTextLift) under a header naming whose they are; a noise call's
+     *  output in the dim noise hue (cfg.noiseTextLift), so it reads as background. */
     _outputSnapshot(record, pick, lane, sheetId) {
-        const isMessage = record.action === 'say' || record.action === 'think';
-        const name = record.action === 'say' ? 'said' : record.action === 'think' ? 'thinking' : 'output';
+        const isMessage = PROSE_ACTIONS.has(record.action);
+        const name = record.action === 'prompt' ? (record.tag || 'prompt')
+            : record.action === 'say' ? 'said' : record.action === 'think' ? 'thinking'
+            : record.action === 'system' ? 'harness' : 'output';
         const worldScale = isMessage ? this.cfg.messageScale : this.cfg.artifactWorldScale;
         const cols = isMessage ? Math.floor(this.cfg.proseWrapCols) : 0;
         const text = String(record.result ?? '');
-        return this._card(name, cols > 0 ? wrapText(text, cols) : text, { worldScale }, pick, lane, sheetId);
+        const opts = { worldScale };
+        if (record.action === 'prompt' || record.action === 'noise') {
+            const hue = this.cfg.hues[record.action] || this.cfg.hues.other;
+            opts.textColor = liftHue(hue, record.action === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
+            opts.filenameColor = hue;
+        }
+        return this._card(name, cols > 0 ? wrapText(text, cols) : text, opts, pick, lane, sheetId);
     }
 
     /**
@@ -1395,7 +1565,7 @@ export default class AgentBooks {
      */
     _loadSnapshot(grid, record, pick, lane, sheetId) {
         const path = record.target;
-        const wire = () => { if (pick) this._wireCardPick(grid, pick.id, pick.meta); };
+        const wire = () => { if (pick && lane.entries.some((e) => e.sheetId === sheetId)) this._wireCardPick(grid, pick.id, pick.meta); };
         let win = null;
         Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
             .then((content) => this._resolveSnapshotText(path, String(content ?? '')))
@@ -1427,7 +1597,7 @@ export default class AgentBooks {
         if (!e) return;   // shed while its content loaded
         e.window = win;
         const note = `shown L${win.first + 1}–${win.last + 1} of ${win.total}`;
-        e.infoText = [fmtMeta(e.record.meta, '\n'), note].filter(Boolean).join('\n');
+        e.infoText = [infoOf(e.record), note].filter(Boolean).join('\n');
         const sz = this._versoSizes(e.call, e.infoText).info;
         const hue = this.cfg.hues[kindForAction(e.record.action)] || this.cfg.hues.other;
         if (e.info) {

@@ -13,9 +13,10 @@
  * and a desk, go through the shared Holding (ctx.holding): a carrel is a
  * RESIDENCE, the dock a VEHICLE, and docking a seated window borrows it.
  *
- * Agent books are born onto the 'agents' shelf — a cylinder like the gomuxai hub,
- * auto-created on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
- * AgentBooks.onChange). Settings ▸ Agent Books `book.autoShelf` turns it off.
+ * The 'agents' desk is the agents desk's (client/SessionDesk.js: local sessions' books, their
+ * subagents on team desks — a derived cylinder like the gomuxai hub). Any other new book no
+ * owner seats is born onto it too (scheduleCarrelSweep's auto-shelf pass, driven by
+ * AgentBooks.onChange). Settings ▸ Agent Books `book.autoShelf` turns that pass off.
  *
  * KNOBS (client/tuning.js): Settings ▸ Carrel are the values a NEW desk is born with,
  * then its owner's form (the hub's and the agents desk's cylinder — cylinderForm), then
@@ -189,8 +190,9 @@ export function restoreCarrel(ctx, saved, expected = 0) {
  *    the dock re-locks what rides, so a seated-and-docked window rides FROM its
  *    seat. Unserved claims persist as residence memory: a window reopened much
  *    later still comes home to its desk.
- * 2. AUTO-SHELF (the default residence): every NEW agent book seats at the
- *    'agents' desk, a cylinder auto-created on first need. Once per lane
+ * 2. AUTO-SHELF (the default residence): every NEW agent book no owner seated (the
+ *    agents desk and the gomuxai hub seat theirs at birth) seats at the 'agents'
+ *    desk, a cylinder auto-created on first need. Once per lane
  *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
  *    user put them. Settings ▸ Agent Books `book.autoShelf` off disarms this pass.
  * @param {AppContext} ctx
@@ -239,8 +241,10 @@ function autoShelf(ctx, map) {
     }
     if (!newcomers.length) return;
 
-    // A world sibling of the tree, born a cylinder like the gomuxai hub.
-    const shelf = existing ?? buildCarrel(ctx, AGENT_SHELF, { managed: true, form: cylinderForm() });
+    // A world sibling of the tree, born a cylinder like the gomuxai hub — the agents desk's
+    // own (derived) when it runs, so the desk has one owner however it first stood up.
+    const shelf = existing ?? ctx.sessionDesk?.tree.desk(AGENT_SHELF)
+        ?? buildCarrel(ctx, AGENT_SHELF, { managed: true, form: cylinderForm() });
     if (shelf._dissolving) return;   // folding — the newcomers keep their cluster spots
 
     for (const lane of newcomers) {

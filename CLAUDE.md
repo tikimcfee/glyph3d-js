@@ -208,13 +208,33 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
   recompute. Gate: `tools/scene-transforms.test.mjs`.
+- **Agent sessions** (`app/client/SessionBooks.js`, `services/data/AgentSessionProvider.js`):
+  gomuxai is the ONE reader of agent transcripts (its docs/EVENTS.md); the relay runs
+  `agent sessions --json` (pushed whole as `agentSessions/changed`; `agentSessions/list`) and
+  `agent transcript <session>` per followed session, and only moves lines
+  (`agentEvents/follow|unfollow|read` RPCs; `agentEvents/lines|ended` pushes). Every agent book
+  opens through SessionBooks: `read {tail}` (doubling until it holds the book's cap) → hydrate →
+  `follow {from: the last at}` → each pushed batch through `AgentEventReader` → `applyEvents`
+  (an add is a sheet, an update rebuilds its sheet in place); paging back reads
+  `read {from, until}` windows by `at`; `agentEvents/ended` (or a reconnect) drops the book's
+  provisional replies and re-follows from the last `at`. A live call that lands ok taps the
+  delta books' watch lane with its event record (meta carries an edit's patch). Lane ids:
+  a workgroup agent's gomuxai name, else the session id (`laneForSession`). The **agents desk**
+  (`app/client/SessionDesk.js`) is the `agents` cylinder: every local session (no workgroup)
+  that is live or written within `gomux.historyHours` gets a book, a session's subagents sit on
+  its own `agents/<session id>` team desk (DeskTree, the hub's rule), older sessions open on
+  demand (`agent.open <session|prefix|name>`, the Agents panel's archive — the whole session
+  list) and are seated there too; a book you clear stays closed. Restore reopens saved books
+  (by session) through the same path. Gates: `tools/session-books.test.mjs`,
+  `tools/agent-events.test.mjs`.
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
   find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
   (`gomux/changed`; `gomux/list`). Each agent shown (live, or finished within
-  `gomux.historyHours`) is an agent book whose lane id is its gomuxai name, hydrated and followed
-  through `agentEvents/*` (Command bus, above): gomuxai's events, never the transcript itself.
-  The tree is desks: the world-managed
+  `gomux.historyHours`) is an agent book whose lane id is its gomuxai name, opened from its
+  current session (the node's `sessionId`, else its transcript's path) through SessionBooks
+  (`agentEvents/*`: gomuxai's events, never the transcript itself); an
+  agent that moves on to a new session keeps its book. The tree is desks (`app/client/DeskTree.js`): the world-managed
   `gomux` carrel — born a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
   stack up to `carrel.cylinderMaxRows` before it widens past `carrel.cylinderRadius`; everything
   around you is a camera turn away); an agent with helpers gets a flat `gomux/<name>` team carrel
@@ -223,8 +243,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
   rebuilt from the tree, never saved — yet a value set on one is its own and comes back with it
-  (per-instance knobs, below). Status rides `lane.meta.gomux`. The relay names a claude
-  agent's session by its transcript's file name when export reports none. `gomux.attach <name>`
+  (per-instance knobs, below). Status rides `lane.meta.gomux` (the agent's own status wins
+  over what a live batch did to the book). The relay names a claude agent's session by its
+  transcript's file name when export reports none. `gomux.attach <name>`
   shows the agent's live tmux screen as terminal `gx-<name>`, riding beside its book (the book's
   aside — `Book.setAside`: right of the cover, height-fit to it, in its seat box) — with NO
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
@@ -263,18 +284,28 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   and slides the reading deck at most `books.turnSlide` pitches: nothing flies through the
   deck. Shift+wheel / two-finger drag page through a detent (`app/client/wheelDetent.js`,
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
-  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (turn number in the
-  run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held.
+  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (each sheet's number in
+  the run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held
+  (the turn = the open sheet's event's prompt). Fed by gomuxai's event stream
+  (`collections/agentEvents.js` reads it; `AgentBooks.applyEvents`), a book is one sheet per
+  EVENT, never grouped: prompts of every origin are first-class sheets (tagged by whose words —
+  `[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
+  `[harness]` — in the prompt hue), bookkeeping tool calls are sheets too, set in a dim noise
+  hue (`book.showNoise` off hides them), every sheet carries its turn id + index, and an event's
+  update (a tool's result, a confirmed reply) rebuilds its sheet IN PLACE (`Book.replaceSheet`).
   An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
-  (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record): pushing past its
-  oldest sheet slides it one turn back (the older turn materializes at the front, the newest
+  (`AgentBooks.setHistory` — SessionBooks gives it the session's `agentEvents/read`): pushing past its
+  oldest sheet slides it one sheet back (the older one materializes at the front, the newest
   waits as a parsed record), past its newest slides it forward, `book.page last` slides it to the
-  live end. Turns outside the window are records, not GPU objects; every parsed record carries its
-  line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches older
-  records from the transcript. The first page back counts the turns before it (off-thread) so
-  numbers are exact. While the window is held away from the live end, live turns wait beyond it
-  (the HUD's `+N newer`) — the book never grows or shifts under the reader.
-  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`.
+  live end. Sheets outside the window are records, not GPU objects; every record carries its
+  source line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches
+  older records. The first page back reads from the transcript's start — the sheets before it
+  are counted, so numbers are exact, and their line starts index later reads (a read's `from`
+  must be a line start); every window reads `historyOverlapBytes` past its end so an edge call
+  pairs with its result. While the window is held away from the live end, live sheets wait beyond it (the HUD's
+  `+N newer`) — the book never grows or shifts under the reader.
+  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`,
+  `tools/agent-events.test.mjs` (gomuxai's corpus).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

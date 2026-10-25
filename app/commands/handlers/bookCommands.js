@@ -82,9 +82,10 @@ function afterTurn(ctx, hit) {
 
 // A page-arg keyword/index, optionally preceded by an id. One trailing arg → default book.
 const splitTarget = (args) => (args.length >= 2 ? [args[0], args[1]] : [undefined, args[0]]);
-const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.turn ? ` · turn ${s.exact ? '' : '~'}${s.turn}/${s.turns}` : ''}${s.following ? ' · live' : ''}` : '');
+const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.sheet ? ` · run ${s.exact ? '' : '~'}${s.sheet}/${s.sheets}` : ''}${s.turn != null ? ` · turn ${s.turn}` : ''}${s.following ? ' · live' : ''}` : '');
 
-/** The head state a verb reports — an agent book's carries its turn in the whole run. */
+/** The head state a verb reports — an agent book's carries the open sheet's place in the
+ *  whole run and the turn it belongs to. */
 const headOf = (hit) => (hit.kind === 'agent' ? hit.books.headState(hit.agentId) : hit.book.headState());
 
 /**
@@ -111,7 +112,8 @@ export default function registerBookCommands(router) {
                 form: f ? 'fitted' : 'natural',
                 sheets: h.count,
                 head: `${h.head + 1}/${h.count}${h.following ? ' (live)' : ''}`,
-                ...(h.turn ? { turn: `${h.exact ? '' : '~'}${h.turn}/${h.turns}` } : {}),
+                ...(h.sheet ? { run: `${h.exact ? '' : '~'}${h.sheet}/${h.sheets}` } : {}),
+                ...(h.turn != null ? { turn: String(h.turn) } : {}),
                 ...(f ? { page: `${f.pageW}×${f.pageH}`, scale: r2(f.scale), content: `${r2(f.contentW)}×${r2(f.contentH)}` } : {}),
                 world: `${r2((b.min.x + b.max.x) / 2)}, ${r2((b.min.y + b.max.y) / 2)}, ${r2((b.min.z + b.max.z) / 2)}`,
             };

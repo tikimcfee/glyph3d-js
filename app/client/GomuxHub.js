@@ -1,12 +1,10 @@
 /** @import { AppContext } from './CommandProvider.jsx' */
-/** @import Carrel from '@glyph3d/core/services/interaction/Carrel.js' */
 /** @import { GomuxProvider, GomuxAgent, GomuxSnapshot } from '@glyph3d/core/services/data/GomuxProvider.js' */
+/** @import SessionBooks from './SessionBooks.js' */
 
-import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
-import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
-import { parseSession, SESSION_HARNESSES, agentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
-import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
-import { buildCarrel, cylinderForm } from '../commands/handlers/carrelCommands.js';
+import DeskTree from './DeskTree.js';
+import { LIFECYCLE } from './SessionDesk.js';
+import { cylinderForm } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
 
 /**
@@ -14,11 +12,12 @@ import { getSetting } from './settings.js';
  *
  * gomuxai (the `agent` CLI) runs agents in tmux sessions and records who spawned whom; the
  * relay watches its stores (cli/gomux.go) and pushes the tree. Here each agent becomes an
- * agent BOOK (lane id = its gomuxai name) that reads the harness's own transcript and
- * follows it live, and the tree becomes DESKS:
+ * agent BOOK (lane id = its gomuxai name) opened from its session's event stream through
+ * SessionBooks — the one open path (tail read → hydrate → follow; live lines append, a tool's
+ * result updates its sheet in place) — and the tree becomes DESKS (DeskTree):
  *
- *   the hub        — one world-managed grid carrel, `gomux`, a sibling of the file tree;
- *   a team         — an agent with helpers gets its own grid carrel, `gomux/<name>`, seated
+ *   the hub        — one world-managed carrel, `gomux`, a sibling of the file tree;
+ *   a team         — an agent with helpers gets its own carrel, `gomux/<name>`, seated
  *                    where its book would be: its own book first, then its helpers (books,
  *                    or their own teams) in spawn order. Nesting is as deep as the tree.
  *
@@ -37,20 +36,14 @@ import { getSetting } from './settings.js';
  * placing the hub — the same answer three checks running, since the load is part event-
  * and part state-driven — the camera stands at the hub's center (carrel.enter).
  *
- * The hub owns the STRUCTURE (which desk a book or team sits at) and rebuilds it from the
- * snapshot every boot — its desks are `derived`, never saved. A book the hub seated stays
- * the hub's to move when the tree changes; one you've taken elsewhere (docked, dragged,
- * seated at your own desk) is yours, and the hub leaves it alone.
- *
- * LIVE FOLLOW: the push carries each transcript's size. A grown transcript is read
- * forward from the lane's cursor (the byte after the last complete line), parsed, and
- * appended. A tool call whose result hasn't been written yet is held back — the cursor
- * stays, and the next read re-parses from it, skipping what was already committed — so a
- * Bash sheet arrives with its output instead of without it.
+ * An agent's book follows its CURRENT session (the tree's `sessionId`, else its
+ * transcript's path): a new session (the agent restarted) is opened into the same book and
+ * the old stream closed. A book you cleared stays closed.
  *
  * Status rides the lane: `lane.meta.gomux` is the agent's node (status/detail/tool/…),
  * its lifecycle maps onto the book's (processing → active, idle → idle, error → stalled,
  * exited or cleaned up → done), and `waiting` (blocked on a person) raises the book's hand.
+ * The agent's own status wins over what a live batch did to the book.
  *
  * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
  * (gomux.attach) riding beside its book — the book's aside, height-fit to the spread — as
@@ -62,39 +55,33 @@ import { getSetting } from './settings.js';
  * Read-only by construction: nothing here types into, starts, or stops an agent.
  */
 
-/** Desk name of the hub, and the team desk prefix. */
+/** Desk name of the hub. */
 export const GOMUX_HUB = 'gomux';
-const teamDesk = (name) => `${GOMUX_HUB}/${name}`;
-
-/** gomuxai status → the book's lifecycle. */
-const LIFECYCLE = { processing: 'active', waiting: 'active', idle: 'idle', error: 'stalled', exited: 'done', unknown: 'idle' };
-
-/** A held-back pending tool stops holding once the re-read window passes this — a
- *  call that never resolves (an interrupted run) must not pin the cursor forever. */
-const MAX_PENDING_BYTES = 4 * 1024 * 1024;
 
 /**
  * @typedef {Object} HubLane
- * @property {string} name
- * @property {'opening'|'open'|'failed'} phase
- * @property {number} cursor        absolute byte the next forward read starts at
- * @property {number} skip          events already committed from the window at `cursor`
- * @property {boolean} reading      a forward read is in flight
- * @property {boolean} again        the transcript grew during it — read again after
- * @property {string|null} harness
- * @property {string|null} desk     the desk the hub last seated this book at
+ * @property {string} name     the agent (and its book's lane id)
+ * @property {string} session  the session its book follows (a session id, or a transcript path)
+ * @property {{size: number|null}|null} failed  its open failed (at this transcript size)
  */
 
 export default class GomuxHub {
     /**
      * @param {AppContext} ctx
      * @param {GomuxProvider} provider
+     * @param {SessionBooks} sessionBooks the one open path
      * @param {{exec?: (cmd: string|string[]) => Promise<any>}} [opts] exec runs a verb (screens)
      */
-    constructor(ctx, provider, { exec = null } = {}) {
+    constructor(ctx, provider, sessionBooks, { exec = null } = {}) {
         this.ctx = ctx;
         this.provider = provider;
+        this.sessionBooks = sessionBooks;
         this._exec = exec;
+        this.tree = new DeskTree(ctx, {
+            hub: GOMUX_HUB, hubTitle: 'gomuxai',
+            hubForm: () => (getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
+            gap: () => getSetting('gomux.gap'),
+        });
         /** Agents whose screen the hub asked for (or that were detached) — asked once. */
         this._screens = new Set();
         /** @type {GomuxSnapshot|null} */
@@ -103,12 +90,9 @@ export default class GomuxHub {
         this.nodes = new Map();
         /** @type {Map<string, HubLane>} */
         this.lanes = new Map();
-        /** Team desks the hub built, by agent name → the desk the team sits at. */
-        this._teamParent = new Map();
-        /** Hook lane id → the agent whose book follows that Claude session. */
-        this._follows = new Map();
         this._off = provider.onChange((snap) => this.apply(snap));
         this._offPane = provider.onPaneSize((e) => this._paneSize(e));
+        this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
         this._disposed = false;
     }
 
@@ -130,8 +114,20 @@ export default class GomuxHub {
     }
 
     /**
-     * Converge on a snapshot: books for every shown agent with a transcript, the desk tree,
-     * status onto lanes, and a forward read for every transcript that grew.
+     * Where an agent's book is: 'opening' | 'open' | 'failed' | 'closed' (cleared, or its
+     * stream stopped), or null when the hub never opened one.
+     * @param {string} name @returns {string|null}
+     */
+    phase(name) {
+        const hl = this.lanes.get(name);
+        if (!hl) return null;
+        const st = this.sessionBooks.streams.get(hl.session);
+        return st && st.lane === name ? st.phase : hl.failed ? 'failed' : 'closed';
+    }
+
+    /**
+     * Converge on a snapshot: a book for every shown agent with a session, the desk tree,
+     * status onto lanes.
      * @param {GomuxSnapshot} snap
      */
     apply(snap) {
@@ -140,12 +136,17 @@ export default class GomuxHub {
         this.snapshot = snap;
         const shown = this._shown(snap);
         this.nodes = new Map(shown.map((a) => [a.name, a]));
-        this._claimSessions(shown);
         for (const a of shown) {
-            if (!a.transcript || !a.harness) continue;   // no record a dialect reads (aider, custom)
+            const session = a.sessionId || a.transcript;   // gomuxai reads a session by its id, or its transcript's path
+            if (!session) continue;                         // no record yet (or a backend that keeps none)
             const hl = this.lanes.get(a.name);
-            if (!hl) this._open(a);
-            else if (hl.phase === 'open' && (a.transcriptSize ?? 0) > hl.cursor) this._follow(a.name);
+            if (!hl) this._open(a, session);
+            else if (hl.session !== session && this.ctx.agentBooks.lanes.has(a.name)) {
+                this.sessionBooks.close(hl.session);        // the agent moved on to a new session: same book
+                this._open(a, session);
+            } else if (hl.failed && hl.failed.size !== (a.transcriptSize ?? null)) {
+                this._open(a, session);                     // its open failed; the transcript moved since — again
+            }
         }
         this._layout();
         for (const a of shown) this._status(a);
@@ -153,34 +154,25 @@ export default class GomuxHub {
         this._centerWhenSettled();
     }
 
-    /**
-     * The hub's books follow their agents' transcripts, so the project hook (which books a
-     * Claude session by its id prefix) would draw a second book for any of them working in
-     * this repo. Claim each shown agent's session: the hook's events for it defer to the
-     * hub (follows), and a hook book already born for one is cleared.
-     * @param {GomuxAgent[]} shown @private
-     */
-    _claimSessions(shown) {
-        this._follows = new Map();
-        for (const a of shown) {
-            if (a.harness !== 'claude' || !a.sessionId) continue;
-            const hid = agentIdForSession(a.sessionId);
-            if (hid !== a.name) this._follows.set(hid, a.name);
-        }
-        const books = this.ctx.agentBooks;
-        for (const [hid, name] of this._follows) {
-            if (!books.lanes.has(hid) || this.lanes.has(hid)) continue;
-            books.remove(hid);
-            console.info(`[gomux] cleared book ${hid}: gomuxai's ${name} follows that session`);
-        }
+    /** Open an agent's book from its session (SessionBooks: tail read → hydrate → follow). @private */
+    _open(a, session) {
+        /** @type {HubLane} */
+        const hl = { name: a.name, session, failed: null };
+        this.lanes.set(a.name, hl);
+        const opening = this.sessionBooks.open(session, { lane: a.name, agentType: a.harness || a.backend });
+        this._layout();   // the book was born just now: seat it before the auto-shelf sweep looks
+        // SessionBooks said why, with the session; the hub tries again once the transcript moves.
+        opening.catch(() => { hl.failed = { size: this.nodes.get(a.name)?.transcriptSize ?? null }; });
     }
 
-    /**
-     * The agent whose book follows the Claude session a hook lane id names, or null.
-     * @param {string} hookId @returns {string|null}
-     */
-    follows(hookId) {
-        return this._follows.get(hookId) ?? null;
+    /** SessionBooks' events for the hub's books: once open, status + screen; after a live
+     *  batch, the agent's own status again (a batch marks the book active). @private */
+    _stream(event, st) {
+        if (this._disposed || (event !== 'opened' && event !== 'applied')) return;
+        const node = this.nodes.get(st.lane);
+        if (!node || this.lanes.get(st.lane)?.session !== st.session) return;
+        this._status(node);
+        if (event === 'opened') this._autoScreens([node]);
     }
 
     /**
@@ -199,9 +191,8 @@ export default class GomuxHub {
         const tick = () => {
             if (this._disposed) return;
             const hub = this.ctx.carrels?.get(GOMUX_HUB);
-            const opening = [...this.lanes.values()].some((l) => l.phase === 'opening');
-            const desks = [...(this.ctx.carrels?.values() || [])].filter((d) => d.derived);
-            const moving = desks.some((d) => d.animator?.isAnimating);
+            const opening = [...this.lanes.keys()].some((name) => this.phase(name) === 'opening');
+            const moving = this.tree.desks().some((d) => d.animator?.isAnimating);
             let sig = null;
             if (hub && !opening && !moving) {
                 hub.updateWorldMatrix(true, false);
@@ -234,7 +225,7 @@ export default class GomuxHub {
         if (!this._exec || getSetting('gomux.autoScreens') === false || !this.ctx.wsbridge?.connected) return;
         for (const a of shown) {
             if (!a.live || !a.attached || this._screens.has(a.name)) continue;
-            if (this.lanes.get(a.name)?.phase !== 'open') continue;
+            if (this.phase(a.name) !== 'open') continue;
             this._screens.add(a.name);
             if (this.ctx.registry?.get(this.screenId(a.name))) continue;   // already up (a reload re-adopted it)
             Promise.resolve(this._exec(['gomux.attach', a.name])).then((r) => {
@@ -246,96 +237,11 @@ export default class GomuxHub {
     /** The agent's screen was closed on purpose — don't reopen it. */
     declineScreen(name) { this._screens.add(name); }
 
-    // ── books ────────────────────────────────────────────────────────────────
-
-    /** Open an agent's book: the transcript's tail, through the archive's one open path. */
-    async _open(a) {
-        const books = this.ctx.agentBooks;
-        const harness = a.harness;
-        /** @type {HubLane} */
-        const hl = { name: a.name, phase: 'opening', cursor: 0, skip: 0, reading: false, again: false, harness, desk: null };
-        this.lanes.set(a.name, hl);
-        books.ensure(a.name, harness);   // born now, so the hub seats it before the auto-shelf sweep looks
-        this._layout();
-        try {
-            const cap = books.capForHydration(a.name);
-            const r = await readSessionTail(this.provider, a.name, {
-                harness, cap,
-                startBytes: books.cfg.tailReadBytes,
-                headMetaBytes: books.cfg.headMetaBytes,
-                parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
-            });
-            if (this._disposed) return;
-            // Turn numbers count from the whole run: the cap's sliced-off events come first
-            // (a floor unless the window reached the transcript's start) — agent.open's rule.
-            const skipped = Number.isFinite(cap) ? Math.max(0, r.total - cap) : 0;
-            await books.hydrate(a.name, r.records, {
-                agentType: harness, sessionId: a.sessionId || null, cwd: r.cwd || a.cwd || '', meta: r.meta,
-                seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
-            });
-            // History: paging back past the kept turns reads older slices of the transcript.
-            books.setHistory(a.name, {
-                read: (window) => this.provider.read(a.name, window),
-                parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
-                harness, cwd: r.cwd || a.cwd || null,
-            });
-            hl.cursor = r.end;
-            hl.phase = 'open';
-            const node = this.nodes.get(a.name);
-            if (node) {
-                this._status(node);
-                this._autoScreens([node]);
-                if ((node.transcriptSize ?? 0) > hl.cursor) this._follow(a.name);
-            }
-        } catch (e) {
-            hl.phase = 'failed';
-            console.warn(`[gomux] ${a.name}: transcript open failed —`, e?.message || e);
-        }
-    }
-
-    /** Read a grown transcript forward and append what's complete. Single-flight per lane. */
-    async _follow(name) {
-        const hl = this.lanes.get(name);
-        if (!hl || hl.phase !== 'open') return;
-        if (hl.reading) { hl.again = true; return; }
-        if (!SESSION_HARNESSES.includes(hl.harness)) {
-            console.warn(`[gomux] ${name}: no parser for harness '${hl.harness}' — the book shows its open-time tail`);
-            hl.phase = 'failed';
-            return;
-        }
-        const node = this.nodes.get(name);
-        hl.reading = true;
-        try {
-            const r = await this.provider.read(name, { fromOffset: hl.cursor });
-            const last = r.bytes.lastIndexOf(0x0A);
-            if (last < 0) return;                                   // no complete line yet
-            const end = r.offset + last + 1;
-            // Raw adapter events (hydrate normalizes them), in the harness's own dialect.
-            const { events } = parseSession(new TextDecoder().decode(r.bytes.subarray(0, last + 1)),
-                { harness: hl.harness, cwd: node?.cwd || null });
-            const pending = events.findIndex((e) => e.kind === 'tool' && e.response == null);
-            const hold = pending >= 0 && end - r.offset < MAX_PENDING_BYTES;
-            const upto = hold ? pending : events.length;
-            const fresh = events.slice(hl.skip, upto);
-            if (hold) { hl.cursor = r.offset; hl.skip = upto; }
-            else { hl.cursor = end; hl.skip = 0; }
-            if (fresh.length && !this._disposed) {
-                await this.ctx.agentBooks.hydrate(name, fresh, { agentType: hl.harness, cwd: node?.cwd || '' });
-                if (node) this._status(node);   // hydrate rests the book at idle; the agent's own status wins
-            }
-        } catch (e) {
-            console.warn(`[gomux] ${name}: follow read failed —`, e?.message || e);
-        } finally {
-            hl.reading = false;
-            if (hl.again) { hl.again = false; this._follow(name); }
-        }
-    }
-
     /** The agent's node onto its lane: meta.gomux, lifecycle, the waiting hand. */
     _status(a) {
         const books = this.ctx.agentBooks;
         const lane = books?.lanes.get(a.name);
-        if (!lane || this.lanes.get(a.name)?.phase === 'opening') return;
+        if (!lane || this.phase(a.name) === 'opening') return;
         const g = {
             name: a.name, parent: a.parent, backend: a.backend, session: a.session,
             status: a.live ? (a.status || 'unknown') : 'exited', detail: a.detail || '', tool: a.tool || '',
@@ -353,101 +259,12 @@ export default class GomuxHub {
         }
     }
 
-    // ── desks ────────────────────────────────────────────────────────────────
-
-    /** A desk by name — built (derived) when absent, BORN in the hub's form: the hub world-
-     *  managed and a cylinder (or a wall), a team built loose as a wall and seated into its
-     *  parent's desk by the layout; every one spaced gomux.gap apart. A desk that already
-     *  stands keeps whatever it has — including values set on it by hand. */
-    _desk(name) {
-        const map = this.ctx.carrels;
-        const have = map?.get(name);
-        if (have && !have._dissolving) return have;
-        const hub = name === GOMUX_HUB;
-        const gap = Number(getSetting('gomux.gap'));
-        const boxH = Number(getSetting('carrel.boxH'));
-        const form = {
-            ...(hub && getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
-            ...(Number.isFinite(gap) && gap >= 0 && boxH > 0 ? { gapFrac: gap / boxH } : {}),
-        };
-        const desk = buildCarrel(this.ctx, name, { managed: hub, nested: !hub, form });
-        desk.derived = true;
-        return desk;
-    }
-
-    /** Set a desk's title text (a FieldLabel in the hub's chrome tint), built on first need. */
-    _title(desk, text) {
-        const atlas = this.ctx.atlas;
-        if (!atlas) return;
-        const lh = Number(getSetting('gomux.titleLine')) || 28;
-        let t = desk.title;
-        if (!t) {
-            t = new FieldLabel({ atlas, text, lineHeight: lh, plate: { color: 0x2a3a52, opacity: 0.85 } });
-            t.name = `carrel-title:${desk.carrelName}`;
-            desk.setTitle(t);
-            return;
-        }
-        if (t.text === text && t.lineHeight === lh) return;
-        t.setText(text);
-        t.setLineHeight(lh);
-        desk.setTitle(t);   // re-place + re-measure the footprint
-    }
-
-    /**
-     * Seat every book and team at its desk. An agent's place is its parent's team desk, or
-     * the hub when it has no shown parent; an agent with shown helpers is represented by its
-     * team desk there, and its book moves inside it. Spawn order is seat order.
-     */
+    /** Seat every book and team at its desk — spawn order is seat order (DeskTree). @private */
     _layout() {
-        if (!this.ctx.carrels || !this.ctx.holding) return;
-        const shown = [...this.nodes.values()];
-        const kids = new Map();
-        for (const a of shown) {
-            const p = a.parent && this.nodes.has(a.parent) ? a.parent : '';
-            if (!kids.has(p)) kids.set(p, []);
-            kids.get(p).push(a);
-        }
-        const hasTeam = (name) => (kids.get(name) || []).some((k) => this.lanes.has(k.name) || kids.has(k.name));
-        if (!shown.some((a) => this.lanes.has(a.name))) return;   // nothing to seat yet — no empty hub
-
-        const place = (parentDesk, a, order) => {
-            if (hasTeam(a.name)) {
-                const team = this._desk(teamDesk(a.name));
-                const n = (kids.get(a.name) || []).length;
-                this._title(team, `${a.name} · ${n} helper${n === 1 ? '' : 's'}`);
-                this._seatDesk(parentDesk, team, order);
-                if (this.lanes.has(a.name)) this._seatBook(team, a.name, 0);
-                (kids.get(a.name) || []).forEach((k, i) => place(team, k, i + 1));
-            } else if (this.lanes.has(a.name)) {
-                this._seatBook(parentDesk, a.name, order);
-            }
-        };
-        const hub = this._desk(GOMUX_HUB);
-        this._title(hub, 'gomuxai');
-        (kids.get('') || []).forEach((a, i) => place(hub, a, i));
-    }
-
-    /** Seat a book at a desk — unless it isn't the hub's to move any more. */
-    _seatBook(desk, name, order) {
-        const lane = this.ctx.agentBooks?.lanes.get(name);
-        const hl = this.lanes.get(name);
-        if (!lane || !hl) return;
-        const holding = this.ctx.holding;
-        const holder = holding.holderOf(lane.groupId);
-        if (holder === desk) { hl.desk = desk.carrelName; return; }
-        // The hub's to move while it sits at a hub desk (or nowhere yet); docked, dragged,
-        // or seated at your own desk, it's yours.
-        if ((holder && !holder.derived) || lane.pinned) return;
-        if (holding.seat({ id: lane.groupId, grid: lane.book }, desk, { order }) === 'seated') hl.desk = desk.carrelName;
-    }
-
-    /** Seat a team desk inside its parent desk (desks aren't cargo — the hub holds them). */
-    _seatDesk(parentDesk, team, order) {
-        const cur = this._teamParent.get(team.carrelName);
-        if (cur === parentDesk.carrelName && parentDesk.has(team.name)) return;
-        if (cur) this.ctx.carrels.get(cur)?.release(team.name);
-        parentDesk.lock(team.name, team, { order });
-        this._teamParent.set(team.carrelName, parentDesk.carrelName);
+        this.tree.layout([...this.nodes.values()].map((a) => ({
+            id: a.name, parent: a.parent, label: a.name,
+            book: this.lanes.has(a.name) && this.ctx.agentBooks?.lanes.has(a.name) ? a.name : null,
+        })));
     }
 
     // ── screens ──────────────────────────────────────────────────────────────
@@ -504,7 +321,7 @@ export default class GomuxHub {
         const out = [];
         const walk = (p, depth) => {
             for (const a of byParent.get(p) || []) {
-                out.push({ depth, agent: a, shown: this.nodes.has(a.name), book: this.lanes.get(a.name)?.phase ?? null });
+                out.push({ depth, agent: a, shown: this.nodes.has(a.name), book: this.phase(a.name) });
                 walk(a.name, depth + 1);
             }
         };
@@ -516,5 +333,6 @@ export default class GomuxHub {
         this._disposed = true;
         this._offPane?.();
         this._off?.();
+        this._offStream?.();
     }
 }

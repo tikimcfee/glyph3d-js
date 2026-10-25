@@ -56,8 +56,7 @@
 
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
 import { toFileUri } from '@glyph3d/core/core/fileUri.js';
-import { openAgentSession } from '../commands/handlers/agentCommands.js';
-import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
+import { openSession, sessionList } from '../commands/handlers/agentCommands.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { listTunings, projectTune } from './tuning.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
@@ -288,18 +287,18 @@ export default class SessionStore {
       dock3d = { layout: ctx.cameraDock?.layoutMode || 'linear', tiles, focused: ctx.cameraDock?.focusedPane || null };
     }
 
-    // Agent books: persisted BY REFERENCE — the harness's session record is the durable
-    // state, so we save WHICH sessions are open plus view intent (head, live-follow, pin,
-    // and a per-book retention override when one is set) and restore re-derives the
-    // content through the adapter. A hydrated lane knows its full session id; a hook-born
-    // lane knows only its 8-hex prefix — saved as `prefix`, resolved against the archive
-    // listing at restore.
+    // Agent books: persisted BY REFERENCE — the session's transcript is the durable state
+    // (gomuxai reads it), so we save WHICH sessions are open plus view intent (head,
+    // live-follow, pin, and a per-book retention override when one is set) and restore
+    // reopens each through the one open path. A book with no session (agent.spawn /
+    // agent.activity by hand) has nothing to reopen and isn't saved.
     const agents = [];
     for (const a of (ctx.agentBooks?.agents?.() || [])) {
       if (ctx.gomuxHub?.lanes.has(a.id)) continue;   // the gomuxai hub reopens its own books from the tree
       const lane = ctx.agentBooks.lanes.get(a.id);
-      const entry = a.sessionId ? { session: a.sessionId } : { prefix: a.id };
-      if (a.type && a.type !== 'claude') entry.harness = a.type;   // non-default harness rides along (kimi)
+      const session = ctx.sessionBooks?.streamOfLane(a.id)?.session ?? a.sessionId;
+      if (!session) continue;
+      const entry = { session };
       entry.head = a.head;
       entry.following = !!a.following;
       if (lane?.maxSheets != null) entry.limit = lane.maxSheets;
@@ -567,14 +566,16 @@ export default class SessionStore {
     }
   }
 
-  // agents — reopen the saved session books BY REFERENCE: each entry re-reads the harness's
-  // own record through the adapter (the one open path agent.open rides), then re-applies view
-  // intent. A saved retention override rides `limit` straight into the hydration (it becomes
-  // the lane's cap again); books without one follow the settings default. Per-entry guarded:
-  // a VANISHED record logs + skips (data self-heal), but an entry-level THROW quarantines the
-  // section — autosave keeps the loaded blob rather than persisting a half-restored roster
-  // over it (the 2026-08-04 wipe: 12 entry failures, phase "OK", empty agents saved).
-  // No session provider with content saved quarantines too (relay offline at launch).
+  // agents — reopen the saved session books BY REFERENCE: each entry's session (looked up in
+  // the relay's session list) reopens through the one open path agent.open rides (SessionBooks:
+  // tail read → hydrate → follow), then view intent re-applies. A session the agents desk or
+  // the hub opened already answers with that open. A saved retention override rides `limit`
+  // straight into the hydration (it becomes the lane's cap again); books without one follow
+  // the settings default. Per-entry guarded: a VANISHED session logs + skips (data
+  // self-heal), but an entry-level THROW quarantines the section — autosave keeps the loaded
+  // blob rather than persisting a half-restored roster over it (the 2026-08-04 wipe: 12 entry
+  // failures, phase "OK", empty agents saved). No session provider (or list) with content
+  // saved quarantines too (relay offline at launch).
   // Saved heads index the previous view's sheet list — a tail-capped hydration clamps them
   // (pageTo clamps).
   //
@@ -597,30 +598,33 @@ export default class SessionStore {
       if (list.length) this._failedSections.add('agents');
       return;
     }
-    const opened = [];            // per-book {agentId, added, total, bytes, ms} — the lane's cost breakdown
-    let failed = 0;               // entry-level throws — clean skips (a vanished record) self-heal, these don't
-    let archivePromise = null;   // fetched once, only if a prefix needs resolving
+    let sessions;
+    try {
+      sessions = new Map((await sessionList(this.ctx)).map((s) => [s.session_id, s]));
+    } catch (e) {
+      console.warn('[session] agent restore: no session list from the relay —', e?.message || e);
+      this._failedSections.add('agents');
+      return;
+    }
+    const opened = [];            // per-book {lane, added, total, reads, ms} — the lane's cost breakdown
+    let failed = 0;               // entry-level throws — clean skips (a vanished session) self-heal, these don't
     const open = async (a) => {
       try {
-        let sid = a.session || null;
-        if (!sid && a.prefix) {
-          archivePromise ??= provider.list();
-          const archive = await archivePromise;
-          const hits = archive.filter((s) => (s.harness || 'claude') === (a.harness || 'claude')
-            && agentIdForEntry(s) === a.prefix);
-          if (hits.length > 1) console.warn(`[session] agent book ${a.prefix}: ${hits.length} archive records share its lane id — left closed`);
-          sid = hits.length === 1 ? hits[0].id : null;
+        const s = typeof a?.session === 'string' ? sessions.get(a.session) : null;
+        if (!s) {
+          // Nothing on the host answers to this book (its transcript is gone) — it stays closed.
+          console.info('[session] agent book left closed — no such session on the host:', a?.session ?? a);
+          return;
         }
-        if (!sid) return;   // nothing on disk answers to this book — it stays closed
-        const r = await openAgentSession(this.ctx, sid, { limit: a.limit, harness: a.harness });
+        const r = await openSession(this.ctx, s, { limit: a.limit });
         opened.push(r);
-        const lane = books.lanes.get(r.agentId);
+        const lane = books.lanes.get(r.lane);
         if (!lane) return;
-        if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(r.agentId, ...a.pinned);
+        if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(r.lane, ...a.pinned);
         if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
       } catch (e) {
         failed++;
-        console.warn('[session] agent restore failed:', a.session || a.prefix, e?.message || e);
+        console.warn('[session] agent restore failed:', a?.session, e?.message || e);
       }
     };
     const POUR_WIDTH = 6;
@@ -635,22 +639,16 @@ export default class SessionStore {
     // of persisting the half-restored (or empty) roster over it.
     if (failed) this._failedSections.add('agents');
 
-    // One cost line for the lane: the Σ columns are WORK time across books (the 6-wide
-    // pour overlaps them — they don't sum to wall), so a fat lane decomposes into WHICH
-    // stage eats it: read/parse scale with the tail WINDOW (tail-grow reads only what
-    // the quota needs), hydrate with the cap.
+    // One cost line for the lane: Σopen is WORK time across books (the 6-wide pour overlaps
+    // them — it doesn't sum to wall); the slowest name their tail reads (a read that had to
+    // grow) and records.
     if (opened.length) {
       const wall = Math.round(performance.now() - t0);
-      const sum = (k) => Math.round(opened.reduce((acc, b) => acc + (b.ms?.[k] || 0), 0));
-      const mb = opened.reduce((acc, b) => acc + (b.bytes || 0), 0) / 1048576;
-      const cost = (b) => (b.ms?.read || 0) + (b.ms?.parse || 0) + (b.ms?.hydrate || 0);
-      const slowest = [...opened].sort((x, y) => cost(y) - cost(x)).slice(0, 3)
-        .map((b) => `${b.agentId} r${Math.round(b.ms.read)}/p${Math.round(b.ms.parse)}/h${Math.round(b.ms.hydrate)}ms `
-          + `${b.added}/${b.total} ev ${(b.bytes / 1048576).toFixed(1)}MB`)
+      const sum = Math.round(opened.reduce((acc, b) => acc + (b.ms || 0), 0));
+      const slowest = [...opened].sort((x, y) => y.ms - x.ms).slice(0, 3)
+        .map((b) => `${b.lane} ${b.ms}ms ${b.reads} read${b.reads === 1 ? '' : 's'} ${b.added}/${b.total} records`)
         .join(' · ');
-      console.info(`[load] restore.agents · books ${opened.length} · wall ${wall}ms · `
-        + `Σread ${sum('read')}ms · Σparse ${sum('parse')}ms · Σhydrate ${sum('hydrate')}ms · `
-        + `parsed ${mb.toFixed(1)}MB · slowest: ${slowest}`);
+      console.info(`[load] restore.agents · books ${opened.length} · wall ${wall}ms · Σopen ${sum}ms · slowest: ${slowest}`);
     }
   }
 

@@ -705,7 +705,8 @@ export const SETTINGS = [
   // autoShelf has no apply: the carrel sweep's auto-shelf pass reads this at each lane
   // birth (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
   // the next agent event.
-  // gomuxai — read by GomuxHub at each tree push. The hub's FORM and spacing are what its
+  // gomuxai — read by GomuxHub at each tree push (historyHours also by SessionDesk at each
+  // session-list push: which local sessions get books). The hub's FORM and spacing are what its
   // desks are BORN with (a desk already standing keeps its own — the HUD's Desk section);
   // its ring's radius and rows are Settings ▸ Carrel's cylinder defaults.
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
@@ -715,7 +716,7 @@ export const SETTINGS = [
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: "Space between books / teams at the hub's desks when they're built (world units)", group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },
-  { key: 'gomux.historyHours', label: 'Show finished agents from the last (h, 0 = all)', group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
+  { key: 'gomux.historyHours', label: "Show finished agents, and local sessions at the 'agents' desk, from the last (h, 0 = all)", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
@@ -751,8 +752,11 @@ export const SETTINGS = [
   { key: 'book.tabs', label: 'Timeline tabs', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.tabs, apply: agentBookParam('tabs') },
   { key: 'book.tabLine', label: 'Tab text size (× page height)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.tabLine, min: 0.001, max: 0.5, step: 0.001, apply: agentBookParam('tabLine') },
   { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.artifactWorldScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('artifactWorldScale') },
-  { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
-  { key: 'book.proseWrapCols', label: 'Message (say / think) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
+  { key: 'book.messageScale', label: 'Prose (prompt / say / think / system) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
+  { key: 'book.proseWrapCols', label: 'Prose (prompt / say / think / system) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
+  { key: 'book.promptTextLift', label: 'Prompt text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.promptTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('promptTextLift') },
+  { key: 'book.showNoise', label: 'Noise tool calls as sheets (ToolSearch, TodoWrite… in a dim hue; off hides them; new events)', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.showNoise, apply: agentBookParam('showNoise') },
+  { key: 'book.noiseTextLift', label: 'Noise sheet text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.noiseTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('noiseTextLift') },
   { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
   // The nameplate above each book: the session NAME container-fit to the spread (a share
   // of its width, row height clamped to [min, max] — past the min it wraps) over the live

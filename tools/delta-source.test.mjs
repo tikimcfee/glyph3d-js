@@ -11,14 +11,14 @@
 // sides index-aligned with spacers and honest +/− stats; (3) reconstructBase
 // walks an edit's structuredPatch hunks BACKWARD from the written file to its
 // pre-edit text — the watch lane's base capture — tolerating both hunk field
-// dialects (jsdiff oldLines / wire oldCount); (4) the tool registry retains an
-// edit's hunks on meta.patch (the watch lane's data source).
+// dialects (jsdiff oldLines / wire oldCount); (4) an edit's event record carries its
+// hunks on meta.patch (the watch lane's data source).
 
 import { structuredPatch } from 'diff';
 import {
     splitUnifiedDiff, alignTexts, alignPatch, reconstructBase, hunksToPatch,
 } from '../packages/glyph3d-core/src/services/state/deltaSource.js';
-import { normalizeToolCall } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
+import { eventRecord } from '../packages/glyph3d-core/src/collections/agentEvents.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -135,16 +135,20 @@ ok(alignTexts('same\ntext', 'same\ntext').added === 0, 'identical texts → no a
     ok(a.added === 2 && a.removed === 1, `hunksToPatch → alignPatch stats +2 −1 (got +${a.added} −${a.removed})`);
 }
 
-// --- 4. the registry retains an edit's hunks --------------------------------------
+// --- 4. an edit's event record carries its hunks -----------------------------------
 
 {
+    // gomuxai's tool table keeps an edit result's structuredPatch whole on meta.patch; the
+    // event record (what SessionBooks hands the watch lane) passes it through untouched.
     const patch = [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a', '+b'] }];
-    const rec = normalizeToolCall('Edit', { file_path: '/p/f.js', old_string: 'a', new_string: 'b' },
-        { structuredPatch: patch }, '/p');
-    ok(rec.meta?.patch === patch, 'editMeta retains the structuredPatch hunks on meta.patch');
-    ok(rec.meta.added === 1 && rec.meta.removed === 1, 'counts still derived');
-    const recNoPatch = normalizeToolCall('Edit', { file_path: '/p/f.js' }, {}, '/p');
-    ok(recNoPatch.meta.patch === undefined, 'no hunks → no patch key (meta stays lean)');
+    const ev = { type: 'event', id: 'toolu_1', op: 'update', seq: 3, at: 120, line: 2, ts: '2026-10-25T00:00:00Z',
+        kind: 'tool', tool: { name: 'Edit', input: { file_path: '/p/f.js', old_string: 'a', new_string: 'b' },
+            result: { status: 'ok' }, action: 'edit', target: 'f.js', meta: { added: 1, removed: 1, ranges: [[1, 1]], patch } } };
+    const rec = eventRecord(ev);
+    ok(rec.action === 'edit' && rec.target === 'f.js' && rec.status === 'ok', 'an edit event → an edit record on its target, ok');
+    ok(rec.meta?.patch === patch, "the record carries the edit's hunks on meta.patch");
+    const pending = eventRecord({ ...ev, tool: { ...ev.tool, result: { status: 'pending' }, meta: { added: 1, removed: 1 } } });
+    ok(pending.meta.patch === undefined, 'a pending edit (no result yet) has no patch');
 }
 
 console.log(`delta-source: ${pass} passed, ${fail} failed`);
