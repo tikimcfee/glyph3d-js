@@ -8,6 +8,7 @@ import IdeDock from './IdeDock.jsx';
 import { CanvasPicker, ObjectDragger, ResizeDragger, SelectionIndicator } from './client/CanvasInteraction.jsx';
 import TouchAdapter from './client/TouchAdapter.jsx';
 import HudPanel from './client/HudPanel.jsx';
+import HoverReadout from './client/HoverReadout.jsx';
 import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
@@ -295,6 +296,8 @@ function App() {
       {/* the HUD — the ONE floating helper: locked-in context (focus/AST/edit/key
           chips, address bar, LSP row) + focused-window controls in one window */}
       <HudPanel client={client} />
+      {/* the hover readout — an agent book's name + what it's doing, beside the cursor */}
+      <HoverReadout client={client} />
       {/* command palette — summoned modal (⌘K) to drive bus verbs; stays open per command */}
       <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>

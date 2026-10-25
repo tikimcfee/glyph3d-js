@@ -4,8 +4,10 @@ import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
 
 /**
  * AgentsPanel — the one 2D browser onto AgentBooks. ONE list of agent sessions, no
- * master-detail split: every OPEN book is a single row (identity color, lifecycle
- * state, raised-hand beacon, sheet count, liveness) that EXPANDS IN PLACE to its
+ * master-detail split: every OPEN book is a row (identity color, the session's NAME
+ * with its lane id dimmed beside it, status, raised-hand beacon, sheet count, liveness,
+ * and under it what the session is doing NOW — all from AgentBooks.readout, the source
+ * the 3D nameplate reads too) that EXPANDS IN PLACE to its
  * detail — the scrub bar, the kept-turns cap, and the scrollable stream of its
  * sheets (oldest → newest) — and CLOSES via its ✕. One lane expanded at a time;
  * expanding a row folds whichever was open.
@@ -65,14 +67,17 @@ const S = {
 
     // -- lane rows: an open book, collapsed to one line --
     agentRow: (on) => ({
-        display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
-        cursor: 'pointer', userSelect: 'none',
+        padding: '3px 8px', cursor: 'pointer', userSelect: 'none',
         borderLeft: `2px solid ${on ? '#6c8fc0' : 'transparent'}`,
         background: on ? 'rgba(120,150,200,0.12)' : 'transparent',
     }),
+    aline: { display: 'flex', alignItems: 'center', gap: 7 },
     acaret: { flex: '0 0 auto', width: 10, textAlign: 'center', fontSize: 9, color: '#5a616c' },
     adot: { flex: '0 0 auto', fontSize: 9 },
-    aid: { flex: '1 1 auto', minWidth: 0, color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    aname: { flex: '1 1 auto', minWidth: 0, color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    aid: { flex: '0 0 auto', color: '#4a515c', fontSize: 10 },
+    asub: { display: 'flex', alignItems: 'center', gap: 7, paddingLeft: 34 },
+    anow: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     aharness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
     astate: (c) => ({ flex: '0 0 auto', color: c, fontSize: 10 }),
     abeacon: { flex: '0 0 auto', color: '#f2a25c', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '35%', whiteSpace: 'nowrap' },
@@ -289,18 +294,24 @@ export default function AgentsPanel({ client }) {
                     return (
                         <React.Fragment key={a.id}>
                             <div style={S.agentRow(on)} onClick={() => setExpanded(on ? null : a.id)}
-                                title={`${a.type}:${a.id} — ${a.count} sheet(s)${a.recent?.length ? '\n' + a.recent.join('\n') : ''}`}>
-                                <span style={S.acaret}>{on ? '▾' : '▸'}</span>
-                                <span style={{ ...S.adot, color: a.color }}>●</span>
-                                <span style={S.aid}>{a.id}</span>
-                                {a.type && a.type !== 'claude' && <span style={S.aharness}>{a.type}</span>}
-                                {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
-                                <span style={S.astate(st.color)}>{st.label}</span>
-                                <span style={S.acount}>{a.count}</span>
-                                {a.following && <span style={S.alive}>live</span>}
-                                <span style={S.aage}>{ago(a.lastTs)}</span>
-                                <span style={S.ax} onClick={(e) => { e.stopPropagation(); after(['agent.clear', a.id]); }}
-                                    title={`Clear ${a.id} (agent.clear)`}>✕</span>
+                                title={`${a.name}\n${a.type}:${a.id} — ${a.count} sheet(s)${a.action ? '\nnow: ' + a.action : ''}${a.recent?.length ? '\n' + a.recent.join('\n') : ''}`}>
+                                <div style={S.aline}>
+                                    <span style={S.acaret}>{on ? '▾' : '▸'}</span>
+                                    <span style={{ ...S.adot, color: a.color }}>●</span>
+                                    <span style={S.aname}>{a.name}</span>
+                                    <span style={S.aid}>{a.id}</span>
+                                    {a.type && a.type !== 'claude' && <span style={S.aharness}>{a.type}</span>}
+                                    <span style={S.ax} onClick={(e) => { e.stopPropagation(); after(['agent.clear', a.id]); }}
+                                        title={`Clear ${a.id} (agent.clear)`}>✕</span>
+                                </div>
+                                <div style={S.asub}>
+                                    <span style={S.astate(st.color)}>{a.status === a.state ? st.label : a.status}</span>
+                                    <span style={S.acount}>{a.count}</span>
+                                    {a.following && <span style={S.alive}>live</span>}
+                                    <span style={S.aage}>{a.wallTs != null ? wallAgo(a.wallTs) : ago(a.lastTs)}</span>
+                                    {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
+                                    {a.action && <span style={S.anow}>{a.action}</span>}
+                                </div>
                             </div>
 
                             {on && sel && (
