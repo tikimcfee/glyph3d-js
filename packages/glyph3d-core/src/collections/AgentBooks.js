@@ -25,7 +25,8 @@
  * The book live-follows its newest sheet — work appends pages and the open spread rides
  * forward; page back to inspect history and the head holds (Book's deck: the open sheet
  * fronts at z = 0, older ones recede, the newer ones paged past lie pressed at the back).
- * Paging never moves the camera.
+ * Paging never moves the camera. A tab per sheet across the top edge is the TIMELINE:
+ * the sheet's turn number in the whole run, hued by action kind, the open one raised.
  *
  * PER-TURN SNAPSHOTS (not dedup): each action renders its OWN copy of the file's
  * content AS IT WAS at that moment — a re-read after an edit shows the new content, so
@@ -92,6 +93,9 @@ export const AGENT_BOOKS_DEFAULTS = {
     // -- the content page (recto) -------------------------------------------------------
     snapContextRows: 8,         // file snapshot: rows of context above/below the touched range
     snapMaxRows: 60,            // file snapshot: window height in rows (a longer file is framed, 0 = whole file)
+    // -- the timeline tabs (one per sheet: turn number, hued by action kind) ----------
+    tabs: true,                 // bind the per-sheet tabs across each book's top edge
+    tabLine: 0.018,             // tab text row height, × pageH
     artifactWorldScale: 0.025,  // worldScale of file-snapshot / output cards (fine print you fly into)
     messageScale: 0.05,         // worldScale of say/think prose — its OWN knob (prose reads bigger)
     proseWrapCols: 72,          // say/think prose word-wraps to this many columns (a page-shaped column, not a 200-wide strip; 0 = the fold's default)
@@ -320,6 +324,9 @@ export default class AgentBooks {
                 state: 'active', beacon: null, lastActivityTs: this._now(),
                 wallTs: null,          // wall-clock ms of the last LIVE activity (hydrated history ages by meta.lastTs)
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
+                seqExact: false,       // seq counts the WHOLE run — only a hydrate that read the record
+                                       // from its start can say so; a live-born lane counts since
+                                       // this display started watching (a floor)
                 groupId: `agent:book:${agentId}`,
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
                 meta: null,            // session provenance (title/slug/cwd/model/gitBranch…, gomux) — hydrate/setLaneMeta
@@ -329,6 +336,9 @@ export default class AgentBooks {
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
+            // The timeline: bound ONCE at birth — Book keeps the tabs parallel to the
+            // sheets from here (a tab per appended sheet, freed with each shed one).
+            if (this.cfg.tabs) book.bindTabs(this._tabOpts());
             // The nameplate: the session's name (container-fit to the book) over its live
             // status, parked above the cover (Book.syncCover owns the per-frame placement).
             // Glyph fields, not baked textures — a long title instances glyphs.
@@ -420,7 +430,7 @@ export default class AgentBooks {
             hasSnapPick = true;
         }
 
-        lane.book.addSheet({ verso, recto });
+        lane.book.addSheet({ verso, recto, meta: { seq, kind: kindForAction(record.action) } });
         lane.entries.push({
             sheetId, verso, action, body, info, snapshot: recto, snapScaleKey,
             call, infoText, window: null,   // window: the snapshot's framed line range, once loaded
@@ -457,11 +467,17 @@ export default class AgentBooks {
      *        pre-normalized records ({action, target, …}) — the codec normalizes in the
      *        worker, so what arrives here is usually records already; either way
      *        eventsToRecords interprets each entry in exactly one place
-     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number}} [opts]
+     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number,
+     *          seqBase?:number, seqExact?:boolean}} [opts] seqBase = records of the session that
+     *        precede `events` (the tail the read skipped) — a fresh lane numbers its turns from
+     *        there, so a sheet's turn is its place in the whole run; seqExact false = the read
+     *        never reached the record's start, so that count is a floor
      * @returns {Promise<number>} sheets added
      */
-    async hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', meta = null, limit, budgetMs = 8 } = {}) {
+    async hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', meta = null, limit, budgetMs = 8,
+                                    seqBase = 0, seqExact = true } = {}) {
         const lane = this.ensure(agentId, agentType);
+        if (lane.seq === 0) { lane.seq = Math.max(0, Math.floor(seqBase) || 0); lane.seqExact = seqExact; }
         if (sessionId) lane.sessionId = sessionId;
         if (meta) {
             lane.meta = { ...(lane.meta || {}), ...meta };
@@ -699,10 +715,16 @@ export default class AgentBooks {
         return hit ? hit[1].book.pageTo(index) : false;
     }
 
-    /** A book's head state (for panels/verbs), or null if it has no lane. */
+    /** A book's head state (for panels/verbs), or null if it has no lane — with the
+     *  open sheet's TURN (1-based place in the whole run, not the index among kept
+     *  sheets), the run's turns so far, and whether those counts are exact. */
     headState(agentId) {
         const hit = this.resolveLane(agentId);
-        return hit ? { agentId: hit[0], ...hit[1].book.headState() } : null;
+        if (!hit) return null;
+        const lane = hit[1];
+        const s = lane.book.headState();
+        const seq = lane.book.sheets[s.head]?.meta?.seq;
+        return { agentId: hit[0], ...s, turn: seq != null ? seq + 1 : 0, turns: lane.seq, exact: lane.seqExact === true };
     }
 
     /**
@@ -851,6 +873,8 @@ export default class AgentBooks {
             lane.book.deck.lerp = this.cfg.pagerLerp;
             lane.book.deck.turned = this.cfg.turnedPitch;
             lane.book.deck.slide = this.cfg.turnSlide;
+            if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts());   // a diff — tabs re-true in place
+            else lane.book.dropTabs();
             for (const e of lane.entries) {
                 this._resizeVerso(lane, e);
                 if (e.snapScaleKey && typeof e.snapshot?.setScale === 'function') {
@@ -978,6 +1002,26 @@ export default class AgentBooks {
             wrapText(name, cols(nameLh)),
             status ? wrapText(status, cols(statusLh)) : '',
             { nameLh, statusLh });
+    }
+
+    /** The timeline tabs' Book.bindTabs opts: a tab per sheet labelled with its TURN
+     *  number, set in a ruler across the open page's top edge (oldest left → newest
+     *  right), banded + plated in its action kind's hue (dark numerals); the open
+     *  sheet's tab keeps its hue and stands raised + brighter — "you are here" in the
+     *  run (Book.syncTabs lifts the head's tab). @private */
+    _tabOpts() {
+        const hex = (c) => ((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) >>> 0;
+        return {
+            atlas: this.atlas,
+            keyOf: (sheet) => sheet.meta?.kind ?? 'other',
+            labelOf: (sheet) => (sheet.meta?.seq != null ? String(sheet.meta.seq + 1) : ''),
+            hueOf: (kind) => hex(this.cfg.hues[kind] || this.cfg.hues.other),
+            lineHeight: this.cfg.pageH * this.cfg.tabLine,
+            plateOpacity: 0.85,
+            activeColor: null,
+            textColor: { r: 0.04, g: 0.05, b: 0.08 },
+            ride: 'front',   // a ruler across the open page's top edge — readable head-on
+        };
     }
 
     /** A bare CodeGrid (no content yet) — the caller drives the single load. */

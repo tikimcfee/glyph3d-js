@@ -85,7 +85,15 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
         parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
     });
     const t2 = performance.now();
-    const added = await ctx.agentBooks.hydrate(agentId, r.records, { agentType, sessionId, cwd: r.cwd, meta: r.meta, limit });
+    // The kept tail's place in the whole run: the events the cap sliced off this window
+    // precede it (turn numbers count from there). Exact only when nothing was skipped —
+    // a window short of the record's start, or skipped events (which may hold noise the
+    // records drop), make the count a floor.
+    const skipped = Number.isFinite(cap) ? Math.max(0, r.total - cap) : 0;
+    const added = await ctx.agentBooks.hydrate(agentId, r.records, {
+        agentType, sessionId, cwd: r.cwd, meta: r.meta, limit,
+        seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
+    });
     const t3 = performance.now();
     return { agentId, added, total: r.total, bytes: r.bytes, offset: r.offset,
              ms: { read: r1(r.readMs), parse: r1(r.parseMs), hydrate: r1(t3 - t2) } };

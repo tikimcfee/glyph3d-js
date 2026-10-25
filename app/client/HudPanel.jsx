@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
+import { bookInSlot } from './bookFocus.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 /**
@@ -19,7 +20,9 @@ import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
  *   address bar   the focus path as clickable segments → focus.path (the same
  *                 absolute focus the keyboard walk lands on)
  *   LSP row       def + references at the caret (LspNavigator) → lsp.goto / panel
- *   controls      camera row · dir-volume splay⇄collapse · layout modes · edit + readout
+ *   controls      camera row · dir-volume splay⇄collapse · agent/delta book paging
+ *                 (◂ ▸ live + where you are: turn in the run, sheet, live|held) ·
+ *                 layout modes · edit + readout
  *
  * The HUD owns no behavior: every control is a thin { fire: a bus verb, reflect:
  * live state } binding. Reflection subscribes to InteractionContext + LspNavigator +
@@ -82,15 +85,16 @@ function readFocus(client) {
   // page is a CodeGrid too, but it's the book's; terminals lack getLayout.
   const isGrid = type === 'grid' && !entry.role && typeof grid.getLayout === 'function';
   const cc = client.ctx.cameraController;
-  // The VOLUME in play — the same resolution a bare book verb runs (the strata idiom):
-  // the focused entity itself, or the volume the focused file's book is riding.
-  const tree = client.ctx.contentTree;
-  let volume = grid.userData?.isVolume ? grid : null;
-  if (!volume && tree?.bookAt) {
-    for (let n = tree.bookAt(id); n; n = n.parent) {
-      if (n.userData?.isVolume) { volume = n; break; }
-    }
-  }
+  // The BOOK in play — the same resolution a bare book verb runs (bookFocus): the focused
+  // entity's own book — a volume (the cover, or the one a focused file rides), an agent
+  // book (a card or the cover), a delta book.
+  const bk = bookInSlot(client.ctx, 'primary');
+  const volume = bk?.kind === 'volume' ? bk.book : null;
+  const shelfBook = bk && bk.kind !== 'volume' ? {
+    kind: bk.kind,
+    addr: bk.kind === 'agent' ? bk.agentId : `delta:${bk.setId}`,
+    ...(bk.kind === 'agent' ? bk.books.headState(bk.agentId) : bk.book.headState()),
+  } : null;
   return {
     id,
     type: type || (isGrid ? 'grid' : 'window'),
@@ -100,6 +104,7 @@ function readFocus(client) {
       path: volume.userData.path, name: volume.userData.name,
       form: volume.form, head: volume.head, count: volume.sheets.length,
     } : null,
+    book: shelfBook,
     layoutMode: isGrid ? inferMode(grid.getLayout?.()) : null,
     scroll: isGrid ? (grid.getScrollOffset?.() ?? 0) : 0,
     total: isGrid ? (grid.getTotalVisualRows?.() ?? 0) : 0,
@@ -290,6 +295,23 @@ export default function HudPanel({ client }) {
               </span>
             </div>
           )}
+          {/* The agent/delta book in play: turn its pages, ride live, and READ where you
+              are — the open sheet's turn in the whole run (~ = a floor: the read began
+              mid-record), the sheet among those kept, live vs held. */}
+          {f.book && (
+            <div style={S.row} data-g3d-book>
+              <Btn onClick={() => fire('book.page', f.book.addr, 'prev')}>◂</Btn>
+              <Btn onClick={() => fire('book.page', f.book.addr, 'next')}>▸</Btn>
+              <Toggle on={f.book.following} onStyle={S.liveOn}
+                onClick={() => fire('book.page', f.book.addr, 'last')}>
+                {f.book.following ? 'live ●' : 'live ○'}
+              </Toggle>
+              <span style={S.readout} title={`${f.book.addr} — sheet ${f.book.head + 1} of ${f.book.count} kept`}>
+                {f.book.turn ? `turn ${f.book.exact ? '' : '~'}${f.book.turn}/${f.book.turns} · ` : ''}
+                {f.book.head + 1}/{f.book.count} · {f.book.following ? 'live' : 'held'}
+              </span>
+            </div>
+          )}
           {f.isGrid && (
             <>
               <div style={S.row}>
@@ -361,6 +383,7 @@ const S = {
   },
   cyanOn: { color: '#08101a', background: '#6cf', border: '1px solid #6cf' },        // active mode / cam-lock
   editOn: { color: '#1a1206', background: '#f0b45a', border: '1px solid #f0b45a' },  // amber = editing
+  liveOn: { color: '#08140c', background: '#7fe0a0', border: '1px solid #7fe0a0' },  // green = riding live
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
   grip: { cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' },

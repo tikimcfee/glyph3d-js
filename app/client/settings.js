@@ -740,6 +740,10 @@ export const SETTINGS = [
   // card sizes for snapshot / output / prose, and the image recto.
   { key: 'book.snapContextRows', label: 'Snapshot context rows (around the touched lines)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapContextRows, min: 0, max: 5000, step: 1, apply: agentBookParam('snapContextRows') },
   { key: 'book.snapMaxRows', label: 'Snapshot window rows (0 = whole file)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapMaxRows, min: 0, max: 100000, step: 1, apply: agentBookParam('snapMaxRows') },
+  // The timeline — one tab per sheet across the book's top edge: the turn number, hued by
+  // action kind, the open sheet's tab raised (tab.raise). tabLine is the tab text height.
+  { key: 'book.tabs', label: 'Timeline tabs', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.tabs, apply: agentBookParam('tabs') },
+  { key: 'book.tabLine', label: 'Tab text size (× page height)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.tabLine, min: 0.001, max: 0.5, step: 0.001, apply: agentBookParam('tabLine') },
   { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.artifactWorldScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('artifactWorldScale') },
   { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
   { key: 'book.proseWrapCols', label: 'Message (say / think) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
@@ -788,11 +792,13 @@ export const SETTINGS = [
   { key: 'books.wheelNotch', label: 'Wheel travel per page (px)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.notch, min: 1, max: 5000, step: 5, apply: (ctx, v) => ctx.pageDetent?.configure({ notch: v }) },
   { key: 'books.wheelLead', label: 'First page of a gesture at (× notch)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.lead, min: 0, max: 1, step: 0.05, apply: (ctx, v) => ctx.pageDetent?.configure({ lead: v }) },
   { key: 'books.wheelIdleMs', label: 'Wheel gesture ends after (ms)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.idleMs, min: 0, max: 5000, step: 10, apply: (ctx, v) => ctx.pageDetent?.configure({ idleMs: v }) },
-  // Edge tabs — one per sheet on a bound library volume (Book.bindTabs). Live geometry:
+  // Edge tabs — one per sheet on a library volume and on an agent book (Book.bindTabs; an
+  // agent's tabs are its timeline — turn numbers, hued by action kind). Live geometry:
   // Book.syncTabs re-reads these every frame.
   { key: 'tab.steps', label: 'Tab stagger (0 = left-to-right, ≥2 = slots)', group: 'Books', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },
   { key: 'tab.placement', label: 'Tab edge', group: 'Books', type: 'enum', options: ['top', 'fore'], default: TAB_DEFAULTS.placement, apply: (_ctx, v) => setTabParam({ placement: v }) },
   { key: 'tab.protrusion', label: 'Tab lift off edge', group: 'Books', type: 'number', default: TAB_DEFAULTS.protrusion, min: 0, max: 60, step: 1, apply: (_ctx, v) => setTabParam({ protrusion: v }) },
+  { key: 'tab.raise', label: 'Open page tab raise (rows)', group: 'Books', type: 'number', default: TAB_DEFAULTS.raise, min: 0, max: 10, step: 0.1, apply: (_ctx, v) => setTabParam({ raise: v }) },
   // Delta Books — the delta shelf (each changeset as a book of before/after spreads). A
   // delta book is the same SUBSET relationship: it inherits the Books base (page face +
   // cover) plus these ADDITIVE delta-only knobs — its OWN page geometry + deck (wider code

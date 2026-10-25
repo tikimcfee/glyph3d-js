@@ -75,7 +75,10 @@ function afterTurn(ctx, hit) {
 
 // A page-arg keyword/index, optionally preceded by an id. One trailing arg → default book.
 const splitTarget = (args) => (args.length >= 2 ? [args[0], args[1]] : [undefined, args[0]]);
-const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.following ? ' · live' : ''}` : '');
+const fmtHead = (s) => (s ? `sheet ${s.head + 1}/${s.count}${s.turn ? ` · turn ${s.exact ? '' : '~'}${s.turn}/${s.turns}` : ''}${s.following ? ' · live' : ''}` : '');
+
+/** The head state a verb reports — an agent book's carries its turn in the whole run. */
+const headOf = (hit) => (hit.kind === 'agent' ? hit.books.headState(hit.agentId) : hit.book.headState());
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -93,7 +96,7 @@ export default function registerBookCommands(router) {
             const f = bk.fitInfo;
             bk.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
             const b = bk.getBounds();
-            const h = bk.headState();
+            const h = headOf(hit);
             const record = {
                 ...(hit.kind === 'agent' ? { agent: hit.agentId }
                   : hit.kind === 'delta' ? { delta: hit.setId }
@@ -101,6 +104,7 @@ export default function registerBookCommands(router) {
                 form: f ? 'fitted' : 'natural',
                 sheets: h.count,
                 head: `${h.head + 1}/${h.count}${h.following ? ' (live)' : ''}`,
+                ...(h.turn ? { turn: `${h.exact ? '' : '~'}${h.turn}/${h.turns}` } : {}),
                 ...(f ? { page: `${f.pageW}×${f.pageH}`, scale: r2(f.scale), content: `${r2(f.contentW)}×${r2(f.contentH)}` } : {}),
                 world: `${r2((b.min.x + b.max.x) / 2)}, ${r2((b.min.y + b.max.y) / 2)}, ${r2((b.min.z + b.max.z) / 2)}`,
             };
@@ -146,7 +150,7 @@ export default function registerBookCommands(router) {
         if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to scroll', data: null };
         const ok = hit.book.scroll(Number(delta) || 0);
         if (ok) afterTurn(ctx, hit);
-        const s = ok ? hit.book.headState() : null;
+        const s = ok ? headOf(hit) : null;
         return ok
             ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
             : { text: 'ERR: could not scroll', data: null };
@@ -167,7 +171,7 @@ export default function registerBookCommands(router) {
                  : a === 'last' ? bk.pageTo(s0.count - 1)
                  : bk.pageTo((Number(a) || 1) - 1);
         if (ok) afterTurn(ctx, hit);
-        const s = bk.headState();
+        const s = headOf(hit);
         return ok
             ? { text: `OK: ${fmtHead(s)}`, data: { ...(hit.agentId ? { agentId: hit.agentId } : {}), ...s } }
             : { text: 'ERR: could not page', data: null };

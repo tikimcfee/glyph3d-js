@@ -194,6 +194,16 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   on gomuxai's server, nested inside our own terminal session (`gomux.detach` closes only ours).
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
+- **Books** (`collections/Book.js`) — library volumes, agent runs, delta sets: a deck of
+  sheets whose one nav state is the head. The open sheet fronts at z = 0, the sheets still
+  ahead recede a pitch each, the sheets turned past lie pressed in a block at the deck's
+  back — the deck's box never depends on the head. A turn CUTS the sheets changing sides
+  and slides the reading deck at most `books.turnSlide` pitches: nothing flies through the
+  deck. Shift+wheel / two-finger drag page through a detent (`app/client/wheelDetent.js`,
+  `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
+  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (turn number in the
+  run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held.
+  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

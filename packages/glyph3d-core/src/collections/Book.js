@@ -136,7 +136,7 @@ export default class Book extends BoundedObject3D {
         this.userData = { isBook: true };   // path/name mirrored on insert by ContentTree
         /** @type {Array<{node:THREE.Group, verso:THREE.Object3D|null, recto:THREE.Object3D|null,
          *               versoMount:THREE.Group, rectoMount:THREE.Group,
-         *               faces:THREE.Mesh[], fit:Object, _at:THREE.Vector3|null}>} */
+         *               faces:THREE.Mesh[], fit:Object, meta:Object|null, _at:THREE.Vector3|null}>} */
         this.sheets = [];
         /** @type {number} the open sheet's index (fronts the deck) */
         this.head = 0;
@@ -190,10 +190,12 @@ export default class Book extends BoundedObject3D {
     /**
      * Append a sheet (page-pair). While following, the head rides to it; while fitted,
      * the new sheet takes page form immediately and seats at its deck slot (no flash).
-     * @param {{verso?:THREE.Object3D|null, recto?:THREE.Object3D|null}} sides
+     * `meta` is the wrapper's own per-sheet record (an agent book's turn number and
+     * action kind) — Book never reads it; the tab fns (bindTabs keyOf/labelOf) do.
+     * @param {{verso?:THREE.Object3D|null, recto?:THREE.Object3D|null, meta?:Object|null}} sides
      * @returns {number} the new sheet's index
      */
-    addSheet({ verso = null, recto = null } = {}) {
+    addSheet({ verso = null, recto = null, meta = null } = {}) {
         const node = new THREE.Group();
         node.name = `sheet:${this.sheets.length}`;
         node.userData = { isBookInternal: true };
@@ -209,7 +211,7 @@ export default class Book extends BoundedObject3D {
             node, verso, recto,
             versoMount: mountFor(verso, 'verso'),
             rectoMount: mountFor(recto, 'recto'),
-            faces: [], fit: {}, _at: null,
+            faces: [], fit: {}, meta, _at: null,
         };
         this.add(node);
         this.sheets.push(sheet);
@@ -516,9 +518,12 @@ export default class Book extends BoundedObject3D {
     // -- tabs: per-sheet edge labels, banded by a content key ------------------------
     //    One Tab3D per sheet (exact page navigation), staggered along the deck's own
     //    Z-recede — each tab rides its sheet's LIVE slot (mid-ease), so the deck's
-    //    cascade IS the thumb-index stagger for free — and banded UP the cover
-    //    edge by a per-book content key (files → first letter, agent moments → action
-    //    kind) so the deck reads as stable groups. syncTabs() repositions every frame
+    //    cascade (reading deck spaced, turned block pressed) IS the thumb-index stagger
+    //    for free — and banded UP the cover edge by a per-book content key (files →
+    //    first letter, agent moments → action kind) so the deck reads as stable groups.
+    //    Or (ride 'front') every tab stands on the FRONT page's plane: one ruler across
+    //    the top edge, index left→right, readable head-on where the cascade hides behind
+    //    the open page — an agent book's timeline. syncTabs() repositions every frame
     //    like syncCover does for the nameplate. Picking stays the wrapper's job (a
     //    'handle'-channel panel block resolving hits to tabs); Book owns build/sync only.
 
@@ -527,13 +532,16 @@ export default class Book extends BoundedObject3D {
      *  A re-bind is a DIFF, not a rebuild: existing sheets keep their Tab3D (its
      *  text/pitch/hue re-true in place) — tabs rent substrate group texels, and
      *  ids retire on dispose, so per-relayout rebuilds would burn the texel space.
-     *  The geometry dials — stagger, edge, lift — are the GLOBAL live `tab.*`
-     *  settings (Tab3D's TAB_CONFIG), re-read by syncTabs every frame. */
+     *  The geometry dials — stagger, edge, lift, raise — are the GLOBAL live `tab.*`
+     *  settings (Tab3D's TAB_CONFIG), re-read by syncTabs every frame. `ride` picks the
+     *  tabs' depth: 'sheet' (each on its sheet's live slot — the thumb-index cascade)
+     *  or 'front' (all on the front page's plane — a ruler you read head-on). */
     bindTabs({ atlas, keyOf = null, labelOf = null, hueOf = null,
               lineHeight = 7, plateOpacity = 0.85, activeColor = 0x6ee7a0,
-              textColor = { r: 1, g: 1, b: 1 } } = {}) {
+              textColor = { r: 1, g: 1, b: 1 }, ride = 'sheet' } = {}) {
+        if (ride !== 'sheet' && ride !== 'front') throw new Error(`Book.bindTabs: ride must be 'sheet' or 'front' (got ${ride})`);
         const prev = new Map((this.tabs ?? []).map((t) => [t.sheet, t]));
-        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor, textColor };
+        this._tabOpts = { atlas, keyOf, labelOf, hueOf, lineHeight, plateOpacity, activeColor, textColor, ride };
         this.tabs = this.sheets.map((sheet, i) => {
             const t = prev.get(sheet);
             if (!t) return this._makeTab(sheet);
@@ -598,11 +606,13 @@ export default class Book extends BoundedObject3D {
 
     /** Re-position every tab each frame. Each tab rides its sheet's LIVE Z slot
      *  (the deck's cascade = the shuffle); bands stagger across the edge by key.
-     *  The head's tab is marked active. @see bindTabs for the placement shapes. */
+     *  The head's tab is marked active and stands RAISED off its edge by
+     *  `tab.raise` rows — the "you are here" tab reads by its pose, not only its
+     *  color. @see bindTabs for the placement shapes. */
     syncTabs() {
         if (!this.tabs) return;
         const o = this._tabOpts;
-        const { steps, placement, protrusion } = TAB_CONFIG;        // live `tab.*` dials (re-read each frame)
+        const { steps, placement, protrusion, raise: raiseRows } = TAB_CONFIG;   // live `tab.*` dials (re-read each frame)
         const b = this.layoutBounds();
         if (b.isEmpty()) { for (const t of this.tabs) t.tab.visible = false; return; }
         const cx = (b.min.x + b.max.x) / 2, cy = (b.min.y + b.max.y) / 2;
@@ -616,11 +626,16 @@ export default class Book extends BoundedObject3D {
         const innerW = Math.max(sx - 2 * tabH, tabH);               // step range across the top (margin each end)
         const bandPitch = Math.min(sx / Math.max(kB, 1), tabH * 6); // 'fore' band pitch (clustered when few)
         const count = this.sheets.length;
-        for (const t of this.tabs) {
-            const idx = this.sheets.indexOf(t.sheet);
+        let frontZ = -Infinity;                                     // 'front' ride: the front-most page's live plane
+        if (o.ride === 'front') for (const s of this.sheets) frontZ = Math.max(frontZ, s.node.position.z);
+        for (let k = 0; k < this.tabs.length; k++) {
+            const t = this.tabs[k];
+            // Tabs are kept index-parallel to the sheets (bind/add/remove) — the per-frame
+            // indexOf made a long book's sync quadratic; it stays only as the guard.
+            const idx = this.sheets[k] === t.sheet ? k : this.sheets.indexOf(t.sheet);
             if (idx < 0) { t.tab.visible = false; continue; }
             const band = bandOf.get(t.key) ?? 0;
-            const z = t.sheet.node.position.z + 1;                      // live slot + 1 unit in front
+            const z = (o.ride === 'front' ? frontZ : t.sheet.node.position.z) + 1;   // live plane + 1 unit in front
             let x, y, rotY = 0;
             if (placement === 'fore') {                             // +X side, facing +X
                 x = cx + sx / 2 + protrusion + tabH * 0.5;
@@ -633,6 +648,8 @@ export default class Book extends BoundedObject3D {
                 x = count > 1 ? (cx - innerW / 2) + (idx / (count - 1)) * innerW : cx;
                 y = cy + sy / 2 + tabH / 2 + protrusion;            // attached to the top edge, sticking up
             }
+            const raise = idx === this.head ? tabH * raiseRows : 0;
+            if (placement === 'fore') x += raise; else y += raise;
             t.tab.position.set(x, y, z);
             t.tab.rotation.set(0, rotY, 0);
             t.tab.visible = true;
