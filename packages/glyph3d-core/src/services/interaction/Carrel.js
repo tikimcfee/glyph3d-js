@@ -155,6 +155,10 @@ export class Carrel extends THREE.Object3D {
         this._expected = 0;      // announced incoming complement (expect()) — wrap pre-shapes for it
         this._expectShape = null; // frozen synthetic box + wrap while a complement fills (stable slots)
         this.worldManaged = false; // placed by a WorldLayout grouping, not a hand (the app flips it)
+        this.derived = false;      // rebuilt from an outside source each boot (the gomuxai hub) — never saved
+        /** @type {Set<Function>} footprint listeners — a desk seated at another desk is its member */
+        this._resizeListeners = new Set();
+        this._footprint = '';
         this._dissolving = false;
         /** Set once a dissolve has fully drained; the ticking runner sweeps dead carrels. */
         this._dead = false;
@@ -478,6 +482,16 @@ export class Carrel extends THREE.Object3D {
         return Math.min(boxW / ext.w, boxHt / ext.h, this.growCap);
     }
 
+    /**
+     * Subscribe to footprint changes (getLocalBounds moved) — the member contract a desk
+     * seated at another desk needs: the outer desk re-seats its row when this one grows.
+     * @param {Function} cb @returns {Function} unsubscribe
+     */
+    onResize(cb) {
+        this._resizeListeners.add(cb);
+        return () => this._resizeListeners.delete(cb);
+    }
+
     /** Re-seat everyone off current extents — the external content-growth tap (a seated
      *  agent book pages in sheets; AgentBooks.onChange calls this; Books have no onResize). */
     refit() { this._relayout(); }
@@ -616,6 +630,11 @@ export class Carrel extends THREE.Object3D {
         }
 
         this._refreshChrome();
+        const fp = `${this._shadow.scale.x}|${this._shadow.scale.z}|${this._shadow.position.z}|${this._stackH}`;
+        if (fp !== this._footprint) {
+            this._footprint = fp;
+            for (const cb of this._resizeListeners) cb();
+        }
     }
 
     /**
@@ -748,7 +767,7 @@ export class Carrel extends THREE.Object3D {
      * @param {Object} [target] THREE.Box3
      * @returns {Object} THREE.Box3
      */
-    localBounds(target = new THREE.Box3()) {
+    getLocalBounds(target = new THREE.Box3()) {
         const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;
         const cz = this._shadow.position.z;
         target.min.set(-hx, 0, cz - hz);
@@ -763,7 +782,7 @@ export class Carrel extends THREE.Object3D {
      * @returns {Object} THREE.Box3
      */
     getBounds(target = new THREE.Box3()) {
-        return this.localBounds(target).applyMatrix4(this.matrixWorld);
+        return this.getLocalBounds(target).applyMatrix4(this.matrixWorld);
     }
 
     /**
@@ -793,6 +812,7 @@ export class Carrel extends THREE.Object3D {
         this.animator.dispose?.();
         this.entries.clear();
         this._releasing.clear();
+        this._resizeListeners.clear();
         this._shadow.geometry.dispose();
         this._shadow.material.dispose();
     }

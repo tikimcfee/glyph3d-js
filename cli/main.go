@@ -370,6 +370,9 @@ func serveCmd() {
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	var reach stringListFlag
 	flagSet.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
+	var gomuxDirs stringListFlag
+	flagSet.Var(&gomuxDirs, "gomuxai", "Extra gomuxai store to watch: a .gomuxai dir, the dir holding one, or an `agent` binary (repeatable). The PATH agent's store and every live agent session's are found on their own.")
+	noGomux := flagSet.Bool("no-gomuxai", false, "Don't watch gomuxai stores")
 	flagSet.Parse(os.Args[2:])
 
 	// Project path: positional arg or cwd
@@ -384,6 +387,9 @@ func serveCmd() {
 		if err != nil {
 			log.Fatalf("[relay] project path: %v", err)
 		}
+		if !*noGomux {
+			fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
+		}
 		if err := RunRelay(*listen, *p, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
@@ -394,6 +400,9 @@ func serveCmd() {
 	fsHandler, err := NewFSHandler(projectPath, reach)
 	if err != nil {
 		log.Fatalf("[serve] project path: %v", err)
+	}
+	if !*noGomux {
+		fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
 	}
 
 	cfg := ServerConfig{

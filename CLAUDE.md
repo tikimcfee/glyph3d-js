@@ -180,6 +180,17 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
   recompute. Gate: `tools/scene-transforms.test.mjs`.
+- **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay reads the
+  gomuxai stores (the `agent` orchestrator's `.gomuxai/gomuxai.db`, read-only — the PATH binary's,
+  each live `agent-*` session's spawning binary's, `--gomuxai <dir>`) and pushes the agent tree
+  (`gomux/changed`; `gomux/list`, `gomux/read` for a transcript window). Each agent shown (live,
+  or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
+  hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
+  without its result yet is held until the result lands). The tree is desks: the world-managed
+  `gomux` carrel; an agent with helpers gets a `gomux/<name>` team carrel seated in its parent's
+  desk (its book first, then its helpers). Hub desks are `derived` — rebuilt from the tree, never
+  saved. Status rides `lane.meta.gomux`. Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`.
+  Read-only: nothing here types into, starts, or stops an agent.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.

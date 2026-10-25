@@ -292,6 +292,7 @@ export default class SessionStore {
     // listing at restore.
     const agents = [];
     for (const a of (ctx.agentBooks?.agents?.() || [])) {
+      if (ctx.gomuxHub?.lanes.has(a.id)) continue;   // the gomuxai hub reopens its own books from the tree
       const lane = ctx.agentBooks.lanes.get(a.id);
       const entry = a.sessionId ? { session: a.sessionId } : { prefix: a.id };
       if (a.type && a.type !== 'claude') entry.harness = a.type;   // non-default harness rides along (kimi)
@@ -307,7 +308,7 @@ export default class SessionStore {
     // Carrels: world furniture — each desk's serialize() carries pose and knobs
     // (NO members — residence is the MODEL's authority via view.carrel).
     const carrels = ctx.carrels instanceof Map
-      ? [...ctx.carrels.values()].filter((c) => !c._dissolving).map((c) => c.serialize())
+      ? [...ctx.carrels.values()].filter((c) => !c._dissolving && !c.derived).map((c) => c.serialize())
       : [];
 
     // Carrel membership: read from the MODEL (listCarreled), not a live-object

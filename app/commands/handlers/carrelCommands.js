@@ -78,11 +78,14 @@ function worldTouch(ctx, carrel) {
  * carrel.move takes it back out (user-placed wins, the pin law). Registered
  * (type 'carrel') either way, so the camera's dynamic-speed / soft-bounds /
  * fit-all spine (getSurfaces) sees it — a desk is a PLACE, not cargo;
- * Holding.resolve refuses to treat it as one.
+ * Holding.resolve refuses to treat it as one. A NESTED desk (`nested`) is
+ * neither: its owner seats it at another desk with Carrel.lock (desks hold
+ * desks only by their owner's hand — the gomuxai hub's teams), which parents
+ * and places it.
  * @param {AppContext} ctx
  * @returns {Carrel}
  */
-function buildCarrel(ctx, name, { radius, managed = false } = {}) {
+export function buildCarrel(ctx, name, { radius, managed = false, nested = false } = {}) {
     const carrel = new Carrel({ name });
     for (const k of CARREL_KNOBS) {
         const v = getSetting(`carrel.${k}`);
@@ -90,9 +93,12 @@ function buildCarrel(ctx, name, { radius, managed = false } = {}) {
     }
     if (Number.isFinite(radius)) carrel.setParam('radius', radius);
 
-    if (managed && ctx.world) {
+    if (nested) {
+        // Seated at another desk by its owner (a gomuxai team inside the hub) — the
+        // outer desk's lock() parents and places it, so it isn't set down anywhere.
+    } else if (managed && ctx.world) {
         carrel.worldManaged = true;
-        ctx.world.register(carrel.name, carrel, () => carrel.localBounds());
+        ctx.world.register(carrel.name, carrel, () => carrel.getLocalBounds());
     } else {
         const cam = ctx.camera;
         if (cam) {
@@ -133,7 +139,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
     const managed = !!saved.managed && !!ctx.world;
     if (managed) {
         carrel.worldManaged = true;
-        ctx.world.register(carrel.name, carrel, () => carrel.localBounds());
+        ctx.world.register(carrel.name, carrel, () => carrel.getLocalBounds());
     } else {
         const p = saved.position || {};
         carrel.position.set(p.x || 0, p.y || 0, p.z || 0);

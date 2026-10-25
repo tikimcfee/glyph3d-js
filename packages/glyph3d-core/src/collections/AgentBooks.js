@@ -422,6 +422,15 @@ export default class AgentBooks {
         return true;
     }
 
+    /** Lower a raised hand (the agent is no longer waiting on you). */
+    clearRequest(agentId) {
+        const lane = this.lanes.get(agentId);
+        if (!lane || !lane.beacon) return false;
+        lane.beacon = null;
+        this._emitChange();
+        return true;
+    }
+
     /** Remove ONE agent's book (any state) — `agent.clear <id>` / the panel ✕. */
     remove(agentId) {
         const lane = this.lanes.get(agentId);

@@ -37,6 +37,7 @@ import registerAttentionCommands from './attentionCommands.js';
 import registerEditCommands from './editCommands.js';
 import registerContextCommands from './contextCommands.js';
 import registerAgentCommands from './agentCommands.js';
+import registerGomuxCommands from './gomuxCommands.js';
 import registerDeltaCommands from './deltaCommands.js';
 import registerMemoryCommands from './memoryCommands.js';
 import registerWorkspaceCommands from './workspaceCommands.js';
@@ -87,6 +88,7 @@ export function registerAllCommands(router) {
     registerEditCommands(router);
     registerContextCommands(router);
     registerAgentCommands(router);
+    registerGomuxCommands(router);
     registerDeltaCommands(router);
     registerMemoryCommands(router);
     registerWorkspaceCommands(router);

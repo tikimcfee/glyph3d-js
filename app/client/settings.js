@@ -167,6 +167,7 @@ export const GROUPS = [
   { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes · edge tabs', columns: 2 },
   { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention', columns: 2 },
   { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck', columns: 2 },
+  { name: 'gomuxai',            subtitle: 'the agent orchestrator\'s tree as books at desks', columns: 2 },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
   { name: 'Motion',             subtitle: 'relayout glide' },
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
@@ -705,6 +706,9 @@ export const SETTINGS = [
   // autoShelf has no apply: the carrel sweep's auto-shelf pass reads this at each lane
   // birth (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
   // the next agent event.
+  // gomuxai — read by GomuxHub at each tree push (no apply: the next push converges).
+  { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
+  { key: 'gomux.historyHours', label: 'Show finished agents from the last (h, 0 = all)', group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and

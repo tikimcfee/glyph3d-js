@@ -182,6 +182,14 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
+- **`gomux-hub.test.mjs`** (headless) — the gomuxai hub's live follow over a growing mock
+  transcript: the cursor stops past the last complete line (a line mid-write arrives whole on the
+  next read); a tool call whose result isn't written yet holds — nothing at or after it commits —
+  and commits once, with its result; past the pending cap a dangling call commits anyway; a push
+  mid-read re-reads once; status rides the lane (meta.gomux, processing → active, waiting raises
+  the hand, cleaned up → done). Mutation-checked (no hold; cursor past the torn line). The relay
+  side is `cd cli && go test -run Gomux` (the tree across stores, departed agents rebuilt from
+  spawn records, UTC-normalized times, the transcript allow-list, gomux/read's window).
 - **`scene-transforms.test.mjs`** (headless) — SceneTransforms on a random 400-node tree: after
   every kind of pose write (vector writes, rotations, three's transform helpers, attach / add /
   detached moves, a subtree built off-scene, a hand-written matrix, a camera, a pivot) every world

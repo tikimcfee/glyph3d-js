@@ -61,9 +61,12 @@ function warnIfTornFirstLine(sessionId, bytes, offset) {
  *         => Promise<{records: Array, total: number, cwd: string|null, meta: Object}>} opts.parse
  *        the codec — NOTE it may TRANSFER the buffer (the parse pool does)
  * @returns {Promise<{records: Array, total: number, cwd: string|null, meta: Object,
- *          offset: number, size: number|null, bytes: number, attempts: number,
+ *          offset: number, end: number, size: number|null, bytes: number, attempts: number,
  *          readMs: number, parseMs: number}>}
  *          `total` counts the events IN THE WINDOW (≥ cap unless offset 0);
+ *          `end` is the absolute byte just past the window's last complete line — where a
+ *          live follower's next forward read starts (a line still being written isn't parsed,
+ *          so it must be re-read whole);
  *          `bytes` is the final window's length; readMs/parseMs sum all attempts;
  *          `offset` is the absolute byte the window starts at — the cursor for
  *          paging further back (0 = the whole record was seen).
@@ -81,6 +84,7 @@ export async function readSessionTail(provider, sessionId, {
         const r = await provider.read(sessionId, wantWhole ? { harness } : { harness, tailBytes });
         readMs += now() - t0;
         const byteLen = r.bytes.byteLength;   // parse may transfer the buffer — measure first
+        const end = r.offset + r.bytes.lastIndexOf(0x0A) + 1;   // past the last COMPLETE line
         warnIfTornFirstLine(sessionId, r.bytes, r.offset);
         const t1 = now();
         const out = await parse(r.bytes, { harness, cwd: r.cwd, cap });
@@ -91,7 +95,7 @@ export async function readSessionTail(provider, sessionId, {
                 out.meta = await readHeadMeta(provider, sessionId, { harness, headMetaBytes, parse, tailMeta: out.meta });
                 readMs += now() - t2;   // read-dominated (a 64KB parse is noise) — one column, honestly named
             }
-            return { ...out, offset: r.offset, size: r.size, bytes: byteLen, attempts, readMs, parseMs };
+            return { ...out, offset: r.offset, end, size: r.size, bytes: byteLen, attempts, readMs, parseMs };
         }
         tailBytes *= 2;
     }

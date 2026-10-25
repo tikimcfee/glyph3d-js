@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1099,6 +1100,19 @@ func (r *Relay) NotifyDisplayRPC(method string, params any) {
 	r.sendToDisplay(msg)
 }
 
+// wireFS connects the filesystem handler's server-initiated pushes (writes,
+// LSP diagnostics, the gomuxai tree) to the display, and starts the watchers
+// that produce them.
+func (r *Relay) wireFS(h *FSHandler) {
+	h.SetNotifyHook(r.NotifyDisplayRPC)
+	r.lsp = NewLSPSupervisor(h)
+	r.lsp.SetNotifyHook(r.NotifyDisplayRPC)
+	if h.gomux != nil {
+		h.gomux.SetNotifyHook(r.NotifyDisplayRPC)
+		h.gomux.Start(context.Background())
+	}
+}
+
 // ServerConfig holds all options for the unified server.
 type ServerConfig struct {
 	Host      string     // Listen address (default "0.0.0.0")
@@ -1119,9 +1133,7 @@ func RunServer(cfg ServerConfig) error {
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
 	// round-trip-confirm a save and reload the affected grid.
 	if cfg.FSHandler != nil {
-		cfg.FSHandler.SetNotifyHook(relay.NotifyDisplayRPC)
-		relay.lsp = NewLSPSupervisor(cfg.FSHandler)
-		relay.lsp.SetNotifyHook(relay.NotifyDisplayRPC)
+		relay.wireFS(cfg.FSHandler)
 	}
 
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
@@ -1224,9 +1236,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay.fs = fsHandler
 	relay.port = port
 	if fsHandler != nil {
-		fsHandler.SetNotifyHook(relay.NotifyDisplayRPC)
-		relay.lsp = NewLSPSupervisor(fsHandler)
-		relay.lsp.SetNotifyHook(relay.NotifyDisplayRPC)
+		relay.wireFS(fsHandler)
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)

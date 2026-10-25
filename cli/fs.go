@@ -445,6 +445,10 @@ type FSHandler struct {
 	searchMu  sync.Mutex
 	searches  map[string]searchRun
 	searchGen uint64
+
+	// gomux, if non-nil, watches the gomuxai stores (the agent orchestrator's
+	// tree) and serves gomux/* — see gomux.go. Set by serveCmd before wiring.
+	gomux *GomuxWatcher
 }
 
 // SetNotifyHook wires the FSHandler to the relay's display push channel.
@@ -615,6 +619,10 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleAgentSessionsList(write, rawID, params)
 			case "agentSessions/read":
 				h.handleAgentSessionsRead(write, writeBin, rawID, params)
+			case "gomux/list":
+				h.handleGomuxList(write, rawID, params)
+			case "gomux/read":
+				h.handleGomuxRead(write, writeBin, rawID, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}

@@ -148,21 +148,28 @@ type agentSessionsListResult struct {
 	Sessions []agentSessionInfo `json:"sessions"`
 }
 
-// agentSessionsReadParams is the body of agentSessions/read. TailBytes = 0
-// reads the whole transcript (bounded by maxSessionReadSize); > 0 reads only
-// the final TailBytes bytes, advanced to the first line boundary. FromOffset
-// (a pointer — 0 is a meaningful start) selects a cursor window instead:
+// transcriptWindow selects the bytes of a transcript read — the window shared
+// by agentSessions/read and gomux/read. TailBytes = 0 reads the whole
+// transcript (bounded by maxSessionReadSize); > 0 reads only the final
+// TailBytes bytes, advanced to the first line boundary. FromOffset (a pointer
+// — 0 is a meaningful start) selects a cursor window instead:
 // [fromOffset, fromOffset+maxBytes) (maxBytes 0 = to EOF), same boundary
 // advance — the client pages BACK through a transcript by minting the next
 // cursor from the previous response's offset. TailBytes and FromOffset are
-// mutually exclusive. Harness selects the archive (default "claude").
-type agentSessionsReadParams struct {
-	ID         string `json:"id"`
+// mutually exclusive.
+type transcriptWindow struct {
 	TailBytes  int64  `json:"tailBytes"`
 	FromOffset *int64 `json:"fromOffset"`
 	MaxBytes   int64  `json:"maxBytes"`
-	Harness    string `json:"harness"`
 	Binary     bool   `json:"binary"` // answer on the binary result plane (raw transcript bytes)
+}
+
+// agentSessionsReadParams is the body of agentSessions/read: an archive id,
+// the window, and Harness selecting the archive (default "claude").
+type agentSessionsReadParams struct {
+	ID      string `json:"id"`
+	Harness string `json:"harness"`
+	transcriptWindow
 }
 
 // agentSessionsReadResult is the agentSessions/read response. Content is the
@@ -273,22 +280,6 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 		h.sendRPCError(write, id, -32602, "invalid session id (want [A-Za-z0-9_-]{1,128}): "+p.ID, map[string]string{"id": p.ID})
 		return
 	}
-	if p.TailBytes < 0 {
-		h.sendRPCError(write, id, -32602, "tailBytes must be non-negative", map[string]string{"id": p.ID})
-		return
-	}
-	if p.FromOffset != nil && *p.FromOffset < 0 {
-		h.sendRPCError(write, id, -32602, "fromOffset must be non-negative", map[string]string{"id": p.ID})
-		return
-	}
-	if p.FromOffset != nil && p.TailBytes > 0 {
-		h.sendRPCError(write, id, -32602, "tailBytes and fromOffset are mutually exclusive", map[string]string{"id": p.ID})
-		return
-	}
-	if p.MaxBytes < 0 || (p.MaxBytes > 0 && p.FromOffset == nil) {
-		h.sendRPCError(write, id, -32602, "maxBytes must be non-negative and requires fromOffset", map[string]string{"id": p.ID})
-		return
-	}
 	harness := p.Harness
 	if harness == "" {
 		harness = "claude"
@@ -336,14 +327,38 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 		h.sendRPCError(write, id, -32602, "unknown harness (want claude|kimi): "+harness, map[string]string{"id": p.ID})
 		return
 	}
+	h.serveTranscriptWindow(write, writeBin, id, p.ID, path, cwd, p.transcriptWindow)
+}
+
+// serveTranscriptWindow answers a transcript read: the window of the file at
+// path (already resolved and contained by the caller), as raw bytes. `name`
+// is the caller's address for the transcript — echoed as the result's id and
+// in every error. The window rules are transcriptWindow's.
+func (h *FSHandler) serveTranscriptWindow(write writeFn, writeBin writeBinFn, id json.RawMessage, name, path, cwd string, p transcriptWindow) {
+	if p.TailBytes < 0 {
+		h.sendRPCError(write, id, -32602, "tailBytes must be non-negative", map[string]string{"id": name})
+		return
+	}
+	if p.FromOffset != nil && *p.FromOffset < 0 {
+		h.sendRPCError(write, id, -32602, "fromOffset must be non-negative", map[string]string{"id": name})
+		return
+	}
+	if p.FromOffset != nil && p.TailBytes > 0 {
+		h.sendRPCError(write, id, -32602, "tailBytes and fromOffset are mutually exclusive", map[string]string{"id": name})
+		return
+	}
+	if p.MaxBytes < 0 || (p.MaxBytes > 0 && p.FromOffset == nil) {
+		h.sendRPCError(write, id, -32602, "maxBytes must be non-negative and requires fromOffset", map[string]string{"id": name})
+		return
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
-		h.sendRPCError(write, id, errFileNotFound, "session not found: "+p.ID, map[string]string{"id": p.ID})
+		h.sendRPCError(write, id, errFileNotFound, "session not found: "+name, map[string]string{"id": name})
 		return
 	}
 	if info.IsDir() {
-		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+p.ID, map[string]string{"id": p.ID})
+		h.sendRPCError(write, id, errIsDirectory, "is a directory: "+name, map[string]string{"id": name})
 		return
 	}
 	size := info.Size()
@@ -367,7 +382,7 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 
 	f, err := os.Open(path)
 	if err != nil {
-		h.sendRPCError(write, id, errFileNotFound, "open error: "+err.Error(), map[string]string{"id": p.ID})
+		h.sendRPCError(write, id, errFileNotFound, "open error: "+err.Error(), map[string]string{"id": name})
 		return
 	}
 	defer f.Close()
@@ -390,7 +405,7 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 	// A live transcript can move under us between Stat and ReadAt; a short
 	// read at EOF is a consistent smaller snapshot, not a failure.
 	if err != nil && err != io.EOF {
-		h.sendRPCError(write, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"id": p.ID})
+		h.sendRPCError(write, id, errFileNotFound, "read error: "+err.Error(), map[string]string{"id": name})
 		return
 	}
 	buf = buf[:got]
@@ -408,7 +423,7 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 
 	if p.Binary {
 		hdr := map[string]any{
-			"id": p.ID, "size": size, "mtime": info.ModTime().UnixMilli(), "offset": offset, "truncated": truncated,
+			"id": name, "size": size, "mtime": info.ModTime().UnixMilli(), "offset": offset, "truncated": truncated,
 		}
 		if cwd != "" {
 			hdr["cwd"] = cwd
@@ -418,7 +433,7 @@ func (h *FSHandler) handleAgentSessionsRead(write writeFn, writeBin writeBinFn, 
 	}
 
 	h.sendRPCResult(write, id, agentSessionsReadResult{
-		ID:        p.ID,
+		ID:        name,
 		Content:   string(buf),
 		Size:      size,
 		Mtime:     info.ModTime().UnixMilli(),

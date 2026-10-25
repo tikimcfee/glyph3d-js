@@ -18,6 +18,8 @@ import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
+import GomuxProvider from '@glyph3d/core/services/data/GomuxProvider.js';
+import GomuxHub from './GomuxHub.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
@@ -222,6 +224,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/services/data/RemoteLspProvider.js').default|null} */ lsp: null,
     /** @type {import('@glyph3d/core/services/interaction/LspNavigator.js').default|null} */ lspNavigator: null,
     /** @type {import('@glyph3d/core/services/data/AgentSessionProvider.js').default|null} */ sessionProvider: null,
+    /** @type {import('./GomuxHub.js').default|null} */ gomuxHub: null,
     /** @type {((dy: number) => boolean)|null} */ tryScrollHovered: null,
     /** @type {((dy: number) => boolean)|null} */ tryPageHovered: null,
     /** @type {import('./SessionStore.js').default|null} */ session: null,
@@ -677,6 +680,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // relay feature: agent.open / agent.sessions / the panel's Archive region read it;
     // client-only mode simply has no archive. Content semantics live in the adapter.
     state.ctx.sessionProvider = new AgentSessionProvider(bridge);
+    // The gomuxai tree (the relay watches the orchestrator's stores): every agent it runs
+    // as a book at the hub desk, helpers at their parent's team desk — GomuxHub. Pushes keep
+    // it current; each connect pulls the whole tree.
+    state.ctx.gomuxHub = new GomuxHub(state.ctx, new GomuxProvider(bridge));
     state.bridge = bridge;
     // Auto-dial only where a relay is plausibly present (resolveRelay's host gate) AND
     // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise
@@ -793,6 +800,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // local project the binary serves the active file source + restores its session.
     // (SessionStore is a local/relay feature; it never runs in pure GitHub mode.)
     const offConn = bridge.onConnectionChange((connected) => {
+      if (connected) state.ctx.gomuxHub?.refresh();
       if (!connected || repo) return;
       state.ctx.fileProvider = remoteProvider;
       // Learn what the binary serves BEFORE restore: session restore normalizes
@@ -843,6 +851,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.glyphFarLod = null;
       state.ctx.sceneTransforms?.dispose();   // hands scene.updateMatrixWorld back — a second boot takes it over again
       state.ctx.sceneTransforms = null;
+      state.ctx.gomuxHub?.dispose();
+      state.ctx.gomuxHub = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
       state.ctx.deltaBooks?.dispose();
