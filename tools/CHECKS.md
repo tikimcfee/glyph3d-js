@@ -185,11 +185,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
 - **`agent-book-history.test.mjs`** (headless) — an agent book's sliding window over a synthetic
-  100-turn transcript and a mock relay window: records carry their line's byte offset; paging near
+  100-turn event stream and a mock `agentEvents/read` (lines after `from`, before `until`;
+  `tail`): records carry their line's byte offset; paging near
   the oldest sheet prefetches records (no sheets); pushing past it slides the window one turn back
   (same size, the deck parallel to the entries, the head on the turn paged to, the newest waiting
-  as a record); a slide wider than the buffer waits for reads and completes; a call at a slice
-  edge pairs with its result (the overlap read); the first page back makes numbers exact; live
+  as a record); a slide wider than the buffer waits for reads (windows by the line-start index)
+  and completes; a call at a window edge pairs with its result (the overlap read); the first page
+  back reads from the start and makes numbers exact; live
   turns while held wait beyond the window; `live` slides to the end and resumes following; the
   run's start ends history. Mutation-checked (no evict, no freeze, no pending slide).
 - **`agent-events.test.mjs`** (headless) — agent books fed by gomuxai's event stream
@@ -202,24 +204,40 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   a tool's pending → result rebuilds its sheet in place (count, index, deck node, head unchanged —
   also across a resumed reader that never saw the add); statuses, an errored file action's error,
   a provisional final reply confirmed; turn ids/indexes on every sheet and in `headState`; a
-  subagent's events land in its own book; a redacted thought says so; the sliding-window history
-  pages back by `at` over a long corpus-derived stream (every paged record equals the full fold —
-  results paired across slice edges), and updates to buffered records replace them there.
+  stream's events land in its own book (a subagent's stream in the subagent's — its events'
+  `agent` is not its session id; an old transcript's sidechain records in a book named by their
+  agent); a redacted thought says so; the sliding-window history pages back by `at` over
+  `agentEvents/read` windows of a long corpus-derived stream (the first from the start, later
+  ones by the line-start index; every paged record equals the full fold — results paired across
+  window edges), and updates to buffered records replace them there.
   Mutation-checked (12 mutants: no in-place replace, position lost, generic tag, no subagent
   routing, orphan update as add, no overlap read, turn dropped, buffered update ignored, …).
   ```
   bun tools/agent-events.test.mjs
   GOMUXAI_DIR=/path/to/gomuxai bun tools/agent-events.test.mjs
   ```
-- **`gomux-hub.test.mjs`** (headless) — the gomuxai hub's live follow over a growing mock
-  transcript: the cursor stops past the last complete line (a line mid-write arrives whole on the
-  next read); a tool call whose result isn't written yet holds — nothing at or after it commits —
-  and commits once, with its result; past the pending cap a dangling call commits anyway; a push
-  mid-read re-reads once; status rides the lane (meta.gomux, processing → active, waiting raises
-  the hand, cleaned up → done). Mutation-checked (no hold; cursor past the torn line). The relay
-  side is `cd cli && go test -run Gomux` (export's snapshot / spawned / changed / removed /
-  store / host lines folded into the tree, a live agent beating a departed namesake, a real
-  follower process, the transcript allow-list, gomux/read's window).
+- **`session-books.test.mjs`** (headless) — agent books over the relay's event wire, end to end:
+  the real AgentSessionProvider over a fake bridge playing the relay (agentSessions/list|changed,
+  agentEvents/read|follow|unfollow, agentEvents/lines|ended), real AgentBooks, Carrel, Holding,
+  SessionBooks, GomuxHub, SessionDesk, agent.open and SessionStore. Open = a tail read (doubled
+  to the cap) → hydrate → follow from the last `at`; live lines append, a result update rebuilds
+  its sheet in place, lines that beat the follow's {ok} are taken; ended (code -1 too) drops the
+  provisional replies and re-follows from the last non-provisional `at`; paging back reads from
+  the start once (exact numbers); the hub's book is the agent's name, its status wins over a
+  live batch, a new session opens into the same book (the old unfollowed), a live edit taps the
+  delta books with its patch; the agents desk opens live + recent local sessions (not old, not
+  workgroup), seats a subagent on its parent's team desk, rebuilds nothing on a re-push that
+  changes nothing shown, leaves a cleared book closed; agent.open by prefix / workgroup name;
+  restore reopens saved books (limit, head), a vanished one stays closed, no list quarantines;
+  capture saves books by session, never the hub's. Mutation-checked with agent-events and
+  agent-book-history (16 mutants: resume from a provisional reply, routing by agent id, no
+  sidechain routing, ended keeping provisionals, delta tap on pending calls, no tail growth,
+  follow from the start, clear still following, desk rebuild every push, workgroup/old sessions
+  on the desk, no teams, batch status winning, old session left followed, history never
+  windowed, no overlap read). The relay side is `cd cli && go test` (cli/agentevents.go, gomux.go).
+  ```
+  bun tools/session-books.test.mjs
+  ```
 - **`desk-tuning.test.mjs`** (headless) — per-instance knobs (client/tuning.js): a Settings ▸
   Carrel default reaches only desks born after it; `carrel.set` tunes one desk, `carrel.get`
   reads value · born · own, `default` returns to what the desk was born as; the gomuxai hub's

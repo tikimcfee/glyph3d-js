@@ -267,14 +267,15 @@ export default class DeltaBooks {
     }
 
     /**
-     * The LIVE lane: a normalized agent tool record (agent.tool ingress calls this for
-     * every event; unwatched agents fall straight through). Edits and writes to real
-     * files update the agent's watch set — base captured once per file, head re-read
-     * from disk, the cumulative pair re-aligned. Async work serializes per file so a
-     * burst of edits lands in order.
-     * @param {string} agentId
-     * @param {{action: string, target?: string, meta?: Object}} rec  normalizeToolCall's record
-     * @param {string} [cwd]  the event's working dir — absolutizes the relativized target
+     * The LIVE lane: an agent's tool call that landed ok, as its event record (the app's
+     * SessionBooks taps every live call of a followed session; unwatched agents fall
+     * straight through). Edits and writes to real files update the agent's watch set —
+     * base captured once per file (an edit's event meta carries its patch), head re-read
+     * from disk, the cumulative pair re-aligned. Async work serializes per file so a burst
+     * of edits lands in order.
+     * @param {string} agentId the agent book's lane id
+     * @param {{action: string, target?: string, meta?: Object}} rec  eventRecord's record
+     * @param {string} [cwd]  the session's working dir — absolutizes the relative target
      */
     ingestTool(agentId, rec, cwd = '') {
         const set = this.sets.get(agentId);

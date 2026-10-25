@@ -39,17 +39,17 @@
  * the root registers as a world grouping beside the ContentTree — the agent stream is
  * a peer layout target to the file tree. A dragged book pins where you put it.
  *
- * The hook stream carries both TOOL CALLS and CONVERSATION — `text` blocks page in as
- * `say` sheets, `thinking` blocks as `think` sheets — so a book reads as a faithful
- * forward of the run: reasoning, speech, and action interleaved in time.
- *
- * gomuxai's EVENT STREAM (agentEvents.js; applyEvents) is one sheet per EVENT, 1:1 and
- * never grouped: every message INTO the agent is a `prompt` sheet as first-class as a
- * file read — tagged by whose words it is (`[you]`, `[you · queued]`, `[delivered]`,
- * `[notification]`, `[peer]`, `[command]`, `[harness]`), its words set in the prompt hue
- * — beside `think` (a redacted block says so), `say` (a final reply marked), tool and
- * `system` sheets; a call the tool table calls noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt it belongs to: id +
- * index; the HUD reads the open sheet's) so a later layer may group by it. An event
+ * A book's content is gomuxai's EVENT STREAM for its session (agentEvents.js — gomuxai
+ * is the one reader of transcripts; the app's SessionBooks opens it: hydrate from a tail
+ * read, then applyEvents as the follow pushes lines). One sheet per EVENT, 1:1 and never
+ * grouped, so a book reads as a faithful forward of the run: every message INTO the agent
+ * is a `prompt` sheet as first-class as a file read — tagged by whose words it is
+ * (`[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
+ * `[harness]`), its words set in the prompt hue — beside `think` (a redacted block says
+ * so), `say` (a final reply marked), tool and `system` sheets; a call the tool table calls
+ * noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt
+ * it belongs to: id + index; the HUD reads the open sheet's) so a later layer may group by
+ * it. An event
  * that changes (a tool's result landing, a provisional reply confirmed) arrives again
  * under its id and its sheet is rebuilt IN PLACE: same index, same number, the deck and
  * the head unmoved.
@@ -73,8 +73,7 @@ import { computeCellMetrics } from '../core/cellMetrics.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { toFileUri } from '../core/fileUri.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from './toolRegistry.js';
-import { eventsToRecords } from '../workers/sessionParseJob.js';
-import { eventRecord, eventFacts, eventLane, sessionLane, sessionMeta } from './agentEvents.js';
+import { eventRecord, eventFacts, eventLane, sessionMeta, parseEventSlice } from './agentEvents.js';
 /** @import { EventChange } from './agentEvents.js' */
 import { yieldToFrame } from '../utils/frameYield.js';
 
@@ -127,18 +126,14 @@ export const AGENT_BOOKS_DEFAULTS = {
                                 // live growth sheds its oldest past this, a session hydration
                                 // materializes only this tail; 0 = unbounded. Per-book override:
                                 // book.limit / agent.open's limit arg (lane.maxSheets).
-    tailReadBytes: 512 * 1024,  // first transcript tail window a hydration requests (bytes);
+    tailReadBytes: 512 * 1024,  // first transcript tail an open asks for (agentEvents/read {tail}, bytes);
                                 // doubles until the window holds maxSheets events (tail-grow —
                                 // a transcript costs its readable tail, not its full history)
     // -- history (paging back past the resident sheets) --------------------------------
     historyLead: 3,             // paging to within this many sheets of the window's oldest one prefetches older records
     historyTurns: 20,           // records one older read brings into the buffer
-    historySliceBytes: 256 * 1024, // first byte span read for an older slice (doubles until it holds historyTurns)
-    historyOverlapBytes: 256 * 1024, // bytes read PAST the cursor so a slice's last tool calls pair with their results
+    historyOverlapBytes: 256 * 1024, // bytes read PAST the window's end so its last tool calls pair with their results
     historyBuffer: 400,         // parsed records a book keeps BESIDE its window (older + newer) — no GPU cost; past it the far ones drop (re-readable)
-    headMetaBytes: 64 * 1024,   // head window re-harvesting the provenance a tail can't see
-                                // (ai-title/agent-name/turn.prompt sit near the file's start);
-                                // read only when the tail's meta lacks a title. 0 disables.
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds
@@ -400,7 +395,8 @@ export default class AgentBooks {
 
     /**
      * One activity record → a SHEET (description verso, content recto) paged into the
-     * agent's book. The shared sink for agent.activity / agent.tool / agent.message.
+     * agent's book. The shared sink for the event stream (applyEvents, hydrate) and the
+     * manual agent.activity verb.
      * @param {string} agentId
      * @param {string} agentType
      * @param {{action:string, target?:string, detail?:string, result?:string, meta?:Object}} record
@@ -509,11 +505,11 @@ export default class AgentBooks {
     }
 
     /**
-     * Bulk-hydrate a lane from a session record's events (the sessionAdapter's output) —
-     * restoration reads the harness's OWN record back through the same normalize path the
-     * live hook takes, so a restored book and that session's still-live stream converge on
-     * one lane. One layout pass for the whole read (the batch discipline): per-event
-     * relayouts are suppressed while building and a single flow lands at the end.
+     * Bulk-hydrate a lane from a window of its session's event records (parseEventSlice over
+     * an `agentEvents/read`) — the open's first read, before the follow takes over through
+     * applyEvents; both build sheets through activity(), so a hydrated book and a live-fed
+     * one hold the same records. One layout pass for the whole read (the batch discipline):
+     * per-record relayouts are suppressed while building and a single flow lands at the end.
      *
      * Only the newest sheets materialize — the lane's retention cap (its override, else
      * cfg.maxSheets) bounds hydration exactly as it bounds live growth: sheets are GPU
@@ -525,22 +521,19 @@ export default class AgentBooks {
      * yielding a frame between them — a deep history no longer lands as one long task that
      * starves every await queued behind it (the restore lanes run CONCURRENTLY, so one
      * lane's block inflates the others' wall times). The batch flag stays HELD across the
-     * yields: no mid-build relayout, no half-built book visible — and a live hook event
-     * landing mid-hydrate just batches into the same closing relayout.
+     * yields: no mid-build relayout, no half-built book visible — and a live event landing
+     * mid-hydrate just batches into the same closing relayout.
      * @param {string} agentId
-     * @param {Array} events - raw adapter events ({kind:'tool'|'message', …}) OR
-     *        pre-normalized records ({action, target, …}) — the codec normalizes in the
-     *        worker, so what arrives here is usually records already; either way
-     *        eventsToRecords interprets each entry in exactly one place
-     * @param {{agentType?:string, sessionId?:string|null, cwd?:string, meta?:Object|null, limit?:number, budgetMs?:number,
+     * @param {Object[]} records - event records (eventRecord's shape), oldest first
+     * @param {{agentType?:string, sessionId?:string|null, meta?:Object|null, limit?:number, budgetMs?:number,
      *          seqBase?:number, seqExact?:boolean}} [opts] seqBase = records of the session that
-     *        precede `events` (the tail the read skipped) — a fresh lane numbers its sheets from
+     *        precede `records` (the tail the read skipped) — a fresh lane numbers its sheets from
      *        there, so a sheet's number is its place in the whole run; seqExact false = the read
      *        never reached the record's start, so that count is a floor
      * @returns {Promise<number>} sheets added
      */
-    async hydrate(agentId, events, { agentType = 'claude', sessionId = null, cwd = '', meta = null, limit, budgetMs = 8,
-                                    seqBase = 0, seqExact = true } = {}) {
+    async hydrate(agentId, records, { agentType = 'claude', sessionId = null, meta = null, limit, budgetMs = 8,
+                                     seqBase = 0, seqExact = true } = {}) {
         const lane = this.ensure(agentId, agentType);
         if (lane.seq === 0) { lane.seq = Math.max(0, Math.floor(seqBase) || 0); lane.seqExact = seqExact; }
         if (sessionId) lane.sessionId = sessionId;
@@ -551,14 +544,14 @@ export default class AgentBooks {
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
-        const slice = events.length > cap ? events.slice(-cap) : events;
-        const records = eventsToRecords(slice, cwd);   // records pass through; noise drops
+        const slice = records.length > cap ? records.slice(-cap) : records;
         this._batch = true;
         let added = 0;
         let slice0 = performance.now();
         try {
-            for (const rec of records) {
+            for (const rec of slice) {
                 this.activity(agentId, agentType, rec);
+                this._noteEventTime(lane, rec);
                 added++;
                 if (performance.now() - slice0 > budgetMs) {
                     await yieldToFrame();
@@ -569,7 +562,8 @@ export default class AgentBooks {
             this._batch = false;
         }
         // A hydrated book renders a RECORD, not a live process — it rests at 'idle'
-        // (never stall-demoted) until a live hook event lands and marks it active.
+        // (never stall-demoted) until a live event lands and marks it active (or its
+        // owner says what the session is doing).
         this._setState(lane, 'idle');
         this._refreshNameplate(lane);   // once, after the batch — not per record
         this._relayout();
@@ -587,10 +581,11 @@ export default class AgentBooks {
      *             a buffer (a tool's result landing, a provisional reply confirmed). An add
      *             of an id a book already holds (a resumed stream re-sending its last line)
      *             is an update too. An update of an event no book holds any more is dropped;
-     *   session → the lane's meta (title, model, cwd, branch, the parent link).
-     * A subagent's events (they carry `agent`) land in its own book, whatever stream fed
-     * them (eventLane / sessionLane). A lane's age is its newest event's own timestamp.
-     * One nameplate restage and one relayout for the whole batch.
+     *   session → the stream's lane meta (title, model, cwd, branch, the parent link) — a
+     *             stream is one session's, so its session lines describe its own book.
+     * A stream's events are its book's (eventLane: only an old Claude transcript's sidechain
+     * records, another agent's, land in a book of their own). A lane's age is its newest
+     * event's own timestamp. One nameplate restage and one relayout for the whole batch.
      * @param {string} streamLane the book this stream feeds
      * @param {EventChange[]} changes
      * @param {{agentType?:string}} [opts] agentType for a lane born here (else the session's harness)
@@ -604,7 +599,7 @@ export default class AgentBooks {
         try {
             for (const c of changes) {
                 if (c.op === 'session') {
-                    const lane = this.ensure(sessionLane(c.session, streamLane), c.session.harness || agentType);
+                    const lane = this.ensure(streamLane, c.session.harness || agentType);
                     lane.meta = { ...(lane.meta || {}), ...sessionMeta(c.session) };
                     if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
                     if (c.session.session_id) lane.sessionId = c.session.session_id;
@@ -613,13 +608,12 @@ export default class AgentBooks {
                 }
                 const rec = eventRecord(c.event, c.pos, { showNoise: this.cfg.showNoise });
                 if (!rec) continue;
-                const id = eventLane(c.event, streamLane);
+                const id = eventLane(c.event, streamLane, !!this.lanes.get(streamLane)?.meta?.parentSession);
                 const held = this.lanes.get(id);
                 if (held && this._replaceRecord(held, rec)) { updated++; touched.add(held); continue; }
                 if (c.op !== 'add') continue;
                 const lane = this.activity(id, held?.agentType || agentType, rec);
-                const t = Date.parse(rec.ts);
-                if (Number.isFinite(t) && !(lane.wallTs >= t)) lane.wallTs = t;
+                this._noteEventTime(lane, rec);
                 added++;
                 touched.add(lane);
             }
@@ -661,11 +655,45 @@ export default class AgentBooks {
         return false;
     }
 
+    /** A lane's age is its newest event's own timestamp (an event record's `ts`). @private */
+    _noteEventTime(lane, rec) {
+        const t = Date.parse(rec.ts);
+        if (Number.isFinite(t) && !(lane.wallTs >= t)) lane.wallTs = t;
+    }
+
     /**
-     * agent.meta / agent.kimi-wire: merge session metadata onto a lane and restage its
-     * nameplate. Live lanes learn their title/cwd/model this way (archived ones get it
-     * through hydrate's opts.meta); an orchestrator's fields ride `meta.gomux`. Unknown
-     * lane → false.
+     * Drop a book's provisional replies (a Stop hook's reply ahead of the transcript) —
+     * what a reader does before it resumes a stream (EVENTS.md, `say`): one whose copy
+     * hasn't landed is sent again, and one whose copy landed meanwhile comes back as that
+     * copy, which a kept provisional sheet would duplicate. Resident sheets leave the deck
+     * (the deck closes up behind them); buffered records leave their buffer.
+     * @param {string} agentId
+     * @returns {number} records dropped
+     */
+    dropProvisional(agentId) {
+        const lane = this.lanes.get(agentId);
+        if (!lane) return 0;
+        let n = 0;
+        for (let i = lane.entries.length - 1; i >= 0; i--) {
+            if (!lane.entries[i].record.provisional) continue;
+            this._evict(lane, i);
+            n++;
+        }
+        for (const key of ['newer', 'older']) {
+            const buf = lane[key];
+            if (!buf?.length) continue;
+            const kept = buf.filter((x) => !x.record.provisional);
+            n += buf.length - kept.length;
+            lane[key] = kept;
+        }
+        if (n) { this._refreshNameplate(lane); this._relayout(); this._emitChange(); }
+        return n;
+    }
+
+    /**
+     * Merge metadata onto a lane and restage its nameplate — an orchestrator's fields ride
+     * `meta.gomux` (GomuxHub); a session's own provenance arrives with its stream's session
+     * lines (applyEvents) and hydrate's opts.meta. Unknown lane → false.
      * @param {string} id lane id
      * @param {Object} meta partial metadata — merged over what the lane already holds
      * @returns {boolean}
@@ -1238,10 +1266,8 @@ export default class AgentBooks {
     /**
      * The cap a hydration of this lane WOULD apply — hydrate's rule (an explicit
      * limit wins, else the lane's override, else the shelf default) without
-     * mutating anything. The parse pool pre-slices the event tail in the worker
-     * to this count, so only what the book will materialize clones back to the
-     * main thread. hydrate re-derives + re-slices identically — the slice here
-     * is transport hygiene, not semantics.
+     * mutating anything: the quota an open's tail read grows until it holds.
+     * hydrate re-derives + re-slices identically.
      * @param {string} agentId @param {number} [limit] @returns {number} cap (Infinity = unbounded)
      */
     capForHydration(agentId, limit) {
@@ -1301,18 +1327,23 @@ export default class AgentBooks {
      * it one sheet back (the older sheet materializes at the front, the newest leaves for
      * the newer buffer), pushing past its newest slides it forward; sheets outside the
      * window wait as parsed records, not GPU objects. Paging near the oldest sheet
-     * prefetches older records from the transcript (by each record's byte offset, `at`)
-     * so a slide never waits on a read. While the window is held away from the live end,
-     * live sheets join the newer buffer — the book never shifts under the reader.
+     * prefetches older records from the session's event stream (`agentEvents/read`
+     * windows keyed by each record's byte offset, `at`) so a slide never waits on a read.
+     * While the window is held away from the live end, live sheets join the newer buffer —
+     * the book never shifts under the reader.
      * @param {string} agentId
-     * @param {{read: (window:{fromOffset?:number, maxBytes?:number, tailBytes?:number}) => Promise<{bytes:Uint8Array, offset:number}>,
-     *          parse: (bytes:Uint8Array, opts:Object) => Promise<{records:Array, count?:number}>,
-     *          harness: string, cwd?: string|null}} source
+     * @param {{read: (window:{from?:number, until?:number}) => Promise<{lines:string[], size?:number}>, sealed?: boolean}} source
+     *        `agentEvents/read` for the book's session: the lines AFTER the line starting at
+     *        `from` (from the start when omitted — `from` must be a line start, an event's
+     *        `at`) and before byte `until` (to the end when omitted). `sealed`: the book's
+     *        older sheets came from ANOTHER session (an agent that moved on to a new one), whose
+     *        offsets this source can't read — nothing older is read, and what was buffered
+     *        from before stays the end of the book.
      */
     setHistory(agentId, source) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
-        lane.history = { ...source, loading: null, done: false };
+        lane.history = { read: source.read, loading: null, done: !!source.sealed, starts: null };
         lane.older ??= [];
         lane.newer ??= [];
         lane.book.onPage = (head, asked) => this._onPage(lane, head, asked);
@@ -1411,8 +1442,12 @@ export default class AgentBooks {
         const from = oldest?.record?.at;
         if (!Number.isFinite(from)) return Promise.resolve(0);   // a live-born record knows no byte offset
         if (from <= 0) { this._reachedStart(lane, oldest.seq); return Promise.resolve(0); }
-        if (!lane.seqExact && !h.counting) h.counting = this._countBefore(lane, from, oldest.seq);
-        h.loading = this._readOlder(lane, from, oldest.seq).finally(() => {
+        h.loading = this._readOlder(lane, oldest.record, oldest.seq).catch((e) => {
+            // Said once per failed read, with the request's anchor: a relay-side window bug
+            // reads as itself, not as a book whose history quietly ends.
+            console.warn(`[AgentBooks] ${lane.agentId}: reading the records before byte ${from} failed —`, e?.message || e);
+            return 0;
+        }).finally(() => {
             h.loading = null;
             const pend = h.pendingBack || 0;
             h.pendingBack = 0;
@@ -1423,42 +1458,41 @@ export default class AgentBooks {
         return h.loading;
     }
 
-    /** @private */
-    async _readOlder(lane, from, fromSeq) {
+    /**
+     * Read the records before `oldest` (seq fromSeq) into the older buffer.
+     *
+     * A read names line starts (`from` must be an event's `at`), so the FIRST read goes
+     * from the transcript's start: every record before the window, which makes the sheet
+     * numbers exact (the count before it) and leaves an index of the line starts there
+     * (`history.starts`). Later reads window by that index — the lines of the
+     * historyTurns records before the oldest known one. Every window reads
+     * historyOverlapBytes PAST its end, so a call near the edge pairs with its result;
+     * what's kept is what comes before the oldest known record (by id — one line can hold
+     * several events). @private
+     */
+    async _readOlder(lane, oldest, fromSeq) {
         const h = lane.history, c = this.cfg;
-        let span = c.historySliceBytes, recs = [], start = 0;
-        for (;;) {
-            const want = Math.max(0, from - span);
-            const r = await h.read({ fromOffset: want, maxBytes: from - want + c.historyOverlapBytes });
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, base: r.offset, showNoise: c.showNoise });
-            recs = out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
-            start = r.offset;
-            if (recs.length >= c.historyTurns || start === 0 || span >= 64 * 1024 * 1024) break;
-            span *= 2;
-        }
+        const from = oldest.at;
+        const until = from + Math.max(1, c.historyOverlapBytes);
+        const starts = h.starts;
+        let before = 0;
+        if (starts) while (before < starts.length && starts[before] < from) before++;
+        const windowed = !!starts && before > c.historyTurns;
+        const r = await h.read(windowed ? { from: starts[before - c.historyTurns - 1], until } : { until });
+        const out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise });
+        const k = out.records.findIndex((x) => x.id === oldest.id);
+        const recs = k >= 0 ? out.records.slice(0, k) : out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
         // The book moved on while we read (closed, or the oldest known record changed): drop it.
-        const oldest = lane.older[0]?.record ?? lane.entries[0]?.record;
-        if (this.lanes.get(lane.agentId) !== lane || oldest?.at !== from) return 0;
+        const now = lane.older[0]?.record ?? lane.entries[0]?.record;
+        if (this.lanes.get(lane.agentId) !== lane || now?.id !== oldest.id) return 0;
+        if (!windowed) {
+            h.starts = [...new Set(recs.map((x) => x.at).filter(Number.isFinite))].sort((a, b) => a - b);
+            if (!lane.seqExact) this._setSheetBase(lane, recs.length - fromSeq);
+        }
         const take = recs.slice(-c.historyTurns);
         lane.older.unshift(...take.map((record, j) => ({ record, seq: fromSeq - take.length + j })));
-        if (start === 0 && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
+        if (!windowed && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
         return take.length;
-    }
-
-    /** Count the records before byte `from` (off-thread, records not cloned back) and make
-     *  the lane's sheet numbers exact: the record at `from` (seq fromSeq) is sheet count+1.
-     *  Once per lane — until it lands, numbers are the open's estimate (shown `~`). @private */
-    async _countBefore(lane, from, fromSeq) {
-        const h = lane.history;
-        try {
-            const r = await h.read({ fromOffset: 0, maxBytes: from });
-            if (r.offset !== 0) return;   // the relay's read bound kept the END — can't count from the start
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, countOnly: true, showNoise: this.cfg.showNoise });
-            if (this.lanes.get(lane.agentId) !== lane) return;
-            this._setSheetBase(lane, out.count - fromSeq);
-        } catch (e) {
-            console.warn(`[AgentBooks] ${lane.agentId}: counting the sheets before the window failed — numbers stay estimates:`, e?.message || e);
-        }
     }
 
     /** The oldest record is the run's first (seq minSeq): sheet numbers become exact. @private */

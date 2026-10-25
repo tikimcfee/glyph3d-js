@@ -4,93 +4,87 @@
 //   bun tools/agent-book-history.test.mjs
 //
 // A book is a fixed-size window (its cap of sheets) sliding over the run; turns outside
-// it wait as parsed records. This gate locks, over a synthetic 100-turn claude transcript
-// and a mock relay window:
-//   - every parsed record carries its line's byte offset (`at`);
+// it wait as parsed records. This gate locks, over a synthetic 100-turn event stream and a
+// mock `agentEvents/read` (gomuxai's `agent transcript --from --until` window):
+//   - every record carries its line's byte offset (`at`), a line start;
 //   - paging near the oldest sheet PREFETCHES older records — no sheets added;
 //   - pushing past the oldest sheet slides the window one turn back: the older turn at the
 //     front, the newest out to the newer buffer — the window's size never changes, the
 //     deck stays parallel to the entries, the head lands on the turn paged to;
 //   - a slide wider than the buffer waits for reads and completes;
-//   - a call at a slice edge pairs with its result (the overlap read);
-//   - the first page back counts the turns before it (exact numbers); the run's start ends
-//     history (turn 1 = the first);
+//   - a call at a window edge pairs with its result (the overlap read past the window);
+//   - the first page back reads from the start and counts the turns before it (exact
+//     numbers); the run's start ends history (turn 1 = the first);
 //   - live turns while held wait in the newer buffer (the book doesn't shift); `live`
 //     slides the window to the end and resumes following.
 //
-// The codec is the real main-thread runSessionParseJob; the books are real AgentBooks on
-// the headless atlas.
+// The parse is the real parseEventSlice; the books are real AgentBooks on the headless atlas.
 
 import * as THREE from 'three';
 import './headless-canvas.mjs';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 const { default: AgentBooks } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
-const { runSessionParseJob } = await import('../packages/glyph3d-core/src/workers/sessionParseJob.js');
+const { parseEventSlice } = await import('../packages/glyph3d-core/src/collections/agentEvents.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error(`  ✗ ${m}`); } };
 const J = (v) => JSON.stringify(v);
 const eq = (a, b, m) => ok(J(a) === J(b), `${m}\n      got  ${J(a)}\n      want ${J(b)}`);
 
-// ── a 100-turn transcript: say k (with bulk), and every 10th a Bash whose result is the NEXT line ──
-const enc = new TextEncoder();
-let ts = 1754700000000;
-const L = (o) => JSON.stringify({ cwd: '/p', timestamp: new Date(ts += 1000).toISOString(), ...o }) + '\n';
-function transcript(n) {
-    let t = '';
+// ── a 100-turn stream: say k, and every 10th a Bash whose result is the NEXT line ──
+const LINE = 500;   // every transcript line is LINE bytes
+let at = 0, seq = 0, ts = 1754700000000;
+const turn = { id: 't', index: 1, derived: false };
+const frame = (o) => ({ type: 'event', seq: seq++, at, line: at / LINE, ts: new Date(ts += 1000).toISOString(), turn, ...o });
+const line = (...frames) => { at += LINE; return frames; };
+const use = (k) => frame({ id: `t${k}`, op: 'add', kind: 'tool', tool: { name: 'Bash', input: { command: `echo ${k}` }, result: { status: 'pending' }, action: 'bash', detail: `echo ${k}` } });
+const res = (k) => frame({ id: `t${k}`, op: 'update', kind: 'tool', tool: { name: 'Bash', input: { command: `echo ${k}` }, result: { status: 'ok', output: `out ${k}` }, action: 'bash', detail: `echo ${k}` } });
+const sayk = (k, text = `say ${k} ` + 'x'.repeat(400)) => frame({ id: `s${k}`, op: 'add', kind: 'say', say: { text } });
+function stream(n) {
+    const out = [];
     for (let k = 0; k < n; k++) {
         if (k === 79) {
             // two PARALLEL calls straddling the open tail's edge: 80 is the oldest resident turn,
-            // so 79 sits in the first older slice with its result written AFTER the cursor
-            t += L({ message: { role: 'assistant', content: [{ type: 'tool_use', id: 't79', name: 'Bash', input: { command: 'echo 79' } }] } });
-            t += L({ message: { role: 'assistant', content: [{ type: 'tool_use', id: 't80', name: 'Bash', input: { command: 'echo 80' } }] } });
-            t += L({ message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't79', content: 'out 79' }] } });
-            t += L({ message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't80', content: 'out 80' }] } });
+            // so 79 sits in the first older window with its result written AFTER the window
+            out.push(...line(use(79)), ...line(use(80)), ...line(res(79)), ...line(res(80)));
             k++;
             continue;
         }
-        if (k % 10 === 7) {
-            t += L({ message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${k}`, name: 'Bash', input: { command: `echo ${k}` } }] } });
-            t += L({ message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${k}`, content: `out ${k}` }] } });
-        } else {
-            t += L({ message: { role: 'assistant', content: [{ type: 'text', text: `say ${k} ` + 'x'.repeat(400) }] } });
-        }
+        if (k % 10 === 7) out.push(...line(use(k)), ...line(res(k)));
+        else out.push(...line(sayk(k)));
     }
-    return t;
+    return out;
 }
-let text = transcript(100);
-let bytes = enc.encode(text);
+const frames = stream(100);
+const SESSION = { type: 'session', session_id: 'h', harness: 'claude', cwd: '/p' };
 
-/** gomux/read + agentSessions/read's window over the growing bytes (line-aligned start). */
+/** agentEvents/read: the lines after the line at `from`, before byte `until`; `tail`: the lines at or after size - tail. */
 const reads = [];
-function read({ fromOffset, maxBytes, tailBytes } = {}) {
-    reads.push({ fromOffset, maxBytes, tailBytes });
-    const size = bytes.length;
-    let start = 0, end = size;
-    if (fromOffset != null) { start = Math.min(fromOffset, size); if (maxBytes > 0) end = Math.min(size, start + maxBytes); }
-    else if (tailBytes > 0 && tailBytes < size) start = size - tailBytes;
-    if (start > 0 && bytes[start - 1] !== 0x0A) { const nl = bytes.indexOf(0x0A, start); start = nl < 0 ? end : nl + 1; }
-    return Promise.resolve({ bytes: bytes.slice(start, end), offset: start, size });
+function read({ from, until, tail } = {}) {
+    reads.push({ from, until, tail });
+    const size = at;
+    let lo = -1, hi = size;
+    if (tail > 0) lo = Math.max(-1, size - tail - 1);
+    if (from != null) lo = from;
+    if (until != null) hi = Math.min(size, until);
+    return Promise.resolve({ lines: [SESSION, ...frames.filter((f) => f.at > lo && f.at < hi)].map(J), size });
 }
-const parse = (b, opts) => Promise.resolve(runSessionParseJob({ bytes: b, ...opts }));
 const label = (r) => r.action === 'say' ? r.result.split(' ')[1] : `bash${r.detail.split(' ')[1]}`;
 const kept = (lane) => lane.entries.map((e) => label(e.record));
 
-// ── open: the tail (20 turns), as agent.open does ──
+// ── open: the tail (20 turns), as SessionBooks does ──
 const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
-books.cfg.historySliceBytes = 2048;      // small slices so the grow loop runs
 books.cfg.historyOverlapBytes = 1024;
-const tail = await read({ tailBytes: 12000 });
-const first = await parse(tail.bytes, { harness: 'claude', cap: 20, base: tail.offset });
+const tail = await read({ tail: 12000 });
+const first = parseEventSlice(tail.lines, { cap: 20 });
 await books.hydrate('a', first.records, { agentType: 'claude', seqBase: first.total - 20, seqExact: false });
-books.setHistory('a', { read, parse, harness: 'claude' });
+books.setHistory('a', { read });
 const lane = books.lanes.get('a');
 const W = 20;
 const parallel = () => lane.entries.every((e, i) => lane.book.sheets[i]?.verso === e.verso);
 const settle = async () => { for (let i = 0; i < 200 && lane.history.loading; i++) await lane.history.loading; };
 eq(kept(lane).slice(0, 3), ['bash80', '81', '82'], 'opened at the tail: turns 80..99');
-ok(lane.entries.every((e) => Number.isFinite(e.record.at)), 'every resident record knows its byte offset');
-ok(new TextDecoder().decode(bytes.subarray(lane.entries[0].record.at)).startsWith('{'), "the oldest record's `at` starts its line");
+ok(lane.entries.every((e) => Number.isFinite(e.record.at) && e.record.at % LINE === 0), 'every resident record knows its byte offset, a line start');
 
 // ── near the oldest sheet: prefetch, no sheets ──
 lane.book.pageTo(5);
@@ -99,7 +93,6 @@ lane.book.pageTo(2);
 ok(!!lane.history.loading, 'paging within historyLead prefetches');
 ok(books.loadOlder('a') === lane.history.loading, 'a second ask joins the read in flight');
 await settle();
-await lane.history.counting;
 ok(lane.entries.length === W && lane.older.length === 20, `prefetch fills the older buffer only (window ${lane.entries.length}, buffer ${lane.older.length})`);
 const turnOf = (i) => lane.book.sheets[i].meta.seq + (lane.sheetBase || 0) + 1;
 ok(lane.seqExact && turnOf(0) === 81, `the first page back counts the turns before it: exact (sheet 0 = turn ${turnOf(0)}, want 81)`);
@@ -114,19 +107,19 @@ eq(lane.newer.map((x) => label(x.record)), ['99'], 'the newest turn left for the
 ok(lane.book.head === 0 && turnOf(0) === 80, 'the head is on the turn paged to (turn 80)');
 ok(parallel(), 'the deck stays parallel to the entries');
 const b79 = lane.entries[0].record;
-ok(String(b79.result).includes('out 79'), "a call at the slice edge pairs with a result written past the cursor (the overlap read)");
+ok(String(b79.result).includes('out 79') && b79.status === 'ok', 'a call at the window edge pairs with a result written past it (the overlap read)');
 
 // ── a slide wider than the buffer waits for reads, then completes ──
+reads.length = 0;
 lane.book.scroll(-50);
 await settle();
 eq(kept(lane)[0], '29', `slid 50 turns back across reads (oldest now ${kept(lane)[0]})`);
 ok(lane.entries.length === W && parallel(), 'still the same window, still parallel');
 ok(lane.newer.length === 51, `everything newer waits as records (${lane.newer.length})`);
+ok(reads.length > 0 && reads.every((w) => Number.isFinite(w.from) && Number.isFinite(w.until)), 'later reads are windows by the line-start index');
 
 // ── a live turn while held waits; `live` slides to the end ──
 const seqBefore = lane.seq;
-text += L({ message: { role: 'assistant', content: [{ type: 'text', text: 'say 100 live' }] } });
-bytes = enc.encode(text);
 books.activity('a', 'claude', { action: 'say', target: '', detail: '', result: 'say 100 live', meta: null });
 ok(lane.seq === seqBefore + 1 && lane.newer.length === 52 && kept(lane)[0] === '29', 'a live turn while held joins the newer buffer — the window holds still');
 ok(books.headState('a').newer === 52, 'the HUD knows how many newer turns wait');

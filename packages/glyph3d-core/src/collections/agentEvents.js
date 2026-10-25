@@ -1,8 +1,9 @@
 /**
- * agentEvents — the reader of gomuxai's agent event stream (`agent events <session> --json`,
- * the contract in gomuxai's docs/EVENTS.md). gomuxai is the one parser of the harnesses'
- * transcripts; this module never reads a transcript. It reads the stream gomuxai serves and
- * turns its events into the records an agent book renders, one sheet per event.
+ * agentEvents — the reader of gomuxai's agent event stream (`agent transcript <session>`, the
+ * contract in gomuxai's docs/EVENTS.md; the relay forwards its lines as `agentEvents/lines`
+ * and answers `agentEvents/read` windows with them). gomuxai is the one parser of the
+ * harnesses' transcripts; this module never reads a transcript. It reads the stream gomuxai
+ * serves and turns its events into the records an agent book renders, one sheet per event.
  *
  * The stream is JSON lines:
  *   {"type":"session", …Session}            what the session is; again whenever it changes
@@ -11,19 +12,19 @@
  * provisional reply is confirmed) comes again as an `update` with the same `id`: the whole
  * event, carrying the `at`/`line`/`ts` of the line that changed it. The reader keeps events
  * by id, so an update REPLACES its event in place, and the event keeps its POSITION: the
- * `at`/`line`/`seq` of the add that introduced it. Position orders events within one
- * stream; `seq` restarts with every stream (a `--from` resume renumbers), so identity is
- * the `id`, and the byte offset `at` (the transcript line the event came from) is what a
- * book pages back by.
+ * `at`/`line`/`seq` of the add that introduced it. Identity is the `id`; the byte offset
+ * `at` (the transcript line the event came from) is what a book pages back by, and what a
+ * follow resumes from (`lastAt`: the newest line read that isn't a provisional reply).
  *
- * Pure: no THREE, no DOM — the worker, the relay-side tooling and the tests import it.
+ * Pure: no THREE, no DOM — the relay-side tooling and the tests import it.
  *
- *   AgentEventReader      push(bytes|text) → changes; the folded events by id
+ *   AgentEventReader      push(bytes|text) → changes; the folded events by id (or, built
+ *                         with retain:false, a framing-only reader for a live follow)
  *   eventRecord(ev, pos)  one event → the record a sheet renders (null: noise, when hidden)
  *   eventFacts(record)    the event's own facts as info rows (turn, status, final, …)
  *   sessionMeta(session)  a session line → the lane meta the nameplate reads
- *   eventLane(ev, lane)   the book an event belongs in (a subagent's events: its own)
- *   parseEventSlice(…)    a window of stream bytes → folded records (a book's history parse)
+ *   eventLane(ev, …)      the book an event belongs in
+ *   parseEventSlice(…)    a window of stream lines → folded records (a book's open + history)
  */
 
 /** Whose words a prompt is, by its origin — the prompt sheet's tag. */
@@ -82,12 +83,26 @@ function checkFrame(f, where) {
  *           null for an update of an event this reader never saw added
  */
 
+/** A provisional reply (the Stop hook's, ahead of the transcript): a follow never resumes
+ *  from it — its line isn't in the transcript yet (EVENTS.md, `say`). */
+const isProvisional = (f) => f.kind === 'say' && !!f.say?.provisional;
+
 /**
  * The stream reader: JSONL in (any chunking — a line split across pushes, a UTF-8 codepoint
  * split across byte chunks), the folded events out. One reader per stream.
+ *
+ * `retain: false` frames and checks without keeping events: every frame is reported as it
+ * came (an add with its own position, an update positionless) — the live follow's reader,
+ * whose books are the store (AgentBooks.applyEvents replaces by id), so a session followed
+ * for days isn't held twice.
  */
 export class AgentEventReader {
-    constructor() {
+    /** @param {{retain?: boolean}} [opts] */
+    constructor({ retain = true } = {}) {
+        this.retain = retain;
+        /** The `at` of the newest line read that isn't a provisional reply — where a follow
+         *  resumes (`agentEvents/follow {from}`); null until an event arrives. */
+        this.lastAt = null;
         /** @type {Object|null} the latest session line */
         this.session = null;
         /** @type {Map<string, {event:AgentEvent, pos:{at:number, line:number, seq:number}|null}>} id → event + position */
@@ -147,6 +162,12 @@ export class AgentEventReader {
             const { type: _t, ...session } = f;
             this.session = session;
             return { op: 'session', session };
+        }
+        if (!isProvisional(f) && !(this.lastAt >= f.at)) this.lastAt = f.at;
+        if (!this.retain) {
+            return f.op === 'add'
+                ? { op: 'add', event: f, pos: { at: f.at, line: f.line, seq: f.seq } }
+                : { op: 'update', event: f, pos: null };
         }
         const have = this.byId.get(f.id);
         if (have) {
@@ -248,7 +269,7 @@ export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
                 target, detail: String(b.detail ?? ''),
                 result: target && status !== 'error' ? '' : out,
                 meta: b.meta && typeof b.meta === 'object' ? b.meta : null,
-                status, subSession: b.sub_session ?? null,
+                status, subSessions: Array.isArray(b.sub_sessions) ? b.sub_sessions.map(String) : [],
             };
         }
         case 'system':
@@ -281,7 +302,7 @@ export function eventFacts(rec) {
     if (rec.eventKind === 'think' && rec.redacted) rows.push('redacted (signature only)');
     if (rec.eventKind === 'tool') {
         if (STATUS_ROWS[rec.status]) rows.push(STATUS_ROWS[rec.status]);
-        if (rec.subSession) rows.push(`started ${rec.subSession}`);
+        if (rec.subSessions?.length) rows.push(`started ${rec.subSessions.join(', ')}`);
     }
     return rows;
 }
@@ -302,41 +323,38 @@ export function sessionMeta(s) {
 }
 
 /**
- * The book an event belongs in: a subagent's own events (they carry `agent`) are its book —
- * named by the subagent id, as the subagent's session id is — whatever stream fed them;
- * everything else is the stream's.
- * @param {AgentEvent} ev @param {string} streamLane @returns {string}
+ * The book an event belongs in. A stream is one session's (`agent transcript <session>`), so
+ * its events are its book's — a subagent's own stream included (its events carry `agent`,
+ * the subagent's id, which for Claude is not its session id: that is `agent-<id>`). The one
+ * exception is an old Claude main transcript that still holds its subagents' records
+ * (sidechains with an agentId, the subagent keeping no transcript of its own): those
+ * events are another agent's and land in a book of their own, named by that `agent`.
+ * @param {AgentEvent} ev
+ * @param {string} streamLane the book the stream feeds
+ * @param {boolean} streamIsSubagent the stream is a subagent's own session (its session
+ *        line names a parent_session)
+ * @returns {string}
  */
-export function eventLane(ev, streamLane) {
-    return ev.agent || streamLane;
+export function eventLane(ev, streamLane, streamIsSubagent) {
+    return ev.agent && !streamIsSubagent ? ev.agent : streamLane;
 }
 
 /**
- * The book a session line describes: a subagent's session (it names its parent) is the
- * subagent's book, its session id being the subagent id; any other is the stream's.
- * @param {Object} session @param {string} streamLane @returns {string}
+ * A WINDOW of a stream (the lines an `agentEvents/read` returned) → its folded records, the
+ * parse half of a book's open and history reads. Events fold by id in arrival order; an
+ * update whose add lies before the window belongs to an older window and is dropped here.
+ * @param {Uint8Array|string|string[]} lines stream lines (an array: one line each, no newline)
+ * @param {{cap?:number, showNoise?:boolean}} [opts] cap keeps the newest N records
+ * @returns {{records:Object[], count:number, total:number, session:Object|null, lastAt:number|null}}
+ *          total: the window's records before the cap; lastAt: where a follow resumes
+ *          after this window (AgentEventReader.lastAt)
  */
-export function sessionLane(session, streamLane) {
-    return session?.parent_session && session.session_id ? session.session_id : streamLane;
-}
-
-/**
- * A WINDOW of a stream (the events of transcript bytes [offset, offset + n)) → its folded
- * records, the parse half of a book's history source. Events fold by id in arrival order;
- * an update whose add lies before the window belongs to an older window and is dropped
- * here. The shape matches what AgentBooks' history reads back ({records, count, total}).
- * @param {Uint8Array|string} bytes stream lines
- * @param {{cap?:number, countOnly?:boolean, showNoise?:boolean}} [opts]
- *        cap keeps the newest N records; countOnly returns only the count
- * @returns {{records:Object[], count:number, total:number, session:Object|null}}
- */
-export function parseEventSlice(bytes, { cap = Infinity, countOnly = false, showNoise = true } = {}) {
+export function parseEventSlice(lines, { cap = Infinity, showNoise = true } = {}) {
     const r = new AgentEventReader();
-    r.push(bytes);
+    r.push(Array.isArray(lines) ? (lines.length ? lines.join('\n') + '\n' : '') : lines);
     r.end();
     const all = r.records({ showNoise });
     const total = all.length;
-    if (countOnly) return { records: [], count: total, total, session: r.session };
     const records = Number.isFinite(cap) && total > cap ? all.slice(-cap) : all;
-    return { records, count: records.length, total, session: r.session };
+    return { records, count: records.length, total, session: r.session, lastAt: r.lastAt };
 }

@@ -184,7 +184,7 @@ parallel CPU work the corpus creates:
   back with a color-index buffer attached) is zero-copy; or SAB removes even
   that. Output: one `u8` color-index per byte leader, staged into a color
   storage buffer parallel to the slots — kernel 1 or the paginate kernel
-  splats it into `instanceColor`. Use the `SessionParsePool` model
+  splats it into `instanceColor`. Use the `SyntaxParsePool` model
   (demand-grown, explicit job queue, backpressure), not `WorkerBridge`'s
   fire-and-forget FIFO — the assembler must not run 300 MB ahead of the GPU.
 - Nothing else. No shaping round-trip (the trie replaces it), no line tables,
@@ -271,7 +271,7 @@ eliminating the 1.25×–2× realloc chain entirely.
 | `CodeGrid._beginLoad` | add `loadBytes(view)` — no split, no TextEncoder, no `buildByteLineIndex` |
 | `GlyphPipelineArena` | `reserve(totalBytes, fileCount)` up front; chunked flush trigger; existing `requestFlush` coalescing does the rest |
 | `GlyphPipelineKernels.appendFiles` | unchanged — it is already the tar-feed API |
-| `SessionParsePool` | template for the optional color-worker pool; `WorkerBridge` stays for the legacy path |
+| `SyntaxParsePool` | template for the optional color-worker pool; `WorkerBridge` stays for the legacy path |
 
 ---
 

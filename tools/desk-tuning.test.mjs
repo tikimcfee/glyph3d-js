@@ -84,7 +84,7 @@ function makeWorld() {
     };
     const lanes = new Map();
     const agentBooks = {
-        lanes, cfg: { tailReadBytes: 1 << 20, headMetaBytes: 0 },
+        lanes, cfg: { tailReadBytes: 1 << 20 },
         resolveLane(ref) {
             if (ref && typeof ref === 'object') { for (const e of lanes.entries()) if (e[1].book === ref) return e; return null; }
             const id = String(ref ?? '');
@@ -168,14 +168,14 @@ const run = makeRouter();
 /** Drive the hub's desk layout over a fixed tree: `lead` with helpers `h1`, `h2`, plus `solo`. */
 function hubWorld() {
     const w = makeWorld();
-    const hub = new GomuxHub(w.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} });
+    const hub = new GomuxHub(w.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, { onStream: () => () => {}, streams: new Map() });
     const agents = [
         { name: 'lead', parent: '' }, { name: 'h1', parent: 'lead' }, { name: 'h2', parent: 'lead' }, { name: 'solo', parent: '' },
     ];
     hub.nodes = new Map(agents.map((a) => [a.name, a]));
     for (const a of agents) {
         w.agentBook(a.name);
-        hub.lanes.set(a.name, { name: a.name, phase: 'open', cursor: 0, skip: 0, reading: false, again: false, harness: 'claude', desk: null });
+        hub.lanes.set(a.name, { name: a.name, session: a.name, failed: null });
     }
     hub._layout();
     return { ...w, hub };
@@ -223,10 +223,10 @@ function hubWorld() {
     // A fresh page where the restore runs FIRST: the hub's desks are born wearing them.
     const w3 = makeWorld();
     new SessionStore({ ctx: w3.ctx, router: null, bridge: null })._restoreTunings(saved);
-    const hub3 = new GomuxHub(w3.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} });
+    const hub3 = new GomuxHub(w3.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, { onStream: () => () => {}, streams: new Map() });
     hub3.nodes = new Map([['solo', { name: 'solo', parent: '' }]]);
     w3.agentBook('solo');
-    hub3.lanes.set('solo', { name: 'solo', phase: 'open', cursor: 0, skip: 0, reading: false, again: false, harness: 'claude', desk: null });
+    hub3.lanes.set('solo', { name: 'solo', session: 'solo', failed: null });
     hub3._layout();
     const born3 = w3.ctx.carrels.get(GOMUX_HUB);
     ok(born3.radius === 1500 && born3.born.radius === getSetting('carrel.cylinderRadius'), 'a hub desk built after the restore is born wearing its own values');

@@ -20,6 +20,8 @@ import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSyst
 import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
 import GomuxProvider from '@glyph3d/core/services/data/GomuxProvider.js';
 import GomuxHub from './GomuxHub.js';
+import SessionBooks from './SessionBooks.js';
+import SessionDesk from './SessionDesk.js';
 import RemoteLspProvider from '@glyph3d/core/services/data/RemoteLspProvider.js';
 import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.js';
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
@@ -225,6 +227,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/services/data/RemoteLspProvider.js').default|null} */ lsp: null,
     /** @type {import('@glyph3d/core/services/interaction/LspNavigator.js').default|null} */ lspNavigator: null,
     /** @type {import('@glyph3d/core/services/data/AgentSessionProvider.js').default|null} */ sessionProvider: null,
+    /** @type {import('./SessionBooks.js').default|null} */ sessionBooks: null,
+    /** @type {import('./SessionDesk.js').default|null} */ sessionDesk: null,
     /** @type {import('./GomuxHub.js').default|null} */ gomuxHub: null,
     /** @type {((dy: number) => boolean)|null} */ tryScrollHovered: null,
     /** @type {((dy: number) => boolean)|null} */ tryPageHovered: null,
@@ -679,14 +683,19 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // no explicit ?repo was given (the binary serving a project); GitHub stays the
     // baseline until then.
     const remoteProvider = new RemoteFileSystemProvider(bridge);
-    // The agent-session archive (the relay's stored transcripts) — a PURE ADDITIVE
-    // relay feature: agent.open / agent.sessions / the panel's Archive region read it;
-    // client-only mode simply has no archive. Content semantics live in the adapter.
+    // Agent sessions and their event streams (the relay runs gomuxai, the one reader of
+    // agent transcripts) — a PURE ADDITIVE relay feature: client-only mode simply has no
+    // agent books. SessionBooks is the one open path (tail read → hydrate → follow) every
+    // agent book opens through: the agents desk (local sessions, SessionDesk), the gomuxai
+    // hub, agent.open, the Agents panel's archive, and restore.
     state.ctx.sessionProvider = new AgentSessionProvider(bridge);
+    state.ctx.sessionBooks = new SessionBooks(state.ctx, state.ctx.sessionProvider);
+    state.ctx.sessionDesk = new SessionDesk(state.ctx, state.ctx.sessionProvider, state.ctx.sessionBooks);
     // The gomuxai tree (the relay watches the orchestrator's stores): every agent it runs
     // as a book at the hub desk, helpers at their parent's team desk — GomuxHub. Pushes keep
     // it current; each connect pulls the whole tree.
-    state.ctx.gomuxHub = new GomuxHub(state.ctx, new GomuxProvider(bridge), { exec: (cmd) => state.router.execute(cmd) });
+    state.ctx.gomuxHub = new GomuxHub(state.ctx, new GomuxProvider(bridge), state.ctx.sessionBooks,
+                                      { exec: (cmd) => state.router.execute(cmd) });
     state.bridge = bridge;
     // Auto-dial only where a relay is plausibly present (resolveRelay's host gate) AND
     // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise
@@ -808,7 +817,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // local project the binary serves the active file source + restores its session.
     // (SessionStore is a local/relay feature; it never runs in pure GitHub mode.)
     const offConn = bridge.onConnectionChange((connected) => {
-      if (connected) state.ctx.gomuxHub?.refresh();
+      if (connected) {
+        // The relay dropped this display's followers when it went: re-follow the open books,
+        // then pull the session list and the gomuxai tree (pushes only announce changes).
+        state.ctx.sessionBooks?.reconnect();
+        state.ctx.sessionDesk?.refresh();
+        state.ctx.gomuxHub?.refresh();
+      }
       if (!connected || repo) return;
       state.ctx.fileProvider = remoteProvider;
       // Learn what the binary serves BEFORE restore: session restore normalizes
@@ -861,6 +876,12 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.sceneTransforms = null;
       state.ctx.gomuxHub?.dispose();
       state.ctx.gomuxHub = null;
+      state.ctx.sessionDesk?.dispose();
+      state.ctx.sessionDesk = null;
+      state.ctx.sessionBooks?.dispose();
+      state.ctx.sessionBooks = null;
+      state.ctx.sessionProvider?.dispose();
+      state.ctx.sessionProvider = null;
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
       state.ctx.deltaBooks?.dispose();

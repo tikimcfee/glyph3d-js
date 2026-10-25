@@ -337,7 +337,7 @@ export default class WebSocketBridge {
     /**
      * Resolve a pending rpcRequest from a binary result frame. The promise settles
      * with { ...headerFields, bytes: Uint8Array } — the provider decodes (`bytes`
-     * for readRange, TextDecoder→content for readFile / agentSessions). Errors never
+     * for readRange, TextDecoder→content for readFile). Errors never
      * ride this plane: they stay small JSON text responses on the regular path.
      * @param {string} idStr @param {Uint8Array} rest @private
      */

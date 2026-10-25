@@ -2,8 +2,8 @@
 //
 //   bun tools/bridge-binary.test.mjs
 //
-// The relay answers binary-opted content RPCs (fs/readFile, fs/readRange,
-// agentSessions/read) with ONE raw frame instead of a JSON-escaped string:
+// The relay answers binary-opted content RPCs (fs/readFile, fs/readRange)
+// with ONE raw frame instead of a JSON-escaped string:
 //
 //   [0x02][idLen:u8][id:utf8][hdrLen:u32 BE][hdr JSON][raw payload]
 //

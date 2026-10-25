@@ -1,176 +1,64 @@
-// toolRegistry.test.mjs — behavior lock for the ONE tool-call registry.
+// toolRegistry.test.mjs — behavior lock for the tool calls' PRESENTATION half.
 //
 //   bun tools/toolRegistry.test.mjs
 //
-// normalizeToolCall(name, input, response, cwd) → {action, target, detail, result, meta} | null is
-// the single seam BOTH the live hook (`agent.tool`) and the replay funnel through, so a regression
-// here breaks every book card. It's pure (no THREE/DOM), so we test it directly with the real
-// Claude Code shapes (file.numLines, structuredPatch, stdout, …). decorateForAction(action, meta) is
-// the per-action highlight mapping (0-based, inclusive). Adding a tool? add an entry AND a case here.
+// What a call did (action/target/detail/meta) is gomuxai's tool table, carried by the event
+// stream; this registry only decorates and colors by the record's action:
+// decorateForAction(action, meta) is the per-action highlight mapping (1-based meta in,
+// 0-based inclusive directives out), kindForAction the identity bucket, ACTION_HUES/cssHue the
+// hues the 3D cards and the 2D panel dots share. Meta shapes are gomuxai's
+// (transcript.SummarizeTool's doc: read {lines, range?}, edit {added, removed, ranges?, patch?}).
 
-import { normalizeToolCall, normalizeMessage, decorateForAction } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
+import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
 const J = (v) => JSON.stringify(v);
 const eq = (a, b, msg) => ok(J(a) === J(b), `${msg}\n      got  ${J(a)}\n      want ${J(b)}`);
 
-const CWD = '/home/ivan/dev/glyph3d-js/';
-
-// ── read: partial slice → range meta + relativized target + READ decoration ───────────
+// ── read: a partial read's range → a READ fill over its slice ─────────────────────────
 {
-  const r = normalizeToolCall('Read', { file_path: CWD + 'a/b.js' },
-    { type: 'text', file: { numLines: 42, startLine: 40, totalLines: 100 } }, CWD);
-  eq(r.action, 'read', 'read: action');
-  eq(r.target, 'a/b.js', 'read: target relativized');
-  eq(r.result, '', 'read: file content IS the snapshot → no result');
-  eq(r.meta, { lines: 42, range: [40, 81] }, 'read: partial meta carries range');
-  const d = decorateForAction('read', r.meta);
-  eq(d?.map(({ startLine, endLine }) => [startLine, endLine]), [[39, 80]], 'read: decorate is 0-based slice');
+  const d = decorateForAction('read', { lines: 42, range: [40, 81] });
+  eq(d?.map(({ startLine, endLine }) => [startLine, endLine]), [[39, 80]], 'read: decorate is the 0-based slice');
   ok(d[0].color.b === 1.0, 'read: decoration is the READ (blue) color');
   ok(d[0].fill === true, 'read: directive requests a background FILL bar');
+  eq(decorateForAction('read', { lines: 100 }), null, 'read full: no range, no decoration');
 }
 
-// ── read: a FULL read decorates nothing (no range) ────────────────────────────────────
+// ── edit: the added-line runs → ADDED fills ──────────────────────────────────────────
 {
-  const r = normalizeToolCall('Read', { file_path: CWD + 'x.js' },
-    { file: { numLines: 100, startLine: 1, totalLines: 100 } }, CWD);
-  eq(r.meta, { lines: 100 }, 'read full: no range');
-  eq(decorateForAction('read', r.meta), null, 'read full: no decoration');
-}
-
-// ── edit: structuredPatch → added/removed + added-line runs + ADDED decoration ────────
-{
-  const sp = [{ newStart: 10, lines: [' a', '+b', '+c', ' d', '-e', '+f'] }];
-  const r = normalizeToolCall('Edit', { file_path: CWD + 'a.js' }, { structuredPatch: sp }, CWD);
-  eq(r.action, 'edit', 'edit: action');
-  // The hunks ride WHOLE on meta.patch — the delta books' watch lane reconstructs
-  // a file's pre-edit base from them (deltaSource.reconstructBase).
-  eq(r.meta, { added: 3, removed: 1, ranges: [[11, 12], [14, 14]], patch: sp }, 'edit: counts + added runs + retained hunks');
-  const d = decorateForAction('edit', r.meta);
+  const d = decorateForAction('edit', { added: 3, removed: 1, ranges: [[11, 12], [14, 14]] });
   eq(d.map(({ startLine, endLine }) => [startLine, endLine]), [[10, 11], [13, 13]], 'edit: decorate 0-based runs');
   ok(d[0].color.g === 1.0, 'edit: decoration is the ADDED (green) color');
   ok(d.every((x) => x.fill === true), 'edit: directives request a background FILL bar');
+  eq(decorateForAction('edit', { added: 0, removed: 2, ranges: [] }), null, 'edit with nothing added: no decoration');
+  eq(decorateForAction('edit', { added: 1, removed: 1 }), null, 'a pending edit (no ranges yet): no decoration');
 }
 
-// ── edit aliases: MultiEdit / NotebookEdit normalize to the same action ────────────────
+// ── nothing else decorates ────────────────────────────────────────────────────────────
 {
-  eq(normalizeToolCall('MultiEdit', { file_path: CWD + 'm.js' }, { structuredPatch: [] }, CWD).action, 'edit', 'MultiEdit → edit');
-  const nb = normalizeToolCall('NotebookEdit', { notebook_path: CWD + 'n.ipynb' }, { structuredPatch: [] }, CWD);
-  eq(nb.action, 'edit', 'NotebookEdit → edit');
-  eq(nb.target, 'n.ipynb', 'NotebookEdit: target from notebook_path');
+  eq(decorateForAction('write', { kind: 'create', lines: 3 }), null, 'write: no decoration (all-new)');
+  eq(decorateForAction('bash', { lines: 2 }), null, 'bash: no decoration');
+  eq(decorateForAction('read', null), null, 'no meta: no decoration');
 }
 
-// ── write: create → kind + line count, no decoration ──────────────────────────────────
+// ── identity buckets: every action a record can carry ─────────────────────────────────
 {
-  const r = normalizeToolCall('Write', { file_path: CWD + 'w.js' }, { type: 'create', content: 'a\nb\nc' }, CWD);
-  eq(r.action, 'write', 'write: action');
-  eq(r.meta, { kind: 'create', lines: 3 }, 'write: kind + lines');
-  eq(decorateForAction('write', r.meta), null, 'write: no decoration (all-new)');
+  const want = {
+    read: 'read', grep: 'search', glob: 'search', search: 'search', edit: 'edit', write: 'write',
+    bash: 'run', task: 'run', ask: 'ask', fetch: 'fetch', say: 'say', send: 'say', think: 'think',
+    prompt: 'prompt', system: 'system', noise: 'noise', skill: 'other', somenewtool: 'other',
+  };
+  for (const [action, kind] of Object.entries(want)) eq(kindForAction(action), kind, `${action} → ${kind}`);
+  eq(kindForAction('READ'), 'read', 'buckets ignore case');
+  ok(Object.values(want).every((k) => ACTION_HUES[k]), 'every bucket has a hue');
 }
 
-// ── bash: no target → keeps stdout as result, lines meta ──────────────────────────────
+// ── hues as CSS ───────────────────────────────────────────────────────────────────────
 {
-  const r = normalizeToolCall('Bash', { command: 'ls -la' }, { stdout: 'one\ntwo\n', interrupted: false }, CWD);
-  eq(r.action, 'bash', 'bash: action');
-  eq(r.detail, 'ls -la', 'bash: detail is the command');
-  eq(r.result, 'one\ntwo\n', 'bash: result is the stdout (no target)');
-  eq(r.meta, { lines: 2 }, 'bash: line count (trailing newline ignored)');
-}
-
-// ── grep / glob: detail + result now; meta pending a real shape (null, not a crash) ───
-{
-  const g = normalizeToolCall('Grep', { path: CWD + 'src', pattern: 'TODO' }, { content: 'src/a.js:1:TODO' }, CWD);
-  eq(g.action, 'grep', 'grep: action');
-  eq(g.target, '', 'grep: no file target — matches are the output, not a snapshot');
-  eq(g.detail, 'TODO', 'grep: detail is the pattern');
-  eq(g.result, 'src/a.js:1:TODO', 'grep: matches kept as result (output card)');
-  eq(g.meta, null, 'grep: meta null until a real shape lands');
-  eq(normalizeToolCall('Glob', { pattern: '**/*.js' }, null, CWD).detail, '**/*.js', 'glob: detail is the pattern');
-}
-
-// ── task: subagent → tools/tokens/ms meta; detail prefers subagent_type ───────────────
-{
-  const r = normalizeToolCall('Task', { subagent_type: 'Explore', description: 'find x' },
-    { totalToolUseCount: 7, totalTokens: 1234, totalDurationMs: 4500, content: 'done' }, CWD);
-  eq(r.action, 'task', 'task: action');
-  eq(r.detail, 'Explore', 'task: detail prefers subagent_type');
-  eq(r.meta, { tools: 7, tokens: 1234, ms: 4500 }, 'task: tools/tokens/ms');
-  eq(r.result, 'done', 'task: final message kept as result');
-  eq(normalizeToolCall('Agent', { description: 'd' }, {}, CWD).action, 'task', 'Agent → task');
-}
-
-// ── askUserQuestion / web tools: detail derivation + result text ──────────────────────
-{
-  const q = normalizeToolCall('AskUserQuestion',
-    { questions: [{ question: 'A?' }, { question: 'B?' }] }, 'chose A', CWD);
-  eq(q.action, 'ask', 'ask: action');
-  eq(q.detail, 'A?\nB?', 'ask: detail joins the questions');
-  eq(q.result, 'chose A', 'ask: bare-string response kept as result');
-  eq(normalizeToolCall('WebFetch', { url: 'http://x' }, { result: 'summary' }, CWD).detail, 'http://x', 'fetch: detail url');
-  eq(normalizeToolCall('WebFetch', { url: 'http://x' }, { result: 'summary' }, CWD).result, 'summary', 'fetch: result from .result');
-  eq(normalizeToolCall('WebSearch', { query: 'q' }, { content: 'hits' }, CWD).action, 'search', 'search: action');
-}
-
-// ── kimi-only names: same registry, adapter-translated shapes ─────────────────────────
-{
-  eq(normalizeToolCall('TodoList', {}, {}, CWD), null, 'TodoList → null (noise)');
-  eq(normalizeToolCall('EnterPlanMode', {}, {}, CWD), null, 'EnterPlanMode → null (noise)');
-  const sw = normalizeToolCall('AgentSwarm', { description: 'review each file' }, { output: 'done' }, CWD);
-  eq(sw.action, 'task', 'AgentSwarm → task');
-  eq(sw.detail, 'review each file', 'AgentSwarm: detail is the description');
-  eq(sw.result, 'done', 'AgentSwarm: output kept as result (no target)');
-  const f = normalizeToolCall('FetchURL', { url: 'http://x' }, { output: 'page text' }, CWD);
-  eq(f.action, 'fetch', 'FetchURL → fetch');
-  eq(f.detail, 'http://x', 'FetchURL: detail url');
-  eq(f.result, 'page text', 'FetchURL: result from .output');
-  const sk = normalizeToolCall('Skill', { skill: 'pdf' }, null, CWD);
-  eq(sk.action, 'skill', 'Skill → skill');
-  eq(sk.detail, 'pdf', 'Skill: detail is the skill name');
-}
-
-// ── agy names: own entries reading agy's native arg keys, shared meta readers ─────────
-{
-  const v = normalizeToolCall('view_file', { AbsolutePath: CWD + 'src/a.js' }, { file: { numLines: 2, startLine: 5, totalLines: 9 } }, CWD);
-  eq([v.action, v.target, v.result, v.meta], ['read', 'src/a.js', '', { lines: 2, range: [5, 6] }], 'view_file → read (AbsolutePath, readMeta)');
-  eq(normalizeToolCall('read_file', { Path: CWD + 'b.md' }, null, CWD).target, 'b.md', 'read_file → target Path');
-  const e = normalizeToolCall('edit_file', { Path: CWD + 'c.js' }, { replacement: { startLine: 10, added: 0, removed: 2 } }, CWD);
-  eq([e.action, e.meta], ['edit', { added: 0, removed: 2, ranges: [] }], 'edit_file: a pure deletion lights no range');
-  eq(normalizeToolCall('replace_file_content', { TargetFile: CWD + 'd.js' }, {}, CWD).target, 'd.js', 'replace_file_content → target TargetFile');
-  eq(normalizeToolCall('write_file', { Path: CWD + 'e.txt' }, { type: 'update', content: 'a\nb' }, CWD).meta, { kind: 'update', lines: 2 }, 'write_file → writeMeta');
-  const b = normalizeToolCall('run_command', { CommandLine: 'make' }, { stdout: 'ok\n', output: 'ok\n' }, CWD);
-  eq([b.action, b.detail, b.result], ['bash', 'make', 'ok\n'], 'run_command → bash');
-  eq(normalizeToolCall('manage_task', { Action: 'kill', TaskId: 'c/task-3' }, { output: 'cancelled' }, CWD).detail, 'kill c/task-3', 'manage_task detail');
-  eq(normalizeToolCall('invoke_subagent', { Role: 'R', Prompt: 'p' }, null, CWD).detail, 'R', 'invoke_subagent: a single top-level spec');
-  eq(normalizeToolCall('search_web', { query: 'q' }, { output: 'hits' }, CWD).action, 'search', 'search_web → search');
-  eq(normalizeToolCall('read_url_content', { Url: 'http://x' }, null, CWD).detail, 'http://x', 'read_url_content → fetch detail Url');
-  eq(normalizeMessage('system', ' told ').action, 'system', "normalizeMessage('system') → system");
-}
-
-// ── noise tools drop entirely (null → caller skips) ───────────────────────────────────
-{
-  eq(normalizeToolCall('TodoWrite', {}, {}, CWD), null, 'TodoWrite → null (noise)');
-  eq(normalizeToolCall('ToolSearch', {}, {}, CWD), null, 'ToolSearch → null (noise)');
-}
-
-// ── unknown tool: tolerant fallback (lowercased name + first recognizable scalar) ─────
-{
-  const r = normalizeToolCall('SomeNewTool', { name: 'nope', command: 'do-it' }, { output: 'out' }, CWD);
-  eq(r.action, 'somenewtool', 'unknown: lowercased action');
-  eq(r.detail, 'do-it', 'unknown: fallback picks the first known scalar (command before name)');
-  eq(r.result, 'out', 'unknown: result via generic text extractor (.output)');
-}
-
-// ── pickText: an error response is surfaced over normal output ─────────────────────────
-{
-  const r = normalizeToolCall('Bash', { command: 'boom' }, { is_error: true, error: 'nope', stdout: 'ignored' }, CWD);
-  eq(r.result, 'error: nope', 'bash: error preferred over stdout');
-}
-
-// ── out-of-cwd target stays absolute (a /tmp file the relay still reaches) ─────────────
-{
-  const r = normalizeToolCall('Read', { file_path: '/tmp/scratch.txt' }, { file: { numLines: 1 } }, CWD);
-  eq(r.target, '/tmp/scratch.txt', 'read: out-of-root target kept absolute');
+  eq(cssHue({ r: 1, g: 0, b: 0.5 }), '#ff0080', 'cssHue: {r,g,b} → #rrggbb');
+  eq(cssHue({ r: 2, g: -1, b: 0 }), '#ff0000', 'cssHue clamps to 0..1');
+  eq(cssHue(null), '#999999', 'cssHue: no hue → neutral grey');
 }
 
 console.log(`\ntoolRegistry: ${pass} passed, ${fail} failed`);
