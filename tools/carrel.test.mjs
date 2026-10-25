@@ -388,5 +388,35 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(!ib.clone().expandByVector(e.negate()).intersectsBox(tb), `a nested desk (title included) and its neighbor never overlap: ${JSON.stringify([ib.min, ib.max, tb.min, tb.max])}`);
 }
 
+// ---- a NATURAL ring: members at their own size, wrapped on a cylinder that widens to fit ----
+{
+    const scene = new THREE.Scene();
+    const ring = new Carrel({ name: 'cyl', radius: 10, boxH: 9, mode: 'ring', seat: 'natural', ringRows: 2, gapFrac: 0.5 });
+    scene.add(ring);
+    const ms = [];
+    for (let i = 0; i < 12; i++) { const g = makeGrid(30, 20); ms.push(g); ring.lock(`m${i}`, g); }
+    settle(ring, 20);
+    ok(ms.every((g) => Math.abs(g.scale.x - 1) < 1e-6), 'natural seats keep every member at its own size');
+    const R = ring._ringR;
+    ok(R > 10, `the ring widened past its radius to fit (R ${R.toFixed(1)})`);
+    const run = 12 * (30 + 4.5);
+    near(R, run / (2 * 300 * Math.PI / 180), 1e-6, 'R fits the members in ringRows rows');
+    ring.updateWorldMatrix(true, true);
+    const c = new THREE.Vector3();
+    const dists = ms.map((g) => { g.updateWorldMatrix(true, false); g.getBounds().getCenter(c); return Math.hypot(c.x, c.z); });
+    ok(dists.every((d) => Math.abs(d - R) < 1), `every member stands on the cylinder (radii ${dists.map((d) => d.toFixed(1)).join(',')})`);
+    const fwd = new THREE.Vector3();
+    const facing = ms.every((g) => { g.getWorldDirection(fwd); g.getBounds().getCenter(c); return fwd.dot(c.clone().setY(0).normalize()) < -0.99; });
+    ok(facing, 'every member faces the axis (stand at the center: a turn, not a flight)');
+    const ys = new Set(ms.map((g) => Math.round(g.getBounds().min.y)));
+    ok(ys.size === 2, `two rows (${[...ys]})`);
+    const uni = new Carrel({ name: 'u', radius: 10, boxH: 9, mode: 'ring' });
+    scene.add(uni);
+    const g0 = makeGrid(30, 20);
+    uni.lock('g', g0);
+    settle(uni);
+    ok(g0.scale.x < 0.5, 'a uniform ring still contain-fits its seats');
+}
+
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -187,7 +187,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
   hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
   without its result yet is held until the result lands). The tree is desks: the world-managed
-  `gomux` carrel; an agent with helpers gets a `gomux/<name>` team carrel seated in its parent's
+  `gomux` carrel — a CYLINDER by default (`gomux.hubForm`: a natural-seat ring, one row,
+  widening to fit; everything around you is a camera turn away); an agent with helpers gets a
+  flat `gomux/<name>` team carrel seated in its parent's
   desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
@@ -200,6 +202,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   closes only ours).
   With `gomux.autoScreens` (default on) every live agent's screen opens beside its book; a
   detached one stays closed.
+  Once per load (`gomux.centerOnLoad`) the camera stands at the hub's center (`carrel.enter`)
+  when the tree, the books and the desks have stopped moving — polled to the same answer three
+  times, since the load is part events, part state.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
 - **Books** (`collections/Book.js`) — library volumes, agent runs, delta sets: a deck of

@@ -115,6 +115,12 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
      * @param {'ring'|'grid'} [opts.mode='ring'] - member arrangement: the arc, or its 0-curvature
      *   limit — a flat semi-grid wall at z=−R facing the doorway (the agent shelf's read)
+     * @param {'uniform'|'natural'} [opts.seat='uniform'] - the RING's seats: uniform contain-fit
+     *   boxes (the dock's grammar), or members at their natural size wrapped along the arc (the
+     *   tree's grammar bent into a cylinder — stand at the center and everything is a turn
+     *   away). A natural ring widens its radius so the members fit in `ringRows` rows. (The
+     *   grid is always natural.)
+     * @param {number} [opts.ringRows=2] - rows a natural ring aims for (its radius grows to fit)
      * @param {'in'|'out'} [opts.facing='in'] - members face the center (stand inside) or outward
      * @param {number} [opts.tableFrac=1.25] - base-shadow overhang: the shadow reaches this
      *   fraction of `radius` beyond the member footprint (1 = flush)
@@ -126,7 +132,8 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
-                  growCap = 1.25, maxArcDeg = 300, mode = 'ring', facing = 'in', tableFrac = 1.25,
+                  growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringRows = 2,
+                  facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14 } = {}) {
         super();
@@ -139,6 +146,10 @@ export class Carrel extends THREE.Object3D {
         this.growCap = growCap;
         this.maxArcDeg = maxArcDeg;
         this.mode = mode === 'grid' ? 'grid' : 'ring';
+        this.seat = seat === 'natural' ? 'natural' : 'uniform';
+        this.ringRows = ringRows;
+        /** the radius the last layout used — a natural ring grows past `radius` to fit */
+        this._ringR = radius;
         this.facing = facing === 'out' ? 'out' : 'in';
         this.tableFrac = tableFrac;
         this.shadowSoft = shadowSoft;
@@ -416,7 +427,7 @@ export class Carrel extends THREE.Object3D {
      * @param {string} key @param {number} value @returns {boolean}
      */
     setParam(key, value) {
-        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'tableFrac',
+        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringRows', 'tableFrac',
               'shadowSoft', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
@@ -439,6 +450,15 @@ export class Carrel extends THREE.Object3D {
     setMode(mode) {
         if (mode !== 'ring' && mode !== 'grid') return false;
         this.mode = mode;
+        this._relayout();
+        return true;
+    }
+
+    /** The ring's seats: 'uniform' contain-fit boxes or 'natural' sizes (see the ctor). */
+    setSeat(seat) {
+        const next = seat === 'natural' ? 'natural' : 'uniform';
+        if (next === this.seat) return false;
+        this.seat = next;
         this._relayout();
         return true;
     }
@@ -573,8 +593,9 @@ export class Carrel extends THREE.Object3D {
         const boxW = this.boxH * this.boxAspect;
         const boxH = this.boxH;
         const gap = this._gap;
-        const R = Math.max(this.radius, 1e-3);
+        let R = Math.max(this.radius, 1e-3);
         const grid = this.mode === 'grid';
+        const natural = grid || this.seat === 'natural';
         if (this._expected && live.length >= this._expected) {   // complement arrived
             this._expected = 0;
             this._expectShape = null;
@@ -584,14 +605,19 @@ export class Carrel extends THREE.Object3D {
             // The measured boxes: real rendered extents on the grid shelf, uniform
             // seats on the ring. eff is decided here once per member — natural scale
             // (the user zoom passes through) vs contain-fit into the seat box.
-            const effs = live.map((e) => (grid ? this._userOf(e) : this._containScale(e, boxW, boxH)));
-            const boxes = grid
+            const effs = live.map((e) => (natural ? this._userOf(e) : this._containScale(e, boxW, boxH)));
+            const boxes = natural
                 ? live.map((e, i) => {
                     const ext = this._extentOf(e);
                     return { w: Math.max(ext.w * effs[i], 1e-3), h: Math.max(ext.h * effs[i], 1e-3) };
                 })
                 : live.map(() => ({ w: boxW, h: boxH }));
 
+            // A natural ring widens until its members fit in ringRows rows along the arc.
+            if (!grid && natural) {
+                const run = boxes.reduce((sum, b) => sum + b.w + gap, 0);
+                R = Math.max(R, run / (Math.max(1, this.ringRows) * this.maxArcDeg * DEG2RAD));
+            }
             const wrapN = Math.max(live.length, this._expected);
             let wrapWidth, W;
             if (wrapN > live.length) {
@@ -656,6 +682,7 @@ export class Carrel extends THREE.Object3D {
             this._stackH = boxH;
         }
 
+        this._ringR = grid ? Math.max(this.radius, 1e-3) : R;
         this._refreshChrome();
         this._notifyFootprint();
     }
@@ -776,7 +803,7 @@ export class Carrel extends THREE.Object3D {
      *  plus the tableFrac overhang. Snaps with the layout (knob gestures read as
      *  direct manipulation). */
     _refreshChrome() {
-        const R = Math.max(this.radius, 1e-3);
+        const R = Math.max(this._ringR ?? this.radius, 1e-3);
         const pad = R * Math.max(this.tableFrac - 1, 0);
         if (this.mode === 'grid') {
             const boxW = this.boxH * this.boxAspect;
@@ -812,7 +839,7 @@ export class Carrel extends THREE.Object3D {
         target.max.set(hx, (this._stackH ?? this.boxH) + this.boxH * 0.25, cz + hz);
         const t = this.title;
         if (t) {
-            const tw = t.width / 2, R = Math.max(this.radius, 1e-3);
+            const tw = t.width / 2, R = Math.max(this._ringR ?? this.radius, 1e-3);
             target.max.y = Math.max(target.max.y, t.position.y + t.height / 2);
             target.min.x = Math.min(target.min.x, -tw);
             target.max.x = Math.max(target.max.x, tw);
@@ -846,6 +873,7 @@ export class Carrel extends THREE.Object3D {
             params: {
                 radius: this.radius, boxH: this.boxH, boxAspect: this.boxAspect,
                 gapFrac: this.gapFrac, growCap: this.growCap, maxArcDeg: this.maxArcDeg,
+                seat: this.seat, ringRows: this.ringRows,
                 mode: this.mode, facing: this.facing,
                 tableFrac: this.tableFrac, shadowSoft: this.shadowSoft,
                 glowColor: this.glowColor, glowStrength: this.glowStrength,

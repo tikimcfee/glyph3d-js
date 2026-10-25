@@ -311,6 +311,31 @@ export default function registerCarrelCommands(router) {
         return { text: `OK: focused carrel '${carrel.carrelName}'`, data: { name: carrel.carrelName, framed } };
     }, { description: 'Make a carrel active and fly the camera to frame it', usage: '<name>', returns: '{ name, framed }' });
 
+    router.register('carrel.enter', (args, ctx) => {
+        const carrel = findCarrel(ctx, args[0]);
+        if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
+        const cc = ctx.cameraController;
+        if (!cc?.flyTo) return { text: 'ERR: no camera controller', data: null };
+        ctx.activeCarrel = carrel.carrelName;
+        // Stand at the desk's center (its table origin), eyes at its members' mean height,
+        // facing its back (local −z): a ring's arc centers ahead, a grid's wall stands ahead.
+        carrel.updateWorldMatrix(true, true);
+        const c = new THREE.Vector3();
+        let ySum = 0, n = 0;
+        for (const e of carrel.entries.values()) {
+            if (e.grid.parent !== carrel) continue;   // borrowed — riding elsewhere
+            const b = e.grid.getBounds?.();
+            if (!b || b.isEmpty()) continue;
+            ySum += b.getCenter(c).y; n++;
+        }
+        const eye = new THREE.Vector3(0, 0, 0).applyMatrix4(carrel.matrixWorld);
+        eye.y = n ? ySum / n : eye.y + carrel.boxH * 0.5;
+        const back = new THREE.Vector3(0, 0, -1).transformDirection(carrel.matrixWorld);
+        const yaw = Math.atan2(-back.x, -back.z);
+        cc.flyTo({ position: { x: eye.x, y: eye.y, z: eye.z }, pitch: 0, yaw }, { ms: 600 });
+        return { text: `OK: standing in carrel '${carrel.carrelName}'`, data: { name: carrel.carrelName, position: { x: eye.x, y: eye.y, z: eye.z }, yaw } };
+    }, { description: "Stand the camera at a carrel's center, facing its back — a ring's members are a turn away", usage: '[name]', returns: '{ name, position, yaw }' });
+
     router.register('carrel.dissolve', (args, ctx) => {
         const map = carrels(ctx);
         const carrel = findCarrel(ctx, args[0]);

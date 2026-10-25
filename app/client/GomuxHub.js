@@ -22,9 +22,17 @@ import { getSetting } from './settings.js';
  *                    where its book would be: its own book first, then its helpers (books,
  *                    or their own teams) in spawn order. Nesting is as deep as the tree.
  *
- * Each desk wears a title (the hub: `gomuxai`; a team: `<name> · N helpers`), and the hub's
- * desks space their members `gomux.gap` apart — books are seated by the room they draw in
- * (Book.getSeatBounds: nameplate, tabs, cover), so nothing overlaps.
+ * The hub is a CYLINDER by default (`gomux.hubForm`: a natural-seat ring — every book and
+ * team at its own size around you, so seeing them is a turn of the camera, not a flight);
+ * team desks are flat walls standing on it. Each desk wears a title (the hub: `gomuxai`; a
+ * team: `<name> · N helpers`), and the hub's desks space their members `gomux.gap` apart —
+ * books are seated by the room they draw in (Book.getSeatBounds: nameplate, tabs, cover,
+ * screen), so nothing overlaps.
+ *
+ * CENTER ON LOAD: once per page load (`gomux.centerOnLoad`), when the tree has arrived,
+ * every shown book has opened, the desks have stopped moving and the world has stopped
+ * placing the hub — the same answer three checks running, since the load is part event-
+ * and part state-driven — the camera stands at the hub's center (carrel.enter).
  *
  * The hub owns the STRUCTURE (which desk a book or team sits at) and rebuilds it from the
  * snapshot every boot — its desks are `derived`, never saved. A book the hub seated stays
@@ -133,6 +141,53 @@ export default class GomuxHub {
         this._layout();
         for (const a of shown) this._status(a);
         this._autoScreens(shown);
+        this._centerWhenSettled();
+    }
+
+    /**
+     * Stand the camera at the hub's center once everything has landed — once per page load.
+     * Polled (not event-driven): the load is part events (tree pushes, book opens, async
+     * card loads) and part state (desk animations, the world's placement), so the only
+     * honest "done" is the same answer three checks running. Gives up after 30s; a person
+     * already flying (drag or a flight key held) is never yanked.
+     * @private
+     */
+    _centerWhenSettled() {
+        if (this._centering || this._centered || !this._exec || getSetting('gomux.centerOnLoad') === false) return;
+        this._centering = true;
+        const t0 = performance.now();
+        let last = null, same = 0;
+        const tick = () => {
+            if (this._disposed) return;
+            const hub = this.ctx.carrels?.get(GOMUX_HUB);
+            const opening = [...this.lanes.values()].some((l) => l.phase === 'opening');
+            const desks = [...(this.ctx.carrels?.values() || [])].filter((d) => d.derived);
+            const moving = desks.some((d) => d.animator?.isAnimating);
+            let sig = null;
+            if (hub && !opening && !moving) {
+                hub.updateWorldMatrix(true, false);
+                const b = hub.getBounds();
+                sig = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z, this.lanes.size].map((v) => Math.round(v)).join(',');
+            }
+            same = sig && sig === last ? same + 1 : 0;
+            last = sig;
+            if (same >= 2) {
+                this._centering = false;
+                this._centered = true;
+                const cc = this.ctx.cameraController;
+                if (cc?.input?.drag?.active || Object.values(cc?.input?.keys || {}).some(Boolean)) return;
+                Promise.resolve(this._exec(['carrel.enter', GOMUX_HUB]))
+                    .catch((e) => console.warn('[gomux] centering on the hub failed —', e?.message || e));
+                return;
+            }
+            if (performance.now() - t0 > 30000) {
+                this._centering = false;
+                console.info('[gomux] the hub never settled within 30s — not centering the camera');
+                return;
+            }
+            setTimeout(tick, 250);
+        };
+        setTimeout(tick, 250);
     }
 
     /** Open each live, attached agent's screen beside its open book — once per agent. */
@@ -268,14 +323,25 @@ export default class GomuxHub {
         const have = map?.get(name);
         if (have && !have._dissolving) return have;
         const desk = buildCarrel(this.ctx, name, { managed: name === GOMUX_HUB, nested: name !== GOMUX_HUB });
-        desk.setMode('grid');
+        desk.setMode(name === GOMUX_HUB && getSetting('gomux.hubForm') !== 'grid' ? 'ring' : 'grid');
         desk.derived = true;
         this._dress(desk);
         return desk;
     }
 
-    /** The hub's spacing on a desk (gomux.gap — world units between members). */
+    /** The hub's form and spacing on a desk: the hub a natural-seat ring (or a flat wall),
+     *  teams flat walls; gomux.gap world units between members. */
     _dress(desk) {
+        if (desk.carrelName === GOMUX_HUB) {
+            const ring = getSetting('gomux.hubForm') !== 'grid';
+            desk.setMode(ring ? 'ring' : 'grid');
+            if (ring) {
+                desk.setSeat('natural');
+                const r = Number(getSetting('gomux.radius')), rows = Number(getSetting('gomux.ringRows'));
+                if (Number.isFinite(r) && r > 0 && desk.radius !== r) desk.setParam('radius', r);
+                if (Number.isFinite(rows) && rows >= 1 && desk.ringRows !== rows) desk.setParam('ringRows', rows);
+            }
+        }
         const gap = Number(getSetting('gomux.gap'));
         if (Number.isFinite(gap) && gap >= 0) {
             const frac = gap / Math.max(desk.boxH, 1e-3);
