@@ -191,9 +191,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
-  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>` shows the agent's live tmux
-  screen as terminal `gx-<name>`, seated beside its book: a READ-ONLY, `ignore-size` tmux client
-  on gomuxai's server, nested inside our own terminal session (`gomux.detach` closes only ours).
+  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>`
+  shows the agent's live tmux screen as terminal `gx-<name>`, seated beside its book — with NO
+  tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
+  every tmux command and broke gomuxai's send-keys): a capture-pane snapshot, then `tail -F` of the
+  pane's pipe-pane log, inside our own terminal session; input goes nowhere (`gomux.detach`
+  closes only ours).
   With `gomux.autoScreens` (default on) every live agent's screen opens beside its book; a
   detached one stays closed.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
@@ -207,7 +210,13 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
   (`app/client/bookFocus.js`). An agent book's tabs are its timeline (turn number in the
   run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held.
-  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`.
+  An agent book PAGES BACK past its kept turns: every parsed record carries its line's byte
+  offset (`at`), and paging within `historyLead` of the oldest sheet reads the slice before it
+  (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record), laying its turns
+  in at the front. The first page back counts the turns before it (off-thread) so numbers are
+  exact; a held book keeps `historyResident` sheets around the head, and letting go of the newest
+  end detaches it from the live tail until you return to live (the tail reloads).
+  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

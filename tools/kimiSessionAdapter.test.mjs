@@ -61,8 +61,8 @@ eq(events.filter((e) => e.kind === 'tool').map((e) => e.name), ['Read', 'Bash', 
   'tools emit at tool.call order, not result-arrival order');
 
 // ── message events ────────────────────────────────────────────────────────────────────
-eq(events[0], { kind: 'message', mtype: 'thinking', text: 'let me think', ts: 1000 }, 'think part → thinking event');
-eq(events[1], { kind: 'message', mtype: 'text', text: 'hello world', ts: 1000 }, 'text part → text event');
+eq(events[0], { kind: 'message', mtype: 'thinking', text: 'let me think', ts: 1000, line: 10 }, 'think part → thinking event');
+eq(events[1], { kind: 'message', mtype: 'text', text: 'hello world', ts: 1000, line: 11 }, 'text part → text event');
 ok(!events.some((e) => e.text === 'user prose'), 'user prose is not a message event');
 
 // ── dialect translation: inputs come out Claude-shaped ────────────────────────────────
@@ -136,7 +136,8 @@ eq(parseKimiSession(J({ type: 'turn.prompt', prompt: 'string shape' }) + '\n').m
     try { obj = JSON.parse(line); } catch { continue; }
     live.push(...kimiWireLineToEvents(obj, state));
   }
-  eq(live, events, 'live==archive: line-by-line translation yields the SAME events (late results fill in place)');
+  // the archive parse adds each event's transcript `line`; the live translator has no file
+  eq(live, events.map(({ line, ...e }) => e), 'live==archive: line-by-line translation yields the SAME events (late results fill in place)');
   eq({
     harness: 'kimi', cwd: state.cwd ?? '/index/cwd',
     title: state.title, createdAt: state.createdAt,
@@ -161,7 +162,7 @@ eq(parseKimiSession(J({ type: 'turn.prompt', prompt: 'string shape' }) + '\n').m
     if (!line.trim()) continue;
     out.push(...kimiWireLineToEvents(JSON.parse(line), st));
   }
-  eq(out, parseKimiSession(flipped).events, 'result-before-call pairs incrementally too');
+  eq(out, parseKimiSession(flipped).events.map(({ line, ...e }) => e), 'result-before-call pairs incrementally too');
   eq(st.calls.size + st.results.size, 0, 'consumed pairing leaves both maps empty');
 }
 

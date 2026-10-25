@@ -12,7 +12,7 @@
 //   - SessionParsePool end-to-end: same result through whichever backend runs,
 //     concurrent jobs don't cross-talk, and a real pool (>1 worker) serves them
 
-import { runSessionParseJob, eventsToRecords } from '../packages/glyph3d-core/src/workers/sessionParseJob.js';
+import { runSessionParseJob, eventsToRecords, stampOffsets } from '../packages/glyph3d-core/src/workers/sessionParseJob.js';
 import { SessionParsePool } from '../packages/glyph3d-core/src/workers/SessionParsePool.js';
 import { parseClaudeSession, parseKimiSession, parseAgySession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
 import { normalizeToolCall, normalizeMessage } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
@@ -69,7 +69,8 @@ const enc = (s) => new TextEncoder().encode(s);
 {
   const job = runSessionParseJob({ bytes: enc(claudeText), harness: 'claude' });
   const want = parseClaudeSession(claudeText);
-  eq(job.records, eventsToRecords(want.events, want.cwd), 'job records === sync parse + normalize');
+  stampOffsets(want.events, enc(claudeText));
+  eq(job.records, eventsToRecords(want.events, want.cwd), 'job records === sync parse + normalize (+ byte offsets)');
   eq(job.total, want.events.length, 'total = full event count');
   eq(job.cwd, want.cwd, 'cwd harvested');
   eq(job.meta, want.meta, 'meta harvested');
@@ -84,10 +85,28 @@ const enc = (s) => new TextEncoder().encode(s);
   eq(sliced.records[0].result, 'out\n', 'tool_use inside the window keeps its paired response');
 }
 
+// ── byte offsets: every record's `at` is its line's absolute offset in the file ──
+{
+  const bytes = enc(claudeText);
+  const whole = runSessionParseJob({ bytes, harness: 'claude' });
+  const lines = claudeText.split('\n');
+  for (const r of whole.records) {
+    const line = new TextDecoder().decode(bytes.subarray(r.at)).split('\n')[0];
+    ok(lines.includes(line) && line.trim().startsWith('{'), `record '${r.action}' at ${r.at} starts a transcript line`);
+  }
+  // a window starting mid-file, parsed with its base, reports the SAME absolute offsets
+  const cut = whole.records[1].at;
+  const tail = runSessionParseJob({ bytes: bytes.subarray(cut), harness: 'claude', base: cut });
+  eq(tail.records.map((r) => r.at), whole.records.slice(1).map((r) => r.at).filter((at) => at >= cut),
+    'a window parsed with its base keeps absolute offsets');
+}
+
 // ── runSessionParseJob: kimi — dialect + index-cwd fallback ───────────────────
 {
   const job = runSessionParseJob({ bytes: enc(kimiText), harness: 'kimi', cwd: '/index/cwd' });
-  eq(job.records, eventsToRecords(parseKimiSession(kimiText, '/index/cwd').events, '/kimi/repo'),
+  const kev = parseKimiSession(kimiText, '/index/cwd').events;
+  stampOffsets(kev, enc(kimiText));
+  eq(job.records, eventsToRecords(kev, '/kimi/repo'),
     'kimi records === sync parse + normalize');
   eq(job.cwd, '/kimi/repo', 'display.cwd wins over the index fallback');
   eq(job.meta.model, 'kimi-k2', 'kimi meta harvested');
@@ -96,7 +115,9 @@ const enc = (s) => new TextEncoder().encode(s);
 // ── runSessionParseJob: agy — dialect + the index workspace WINS ──────────────
 {
   const job = runSessionParseJob({ bytes: enc(agyText), harness: 'agy', cwd: '/index/ws' });
-  eq(job.records, eventsToRecords(parseAgySession(agyText, '/index/ws').events, '/index/ws'),
+  const aev = parseAgySession(agyText, '/index/ws').events;
+  stampOffsets(aev, enc(agyText));
+  eq(job.records, eventsToRecords(aev, '/index/ws'),
     'agy records === sync parse + normalize');
   eq(job.cwd, '/index/ws', 'the index workspace wins over run_command Cwd');
   eq(job.records.map((r) => r.action), ['bash', 'say'], 'agy actions');
@@ -118,9 +139,18 @@ const enc = (s) => new TextEncoder().encode(s);
 {
   const pool = new SessionParsePool();
   const r = await pool.parse(enc(claudeText), { harness: 'claude' });
-  eq(r.records, eventsToRecords(parseClaudeSession(claudeText).events, '/main/repo'),
+  const pev = parseClaudeSession(claudeText).events;
+  stampOffsets(pev, enc(claudeText));
+  eq(r.records, eventsToRecords(pev, '/main/repo'),
     `pool result matches dialect (workers: ${pool.workerCount})`);
   ok(pool.workerCount <= 1, `a single job spawns AT MOST one worker (count: ${pool.workerCount})`);
+  // a window's base rides through the pool (worker OR fallback): offsets stay absolute
+  const all = enc(claudeText);
+  const cut = all.indexOf(0x0A) + 1;
+  const win = await pool.parse(all.slice(cut), { harness: 'claude', base: cut });
+  const whole = runSessionParseJob({ bytes: all, harness: 'claude' });
+  eq(win.records.map((r) => r.at), whole.records.map((r) => r.at).filter((at) => at >= cut),
+    `pool: a window's records keep their absolute offsets (workers: ${pool.workerCount})`);
 
   // Consecutive + concurrent jobs, mixed caps/harnesses — no cross-talk, pool grows on demand.
   const [a, b] = await Promise.all([

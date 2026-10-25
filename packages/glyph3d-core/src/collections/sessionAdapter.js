@@ -26,7 +26,10 @@
  *   { harness: 'claude'|'kimi'|'agy', cwd, slug, title, model, version, gitBranch, agentName,
  *     firstTs, lastTs, ... }   — harness-specific extras noted per adapter below.
  *
- * events, in transcript LINE order (block order within a line):
+ * events, in transcript LINE order (block order within a line). Every event carries `line`, the
+ * 0-based index of the transcript line it came from (its tool CALL's line for a tool) — the codec
+ * turns it into the event's byte offset in the file, which is how a book pages back through a
+ * record in windows (sessionParseJob `at`).
  *   { kind: 'tool',    name, input, response, ts }   — one per tool_use block. `response` is the
  *     structured `toolUseResult` when the transcript carries one, with the tool_result TEXT merged
  *     in as `content` when the structured object lacks a text field (stdout/content/result/output);
@@ -175,8 +178,10 @@ function* parseClaudeSessionSteps(text, budgetMs = Infinity) {
     // Parse once, filter once: malformed lines and sidechain lines drop here, so neither the
     // pairing pass nor the emit pass ever sees them (a sidechain's cwd/results don't leak either).
     const parsed = [];
-    let i = 0;
+    const lineOf = [];             // parsed[k]'s transcript line index
+    let i = 0, li = -1;
     for (const line of String(text ?? '').split('\n')) {
+        li++;
         if (overBudget(i++)) yield;
         if (!line.trim()) continue;
         let obj;
@@ -184,6 +189,7 @@ function* parseClaudeSessionSteps(text, budgetMs = Infinity) {
         if (!obj || typeof obj !== 'object') continue;
         if (obj.isSidechain === true) continue;
         parsed.push(obj);
+        lineOf.push(li);
     }
 
     // Pass 1 — pair results by tool_use_id across the WHOLE transcript. A tool_result rides a
@@ -207,12 +213,16 @@ function* parseClaudeSessionSteps(text, budgetMs = Infinity) {
     const events = [];
     let cwd = null, firstTs = null, lastTs = null;
     let slug = null, title = null, model = null, version = null, gitBranch = null, agentName = null;
+    let curLine = 0;
     const push = (ev) => {
+        ev.line = curLine;
         events.push(ev);
         if (ev.ts != null) { if (firstTs === null) firstTs = ev.ts; lastTs = ev.ts; }
     };
     i = 0;
-    for (const obj of parsed) {
+    for (let k = 0; k < parsed.length; k++) {
+        const obj = parsed[k];
+        curLine = lineOf[k];
         if (overBudget(i++)) yield;
         // Meta harvest: first-seen wins, on ANY line (the bookkeeping lines that carry
         // slug/aiTitle/agentName have no message.content, so this runs before that skip).
@@ -490,13 +500,14 @@ function* parseKimiSessionSteps(text, cwd, budgetMs = Infinity) {
     const overBudget = makeSliceBudget(budgetMs);
     const state = createKimiWireState();
     const events = [];
-    let i = 0;
+    let i = 0, li = -1;
     for (const line of String(text ?? '').split('\n')) {
+        li++;
         if (overBudget(i++)) yield;
         if (!line.trim()) continue;
         let obj;
         try { obj = JSON.parse(line); } catch { continue; }
-        events.push(...kimiWireLineToEvents(obj, state));
+        for (const e of kimiWireLineToEvents(obj, state)) { e.line = li; events.push(e); }
     }
     const cwdOut = state.cwd ?? (typeof cwd === 'string' && cwd ? cwd : null);
     return {
@@ -863,13 +874,14 @@ function* parseAgySessionSteps(text, cwd, budgetMs = Infinity) {
     const state = createAgyState();
     const events = [];
     let malformedLines = 0;
-    let i = 0;
+    let i = 0, li = -1;
     for (const line of String(text ?? '').split('\n')) {
+        li++;
         if (overBudget(i++)) yield;
         if (!line.trim()) continue;
         let obj;
         try { obj = JSON.parse(line); } catch { malformedLines++; continue; }
-        for (const e of agyStepToEvents(obj, state)) events.push(e);
+        for (const e of agyStepToEvents(obj, state)) { e.line = li; events.push(e); }
     }
     const unknown = Object.keys(state.unknownSteps);
     if (unknown.length) {

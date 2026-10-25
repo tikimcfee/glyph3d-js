@@ -309,6 +309,8 @@ export default function HudPanel({ client }) {
               <span style={S.readout} title={`${f.book.addr} — sheet ${f.book.head + 1} of ${f.book.count} kept`}>
                 {f.book.turn ? `turn ${f.book.exact ? '' : '~'}${f.book.turn}/${f.book.turns} · ` : ''}
                 {f.book.head + 1}/{f.book.count} · {f.book.following ? 'live' : 'held'}
+                {f.book.loading ? ' · loading older…' : ''}
+                {f.book.newer ? ` · +${f.book.newer} newer (live reloads)` : ''}
               </span>
             </div>
           )}

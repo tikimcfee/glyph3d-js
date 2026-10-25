@@ -15,6 +15,11 @@
  *   - on the main thread in the pool's no-worker fallback (tests, headless),
  *   - directly in headless behavior locks (tools/session-parse.test.mjs).
  *
+ * Every record carries `at`: the absolute byte offset (in the transcript file) of the line its
+ * event came from — `base` (where these bytes start in the file) + the line's start in them.
+ * A book pages back through a record by these: its oldest resident record's `at` is the
+ * backward cursor, and an older window keeps only records before it.
+ *
  * `cap` slices the event tail BEFORE normalizing — EXACTLY hydrate's order
  * (cap counts EVENTS, noise then drops), so the book's depth semantics don't
  * move an inch. `total` always reports the FULL pre-slice count.
@@ -39,9 +44,24 @@ export function eventsToRecords(events, cwd = '') {
             : ev.kind === 'message'
                 ? normalizeMessage(ev.mtype, ev.text)
                 : normalizeToolCall(ev.name, ev.input, ev.response, ev.cwd ?? cwd);
-        if (rec) records.push(rec);
+        if (rec) {
+            if (ev.at != null && rec !== ev) rec.at = ev.at;
+            records.push(rec);
+        }
     }
     return records;
+}
+
+/**
+ * Give each event its line's absolute byte offset: base + the line's start in `bytes`
+ * (line i starts after the i-th 0x0A — the adapters split the decoded text on '\n', and a
+ * UTF-8 newline is that one byte, so line indices agree across text and bytes).
+ * @param {Array<{line?:number, at?:number}>} events @param {Uint8Array} bytes @param {number} base
+ */
+export function stampOffsets(events, bytes, base = 0) {
+    const starts = [0];
+    for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x0A) starts.push(i + 1);
+    for (const ev of events) if (Number.isInteger(ev.line) && ev.line < starts.length) ev.at = base + starts[ev.line];
 }
 
 /**
@@ -50,14 +70,20 @@ export function eventsToRecords(events, cwd = '') {
  * @param {string} [job.harness='claude'] - 'claude' | 'kimi' | 'agy' (unknown → throws)
  * @param {string} [job.cwd] - the archive index's working dir (kimi: fallback; agy: the workspace)
  * @param {number} [job.cap=Infinity] - keep only the newest N events (Infinity = all)
+ * @param {number} [job.base=0] - the absolute file offset these bytes start at (records' `at`)
+ * @param {boolean} [job.countOnly=false] - return only how many records the bytes hold
+ *        (`records` comes back empty) — a book counting the turns before its oldest resident
+ *        one, without cloning a whole history back
  * @returns {{ records: Array, total: number, cwd: string|null, meta: Object,
  *             firstTs: number|null, lastTs: number|null }}
  */
-export function runSessionParseJob({ bytes, harness = 'claude', cwd = null, cap = Infinity }) {
+export function runSessionParseJob({ bytes, harness = 'claude', cwd = null, cap = Infinity, base = 0, countOnly = false }) {
     const text = _utf8.decode(bytes);
     const out = parseSession(text, { harness, cwd });
+    stampOffsets(out.events, bytes, base);
     const total = out.events.length;
     const slice = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
     const records = eventsToRecords(slice, out.cwd ?? cwd ?? '');
-    return { records, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
+    if (countOnly) return { records: [], count: records.length, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
+    return { records, count: records.length, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
 }

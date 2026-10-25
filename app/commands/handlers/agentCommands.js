@@ -94,6 +94,12 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
         agentType, sessionId, cwd: r.cwd, meta: r.meta, limit,
         seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
     });
+    // History: paging back past the kept turns reads older slices of the same record.
+    ctx.agentBooks.setHistory(agentId, {
+        read: (window) => provider.read(sessionId, { ...window, harness: agentType }),
+        parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
+        harness: agentType, cwd: r.cwd ?? null,
+    });
     const t3 = performance.now();
     return { agentId, added, total: r.total, bytes: r.bytes, offset: r.offset,
              ms: { read: r1(r.readMs), parse: r1(r.parseMs), hydrate: r1(t3 - t2) } };

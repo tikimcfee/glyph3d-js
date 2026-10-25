@@ -178,6 +178,12 @@ export default class GomuxHub {
                 agentType: harness, sessionId: a.sessionId || null, cwd: r.cwd || a.cwd || '', meta: r.meta,
                 seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
             });
+            // History: paging back past the kept turns reads older slices of the transcript.
+            books.setHistory(a.name, {
+                read: (window) => this.provider.read(a.name, window),
+                parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
+                harness, cwd: r.cwd || a.cwd || null,
+            });
             hl.cursor = r.end;
             hl.phase = 'open';
             const node = this.nodes.get(a.name);

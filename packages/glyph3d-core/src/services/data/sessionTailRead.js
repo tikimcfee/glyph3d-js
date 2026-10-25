@@ -59,7 +59,7 @@ function warnIfTornFirstLine(sessionId, bytes, offset) {
  * @param {number} [opts.startBytes] - first tail window size (doubles per retry)
  * @param {number} [opts.headMetaBytes] - head window re-harvesting first-seen
  *        provenance a tail can't see (0 disables)
- * @param {(bytes: Uint8Array, opts: {harness: string, cwd: string|null, cap: number})
+ * @param {(bytes: Uint8Array, opts: {harness: string, cwd: string|null, cap: number, base: number})
  *         => Promise<{records: Array, total: number, cwd: string|null, meta: Object}>} opts.parse
  *        the codec — NOTE it may TRANSFER the buffer (the parse pool does)
  * @returns {Promise<{records: Array, total: number, cwd: string|null, meta: Object,
@@ -89,7 +89,7 @@ export async function readSessionTail(provider, sessionId, {
         const end = r.offset + r.bytes.lastIndexOf(0x0A) + 1;   // past the last COMPLETE line
         warnIfTornFirstLine(sessionId, r.bytes, r.offset);
         const t1 = now();
-        const out = await parse(r.bytes, { harness, cwd: r.cwd, cap });
+        const out = await parse(r.bytes, { harness, cwd: r.cwd, cap, base: r.offset });
         parseMs += now() - t1;
         // The archive index's title (agy's annotations) is the conversation's CURRENT name —
         // it wins over whatever the transcript window yields (a first prompt, or nothing).

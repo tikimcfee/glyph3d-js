@@ -1,7 +1,7 @@
 /**
  * SessionParsePool — the main-thread handle on the transcript codec.
  *
- * parseSessionOffThread(bytes, { harness, cwd, cap }) → { records, total, cwd, meta, … }.
+ * parseSessionOffThread(bytes, { harness, cwd, cap, base }) → { records, total, cwd, meta, … }.
  *
  * Two backends behind the ONE result shape:
  *   - a POOL of dedicated parse workers (production): jobs are idempotent pure
@@ -15,7 +15,7 @@
  *     same eventsToRecords.
  */
 
-import { runSessionParseJob, eventsToRecords } from './sessionParseJob.js';
+import { runSessionParseJob, eventsToRecords, stampOffsets } from './sessionParseJob.js';
 import { parseSessionAsync } from '../collections/sessionAdapter.js';
 
 // The pool is DEMAND-DRIVEN: one worker at first job, spawning another whenever
@@ -42,18 +42,19 @@ export class SessionParsePool {
      * Parse a transcript's raw bytes into normalized book records.
      * @param {Uint8Array} bytes - raw JSONL transcript (its buffer is TRANSFERRED
      *        to a worker when the pool path runs — read byteLength BEFORE calling)
-     * @param {{ harness?: string, cwd?: string|null, cap?: number }} [opts]
+     * @param {{ harness?: string, cwd?: string|null, cap?: number, base?: number }} [opts]
+     *        base = the absolute file offset the bytes start at (records' `at`)
      * @returns {Promise<{ records: Array, total: number, cwd: string|null, meta: Object,
      *           firstTs: number|null, lastTs: number|null }>}
      */
-    async parse(bytes, { harness = 'claude', cwd = null, cap = Infinity } = {}) {
+    async parse(bytes, { harness = 'claude', cwd = null, cap = Infinity, base = 0, countOnly = false } = {}) {
         if (this._ensureWorkers()) {
             return new Promise((resolve, reject) => {
                 this._queue.push({
                     msg: {
                         jobId: ++this._nextJobId,
                         bytes: { buffer: bytes.buffer, byteOffset: bytes.byteOffset, byteLength: bytes.byteLength },
-                        harness, cwd, cap,
+                        harness, cwd, cap, base, countOnly,
                     },
                     transfer: [bytes.buffer],
                     resolve, reject,
@@ -65,10 +66,12 @@ export class SessionParsePool {
         // normalize pass over the capped tail is trivial at any sane cap.
         const text = new TextDecoder().decode(bytes);
         const out = await parseSessionAsync(text, { harness, cwd });
+        stampOffsets(out.events, bytes, base);
         const total = out.events.length;
         const slice = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
         const records = eventsToRecords(slice, out.cwd ?? cwd ?? '');
-        return { records, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
+        if (countOnly) return { records: [], count: records.length, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
+        return { records, count: records.length, total, cwd: out.cwd, meta: out.meta, firstTs: out.firstTs, lastTs: out.lastTs };
     }
 
     /**
@@ -164,7 +167,7 @@ export function getSessionParsePool() {
 
 /**
  * Convenience: parse through the shared pool.
- * @param {Uint8Array} bytes @param {{ harness?: string, cwd?: string|null, cap?: number }} [opts]
+ * @param {Uint8Array} bytes @param {{ harness?: string, cwd?: string|null, cap?: number, base?: number }} [opts]
  */
 export function parseSessionOffThread(bytes, opts) {
     return getSessionParsePool().parse(bytes, opts);

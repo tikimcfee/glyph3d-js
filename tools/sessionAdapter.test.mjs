@@ -65,8 +65,8 @@ eq(events.filter((e) => e.kind === 'tool').map((e) => e.name), ['Edit', 'Bash', 
   'tools emit at tool_use order, not result-arrival order');
 
 // ── message events ────────────────────────────────────────────────────────────────────
-eq(events[0], { kind: 'message', mtype: 'thinking', text: 'let me think', ts: Date.parse(T(0)) }, 'thinking block');
-eq(events[1], { kind: 'message', mtype: 'text', text: 'hello world', ts: Date.parse(T(0)) }, 'text block after it');
+eq(events[0], { kind: 'message', mtype: 'thinking', text: 'let me think', ts: Date.parse(T(0)), line: 3 }, 'thinking block (line = its transcript line)');
+eq(events[1], { kind: 'message', mtype: 'text', text: 'hello world', ts: Date.parse(T(0)), line: 3 }, 'text block after it (same line)');
 eq(events[6].text, 'all done', 'trailing prose is the last event');
 ok(!events.some((e) => e.text === 'sidechain prose'), 'sidechain prose skipped');
 ok(!events.some((e) => e.text === 'do the thing'), 'user prompt text is not a message event');

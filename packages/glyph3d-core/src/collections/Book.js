@@ -156,6 +156,9 @@ export default class Book extends BoundedObject3D {
         this._faceMat = null;    // per-book face material (ownFace) — shared singleton otherwise
         /** @type {{mesh:THREE.Mesh, edges:THREE.LineSegments, fill:THREE.Material, edge:THREE.Material, opts:Object}|null} */
         this.cover = null;       // the identity/interaction body while bound (bindCover)
+        /** @type {((head:number, asked:number, from:number) => void)|null} the owner's paging tap —
+         *  every pageTo (verbs, keys, wheel, HUD) calls it after moving the head */
+        this.onPage = null;
         /** @type {Object|null} a nameplate plate (Label3D) parked above the cover box (setNameplate) */
         this.nameplate = null;
         /** @type {Array<{sheet:Object, tab:Tab3D, key:string}>|null} per-sheet edge tabs (null until bindTabs) */
@@ -196,9 +199,21 @@ export default class Book extends BoundedObject3D {
      * @param {{verso?:THREE.Object3D|null, recto?:THREE.Object3D|null, meta?:Object|null}} sides
      * @returns {number} the new sheet's index
      */
-    addSheet({ verso = null, recto = null, meta = null } = {}) {
+    addSheet(sides = {}) { return this.insertSheet(this.sheets.length, sides); }
+
+    /**
+     * Insert a sheet at index `i` (0 = the oldest end — a book paging back through a long
+     * record lays the older slice in front). A held head stays on ITS sheet (it shifts up
+     * when the insert lands at or before it); a following head rides the newest. The new
+     * sheet seats directly; the rest ease to their re-derived slots.
+     * @param {number} i
+     * @param {{verso?:THREE.Object3D|null, recto?:THREE.Object3D|null, meta?:Object|null}} sides
+     * @returns {number} the new sheet's index
+     */
+    insertSheet(i, { verso = null, recto = null, meta = null } = {}) {
+        i = Math.min(Math.max(0, Math.floor(i) || 0), this.sheets.length);
         const node = new THREE.Group();
-        node.name = `sheet:${this.sheets.length}`;
+        node.name = `sheet:${i}`;
         node.userData = { isBookInternal: true };
         const mountFor = (content, name) => {
             const m = new THREE.Group();
@@ -215,12 +230,14 @@ export default class Book extends BoundedObject3D {
             faces: [], fit: {}, meta, _at: null,
         };
         this.add(node);
-        this.sheets.push(sheet);
-        if (this._tabOpts) this.tabs?.push(this._makeTab(sheet));   // keep tabs parallel to sheets
+        const held = this.sheets.length > 0 && !this.following;
+        this.sheets.splice(i, 0, sheet);
+        if (this._tabOpts) this.tabs?.splice(i, 0, this._makeTab(sheet));   // keep tabs parallel to sheets
         if (this.following) this.head = this.sheets.length - 1;
+        else if (held && i <= this.head) this.head += 1;
         if (this._fitOpts) this._fitSheet(sheet, this._fitOpts);
-        this._seat(this.sheets.length - 1);
-        return this.sheets.length - 1;
+        this._seat(i);
+        return i;
     }
 
     /**
@@ -394,9 +411,13 @@ export default class Book extends BoundedObject3D {
         const n = this.sheets.length;
         if (!n) return false;
         const from = Math.min(Math.max(0, this.head), n - 1);
-        this.head = Math.min(Math.max(0, Math.round(index)), n - 1);
+        const asked = Math.round(index);
+        this.head = Math.min(Math.max(0, asked), n - 1);
         this.following = this.head === n - 1;
         if (this.form === 'deck' && this.head !== from) this._turnDeck(from);
+        // The owner's paging tap (an agent book loads an older slice as the head nears the
+        // oldest resident sheet) — `asked` past either end says the reader pushed on an edge.
+        this.onPage?.(this.head, asked, from);
         return true;
     }
 
