@@ -19,7 +19,7 @@
  * Pure: no THREE, no DOM — the worker, the relay-side tooling and the tests import it.
  *
  *   AgentEventReader      push(bytes|text) → changes; the folded events by id
- *   eventRecord(ev, pos)  one event → the record a sheet renders (null: hidden noise)
+ *   eventRecord(ev, pos)  one event → the record a sheet renders (null: noise, when hidden)
  *   eventFacts(record)    the event's own facts as info rows (turn, status, final, …)
  *   sessionMeta(session)  a session line → the lane meta the nameplate reads
  *   eventLane(ev, lane)   the book an event belongs in (a subagent's events: its own)
@@ -203,18 +203,19 @@ function outputOf(result) {
  *   think   action 'think', result = the text; a redacted block has detail 'redacted'
  *   say     action 'say', result = the text; final / provisional ride as flags
  *   tool    the tool table's action/target/detail/meta as gomuxai sent them; result = the
- *           output, except a file target that succeeded (its snapshot is the content)
+ *           output, except a file target that succeeded (its snapshot is the content). A
+ *           call the table calls noise keeps action 'noise' and heads with its tool's name
  *   system  action 'system', detail = the subtype, result = the text (else the data as JSON)
  *   request action 'request', detail = the model (only a `--requests` stream has these)
  *
- * A tool the table calls noise is null (hidden) unless `showNoise`.
+ * Every event is a record by default (1:1); `showNoise: false` makes a noise call null.
  * @param {AgentEvent} ev
  * @param {{at:number, line?:number, seq?:number}|null} [pos] the event's position (its add);
  *        defaults to the event's own
  * @param {{showNoise?:boolean}} [opts]
  * @returns {Object|null}
  */
-export function eventRecord(ev, pos = null, { showNoise = false } = {}) {
+export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
     const at = pos?.at ?? ev.at;
     const base = {
         id: ev.id, eventKind: ev.kind, at, ts: ev.ts ?? null,
@@ -243,6 +244,7 @@ export function eventRecord(ev, pos = null, { showNoise = false } = {}) {
             const out = outputOf(b.result);
             return {
                 ...base, action: String(b.action || b.name || 'tool').toLowerCase(), name: b.name ?? null,
+                ...(b.action === 'noise' && b.name ? { tag: String(b.name) } : {}),
                 target, detail: String(b.detail ?? ''),
                 result: target && status !== 'error' ? '' : out,
                 meta: b.meta && typeof b.meta === 'object' ? b.meta : null,
@@ -328,7 +330,7 @@ export function sessionLane(session, streamLane) {
  *        cap keeps the newest N records; countOnly returns only the count
  * @returns {{records:Object[], count:number, total:number, session:Object|null}}
  */
-export function parseEventSlice(bytes, { cap = Infinity, countOnly = false, showNoise = false } = {}) {
+export function parseEventSlice(bytes, { cap = Infinity, countOnly = false, showNoise = true } = {}) {
     const r = new AgentEventReader();
     r.push(bytes);
     r.end();

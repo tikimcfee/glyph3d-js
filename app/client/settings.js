@@ -754,7 +754,8 @@ export const SETTINGS = [
   { key: 'book.messageScale', label: 'Prose (prompt / say / think / system) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
   { key: 'book.proseWrapCols', label: 'Prose (prompt / say / think / system) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
   { key: 'book.promptTextLift', label: 'Prompt text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.promptTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('promptTextLift') },
-  { key: 'book.showNoise', label: 'Show noise tool calls (ToolSearch, TodoWrite…; new events)', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.showNoise, apply: agentBookParam('showNoise') },
+  { key: 'book.showNoise', label: 'Noise tool calls as sheets (ToolSearch, TodoWrite… in a dim hue; off hides them; new events)', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.showNoise, apply: agentBookParam('showNoise') },
+  { key: 'book.noiseTextLift', label: 'Noise sheet text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.noiseTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('noiseTextLift') },
   { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
   // The nameplate above each book: the session NAME container-fit to the spread (a share
   // of its width, row height clamped to [min, max] — past the min it wraps) over the live

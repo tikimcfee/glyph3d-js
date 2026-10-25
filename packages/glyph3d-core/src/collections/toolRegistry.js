@@ -298,6 +298,7 @@ const ACTION_KIND = {
     say: 'say', send: 'say', think: 'think',
     prompt: 'prompt',
     system: 'system',
+    noise: 'noise',
 };
 
 /** The identity bucket an action colors/sorts under. Unknown actions read as 'other'. */
@@ -319,6 +320,7 @@ export const ACTION_HUES = {
     think:  { r: 0.58, g: 0.52, b: 0.78 },   // dim violet — interior REASONING (the thinking turns)
     prompt: { r: 0.96, g: 0.42, b: 0.78 },   // rose — a message INTO the agent (yours, queued, delivered, a notification)
     system: { r: 0.80, g: 0.74, b: 0.52 },   // muted sand — the HARNESS speaking (system messages, compaction)
+    noise:  { r: 0.34, g: 0.36, b: 0.40 },   // dim slate — bookkeeping calls (ToolSearch, TodoWrite…): background, not content
     other:  { r: 0.62, g: 0.64, b: 0.68 },
 };
 

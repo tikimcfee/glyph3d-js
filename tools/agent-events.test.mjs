@@ -25,7 +25,7 @@ import { join, relative } from 'node:path';
 import './headless-canvas.mjs';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 const { default: AgentBooks, AGENT_BOOKS_DEFAULTS } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
-const { AgentEventReader, eventRecord, parseEventSlice, PROMPT_ORIGINS } =
+const { AgentEventReader, parseEventSlice, PROMPT_ORIGINS } =
     await import('../packages/glyph3d-core/src/collections/agentEvents.js');
 const { ACTION_HUES } = await import('../packages/glyph3d-core/src/collections/toolRegistry.js');
 
@@ -84,7 +84,7 @@ function live(books, lane, c, { each } = {}) {
     return r;
 }
 const ids = (lane) => lane.entries.map((e) => e.record.id);
-const visibleIds = (c, showNoise = false) => {
+const visibleIds = (c, showNoise = true) => {
     const seen = new Set(), out = [];
     for (const f of evs(c)) {
         if (f.kind === 'tool' && f.tool.action === 'noise' && !showNoise) continue;
@@ -371,11 +371,29 @@ for (const c of CASES.keys()) {
     ok(!fin[0].record.final && fin[1].record.final && /final reply/.test(fin[1].infoText), 'the closing reply is marked final');
     const td = lane.entries.find((e) => e.record.action === 'system');
     ok(td.call.verb === 'system' && td.call.head === 'turn_duration' && /"durationMs": 18234/.test(td.record.result), 'a system record: its subtype heads, its data is the content');
-    ok(!lane.entries.some((e) => e.record.name === 'ToolSearch'), 'noise is hidden by default');
-    const shown = newBooks({ showNoise: true });
-    live(shown, 'K', 'claude/basic-turn');
-    const ts = shown.lanes.get('K').entries.filter((e) => e.record.name === 'ToolSearch');
-    ok(ts.length === 1 && ts[0].record.status === 'ok', 'showNoise: the noise call is one sheet, its update in place');
+    const ts = lane.entries.filter((e) => e.record.name === 'ToolSearch');
+    ok(ts.length === 1 && ts[0].record.status === 'ok', 'noise is shown by default: one sheet, its update in place');
+    const ti = lane.entries.indexOf(ts[0]);
+    ok(ts[0].call.verb === 'ToolSearch' && ts[0].call.head === 'select:WebFetch', 'a noise sheet heads with its tool\'s name');
+    ok(lane.book.sheets[ti].meta.kind === 'noise' && lane.book.tabs[ti].key === 'noise', 'a noise sheet bands as noise');
+    const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const bash = lane.entries.find((e) => e.record.name === 'Bash');
+    ok(lum(ts[0].action.config.textColor) < lum(bash.action.config.textColor) * 0.6
+        && lum(ts[0].info.config.textColor) < lum(bash.info.config.textColor) * 0.6,
+        'a noise sheet is set quieter than a real call (headline and info rows)');
+    const noisy = { ...evs('claude/basic-turn').find((f) => f.op === 'update' && f.tool?.action === 'noise') };
+    noisy.tool = { ...noisy.tool, result: { status: 'ok', output: 'WebFetch' } };
+    const nb = newBooks();
+    nb.applyEvents('O', [{ op: 'add', event: noisy, pos: null }]);
+    const ne = nb.lanes.get('O').entries[0];
+    const nh = ACTION_HUES.noise, t = AGENT_BOOKS_DEFAULTS.noiseTextLift;
+    const quiet = { r: nh.r + (1 - nh.r) * t, g: nh.g + (1 - nh.g) * t, b: nh.b + (1 - nh.b) * t };
+    ok(ne.snapshot && J(ne.snapshot.config.textColor) === J(quiet) && lum(ne.snapshot.config.textColor) < lum(bash.snapshot.config.textColor) * 0.75,
+        'a noise call\'s output is set in the dim noise hue, quieter than a real call\'s');
+    const hidden = newBooks({ showNoise: false });
+    live(hidden, 'K', 'claude/basic-turn');
+    ok(!hidden.lanes.get('K').entries.some((e) => e.record.name === 'ToolSearch'), 'showNoise off: noise calls (and their updates) make no sheet');
+    eq(ids(hidden.lanes.get('K')), visibleIds('claude/basic-turn', false), 'showNoise off: every other event is still a sheet, in order');
     const sr = newBooks();
     live(sr, 'S', 'claude/system-records');
     eq(sr.lanes.get('S').entries.filter((e) => e.record.action === 'system').map((e) => e.call.head),

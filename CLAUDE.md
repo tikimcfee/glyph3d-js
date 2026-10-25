@@ -249,7 +249,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (`collections/agentEvents.js` reads it; `AgentBooks.applyEvents`), a book is one sheet per
   EVENT, never grouped: prompts of every origin are first-class sheets (tagged by whose words —
   `[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
-  `[harness]` — in the prompt hue), every sheet carries its turn id + index, and an event's
+  `[harness]` — in the prompt hue), bookkeeping tool calls are sheets too, set in a dim noise
+  hue (`book.showNoise` off hides them), every sheet carries its turn id + index, and an event's
   update (a tool's result, a confirmed reply) rebuilds its sheet IN PLACE (`Book.replaceSheet`).
   An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
   (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record): pushing past its

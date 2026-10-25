@@ -197,7 +197,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   corpus (`$GOMUXAI_DIR/internal/transcript/testdata/corpus/**/*.events.jsonl`, default
   `~/dev/gomuxai`; FAILS when it is missing). The reader folds any chunking (1-byte, mid-codepoint)
   to the same events, one per id, an update replacing its event and keeping the add's position;
-  off-contract frames throw. One sheet per event (noise hidden unless `book.showNoise`), live ==
+  off-contract frames throw. One sheet per event (noise too, in its dim hue; `book.showNoise` off hides it), live ==
   hydrated; prompts of every origin are sheets tagged by whose words they are, in the prompt hue;
   a tool's pending → result rebuilds its sheet in place (count, index, deck node, head unchanged —
   also across a resumed reader that never saw the add); statuses, an errored file action's error,

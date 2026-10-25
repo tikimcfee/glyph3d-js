@@ -48,7 +48,7 @@
  * file read — tagged by whose words it is (`[you]`, `[you · queued]`, `[delivered]`,
  * `[notification]`, `[peer]`, `[command]`, `[harness]`), its words set in the prompt hue
  * — beside `think` (a redacted block says so), `say` (a final reply marked), tool and
- * `system` sheets. Each sheet carries its event's TURN (the prompt it belongs to: id +
+ * `system` sheets; a call the tool table calls noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt it belongs to: id +
  * index; the HUD reads the open sheet's) so a later layer may group by it. An event
  * that changes (a tool's result landing, a provisional reply confirmed) arrives again
  * under its id and its sheet is rebuilt IN PLACE: same index, same number, the deck and
@@ -113,7 +113,8 @@ export const AGENT_BOOKS_DEFAULTS = {
     messageScale: 0.05,         // worldScale of prose (prompt/say/think/system) — its OWN knob (prose reads bigger)
     proseWrapCols: 72,          // prose (prompt/say/think/system) word-wraps to this many columns (a page-shaped column, not a 200-wide strip; 0 = the fold's default)
     promptTextLift: 0.6,        // a prompt's words: the prompt hue lifted toward white (0 = hue, 1 = white) — whose words they are reads at a glance
-    showNoise: false,           // tool calls the tool table calls noise (ToolSearch, TodoWrite…): false hides them, true gives each its sheet (new events)
+    showNoise: true,            // tool calls the tool table calls noise (ToolSearch, TodoWrite…): true gives each its sheet, set quietly (1:1 events); false hides them (new events)
+    noiseTextLift: 0.15,        // a noise sheet's headline + output: the dim noise hue lifted this far toward white (0 = hue) — kept low so it reads as background
     snapshotImageWidth: 40,     // world width of an image recto (height follows aspect)
     highlightFillOpacity: 0.22, // decorate FILL bar opacity (0 falls back to additive tint)
     // -- the cluster ---------------------------------------------------------------
@@ -444,7 +445,7 @@ export default class AgentBooks {
         const action = this._card(`[${call.verb}]`, wrapText(call.head, sz.head.cols), {
             worldScale: CARD_WORLD_SCALE, gridScale: sz.head.gridScale,
             layout: { wrapWidth: sz.head.cols, zWrapSpacing: 0 },
-            filenameColor: hue, textColor: liftHue(hue, this.cfg.callTextLift),
+            filenameColor: hue, textColor: liftHue(hue, record.action === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
         }, { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         let body = null;
         if (call.rest) {
@@ -1418,7 +1419,7 @@ export default class AgentBooks {
         for (;;) {
             const want = Math.max(0, from - span);
             const r = await h.read({ fromOffset: want, maxBytes: from - want + c.historyOverlapBytes });
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, base: r.offset });
+            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, base: r.offset, showNoise: c.showNoise });
             recs = out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
             start = r.offset;
             if (recs.length >= c.historyTurns || start === 0 || span >= 64 * 1024 * 1024) break;
@@ -1441,7 +1442,7 @@ export default class AgentBooks {
         try {
             const r = await h.read({ fromOffset: 0, maxBytes: from });
             if (r.offset !== 0) return;   // the relay's read bound kept the END — can't count from the start
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, countOnly: true });
+            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, countOnly: true, showNoise: this.cfg.showNoise });
             if (this.lanes.get(lane.agentId) !== lane) return;
             this._setSheetBase(lane, out.count - fromSeq);
         } catch (e) {
@@ -1490,7 +1491,8 @@ export default class AgentBooks {
      *  say/think, the harness's words). Ships RAW — the fit frames it; nothing is truncated
      *  here. Prose word-wraps to cfg.proseWrapCols (a page-shaped column reads at a far
      *  larger fit than a 200-column strip). A prompt's words are set in the prompt hue
-     *  (lifted by cfg.promptTextLift) under a header naming whose they are. */
+     *  (lifted by cfg.promptTextLift) under a header naming whose they are; a noise call's
+     *  output in the dim noise hue (cfg.noiseTextLift), so it reads as background. */
     _outputSnapshot(record, pick, lane, sheetId) {
         const isMessage = PROSE_ACTIONS.has(record.action);
         const name = record.action === 'prompt' ? (record.tag || 'prompt')
@@ -1500,9 +1502,9 @@ export default class AgentBooks {
         const cols = isMessage ? Math.floor(this.cfg.proseWrapCols) : 0;
         const text = String(record.result ?? '');
         const opts = { worldScale };
-        if (record.action === 'prompt') {
-            const hue = this.cfg.hues.prompt || this.cfg.hues.other;
-            opts.textColor = liftHue(hue, this.cfg.promptTextLift);
+        if (record.action === 'prompt' || record.action === 'noise') {
+            const hue = this.cfg.hues[record.action] || this.cfg.hues.other;
+            opts.textColor = liftHue(hue, record.action === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
             opts.filenameColor = hue;
         }
         return this._card(name, cols > 0 ? wrapText(text, cols) : text, opts, pick, lane, sheetId);
