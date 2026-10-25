@@ -37,6 +37,8 @@ type Relay struct {
 	sources       map[string]*sourceConn
 	nextID        atomic.Int64
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
+	gxMu          sync.Mutex
+	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
 	upgrader      websocket.Upgrader
 	fs            *FSHandler      // nil if --root not provided
 	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers

@@ -571,6 +571,16 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		return
 	}
 	id := gomuxTerminalID(name)
+	// ONE adapter per screen. A display reload asks for every screen again before the
+	// adapters it already has re-adopt their terminals; a second adapter would attach a
+	// second client to the same session, and with window-size latest the two clients'
+	// sizes fight (the screen ping-pongs). If the session has a client, its adapter is
+	// alive and will re-create the terminal itself — answer with its id. A request
+	// already in flight (no client yet) is answered the same way.
+	if r.gomuxScreenLive(id) {
+		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "existing": true})
+		return
+	}
 	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket,
 		"--cols", strconv.Itoa(cols), "--rows", strconv.Itoa(rows),
 		"--", "sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath}
@@ -588,4 +598,24 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		err := cmd.Wait()
 		log.Printf("[gomux] %s: screen adapter '%s' (pid %d) exited: %v", name, id, pid, err)
 	}()
+}
+
+// gomuxScreenLive reports whether a screen's adapter exists — its session (on our socket)
+// has a client, or one was forked moments ago and hasn't attached yet — and otherwise
+// claims the slot for the caller about to fork one.
+func (r *Relay) gomuxScreenLive(id string) bool {
+	session := "glyph-" + sanitizeSession(id)
+	if out, err := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return true
+	}
+	r.gxMu.Lock()
+	defer r.gxMu.Unlock()
+	if r.gxForked == nil {
+		r.gxForked = map[string]time.Time{}
+	}
+	if t, ok := r.gxForked[id]; ok && time.Since(t) < 15*time.Second {
+		return true
+	}
+	r.gxForked[id] = time.Now()
+	return false
 }

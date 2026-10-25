@@ -199,7 +199,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
   every tmux command and broke gomuxai's send-keys): a capture-pane snapshot, then `tail -F` of the
   pane's pipe-pane log, inside our own terminal session; input goes nowhere (`gomux.detach`
-  closes only ours).
+  closes only ours). One adapter per screen: the relay answers a repeat ask (a reload re-asking
+  before its adapters re-adopt) with the live one. A screen shows the agent's pane at that
+  pane's size — `terminal.resize` refuses it (scale it instead).
   With `gomux.autoScreens` (default on) every live agent's screen opens beside its book; a
   detached one stays closed.
   Once per load (`gomux.centerOnLoad`) the camera stands at the hub's center (`carrel.enter`)

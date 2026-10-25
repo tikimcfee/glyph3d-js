@@ -299,6 +299,12 @@ export default function registerTerminalCommands(router) {
         if (isNaN(cols) || isNaN(rows) || cols < 1 || rows < 1) {
             return { text: 'ERR: cols and rows must be positive integers', data: null };
         }
+        // An agent's screen shows the agent's OWN pane, drawn at that pane's size — resizing
+        // the viewer can't reflow it. Say so (scale the window instead).
+        const screenOf = ctx.gomuxHub?.screenAgent?.(id);
+        if (screenOf) {
+            return { text: `ERR: '${id}' is ${screenOf}'s screen — it shows the agent's own ${grid.cols}x${grid.rows} pane; scale it (window.scale / the scale grip) instead`, data: null };
+        }
 
         // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the dock
         // state — so a live grip-drag streams its steps through log.search/buslog and the resize↔dock

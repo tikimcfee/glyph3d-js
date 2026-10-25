@@ -433,6 +433,12 @@ export default class GomuxHub {
         return 'gx-' + String(name).replace(/[^A-Za-z0-9_-]/g, '_');
     }
 
+    /** The agent whose screen terminal `id` is, or null — a lookup over the tree. */
+    screenAgent(id) {
+        for (const a of this.snapshot?.agents || []) if (this.screenId(a.name) === id) return a.name;
+        return null;
+    }
+
     /**
      * Give an agent's screen terminal to its book as the book's ASIDE — parked right of
      * the spread, its height fit to the book's (Book.setAside), riding the book wherever
