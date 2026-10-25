@@ -195,6 +195,29 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
+// rpcCapture decodes the single JSON-RPC frame a handler writes, exposing
+// whichever side (result or error) it carried.
+type rpcCapture struct {
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// captureRPC returns a writeFn that decodes the handler's response into the
+// returned capture. Handlers invoked directly (not via Handle's goroutine)
+// write synchronously, so the capture is filled when the handler returns.
+func captureRPC(t *testing.T) (writeFn, *rpcCapture) {
+	t.Helper()
+	c := &rpcCapture{}
+	return func(data []byte) {
+		if err := json.Unmarshal(data, c); err != nil {
+			t.Fatalf("bad rpc frame: %v", err)
+		}
+	}, c
+}
+
 // callWriteFile invokes handleWriteFile and decodes the JSON-RPC envelope into
 // either a result (success) or an error object (rpcErr is nil on success). The
 // error map's "code" is a float64 (JSON number) — compare via int(...).

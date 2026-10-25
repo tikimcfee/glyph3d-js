@@ -54,6 +54,7 @@ app/
   ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel CarrelsPanel   dockview panels
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
+  gomux.go agentevents.go                           gomuxai: hub tree, agent sessions + events
 Makefile  tools/dev.sh
 ```
 
@@ -81,8 +82,16 @@ as a typed line when its args are plain tokens (or the verb arg is itself a quot
 and as a `call` bundle when an arg carries spaces/quotes/newlines (handlers take raw text —
 no per-verb base64), log replies render as records, and `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
 `seed-history` are its client commands. JS that genuinely needs JS (Playwright, simulated
-displays) dials through `tools/lib/relay.mjs`. `make build` hard-links `cli/glyph3d-cli`
-(the binary the Claude Code hook runs) to the one binary it builds.
+displays) dials through `tools/lib/relay.mjs`.
+
+**Agent transcripts come from gomuxai**: the relay runs the installed `agent` CLI
+(`agent sessions --json`, `agent transcript … --follow`) and moves its lines to the display
+(`cli/agentevents.go`); nothing in this repo reads a harness transcript. `serve
+--sessions-interval` (10s) paces the session list, `--max-followers` (64) caps live
+followers, `--no-gomuxai` turns all of it off, `--debug` logs each session-list push's size.
+Every `agent` child dies with the relay (`cli/children.go`): Pdeathsig on Linux, however the
+relay dies; elsewhere the SIGINT/SIGTERM handler kills them (a SIGKILLed relay off Linux
+still orphans its `agent export`).
 
 ## Command bus
 
@@ -99,6 +108,19 @@ is a queued-reload recovery:
 `onDeviceLost` stops the loop, the layout engine suspends dispatches
 (`tools/device-loss-recovery.test.mjs`), and the page reloads once a minute at most
 (the loop guard lives in sessionStorage) so the substrate can re-seat the session.
+
+Agent sessions and their events ride relay↔display JSON-RPC (`cli/agentevents.go`), the
+relay moving gomuxai's lines without reading them: `agentSessions/list` and the
+`agentSessions/changed` push (`agent sessions --json`, re-run while a display is connected,
+pushed when it changed); `agentEvents/follow {session, from?}` / `unfollow` (one
+`agent transcript --follow` per session and byte, shared, killed when no subscription holds
+it — a display disconnecting drops its own — at most `--max-followers`); `agentEvents/lines`
+batches (≤50 ms or 256 KB, in order, whole lines, on their own display plane behind control
+traffic; a display that leaves a push waiting 10 s loses the subscription with
+`agentEvents/ended` code -1 rather than the relay buffering); `agentEvents/ended` when a
+follower exits (its stderr also lands in the relay log as `[agent-transcript]`); and
+`agentEvents/read {session, from?, until?, tail?}` → `{lines, size}`, a bounded one-shot
+whose `tail` starts at the first line start at/after `size - tail` (`--from` the line before).
 
 The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →
 the relay log store; `load.stats` answers with stage aggregates + the worst
@@ -189,10 +211,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
   find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
-  (`gomux/changed`; `gomux/list`, `gomux/read` for a transcript window). Each agent shown (live,
-  or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
-  hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
-  without its result yet is held until the result lands). The tree is desks: the world-managed
+  (`gomux/changed`; `gomux/list`). Each agent shown (live, or finished within
+  `gomux.historyHours`) is an agent book whose lane id is its gomuxai name, hydrated and followed
+  through `agentEvents/*` (Command bus, above): gomuxai's events, never the transcript itself.
+  The tree is desks: the world-managed
   `gomux` carrel — born a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
   stack up to `carrel.cylinderMaxRows` before it widens past `carrel.cylinderRadius`; everything
   around you is a camera turn away); an agent with helpers gets a flat `gomux/<name>` team carrel
@@ -201,10 +223,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
   rebuilt from the tree, never saved — yet a value set on one is its own and comes back with it
-  (per-instance knobs, below). Status rides `lane.meta.gomux`. One book per Claude
-  session: the relay names a claude agent's session by its transcript when export reports none,
-  and the hub claims it — the project hook's events for a claimed session defer to the hub
-  (`GomuxHub.follows`) and a hook book already born for one is cleared. `gomux.attach <name>`
+  (per-instance knobs, below). Status rides `lane.meta.gomux`. The relay names a claude
+  agent's session by its transcript's file name when export reports none. `gomux.attach <name>`
   shows the agent's live tmux screen as terminal `gx-<name>`, riding beside its book (the book's
   aside — `Book.setAside`: right of the cover, height-fit to it, in its seat box) — with NO
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
