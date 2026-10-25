@@ -560,7 +560,8 @@ export default class AgentBooks {
         if (gx && (gx.tool || gx.detail)) { verb = gx.tool || ''; head = gx.detail || ''; }
         const wallTs = lane.wallTs ?? (Number.isFinite(meta.lastTs) ? meta.lastTs : null);
         const base = meta.cwd ? String(meta.cwd).split('/').filter(Boolean).pop() : null;
-        const where = [base, lane.agentType, meta.model, meta.gitBranch, gx?.backend,
+        const where = [base, lane.agentType, meta.model, meta.gitBranch,
+            gx?.backend && gx.backend !== lane.agentType ? gx.backend : null,
             gx?.parent ? `parent ${gx.parent}` : null].filter(Boolean).join(' · ');
         const out = {
             agentId: lane.agentId,
@@ -591,16 +592,18 @@ export default class AgentBooks {
     /**
      * The nameplate's two blocks for a lane, unwrapped: the name, and the status rows —
      *   `status · step N · age ago` (· `needs you: <beacon>`)
-     *   the current action (`verb  head`)
+     *   the current action (`verb  head`; a say/think is its verb alone — the prose is
+     *     the open page itself, and a paragraph would stand the plate a page tall)
      *   where it runs (cwd · type · model · branch · backend · parent)
      * @returns {{name:string, status:string}}
      */
     nameplateText(lane) {
         const r = this.readout(lane);
+        const action = r.verb === 'say' || r.verb === 'think' ? r.verb : r.action;
         const age = r.age ? (r.age === 'now' ? 'now' : `${r.age} ago`) : null;
         const row1 = [r.status, r.step ? `step ${r.step}` : null, age,
             r.beacon ? `needs you: ${r.beacon}` : null].filter(Boolean).join(' · ');
-        return { name: r.name, status: [row1, r.action, r.where].filter(Boolean).join('\n') };
+        return { name: r.name, status: [row1, action, r.where].filter(Boolean).join('\n') };
     }
 
     /** agent.state — set a lane's lifecycle by hand. */

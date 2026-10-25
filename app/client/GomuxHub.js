@@ -5,6 +5,7 @@
 import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
 import { parseSession, SESSION_HARNESSES } from '@glyph3d/core/collections/sessionAdapter.js';
+import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
 import { buildCarrel } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
 
@@ -20,6 +21,10 @@ import { getSetting } from './settings.js';
  *   a team         — an agent with helpers gets its own grid carrel, `gomux/<name>`, seated
  *                    where its book would be: its own book first, then its helpers (books,
  *                    or their own teams) in spawn order. Nesting is as deep as the tree.
+ *
+ * Each desk wears a title (the hub: `gomuxai`; a team: `<name> · N helpers`), and the hub's
+ * desks space their members `gomux.gap` apart — books are seated by the room they draw in
+ * (Book.getSeatBounds: nameplate, tabs, cover), so nothing overlaps.
  *
  * The hub owns the STRUCTURE (which desk a book or team sits at) and rebuilds it from the
  * snapshot every boot — its desks are `derived`, never saved. A book the hub seated stays
@@ -231,7 +236,35 @@ export default class GomuxHub {
         const desk = buildCarrel(this.ctx, name, { managed: name === GOMUX_HUB, nested: name !== GOMUX_HUB });
         desk.setMode('grid');
         desk.derived = true;
+        this._dress(desk);
         return desk;
+    }
+
+    /** The hub's spacing on a desk (gomux.gap — world units between members). */
+    _dress(desk) {
+        const gap = Number(getSetting('gomux.gap'));
+        if (Number.isFinite(gap) && gap >= 0) {
+            const frac = gap / Math.max(desk.boxH, 1e-3);
+            if (Math.abs(desk.gapFrac - frac) > 1e-6) desk.setParam('gapFrac', frac);
+        }
+    }
+
+    /** Set a desk's title text (a FieldLabel in the hub's chrome tint), built on first need. */
+    _title(desk, text) {
+        const atlas = this.ctx.atlas;
+        if (!atlas) return;
+        const lh = Number(getSetting('gomux.titleLine')) || 28;
+        let t = desk.title;
+        if (!t) {
+            t = new FieldLabel({ atlas, text, lineHeight: lh, plate: { color: 0x2a3a52, opacity: 0.85 } });
+            t.name = `carrel-title:${desk.carrelName}`;
+            desk.setTitle(t);
+            return;
+        }
+        if (t.text === text && t.lineHeight === lh) return;
+        t.setText(text);
+        t.setLineHeight(lh);
+        desk.setTitle(t);   // re-place + re-measure the footprint
     }
 
     /**
@@ -254,6 +287,9 @@ export default class GomuxHub {
         const place = (parentDesk, a, order) => {
             if (hasTeam(a.name)) {
                 const team = this._desk(teamDesk(a.name));
+                this._dress(team);
+                const n = (kids.get(a.name) || []).length;
+                this._title(team, `${a.name} · ${n} helper${n === 1 ? '' : 's'}`);
                 this._seatDesk(parentDesk, team, order);
                 if (this.lanes.has(a.name)) this._seatBook(team, a.name, 0);
                 (kids.get(a.name) || []).forEach((k, i) => place(team, k, i + 1));
@@ -262,6 +298,8 @@ export default class GomuxHub {
             }
         };
         const hub = this._desk(GOMUX_HUB);
+        this._dress(hub);
+        this._title(hub, 'gomuxai');
         (kids.get('') || []).forEach((a, i) => place(hub, a, i));
     }
 

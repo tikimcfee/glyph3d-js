@@ -348,5 +348,45 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     near(g.getWorldPosition(new THREE.Vector3()).distanceTo(before), 0, 1e-3, 'carrel inPlace release: no slide');
 }
 
+// ---- seats hold the room a member DRAWS (getSeatBounds), titles + nesting clear ----
+{
+    const scene = new THREE.Scene();
+    const shelf = new Carrel({ name: 'seat', radius: 20, boxH: 9, mode: 'grid', gapFrac: 0 });
+    scene.add(shelf);
+    // b's seat box reaches 4 units above its pages (a nameplate): the stack holds all of it
+    const b = makeGrid(10, 6);
+    b.getSeatBounds = (t = new THREE.Box3()) => b.getLocalBounds(t).union(
+        new THREE.Box3(new THREE.Vector3(-5, 0, 0), new THREE.Vector3(5, 4, 0)));
+    shelf.lock('b', b);
+    settle(shelf);
+    near(shelf._stackH, 10, 1e-6, "the stack is as tall as b's seat (pages 6 + plate 4)");
+    near(b.getBounds().min.y, 0, 1e-6, 'and its pages still rest on the table');
+
+    // a titled desk seated at another desk: the outer desk makes room for the title
+    const outer = new Carrel({ name: 'outer', radius: 20, boxH: 9, mode: 'grid', gapFrac: 0 });
+    scene.add(outer);
+    const inner = new Carrel({ name: 'inner', radius: 5, boxH: 9, mode: 'grid', gapFrac: 0 });
+    inner.lock('c', makeGrid(4, 4));
+    settle(inner);
+    const before = inner.getLocalBounds().max.y;
+    let fired = 0;
+    inner.onResize(() => fired++);
+    const title = new THREE.Object3D();
+    title.width = 8; title.height = 3; title.dispose = () => {};
+    inner.setTitle(title);
+    ok(fired === 1, `setTitle fires the footprint listener once (got ${fired})`);
+    ok(inner.getLocalBounds().max.y >= 4 + 3 - 1e-6 && inner.getLocalBounds().max.y > before,
+        `the title is counted in the desk's bounds (got ${inner.getLocalBounds().max.y})`);
+    outer.lock('inner', inner);
+    const top = makeGrid(30, 2);
+    outer.lock('top', top);   // wraps onto the next row if it can't share — either way, no overlap
+    settle(outer); settle(inner);
+    inner.updateWorldMatrix(true, true);
+    const ib = inner.getLocalBounds().clone().applyMatrix4(inner.matrixWorld);
+    const tb = top.getBounds();
+    const e = new THREE.Vector3(1e-6, 1e-6, 1e-6);   // gap 0: touching is fine, overlapping isn't
+    ok(!ib.clone().expandByVector(e.negate()).intersectsBox(tb), `a nested desk (title included) and its neighbor never overlap: ${JSON.stringify([ib.min, ib.max, tb.min, tb.max])}`);
+}
+
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

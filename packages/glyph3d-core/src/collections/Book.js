@@ -123,6 +123,7 @@ function coverUnit() {
 
 const _coverSize = new THREE.Vector3();
 const _coverCenter = new THREE.Vector3();
+const _furn = new THREE.Box3();
 
 export default class Book extends BoundedObject3D {
     /**
@@ -751,6 +752,43 @@ export default class Book extends BoundedObject3D {
 
     /** BoundedObject3D's Measurable contract — getBounds() derives the world AABB from this. */
     getLocalBounds() { return this.layoutBounds(); }
+
+    /**
+     * The room a SEAT must hold for this book (local frame): the book as it draws — the
+     * layout box (the pages) plus the furniture parked around it: the cover's pad, the
+     * tab ruler on the top (or fore) edge, and the nameplate above the cover. A carrel
+     * seats and packs members by this when they offer it, so neighbors never overlap a
+     * nameplate; framing, markers and the tree keep measuring the pages (getLocalBounds).
+     * @returns {THREE.Box3}
+     */
+    getSeatBounds() {
+        const b = this.layoutBounds();
+        if (b.isEmpty() || !this.fitted) return b;
+        const lb = b.clone();
+        const c = this.cover;
+        const pad = c ? c.opts.pad : 0, zPad = c ? c.opts.zPad : 0;
+        if (c && c.opts.visible !== false) {
+            b.min.x -= pad; b.min.y -= pad; b.min.z -= zPad;
+            b.max.x += pad; b.max.y += pad; b.max.z += zPad;
+        }
+        if (this.tabs?.length) {
+            const { placement, protrusion, raise } = TAB_CONFIG;
+            const reach = this._tabOpts.lineHeight * (1 + raise) + protrusion;
+            if (placement === 'fore') b.max.x += reach + this._tabOpts.lineHeight;
+            else b.max.y += reach;
+        }
+        const np = this.nameplate;
+        if (np && np.visible !== false) {
+            // syncCover's placement: centered over the cover, its center 0.8 plate-heights
+            // above the cover's top edge.
+            const cy = lb.max.y + pad + np.height * 0.8;
+            const cx = (lb.min.x + lb.max.x) / 2, cz = (lb.min.z + lb.max.z) / 2;
+            _furn.min.set(cx - np.width / 2, cy - np.height / 2, cz);
+            _furn.max.set(cx + np.width / 2, cy + np.height / 2, cz);
+            b.union(_furn);
+        }
+        return b;
+    }
 
     /**
      * Detach every content (returned to their callers' care) and free the sheets, the

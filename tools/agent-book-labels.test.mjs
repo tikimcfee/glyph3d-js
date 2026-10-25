@@ -141,8 +141,8 @@ const cfg = books.cfg;
     ok(lane.label.nameText === 'Fix the flurbit', `the name is the title (got ${JSON.stringify(lane.label.nameText)})`);
     const st = lane.label.statusText;
     ok(st.startsWith('idle · step 3 · 4m ago'), `status row: idle · step · age from the record's lastTs (got ${JSON.stringify(st)})`);
-    ok(st.includes('say  Done — the plate reads.') && !st.includes('More prose'),
-        `the current call = the newest record's first line (got ${JSON.stringify(st)})`);
+    ok(st.split('\n')[1] === 'say' && !st.includes('Done — the plate reads.'),
+        `a say/think's current call is its verb alone — the prose is the open page, not the plate (got ${JSON.stringify(st)})`);
     ok(st.includes('glyph3d-js · claude · claude-opus-4 · main'), 'where it runs: cwd · type · model · branch');
     const row = books.agents().find((a) => a.id === 'abc123');
     ok(row?.meta?.title === 'Fix the flurbit', 'agents() exposes meta per lane');

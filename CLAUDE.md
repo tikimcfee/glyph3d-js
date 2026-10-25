@@ -188,8 +188,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
   without its result yet is held until the result lands). The tree is desks: the world-managed
   `gomux` carrel; an agent with helpers gets a `gomux/<name>` team carrel seated in its parent's
-  desk (its book first, then its helpers). Hub desks are `derived` — rebuilt from the tree, never
-  saved. Status rides `lane.meta.gomux`. `gomux.attach <name>` shows the agent's live tmux
+  desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
+  Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
+  — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
+  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>` shows the agent's live tmux
   screen as terminal `gx-<name>`, seated beside its book: a READ-ONLY, `ignore-size` tmux client
   on gomuxai's server, nested inside our own terminal session (`gomux.detach` closes only ours).
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.

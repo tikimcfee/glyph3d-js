@@ -159,6 +159,8 @@ export class Carrel extends THREE.Object3D {
         /** @type {Set<Function>} footprint listeners — a desk seated at another desk is its member */
         this._resizeListeners = new Set();
         this._footprint = '';
+        /** @type {Object|null} a title (FieldLabel) standing over the stack (setTitle) */
+        this.title = null;
         this._dissolving = false;
         /** Set once a dissolve has fully drained; the ticking runner sweeps dead carrels. */
         this._dead = false;
@@ -225,7 +227,7 @@ export class Carrel extends THREE.Object3D {
                     quat: grid.quaternion.clone(),
                 },
             homeBounds: h ? (h.bounds ? h.bounds.clone() : null) : (hasBounds ? b.clone() : null),
-            _extentFallback: extentFromBox(grid.getLocalBounds?.()) || {
+            _extentFallback: extentFromBox(grid.getSeatBounds?.() ?? grid.getLocalBounds?.()) || {
                 w: hasBounds ? Math.max((b.max.x - b.min.x) / resolvedScale, 1e-3) : 10,
                 h: hasBounds ? Math.max((b.max.y - b.min.y) / resolvedScale, 1e-3) : 10,
                 d: hasBounds ? Math.max((b.max.z - b.min.z) / resolvedScale, 1e-3) : 10,
@@ -465,7 +467,9 @@ export class Carrel extends THREE.Object3D {
      *  between sheets) holds the last-good form instead of flashing the lock-time
      *  guess — form is continuous even when measurement briefly isn't. */
     _extentOf(e) {
-        const live = extentFromBox(e.grid.getLocalBounds?.());
+        // A member that knows the room it draws in (a Book: nameplate, tabs, cover) is
+        // seated by that; anything else by its content box.
+        const live = extentFromBox(e.grid.getSeatBounds?.() ?? e.grid.getLocalBounds?.());
         if (live) e._extentFallback = live;
         return live || e._extentFallback;
     }
@@ -480,6 +484,29 @@ export class Carrel extends THREE.Object3D {
     _containScale(e, boxW, boxHt) {
         const ext = this._extentOf(e);
         return Math.min(boxW / ext.w, boxHt / ext.h, this.growCap);
+    }
+
+    /**
+     * Give the desk a title — a label (FieldLabel or anything with width/height) standing
+     * centered over the member stack, at the wall (grid) or the ring's back. Parented in,
+     * placed with the chrome, and counted in getLocalBounds, so a desk seated at another
+     * desk keeps its title clear of its neighbors. Replacing disposes the old one; null
+     * detaches without disposing.
+     * @param {Object|null} label
+     */
+    setTitle(label) {
+        if (this.title && this.title !== label) {
+            this.remove(this.title);
+            this.title.dispose?.();
+        }
+        this.title = label || null;
+        if (this.title) {
+            this.title.userData.isMarker = true;
+            this.add(this.title);
+        }
+        this._refreshChrome();
+        this._notifyFootprint();
+        return this;
     }
 
     /**
@@ -630,7 +657,13 @@ export class Carrel extends THREE.Object3D {
         }
 
         this._refreshChrome();
-        const fp = `${this._shadow.scale.x}|${this._shadow.scale.z}|${this._shadow.position.z}|${this._stackH}`;
+        this._notifyFootprint();
+    }
+
+    /** Tell footprint listeners when getLocalBounds moved (an outer desk re-seats). */
+    _notifyFootprint() {
+        const t = this.title;
+        const fp = `${this._shadow.scale.x}|${this._shadow.scale.z}|${this._shadow.position.z}|${this._stackH}|${t ? `${t.width}x${t.height}` : ''}`;
         if (fp !== this._footprint) {
             this._footprint = fp;
             for (const cb of this._resizeListeners) cb();
@@ -756,6 +789,11 @@ export class Carrel extends THREE.Object3D {
             this._shadow.scale.set(r * 2, 1, r * 2);
             this._shadow.position.set(0, 0, 0);
         }
+        // The title stands over the stack's top, at the wall (grid) / the ring's back.
+        if (this.title) {
+            const top = (this._stackH ?? this.boxH) + this._gap * 0.5;
+            this.title.position.set(0, top + this.title.height / 2, -R);
+        }
     }
 
     // ===================== bounds & state =====================
@@ -772,6 +810,15 @@ export class Carrel extends THREE.Object3D {
         const cz = this._shadow.position.z;
         target.min.set(-hx, 0, cz - hz);
         target.max.set(hx, (this._stackH ?? this.boxH) + this.boxH * 0.25, cz + hz);
+        const t = this.title;
+        if (t) {
+            const tw = t.width / 2, R = Math.max(this.radius, 1e-3);
+            target.max.y = Math.max(target.max.y, t.position.y + t.height / 2);
+            target.min.x = Math.min(target.min.x, -tw);
+            target.max.x = Math.max(target.max.x, tw);
+            target.min.z = Math.min(target.min.z, -R);
+            target.max.z = Math.max(target.max.z, -R);
+        }
         return target;
     }
 
@@ -813,6 +860,8 @@ export class Carrel extends THREE.Object3D {
         this.entries.clear();
         this._releasing.clear();
         this._resizeListeners.clear();
+        this.title?.dispose?.();
+        this.title = null;
         this._shadow.geometry.dispose();
         this._shadow.material.dispose();
     }
