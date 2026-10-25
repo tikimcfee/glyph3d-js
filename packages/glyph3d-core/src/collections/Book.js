@@ -124,6 +124,8 @@ function coverUnit() {
 const _coverSize = new THREE.Vector3();
 const _coverCenter = new THREE.Vector3();
 const _furn = new THREE.Box3();
+const _asideBox = new THREE.Box3();
+const _asideAt = new THREE.Vector3();
 
 export default class Book extends BoundedObject3D {
     /**
@@ -159,6 +161,9 @@ export default class Book extends BoundedObject3D {
         /** @type {((head:number, asked:number, from:number) => void)|null} the owner's paging tap —
          *  every pageTo (verbs, keys, wheel, HUD) calls it after moving the head */
         this.onPage = null;
+        /** @type {Object|null} a window riding BESIDE the book (setAside) — an agent's screen */
+        this.aside = null;
+        this._asideGap = 24;
         /** @type {Object|null} a nameplate plate (Label3D) parked above the cover box (setNameplate) */
         this.nameplate = null;
         /** @type {Array<{sheet:Object, tab:Tab3D, key:string}>|null} per-sheet edge tabs (null until bindTabs) */
@@ -500,7 +505,59 @@ export default class Book extends BoundedObject3D {
                 _coverCenter.y + (_coverSize.y + 2 * c.opts.pad) / 2 + np.height * 0.8,
                 _coverCenter.z);
         }
+        this._placeAside(b, c.opts.pad);
         return this;
+    }
+
+    /**
+     * Seat a window BESIDE the book — an agent's live screen next to its run. It's parked
+     * right of the cover, its height fit to the cover's, its face on the front page's
+     * plane, re-anchored every sync while it's parented here. Docked away it's left alone
+     * (the dock owns it); released home it lands back here. Counted in getSeatBounds. The
+     * book never disposes it: dispose hands it back to the book's parent. null detaches.
+     * @param {Object|null} obj a window with getLocalBounds() (a TerminalGrid)
+     * @param {{gap?: number}} [opts] world gap between the cover and the window
+     */
+    setAside(obj, { gap = 24 } = {}) {
+        if (this.aside && this.aside !== obj && this.aside.parent === this) this.parent?.attach(this.aside);
+        this.aside = obj || null;
+        this._asideGap = gap;
+        if (obj && obj.parent !== this) this.attach(obj);
+        this.syncCover();
+        return this;
+    }
+
+    /** The aside's pose for a layout box `b` (local): scale s, position — or null. @private */
+    _asidePose(b, pad) {
+        const a = this.aside;
+        if (!a || a.parent !== this || b.isEmpty()) return null;
+        const lb = a.getLocalBounds?.();
+        if (!lb || lb.isEmpty()) return null;
+        const h = Math.max(lb.max.y - lb.min.y, 1e-6);
+        const s = (b.max.y - b.min.y + 2 * pad) / h;
+        const left = b.max.x + pad + this._asideGap;
+        return {
+            s, lb,
+            x: left - lb.min.x * s,
+            y: (b.min.y + b.max.y) / 2 - ((lb.min.y + lb.max.y) / 2) * s,
+            z: b.max.z,
+        };
+    }
+
+    /** Park the aside beside the cover (syncCover's per-frame placement). @private */
+    _placeAside(b, pad) {
+        const p = this._asidePose(b, pad);
+        if (!p) return;
+        const a = this.aside;
+        if (a.scaleModel) {
+            const user = a.scaleModel.user?.y || 1;
+            a.scaleModel.placement = p.s / user;
+            a.scaleModel.resolve(a);
+        } else {
+            a.scale.setScalar(p.s);
+        }
+        a.position.set(p.x, p.y, p.z);
+        a.quaternion.identity();
     }
 
     /** Give the book a nameplate (a Label3D): parented in (rides every transform),
@@ -808,6 +865,13 @@ export default class Book extends BoundedObject3D {
             _furn.max.set(cx + np.width / 2, cy + np.height / 2, cz);
             b.union(_furn);
         }
+        const ap = this._asidePose(lb, pad);
+        if (ap) {
+            _asideBox.copy(ap.lb);
+            _asideBox.min.multiplyScalar(ap.s); _asideBox.max.multiplyScalar(ap.s);
+            _asideBox.translate(_asideAt.set(ap.x, ap.y, ap.z));
+            b.union(_asideBox);
+        }
         return b;
     }
 
@@ -818,6 +882,8 @@ export default class Book extends BoundedObject3D {
      */
     dispose() {
         const single = this.leaf;
+        if (this.aside?.parent === this) this.parent?.attach(this.aside);   // not ours to dispose
+        this.aside = null;
         this.dropCover();
         this.dropTabs();
         for (const sheet of this.sheets) {

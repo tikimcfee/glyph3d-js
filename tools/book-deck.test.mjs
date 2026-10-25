@@ -168,5 +168,38 @@ for (const [from, to] of [[19, 0], [0, 19], [17, 3]]) {
 function eq(a, b, m) { ok(JSON.stringify(a) === JSON.stringify(b), `${m} (got ${JSON.stringify(a)})`); }
 function eq6(a, b, m) { ok(a.length === b.length && a.every((v, i) => near(v, b[i], 0.01)), `${m} (got ${a.map((v) => Math.round(v * 100) / 100)})`); }
 
+// ---- an ASIDE rides beside the book: right of the cover, height-fit, in the seat box ----
+{
+    const bk = deck(3);
+    bk.bindCover({ pad: 2 });
+    const win = new THREE.Object3D();
+    win.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(0, -10, -1), new THREE.Vector3(40, 0, 1));   // 40×10, top-anchored
+    const away = new THREE.Group();
+    away.add(win);
+    bk.setAside(win, { gap: 5 });
+    ok(win.parent === bk, 'setAside parents the window to the book');
+    const lb = bk.layoutBounds();
+    const coverH = lb.max.y - lb.min.y + 4;
+    near(win.scale.x, coverH / 10, 1e-6) ? pass++ : (fail++, console.log(`  ✗ aside height fits the cover (scale ${win.scale.x}, want ${coverH / 10})`));
+    const wb = win.getLocalBounds().clone().applyMatrix4(win.matrix.compose(win.position, win.quaternion, win.scale));
+    ok(near(wb.min.x, lb.max.x + 2 + 5, 1e-6), `aside starts gap past the cover's right edge (x ${wb.min.x})`);
+    ok(near((wb.min.y + wb.max.y) / 2, (lb.min.y + lb.max.y) / 2, 1e-6), 'aside is centered on the book vertically');
+    const seat = bk.getSeatBounds();
+    ok(seat.max.x >= wb.max.x - 1e-6, 'the seat box holds the aside');
+    ok(bk.getLocalBounds().max.x === lb.max.x, 'framing keeps the page box');
+    // docked away: untouched, and out of the seat
+    away.attach(win);
+    win.position.set(123, 4, 5);
+    bk.syncCover();
+    ok(win.position.x === 123, 'a window docked away is left alone');
+    ok(bk.getSeatBounds().max.x < wb.max.x, 'and the seat box lets it go');
+    // dispose hands a riding aside back to the book's parent
+    bk.attach(win);
+    const shelf = new THREE.Group();
+    shelf.add(bk);
+    bk.dispose();
+    ok(win.parent === shelf, "dispose hands the aside to the book's parent, never disposes it");
+}
+
 console.log(`\nbook-deck.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

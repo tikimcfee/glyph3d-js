@@ -182,15 +182,14 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
-- **`agent-book-history.test.mjs`** (headless) — paging an agent book back past its kept turns,
-  over a synthetic 100-turn transcript and a mock relay window: records carry their line's byte
-  offset; paging within historyLead lays the previous slice in at the front (in order, no gap or
-  duplicate, the deck parallel to the entries, the reader's sheet unmoved); a call at the slice
-  edge pairs with a result written past the cursor (the overlap read); the first page back counts
-  the turns before it (exact numbers); reaching the start ends history; a held book keeps
-  historyResident sheets and lets go of the far end (the newest end detaches it — live turns are
-  counted, not built — and returning to live reloads the tail). Mutation-checked (no overlap, no
-  count, append instead of insert, no held window).
+- **`agent-book-history.test.mjs`** (headless) — an agent book's sliding window over a synthetic
+  100-turn transcript and a mock relay window: records carry their line's byte offset; paging near
+  the oldest sheet prefetches records (no sheets); pushing past it slides the window one turn back
+  (same size, the deck parallel to the entries, the head on the turn paged to, the newest waiting
+  as a record); a slide wider than the buffer waits for reads and completes; a call at a slice
+  edge pairs with its result (the overlap read); the first page back makes numbers exact; live
+  turns while held wait beyond the window; `live` slides to the end and resumes following; the
+  run's start ends history. Mutation-checked (no evict, no freeze, no pending slide).
 - **`gomux-hub.test.mjs`** (headless) — the gomuxai hub's live follow over a growing mock
   transcript: the cursor stops past the last complete line (a line mid-write arrives whole on the
   next read); a tool call whose result isn't written yet holds — nothing at or after it commits —

@@ -1,20 +1,22 @@
-// agent-book-history.test.mjs — behavior lock for paging BACK past an agent book's
-// resident turns (AgentBooks.setHistory / loadOlder):
+// agent-book-history.test.mjs — behavior lock for an agent book's SLIDING WINDOW over its
+// whole run (AgentBooks.setHistory / slide / loadOlder):
 //
 //   bun tools/agent-book-history.test.mjs
 //
-// A book keeps its newest turns in space; its history pages the rest in as you read back.
-// This gate locks, over a synthetic 100-turn claude transcript and a mock relay window:
-//   - every parsed record carries its line's byte offset (`at`), so the oldest resident
-//     record IS the backward cursor;
-//   - paging to within historyLead of the oldest sheet lays the previous slice in at the
-//     front — in order, no duplicates, the reader's page unchanged;
-//   - a tool call at the slice's edge still pairs with its result (the overlap read);
-//   - reading back to the record's start makes turn numbers exact (turn 1 = the first);
-//   - a held book keeps a window around the head: past historyResident it lets go of the
-//     end FARTHER from the reader — the newest end detaches it from the live tail, live
-//     turns are counted not built, and returning to live reloads the tail;
-//   - single-flight: a second page while a slice loads joins it.
+// A book is a fixed-size window (its cap of sheets) sliding over the run; turns outside
+// it wait as parsed records. This gate locks, over a synthetic 100-turn claude transcript
+// and a mock relay window:
+//   - every parsed record carries its line's byte offset (`at`);
+//   - paging near the oldest sheet PREFETCHES older records — no sheets added;
+//   - pushing past the oldest sheet slides the window one turn back: the older turn at the
+//     front, the newest out to the newer buffer — the window's size never changes, the
+//     deck stays parallel to the entries, the head lands on the turn paged to;
+//   - a slide wider than the buffer waits for reads and completes;
+//   - a call at a slice edge pairs with its result (the overlap read);
+//   - the first page back counts the turns before it (exact numbers); the run's start ends
+//     history (turn 1 = the first);
+//   - live turns while held wait in the newer buffer (the book doesn't shift); `live`
+//     slides the window to the end and resumes following.
 //
 // The codec is the real main-thread runSessionParseJob; the books are real AgentBooks on
 // the headless atlas.
@@ -83,57 +85,66 @@ const first = await parse(tail.bytes, { harness: 'claude', cap: 20, base: tail.o
 await books.hydrate('a', first.records, { agentType: 'claude', seqBase: first.total - 20, seqExact: false });
 books.setHistory('a', { read, parse, harness: 'claude' });
 const lane = books.lanes.get('a');
+const W = 20;
+const parallel = () => lane.entries.every((e, i) => lane.book.sheets[i]?.verso === e.verso);
+const settle = async () => { for (let i = 0; i < 200 && lane.history.loading; i++) await lane.history.loading; };
 eq(kept(lane).slice(0, 3), ['bash80', '81', '82'], 'opened at the tail: turns 80..99');
 ok(lane.entries.every((e) => Number.isFinite(e.record.at)), 'every resident record knows its byte offset');
-ok(new TextDecoder().decode(bytes.subarray(lane.entries[0].record.at)).startsWith('{'), 'the oldest record\'s `at` starts its line');
+ok(new TextDecoder().decode(bytes.subarray(lane.entries[0].record.at)).startsWith('{'), "the oldest record's `at` starts its line");
 
-// ── page back: within historyLead of the oldest sheet loads the previous slice ──
-lane.book.pageTo(5);                      // held, 5 from the oldest — outside the lead
-ok(!lane.history.loading, 'paging outside historyLead loads nothing');
-const headSheet = lane.book.sheets[2];
-lane.book.pageTo(2);                      // within the lead
-ok(!!lane.history.loading, 'paging within historyLead starts a slice');
-const again = books.loadOlder('a');
-ok(again === lane.history.loading, 'a second ask joins the slice in flight');
-const added = await again;
-ok(added === 20, `one slice = historyTurns turns (got ${added})`);
-eq(kept(lane).slice(0, 3), ['60', '61', '62'], 'the slice lays in at the front, oldest first');
-eq(kept(lane).slice(18, 23), ['78', 'bash79', 'bash80', '81', '82'], '… joining the resident turns with no gap and no duplicate');
-const bash79 = lane.entries.find((e) => e.record.detail === 'echo 79');
-ok(bash79 && String(bash79.record.result).includes('out 79'), "the slice's last call pairs with a result written past the cursor (the overlap read)");
-ok(lane.book.sheets[lane.book.head] === headSheet, "the reader's page didn't move");
-ok(lane.entries.every((e, i) => lane.book.sheets[i]?.verso === e.verso), 'the deck stays parallel to the entries (sheet i is turn i)');
+// ── near the oldest sheet: prefetch, no sheets ──
+lane.book.pageTo(5);
+ok(!lane.history.loading, 'paging outside historyLead reads nothing');
+lane.book.pageTo(2);
+ok(!!lane.history.loading, 'paging within historyLead prefetches');
+ok(books.loadOlder('a') === lane.history.loading, 'a second ask joins the read in flight');
+await settle();
 await lane.history.counting;
+ok(lane.entries.length === W && lane.older.length === 20, `prefetch fills the older buffer only (window ${lane.entries.length}, buffer ${lane.older.length})`);
 const turnOf = (i) => lane.book.sheets[i].meta.seq + (lane.turnBase || 0) + 1;
-ok(lane.seqExact && turnOf(0) === 61, `the first page back counts the turns before it: exact numbers (sheet 0 = turn ${turnOf(0)}, want 61)`);
-ok(turnOf(lane.entries.length - 1) === 100 && books.headState('a').turns === 100, 'the newest is turn 100 of 100');
-const bash67 = lane.entries.find((e) => e.record.action === 'bash' && e.record.detail === 'echo 67');
-ok(bash67 && String(bash67.record.result).includes('out 67'), 'a tool call inside the slice carries its result');
+ok(lane.seqExact && turnOf(0) === 81, `the first page back counts the turns before it: exact (sheet 0 = turn ${turnOf(0)}, want 81)`);
+ok(books.headState('a').turns === 100, 'turn 100 of 100 is the newest');
 
-// ── page all the way back: turn numbers become exact ──
-for (let i = 0; i < 10 && !lane.history.done; i++) { lane.book.pageTo(0); await lane.history.loading; }
-ok(lane.history.done, 'reached the record\'s start');
-eq(kept(lane)[0], '0', 'the oldest resident turn is the first one');
-ok(lane.entries.length <= Math.max(books._capFor(lane), books.cfg.historyResident), `a held book keeps at most historyResident sheets (got ${lane.entries.length})`);
-ok(lane.detached, 'paging that far back let go of the newest end — detached from the live tail');
+// ── push past the oldest sheet: slide one turn back ──
 lane.book.pageTo(0);
-const hs = books.headState('a');
-ok(hs.exact && hs.turn === 1, `turn numbers exact: the first sheet is turn 1 (got ${hs.exact ? '' : '~'}${hs.turn})`);
-eq(lane.book.tabs?.[0]?.label ?? lane.book.tabs?.[0]?.tab?.text ?? '1', '1', 'its tab reads 1');
+lane.book.scroll(-1);
+eq(kept(lane).slice(0, 2), ['bash79', 'bash80'], 'the window slid one turn back: the older turn at the front');
+ok(lane.entries.length === W, `the window keeps its size (${lane.entries.length})`);
+eq(lane.newer.map((x) => label(x.record)), ['99'], 'the newest turn left for the newer buffer');
+ok(lane.book.head === 0 && turnOf(0) === 80, 'the head is on the turn paged to (turn 80)');
+ok(parallel(), 'the deck stays parallel to the entries');
+const b79 = lane.entries[0].record;
+ok(String(b79.result).includes('out 79'), "a call at the slice edge pairs with a result written past the cursor (the overlap read)");
 
-// ── live turns while detached are counted, then returning to live reloads the tail ──
+// ── a slide wider than the buffer waits for reads, then completes ──
+lane.book.scroll(-50);
+await settle();
+eq(kept(lane)[0], '29', `slid 50 turns back across reads (oldest now ${kept(lane)[0]})`);
+ok(lane.entries.length === W && parallel(), 'still the same window, still parallel');
+ok(lane.newer.length === 51, `everything newer waits as records (${lane.newer.length})`);
+
+// ── a live turn while held waits; `live` slides to the end ──
 const seqBefore = lane.seq;
 text += L({ message: { role: 'assistant', content: [{ type: 'text', text: 'say 100 live' }] } });
 bytes = enc.encode(text);
-const liveRec = (await parse(bytes.subarray(bytes.lastIndexOf(0x7B, bytes.length - 2) ), { harness: 'claude' })).records.at(-1);
-books.activity('a', 'claude', liveRec ?? { action: 'say', result: 'say 100 live' });
-ok(lane.seq === seqBefore + 1 && books.headState('a').newer === 1, 'a live turn while detached is counted, not built');
-eq(kept(lane).includes('100'), false, '… and not appended after the gap');
-lane.book.pageTo(lane.book.sheets.length - 1);   // back to live
-for (let i = 0; i < 50 && lane.detached; i++) await new Promise((r) => setTimeout(r, 5));
-ok(!lane.detached && lane.book.following, 'returning to live reloads the tail');
-eq(kept(lane).at(-1), '100', 'the reloaded tail ends at the live turn');
-ok(lane.entries.length <= books._capFor(lane), 'and keeps the cap');
+books.activity('a', 'claude', { action: 'say', target: '', detail: '', result: 'say 100 live', meta: null });
+ok(lane.seq === seqBefore + 1 && lane.newer.length === 52 && kept(lane)[0] === '29', 'a live turn while held joins the newer buffer — the window holds still');
+ok(books.headState('a').newer === 52, 'the HUD knows how many newer turns wait');
+lane.book.pageTo(Infinity);   // book.page last
+eq(kept(lane).at(-1), '100', '`live` slides the window to the newest turn');
+ok(lane.entries.length === W && lane.newer.length === 0 && lane.book.following, 'full window, nothing waiting, following again');
+ok(parallel(), 'parallel after the jump');
+books.activity('a', 'claude', { action: 'say', target: '', detail: '', result: 'say 101 live', meta: null });
+eq(kept(lane).at(-1), '101', 'following: a live turn appends');
+ok(lane.entries.length === W && lane.older.at(-1) && label(lane.older.at(-1).record) === '81', 'and the shed turn waits in the older buffer');
+
+// ── all the way back: the run's start ──
+lane.book.pageTo(0);
+lane.book.scroll(-500);
+await settle();
+eq(kept(lane)[0], '0', 'slid back to the first turn');
+ok(lane.history.done && turnOf(0) === 1, `the start: history done, sheet 0 is turn ${turnOf(0)}`);
+ok(lane.entries.length === W && parallel(), 'the window is the same size at the start');
 
 console.log(`agent-book-history: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

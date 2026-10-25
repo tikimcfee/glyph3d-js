@@ -115,11 +115,11 @@ export const AGENT_BOOKS_DEFAULTS = {
                                 // doubles until the window holds maxSheets events (tail-grow —
                                 // a transcript costs its readable tail, not its full history)
     // -- history (paging back past the resident turns) --------------------------------
-    historyLead: 3,             // paging to within this many sheets of the oldest resident one loads the next older slice
-    historyTurns: 20,           // turns one older slice brings in
+    historyLead: 3,             // paging to within this many sheets of the window's oldest one prefetches older records
+    historyTurns: 20,           // records one older read brings into the buffer
     historySliceBytes: 256 * 1024, // first byte span read for an older slice (doubles until it holds historyTurns)
     historyOverlapBytes: 256 * 1024, // bytes read PAST the cursor so a slice's last tool calls pair with their results
-    historyResident: 60,        // a book paged back (held) keeps at most this many sheets — it lets go of the end farther from you
+    historyBuffer: 400,         // parsed records a book keeps BESIDE its window (older + newer) — no GPU cost; past it the far ones drop (re-readable)
     headMetaBytes: 64 * 1024,   // head window re-harvesting the provenance a tail can't see
                                 // (ai-title/agent-name/turn.prompt sit near the file's start);
                                 // read only when the tail's meta lacks a title. 0 disables.
@@ -380,11 +380,11 @@ export default class AgentBooks {
         lane.lastActivityTs = this._now();
         if (!this._batch) lane.wallTs = Date.now();   // a hydration replays history — its age is meta.lastTs
 
-        if (lane.detached) {
-            // Paged back so far the newest turns were let go: the book no longer ends at the
-            // live tail, so a live turn can't append — count it; returning to live reloads.
-            lane.newerDropped = (lane.newerDropped || 0) + 1;
-            lane.seq++;
+        if (lane.newer?.length || (lane.history && !lane.book.following && lane.entries.length)) {
+            // The window is held away from the live end (you're reading back): a live turn
+            // waits as a record beyond the window — the book doesn't shift under you. Paging
+            // past the newest sheet (or `live`) slides it in.
+            (lane.newer ??= []).push({ record, seq: lane.seq++ });
             if (!this._batch) { this._refreshNameplate(lane); this._emitChange(); }
             return lane;
         }
@@ -758,7 +758,7 @@ export default class AgentBooks {
         const seq = lane.book.sheets[s.head]?.meta?.seq;
         const base = lane.turnBase || 0, h = lane.history;
         return { agentId: hit[0], ...s, turn: seq != null ? seq + base + 1 : 0, turns: lane.seq + base, exact: lane.seqExact === true,
-                 older: !!h && !h.done, loading: !!h?.loading, detached: !!lane.detached, newer: lane.newerDropped || 0 };
+                 older: !!h && (!h.done || (lane.older?.length ?? 0) > 0), loading: !!h?.loading, newer: lane.newer?.length ?? 0 };
     }
 
     /**
@@ -1115,68 +1115,154 @@ export default class AgentBooks {
 
     /** Shed a lane's oldest sheets past its cap. Entries and deck stay parallel arrays;
      *  each evicted sheet's cards fully release (registry, picking, GPU) and the deck
-     *  closes up behind them. @private @returns {number} sheets shed */
+     *  closes up behind them. A book with a history keeps each shed turn's RECORD in its
+     *  older buffer, so paging back slides it in without a read. @private @returns {number} sheets shed */
     _trimLane(lane) {
         const cap = this._capFor(lane);
         let n = 0;
-        if (lane.book.following || !lane.history) {
-            while (lane.entries.length > cap) {
-                const e = lane.entries.shift();
-                lane.book.removeSheet(0);
-                this._disposeEntry(e);
-                n++;
-            }
-            return n;
-        }
-        // Held with a history to page through: keep a window AROUND the head — let go of the
-        // end farther from the reader. Letting go of the newest end detaches the book from the
-        // live tail (live turns are counted, not built); returning to live reloads it.
-        const max = Math.max(cap, this.cfg.historyResident);
-        while (lane.entries.length > max) {
-            const last = lane.entries.length - 1;
-            const head = lane.book.head;
-            const i = head > last - head ? 0 : last;
-            const [e] = lane.entries.splice(i, 1);
-            lane.book.removeSheet(i);
-            this._disposeEntry(e);
-            if (i === last) lane.detached = true;
+        while (lane.entries.length > cap) {
+            const item = this._evict(lane, 0);
+            if (lane.history) this._keepOlder(lane, [item]);
             n++;
         }
         return n;
     }
 
-    // -- history: paging back past the resident turns ----------------------------------
+    /** Remove sheet i and release its cards; returns its {record, seq}. @private */
+    _evict(lane, i) {
+        const [e] = lane.entries.splice(i, 1);
+        const seq = lane.book.sheets[i]?.meta?.seq ?? e.pickMeta.seq;
+        lane.book.removeSheet(i);
+        this._disposeEntry(e);
+        return { record: e.record, seq };
+    }
+
+    /** Build {record, seq} into a sheet at index i. @private */
+    _materialize(lane, i, item) {
+        const { sides, entry } = this._buildSheet(lane, item.record, item.seq);
+        lane.book.insertSheet(i, sides);
+        lane.entries.splice(i, 0, entry);
+    }
+
+    /** Append records to the older buffer's NEWEST end, dropping its oldest past the
+     *  buffer bound (they stay readable from the transcript). @private */
+    _keepOlder(lane, items) {
+        const older = (lane.older ??= []);
+        older.push(...items);
+        const max = Math.max(0, this.cfg.historyBuffer);
+        if (older.length > max) {
+            older.splice(0, older.length - max);
+            if (lane.history) lane.history.done = false;   // the dropped ones are behind the cursor again
+        }
+    }
+
+    // -- history: a sliding window over the whole run ------------------------------------
 
     /**
-     * Give a lane its HISTORY — where its older turns come from. Paging to within
-     * cfg.historyLead sheets of the oldest resident one reads the slice before it from the
-     * transcript (by each record's byte offset, `at`), parses it off-thread and lays its
-     * turns in at the front; the reader's page doesn't move. Returning to live after the
-     * book let go of its newest end reloads the tail.
+     * Give a lane its HISTORY — where its older turns come from. The book is a fixed-size
+     * WINDOW (its cap of sheets) sliding over the run: pushing past its oldest sheet slides
+     * it one turn back (the older turn materializes at the front, the newest leaves for
+     * the newer buffer), pushing past its newest slides it forward; turns outside the
+     * window wait as parsed records, not GPU objects. Paging near the oldest sheet
+     * prefetches older records from the transcript (by each record's byte offset, `at`)
+     * so a slide never waits on a read. While the window is held away from the live end,
+     * live turns join the newer buffer — the book never shifts under the reader.
      * @param {string} agentId
      * @param {{read: (window:{fromOffset?:number, maxBytes?:number, tailBytes?:number}) => Promise<{bytes:Uint8Array, offset:number}>,
-     *          parse: (bytes:Uint8Array, opts:Object) => Promise<{records:Array}>,
+     *          parse: (bytes:Uint8Array, opts:Object) => Promise<{records:Array, count?:number}>,
      *          harness: string, cwd?: string|null}} source
      */
     setHistory(agentId, source) {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
         lane.history = { ...source, loading: null, done: false };
-        lane.book.onPage = (head) => this._onPage(lane, head);
+        lane.older ??= [];
+        lane.newer ??= [];
+        lane.book.onPage = (head, asked) => this._onPage(lane, head, asked);
         return true;
     }
 
-    /** Book.onPage: near the oldest resident sheet, page in history; back at live after a
-     *  detach, reload the tail. @private */
-    _onPage(lane, head) {
-        if (lane.detached && lane.book.following) { this._reanchor(lane); return; }
-        if (head <= this.cfg.historyLead) this.loadOlder(lane.agentId);
+    /** Book.onPage: slide past either end, prefetch near the oldest. @private */
+    _onPage(lane, head, asked) {
+        const n = lane.book.sheets.length;
+        if (asked === Infinity) { this.slide(lane.agentId, lane.newer.length); return; }   // `live`
+        if (asked < 0) this.slide(lane.agentId, asked);
+        else if (asked > n - 1 && lane.newer.length) this.slide(lane.agentId, asked - (n - 1));
+        if (lane.book.head <= this.cfg.historyLead && lane.older.length < this.cfg.historyTurns) this.loadOlder(lane.agentId);
     }
 
     /**
-     * Lay in the slice of turns before the oldest resident one. Single-flight per lane;
-     * resolves with the turns added (0 when there's nothing older, no history, or the
-     * book moved on while it read).
+     * Slide a book's window by `delta` turns (− older, + newer), keeping its size: each
+     * step materializes one turn at the leading edge and returns the trailing edge's turn
+     * to its buffer. The head lands on the leading edge (the turn you paged to). Sliding
+     * back past what's buffered waits for the read in flight and goes on.
+     * @param {string} agentId @param {number} delta
+     * @returns {number} turns slid
+     */
+    slide(agentId, delta) {
+        const lane = this.lanes.get(agentId);
+        if (!lane?.history || !delta) return 0;
+        const book = lane.book;
+        let moved = 0;
+        if (delta < 0) {
+            const want = -delta;
+            const k = Math.min(want, lane.older.length);
+            if (k) {
+                const cap = this._capFor(lane);
+                this._batch = true;
+                try {
+                    for (let i = 0; i < k; i++) {
+                        this._materialize(lane, 0, lane.older.pop());
+                        if (lane.entries.length > cap) lane.newer.unshift(this._evict(lane, lane.entries.length - 1));
+                    }
+                } finally { this._batch = false; }
+                book.head = 0;
+                book.following = false;
+                moved = k;
+            }
+            if (want > k && !lane.history.done) {
+                lane.history.pendingBack = (lane.history.pendingBack || 0) + (want - k);
+                this.loadOlder(agentId);
+            }
+        } else {
+            const k = Math.min(delta, lane.newer.length);
+            if (!k) return 0;
+            this._batch = true;
+            try {
+                if (k >= lane.entries.length) {
+                    // a jump wider than the window: rebuild it from the newer buffer's end
+                    const all = [...lane.entries.map((_, i) => ({ record: lane.entries[i].record, seq: book.sheets[i].meta.seq }))];
+                    while (lane.entries.length) this._evict(lane, lane.entries.length - 1);
+                    const cap = this._capFor(lane);
+                    const pulled = lane.newer.splice(0, k);
+                    const seq = all.concat(pulled);
+                    const keep = Number.isFinite(cap) ? seq.slice(-cap) : seq;
+                    this._keepOlder(lane, seq.slice(0, seq.length - keep.length));
+                    keep.forEach((item, i) => this._materialize(lane, i, item));
+                } else {
+                    for (let i = 0; i < k; i++) {
+                        this._materialize(lane, lane.entries.length, lane.newer.shift());
+                        this._keepOlder(lane, [this._evict(lane, 0)]);
+                    }
+                }
+            } finally { this._batch = false; }
+            book.head = book.sheets.length - 1;
+            book.following = lane.newer.length === 0;
+            moved = k;
+        }
+        if (moved) {
+            book.seatAll();   // a slide is a cut — the window re-seats at once, nothing flies
+            this._refreshNameplate(lane);
+            this._relayout();
+            this._emitChange();
+        }
+        return moved * Math.sign(delta);
+    }
+
+    /**
+     * Read the records before the oldest known one (the older buffer's, else the window's)
+     * into the older buffer. Single-flight per lane; resolves with the records added.
+     * A slide waiting on it goes on when it lands.
      * @param {string} agentId @returns {Promise<number>}
      */
     loadOlder(agentId) {
@@ -1184,17 +1270,24 @@ export default class AgentBooks {
         const h = lane?.history;
         if (!h || h.done) return Promise.resolve(0);
         if (h.loading) return h.loading;
-        const from = lane.entries[0]?.record?.at;
+        const oldest = lane.older[0] ?? (lane.entries[0] && { record: lane.entries[0].record, seq: lane.book.sheets[0].meta.seq });
+        const from = oldest?.record?.at;
         if (!Number.isFinite(from)) return Promise.resolve(0);   // a live-born record knows no byte offset
-        if (from <= 0) { this._reachedStart(lane, 0); return Promise.resolve(0); }
-        if (!lane.seqExact && !h.counting) h.counting = this._countBefore(lane, from);
-        h.loading = this._readOlder(lane, from).finally(() => { h.loading = null; this._emitChange(); });
+        if (from <= 0) { this._reachedStart(lane, oldest.seq); return Promise.resolve(0); }
+        if (!lane.seqExact && !h.counting) h.counting = this._countBefore(lane, from, oldest.seq);
+        h.loading = this._readOlder(lane, from, oldest.seq).finally(() => {
+            h.loading = null;
+            const pend = h.pendingBack || 0;
+            h.pendingBack = 0;
+            if (pend && this.lanes.get(lane.agentId) === lane) this.slide(lane.agentId, -pend);
+            this._emitChange();
+        });
         this._emitChange();
         return h.loading;
     }
 
     /** @private */
-    async _readOlder(lane, from) {
+    async _readOlder(lane, from, fromSeq) {
         const h = lane.history, c = this.cfg;
         let span = c.historySliceBytes, recs = [], start = 0;
         for (;;) {
@@ -1206,106 +1299,44 @@ export default class AgentBooks {
             if (recs.length >= c.historyTurns || start === 0 || span >= 64 * 1024 * 1024) break;
             span *= 2;
         }
-        // The book moved on while we read (closed, reloaded, or another slice landed): drop it.
-        if (this.lanes.get(lane.agentId) !== lane || lane.entries[0]?.record?.at !== from) return 0;
+        // The book moved on while we read (closed, or the oldest known record changed): drop it.
+        const oldest = lane.older[0]?.record ?? lane.entries[0]?.record;
+        if (this.lanes.get(lane.agentId) !== lane || oldest?.at !== from) return 0;
         const take = recs.slice(-c.historyTurns);
-        await this._prepend(lane, take);
-        if (start === 0 && take.length === recs.length) this._reachedStart(lane, take.length);
+        lane.older.unshift(...take.map((record, j) => ({ record, seq: fromSeq - take.length + j })));
+        if (start === 0 && take.length === recs.length) this._reachedStart(lane, fromSeq - take.length);
         return take.length;
     }
 
     /** Count the records before byte `from` (off-thread, records not cloned back) and make
-     *  the lane's turn numbers exact: the record at `from` is turn count+1. Once per lane —
-     *  until it lands, numbers are the open's estimate (shown `~`). @private */
-    async _countBefore(lane, from) {
+     *  the lane's turn numbers exact: the record at `from` (seq fromSeq) is turn count+1.
+     *  Once per lane — until it lands, numbers are the open's estimate (shown `~`). @private */
+    async _countBefore(lane, from, fromSeq) {
         const h = lane.history;
         try {
             const r = await h.read({ fromOffset: 0, maxBytes: from });
             if (r.offset !== 0) return;   // the relay's read bound kept the END — can't count from the start
             const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Infinity, countOnly: true });
             if (this.lanes.get(lane.agentId) !== lane) return;
-            // The resident sheet at `from` (if it's still there — slices may have landed since).
-            const sheet = lane.entries.findIndex((e) => e.record?.at === from);
-            if (sheet < 0) return;
-            lane.turnBase = out.count - lane.book.sheets[sheet].meta.seq;
-            lane.seqExact = true;
-            if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));   // re-label in place
-            this._refreshNameplate(lane);
-            this._emitChange();
+            this._setTurnBase(lane, out.count - fromSeq);
         } catch (e) {
             console.warn(`[AgentBooks] ${lane.agentId}: counting the turns before the window failed — numbers stay estimates:`, e?.message || e);
         }
     }
 
-    /** Insert older records' sheets at the front, oldest first; the head keeps its sheet. @private */
-    async _prepend(lane, records, budgetMs = 8) {
-        if (!records.length) return;
-        const first = lane.book.sheets[0]?.meta?.seq ?? lane.seq;
-        this._batch = true;
-        let slice0 = performance.now();
-        try {
-            for (let j = 0; j < records.length; j++) {
-                const { sides, entry } = this._buildSheet(lane, records[j], first - records.length + j);
-                lane.book.insertSheet(j, sides);
-                lane.entries.splice(j, 0, entry);
-                if (performance.now() - slice0 > budgetMs) { await yieldToFrame(); slice0 = performance.now(); }
-            }
-        } finally {
-            this._batch = false;
-        }
-        this._trimLane(lane);
-        this._refreshNameplate(lane);
-        this._relayout();
-        this._emitChange();
-    }
-
-    /** The oldest resident turn is the record's first: turn numbers become exact. @private */
-    _reachedStart(lane) {
+    /** The oldest record is the run's first (seq minSeq): turn numbers become exact. @private */
+    _reachedStart(lane, minSeq) {
         lane.history.done = true;
-        const minSeq = lane.book.sheets[0]?.meta?.seq ?? 0;
-        lane.turnBase = -minSeq;
-        lane.seqExact = true;
-        if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));   // re-label in place
-        this._refreshNameplate(lane);
-        this._emitChange();
+        this._setTurnBase(lane, -minSeq);
     }
 
-    /** Back at live after letting go of the newest end: drop the resident window and reload
-     *  the tail (the turns counted while detached included). @private */
-    async _reanchor(lane) {
-        const h = lane.history;
-        if (!h || h.reanchoring) return;
-        h.reanchoring = true;
-        try {
-            const cap = this._capFor(lane);
-            const r = await h.read({ tailBytes: this.cfg.tailReadBytes });
-            const out = await h.parse(r.bytes, { harness: h.harness, cwd: h.cwd ?? null, cap: Number.isFinite(cap) ? cap : Infinity, base: r.offset });
-            if (this.lanes.get(lane.agentId) !== lane) return;
-            for (const e of lane.entries) this._disposeEntry(e);
-            while (lane.book.sheets.length) lane.book.removeSheet(lane.book.sheets.length - 1);
-            lane.entries = [];
-            lane.detached = false;
-            lane.newerDropped = 0;
-            h.done = false;
-            const recs = out.records;
-            const top = lane.seq;
-            this._batch = true;
-            try {
-                recs.forEach((rec, j) => {
-                    const { sides, entry } = this._buildSheet(lane, rec, top - recs.length + j);
-                    lane.book.addSheet(sides);
-                    lane.entries.push(entry);
-                });
-            } finally { this._batch = false; }
-            lane.book.pageTo(lane.book.sheets.length - 1);
-            this._refreshNameplate(lane);
-            this._relayout();
-            this._emitChange();
-        } catch (e) {
-            console.warn(`[AgentBooks] ${lane.agentId}: reloading the live tail failed —`, e?.message || e);
-        } finally {
-            h.reanchoring = false;
-        }
+    /** Exact turn numbers from here: turn = seq + base + 1; tabs re-label in place. @private */
+    _setTurnBase(lane, base) {
+        lane.turnBase = base;
+        lane.seqExact = true;
+        if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));
+        this._refreshNameplate(lane);
+        this._emitChange();
     }
 
     /** Schedule one _relayout for this tick, however many settles ask. @private */

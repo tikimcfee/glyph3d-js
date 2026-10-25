@@ -42,7 +42,8 @@ import { getSetting } from './settings.js';
  * exited or cleaned up → done), and `waiting` (blocked on a person) raises the book's hand.
  *
  * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
- * (gomux.attach — a read-only terminal) seated beside its book as soon as the book is open.
+ * (gomux.attach) riding beside its book — the book's aside, height-fit to the spread — as
+ * soon as the book is open.
  * Detaching one (gomux.detach) is remembered: the hub won't reopen it.
  *
  * Read-only by construction: nothing here types into, starts, or stops an agent.
@@ -367,22 +368,20 @@ export default class GomuxHub {
     }
 
     /**
-     * Seat an agent's screen terminal at the desk its book sits at, just after the book.
-     * A screen already held elsewhere (docked, or seated by hand) stays put.
-     * @returns {string|null} the desk it sits at, or null when there's no book desk
+     * Give an agent's screen terminal to its book as the book's ASIDE — parked right of
+     * the spread, its height fit to the book's (Book.setAside), riding the book wherever
+     * its desk puts it. A screen held elsewhere (docked, or seated by hand) stays put.
+     * @returns {string|null} 'book' when it rides the book, else what holds it, or null
      */
     seatScreen(name, id) {
         const lane = this.ctx.agentBooks?.lanes.get(name);
-        const holding = this.ctx.holding;
-        const desk = lane ? holding?.residenceOf(lane.groupId) : null;
         const entry = this.ctx.registry?.get(id);
-        if (!desk || !entry) return null;
-        const held = holding.holderOf(id);
-        if (held && held !== desk) return held.carrelName ?? null;
-        if (held === desk) return desk.carrelName;
-        const order = desk.entries.get(lane.groupId)?.order ?? 0;
-        holding.seat({ id, grid: entry.grid }, desk, { order: order + 0.5 });
-        return desk.carrelName;
+        if (!lane || !entry) return null;
+        const held = this.ctx.holding?.holderOf(id);
+        if (held) return held.carrelName ?? 'dock';
+        lane.book.setAside(entry.grid, { gap: Number(getSetting('gomux.screenGap')) || 24 });
+        this.ctx.agentBooks._requestRelayout();   // the book's seat grew by the screen
+        return 'book';
     }
 
     // ── read side ────────────────────────────────────────────────────────────

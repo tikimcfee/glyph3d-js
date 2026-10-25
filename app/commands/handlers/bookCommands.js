@@ -168,7 +168,7 @@ export default function registerBookCommands(router) {
         const ok = a === 'next' ? bk.scroll(+1)
                  : a === 'prev' ? bk.scroll(-1)
                  : a === 'first' ? bk.pageTo(0)
-                 : a === 'last' ? bk.pageTo(s0.count - 1)
+                 : a === 'last' ? bk.pageTo(Infinity)   // the live end: a window held back slides to it
                  : bk.pageTo((Number(a) || 1) - 1);
         if (ok) afterTurn(ctx, hit);
         const s = headOf(hit);

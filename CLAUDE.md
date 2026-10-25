@@ -192,7 +192,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
   rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>`
-  shows the agent's live tmux screen as terminal `gx-<name>`, seated beside its book — with NO
+  shows the agent's live tmux screen as terminal `gx-<name>`, riding beside its book (the book's
+  aside — `Book.setAside`: right of the cover, height-fit to it, in its seat box) — with NO
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
   every tmux command and broke gomuxai's send-keys): a capture-pane snapshot, then `tail -F` of the
   pane's pipe-pane log, inside our own terminal session; input goes nowhere (`gomux.detach`
@@ -210,12 +211,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
   (`app/client/bookFocus.js`). An agent book's tabs are its timeline (turn number in the
   run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held.
-  An agent book PAGES BACK past its kept turns: every parsed record carries its line's byte
-  offset (`at`), and paging within `historyLead` of the oldest sheet reads the slice before it
-  (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record), laying its turns
-  in at the front. The first page back counts the turns before it (off-thread) so numbers are
-  exact; a held book keeps `historyResident` sheets around the head, and letting go of the newest
-  end detaches it from the live tail until you return to live (the tail reloads).
+  An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
+  (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record): pushing past its
+  oldest sheet slides it one turn back (the older turn materializes at the front, the newest
+  waits as a parsed record), past its newest slides it forward, `book.page last` slides it to the
+  live end. Turns outside the window are records, not GPU objects; every parsed record carries its
+  line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches older
+  records from the transcript. The first page back counts the turns before it (off-thread) so
+  numbers are exact. While the window is held away from the live end, live turns wait beyond it
+  (the HUD's `+N newer`) — the book never grows or shifts under the reader.
   Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`.
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via

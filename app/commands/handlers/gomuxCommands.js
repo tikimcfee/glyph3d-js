@@ -94,7 +94,7 @@ export default function registerGomuxCommands(router) {
         }
         const seated = hub.seatScreen(name, id);
         return {
-            text: `OK: ${name}'s screen is terminal '${id}' (read-only)${seated ? `, seated beside its book at '${seated}'` : ''}`,
+            text: `OK: ${name}'s screen is terminal '${id}' (read-only)${seated === 'book' ? ', riding beside its book' : seated ? ` (held at '${seated}')` : ''}`,
             data: { id, seated: seated || null },
         };
     }, { description: "The agent's live tmux screen as a read-only terminal, seated beside its book", usage: '<name>', returns: '{ id, seated }' });
