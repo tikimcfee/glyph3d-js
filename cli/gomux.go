@@ -55,9 +55,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // gomuxPollInterval is the change-detection tick. A var so tests can shorten it.
@@ -646,4 +649,78 @@ func (h *FSHandler) handleGomuxRead(write writeFn, writeBin writeBinFn, id json.
 		return
 	}
 	h.serveTranscriptWindow(write, writeBin, id, p.Name, a.Transcript, a.Cwd, p.transcriptWindow)
+}
+
+// ---- the agent's live screen ----
+
+// gomuxTerminalID is the terminal an agent's screen shows in: `gx-<name>`, so its
+// glyphd-side session is `glyph-gx-<name>` and never collides with a spawned term-N.
+func gomuxTerminalID(name string) string { return "gx-" + sanitizeSession(name) }
+
+// attachGomuxAgent forks a terminal adapter whose shell is a READ-ONLY tmux client on
+// the agent's own session — the agent's live screen beside its book. Nested, not
+// retargeted: the adapter's session lives on our socket as usual (recovery, keymap
+// neutralization and kill all stay inside it), and its one process is
+// `tmux attach -t agent-<name> -f read-only,ignore-size` against gomuxai's server
+// (the default socket — TMUX unset so the inner client doesn't talk to ours). Read-only:
+// keys typed at the terminal never reach the agent. ignore-size: our window never
+// resizes the agent's. The terminal opens at the agent pane's own size. Killing the
+// terminal kills only our outer session; the agent's session ends the terminal when it
+// ends.
+func (r *Relay) attachGomuxAgent(ws *websocket.Conn, name string) {
+	reply := func(err string) { ws.WriteJSON(map[string]any{"event": "gomux.attaching", "name": name, "error": err}) }
+	if r.fs == nil || r.fs.gomux == nil {
+		reply("gomuxai watcher not running")
+		return
+	}
+	var agent *gomuxAgent
+	for _, a := range r.fs.gomux.Snapshot().Agents {
+		if a.Name == name {
+			a := a
+			agent = &a
+			break
+		}
+	}
+	if agent == nil {
+		reply("no gomuxai agent named " + name)
+		return
+	}
+	if !agent.Attached {
+		reply("agent " + name + " has no tmux session (" + agent.Session + ")")
+		return
+	}
+	cols, rows := 80, 24
+	if out, err := r.fs.gomux.tmux("display-message", "-p", "-t", agent.Session, "#{pane_width} #{pane_height}"); err == nil {
+		if f := strings.Fields(strings.TrimSpace(out)); len(f) == 2 {
+			if c, e := strconv.Atoi(f[0]); e == nil && c > 0 {
+				cols = c
+			}
+			if rr, e := strconv.Atoi(f[1]); e == nil && rr > 0 {
+				rows = rr
+			}
+		}
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		reply("cannot locate glyph3d-cli binary: " + err.Error())
+		return
+	}
+	id := gomuxTerminalID(name)
+	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket,
+		"--cols", strconv.Itoa(cols), "--rows", strconv.Itoa(rows),
+		"--", "env", "-u", "TMUX", r.fs.gomux.tmuxBin, "attach-session", "-t", agent.Session, "-f", "read-only,ignore-size"}
+	cmd := exec.Command(exePath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		reply("spawn failed: " + err.Error())
+		return
+	}
+	pid := cmd.Process.Pid
+	log.Printf("[gomux] %s: screen attached read-only as terminal '%s' (pid %d, %dx%d)", name, id, pid, cols, rows)
+	ws.WriteJSON(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows})
+	go func() {
+		err := cmd.Wait()
+		log.Printf("[gomux] %s: screen adapter '%s' (pid %d) exited: %v", name, id, pid, err)
+	}()
 }

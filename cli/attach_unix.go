@@ -21,10 +21,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// glyphdSocket is the dedicated tmux socket (`tmux -L glyphd`). Isolating our
-// sessions lets us neutralize the client keymap without touching the operator's own
-// tmux, and namespaces persistence/adoption.
-const glyphdSocket = "glyphd"
 
 // frameOutput is the type byte of an OUTPUT data-plane frame (adapter → display):
 //
@@ -44,7 +40,7 @@ const coalesceInterval = 16 * time.Millisecond
 
 // tmuxCmd builds a tmux command pinned to our dedicated socket.
 func tmuxCmd(args ...string) *exec.Cmd {
-	return exec.Command("tmux", append([]string{"-L", glyphdSocket}, args...)...)
+	return exec.Command("tmux", append([]string{"-L", tmuxSocket}, args...)...)
 }
 
 // paneScrollPosition returns how many lines the pane is scrolled BACK from live
@@ -479,7 +475,7 @@ func ensureTmuxSession(cfg terminalConfig) error {
 	return nil
 }
 
-// startTmuxAttach opens a PTY running `tmux -L glyphd attach`. TERM on the client
+// startTmuxAttach opens a PTY running `tmux -L <tmuxSocket> attach`. TERM on the client
 // determines what escape sequences tmux emits to us; xterm-256color is what
 // @xterm/headless parses cleanly. Resize is SIGWINCH-only (pty.Setsize) — never
 // `tmux resize-window` (it flips window-size to manual and then ignores SIGWINCH).

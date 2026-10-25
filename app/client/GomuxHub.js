@@ -286,6 +286,32 @@ export default class GomuxHub {
         this._teamParent.set(team.carrelName, parentDesk.carrelName);
     }
 
+    // ── screens ──────────────────────────────────────────────────────────────
+
+    /** The terminal id an agent's screen shows in — the relay's gomuxTerminalID. */
+    screenId(name) {
+        return 'gx-' + String(name).replace(/[^A-Za-z0-9_-]/g, '_');
+    }
+
+    /**
+     * Seat an agent's screen terminal at the desk its book sits at, just after the book.
+     * A screen already held elsewhere (docked, or seated by hand) stays put.
+     * @returns {string|null} the desk it sits at, or null when there's no book desk
+     */
+    seatScreen(name, id) {
+        const lane = this.ctx.agentBooks?.lanes.get(name);
+        const holding = this.ctx.holding;
+        const desk = lane ? holding?.residenceOf(lane.groupId) : null;
+        const entry = this.ctx.registry?.get(id);
+        if (!desk || !entry) return null;
+        const held = holding.holderOf(id);
+        if (held && held !== desk) return held.carrelName ?? null;
+        if (held === desk) return desk.carrelName;
+        const order = desk.entries.get(lane.groupId)?.order ?? 0;
+        holding.seat({ id, grid: entry.grid }, desk, { order: order + 0.5 });
+        return desk.carrelName;
+    }
+
     // ── read side ────────────────────────────────────────────────────────────
 
     /** The tree as rows for gomux.list: depth-first in spawn order. */

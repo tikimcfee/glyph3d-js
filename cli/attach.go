@@ -22,6 +22,14 @@ import (
 	"strings"
 )
 
+// tmuxSocket is the dedicated tmux socket terminals live on (`tmux -L glyphd` by
+// default). Isolating our sessions lets the adapter neutralize the client keymap
+// without touching the operator's own tmux, and namespaces persistence/adoption.
+// `serve --tmux-socket` sets it for the relay (recovery) and passes it to every
+// adapter it forks (`attach --tmux-socket`) — a second relay on its own socket
+// can't adopt or kill the first relay's terminals.
+var tmuxSocket = "glyphd"
+
 // terminalConfig is the parsed invocation, handed to the platform-specific
 // runTerminal (attach_unix.go / attach_windows.go).
 type terminalConfig struct {
@@ -42,10 +50,11 @@ func attachCmd() {
 	cols := fs.Int("cols", 80, "Terminal columns")
 	rows := fs.Int("rows", 24, "Terminal rows")
 	scale := fs.Float64("scale", 2.0, "TerminalGrid size multiplier")
+	fs.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) the session lives on")
 
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --tmux-socket")
 		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
 	}
 

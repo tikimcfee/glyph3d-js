@@ -658,6 +658,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 		Descriptor json.RawMessage `json:"descriptor"`
 		Cols       int             `json:"cols"`
 		Rows       int             `json:"rows"`
+		Name       string          `json:"name"`
 	}
 	if err := json.Unmarshal(msg, &m); err != nil {
 		ws.WriteJSON(map[string]any{"error": "invalid relay message"})
@@ -726,6 +727,9 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 
 	case "terminal.recover":
 		r.recoverTerminals(ws)
+
+	case "gomux.attach":
+		r.attachGomuxAgent(ws, m.Name)
 
 	case "log.follow":
 		if role != "controller" || clientID == "" {
@@ -983,7 +987,7 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 		return
 	}
 	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
-	args := []string{"attach", id, "--port", strconv.Itoa(r.port)}
+	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket}
 	if cols > 0 {
 		args = append(args, "--cols", strconv.Itoa(cols))
 	}
@@ -1019,7 +1023,7 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 // map — so this is idempotent, one-command recovery after any relay restart. (tmux-absent / non-unix:
 // `ls` errors → nothing to recover, returned gracefully.)
 func (r *Relay) recoverTerminals(ws *websocket.Conn) {
-	out, err := exec.Command("tmux", "-L", "glyphd", "ls", "-F", "#{session_name}").Output()
+	out, err := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}").Output()
 	if err != nil {
 		ws.WriteJSON(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0})
 		return
@@ -1037,13 +1041,13 @@ func (r *Relay) recoverTerminals(ws *websocket.Conn) {
 			continue
 		}
 		// Already adopted? A session with an attached client has a live adapter — skip it.
-		clients, _ := exec.Command("tmux", "-L", "glyphd", "list-clients", "-t", session, "-F", "#{client_name}").Output()
+		clients, _ := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output()
 		if strings.TrimSpace(string(clients)) != "" {
 			continue
 		}
 		id := strings.TrimPrefix(session, "glyph-")
-		args := []string{"attach", id, "--port", strconv.Itoa(r.port)}
-		if sz, e := exec.Command("tmux", "-L", "glyphd", "display-message", "-t", session, "-p", "#{pane_width} #{pane_height}").Output(); e == nil {
+		args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket}
+		if sz, e := exec.Command("tmux", "-L", tmuxSocket, "display-message", "-t", session, "-p", "#{pane_width} #{pane_height}").Output(); e == nil {
 			if f := strings.Fields(strings.TrimSpace(string(sz))); len(f) == 2 {
 				args = append(args, "--cols", f[0], "--rows", f[1])
 			}

@@ -189,9 +189,13 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   without its result yet is held until the result lands). The tree is desks: the world-managed
   `gomux` carrel; an agent with helpers gets a `gomux/<name>` team carrel seated in its parent's
   desk (its book first, then its helpers). Hub desks are `derived` — rebuilt from the tree, never
-  saved. Status rides `lane.meta.gomux`. Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`.
+  saved. Status rides `lane.meta.gomux`. `gomux.attach <name>` shows the agent's live tmux
+  screen as terminal `gx-<name>`, seated beside its book: a READ-ONLY, `ignore-size` tmux client
+  on gomuxai's server, nested inside our own terminal session (`gomux.detach` closes only ours).
+  Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
-- **Terminals** are tmux-backed (socket `tmux -L glyphd`, sessions `glyph-<id>`) via
+- **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
+  relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
   reloads. See the `saved-state` and `terminal-control-subsystem` memories.
 - **Sensor plane** — capture devices (an iPhone running the `motion-source-ios`

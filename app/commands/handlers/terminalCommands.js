@@ -40,7 +40,7 @@ const log = createLogger('terminal');
  * @param {number} [timeoutMs=15000]
  * @returns {Promise<boolean>} true when the terminal arrived, false on timeout
  */
-function waitForTerminal(registry, id, timeoutMs = 15000) {
+export function waitForTerminal(registry, id, timeoutMs = 15000) {
     if (registry.get(id)) return Promise.resolve(true);
     return new Promise((resolve) => {
         const done = (arrived) => {

@@ -373,6 +373,7 @@ func serveCmd() {
 	var gomuxDirs stringListFlag
 	flagSet.Var(&gomuxDirs, "gomuxai", "Extra gomuxai store to watch: a .gomuxai dir, the dir holding one, or an `agent` binary (repeatable). The PATH agent's store and every live agent session's are found on their own.")
 	noGomux := flagSet.Bool("no-gomuxai", false, "Don't watch gomuxai stores")
+	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
 	flagSet.Parse(os.Args[2:])
 
 	// Project path: positional arg or cwd

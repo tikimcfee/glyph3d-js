@@ -5,11 +5,18 @@
  *   gomux.list               the tree, depth-first in spawn order: status · detail · book
  *   gomux.status <name>      one agent's node (status, the tool in flight, a pending prompt)
  *   gomux.refresh            pull the tree from the relay now (pushes keep it current)
+ *   gomux.attach <name>      the agent's live tmux screen as a terminal, seated beside its book
+ *   gomux.detach <name>      close that terminal (the agent's session is untouched)
  *
- * Read-only: these verbs never type into, start, or stop an agent. Framing an agent's book
+ * Read-only: these verbs never type into, start, or stop an agent. The screen is a
+ * read-only tmux client on the agent's session (cli/gomux.go attachGomuxAgent): keys typed
+ * at it go nowhere, and it never resizes the agent's window. Dock it like any terminal
+ * (`dock.lock gx-<name>`); releasing it returns it to its seat by the book. Framing an agent's book
  * is the ordinary camera verb on its lane: `camera.focus agent:book:<name>`.
  */
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
+
+import { waitForTerminal } from './terminalCommands.js';
 
 const noHub = { text: 'ERR: no gomuxai hub (needs the relay)', data: null };
 
@@ -61,6 +68,46 @@ export default function registerGomuxCommands(router) {
         ].filter(Boolean);
         return { text: lines.join('\n'), data: { ...a, book: hub.lanes.get(a.name)?.phase ?? null } };
     }, { description: "One gomuxai agent's node — status, the tool in flight, a pending permission prompt", usage: '<name>' });
+
+    router.register('gomux.attach', async (args, ctx) => {
+        const hub = ctx.gomuxHub;
+        if (!hub) return noHub;
+        const [name] = args;
+        if (!name) return { text: 'ERR: usage: gomux.attach <name>', data: null };
+        const bridge = ctx.wsbridge;
+        if (!bridge?.connected) return { text: 'ERR: not connected to the relay', data: null };
+        const a = hub.snapshot?.agents.find((x) => x.name === name);
+        if (!a) return { text: `ERR: no gomuxai agent '${name}'`, data: null };
+        if (!a.attached) return { text: `ERR: '${name}' has no live tmux session (${a.live ? a.status : 'cleaned up'})`, data: null };
+
+        let id = hub.screenId(name);
+        if (!ctx.registry?.get(id)) {
+            const ackPromise = bridge.waitForEvent('gomux.attaching', 5000);
+            bridge.send(JSON.stringify({ relay: 'gomux.attach', name }));
+            const ack = await ackPromise;
+            if (!ack) return { text: `ERR: no answer from the relay for '${name}' (an old relay without gomux.attach?)`, data: null };
+            if (ack.error) return { text: `ERR: ${ack.error}`, data: null };
+            id = ack.id;
+            if (!(await waitForTerminal(ctx.registry, id))) {
+                return { text: `OK: '${name}' screen '${id}' is spawning — the adapter hasn't connected yet`, data: { id, seated: false } };
+            }
+        }
+        const seated = hub.seatScreen(name, id);
+        return {
+            text: `OK: ${name}'s screen is terminal '${id}' (read-only)${seated ? `, seated beside its book at '${seated}'` : ''}`,
+            data: { id, seated: seated || null },
+        };
+    }, { description: "The agent's live tmux screen as a read-only terminal, seated beside its book", usage: '<name>', returns: '{ id, seated }' });
+
+    router.register('gomux.detach', async (args, ctx) => {
+        const hub = ctx.gomuxHub;
+        if (!hub) return noHub;
+        const [name] = args;
+        if (!name) return { text: 'ERR: usage: gomux.detach <name>', data: null };
+        const id = hub.screenId(name);
+        if (!ctx.registry?.get(id)) return { text: `ERR: '${name}' has no screen open`, data: null };
+        return router.execute(['terminal.kill', id]);
+    }, { description: "Close an agent's screen terminal (the agent's own session is untouched)", usage: '<name>' });
 
     router.register('gomux.refresh', async (_args, ctx) => {
         const hub = ctx.gomuxHub;
