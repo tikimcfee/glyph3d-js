@@ -159,7 +159,7 @@ export const GROUPS = [
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane', columns: 2 },
   { name: 'Carrel',             subtitle: 'what a NEW desk is born with — one desk is tuned in the HUD (its Desk section)', columns: 2 },
   { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes · edge tabs', columns: 2 },
-  { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention', columns: 2 },
+  { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · page text · retention', columns: 2 },
   { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck', columns: 2 },
   { name: 'gomuxai',            subtitle: 'the agent orchestrator\'s tree as books at desks', columns: 2 },
   { name: 'Strata',             subtitle: 'nested Z-depth structure view', columns: 2 },
@@ -697,7 +697,7 @@ export const SETTINGS = [
 
   // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
   // is a SUBSET of the Books base (it inherits the shared page face + cover) plus
-  // these ADDITIVE agent-only knobs: page geometry, the deck, the card scales, and retention.
+  // these ADDITIVE agent-only knobs: page geometry, the deck, page text, and retention.
   // Every dial re-fits the live shelf via applyScales (cards re-scale, sheets re-fit,
   // over-cap sheets shed, the cluster re-flows). Ranges are deliberately WIDE — a small
   // positive min just keeps a value off 0/negative; the user, not us, decides what's "too
@@ -722,45 +722,46 @@ export const SETTINGS = [
   { key: 'agents.maxBooks', label: "Books the 'agents' desk opens by itself: the newest N live or recent local sessions (0 = none; agent.open and the archive still open any)", group: 'Agent Books', type: 'number', default: 24, min: 0, max: 5000, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
-  // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
-  // the deck pitch / page-turn easing. These are the agent card's dims (delta books
+  // Page geometry + deck — the AGENT card's page rect, spread spine, and the deck pitch /
+  // page-turn easing. These are the agent card's dims (delta books
   // and library volumes carry their OWN page geometry); they live here, not in Books, so a
   // shared-base dial isn't mistaken for one that resizes every shelf at once.
   { key: 'book.pageW', label: 'Page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageW, min: 10, max: 5000, step: 10, apply: agentBookParam('pageW') },
   { key: 'book.pageH', label: 'Page height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageH, min: 10, max: 5000, step: 10, apply: agentBookParam('pageH') },
   { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.gutter, min: 0, max: 500, step: 2, apply: agentBookParam('gutter') },
-  { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxUpscale, min: 0.1, max: 100, step: 0.1, apply: agentBookParam('maxUpscale') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.zPitch, min: 1, max: 4000, step: 5, apply: agentBookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pagerLerp, min: 0, max: 60, step: 0.5, apply: agentBookParam('pagerLerp') },
-  // The description page (verso) — WORLD row pitches, never shrunk by long content: the
-  // action HEADLINE (`[verb]` + the call's first line, wrapped to the page), the call's
-  // remaining lines, and the info rows. The headline steps down toward its minimum only
-  // when its wrapped call would take more than its page share.
-  { key: 'book.callLineHeight', label: 'Headline row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callLineHeight, min: 0.5, max: 400, step: 0.5, apply: agentBookParam('callLineHeight') },
-  { key: 'book.callMinLineHeight', label: 'Headline min row height (long calls)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callMinLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('callMinLineHeight') },
-  { key: 'book.callMaxFrac', label: 'Headline page share before stepping down', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callMaxFrac, min: 0.05, max: 1, step: 0.05, apply: agentBookParam('callMaxFrac') },
+  // Page text — each side's text size (a world row height) and how its lines break: these
+  // are the DEFAULTS every agent book shows; one book may carry its own (the HUD's Book
+  // section / book.set — it wins, and a change here passes it by). One rule sizes every
+  // block: its size is the most it's set at, and text too big for its page scales DOWN to
+  // fit. "natural" keeps the text's own lines, so a long line shrinks its block (left to
+  // right readable); "wrap" wraps to the page first and shrinks only if still too tall.
+  // The left page's headline is the text size; the call's remaining lines and the numbers
+  // below keep their share of it. The right page's prose is its text size; a file or a
+  // command's output keeps its share.
+  { key: 'book.versoTextSize', label: 'Left page text size (the headline’s row height)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.versoTextSize, min: 0.5, max: 400, step: 0.5, apply: agentBookParam('versoTextSize') },
+  { key: 'book.versoBreak', label: 'Left page lines: wrap = wrap to the page · natural = keep the text’s own lines (a long one shrinks to fit)', group: 'Agent Books', type: 'enum', options: ['wrap', 'natural'], default: AGENT_BOOKS_DEFAULTS.versoBreak, apply: agentBookParam('versoBreak') },
+  { key: 'book.versoBodyRatio', label: 'Left page: the rest of a multi-line command (× left page text size)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.versoBodyRatio, min: 0.05, max: 5, step: 0.05, apply: agentBookParam('versoBodyRatio') },
+  { key: 'book.versoInfoRatio', label: 'Left page: the numbers below (lines, +/−, tokens… × left page text size)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.versoInfoRatio, min: 0.05, max: 5, step: 0.05, apply: agentBookParam('versoInfoRatio') },
+  { key: 'book.rectoTextSize', label: 'Right page text size (prose’s row height)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.rectoTextSize, min: 0.5, max: 400, step: 0.5, apply: agentBookParam('rectoTextSize') },
+  { key: 'book.rectoBreak', label: 'Right page lines: wrap = wrap to the page · natural = keep the text’s own lines (a long one shrinks to fit)', group: 'Agent Books', type: 'enum', options: ['wrap', 'natural'], default: AGENT_BOOKS_DEFAULTS.rectoBreak, apply: agentBookParam('rectoBreak') },
+  { key: 'book.rectoFileRatio', label: 'Right page: files and command output (× right page text size)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.rectoFileRatio, min: 0.05, max: 5, step: 0.05, apply: agentBookParam('rectoFileRatio') },
+  { key: 'book.pageMargin', label: 'Page margin (around each page’s text)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageMargin, min: 0, max: 1000, step: 1, apply: agentBookParam('pageMargin') },
+  { key: 'book.rowGap', label: 'Left page: gap between the headline, the command, and the numbers', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.rowGap, min: 0, max: 1000, step: 1, apply: agentBookParam('rowGap') },
   { key: 'book.callTextLift', label: 'Headline text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('callTextLift') },
-  { key: 'book.bodyLineHeight', label: 'Call body row height (multi-line commands)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.bodyLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('bodyLineHeight') },
-  { key: 'book.bodyMinLineHeight', label: 'Call body min row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.bodyMinLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('bodyMinLineHeight') },
-  { key: 'book.infoLineHeight', label: 'Info row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.infoLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('infoLineHeight') },
-  { key: 'book.pageMargin', label: 'Description page margin', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageMargin, min: 0, max: 1000, step: 1, apply: agentBookParam('pageMargin') },
-  { key: 'book.rowGap', label: 'Description row gap', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.rowGap, min: 0, max: 1000, step: 1, apply: agentBookParam('rowGap') },
   // The content page (recto): a file snapshot FRAMES the touched range (± context, at most
-  // the window height; applies to snapshots loaded after the change), then the fine-print
-  // card sizes for snapshot / output / prose, and the image recto.
+  // the window height; applies to snapshots loaded after the change), and the image recto.
   { key: 'book.snapContextRows', label: 'Snapshot context rows (around the touched lines)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapContextRows, min: 0, max: 5000, step: 1, apply: agentBookParam('snapContextRows') },
   { key: 'book.snapMaxRows', label: 'Snapshot window rows (0 = whole file)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapMaxRows, min: 0, max: 100000, step: 1, apply: agentBookParam('snapMaxRows') },
   // The timeline — one tab per sheet across the book's top edge: the turn number, hued by
   // action kind, the open sheet's tab raised (tab.raise). tabLine is the tab text height.
   { key: 'book.tabs', label: 'Timeline tabs', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.tabs, apply: agentBookParam('tabs') },
   { key: 'book.tabLine', label: 'Tab text size (× page height)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.tabLine, min: 0.001, max: 0.5, step: 0.001, apply: agentBookParam('tabLine') },
-  { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.artifactWorldScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('artifactWorldScale') },
-  { key: 'book.messageScale', label: 'Prose (prompt / say / think / system) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
-  { key: 'book.proseWrapCols', label: 'Prose (prompt / say / think / system) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
   { key: 'book.promptTextLift', label: 'Prompt text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.promptTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('promptTextLift') },
   { key: 'book.showNoise', label: 'Noise tool calls as sheets (ToolSearch, TodoWrite… in a dim hue; off hides them; new events)', group: 'Agent Books', type: 'bool', default: AGENT_BOOKS_DEFAULTS.showNoise, apply: agentBookParam('showNoise') },
   { key: 'book.noiseTextLift', label: 'Noise sheet text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.noiseTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('noiseTextLift') },
-  { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
+  { key: 'book.snapshotImageWidth', label: 'Right page image width (a tall one scales down to fit; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
   // The nameplate above each book: the session NAME container-fit to the spread (a share
   // of its width, row height clamped to [min, max] — past the min it wraps) over the live
   // STATUS block at a ratio of the name's row height; ages re-read every tick.

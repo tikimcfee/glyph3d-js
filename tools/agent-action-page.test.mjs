@@ -1,20 +1,23 @@
 // agent-action-page.test.mjs — behavior lock for how an agent sheet RENDERS its action:
-// the verso headline composed at world size (never shrunk by long content) and the recto
-// file snapshot framed to the touched range.
+// the verso composed at world size by the page-text rule and the recto file snapshot
+// framed to the touched range.
 //
 //   bun tools/agent-action-page.test.mjs
 //
 // Locks:
 //   - actionCall: the headline line (target / the call's first non-empty line / a say's
 //     opening line) vs the rest of the call (nothing dropped)
-//   - fitTextBlock: holds maxLh while the wrapped text fits, steps down only past the
-//     budget, floors at minLh
+//   - fitTextStack (the ONE sizing rule): a block's natural row height is its size; it
+//     only ever scales DOWN — natural: a long line shrinks ITS block to the page width;
+//     wrap: wraps first, shrinks only when the stack is too tall (re-wrapping wider), as
+//     much as it must and no more; short text never grows; ratios hold under a squeeze
 //   - wrapText: rows ≤ cols, every character kept
 //   - snapshotWindow: touched runs ± context, capped, slid inside the file; null when the
 //     file fits or windowing is off; a rangeless action frames the top
 //   - the VERSO is an ActionPage stating exactly the page rect → Book's fit is 1, so the
-//     headline's world line height IS cfg.callLineHeight — the same for a one-word call
-//     and a long multi-line command (whose remaining lines ride a body card, wrapped)
+//     headline's world row height IS versoTextSize for a call that fits; a long command
+//     on a natural page keeps its first line whole (one row, shrunk to the width), its
+//     remaining lines ride a body card
 //   - the RECTO of a partial read loads just its window, lights the touched lines at
 //     their window rows, and names the window in the verso's info rows
 //   - cfg changes re-size live headlines (applyScales)
@@ -27,9 +30,9 @@ import * as THREE from 'three';
 
 globalThis.window ??= { addEventListener() {} };
 
-const { default: AgentBooks, actionCall, snapshotWindow, wrapText } =
+const { default: AgentBooks, actionCall, snapshotWindow } =
     await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
-const { fitTextBlock } = await import('../packages/glyph3d-core/src/collections/ActionPage.js');
+const { fitTextStack, wrapText } = await import('../packages/glyph3d-core/src/collections/ActionPage.js');
 const { computeCellMetrics } = await import('../packages/glyph3d-core/src/core/cellMetrics.js');
 
 let pass = 0, fail = 0;
@@ -48,19 +51,57 @@ const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
     ok(actionCall({ action: 'bash' }).head === '', 'an empty call heads with nothing');
 }
 
-// ── fitTextBlock ──
+// ── fitTextStack — the one sizing rule ──
 {
-    const o = { innerW: 288, availH: 170, maxLh: 18, minLh: 8, advPerLh: 0.5 };
-    const one = fitTextBlock('rg -n foo', { ...o, extraRows: 1 });
-    ok(one.lh === 18 && one.rows === 2, `a short call holds maxLh (got ${JSON.stringify(one)})`);
-    ok(one.cols === Math.floor(288 / (0.5 * 18)), 'cols = the page width in cells at that line height');
-    const long = fitTextBlock('x'.repeat(2000), { ...o, extraRows: 1 });
-    ok(long.lh === 8, `a call too long for the budget floors at minLh (got ${long.lh})`);
-    const mid = fitTextBlock('y'.repeat(400), { ...o, extraRows: 1 });
-    ok(mid.lh < 18 && mid.lh >= 8 && mid.rows * mid.lh <= 170, `a medium call steps down just enough to fit (got ${JSON.stringify(mid)})`);
+    const o = { innerW: 288, innerH: 388, advPerLh: 0.5 };
+    const fit1 = (b) => fitTextStack([b], o)[0];
+    const height = (out, gap = 0) => out.filter(Boolean).reduce((h, s) => h + s.rows * s.lh, 0) + gap * (out.filter(Boolean).length - 1);
+
+    // natural: only the text's own lines; a long line shrinks its block to the width.
+    const short = fit1({ text: 'rg -n foo', size: 18, brk: 'natural', extraRows: 1.5 });
+    ok(short.lh === 18 && short.cols === 0 && short.rows === 2.5, `natural: a short line sits at its size, unwrapped (got ${JSON.stringify(short)})`);
+    const long = fit1({ text: 'x'.repeat(200), size: 18, brk: 'natural' });
+    ok(near(long.lh, 288 / (200 * 0.5)) && long.rows === 1 && long.cols === 0,
+        `natural: a long line shrinks to the page width, still one row (got ${JSON.stringify(long)})`);
+    const two = fit1({ text: 'short\n' + 'y'.repeat(100), size: 18, brk: 'natural' });
+    ok(near(two.lh, 288 / (100 * 0.5)) && two.rows === 2, 'natural: the widest line sets the block');
+    const tall = fit1({ text: Array.from({ length: 100 }, () => 'z').join('\n'), size: 18, brk: 'natural' });
+    ok(near(tall.lh, 388 / 100, 1e-6) && tall.rows === 100, `natural: too many lines shrink to the page height (got ${tall.lh})`);
+
+    // wrap: wraps to the page width at its size; shrinks only if still too tall.
+    const w1 = fit1({ text: 'rg -n foo', size: 18, brk: 'wrap', words: true });
+    ok(w1.lh === 18 && w1.cols === Math.floor(288 / (0.5 * 18)), `wrap: a short call sits at its size; cols = the page width in cells (got ${JSON.stringify(w1)})`);
+    const w2 = fit1({ text: 'word '.repeat(60), size: 18, brk: 'wrap', words: true });
+    ok(w2.lh === 18 && w2.rows > 1 && w2.rows * w2.lh <= 388, `wrap: text that wraps and still fits keeps its size (got ${JSON.stringify(w2)})`);
+    const big = 'word '.repeat(3000);
+    const w3 = fit1({ text: big, size: 18, brk: 'wrap', words: true });
+    ok(w3.lh < 18 && w3.rows * w3.lh <= 388, `wrap: too tall even wrapped, it scales down to fit (got ${JSON.stringify(w3)})`);
+    ok(w3.cols > w1.cols && w3.rows === wrapText(big, w3.cols).split('\n').length, 'wrap: a shrunk block re-wraps wider, rows counted by the real word wrap');
+    const nudge = fitTextStack([{ text: big, size: 18 * (w3.lh / 18) * 1.02, brk: 'wrap', words: true }], o)[0];
+    ok(nudge.lh < 18 * (w3.lh / 18) * 1.02, 'wrap: it shrinks as much as it must — 2% larger no longer fits');
+
+    // never grows; ratios hold under a squeeze; a natural long line shrinks only its block.
+    ok([short, long, two, tall, w1, w2, w3].every((s) => s.lh <= 18), 'no block is ever set larger than its size');
+    const stack = fitTextStack([
+        { text: 'head', size: 18, brk: 'wrap', words: true },
+        { text: Array.from({ length: 80 }, (_, i) => `line ${i}`).join('\n'), size: 9, brk: 'wrap', words: true },
+        { text: '3 lines', size: 9, brk: 'wrap' },
+    ], { ...o, gap: 10 });
+    ok(near(stack[0].lh / stack[1].lh, 2) && near(stack[1].lh, stack[2].lh), `a squeezed stack keeps its ratios (got ${stack.map((s) => s.lh.toFixed(2))})`);
+    ok(height(stack, 10) <= 388 + 1e-6 && stack[0].lh < 18, 'and fits the page');
+    const mixed = fitTextStack([
+        { text: 'x'.repeat(300), size: 18, brk: 'natural' },
+        null,
+        { text: 'lines 3', size: 9, brk: 'natural' },
+    ], { ...o, gap: 10 });
+    ok(mixed[1] === null && mixed[0].lh < 9 && mixed[2].lh === 9, 'natural: a long headline shrinks alone — its neighbours keep their size; a null block is absent');
+
     let threw = false;
-    try { fitTextBlock('a', { ...o, advPerLh: 0 }); } catch { threw = true; }
+    try { fitTextStack([{ text: 'a', size: 9, brk: 'wrap' }], { ...o, advPerLh: 0 }); } catch { threw = true; }
     ok(threw, 'a missing cell metric fails loud');
+    threw = false;
+    try { fitTextStack([{ text: 'a', size: 0, brk: 'wrap' }], o); } catch { threw = true; }
+    ok(threw, 'a zero size fails loud');
 }
 
 // ── wrapText ──
@@ -128,15 +169,15 @@ const worldLh = (card) => card.scale.y * ls;   // a card's world row pitch (its 
     const lane = books.lanes.get('a1');
     const [short, long, read] = lane.entries;
     ok(short.verso.userData.isActionPage && long.verso.userData.isActionPage, 'every verso is an ActionPage');
-    ok(near(worldLh(short.action), cfg.callLineHeight), `a short call's headline rides callLineHeight (got ${worldLh(short.action).toFixed(3)})`);
-    ok(worldLh(long.action) >= cfg.callMinLineHeight && worldLh(long.action) > worldLh(long.body) - 1e-9,
-        `a long command's headline stays ≥ callMinLineHeight and ≥ its body (head ${worldLh(long.action).toFixed(2)}, body ${worldLh(long.body).toFixed(2)})`);
+    ok(cfg.versoBreak === 'natural', 'the left page keeps the text\'s own lines by default');
+    ok(near(worldLh(short.action), cfg.versoTextSize), `a short call's headline sits at versoTextSize (got ${worldLh(short.action).toFixed(3)})`);
     ok(long.body && long.body.content.includes('echo step 11'), 'the command\'s remaining lines ride the body card — nothing dropped');
-    ok(long.action.content.replace(/\s+/g, '') === longCmd.split('\n')[0].replace(/\s+/g, '') && long.action.content.includes('\n'),
-        'the headline holds the WHOLE first line, word-wrapped (not cut)');
-    const cols = long.action.getLayout().wrapWidth;
-    ok(cols > 0 && cols * (worldLh(long.action) * 0.5) <= cfg.pageW - 2 * cfg.pageMargin + 1e-6,
-        `the headline wraps to the page width (wrapWidth ${cols})`);
+    const first = longCmd.split('\n')[0];
+    ok(long.action.content === first && long.action.getLayout().wrapWidth === 0,
+        'natural: the headline holds the WHOLE first line on one row (not cut, not wrapped)');
+    ok(worldLh(long.action) < cfg.versoTextSize && near(worldLh(long.action) * 0.5 * [...first].length, cfg.pageW - 2 * cfg.pageMargin, 1e-3),
+        `natural: the long first line shrinks its headline to the page width (got ${worldLh(long.action).toFixed(2)})`);
+    ok(near(worldLh(short.info), cfg.versoTextSize * cfg.versoInfoRatio), 'the info rows keep their share of the left page text size');
     const sheet = lane.book.sheets[1];
     ok(near(sheet.fit.verso.scale, 1), `the verso fits at scale 1 — the page states its rect (got ${sheet.fit.verso.scale})`);
     const box = long.verso.layoutBounds();
@@ -165,7 +206,7 @@ const worldLh = (card) => card.scale.y * ls;   // a card's world row pitch (its 
 
 // ── live cfg re-sizes the headline ──
 {
-    books.cfg.callLineHeight = 30;
+    books.cfg.versoTextSize = 30;
     books.applyScales();
     await tick(60);
     const e = books.lanes.get('a1').entries[0];

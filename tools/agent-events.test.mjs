@@ -188,7 +188,7 @@ for (const c of CASES.keys()) {
         ok(lane.book.sheets[i].meta.kind === 'prompt' && lane.book.tabs[i].key === 'prompt', `${c}: a prompt sheet's tab bands as 'prompt'`);
         ok(e.snapshot && e.snapshot.filename === tag && J(e.snapshot.config.textColor) === J(lift(ACTION_HUES.prompt, AGENT_BOOKS_DEFAULTS.promptTextLift)),
             `${c}: the recto sets the words in the prompt hue under whose words they are`);
-        ok(e.snapScaleKey === 'messageScale', `${c}: a prompt is prose (message scale)`);
+        ok(e.rectoRole === 'prose', `${c}: a prompt is prose (set at the right page text size)`);
     }
     const cmd = byOrigin.get('command').find((p) => p.e.record.command === '/review');
     ok(cmd && cmd.e.call.head === '/review internal/server', 'a slash command: its command and args head the page');

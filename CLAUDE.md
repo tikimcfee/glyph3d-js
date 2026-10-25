@@ -297,7 +297,16 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   and slides the reading deck at most `books.turnSlide` pitches: nothing flies through the
   deck. Shift+wheel / two-finger drag page through a detent (`app/client/wheelDetent.js`,
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
-  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (each sheet's number in
+  (`app/client/bookFocus.js`). An agent sheet is a spread: the verso (`[verb]` headline,
+  the call's remaining lines, info rows) and the recto (prose, a file snapshot, an output,
+  an image). Each side has a text size (a world row height: `versoTextSize` is the
+  headline's, `rectoTextSize` prose's — the other blocks keep a ratio of it) and a break
+  (`wrap` to the page | `natural`, the text's own lines): Settings ▸ Agent Books holds the
+  deck defaults, `book.set <id> <knob>` (the HUD's Book section) gives one book its own.
+  ONE sizing rule (`fitTextStack`, `collections/ActionPage.js`): a block's size is the most
+  it's set at; too big for its page, it scales DOWN — a natural long line shrinks its block
+  (left to right), wrapped text shrinks only if still too tall; nothing is upscaled.
+  Gate: `tools/book-page-text.test.mjs`. An agent book's tabs are its timeline (each sheet's number in
   the run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held
   (the turn = the open sheet's event's prompt). Fed by gomuxai's event stream
   (`collections/agentEvents.js` reads it; `AgentBooks.applyEvents`), a book is one sheet per

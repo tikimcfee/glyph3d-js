@@ -5,15 +5,23 @@
  *
  *   verso (left)  — the DESCRIPTION, an ActionPage composed at WORLD size: the action
  *                   headline (`[verb]` over the call's first line — the path, the
- *                   command, the pattern, a say/think's opening line) at a fixed line
- *                   height, WRAPPED to the page rather than shrunk by long content; the
- *                   call's remaining lines (a multi-line command) below it at a smaller
- *                   size; then its terse numeric meta (lines read, +/−, tokens…),
+ *                   command, the pattern, a say/think's opening line), the call's
+ *                   remaining lines (a multi-line command) below it, then its terse
+ *                   numeric meta (lines read, +/−, tokens…),
  *   recto (right) — the CONTENT: the file's snapshot as-of the moment (touched lines
  *                   lit through the shared tool registry) FRAMED to the touched range
  *                   with some context (snapshotWindow), a command's output, an image, or
- *                   the say/think prose. Content fits its page and so reads smaller than
- *                   the headline — at a distance the action call is what reads first.
+ *                   the say/think prose.
+ *
+ * PAGE TEXT. Each side has a text size (a world row height) and a break: `wrap` (rows
+ * wrap to the page width) or `natural` (only the text's own newlines). The shelf's cfg
+ * holds the defaults (versoTextSize / versoBreak / rectoTextSize / rectoBreak); one book
+ * may carry its own (tuneText — lane.textOwn), which wins. The verso's headline sits at
+ * the verso size, its call body and info rows at their ratios of it; the recto's prose at
+ * the recto size, a file or a command's output at its ratio. ONE sizing rule for every
+ * block (fitTextStack): its natural size is the configured size, and when it doesn't fit
+ * its page it scales DOWN to fit — never up. A natural long line shrinks its block
+ * (left-to-right readable); wrapped text wraps first and shrinks only if still too tall.
  *
  * Each book wears an AgentNameplate above its cover: the session's NAME container-fit
  * to the book's width, over a live STATUS block (state · step · age, the current
@@ -65,7 +73,7 @@ import Book, { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from './Book.js';
 /** @import { BookHost } from './Book.js' */
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
-import ActionPage, { fitTextBlock } from './ActionPage.js';
+import ActionPage, { fitTextStack, wrapText } from './ActionPage.js';
 import AgentNameplate from './AgentNameplate.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -82,8 +90,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     pageW: 320,                 // page width each side of a spread presents (world units)
     pageH: 420,                 // page height — portrait: these are books
     gutter: 24,                 // the spread's spine gap between verso and recto
-    maxUpscale: 3,              // contain-fit may enlarge small cards up to this — caps the one-liner giant
-    face: true,                 // render the page faces behind the content
+    face: true,                // render the page faces behind the content
     faceColor: 0x0a0a1e,        // page-face fill (the dark window wall)
     faceOpacity: 0.85,          // page-face opacity
     faceDepth: PAGE_FACE_DEFAULTS.surfaceDepth, // how far behind the content each face sits
@@ -92,29 +99,28 @@ export const AGENT_BOOKS_DEFAULTS = {
     pagerLerp: 9,               // per-sheet z-slot easing rate (higher = snappier)
     turnedPitch: DECK_DEFAULTS.turned, // the turned block's pitch, × zPitch (pressed pages)
     turnSlide: DECK_DEFAULTS.slide,    // how far a turn visibly slides the deck (pitches; the rest cuts)
-    // -- the description page (verso): WORLD sizes, never shrunk by long content ---------
-    pageMargin: 16,             // inset of the verso's cards from the page edge
+    // -- page text: sizes are WORLD row heights, each the most a block is set at — one that
+    //    doesn't fit its page scales down (fitTextStack). Per-book overrides: tuneText. ----
+    pageMargin: 16,             // inset of each page's text from the page edge
     rowGap: 10,                 // verso gap between headline → call body → info rows
-    callLineHeight: 18,         // world row pitch of the action headline (`[verb]` + the call's first line)
-    callMinLineHeight: 8,       // floor the headline steps down to when its wrapped call overflows callMaxFrac
-    callMaxFrac: 0.45,          // share of the page height the headline may take before stepping down
+    versoTextSize: 18,          // left page: the headline's row height (`[verb]` + the call's first line)
+    versoBodyRatio: 0.5,        // left page: the call's remaining lines (a multi-line command), × versoTextSize
+    versoInfoRatio: 0.5,        // left page: the info rows (lines, +/−, range, tokens…), × versoTextSize
+    versoBreak: 'natural',      // left page lines: 'wrap' to the page width | 'natural' — the text's own lines (a long one shrinks to fit)
+    rectoTextSize: 9,           // right page: prose's row height (prompt / say / think / system)
+    rectoFileRatio: 0.5,        // right page: a file snapshot or a command's output, × rectoTextSize
+    rectoBreak: 'wrap',         // right page lines: 'wrap' to the page width | 'natural' — the text's own lines
     callTextLift: 0.55,         // headline call text: action hue lifted toward white (0 = hue, 1 = white); the [verb] tag stays hue
-    bodyLineHeight: 9,          // world row pitch of the call's remaining lines (a multi-line command)
-    bodyMinLineHeight: 2,       // floor for the call body when it overflows the page (past it, the page shrinks)
-    infoLineHeight: 9,          // world row pitch of the info rows (lines, +/−, range, tokens…)
     // -- the content page (recto) -------------------------------------------------------
-    snapContextRows: 8,         // file snapshot: rows of context above/below the touched range
+    snapContextRows: 8,        // file snapshot: rows of context above/below the touched range
     snapMaxRows: 60,            // file snapshot: window height in rows (a longer file is framed, 0 = whole file)
     // -- the timeline tabs (one per sheet: its number in the run, hued by action kind) ----------
     tabs: true,                 // bind the per-sheet tabs across each book's top edge
     tabLine: 0.018,             // tab text row height, × pageH
-    artifactWorldScale: 0.025,  // worldScale of file-snapshot / output cards (fine print you fly into)
-    messageScale: 0.05,         // worldScale of prose (prompt/say/think/system) — its OWN knob (prose reads bigger)
-    proseWrapCols: 72,          // prose (prompt/say/think/system) word-wraps to this many columns (a page-shaped column, not a 200-wide strip; 0 = the fold's default)
     promptTextLift: 0.6,        // a prompt's words: the prompt hue lifted toward white (0 = hue, 1 = white) — whose words they are reads at a glance
     showNoise: true,            // tool calls the tool table calls noise (ToolSearch, TodoWrite…): true gives each its sheet, set quietly (1:1 events); false hides them (new events)
     noiseTextLift: 0.15,        // a noise sheet's headline + output: the dim noise hue lifted this far toward white (0 = hue) — kept low so it reads as background
-    snapshotImageWidth: 40,     // world width of an image recto (height follows aspect)
+    snapshotImageWidth: 120,    // world width of an image recto (height follows aspect; a tall one scales down to fit)
     highlightFillOpacity: 0.22, // decorate FILL bar opacity (0 falls back to additive tint)
     // -- the cluster ---------------------------------------------------------------
     layout: 'packed',           // scheme placing the books (LAYOUT_SCHEMES: packed | walk | district | …)
@@ -198,9 +204,20 @@ export function actionCall(rec) {
 }
 
 /** The actions whose content IS prose — a message in (prompt), the agent's speech and
- *  reasoning (say/think), the harness speaking (system): set at message scale, wrapped to a
- *  page column, and named by their verb alone on the nameplate. */
+ *  reasoning (say/think), the harness speaking (system): set at the recto text size (a file
+ *  or an output rides its ratio of it), and named by their verb alone on the nameplate. */
 const PROSE_ACTIONS = new Set(['prompt', 'say', 'think', 'system']);
+
+/** The page-text knobs ONE book may carry its own value for (tuneText) — the shelf's cfg
+ *  holds the defaults. */
+export const PAGE_TEXT_TUNABLE = Object.freeze(['versoTextSize', 'rectoTextSize', 'versoBreak', 'rectoBreak']);
+
+/** A page's breaks: wrap to the page width, or only the text's own newlines. */
+export const PAGE_BREAKS = Object.freeze(['wrap', 'natural']);
+
+/** Rows a card with a filename header adds above its text (CodeGrid sets the text 1.5
+ *  rows below the header's top). */
+const HEADER_ROWS = 1.5;
 
 /** A sheet's info rows: the tool table's numeric meta, then the event's own facts (its
  *  turn, a call's status, a final reply…). */
@@ -235,40 +252,6 @@ export function snapshotWindow(meta, total, { context, maxRows }) {
     return { first: Math.max(0, first), last };
 }
 
-/** A word longer than a row breaks after these (a path's `/`, a URL's `?&=`, `snake_case`,
- *  `kebab-case`, `a.b.c`) before it ever breaks mid-run. */
-const WORD_BREAKS = /[^/\\\-_.,;:?&=|]*[/\\\-_.,;:?&=|]+|[^/\\\-_.,;:?&=|]+$/g;
-
-/** Word-wrap `text` to `cols` codepoints per row; the whitespace a row breaks at becomes
- *  the break. A word that fits a row moves whole to the next. A word longer than a row
- *  (a path, a URL) starts where it stands and breaks after its separators (WORD_BREAKS),
- *  inside a run only when the run alone is wider than a row. Wraps, never cuts — every
- *  word's every codepoint stays. Pure. */
-export function wrapText(text, cols) {
-    const c = Math.max(1, Math.floor(cols));
-    const out = [];
-    const flush = (row) => out.push(row.join('').trimEnd());
-    for (const line of String(text ?? '').split('\n')) {
-        let row = [];
-        for (const tok of line.split(/(\s+)/)) {
-            if (!tok) continue;
-            const t = [...tok];
-            if (row.length + t.length <= c) { row.push(...t); continue; }
-            if (!/\S/.test(tok)) { flush(row); row = []; continue; }
-            if (t.length <= c) { flush(row); row = t; continue; }
-            for (const piece of tok.match(WORD_BREAKS) ?? [tok]) {
-                let p = [...piece];
-                if (row.length + p.length <= c) { row.push(...p); continue; }
-                if (row.length) { flush(row); row = []; }
-                while (p.length > c) { out.push(p.slice(0, c).join('')); p = p.slice(c); }
-                row = p;
-            }
-        }
-        flush(row);
-    }
-    return out.join('\n');
-}
-
 /** A wall-clock age, terse: now / 12s / 4m / 3h / 2d. */
 export function fmtAge(ms) {
     if (!(ms >= 0)) return '';
@@ -284,9 +267,13 @@ export function fmtAge(ms) {
 /** An {r,g,b} hue lifted toward white by t (0 = hue, 1 = white). */
 const liftHue = (c, t) => ({ r: c.r + (1 - c.r) * t, g: c.g + (1 - c.g) * t, b: c.b + (1 - c.b) * t });
 
-/** The cards' glyph-field unit (pixels → world). Card SIZES are set in world line
- *  heights (the cfg *LineHeight dials) and converted through the atlas metrics, so this
- *  only fixes the field's internal unit. */
+/** A card's text as the card shows it: word-wrapped to `cols` (a wrap page), or as
+ *  written (a natural page — fitTextStack's cols 0). */
+const setAs = (text, cols) => (cols > 0 ? wrapText(text, cols) : String(text ?? ''));
+
+/** The cards' glyph-field unit (pixels → world). Card SIZES are set in world row
+ *  heights (the page text sizes, fitted by fitTextStack) and converted through the atlas
+ *  metrics into each card's gridScale, so this only fixes the field's internal unit. */
 const CARD_WORLD_SCALE = 0.025;
 
 /** One record as a single glanceable roster line: `read  src/foo.js`, `bash  rg -n TODO → 3`. */
@@ -368,6 +355,7 @@ export default class AgentBooks {
                 cwd: null,             // the session's working dir (meta.cwd), kept beside sessionId
                 label: null,           // the nameplate (AgentNameplate) above the cover, in the lane's hue
                 maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
+                textOwn: {},           // page-text values given to THIS book (tuneText) — they win over cfg
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
@@ -449,15 +437,15 @@ export default class AgentBooks {
         // the call's first line), the call's remaining lines, then its numeric meta.
         const call = actionCall(record);
         const infoText = infoOf(record);
-        const sz = this._versoSizes(call, infoText);
-        const action = this._card(`[${call.verb}]`, wrapText(call.head, sz.head.cols), {
+        const sz = this._versoSizes(lane, call, infoText);
+        const action = this._card(`[${call.verb}]`, setAs(call.head, sz.head.cols), {
             worldScale: CARD_WORLD_SCALE, gridScale: sz.head.gridScale,
             layout: { wrapWidth: sz.head.cols, zWrapSpacing: 0 },
             filenameColor: hue, textColor: liftHue(hue, record.action === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
         }, { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         let body = null;
         if (call.rest) {
-            body = this._card('call', wrapText(call.rest, sz.body.cols), {
+            body = this._card('call', setAs(call.rest, sz.body.cols), {
                 worldScale: CARD_WORLD_SCALE, gridScale: sz.body.gridScale, showFilename: false,
                 layout: { wrapWidth: sz.body.cols, zWrapSpacing: 0 }, textColor: hue,
             }, { id: bodyId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
@@ -475,28 +463,35 @@ export default class AgentBooks {
         // One home each: the verso holds the action's INPUT; the result lives here. A file's
         // content IS its snapshot; a no-target action's output (bash/grep/say/think) rides the
         // record raw — EPHEMERAL, no path to re-read. A file action that carries a result
-        // (it failed: the error is the content) shows that instead. Ships RAW; the fit frames it.
-        let recto = null, hasSnapPick = false, snapScaleKey = null;
+        // (it failed: the error is the content) shows that instead. Ships RAW, sized by the
+        // page-text rule (_rectoSize).
+        let recto = null, hasSnapPick = false, rectoRole = null, rectoText = null;
         if (record.target && !record.result) {
             const kind = classifyByExtension(record.target);
             if (kind?.kind === 'image') {
                 recto = this._imageSnapshot(record.target, kind.format, lane, sheetId);
             } else {
-                recto = this._makeGrid(record.target, { worldScale: this.cfg.artifactWorldScale });
-                snapScaleKey = 'artifactWorldScale';
+                rectoRole = 'file';   // its text arrives with the load (_loadSnapshot)
+                recto = this._makeGrid(record.target, {
+                    worldScale: CARD_WORLD_SCALE, gridScale: this._rectoSize(lane, 'file', '').gridScale,
+                    layout: { wrapWidth: 0, zWrapSpacing: 0 },
+                });
                 this._loadSnapshot(recto, record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
                 hasSnapPick = true;
             }
         } else if (record.result) {
-            recto = this._outputSnapshot(record, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
-            snapScaleKey = PROSE_ACTIONS.has(record.action) ? 'messageScale' : 'artifactWorldScale';
+            rectoRole = PROSE_ACTIONS.has(record.action) ? 'prose' : 'output';
+            rectoText = String(record.result);
+            recto = this._outputSnapshot(record, rectoRole, { id: snapId, meta: { ...meta, kind: 'snap' } }, lane, sheetId);
             hasSnapPick = true;
         }
 
         return {
             sides: { verso, recto, meta: { seq, kind: kindForAction(record.action) } },
             entry: {
-                sheetId, verso, action, body, info, snapshot: recto, snapScaleKey,
+                sheetId, verso, action, body, info, snapshot: recto,
+                rectoRole,                      // 'prose' | 'output' | 'file' (a snapshot) | null (an image / none)
+                rectoText,                      // the recto's text as shipped (a snapshot's: its window, once loaded)
                 call, infoText, window: null,   // window: the snapshot's framed line range, once loaded
                 pickMeta: meta,                 // the cards' shared registry meta (agentId, seq, sheetId, record)
                 actionId, bodyId: body ? bodyId : null, infoId: info ? infoId : null, snapId: hasSnapPick ? snapId : null,
@@ -1107,13 +1102,12 @@ export default class AgentBooks {
     }
 
     /**
-     * Re-apply the current cfg SIZES to every live card — the one entry the config verb
-     * and the Settings rows both route through. Verso cards re-size to their world line
-     * heights and re-wrap to the page (a re-fold, so their sheet re-arranges as each
-     * settles); worldScale content cards bake their layout at build, so a uniform
-     * transform re-sizes them (desired ÷ built). Then re-fit + re-flow so pages re-read,
-     * and restage the nameplates. A tightened cfg.maxSheets lands here too — each lane
-     * sheds to its cap first. (Snapshot windows re-frame on the next snapshot load.)
+     * Re-apply the current cfg to every live card — the one entry the config verb and the
+     * Settings rows both route through. Every page's text re-fits by the page-text rule
+     * (each book's own values win — a shelf default reaches only the books that don't
+     * carry their own; _refitText). Then re-fit + re-flow so pages re-read, and restage
+     * the nameplates. A tightened cfg.maxSheets lands here too — each lane sheds to its cap
+     * first. (Snapshot windows re-frame on the next snapshot load.)
      */
     applyScales() {
         for (const lane of this.lanes.values()) {
@@ -1121,18 +1115,56 @@ export default class AgentBooks {
             lane.book.setDeckDefaults(this._deckDefaults());
             if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));   // a diff — tabs re-true in place
             else lane.book.dropTabs();
-            for (const e of lane.entries) {
-                this._resizeVerso(lane, e);
-                if (e.snapScaleKey && typeof e.snapshot?.setScale === 'function') {
-                    const built = e.snapshot.config?.worldScale;
-                    const target = this.cfg[e.snapScaleKey];
-                    if (built > 0 && target > 0) e.snapshot.setScale(target / built);
-                }
-            }
+            this._refitText(lane);
             lane.book.fit(this._pageOpts(lane));
             this._refreshNameplate(lane);
         }
         this._relayout();
+    }
+
+    /**
+     * Give ONE book its own value for a page-text knob (PAGE_TEXT_TUNABLE) — a text size
+     * (a world row height, > 0) or a break ('wrap' | 'natural'); null drops it, back to the
+     * shelf's cfg. Only that book's sheets re-fit, in place.
+     * @param {string} agentId any address resolveLane answers to
+     * @param {string} key @param {number|string|null} value
+     * @returns {boolean} whether the value was taken
+     */
+    tuneText(agentId, key, value) {
+        const hit = this.resolveLane(agentId);
+        if (!hit || !PAGE_TEXT_TUNABLE.includes(key)) return false;
+        const lane = hit[1];
+        if (value == null) delete lane.textOwn[key];
+        else if (key.endsWith('Break') ? PAGE_BREAKS.includes(value) : (typeof value === 'number' && value > 0)) lane.textOwn[key] = value;
+        else return false;
+        this._refitText(lane);
+        lane.book.fit(this._pageOpts(lane));
+        this._relayout();
+        return true;
+    }
+
+    /** A book's page text: the values it shows (its own, else the shelf's) and which are its
+     *  own. @returns {{values:Object, own:Object}|null} */
+    textOf(agentId) {
+        const hit = this.resolveLane(agentId);
+        return hit ? { values: this._textOf(hit[1]), own: { ...hit[1].textOwn } } : null;
+    }
+
+    /** The page text a lane shows — its own values over the shelf's. @private */
+    _textOf(lane) {
+        const own = lane?.textOwn || {};
+        const out = {};
+        for (const k of PAGE_TEXT_TUNABLE) out[k] = own[k] ?? this.cfg[k];
+        return out;
+    }
+
+    /** Re-fit every live sheet's text on both pages (verso cards, the recto's text card) to
+     *  the lane's page text, in place. @private */
+    _refitText(lane) {
+        for (const e of lane.entries) {
+            this._resizeVerso(lane, e);
+            this._fitRecto(lane, e);
+        }
     }
 
     dispose() {
@@ -1144,12 +1176,14 @@ export default class AgentBooks {
 
     _now() { return typeof performance !== 'undefined' ? performance.now() : 0; }
 
-    /** The live Book.fit opts — page dims + the per-agent face identity. */
+    /** The live Book.fit opts — page dims + the per-agent face identity. maxUpscale 1: a
+     *  page's content is never set larger than its configured size; the fit only ever
+     *  shrinks what the page-text rule's estimate under-counted (and an image too tall). */
     _pageOpts(lane = null) {
         const c = this.cfg;
         const hex = lane ? c.palette[lane.hueIdx % c.palette.length] : c.faceColor;
         return {
-            pageW: c.pageW, pageH: c.pageH, gutter: c.gutter, maxUpscale: c.maxUpscale,
+            pageW: c.pageW, pageH: c.pageH, gutter: c.gutter, maxUpscale: 1,
             surface: c.face, surfacePad: 0, surfaceDepth: c.faceDepth,
             surfaceColor: c.faceColor, surfaceOpacity: c.faceOpacity,
             surfaceBorder: true, surfaceBorderColor: hex,
@@ -1176,54 +1210,105 @@ export default class AgentBooks {
         return { pageW: c.pageW, pageH: c.pageH, margin: c.pageMargin, gap: c.rowGap };
     }
 
-    /**
-     * Size an action call's verso cards in world units: the headline at callLineHeight
-     * (stepping down toward callMinLineHeight only when its wrapped call would take more
-     * than callMaxFrac of the page), the info rows at infoLineHeight, and the call's
-     * remaining lines in whatever height is left (bodyLineHeight, stepping down toward
-     * bodyMinLineHeight). Each comes back as the card's gridScale + wrap columns.
-     * @private
-     * @param {{head:string, rest:string}} call @param {string} infoText
-     */
-    _versoSizes(call, infoText) {
+    /** A page's text area (inside its margin) + the cell metrics fitTextStack sizes by, and
+     *  a fitted block → its card's gridScale. @private */
+    _textArea() {
         const c = this.cfg;
-        const adv = this._advPerLh();
         const ls = computeCellMetrics(this.atlas.getCharSize(), CARD_WORLD_SCALE).lineSpacing;
-        const innerW = Math.max(c.pageW - 2 * c.pageMargin, 1);
-        const innerH = Math.max(c.pageH - 2 * c.pageMargin, 1);
-        const card = ({ lh, cols }) => ({ gridScale: lh / ls, cols, lh });
-        const head = fitTextBlock(call.head, {
-            innerW, availH: innerH * c.callMaxFrac, maxLh: c.callLineHeight, minLh: c.callMinLineHeight,
-            advPerLh: adv, extraRows: 1,   // + the `[verb]` tag row
-        });
-        const info = fitTextBlock(infoText, {
-            innerW, availH: Infinity, maxLh: c.infoLineHeight, minLh: c.infoLineHeight, advPerLh: adv,
-        });
-        const used = head.rows * head.lh + (infoText ? c.rowGap + info.rows * info.lh : 0);
-        const body = fitTextBlock(call.rest, {
-            innerW, availH: innerH - used - c.rowGap, maxLh: c.bodyLineHeight, minLh: c.bodyMinLineHeight, advPerLh: adv,
-        });
-        return { head: card(head), info: card(info), body: card(body) };
+        return {
+            innerW: Math.max(c.pageW - 2 * c.pageMargin, 1),
+            innerH: Math.max(c.pageH - 2 * c.pageMargin, 1),
+            advPerLh: this._advPerLh(),
+            card: (s) => (s ? { gridScale: s.lh / ls, cols: s.cols, lh: s.lh } : null),
+        };
     }
 
-    /** Re-size + re-wrap one sheet's verso cards to the live cfg — the call text re-wraps
-     *  at word boundaries for its new column count (a re-load), the info rows re-fold at
+    /**
+     * Size an action call's verso cards by the page-text rule (fitTextStack) as ONE stack on
+     * the page: the headline (`[verb]` tag row + the call's first line) at the lane's
+     * versoTextSize, the call's remaining lines and the info rows at their ratios of it
+     * (cfg.versoBodyRatio / versoInfoRatio), all on the lane's versoBreak. Each comes back
+     * as the card's gridScale + wrap columns (0 = natural); an absent card (no rest, no info)
+     * as null.
+     * @private
+     * @param {Object} lane @param {{head:string, rest:string}} call @param {string} infoText
+     */
+    _versoSizes(lane, call, infoText) {
+        const c = this.cfg;
+        const t = this._textOf(lane);
+        const a = this._textArea();
+        const brk = t.versoBreak;
+        const [head, body, info] = fitTextStack([
+            { text: call.head, size: t.versoTextSize, brk, words: true, extraRows: HEADER_ROWS },
+            call.rest ? { text: call.rest, size: t.versoTextSize * c.versoBodyRatio, brk, words: true } : null,
+            infoText ? { text: infoText, size: t.versoTextSize * c.versoInfoRatio, brk } : null,
+        ], { innerW: a.innerW, innerH: a.innerH, gap: c.rowGap, advPerLh: a.advPerLh });
+        return { head: a.card(head), body: a.card(body), info: a.card(info) };
+    }
+
+    /** Re-size one sheet's verso cards to the lane's page text — the call text re-sets for
+     *  its new columns (word-wrapped, or as written: a re-load), the info rows re-fold at
      *  theirs; each settles (re-arranges the page, re-fits the sheet) as it lands. @private */
     _resizeVerso(lane, e) {
         if (!e.call) return;
-        const sz = this._versoSizes(e.call, e.infoText);
-        const settle = () => this._settle(lane, e.sheetId);
-        for (const [card, s, text] of [[e.action, sz.head, e.call.head], [e.body, sz.body, e.call.rest]]) {
-            if (!card) continue;
-            card.setScale(s.gridScale);
-            card.config.layout.wrapWidth = s.cols;
-            card.loadFile(card.filename, wrapText(text, s.cols)).then(settle).catch(() => {});
-        }
-        if (e.info) {
+        const sz = this._versoSizes(lane, e.call, e.infoText);
+        this._resizeCallCards(lane, e, sz);
+        if (e.info && sz.info) {
             e.info.setScale(sz.info.gridScale);
-            e.info.setLayout({ wrapWidth: sz.info.cols }).then(settle).catch(() => {});
+            e.info.setLayout({ wrapWidth: sz.info.cols }).then(() => this._settle(lane, e.sheetId)).catch(() => {});
         }
         e.verso?.arrange?.(this._arrangeOpts());
+    }
+
+    /** Re-size the call's cards (headline, body) to `sz` — a card whose size and columns
+     *  already match is left alone; one that moved re-sets its text (a re-load). @private */
+    _resizeCallCards(lane, e, sz) {
+        const settle = () => this._settle(lane, e.sheetId);
+        for (const [card, s, text] of [[e.action, sz.head, e.call.head], [e.body, sz.body, e.call.rest]]) {
+            if (!card || !s) continue;
+            if (Math.abs(card.config.gridScale - s.gridScale) < 1e-9 && card.config.layout.wrapWidth === s.cols) continue;
+            card.setScale(s.gridScale);
+            card.config.layout.wrapWidth = s.cols;
+            card.loadFile(card.filename, setAs(text, s.cols)).then(settle).catch(() => {});
+        }
+    }
+
+    /**
+     * Size a recto's text card by the page-text rule — one block on the page: prose at the
+     * lane's rectoTextSize, a file snapshot or a command's output at cfg.rectoFileRatio of
+     * it, on the lane's rectoBreak. Prose and output wrap by WORD (wrapText sets their
+     * text); a file snapshot wraps in the fold, so its lines stay the file's lines (the
+     * touched-line highlights address them).
+     * @private
+     * @param {Object} lane @param {'prose'|'output'|'file'} role @param {string} text
+     * @returns {{gridScale:number, cols:number, lh:number}}
+     */
+    _rectoSize(lane, role, text) {
+        const t = this._textOf(lane);
+        const a = this._textArea();
+        const size = role === 'prose' ? t.rectoTextSize : t.rectoTextSize * this.cfg.rectoFileRatio;
+        const [s] = fitTextStack([{ text, size, brk: t.rectoBreak, words: role !== 'file', extraRows: HEADER_ROWS }],
+            { innerW: a.innerW, innerH: a.innerH, advPerLh: a.advPerLh });
+        return a.card(s);
+    }
+
+    /** Re-size one sheet's recto text card to the lane's page text, in place: prose/output
+     *  re-set for their new columns (a re-load), a snapshot re-folds (setLayout) and re-lights
+     *  its touched lines. A snapshot still loading is sized by its load. @private */
+    _fitRecto(lane, e) {
+        const grid = e.snapshot;
+        if (!e.rectoRole || e.rectoText == null || typeof grid?.setScale !== 'function') return;
+        const sz = this._rectoSize(lane, e.rectoRole, e.rectoText);
+        const settle = () => this._settle(lane, e.sheetId);
+        grid.setScale(sz.gridScale);
+        if (e.rectoRole === 'file') {
+            grid.setLayout({ wrapWidth: sz.cols })
+                .then(() => { this._decorateSnapshot(grid, e.record, e.window ? e.window.first : 0); settle(); })
+                .catch(() => {});
+            return;
+        }
+        grid.config.layout.wrapWidth = sz.cols;
+        grid.loadFile(grid.filename, setAs(e.rectoText, sz.cols)).then(settle).catch(() => {});
     }
 
     /**
@@ -1586,26 +1671,25 @@ export default class AgentBooks {
     }
 
     /** A no-target action's OUTPUT as the recto: command result / prose (a prompt, a
-     *  say/think, the harness's words). Ships RAW — the fit frames it; nothing is truncated
-     *  here. Prose word-wraps to cfg.proseWrapCols (a page-shaped column reads at a far
-     *  larger fit than a 200-column strip). A prompt's words are set in the prompt hue
-     *  (lifted by cfg.promptTextLift) under a header naming whose they are; a noise call's
-     *  output in the dim noise hue (cfg.noiseTextLift), so it reads as background. */
-    _outputSnapshot(record, pick, lane, sheetId) {
-        const isMessage = PROSE_ACTIONS.has(record.action);
+     *  say/think, the harness's words). Ships RAW — nothing is truncated here — sized by
+     *  the page-text rule (_rectoSize: prose at the recto size, an output at its ratio;
+     *  word-wrapped to the page, or its own lines). A prompt's words are set in the prompt
+     *  hue (lifted by cfg.promptTextLift) under a header naming whose they are; a noise
+     *  call's output in the dim noise hue (cfg.noiseTextLift), so it reads as background.
+     *  @param {Object} record @param {'prose'|'output'} role */
+    _outputSnapshot(record, role, pick, lane, sheetId) {
         const name = record.action === 'prompt' ? (record.tag || 'prompt')
             : record.action === 'say' ? 'said' : record.action === 'think' ? 'thinking'
             : record.action === 'system' ? 'harness' : 'output';
-        const worldScale = isMessage ? this.cfg.messageScale : this.cfg.artifactWorldScale;
-        const cols = isMessage ? Math.floor(this.cfg.proseWrapCols) : 0;
         const text = String(record.result ?? '');
-        const opts = { worldScale };
+        const sz = this._rectoSize(lane, role, text);
+        const opts = { worldScale: CARD_WORLD_SCALE, gridScale: sz.gridScale, layout: { wrapWidth: sz.cols, zWrapSpacing: 0 } };
         if (record.action === 'prompt' || record.action === 'noise') {
             const hue = this.cfg.hues[record.action] || this.cfg.hues.other;
             opts.textColor = liftHue(hue, record.action === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
             opts.filenameColor = hue;
         }
-        return this._card(name, cols > 0 ? wrapText(text, cols) : text, opts, pick, lane, sheetId);
+        return this._card(name, setAs(text, sz.cols), opts, pick, lane, sheetId);
     }
 
     /**
@@ -1613,8 +1697,9 @@ export default class AgentBooks {
      * the touched range — snapshotWindow picks the lines (the touched runs ± snapContextRows,
      * at most snapMaxRows), the grid loads just that slice, and the touched lines light up
      * at their window rows. The page then shows a legible window instead of a whole file
-     * shrunk to fit; the verso's info rows name the window (`shown L…–… of N`). Registers
-     * as a pickable card after load. @private
+     * shrunk to fit; the verso's info rows name the window (`shown L…–… of N`). The slice
+     * is sized by the page-text rule before its one load (_rectoSize) and kept on the entry
+     * (rectoText) for later re-fits. Registers as a pickable card after load. @private
      */
     _loadSnapshot(grid, record, pick, lane, sheetId) {
         const path = record.target;
@@ -1626,9 +1711,14 @@ export default class AgentBooks {
                 const lines = text.split('\n');
                 const w = snapshotWindow(record.meta, lines.length,
                     { context: this.cfg.snapContextRows, maxRows: this.cfg.snapMaxRows });
-                if (!w) return grid.loadFile(path, text);
-                win = { ...w, total: lines.length };
-                return grid.loadFile(path, lines.slice(w.first, w.last + 1).join('\n'));
+                if (w) win = { ...w, total: lines.length };
+                const shown = w ? lines.slice(w.first, w.last + 1).join('\n') : text;
+                const e = lane.entries.find((x) => x.sheetId === sheetId);
+                if (e) e.rectoText = shown;
+                const sz = this._rectoSize(lane, 'file', shown);
+                grid.setScale(sz.gridScale);
+                grid.config.layout.wrapWidth = sz.cols;
+                return grid.loadFile(path, shown);
             })
             .then(() => {
                 this._decorateSnapshot(grid, record, win ? win.first : 0);
@@ -1651,18 +1741,20 @@ export default class AgentBooks {
         e.window = win;
         const note = `shown L${win.first + 1}–${win.last + 1} of ${win.total}`;
         e.infoText = [infoOf(e.record), note].filter(Boolean).join('\n');
-        const sz = this._versoSizes(e.call, e.infoText).info;
+        // The stack changed — the page re-fits whole (a taller info block can shrink the call).
+        const sz = this._versoSizes(lane, e.call, e.infoText);
+        this._resizeCallCards(lane, e, sz);
         const hue = this.cfg.hues[kindForAction(e.record.action)] || this.cfg.hues.other;
         if (e.info) {
-            e.info.setScale(sz.gridScale);
-            e.info.config.layout.wrapWidth = sz.cols;
+            e.info.setScale(sz.info.gridScale);
+            e.info.config.layout.wrapWidth = sz.info.cols;
             e.info.loadFile('info', e.infoText).then(() => this._settle(lane, sheetId)).catch(() => {});
             return;
         }
         e.infoId = `${sheetId}:info`;
         e.info = this._card('info', e.infoText, {
-            worldScale: CARD_WORLD_SCALE, gridScale: sz.gridScale, showFilename: false,
-            layout: { wrapWidth: sz.cols, zWrapSpacing: 0 }, textColor: hue,
+            worldScale: CARD_WORLD_SCALE, gridScale: sz.info.gridScale, showFilename: false,
+            layout: { wrapWidth: sz.info.cols, zWrapSpacing: 0 }, textColor: hue,
         }, { id: e.infoId, meta: { ...e.pickMeta, kind: 'info' } }, lane, sheetId);
         e.verso.setParts([e.action, e.body, e.info]);
     }
