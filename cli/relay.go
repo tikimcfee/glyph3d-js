@@ -29,20 +29,20 @@ import (
 type Relay struct {
 	mu            sync.RWMutex
 	display       *websocket.Conn
-	displayWrite  chan displayMsg   // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
-	displayBytes  chan []byte       // terminal OUTPUT binary frames (blocking send = lossless backpressure)
-	displayFrames chan []byte       // sensor frames (drop-oldest — freshness beats completeness)
-	displayDone   chan struct{}     // closed on display teardown — unblocks writer + blocked byte senders
+	displayWrite  chan displayMsg // control/JSON + RPC-binary write queue (text non-blocking/drop-OK, binary blocking — self-correcting)
+	displayBytes  chan []byte     // terminal OUTPUT binary frames (blocking send = lossless backpressure)
+	displayFrames chan []byte     // sensor frames (drop-oldest — freshness beats completeness)
+	displayDone   chan struct{}   // closed on display teardown — unblocks writer + blocked byte senders
 	controllers   map[string]*websocket.Conn
 	sources       map[string]*sourceConn
 	nextID        atomic.Int64
-	termSeq      atomic.Int64 // monotonic id source for relay-spawned terminal adapters
-	upgrader     websocket.Upgrader
-	fs           *FSHandler      // nil if --root not provided
-	lsp          *LSPSupervisor  // nil if --root not provided; hosts language servers
-	port         int             // port this relay serves on (spawned adapters connect back here)
-	logs         *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
-	logSubs      map[string]bool // controller ids subscribed via log.follow (guarded by mu)
+	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
+	upgrader      websocket.Upgrader
+	fs            *FSHandler      // nil if --root not provided
+	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers
+	port          int             // port this relay serves on (spawned adapters connect back here)
+	logs          *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
+	logSubs       map[string]bool // controller ids subscribed via log.follow (guarded by mu)
 }
 
 // displayMsg is one queued write to the display WebSocket. binary marks RPC binary
@@ -660,8 +660,21 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 		Rows       int             `json:"rows"`
 		Name       string          `json:"name"`
 	}
+	// Replies to the DISPLAY go through its writer queue: the display's socket has a
+	// dedicated writer goroutine, and a direct write from this read loop races it
+	// (gorilla/websocket panics on concurrent writes — several screens opening at
+	// once took the display down). Controllers' sockets are written here directly.
+	reply := func(v any) {
+		if role == "display" {
+			if b, err := json.Marshal(v); err == nil {
+				r.sendToDisplay(b)
+			}
+			return
+		}
+		ws.WriteJSON(v)
+	}
 	if err := json.Unmarshal(msg, &m); err != nil {
-		ws.WriteJSON(map[string]any{"error": "invalid relay message"})
+		reply(map[string]any{"error": "invalid relay message"})
 		return
 	}
 
@@ -678,7 +691,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 			log.Printf("[relay] atlas cache hit: %s", key)
 			var descriptor json.RawMessage
 			json.Unmarshal(jsonData, &descriptor)
-			ws.WriteJSON(map[string]any{
+			reply(map[string]any{
 				"event":      "atlas.result",
 				"hit":        true,
 				"png":        base64.StdEncoding.EncodeToString(pngData),
@@ -686,7 +699,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 			})
 		} else {
 			log.Printf("[relay] atlas cache miss: %s", key)
-			ws.WriteJSON(map[string]any{
+			reply(map[string]any{
 				"event": "atlas.result",
 				"hit":   false,
 			})
@@ -696,13 +709,13 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 		os.MkdirAll(dir, 0755)
 		pngBytes, err := base64.StdEncoding.DecodeString(m.PNG)
 		if err != nil {
-			ws.WriteJSON(map[string]any{"error": "invalid base64 png data"})
+			reply(map[string]any{"error": "invalid base64 png data"})
 			return
 		}
 		os.WriteFile(pngPath, pngBytes, 0644)
 		os.WriteFile(jsonPath, m.Descriptor, 0644)
 		log.Printf("[relay] atlas cached: %s", jsonPath)
-		ws.WriteJSON(map[string]any{
+		reply(map[string]any{
 			"event": "atlas.cached",
 			"path":  jsonPath,
 		})
@@ -716,40 +729,40 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 			removed++
 		}
 		log.Printf("[relay] atlas cache cleared: %s (%d files)", key, removed)
-		ws.WriteJSON(map[string]any{
+		reply(map[string]any{
 			"event":   "atlas.cleared",
 			"key":     key,
 			"removed": removed,
 		})
 
 	case "terminal.spawn":
-		r.spawnTerminalAdapter(ws, m.Cols, m.Rows)
+		r.spawnTerminalAdapter(reply, m.Cols, m.Rows)
 
 	case "terminal.recover":
-		r.recoverTerminals(ws)
+		r.recoverTerminals(reply)
 
 	case "gomux.attach":
-		r.attachGomuxAgent(ws, m.Name)
+		r.attachGomuxAgent(reply, m.Name)
 
 	case "log.follow":
 		if role != "controller" || clientID == "" {
-			ws.WriteJSON(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})
+			reply(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})
 			return
 		}
 		r.mu.Lock()
 		r.logSubs[clientID] = true
 		r.mu.Unlock()
 		log.Printf("[relay] controller '%s' following logs", clientID)
-		ws.WriteJSON(map[string]any{"event": "log.follow", "ok": true})
+		reply(map[string]any{"event": "log.follow", "ok": true})
 
 	case "log.unfollow":
 		r.mu.Lock()
 		delete(r.logSubs, clientID)
 		r.mu.Unlock()
-		ws.WriteJSON(map[string]any{"event": "log.unfollow", "ok": true})
+		reply(map[string]any{"event": "log.unfollow", "ok": true})
 
 	default:
-		ws.WriteJSON(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
+		reply(map[string]any{"error": fmt.Sprintf("unknown relay command: %s", m.Relay)})
 	}
 }
 
@@ -980,10 +993,10 @@ func parseSinceDuration(s string) (time.Duration, error) {
 // TerminalGrid in the display, and pumps a real shell (tmux) into it. The browser
 // can't spawn a host process itself, so the relay does it on request (this is the
 // "+ terminal" button's backend). Single-user tool: as trusted as the command bus.
-func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
+func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
 	exePath, err := os.Executable()
 	if err != nil {
-		ws.WriteJSON(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
+		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
 		return
 	}
 	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
@@ -998,12 +1011,12 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		ws.WriteJSON(map[string]any{"error": "spawn failed: " + err.Error()})
+		reply(map[string]any{"error": "spawn failed: " + err.Error()})
 		return
 	}
 	pid := cmd.Process.Pid
 	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, pid, r.port)
-	ws.WriteJSON(map[string]any{"event": "terminal.spawning", "id": id})
+	reply(map[string]any{"event": "terminal.spawning", "id": id})
 
 	// Reap the child when it exits. The adapter's lifecycle is owned by tmux + the
 	// display (terminal.kill → terminal.shutdown → graceful exit), not the relay —
@@ -1022,15 +1035,15 @@ func (r *Relay) spawnTerminalAdapter(ws *websocket.Conn, cols, rows int) {
 // are skipped (already adopted). Dedup is via tmux's own client list — the relay keeps no adapter
 // map — so this is idempotent, one-command recovery after any relay restart. (tmux-absent / non-unix:
 // `ls` errors → nothing to recover, returned gracefully.)
-func (r *Relay) recoverTerminals(ws *websocket.Conn) {
+func (r *Relay) recoverTerminals(reply func(any)) {
 	out, err := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}").Output()
 	if err != nil {
-		ws.WriteJSON(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0})
+		reply(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0})
 		return
 	}
 	exePath, err := os.Executable()
 	if err != nil {
-		ws.WriteJSON(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
+		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
 		return
 	}
 	recovered := []string{}
@@ -1074,7 +1087,7 @@ func (r *Relay) recoverTerminals(ws *websocket.Conn) {
 		}
 	}
 	log.Printf("[relay] terminal.recover: %d session(s) re-adopted", len(recovered))
-	ws.WriteJSON(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered)})
+	reply(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered)})
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {

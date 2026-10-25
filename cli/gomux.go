@@ -59,8 +59,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // gomuxPollInterval is the change-detection tick. A var so tests can shorten it.
@@ -673,22 +671,35 @@ func (h *FSHandler) handleGomuxRead(write writeFn, writeBin writeBinFn, id json.
 
 // ---- the agent's live screen ----
 
+// gomuxScreenScript draws an agent's screen with no tmux client on gomuxai's server:
+// $1 = tmux binary, $2 = the agent's session, $3 = its pipe-pane log. Input is ignored
+// (echo off; tail reads no stdin). Each captured row lands at its own position (so the
+// snapshot can't scroll), the cursor goes where the pane's is, then the log streams on.
+const gomuxScreenScript = `stty -echo -icanon 2>/dev/null
+printf '\033[2J\033[H'
+env -u TMUX "$1" capture-pane -e -p -t "$2" | awk '{ printf "\033[%d;1H%s", NR, $0 }'
+pos=$(env -u TMUX "$1" display-message -p -t "$2" '#{cursor_y} #{cursor_x}')
+set -- "$@" $pos
+printf '\033[%d;%dH' $(( $4 + 1 )) $(( $5 + 1 ))
+exec tail -c 0 -F "$3"
+`
+
 // gomuxTerminalID is the terminal an agent's screen shows in: `gx-<name>`, so its
 // glyphd-side session is `glyph-gx-<name>` and never collides with a spawned term-N.
 func gomuxTerminalID(name string) string { return "gx-" + sanitizeSession(name) }
 
-// attachGomuxAgent forks a terminal adapter whose shell is a READ-ONLY tmux client on
-// the agent's own session — the agent's live screen beside its book. Nested, not
-// retargeted: the adapter's session lives on our socket as usual (recovery, keymap
-// neutralization and kill all stay inside it), and its one process is
-// `tmux attach -t agent-<name> -f read-only,ignore-size` against gomuxai's server
-// (the default socket — TMUX unset so the inner client doesn't talk to ours). Read-only:
-// keys typed at the terminal never reach the agent. ignore-size: our window never
-// resizes the agent's. The terminal opens at the agent pane's own size. Killing the
-// terminal kills only our outer session; the agent's session ends the terminal when it
-// ends.
-func (r *Relay) attachGomuxAgent(ws *websocket.Conn, name string) {
-	reply := func(err string) { ws.WriteJSON(map[string]any{"event": "gomux.attaching", "name": name, "error": err}) }
+// attachGomuxAgent forks a terminal adapter that shows the agent's screen WITHOUT a tmux
+// client on gomuxai's server. Any client there — even a read-only one — becomes tmux's
+// "most recently active client", the default target of every CLI command, and a
+// read-only one makes gomuxai's own send-keys fail host-wide. So the screen is built
+// from what gomuxai already records: a capture-pane snapshot (each row positioned, then
+// the cursor), followed by `tail -F` of the pane's pipe-pane log (logs/<name>.log, the
+// raw byte stream the agent's terminal emits). The adapter's session lives on our socket
+// as always; its shell ignores input (echo off, tail reads no stdin), so keys typed at it
+// go nowhere, and nothing here can resize or touch the agent's window. The terminal
+// opens at the agent pane's own size. Killing it kills only our session.
+func (r *Relay) attachGomuxAgent(send func(any), name string) {
+	reply := func(err string) { send(map[string]any{"event": "gomux.attaching", "name": name, "error": err}) }
 	if r.fs == nil || r.fs.gomux == nil {
 		reply("gomuxai watcher not running")
 		return
@@ -707,6 +718,11 @@ func (r *Relay) attachGomuxAgent(ws *websocket.Conn, name string) {
 	}
 	if !agent.Attached {
 		reply("agent " + name + " has no tmux session (" + agent.Session + ")")
+		return
+	}
+	logPath := filepath.Join(agent.DataDir, "logs", name+".log")
+	if info, err := os.Stat(logPath); err != nil || info.IsDir() {
+		reply("no pane log for " + name + " at " + logPath + " (gomuxai pipes each agent's pane there)")
 		return
 	}
 	cols, rows := 80, 24
@@ -728,7 +744,7 @@ func (r *Relay) attachGomuxAgent(ws *websocket.Conn, name string) {
 	id := gomuxTerminalID(name)
 	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket,
 		"--cols", strconv.Itoa(cols), "--rows", strconv.Itoa(rows),
-		"--", "env", "-u", "TMUX", r.fs.gomux.tmuxBin, "attach-session", "-t", agent.Session, "-f", "read-only,ignore-size"}
+		"--", "sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath}
 	cmd := exec.Command(exePath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -737,8 +753,8 @@ func (r *Relay) attachGomuxAgent(ws *websocket.Conn, name string) {
 		return
 	}
 	pid := cmd.Process.Pid
-	log.Printf("[gomux] %s: screen attached read-only as terminal '%s' (pid %d, %dx%d)", name, id, pid, cols, rows)
-	ws.WriteJSON(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows})
+	log.Printf("[gomux] %s: screen as terminal '%s' (pid %d, %dx%d, from its pane log)", name, id, pid, cols, rows)
+	send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows})
 	go func() {
 		err := cmd.Wait()
 		log.Printf("[gomux] %s: screen adapter '%s' (pid %d) exited: %v", name, id, pid, err)
