@@ -1,8 +1,9 @@
 package main
 
 // The relay client: dial the relay as a controller, run verbs, render the replies.
-// One-shot argv rides the `call` bundle (call.go) so every argument arrives at its
-// handler byte-identical; REPL and pipe lines are already bus syntax and go as typed.
+// A one-shot goes as a typed line when its argv is plain tokens and as a `call` bundle
+// (call.go) when an argument needs one (oneShotLine); REPL and pipe lines are already
+// bus syntax and go as typed.
 // Client-side composites live beside it: screenshot (verb chain → capture → PNG),
 // log.follow (the relay's live log feed), seed-history (tmux scrollback → depth
 // history).
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 )
@@ -118,14 +120,82 @@ func sendLine(conn *websocket.Conn, line string, within time.Duration) (*Respons
 	}
 }
 
-// sendArgv sends argv as a `call` bundle — the lossless form for an already-split
+// session is a controller connection that redials after a failed exchange. gorilla's
+// read errors are sticky — once a deadline fires the connection is dead for every later
+// read — and a late reply to the abandoned request would otherwise be taken as the next
+// request's. So one slow verb costs only itself.
+type session struct {
+	url  string
+	conn *websocket.Conn
+}
+
+// openSession dials url; a relay that isn't there is fatal (exit 2).
+func openSession(url string) *session {
+	return &session{url: url, conn: mustConnect(url)}
+}
+
+// send runs one command line on the session, redialing first if the last one failed.
+func (s *session) send(line string, within time.Duration) (*Response, error) {
+	if s.conn == nil {
+		c, err := connect(s.url)
+		if err != nil {
+			return nil, err
+		}
+		s.conn = c
+	}
+	resp, err := sendLine(s.conn, line, within)
+	if err != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+	return resp, err
+}
+
+// sendArgv runs argv as a `call` bundle — the lossless form for an already-split
 // command (spaces, quotes, newlines and empty args all arrive intact).
-func sendArgv(conn *websocket.Conn, argv []string, within time.Duration) (*Response, error) {
+func (s *session) sendArgv(argv []string, within time.Duration) (*Response, error) {
 	line, err := callLine(argv)
 	if err != nil {
 		return nil, err
 	}
-	return sendLine(conn, line, within)
+	return s.send(line, within)
+}
+
+func (s *session) close() {
+	if s.conn != nil {
+		s.conn.Close()
+	}
+}
+
+// plainToken reports whether s survives the bus tokenizer (CommandRouter.parse) as
+// itself: non-empty, no whitespace, no `"` or `\`.
+func plainToken(s string) bool {
+	return s != "" && !strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '"' || r == '\\'
+	})
+}
+
+// oneShotLine is the wire form of a one-shot's argv:
+//
+//   - the verb argument itself holds whitespace (`glyph3d-cli "camera.fly 0 0 10"`):
+//     the caller wrote a command line — join the args and send it as typed;
+//   - every arg is a plain token (`grid.list`, `whoami`, `call <b64>`): the typed line
+//     (the args joined) tokenizes back to exactly this argv, and relay protocol words
+//     and the `call` hatch reach whoever answers them as typed;
+//   - otherwise an argument needs carrying (spaces, quotes, newlines, empty): a `call`
+//     bundle delivers the argv byte-identical.
+func oneShotLine(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("no command")
+	}
+	plain := true
+	for _, a := range args {
+		plain = plain && plainToken(a)
+	}
+	if plain || strings.ContainsFunc(args[0], unicode.IsSpace) {
+		return strings.Join(args, " "), nil
+	}
+	return callLine(args)
 }
 
 // verbOf is the verb of a typed line (its first token).
@@ -180,6 +250,16 @@ func printResponse(verb string, resp *Response) {
 			fmt.Fprintln(os.Stderr, resp.Text)
 			return
 		}
+	}
+	if resp.Text == "" && resp.hasData() {
+		// A reply that is all data (no summary text): show the data.
+		var pretty bytes.Buffer
+		if json.Indent(&pretty, resp.Data, "", "  ") == nil {
+			fmt.Println(pretty.String())
+		} else {
+			fmt.Println(string(resp.Data))
+		}
+		return
 	}
 	fmt.Println(resp.Text)
 }
@@ -294,7 +374,7 @@ func orNone(s string) string {
 
 // --- REPL ---
 
-func repl(conn *websocket.Conn) {
+func repl(s *session) {
 	fmt.Println("glyph3d-cli REPL. Type '.help' for meta commands, '.exit' to quit.")
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -324,7 +404,7 @@ func repl(conn *websocket.Conn) {
 			fmt.Println("  Any other input is sent as a command line (try: help).")
 			continue
 		}
-		resp, err := sendLine(conn, line, *timeout)
+		resp, err := s.send(line, *timeout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			continue
@@ -355,13 +435,13 @@ func screenshotCmd(url string, args []string) int {
 		return 2
 	}
 
-	conn := mustConnect(url)
-	defer conn.Close()
+	s := openSession(url)
+	defer s.close()
 
 	// Verb lines may start a load or a fly — give them the longer of --timeout and 15s.
 	cmdWithin := max(*timeout, 15*time.Second)
 	for _, c := range cmds {
-		resp, err := sendLine(conn, c, cmdWithin)
+		resp, err := s.send(c, cmdWithin)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "screenshot: --cmd %q: %v\n", c, err)
 			return 1
@@ -375,7 +455,7 @@ func screenshotCmd(url string, args []string) int {
 		time.Sleep(*wait)
 	}
 
-	resp, err := sendLine(conn, "screenshot", max(*timeout, 20*time.Second))
+	resp, err := s.send("screenshot", max(*timeout, 20*time.Second))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "screenshot: %v\n", err)
 		return 1
@@ -535,12 +615,12 @@ func seedHistoryCmd(url string, args []string) int {
 	}
 	fs.Parse(args)
 
-	conn := mustConnect(url)
-	defer conn.Close()
+	s := openSession(url)
+	defer s.close()
 
 	ids := fs.Args()
 	if len(ids) == 0 {
-		resp, err := sendLine(conn, "terminal.list", *timeout)
+		resp, err := s.send("terminal.list", *timeout)
 		if err != nil || resp.failed() {
 			fmt.Fprintf(os.Stderr, "seed-history: terminal.list: %v %s\n", err, respText(resp))
 			return 1
@@ -572,7 +652,7 @@ func seedHistoryCmd(url string, args []string) int {
 			failed++
 			continue
 		}
-		resp, err := sendArgv(conn, []string{"terminal.depth.seed", id, string(text)}, *timeout)
+		resp, err := s.sendArgv([]string{"terminal.depth.seed", id, string(text)}, *timeout)
 		if err != nil || resp.failed() {
 			fmt.Printf("  ✗ %s: %v %s\n", id, err, respText(resp))
 			failed++

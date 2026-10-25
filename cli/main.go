@@ -9,7 +9,7 @@
 //
 // Client side — global flags go BEFORE the verb or client command:
 //
-//	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot
+//	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot (oneShotLine)
 //	glyph3d-cli [...] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
 //	glyph3d-cli [...] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
 //	glyph3d-cli [...] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
@@ -88,23 +88,27 @@ func main() {
 		}
 	}
 
-	conn := mustConnect(url)
-	defer conn.Close()
+	s := openSession(url)
+	defer s.close()
 
 	switch {
 	case len(args) > 0:
-		// One-shot: the shell already split the argv — ship it as a `call` bundle so
-		// every argument reaches its handler byte-identical.
-		resp, err := sendArgv(conn, args, *timeout)
+		// One-shot: a typed line when the argv is plain tokens, a `call` bundle when an
+		// argument needs carrying (see oneShotLine).
+		line, err := oneShotLine(args)
 		if err != nil {
-			log.Fatalf("%s: %v", args[0], err)
+			log.Fatalf("%v", err)
 		}
-		printResponse(args[0], resp)
+		resp, err := s.send(line, *timeout)
+		if err != nil {
+			log.Fatalf("%s: %v", verbOf(args[0]), err)
+		}
+		printResponse(verbOf(args[0]), resp)
 		if resp.failed() {
 			os.Exit(1)
 		}
 	case isInteractive():
-		repl(conn)
+		repl(s)
 	default:
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -113,7 +117,7 @@ func main() {
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ".") {
 				continue
 			}
-			resp, err := sendLine(conn, line, *timeout)
+			resp, err := s.send(line, *timeout)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 				continue

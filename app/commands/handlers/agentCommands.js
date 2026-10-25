@@ -293,7 +293,11 @@ export default function registerAgentCommands(router) {
         const [id, line] = args;
         let obj;
         try { obj = JSON.parse(line); }
-        catch { return { text: 'OK: wire line dropped (malformed)', data: null }; }
+        catch (e) {
+            // Dropped, not fatal — but said: a dialect change upstream would otherwise go dark.
+            console.warn(`[agent.kimi-wire] ${id}: malformed wire line dropped (${e.message}): ${line}`);
+            return { text: 'OK: wire line dropped (malformed)', data: null };
+        }
         books.ensure(id, 'kimi');
         let lane = kimiWireLanes.get(id);
         if (!lane) {

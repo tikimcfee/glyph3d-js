@@ -298,9 +298,13 @@ that — prefer it for deterministic CI once wired.
 
 **`glyph3d-cli`** is the one client for "dial the relay, run verbs, render the results".
 Global flags (`--port N` / `--host url`, `--json`, `--timeout`) go before the verb. A
-one-shot's argv rides the `call` bundle, so every argument reaches its handler
+one-shot whose args are all plain tokens goes as the typed line (`whoami`, `ping` and
+`call <b64>` reach whoever answers them as typed), and so does one whose verb arg is
+itself a quoted line (`./glyph3d-cli "camera.move 0 0 300"`). When an arg carries
+spaces, quotes, backslashes, newlines or is empty, the argv rides the `call` bundle
 byte-identical — `./glyph3d-cli grid.create "two words" notes.txt` needs no quoting
-discipline or base64; REPL and piped lines go as typed. Client commands beside the verbs:
+discipline or base64. REPL and piped lines go as typed. A request that outlives
+`--timeout` costs only itself: the client redials for the next one. Client commands beside the verbs:
 `screenshot` (above), `log.follow` (below), and `seed-history [--lines 300] [id ...]` —
 each terminal's tmux scrollback into its depth-history ring via `terminal.depth.seed`
 (the ring is in-memory: re-run after a reload).

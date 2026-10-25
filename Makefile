@@ -37,9 +37,14 @@ GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
 # --- Default: build for current platform ---
 
+# The Claude Code hook runs $(CLI_DIR)/$(BINARY) (.claude/settings.local.json), so the
+# build hard-links that name to the one binary it just built — the same file, never a
+# second build that could lag the handlers it talks to. `ln -f` swaps the directory
+# entry, so a hook process mid-run keeps its old inode instead of failing "text busy".
 build: prep
 	cd $(CLI_DIR) && go build $(GOFLAGS) -o ../$(BINARY) .
-	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
+	ln -f $(BINARY) $(CLI_DIR)/$(BINARY)
+	@echo "Built ./$(BINARY) (+ $(CLI_DIR)/$(BINARY), the hook's) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
 
 # --- Prep: build the app (Vite) and stage it into cli/web/ for go:embed ---
 # The app is a self-contained production build — it bundles @glyph3d/core + the

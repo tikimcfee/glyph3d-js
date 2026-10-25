@@ -76,11 +76,13 @@ bundles its deps at build (no importmap). `make all` cross-compiles all platform
 
 **Drive it from the CLI** — the same command bus the UI uses:
 `./glyph3d-cli grid.list`, `./glyph3d-cli file.open path/to/file.js`. Global flags go
-*before* the subcommand (e.g. `--port 8099`). It is the ONE relay client: a one-shot's
-argv rides the `call` bundle (handlers take raw text — no per-verb base64), log replies
-render as records, and `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
+*before* the subcommand (e.g. `--port 8099`). It is the ONE relay client: a one-shot goes
+as a typed line when its args are plain tokens (or the verb arg is itself a quoted line)
+and as a `call` bundle when an arg carries spaces/quotes/newlines (handlers take raw text —
+no per-verb base64), log replies render as records, and `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
 `seed-history` are its client commands. JS that genuinely needs JS (Playwright, simulated
-displays) dials through `tools/lib/relay.mjs`.
+displays) dials through `tools/lib/relay.mjs`. `make build` hard-links `cli/glyph3d-cli`
+(the binary the Claude Code hook runs) to the one binary it builds.
 
 ## Command bus
 
