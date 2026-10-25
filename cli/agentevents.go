@@ -6,15 +6,16 @@ package main
 // The relay runs it and moves what it prints:
 //   - `agent sessions --json`, re-run every --sessions-interval while a display is
 //     connected: agentSessions/list answers with the last run, agentSessions/changed
-//     pushes a run that differs from the one before.
-//   - `agent transcript <session> --follow [--from <at>]`, one per (session, from), shared
+//     pushes a run whose shown fields differ (sessionShape — not size/mtime/status_at).
+//   - `agent transcript <path> --follow [--from <at>]`, one per (transcript, from), shared
 //     by every display subscription that asked for it and killed when the last one goes
 //     (unfollow, or the display disconnecting), at most --max-followers at once. Its
 //     stdout lines are pushed as agentEvents/lines batches, its exit as agentEvents/ended,
 //     its stderr to the relay log as [agent-transcript] lines.
 //   - `agent transcript <path> [--from <at>] --until <byte>`, one-shot: agentEvents/read.
-// For a tail window the relay finds line STARTS in the transcript (finding a newline is
-// not parsing); it reads nothing else of it.
+// Follow and read name the transcript the same way (resolveSession, over the latest
+// session list), and hand `agent` its path. For a tail window the relay finds line STARTS
+// in the transcript (finding a newline is not parsing); it reads nothing else of it.
 //
 // RPCs (fs.go dispatch):
 //   agentSessions/list   {}                                → {gen, sessions}
@@ -26,13 +27,14 @@ package main
 //   agentEvents/lines     {session, lines}  (the events plane, below)
 //   agentEvents/ended     {session, code, error?}
 //
-// A subscription is (display, session): a display holds at most one follower per session,
-// and following a session again from another byte swaps its follower. Lines ride their
+// A subscription is (display, session name): a display holds at most one follower per
+// name, and following a name again from another byte swaps its follower. Lines ride their
 // own lossless display plane (Relay.pushAgentEvent: control traffic drains first; a push
 // waits for room). A display that leaves a push waiting past agentEventsStall is not
 // keeping up: its subscription is dropped with agentEvents/ended (code -1) instead of
-// buffering. A follower holds one batch and a few lines in memory; between pushes the
-// agent's own pipe backpressures it.
+// buffering. An ended waits for the plane as long as the display stays connected, so it
+// always arrives, after the lines queued before it. A follower holds one batch and a few
+// lines in memory; between pushes the agent's own pipe backpressures it.
 
 import (
 	"bufio"
@@ -67,7 +69,8 @@ var (
 )
 
 // agentEventsPush delivers one lines/ended push to a display, waiting at most `wait` for
-// room: errDisplayGone if that display has left, errDisplayStalled if the wait ran out.
+// room (0 = as long as the display stays): errDisplayGone if that display has left,
+// errDisplayStalled if the wait ran out.
 type agentEventsPush func(display uint64, method string, params any, wait time.Duration) error
 
 // AgentEvents runs gomuxai's session list and transcript followers for the displays.
@@ -86,17 +89,18 @@ type AgentEvents struct {
 	subs      map[subKey]*follower
 	pollStop  context.CancelFunc
 
-	sessMu   sync.Mutex // one `agent sessions` run at a time; guards the fields below
-	polled   bool
-	sessRaw  []byte
-	sessions agentSessionsList
-	paths    map[string]string // session_id → transcript path, and path → itself
-	pollErr  string
+	sessMu  sync.Mutex // one `agent sessions` run at a time; guards the fields below
+	polled  bool
+	sessRaw []byte       // the latest output
+	refs    []sessionRef // what resolveSession reads of it, in list order
+	shape   string       // the shown fields of the last list pushed (sessionShape)
+	gen     uint64       // bumps with each push
+	pollErr string
 }
 
 type followKey struct {
-	session string
-	from    int64 // -1 = from the start
+	path string // the resolved transcript
+	from int64  // -1 = from the start
 }
 
 type subKey struct {
@@ -110,7 +114,7 @@ type follower struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	out    *os.File        // our end of its stdout
-	subs   map[uint64]bool // displays holding it (AgentEvents.mu)
+	subs   map[subKey]bool // subscriptions holding it (AgentEvents.mu)
 	done   bool            // stopped by the relay or exited: no more pushes but ended (AgentEvents.mu)
 }
 
@@ -187,15 +191,21 @@ func (a *AgentEvents) DisplayGone(display uint64) {
 
 // ---- following ----
 
-// Follow subscribes a display to a session's events from a byte (-1 = the start).
-// Idempotent; a follow from another byte replaces the display's follower for the session.
-func (a *AgentEvents) Follow(display uint64, session string, from int64) error {
+// Follow subscribes a display to a session's events from a byte (-1 = the start). The
+// session resolves through resolveSession first (an unknown or ambiguous one is an
+// error, not a follower that dies). Idempotent; a follow from another byte, or of a name
+// that now resolves to another transcript, replaces the display's follower for it.
+func (a *AgentEvents) Follow(ctx context.Context, display uint64, session string, from int64) error {
+	path, err := a.resolveSession(ctx, session)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.displays[display] {
 		return errDisplayGone
 	}
-	sk, key := subKey{display, session}, followKey{session, from}
+	sk, key := subKey{display, session}, followKey{path, from}
 	if f := a.subs[sk]; f != nil {
 		if f.key == key && !f.done {
 			return nil
@@ -208,12 +218,11 @@ func (a *AgentEvents) Follow(display uint64, session string, from int64) error {
 			log.Printf("[agent-transcript] follower cap (%d) reached: not following %s", a.maxFollowers, session)
 			return fmt.Errorf("follower cap reached: %d transcripts followed (--max-followers); not following %s", a.maxFollowers, session)
 		}
-		var err error
 		if f, err = a.startLocked(key); err != nil {
 			return err
 		}
 	}
-	f.subs[display] = true
+	f.subs[sk] = true
 	a.subs[sk] = f
 	return nil
 }
@@ -232,7 +241,7 @@ func (a *AgentEvents) dropSubLocked(sk subKey, f *follower) {
 	if a.subs[sk] == f {
 		delete(a.subs, sk)
 	}
-	delete(f.subs, sk.display)
+	delete(f.subs, sk)
 	if len(f.subs) == 0 {
 		a.stopLocked(f)
 	}
@@ -256,7 +265,7 @@ func (a *AgentEvents) startLocked(key followKey) (*follower, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"transcript", key.session, "--follow", "-q"}
+	args := []string{"transcript", key.path, "--follow", "-q"}
 	if key.from >= 0 {
 		args = append(args, "--from", strconv.FormatInt(key.from, 10))
 	}
@@ -283,9 +292,9 @@ func (a *AgentEvents) startLocked(key followKey) (*follower, error) {
 		errR.Close()
 		return nil, errMsg("start " + bin + " transcript: " + err.Error())
 	}
-	f := &follower{key: key, cmd: cmd, cancel: cancel, out: outR, subs: map[uint64]bool{}}
+	f := &follower{key: key, cmd: cmd, cancel: cancel, out: outR, subs: map[subKey]bool{}}
 	a.followers[key] = f
-	log.Printf("[agent-transcript] following %s%s (pid %d)", key.session,
+	log.Printf("[agent-transcript] following %s%s (pid %d)", key.path,
 		orEmpty(" from "+strconv.FormatInt(key.from, 10), key.from >= 0), cmd.Process.Pid)
 	go a.run(f, errR)
 	return f, nil
@@ -302,7 +311,7 @@ func (a *AgentEvents) run(f *follower, stderr *os.File) {
 		sc.Buffer(make([]byte, 4096), 1<<20)
 		for sc.Scan() {
 			line := sc.Text()
-			a.logLine(f.key.session, line)
+			a.logLine(f.key.path, line)
 			if errTail.Len() > 2048 {
 				errTail.Reset()
 			}
@@ -321,7 +330,7 @@ func (a *AgentEvents) run(f *follower, stderr *os.File) {
 			b, err := br.ReadBytes('\n')
 			if err != nil {
 				if len(b) > 0 && !errors.Is(err, os.ErrClosed) {
-					log.Printf("[agent-transcript] %s: dropped an unterminated last line (%d bytes)", f.key.session, len(b))
+					log.Printf("[agent-transcript] %s: dropped an unterminated last line (%d bytes)", f.key.path, len(b))
 				}
 				return
 			}
@@ -343,38 +352,58 @@ func (a *AgentEvents) run(f *follower, stderr *os.File) {
 	if a.followers[f.key] == f {
 		delete(a.followers, f.key)
 	}
-	var to []uint64
-	for d := range f.subs {
-		to = append(to, d)
-		if sk := (subKey{d, f.key.session}); a.subs[sk] == f {
+	to := sortedSubs(f.subs)
+	for _, sk := range to {
+		if a.subs[sk] == f {
 			delete(a.subs, sk)
 		}
 	}
-	f.subs = map[uint64]bool{}
+	f.subs = map[subKey]bool{}
 	a.mu.Unlock()
 	if stopped {
-		log.Printf("[agent-transcript] stopped %s", f.key.session)
+		log.Printf("[agent-transcript] stopped %s", f.key.path)
 		return
 	}
-	ended := agentEventsEnded{Session: f.key.session, Code: 0}
+	code, msg := 0, ""
 	if err != nil {
-		ended.Code = -1
+		code = -1
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			ended.Code = ee.ExitCode()
+			code = ee.ExitCode()
 		}
-		ended.Error = err.Error()
+		msg = err.Error()
 	}
-	if msg := strings.TrimSpace(errTail.String()); msg != "" {
-		ended.Error = msg
+	if tail := strings.TrimSpace(errTail.String()); tail != "" {
+		msg = tail
 	}
-	log.Printf("[agent-transcript] %s ended (code %d)%s", f.key.session, ended.Code, orEmpty(": "+ended.Error, ended.Error != ""))
-	sort.Slice(to, func(i, j int) bool { return to[i] < to[j] })
-	for _, d := range to {
-		if err := a.push(d, "agentEvents/ended", ended, agentEventsStall); err != nil && err != errDisplayGone {
-			log.Printf("[agent-transcript] %s: ended not delivered: %v", f.key.session, err)
+	log.Printf("[agent-transcript] %s ended (code %d)%s", f.key.path, code, orEmpty(": "+msg, msg != ""))
+	for _, sk := range to {
+		a.sendEnded(sk, code, msg)
+	}
+}
+
+// sendEnded tells a display its subscription is over. It waits for the events plane as
+// long as the display stays connected — behind the lines already queued, so it arrives
+// after them — because a display must always learn it lost a subscription.
+func (a *AgentEvents) sendEnded(sk subKey, code int, msg string) {
+	err := a.push(sk.display, "agentEvents/ended", agentEventsEnded{Session: sk.session, Code: code, Error: msg}, 0)
+	if err != nil && err != errDisplayGone {
+		log.Printf("[agent-transcript] %s: ended not delivered: %v", sk.session, err)
+	}
+}
+
+func sortedSubs(m map[subKey]bool) []subKey {
+	out := make([]subKey, 0, len(m))
+	for sk := range m {
+		out = append(out, sk)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].display != out[j].display {
+			return out[i].display < out[j].display
 		}
-	}
+		return out[i].session < out[j].session
+	})
+	return out
 }
 
 // batch pushes lines in order, at most agentEventsBatchWait after the first of a batch
@@ -416,39 +445,39 @@ func (a *AgentEvents) batch(f *follower, lines <-chan []byte) {
 	}
 }
 
-// deliver pushes one batch to every display holding the follower. A display that
-// stalls loses its subscription (with an ended saying why).
+// deliver pushes one batch to every subscription holding the follower, each under the
+// session name it followed by. A display that stalls loses its subscription.
 func (a *AgentEvents) deliver(f *follower, batch []string) {
 	a.mu.Lock()
 	if f.done {
 		a.mu.Unlock()
 		return
 	}
-	to := make([]uint64, 0, len(f.subs))
-	for d := range f.subs {
-		to = append(to, d)
-	}
+	to := sortedSubs(f.subs)
 	a.mu.Unlock()
-	sort.Slice(to, func(i, j int) bool { return to[i] < to[j] })
-	msg := agentEventsLines{Session: f.key.session, Lines: batch}
-	for _, d := range to {
-		if err := a.push(d, "agentEvents/lines", msg, agentEventsStall); err == errDisplayStalled {
-			a.stalled(f, d)
+	for _, sk := range to {
+		msg := agentEventsLines{Session: sk.session, Lines: batch}
+		if err := a.push(sk.display, "agentEvents/lines", msg, agentEventsStall); err == errDisplayStalled {
+			a.stalled(f, sk)
 		}
 	}
 }
 
-func (a *AgentEvents) stalled(f *follower, display uint64) {
+// stalled drops a subscription whose display left a push waiting agentEventsStall, and
+// tells it so (sendEnded: queued behind its lines, however long the plane takes).
+func (a *AgentEvents) stalled(f *follower, sk subKey) {
 	a.mu.Lock()
-	if f.subs[display] {
-		a.dropSubLocked(subKey{display, f.key.session}, f)
+	held := f.subs[sk]
+	if held {
+		a.dropSubLocked(sk, f)
 	}
 	a.mu.Unlock()
-	msg := fmt.Sprintf("display not keeping up: a push waited %s; follow again from the last at", agentEventsStall)
-	log.Printf("[agent-transcript] %s: %s (display %d unsubscribed)", f.key.session, msg, display)
-	if err := a.push(display, "agentEvents/ended", agentEventsEnded{Session: f.key.session, Code: -1, Error: msg}, agentEventsStall); err != nil {
-		log.Printf("[agent-transcript] %s: ended not delivered: %v", f.key.session, err)
+	if !held {
+		return
 	}
+	msg := fmt.Sprintf("display not keeping up: a push waited %s; follow again from the last at", agentEventsStall)
+	log.Printf("[agent-transcript] %s: %s (display %d unsubscribed)", sk.session, msg, sk.display)
+	go a.sendEnded(sk, -1, msg)
 }
 
 // ---- the session list ----
@@ -466,8 +495,8 @@ func (a *AgentEvents) poll(ctx context.Context) {
 	}
 }
 
-// refreshSessions runs `agent sessions --json` once; a list that differs from the last
-// one takes the next gen and is pushed.
+// refreshSessions runs `agent sessions --json` once and keeps its output; a list whose
+// shape changed takes the next gen and is pushed.
 func (a *AgentEvents) refreshSessions(ctx context.Context) error {
 	a.sessMu.Lock()
 	defer a.sessMu.Unlock()
@@ -510,74 +539,160 @@ func (a *AgentEvents) runSessions(ctx context.Context) ([]byte, error) {
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
 
+// sessionShape is what a display shows of a session: a list whose shapes are unchanged
+// (only size, mtime, status_at or order moved) isn't pushed; those ride the next push
+// and agentSessions/list.
+type sessionShape struct {
+	ID            string          `json:"session_id"`
+	Path          string          `json:"path"`
+	Harness       string          `json:"harness"`
+	Cwd           string          `json:"cwd"`
+	Project       string          `json:"project"`
+	Title         string          `json:"title"`
+	AgentName     string          `json:"agent_name"`
+	Status        string          `json:"status"`
+	Workgroup     json.RawMessage `json:"workgroup"`
+	ParentSession json.RawMessage `json:"parent_session"`
+	ContinuedIn   string          `json:"continued_in"`
+}
+
 func (a *AgentEvents) applySessionsLocked(raw []byte) error {
 	if a.polled && bytes.Equal(raw, a.sessRaw) {
 		return nil
 	}
-	var ss []struct {
-		ID   string `json:"session_id"`
-		Path string `json:"path"`
-	}
+	var ss []sessionShape
 	if err := json.Unmarshal(raw, &ss); err != nil {
 		return errMsg("agent sessions --json: not a JSON array of sessions: " + err.Error())
 	}
-	paths := make(map[string]string, 2*len(ss))
-	for _, s := range ss {
-		if s.ID != "" {
-			paths[s.ID] = s.Path
+	refs := make([]sessionRef, len(ss))
+	keys := make([]string, len(ss))
+	for i, s := range ss {
+		var wg struct {
+			Name string `json:"name"`
 		}
-		if s.Path != "" {
-			paths[s.Path] = s.Path
-		}
+		json.Unmarshal(s.Workgroup, &wg)
+		refs[i] = sessionRef{id: s.ID, path: s.Path, workgroup: wg.Name, sub: isJSONSet(s.ParentSession)}
+		k, _ := json.Marshal(s)
+		keys[i] = string(k)
 	}
-	a.polled, a.sessRaw, a.paths = true, raw, paths
-	a.sessions = agentSessionsList{Gen: a.sessions.Gen + 1, Sessions: raw}
-	debugf("[agent-sessions] changed: gen %d, %d sessions, %d bytes pushed", a.sessions.Gen, len(ss), len(raw))
+	sort.Strings(keys)
+	shape := strings.Join(keys, "\n")
+	first := !a.polled
+	a.polled, a.sessRaw, a.refs = true, raw, refs
+	if !first && shape == a.shape {
+		return nil
+	}
+	a.shape = shape
+	a.gen++
+	debugf("[agent-sessions] changed: gen %d, %d sessions, %d bytes pushed", a.gen, len(ss), len(raw))
 	if a.notify != nil {
-		a.notify("agentSessions/changed", a.sessions)
+		a.notify("agentSessions/changed", agentSessionsList{Gen: a.gen, Sessions: raw})
 	}
 	return nil
 }
 
-// List answers with the last list (running `agent sessions` first if none ran yet).
+func isJSONSet(r json.RawMessage) bool {
+	s := strings.TrimSpace(string(r))
+	return s != "" && s != "null"
+}
+
+// List answers with the latest list (running `agent sessions` first if none ran yet),
+// under the gen of the last shape pushed.
 func (a *AgentEvents) List(ctx context.Context) (agentSessionsList, error) {
 	a.sessMu.Lock()
-	polled, s := a.polled, a.sessions
+	polled := a.polled
 	a.sessMu.Unlock()
-	if polled {
-		return s, nil
-	}
-	if err := a.refreshSessions(ctx); err != nil {
-		return agentSessionsList{}, err
+	if !polled {
+		if err := a.refreshSessions(ctx); err != nil {
+			return agentSessionsList{}, err
+		}
 	}
 	a.sessMu.Lock()
 	defer a.sessMu.Unlock()
-	return a.sessions, nil
+	return agentSessionsList{Gen: a.gen, Sessions: a.sessRaw}, nil
 }
 
-// transcriptPath names a listed session's transcript (by session_id or path), asking
-// `agent sessions` again once when the session isn't in the last list.
-func (a *AgentEvents) transcriptPath(ctx context.Context, session string) (string, error) {
-	lookup := func() (string, bool) {
-		a.sessMu.Lock()
-		defer a.sessMu.Unlock()
-		p, ok := a.paths[session]
-		return p, ok
+// sessionRef is what resolveSession reads of a listed session.
+type sessionRef struct {
+	id, path, workgroup string
+	sub                 bool // a subagent's session (parent_session set)
+}
+
+// errSessionMiss: no listed session answers to the name (asking again may help;
+// an ambiguous name is a different error, which asking again won't fix).
+type errSessionMiss string
+
+func (e errSessionMiss) Error() string { return string(e) }
+
+// resolveSession is the ONE way follow and read name a transcript, over the latest
+// `agent sessions` list: an exact session_id, an exact path, a workgroup agent's name
+// (its newest session that isn't a subagent's — the list is newest first), or the
+// start of exactly one session_id. A miss asks `agent sessions` again once. An unknown
+// or ambiguous name, or a session with no transcript yet, is an error.
+func (a *AgentEvents) resolveSession(ctx context.Context, session string) (string, error) {
+	if session == "" {
+		return "", errMsg("session required")
 	}
-	p, ok := lookup()
-	if !ok {
+	a.sessMu.Lock()
+	polled := a.polled
+	a.sessMu.Unlock()
+	if !polled {
 		if err := a.refreshSessions(ctx); err != nil {
 			return "", err
 		}
-		p, ok = lookup()
 	}
-	if !ok {
-		return "", errMsg("no agent session " + strconv.Quote(session) + " (agent sessions lists it by session_id or path)")
+	ref, err := a.lookupSession(session)
+	if _, miss := err.(errSessionMiss); miss {
+		if rerr := a.refreshSessions(ctx); rerr != nil {
+			return "", rerr
+		}
+		ref, err = a.lookupSession(session)
 	}
-	if p == "" {
-		return "", errMsg("agent session " + strconv.Quote(session) + " has no transcript yet")
+	if err != nil {
+		return "", err
 	}
-	return p, nil
+	if ref.path == "" {
+		return "", errMsg("agent session " + strconv.Quote(session) + " (" + ref.id + ") has no transcript yet")
+	}
+	return ref.path, nil
+}
+
+func (a *AgentEvents) lookupSession(s string) (sessionRef, error) {
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	for _, r := range a.refs {
+		if r.id == s {
+			return r, nil
+		}
+	}
+	for _, r := range a.refs {
+		if r.path != "" && r.path == s {
+			return r, nil
+		}
+	}
+	for _, r := range a.refs {
+		if r.workgroup == s && !r.sub {
+			return r, nil
+		}
+	}
+	var hits []sessionRef
+	for _, r := range a.refs {
+		if strings.HasPrefix(r.id, s) {
+			hits = append(hits, r)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return sessionRef{}, errSessionMiss("no agent session " + strconv.Quote(s) +
+			": agent sessions lists none by that session_id, path, workgroup name or id prefix")
+	}
+	ids := make([]string, 0, 3)
+	for _, h := range hits[:min(3, len(hits))] {
+		ids = append(ids, h.id)
+	}
+	return sessionRef{}, fmt.Errorf("agent session %q is ambiguous: %d session ids start with it (%s…)", s, len(hits), strings.Join(ids, ", "))
 }
 
 // ---- reading ----
@@ -594,11 +709,12 @@ type agentEventsReadResult struct {
 	Size  int64    `json:"size"`
 }
 
-// Read runs one bounded `agent transcript --until` over a listed session's transcript.
-// The window ends at the size it saw (or `until`, if lower); `tail: N` starts it at the
-// first line start at or after size-N (see tailFrom).
+// Read runs one bounded `agent transcript --until` over a session's transcript
+// (resolveSession). The window ends at the size it saw, or `until` if lower; `tail: N`
+// starts it at the first line start at or after end-N (see tailFrom) — with `until`, the
+// last ~N bytes before it.
 func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentEventsReadResult, error) {
-	path, err := a.transcriptPath(ctx, p.Session)
+	path, err := a.resolveSession(ctx, p.Session)
 	if err != nil {
 		return agentEventsReadResult{}, err
 	}
@@ -620,7 +736,7 @@ func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentE
 		until = *p.Until
 	}
 	if p.Tail != nil {
-		if from, err = tailFrom(file, size, *p.Tail); err != nil {
+		if from, err = tailFrom(file, until, *p.Tail); err != nil {
 			return agentEventsReadResult{}, err
 		}
 	}
@@ -675,8 +791,8 @@ func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentE
 	return res, nil
 }
 
-// tailFrom answers "the last ~n bytes" of a transcript of `size` bytes as the --from to
-// pass: the window starts at the first line start at or after size-n that begins a
+// tailFrom answers "the last ~n bytes" of a transcript's first `size` bytes (its size, or
+// a read's until) as the --from to pass: the window starts at the first line start at or after size-n that begins a
 // complete line (or, when none does, at the last complete line), and since --from
 // resumes AFTER the line starting at its offset, the answer is the start of the line
 // before the window. -1 = read from the start (the window starts at byte 0, or the file
@@ -799,7 +915,9 @@ func (h *FSHandler) handleAgentEventsFollow(write writeFn, id json.RawMessage, r
 		}
 		from = *p.From
 	}
-	if err := h.agents.Follow(display, p.Session, from); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+	if err := h.agents.Follow(ctx, display, p.Session, from); err != nil {
 		h.sendRPCError(write, id, -32000, err.Error(), map[string]string{"session": p.Session})
 		return
 	}
@@ -832,7 +950,7 @@ func (h *FSHandler) handleAgentEventsRead(write writeFn, id json.RawMessage, raw
 	}
 	switch {
 	case p.Tail != nil && p.From != nil:
-		h.sendRPCError(write, id, -32602, "tail and from both given: a tail picks its own from", nil)
+		h.sendRPCError(write, id, -32602, "tail and from both given: a tail picks its own from (tail with until reads the last bytes before until)", nil)
 		return
 	case p.Tail != nil && *p.Tail <= 0:
 		h.sendRPCError(write, id, -32602, "tail must be a positive byte count", nil)

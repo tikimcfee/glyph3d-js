@@ -110,17 +110,24 @@ is a queued-reload recovery:
 (the loop guard lives in sessionStorage) so the substrate can re-seat the session.
 
 Agent sessions and their events ride relay↔display JSON-RPC (`cli/agentevents.go`), the
-relay moving gomuxai's lines without reading them: `agentSessions/list` and the
-`agentSessions/changed` push (`agent sessions --json`, re-run while a display is connected,
-pushed when it changed); `agentEvents/follow {session, from?}` / `unfollow` (one
-`agent transcript --follow` per session and byte, shared, killed when no subscription holds
-it — a display disconnecting drops its own — at most `--max-followers`); `agentEvents/lines`
-batches (≤50 ms or 256 KB, in order, whole lines, on their own display plane behind control
-traffic; a display that leaves a push waiting 10 s loses the subscription with
-`agentEvents/ended` code -1 rather than the relay buffering); `agentEvents/ended` when a
-follower exits (its stderr also lands in the relay log as `[agent-transcript]`); and
-`agentEvents/read {session, from?, until?, tail?}` → `{lines, size}`, a bounded one-shot
-whose `tail` starts at the first line start at/after `size - tail` (`--from` the line before).
+relay moving gomuxai's lines without reading them: `agentSessions/list` (the latest
+`agent sessions --json`, re-run while a display is connected) and the `agentSessions/changed`
+push, sent only when a session appears or leaves or a field a display shows changes (status,
+title, workgroup, parent, agent name, harness, cwd/project) — size/mtime/status_at ride the
+next push and the list. Follow and read name a session through ONE resolver over that list
+(exact session_id, exact path, a workgroup agent's name = its newest non-subagent session, a
+unique id prefix; a miss re-polls once; unknown/ambiguous is an RPC error) and hand `agent`
+the path. `agentEvents/follow {session, from?}` / `unfollow`: one `agent transcript --follow`
+per transcript and byte, shared, killed when no subscription holds it — a display
+disconnecting drops its own — at most `--max-followers`. `agentEvents/lines` batches (≤50 ms
+or 256 KB, in order, whole lines, on their own display plane behind control traffic; a display
+that leaves a push waiting 10 s loses the subscription rather than the relay buffering).
+`agentEvents/ended` (a follower exited, code + stderr; or code -1, the display stalled) waits
+on that plane as long as the display stays, behind the lines queued before it — a display
+always learns. Followers' stderr lands in the relay log as `[agent-transcript]`.
+`agentEvents/read {session, from?, until?, tail?}` → `{lines, size}` is a bounded one-shot
+ending at min(until, size); `tail` (not with `from`) starts at the first line start at/after
+`end - tail` (`--from` the line before), so `{until, tail}` pages back without the prefix.
 
 The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →
 the relay log store; `load.stats` answers with stage aggregates + the worst

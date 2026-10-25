@@ -7,7 +7,7 @@ import "testing"
 func TestChildren_ShutdownKillsThem(t *testing.T) {
 	f := newAgentFixture(t)
 	f.a.DisplayConnected(1)
-	if err := f.a.Follow(1, "s", -1); err != nil {
+	if err := f.a.Follow(bg, 1, "s", -1); err != nil {
 		t.Fatal(err)
 	}
 	pid := f.pidOf(t, "s")

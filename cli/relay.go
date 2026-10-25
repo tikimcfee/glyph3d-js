@@ -183,7 +183,7 @@ func (r *Relay) sendFrameToDisplay(data []byte) bool {
 }
 
 // pushAgentEvent sends one agentEvents/* notification to a display on the events plane:
-// lossless and in order, waiting at most `wait` for room. errDisplayGone when that display
+// lossless and in order, waiting at most `wait` for room (0 = until the display leaves). errDisplayGone when that display
 // is no longer the connected one; errDisplayStalled when the wait ran out (the display
 // isn't keeping up — the caller drops its subscription rather than buffer).
 func (r *Relay) pushAgentEvent(display uint64, method string, params any, wait time.Duration) error {
@@ -197,14 +197,18 @@ func (r *Relay) pushAgentEvent(display uint64, method string, params any, wait t
 	if ch == nil || cur != display {
 		return errDisplayGone
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
+	var expired <-chan time.Time // wait 0: no deadline
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		expired = t.C
+	}
 	select {
 	case ch <- msg:
 		return nil
 	case <-done:
 		return errDisplayGone
-	case <-t.C:
+	case <-expired:
 		return errDisplayStalled
 	}
 }
