@@ -361,7 +361,7 @@ export default function HudPanel({ client }) {
                 resetHint="back to a deck"
                 onSet={(v) => tune('book.form', f.book.addr, v)}
                 onReset={() => tune('book.form', f.book.addr, 'default')} />
-              {BOOK_KNOBS.map((k) => (
+              {BOOK_KNOBS.filter((k) => !k.shows || k.shows(f.bookTune)).map((k) => (
                 <KnobRow key={k.key} knob={k} value={f.bookTune.values[k.key]} own={k.key in f.bookTune.own}
                   resetHint="back to the shelf's default (Settings)"
                   onSet={(v) => tune('book.set', f.book.addr, k.key, String(v))}

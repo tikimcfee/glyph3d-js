@@ -15,9 +15,11 @@
  *                                               delta book's is its own (tuning, persisted;
  *                                               'default' drops it — a deck again); the head
  *                                               stays the bookmark in both forms.
- *   book.set    [id] <knob> <value|default>     give ONE agent/delta book its own deck value
- *                                               (client/tuning.js BOOK_KNOBS) — it wins over
- *                                               the shelf's Settings default and persists
+ *   book.set    [id] <knob> <value|default>     give ONE agent/delta book its own deck value,
+ *                                               or an agent book its own page text (each
+ *                                               page's text size + line break) (client/
+ *                                               tuning.js BOOK_KNOBS) — it wins over the
+ *                                               shelf's Settings default and persists
  *   book.get    [id]                            one book's deck knobs, form, and which are its own
  *   book.move   <id> <x> <y> <z>                pin an agent book where you put it (drag-release / CLI)
  *   book.config [key value]                     get/set an agent-shelf constant — re-flows live
@@ -32,7 +34,7 @@
  * else the first agent lane. The book keys (, . < >) are bare book.page lines, so they
  * turn the book you're reading. The file library's page dims stay
  * layout-scheme opts (`layout.scheme library --page-w …`); book.config dials the agent
- * shelf's cfg (page dims, deck pitch, card scales, faces, covers).
+ * shelf's cfg (page dims, deck pitch, page text, faces, covers).
  */
 
 import { box, kvLines } from '../formatResponse.js';
@@ -233,7 +235,7 @@ export default function registerBookCommands(router) {
             data: { book: who, key, value: r.value, own: r.own },
         };
     }, {
-        description: "Give ONE agent/delta book its own deck value — it wins over the shelf's Settings default and persists; 'default' hands it back",
+        description: "Give ONE agent/delta book its own deck value (an agent book also its page text: each page's text size and line break) — it wins over the shelf's Settings default and persists; 'default' hands it back",
         usage: `[id] <${BOOK_KNOBS.map((k) => k.key).join('|')}> <value|default>`,
         returns: '{ book, key, value, own }',
     });
@@ -246,7 +248,7 @@ export default function registerBookCommands(router) {
         }
         const d = readBook(ctx, hit);
         const lines = [`${'form' in d.own ? '*' : ' '}form = ${d.form}`,
-            ...BOOK_KNOBS.map((k) => `${k.key in d.own ? '*' : ' '}${k.key} = ${d.values[k.key]}`)];
+            ...BOOK_KNOBS.filter((k) => k.key in d.values).map((k) => `${k.key in d.own ? '*' : ' '}${k.key} = ${d.values[k.key]}`)];
         const cap = hit.kind === 'agent' ? hit.books.limitOf(hit.agentId) : null;
         if (cap) lines.push(`${cap.override == null ? ' ' : '*'}limit = ${cap.cap || 'all'} (book.limit)`);
         return { text: `OK: ${d.id} (* = its own value)\n${lines.join('\n')}`, data: { ...d, ...(cap ? { limit: cap } : {}) } };

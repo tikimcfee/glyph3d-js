@@ -40,6 +40,7 @@ import { pageableBookOf } from './bookFocus.js';
  * @property {Object<string,string>} [names] enum value → its HUD button text
  * @property {number} [min] @property {number} [max] @property {number} [step]
  * @property {boolean} [hud]         false: verb-only (not a HUD row)
+ * @property {boolean} [page]        a book knob that's an agent book's page text (AgentBooks.tuneText), not its deck
  * @property {(o: Object) => boolean} [shows] the row matters for this instance's current shape
  */
 
@@ -81,9 +82,21 @@ export const DESK_KNOBS = [
     short: 'turn rate', label: 'How quickly members turn to face their way' },
 ];
 
-/** @type {Knob[]} one shelf book's knobs — its deck (Book.DECK_TUNABLE). Its form is
- *  book.form (also its own); an agent book's kept turns are book.limit. */
+const agentBook = (b) => b.kind === 'agent';
+
+/** @type {Knob[]} one shelf book's knobs — its deck (Book.DECK_TUNABLE), and an agent
+ *  book's page text (`page`: AgentBooks.PAGE_TEXT_TUNABLE — each page's text size and how
+ *  its lines break; past the page, text scales down to fit). Its form is book.form (also
+ *  its own); an agent book's kept turns are book.limit. */
 export const BOOK_KNOBS = [
+  { key: 'versoTextSize', type: 'number', min: 0.5, max: 400, step: 0.5, page: true, shows: agentBook,
+    short: 'left text', label: 'Left page text size — the headline’s row height (the rest of the call and its numbers keep their share); too big for the page, it scales down to fit' },
+  { key: 'versoBreak', type: 'enum', options: ['wrap', 'natural'], names: { wrap: 'wrap to page', natural: 'own lines' }, page: true, shows: agentBook,
+    short: 'left lines', label: 'Left page lines — wrap to the page, or keep the text’s own lines (a long line shrinks to fit, left to right)' },
+  { key: 'rectoTextSize', type: 'number', min: 0.5, max: 400, step: 0.5, page: true, shows: agentBook,
+    short: 'right text', label: 'Right page text size — prose’s row height (files and command output keep their share); too big for the page, it scales down to fit' },
+  { key: 'rectoBreak', type: 'enum', options: ['wrap', 'natural'], names: { wrap: 'wrap to page', natural: 'own lines' }, page: true, shows: agentBook,
+    short: 'right lines', label: 'Right page lines — wrap to the page, or keep the text’s own lines (a long line shrinks to fit, left to right)' },
   { key: 'zPitch', type: 'number', min: 1, max: 4000, step: 5,
     short: 'spacing', label: 'How far apart the pages ahead stand' },
   { key: 'turned', type: 'number', min: 0.01, max: 1, step: 0.01,
@@ -233,8 +246,10 @@ export function bookTuneId(hit) {
   return null;
 }
 
-/** Lay a record over a book. @returns {boolean} changed */
-export function applyBookTune(book, tune) {
+/** Lay a record over a shelf book (a BookHit) — keys it doesn't know are skipped, as is a
+ *  page-text key on a book that isn't an agent's. @returns {boolean} changed */
+export function applyBookTune(hit, tune) {
+  const book = hit.book;
   let changed = false;
   for (const [key, raw] of Object.entries(tune || {})) {
     if (key === 'form') {
@@ -244,9 +259,22 @@ export function applyBookTune(book, tune) {
     }
     const knob = BOOK_BY_KEY.get(key);
     const v = knob ? coerce(knob, raw) : null;
-    if (v != null && (book.deck[key] !== v || !(key in book.deckOwn)) && book.tuneDeck(key, v)) changed = true;
+    if (v == null) continue;
+    if (knob.page) {
+      if (hit.kind !== 'agent') continue;
+      const text = hit.books.textOf(hit.agentId);
+      if (text && text.own[key] !== v && hit.books.tuneText(hit.agentId, key, v)) changed = true;
+      continue;
+    }
+    if ((book.deck[key] !== v || !(key in book.deckOwn)) && book.tuneDeck(key, v)) changed = true;
   }
   return changed;
+}
+
+/** A book knob's live value on a shelf book (undefined: a page knob on a delta book). */
+function bookValue(hit, knob) {
+  if (!knob.page) return hit.book.deck[knob.key];
+  return hit.kind === 'agent' ? hit.books.textOf(hit.agentId)?.values[knob.key] : undefined;
 }
 
 /**
@@ -268,27 +296,32 @@ export function tuneBook(ctx, hit, key, raw) {
   }
   const knob = BOOK_BY_KEY.get(key);
   if (!knob) return { ok: false, error: `no book knob '${key}' (knobs: ${BOOK_KNOBS.map((k) => k.key).join('|')})` };
+  if (knob.page && hit.kind !== 'agent') return { ok: false, error: `${key} is an agent book's page text — a delta book's pages fit their files` };
+  const set = (v) => (knob.page ? hit.books.tuneText(hit.agentId, key, v) : book.tuneDeck(key, v));
   if (raw === 'default') {
-    book.tuneDeck(key, null);
+    set(null);
     writeTune(ctx, id, key, null);
-    return { ok: true, key, value: book.deck[key], own: false };
+    return { ok: true, key, value: bookValue(hit, knob), own: false };
   }
   const v = coerce(knob, raw);
-  if (v == null) return { ok: false, error: `${key} wants a number` };
-  book.tuneDeck(key, v);
+  if (v == null || (knob.page && knob.type === 'number' && !(v > 0))) {
+    return { ok: false, error: knob.type === 'enum' ? `${key} is one of ${knob.options.join('|')}` : `${key} wants a${knob.page ? ' positive' : ''} number` };
+  }
+  set(v);
   writeTune(ctx, id, key, v);
-  return { ok: true, key, value: book.deck[key], own: true };
+  return { ok: true, key, value: bookValue(hit, knob), own: true };
 }
 
 /**
- * A shelf book's knobs as a reading: live values, form, and which are its own.
+ * A shelf book's knobs as a reading: its kind, live values (the knobs its kind has),
+ * form, and which are its own.
  * @param {AppContext} ctx @param {Object} hit
  */
 export function readBook(ctx, hit) {
   const id = bookTuneId(hit);
   const values = {};
-  for (const k of BOOK_KNOBS) values[k.key] = hit.book.deck[k.key];
-  return { id, form: hit.book.form, values, own: id ? tuneOf(ctx, id) : {} };
+  for (const k of BOOK_KNOBS) if (!k.shows || k.shows(hit)) values[k.key] = bookValue(hit, k);
+  return { id, kind: hit.kind, form: hit.book.form, values, own: id ? tuneOf(ctx, id) : {} };
 }
 
 // ── projection ────────────────────────────────────────────────────────────────
@@ -309,5 +342,5 @@ export function projectTune(ctx, id, tune) {
     return changed;
   }
   const hit = pageableBookOf(ctx, obj);
-  return hit && hit.book === obj && bookTuneId(hit) === id ? applyBookTune(obj, tune) : false;
+  return hit && hit.book === obj && bookTuneId(hit) === id ? applyBookTune(hit, tune) : false;
 }

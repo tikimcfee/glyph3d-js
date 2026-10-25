@@ -94,6 +94,9 @@ function makeWorld() {
         },
         agents: () => [...lanes.keys()].map((id) => ({ id })),
         limitOf: (id) => ({ agentId: id, override: null, cap: 0, count: 0 }),
+        // Page text rides the real AgentBooks — locked in tools/book-page-text.test.mjs.
+        textOf: () => ({ values: {}, own: {} }),
+        tuneText: () => false,
     };
     const world = { relayouts: 0, register() {}, unregister() {}, relayout() { this.relayouts++; } };
     const ctx = {
