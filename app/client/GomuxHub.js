@@ -4,7 +4,7 @@
 
 import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
-import { parseSession, SESSION_HARNESSES } from '@glyph3d/core/collections/sessionAdapter.js';
+import { parseSession, SESSION_HARNESSES, agentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
 import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
 import { buildCarrel } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
@@ -103,6 +103,8 @@ export default class GomuxHub {
         this.lanes = new Map();
         /** Team desks the hub built, by agent name → the desk the team sits at. */
         this._teamParent = new Map();
+        /** Hook lane id → the agent whose book follows that Claude session. */
+        this._follows = new Map();
         this._off = provider.onChange((snap) => this.apply(snap));
         this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._disposed = false;
@@ -136,6 +138,7 @@ export default class GomuxHub {
         this.snapshot = snap;
         const shown = this._shown(snap);
         this.nodes = new Map(shown.map((a) => [a.name, a]));
+        this._claimSessions(shown);
         for (const a of shown) {
             if (!a.transcript || !a.harness) continue;   // no record a dialect reads (aider, custom)
             const hl = this.lanes.get(a.name);
@@ -146,6 +149,36 @@ export default class GomuxHub {
         for (const a of shown) this._status(a);
         this._autoScreens(shown);
         this._centerWhenSettled();
+    }
+
+    /**
+     * The hub's books follow their agents' transcripts, so the project hook (which books a
+     * Claude session by its id prefix) would draw a second book for any of them working in
+     * this repo. Claim each shown agent's session: the hook's events for it defer to the
+     * hub (follows), and a hook book already born for one is cleared.
+     * @param {GomuxAgent[]} shown @private
+     */
+    _claimSessions(shown) {
+        this._follows = new Map();
+        for (const a of shown) {
+            if (a.harness !== 'claude' || !a.sessionId) continue;
+            const hid = agentIdForSession(a.sessionId);
+            if (hid !== a.name) this._follows.set(hid, a.name);
+        }
+        const books = this.ctx.agentBooks;
+        for (const [hid, name] of this._follows) {
+            if (!books.lanes.has(hid) || this.lanes.has(hid)) continue;
+            books.remove(hid);
+            console.info(`[gomux] cleared book ${hid}: gomuxai's ${name} follows that session`);
+        }
+    }
+
+    /**
+     * The agent whose book follows the Claude session a hook lane id names, or null.
+     * @param {string} hookId @returns {string|null}
+     */
+    follows(hookId) {
+        return this._follows.get(hookId) ?? null;
     }
 
     /**

@@ -10,12 +10,15 @@
 //   - a held window that outgrows the pending cap commits anyway (an interrupted call
 //     must not pin the cursor forever),
 //   - single-flight: a push landing mid-read re-reads once after,
-//   - the agent's status rides the lane (meta.gomux, lifecycle, the waiting hand).
+//   - the agent's status rides the lane (meta.gomux, lifecycle, the waiting hand),
+//   - ONE book per Claude session: the hub claims its agents' sessions, a hook book already
+//     born for one is cleared, and the hook verbs (agent.tool/message/meta) defer to the hub.
 //
 // The provider mocks cli/gomux.go's gomux/read window over a growing byte buffer; the
 // books are a recorder. No carrels in ctx — the desk layout stands down.
 
 import GomuxHub from '../app/client/GomuxHub.js';
+import registerAgentCommands from '../app/commands/handlers/agentCommands.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
@@ -151,6 +154,36 @@ const names = (books) => books.appended.map((e) => e.kind === 'tool' ? `tool:${e
     for (let i = 0; i < 5 && hub.lanes.get('c').reading; i++) await new Promise((r) => setTimeout(r, 5));
     eq(names(books), ['say:one', 'say:two'], 'the second push is served by one follow-up read');
     eq(provider.reads, 2, 'two reads, not three');
+}
+
+// ── one book per Claude session: the hub's claim beats the project hook's ──────
+{
+    const books = makeBooks();
+    books.remove = (id) => books.lanes.delete(id);
+    const hub = new GomuxHub({ agentBooks: books }, makeProvider());
+    books.ensure('coord');
+    hub.lanes.set('coord', { name: 'coord', phase: 'open', cursor: 0, skip: 0, reading: false, again: false, harness: 'claude', desk: null });
+    books.ensure('5a795230');                          // the hook booked coord's session before the claim
+    books.ensure('3f34adff');                          // a session no gomuxai agent runs
+    hub._claimSessions([
+        { name: 'coord', harness: 'claude', sessionId: '5a795230-061d-45b7-afc2-beebe47be48e' },
+        { name: 'gem', harness: 'agy', sessionId: 'abcdef12-0000' },
+        { name: 'quiet', harness: 'claude' },
+    ]);
+    eq(hub.follows('5a795230'), 'coord', "the hook's id for coord's session resolves to coord");
+    eq([hub.follows('3f34adff'), hub.follows('abcdef12')], [null, null], 'other sessions (and non-claude harnesses) stay the hook\'s');
+    eq([...books.lanes.keys()].sort(), ['3f34adff', 'coord'], "the hook's duplicate book is cleared; coord's own and the unclaimed one stay");
+
+    const verbs = new Map();
+    registerAgentCommands({ register: (name, fn) => verbs.set(name, fn) });
+    const ctx = { agentBooks: books, gomuxHub: hub };
+    const replies = [
+        verbs.get('agent.tool')(['5a795230', 'claude', 'Bash', '{"command":"ls"}', '"x"', '/p'], ctx),
+        verbs.get('agent.message')(['5a795230', 'claude', 'text', 'hello'], ctx),
+        verbs.get('agent.meta')(['5a795230', '{"slug":"s"}'], ctx),
+    ];
+    ok(replies.every((r) => r.data?.followedBy === 'coord'), `the hook verbs defer to the hub: ${J(replies.map((r) => r.text))}`);
+    ok(!books.lanes.has('5a795230'), 'and draw no second book');
 }
 
 console.log(`gomux-hub: ${pass} passed, ${fail} failed`);

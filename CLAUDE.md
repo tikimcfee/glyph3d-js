@@ -193,7 +193,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
-  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. `gomux.attach <name>`
+  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. One book per Claude
+  session: the relay names a claude agent's session by its transcript when export reports none,
+  and the hub claims it — the project hook's events for a claimed session defer to the hub
+  (`GomuxHub.follows`) and a hook book already born for one is cleared. `gomux.attach <name>`
   shows the agent's live tmux screen as terminal `gx-<name>`, riding beside its book (the book's
   aside — `Book.setAside`: right of the cover, height-fit to it, in its seat box) — with NO
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of

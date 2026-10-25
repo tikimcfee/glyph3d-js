@@ -370,6 +370,12 @@ func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
 		log.Printf("[gomux] %s: transcript outside the harness homes, not served: %s", a.Name, n.Transcript)
 		n.Transcript = ""
 	}
+	// Claude names a transcript by its session id (<projects>/<cwd-slug>/<uuid>.jsonl);
+	// export's session_id stays empty until gomuxai's hooks report one. The display
+	// keys its dedupe on it (the project hook books the same session by its id).
+	if n.SessionID == "" && n.Harness == "claude" && n.Transcript != "" {
+		n.SessionID = strings.TrimSuffix(filepath.Base(n.Transcript), ".jsonl")
+	}
 	return n
 }
 

@@ -179,6 +179,10 @@ function flushKimiWireLane(ctx, books, id, lane) {
     if (Object.keys(meta).length) books.setLaneMeta(id, { harness: 'kimi', ...meta });
 }
 
+/** A hook event for a Claude session gomuxai's hub already books (GomuxHub.follows):
+ *  the hub reads that transcript itself, so the hook's copy draws nothing. */
+const followed = (id, agent) => ({ text: `OK: ${id} — gomuxai's ${agent} follows this session`, data: { id, followedBy: agent } });
+
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
@@ -226,6 +230,8 @@ export default function registerAgentCommands(router) {
         // The delta lane taps the SAME normalized record (before the label rewrite —
         // it needs the cwd-relative target to key files on disk); unwatched ids fall through.
         ctx.deltaBooks?.ingestTool?.(id, rec, cwd);
+        const follower = ctx.gomuxHub?.follows(id);
+        if (follower) return followed(id, follower);
         const label = emitActivity(ctx, books, id, type, rec);
         return {
             text: `OK: ${id} ${rec.action}${label ? ' ' + label : ''}`,
@@ -245,6 +251,8 @@ export default function registerAgentCommands(router) {
         // (say/think). text rides the `call` hatch so its newlines/quotes survive the
         // tokenizer. A whitespace-only block drops (normalizeMessage → null).
         const [id, type, kind] = args;
+        const follower = ctx.gomuxHub?.follows(id);
+        if (follower) return followed(id, follower);
         const text = typeof args[3] === 'string' ? args[3] : String(args[3] ?? '');
         const rec = normalizeMessage(kind, text);
         if (!rec) return { text: `OK: ${kind} dropped (empty)`, data: { dropped: kind } };
@@ -263,6 +271,8 @@ export default function registerAgentCommands(router) {
         // once per session on the first transcript flush. Merges onto the lane and rebakes
         // its nameplate. The lane may not exist yet (meta can beat the first tool event).
         const [id] = args;
+        const follower = ctx.gomuxHub?.follows(id);
+        if (follower) return followed(id, follower);
         const meta = parseJSONArg(args[1]);
         if (!meta) return { text: 'ERR: agent.meta needs a JSON object', data: null };
         books.ensure(id, typeof meta.harness === 'string' ? meta.harness : 'agent');

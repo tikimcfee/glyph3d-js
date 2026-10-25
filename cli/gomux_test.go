@@ -153,6 +153,24 @@ func TestGomuxExport_LiveBeatsDepartedNamesake(t *testing.T) {
 	}
 }
 
+// A claude agent's session id: export's when it reports one, else the transcript's name
+// (Claude names it by the session) — only for a transcript the relay serves.
+func TestGomuxExport_SessionIDFromTranscript(t *testing.T) {
+	home, coordT, childT := exportFixture(t)
+	w := newGomuxTestWatcher(t, home)
+	mustApply(t, w, `{"type":"snapshot","stores":[{"dir":"/s"}],"agents":[`+
+		agentJSON(map[string]any{"name": "said", "store": "/s", "live": true, "session_id": "sid", "transcript": coordT, "dialect": "claude"})+`,`+
+		agentJSON(map[string]any{"name": "named", "store": "/s", "live": true, "transcript": childT, "dialect": "claude"})+`,`+
+		agentJSON(map[string]any{"name": "outside", "store": "/s", "live": true, "transcript": "/etc/x.jsonl", "dialect": "claude"})+`,`+
+		agentJSON(map[string]any{"name": "gem", "store": "/s", "live": true, "transcript": childT, "dialect": "agy"})+`]}`)
+	got := gomuxByName(w.Snapshot())
+	for name, want := range map[string]string{"said": "sid", "named": "t1", "outside": "", "gem": ""} {
+		if got[name].SessionID != want {
+			t.Errorf("%s: sessionId %q, want %q", name, got[name].SessionID, want)
+		}
+	}
+}
+
 // The follower runs a real process: a fake `agent` printing a snapshot and a change.
 func TestGomuxExport_FollowsAProcess(t *testing.T) {
 	dir := t.TempDir()
