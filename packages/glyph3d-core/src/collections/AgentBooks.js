@@ -15,6 +15,13 @@
  *                   the say/think prose. Content fits its page and so reads smaller than
  *                   the headline — at a distance the action call is what reads first.
  *
+ * Each book wears an AgentNameplate above its cover: the session's NAME container-fit
+ * to the book's width, over a live STATUS block (state · step · age, the current
+ * action, where it runs). readout() is the one source for that status — the nameplate,
+ * the Agents panel rows, and the canvas hover readout all read it. An external
+ * orchestrator's fields ride lane.meta.gomux ({name, parent, backend, status, detail,
+ * tool, session}); when present its name/status/detail win.
+ *
  * The book live-follows its newest sheet — work appends pages and the open spread rides
  * forward; page back to inspect history and the head holds (Book's rolodex deck: the
  * open sheet fronts at z = 0, the rest recede). Paging never moves the camera.
@@ -46,7 +53,7 @@ import Book, { PAGE_FACE_DEFAULTS } from './Book.js';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
 import ActionPage, { fitTextBlock } from './ActionPage.js';
-import FieldLabel from './FieldLabel.js';
+import AgentNameplate from './AgentNameplate.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
@@ -109,6 +116,11 @@ export const AGENT_BOOKS_DEFAULTS = {
     coverZPad: 24,              // Z inflation (front of newest / behind oldest)
     coverOpacity: 0.06,         // translucent fill — identity tint, never occlusion
     coverEdgeOpacity: 0.22,     // wireframe frame line (0 = no edges)
+    labelFit: 0.9,              // nameplate: share of the book's spread width the name may span
+    labelMinLineHeight: 14,     // nameplate name: smallest world row pitch (a longer name wraps)
+    labelMaxLineHeight: 40,     // nameplate name: largest world row pitch (a short name stops growing)
+    labelStatusRatio: 0.5,      // nameplate status block row pitch, × the name's
+    labelTickMs: 1000,          // how often the nameplates' ages re-read (text that didn't change is a no-op)
     palette: [                  // per-agent identity hues, indexed by lane creation order
         0x3a6ea5, 0xa56a3a, 0x4a9a6a, 0x8a5aa5, 0xa54a5a, 0x5a8aa5,
     ],
@@ -212,6 +224,18 @@ export function wrapText(text, cols) {
     return out.join('\n');
 }
 
+/** A wall-clock age, terse: now / 12s / 4m / 3h / 2d. */
+export function fmtAge(ms) {
+    if (!(ms >= 0)) return '';
+    const s = Math.round(ms / 1000);
+    if (s < 1) return 'now';
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.round(m / 60);
+    return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+
 /** An {r,g,b} hue lifted toward white by t (0 = hue, 1 = white). */
 const liftHue = (c, t) => ({ r: c.r + (1 - c.r) * t, g: c.g + (1 - c.g) * t, b: c.b + (1 - c.b) * t });
 
@@ -289,37 +313,33 @@ export default class AgentBooks {
                 agentId,
                 agentType: agentType || 'agent',
                 state: 'active', beacon: null, lastActivityTs: this._now(),
+                wallTs: null,          // wall-clock ms of the last LIVE activity (hydrated history ages by meta.lastTs)
                 seq: 0, entries: [],   // one entry per sheet: cards + ids + the record
                 groupId: `agent:book:${agentId}`,
                 sessionId: null,       // the harness session record this book renders (set by hydrate)
-                meta: null,            // session provenance (title/slug/cwd/model/gitBranch…) — hydrate/setLaneMeta
+                meta: null,            // session provenance (title/slug/cwd/model/gitBranch…, gomux) — hydrate/setLaneMeta
                 cwd: null,             // the session's working dir (meta.cwd), kept beside sessionId
-                label: null,           // the nameplate (FieldLabel) above the cover, in the lane's hue
+                label: null,           // the nameplate (AgentNameplate) above the cover, in the lane's hue
                 maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
-            // The nameplate: a FieldLabel (glyph-field text over an identity-hue plate) in the
-            // lane's palette hue, parked above the cover (Book.syncCover owns the per-frame
-            // placement). Born as '~<id> · <type>'; rebuilt to full provenance as metadata
-            // lands (hydrate / setLaneMeta). A field, not a baked texture — so a long session
-            // title instances glyphs instead of breaching the GPU max-texture limit.
-            lane.label = new FieldLabel({
+            // The nameplate: the session's name (container-fit to the book) over its live
+            // status, parked above the cover (Book.syncCover owns the per-frame placement).
+            // Glyph fields, not baked textures — a long title instances glyphs.
+            lane.label = new AgentNameplate({
                 atlas: this.atlas,
-                text: `~${agentId} · ${lane.agentType}`,
-                lineHeight: (this.cfg.pageH * 0.05) / 3,   // per-row; full 3-line provenance ≈ the old plate height
-                plate: {
-                    color: this.cfg.palette[hueIdx % this.cfg.palette.length],
-                    opacity: 0.85,
-                },
+                color: this.cfg.palette[hueIdx % this.cfg.palette.length],
             });
             lane.label.name = `agent-label:${agentId}`;
             book.setNameplate(lane.label);
+            this._refreshNameplate(lane);
             this.lanes.set(agentId, lane);
             this._registerGroup(agentId, lane);
             this._emitChange();
         } else if (agentType && lane.agentType !== agentType) {
             lane.agentType = agentType;
+            this._refreshNameplate(lane);
         }
         return lane;
     }
@@ -337,6 +357,7 @@ export default class AgentBooks {
         this._setState(lane, 'active');
         lane.beacon = null;   // it's acting → hand lowered
         lane.lastActivityTs = this._now();
+        if (!this._batch) lane.wallTs = Date.now();   // a hydration replays history — its age is meta.lastTs
 
         const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
         const seq = lane.seq++;
@@ -403,7 +424,7 @@ export default class AgentBooks {
             record, ts: this._now(),
         });
         this._trimLane(lane);   // past the cap, the oldest turn leaves as the newest lands
-        if (!this._batch) { this._relayout(); this._emitChange(); }
+        if (!this._batch) { this._refreshNameplate(lane); this._relayout(); this._emitChange(); }
         return lane;
     }
 
@@ -440,7 +461,6 @@ export default class AgentBooks {
         if (meta) {
             lane.meta = { ...(lane.meta || {}), ...meta };
             if (meta.cwd) lane.cwd = meta.cwd;
-            lane.label?.setText(this.provenanceText(lane));
         }
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
@@ -465,15 +485,17 @@ export default class AgentBooks {
         // A hydrated book renders a RECORD, not a live process — it rests at 'idle'
         // (never stall-demoted) until a live hook event lands and marks it active.
         this._setState(lane, 'idle');
+        this._refreshNameplate(lane);   // once, after the batch — not per record
         this._relayout();
         this._emitChange();
         return added;
     }
 
     /**
-     * agent.meta / agent.kimi-wire: merge session metadata onto a lane and rebake its
-     * nameplate to the new provenance. Live lanes learn their title/cwd/model this way
-     * (archived ones get it through hydrate's opts.meta). Unknown lane → false.
+     * agent.meta / agent.kimi-wire: merge session metadata onto a lane and restage its
+     * nameplate. Live lanes learn their title/cwd/model this way (archived ones get it
+     * through hydrate's opts.meta); an orchestrator's fields ride `meta.gomux`. Unknown
+     * lane → false.
      * @param {string} id lane id
      * @param {Object} meta partial metadata — merged over what the lane already holds
      * @returns {boolean}
@@ -483,27 +505,81 @@ export default class AgentBooks {
         if (!lane || !meta || typeof meta !== 'object') return false;
         lane.meta = { ...(lane.meta || {}), ...meta };
         if (lane.meta.cwd) lane.cwd = lane.meta.cwd;
-        lane.label?.setText(this.provenanceText(lane));
+        this._refreshNameplate(lane);
         this._emitChange();
         return true;
     }
 
     /**
-     * The nameplate's provenance text for a lane — up to three lines, each omitted
-     * when its data is absent:
-     *   1. the session name — meta.title ?? meta.slug ?? '~<id>'
-     *   2. basename(meta.cwd) · agentType
-     *   3. meta.model (· meta.gitBranch)
+     * What a session IS and what it's DOING, in one record — the single source the
+     * nameplate, the Agents panel rows, and the canvas hover readout all read.
+     *
+     *   name    — meta.gomux.name ?? meta.title ?? meta.agentName ?? meta.slug ?? '~<id>'
+     *   status  — meta.gomux.status ?? the lane's lifecycle (active/idle/stalled/done)
+     *   verb/head/action — the current call: gomux.tool + gomux.detail when an orchestrator
+     *             reports them, else the newest record's call (actionCall); action is the
+     *             one-line `verb  head` form
+     *   step    — records this book has seen (lane.seq)
+     *   wallTs/age — wall-clock time of the last live activity, else the record's lastTs
+     *   where   — basename(cwd) · type · model · branch · gomux backend · parent
+     *   page    — the book's head/count/following
+     * `ref` is a lane or anything resolveLane takes (id, group id, Book). With `sheetId`,
+     * `sheet` describes that sheet too (a hovered page that isn't the newest).
+     * @param {string|Object} ref
+     * @param {string} [sheetId]
+     * @returns {Object|null}
      */
-    provenanceText(lane) {
+    readout(ref, sheetId) {
+        const lane = (ref && typeof ref === 'object' && Array.isArray(ref.entries)) ? ref : this.resolveLane(ref)?.[1];
+        if (!lane) return null;
         const meta = lane.meta || {};
-        const lines = [meta.title ?? meta.slug ?? `~${lane.agentId}`];
+        const gx = meta.gomux && typeof meta.gomux === 'object' ? meta.gomux : null;
+        const newest = lane.entries.length ? lane.entries[lane.entries.length - 1] : null;
+        let verb = newest?.call.verb || '', head = newest?.call.head || '';
+        if (gx && (gx.tool || gx.detail)) { verb = gx.tool || ''; head = gx.detail || ''; }
+        const wallTs = lane.wallTs ?? (Number.isFinite(meta.lastTs) ? meta.lastTs : null);
         const base = meta.cwd ? String(meta.cwd).split('/').filter(Boolean).pop() : null;
-        const line2 = [base, lane.agentType].filter(Boolean).join(' · ');
-        if (line2) lines.push(line2);
-        const line3 = [meta.model, meta.gitBranch].filter(Boolean).join(' · ');
-        if (line3) lines.push(line3);
-        return lines.join('\n');
+        const where = [base, lane.agentType, meta.model, meta.gitBranch, gx?.backend,
+            gx?.parent ? `parent ${gx.parent}` : null].filter(Boolean).join(' · ');
+        const out = {
+            agentId: lane.agentId,
+            name: gx?.name || meta.title || meta.agentName || meta.slug || `~${lane.agentId}`,
+            state: lane.state,
+            status: gx?.status || lane.state,
+            beacon: lane.beacon,
+            verb, head,
+            action: [verb, head].filter(Boolean).join('  '),
+            step: lane.seq,
+            wallTs,
+            age: wallTs != null ? fmtAge(Date.now() - wallTs) : '',
+            where,
+            page: lane.book.headState(),
+            sheet: null,
+        };
+        if (sheetId) {
+            const i = lane.entries.findIndex((e) => e.sheetId === sheetId);
+            if (i >= 0) {
+                const e = lane.entries[i];
+                out.sheet = { index: i, verb: e.call.verb, head: e.call.head, info: e.infoText,
+                    window: e.window ? { ...e.window } : null };
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The nameplate's two blocks for a lane, unwrapped: the name, and the status rows —
+     *   `status · step N · age ago` (· `needs you: <beacon>`)
+     *   the current action (`verb  head`)
+     *   where it runs (cwd · type · model · branch · backend · parent)
+     * @returns {{name:string, status:string}}
+     */
+    nameplateText(lane) {
+        const r = this.readout(lane);
+        const age = r.age ? (r.age === 'now' ? 'now' : `${r.age} ago`) : null;
+        const row1 = [r.status, r.step ? `step ${r.step}` : null, age,
+            r.beacon ? `needs you: ${r.beacon}` : null].filter(Boolean).join(' · ');
+        return { name: r.name, status: [row1, r.action, r.where].filter(Boolean).join('\n') };
     }
 
     /** agent.state — set a lane's lifecycle by hand. */
@@ -511,6 +587,7 @@ export default class AgentBooks {
         const lane = this.lanes.get(agentId);
         if (!lane || !STATES.has(state)) return false;
         this._setState(lane, state);
+        this._refreshNameplate(lane);
         this._emitChange();
         return true;
     }
@@ -521,6 +598,7 @@ export default class AgentBooks {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
         this._setState(lane, 'done');
+        this._refreshNameplate(lane);
         this._emitChange();
         return true;
     }
@@ -530,6 +608,7 @@ export default class AgentBooks {
         const lane = this.lanes.get(agentId);
         if (!lane) return false;
         lane.beacon = msg || 'needs you';
+        this._refreshNameplate(lane);
         this._emitChange();
         return true;
     }
@@ -640,15 +719,22 @@ export default class AgentBooks {
     /**
      * The lanes present, for the panel's roster — everything a row needs in one call:
      * id, type, lifecycle, beacon, identity color, sheet count, retention (effective
-     * cap + whether it's an override), head + live-follow, and the newest sheet's time.
+     * cap + whether it's an override), head + live-follow, the newest sheet's time, and
+     * the readout's name / status / current action / wall-clock time.
      * Ordered oldest lane first (creation order).
      */
     agents() {
         const pal = this.cfg.palette;
         return [...this.lanes.entries()].map(([id, l]) => {
             const cap = this._capFor(l);
+            const r = this.readout(l);
             return {
                 id,
+                name: r.name,
+                status: r.status,
+                action: r.action,
+                step: r.step,
+                wallTs: r.wallTs,
                 type: l.agentType,
                 state: l.state,
                 beacon: l.beacon,
@@ -692,15 +778,19 @@ export default class AgentBooks {
 
     // -- per-frame -------------------------------------------------------------------
 
-    /** Ease every book's deck toward its slots; detect stalls. */
+    /** Ease every book's deck toward its slots; detect stalls; re-read the nameplates'
+     *  ages every cfg.labelTickMs (an unchanged plate is a no-op in FieldLabel). */
     update(dt) {
         const now = this._now();
+        const tick = !this._batch && !(now - (this._labelTickAt ?? -Infinity) < this.cfg.labelTickMs);   // a hydration restages once, at its end
+        if (tick) this._labelTickAt = now;
         let changed = false;
         for (const lane of this.lanes.values()) {
             if (lane.state === 'active' && now - lane.lastActivityTs > this.cfg.stallMs) {
                 this._setState(lane, 'stalled');
                 changed = true;
-            }
+                this._refreshNameplate(lane);
+            } else if (tick) this._refreshNameplate(lane);
             lane.book.update(dt);
         }
         if (changed) this._emitChange();
@@ -744,8 +834,9 @@ export default class AgentBooks {
      * and the Settings rows both route through. Verso cards re-size to their world line
      * heights and re-wrap to the page (a re-fold, so their sheet re-arranges as each
      * settles); worldScale content cards bake their layout at build, so a uniform
-     * transform re-sizes them (desired ÷ built). Then re-fit + re-flow so pages re-read.
-     * A tightened cfg.maxSheets lands here too — each lane sheds to its cap first. (Snapshot windows re-frame on the next snapshot load.)
+     * transform re-sizes them (desired ÷ built). Then re-fit + re-flow so pages re-read,
+     * and restage the nameplates. A tightened cfg.maxSheets lands here too — each lane
+     * sheds to its cap first. (Snapshot windows re-frame on the next snapshot load.)
      */
     applyScales() {
         for (const lane of this.lanes.values()) {
@@ -761,6 +852,7 @@ export default class AgentBooks {
                 }
             }
             lane.book.fit(this._pageOpts(lane));
+            this._refreshNameplate(lane);
         }
         this._relayout();
     }
@@ -854,6 +946,30 @@ export default class AgentBooks {
             e.info.setLayout({ wrapWidth: sz.info.cols }).then(settle).catch(() => {});
         }
         e.verso?.arrange?.(this._arrangeOpts());
+    }
+
+    /**
+     * Restage a lane's nameplate from its readout. The NAME container-fits the book: it
+     * spans up to labelFit of the spread's width, its line height clamped to
+     * [labelMinLineHeight, labelMaxLineHeight] — a name too long even at the minimum
+     * wraps. The status block rides at labelStatusRatio × the name's line height, wrapped
+     * to the same width. Identical text is a no-op downstream (FieldLabel). @private
+     */
+    _refreshNameplate(lane) {
+        if (!lane.label) return;
+        const c = this.cfg;
+        const { name, status } = this.nameplateText(lane);
+        const adv = this._advPerLh();
+        const W = (2 * c.pageW + c.gutter) * c.labelFit;
+        const widest = Math.max(1, ...name.split('\n').map((l) => [...l].length));
+        const lo = Math.min(c.labelMinLineHeight, c.labelMaxLineHeight);
+        const nameLh = Math.min(Math.max(W / (widest * adv), lo), c.labelMaxLineHeight);
+        const statusLh = nameLh * c.labelStatusRatio;
+        const cols = (lh) => Math.floor(W / (adv * lh) + 1e-6);   // a name fit exactly to W is W/lh cells, not one fewer
+        lane.label.set(
+            wrapText(name, cols(nameLh)),
+            status ? wrapText(status, cols(statusLh)) : '',
+            { nameLh, statusLh });
     }
 
     /** A bare CodeGrid (no content yet) — the caller drives the single load. */

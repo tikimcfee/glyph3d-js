@@ -743,6 +743,14 @@ export const SETTINGS = [
   { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
   { key: 'book.proseWrapCols', label: 'Message (say / think) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
   { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
+  // The nameplate above each book: the session NAME container-fit to the spread (a share
+  // of its width, row height clamped to [min, max] — past the min it wraps) over the live
+  // STATUS block at a ratio of the name's row height; ages re-read every tick.
+  { key: 'book.labelFit', label: 'Nameplate width (share of the spread)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelFit, min: 0.05, max: 10, step: 0.05, apply: agentBookParam('labelFit') },
+  { key: 'book.labelMinLineHeight', label: 'Nameplate min name row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelMinLineHeight, min: 0.5, max: 1000, step: 0.5, apply: agentBookParam('labelMinLineHeight') },
+  { key: 'book.labelMaxLineHeight', label: 'Nameplate max name row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelMaxLineHeight, min: 0.5, max: 1000, step: 0.5, apply: agentBookParam('labelMaxLineHeight') },
+  { key: 'book.labelStatusRatio', label: 'Nameplate status size (× name)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelStatusRatio, min: 0.05, max: 5, step: 0.05, apply: agentBookParam('labelStatusRatio') },
+  { key: 'book.labelTickMs', label: 'Nameplate age refresh (ms)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelTickMs, min: 50, max: 600000, step: 50, apply: agentBookParam('labelTickMs') },
   // Books — the SHARED base every Book carrier wears, fanned to ALL THREE owners (agent
   // shelf, delta shelf, library volumes): the page face + the COVER (the translucent
   // bounding box — on library volumes that's the "directory box"; on agent/delta books

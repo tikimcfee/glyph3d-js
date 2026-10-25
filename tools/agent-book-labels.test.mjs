@@ -1,18 +1,23 @@
-// agent-book-labels.test.mjs — behavior lock for agent book NAMEPLATES: the FieldLabel
-// (glyph-field text over a palette-hue plate) each lane's book wears above its cover, and
-// the provenance metadata flow that fills it (hydrate opts.meta / setLaneMeta →
-// provenanceText → setText).
+// agent-book-labels.test.mjs — behavior lock for agent book NAMEPLATES: the AgentNameplate
+// (the session NAME on a palette-hue plate over a live STATUS block) each lane's book wears
+// above its cover, and the readout that fills it (hydrate opts.meta / setLaneMeta / live
+// activity → readout → nameplateText → AgentNameplate.set).
 //
 //   bun tools/agent-book-labels.test.mjs
 //
 // Locks:
 //   - ensure() creates a nameplate in the lane's palette hue, parented to the book,
-//     initial text '~<id> · <agentType>'
+//     named '~<id>', its status naming the lifecycle + harness
 //   - Label3D._bake multi-line: '\n' stacks rows (Button3D chrome keeps the baked path;
 //     dock-labels.test.mjs stays green as the regression net)
-//   - hydrate(..., {meta}) stores lane.meta/lane.cwd and rebuilds the plate text
-//   - setLaneMeta(id, meta) merges and rebuilds; unknown id → false
-//   - provenanceText: title/slug/~id · basename(cwd)+type · model+branch, lines omitted
+//   - container-fit: a short name stops at labelMaxLineHeight, a longer one shrinks toward
+//     labelMinLineHeight, a name too long even there WRAPS (every character kept)
+//   - hydrate(..., {meta}) stores lane.meta/lane.cwd and restages the plate ONCE (not per
+//     record); a hydrated book's age reads the record's lastTs
+//   - live activity restages: status · step · age, the current call, where it runs
+//   - setLaneMeta(id, meta) merges and restages; unknown id → false
+//   - meta.gomux (an orchestrator's fields) wins the name / status / current call
+//   - readout(): the one source the plate, the panel rows (agents()) and the hover read
 //   - remove()/_kill disposes the plate with the book
 //
 // Headless: the shared 2d-canvas stub stands in for the DOM (the plate bake), the
@@ -26,7 +31,7 @@ import * as THREE from 'three';
 globalThis.window ??= { addEventListener() {} };
 
 const { default: Label3D } = await import('../packages/glyph3d-core/src/components/Label3D.js');
-const { default: FieldLabel } = await import('../packages/glyph3d-core/src/collections/FieldLabel.js');
+const { default: AgentNameplate } = await import('../packages/glyph3d-core/src/collections/AgentNameplate.js');
 const { default: AgentBooks } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
 
 let pass = 0, fail = 0;
@@ -60,17 +65,27 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); 
 
 // ── nameplate on ensure ──
 const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
+const cfg = books.cfg;
 {
     const lane = books.ensure('abc123', 'claude');
-    ok(lane.label instanceof FieldLabel, 'ensure creates a FieldLabel nameplate');
-    ok(lane.label.text === '~abc123 · claude', `initial text is '~<id> · <type>' (got "${lane.label.text}")`);
-    ok(lane.label._plateCfg.color === books.cfg.palette[0], 'nameplate wears the lane palette hue');
+    ok(lane.label instanceof AgentNameplate, 'ensure creates an AgentNameplate');
+    ok(lane.label.nameText === '~abc123', `initial name is '~<id>' (got "${lane.label.nameText}")`);
+    ok(lane.label.statusText === 'active\nclaude',
+        `initial status names the lifecycle + harness (got ${JSON.stringify(lane.label.statusText)})`);
+    ok(lane.label.nameLabel._plateCfg.color === cfg.palette[0], 'name plate wears the lane palette hue');
     ok(lane.book.nameplate === lane.label && lane.label.parent === lane.book,
         'nameplate is parented to the book (book.setNameplate)');
     ok(lane.label.userData.isMarker === true, 'nameplate is pick-inert');
+    ok(lane.label.nameLabel.lineHeight === cfg.labelMaxLineHeight,
+        `a short name stops at labelMaxLineHeight (got ${lane.label.nameLabel.lineHeight})`);
+    ok(Math.abs(lane.label.statusLabel.lineHeight - cfg.labelMaxLineHeight * cfg.labelStatusRatio) < 1e-9,
+        'status rows ride labelStatusRatio × the name');
+}
 
-    // syncCover parks it just above the cover box, re-anchored per update(). The cover
-    // only has bounds once the book holds a sheet (a sheetless book's bounds are empty).
+// ── placement: syncCover parks the plate just above the cover ──
+{
+    // A throwaway lane: the bare leaf below is a raw sheet with no entry behind it.
+    const lane = books.ensure('place1', 'claude');
     const leaf = new THREE.Object3D();
     leaf.userData.size = { x: 100, y: 200, z: 2 };   // leafBox's bare-object contract
     lane.book.addSheet({ recto: leaf });
@@ -80,22 +95,59 @@ const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, 
     const topEdge = c.mesh.position.y + c.mesh.scale.y / 2;
     const gap = lane.label.position.y - lane.label.height / 2 - topEdge;
     ok(gap > 0 && gap < lane.label.height, `nameplate sits just above the cover (gap ${gap.toFixed(2)} of plate ${lane.label.height})`);
+    const nl = lane.label.nameLabel, sl = lane.label.statusLabel;
+    ok(nl.position.y - nl.height / 2 > sl.position.y + sl.height / 2 - 1e-9, 'the name stacks above the status block');
+    books.remove('place1');
 }
 
-// ── hydrate stores meta + rebakes ──
+// ── container-fit: shrink toward the minimum, then wrap ──
 {
-    await books.hydrate('abc123', [], {
+    const W = (2 * cfg.pageW + cfg.gutter) * cfg.labelFit;
+    const mid = books.ensure('fit1', 'claude');
+    books.setLaneMeta('fit1', { title: 'A considerably longer session title that has to shrink to fit the book' });
+    const lh = mid.label.nameLabel.lineHeight;
+    ok(lh < cfg.labelMaxLineHeight && lh >= cfg.labelMinLineHeight, `a longer name shrinks within [min,max] (lh ${lh.toFixed(2)})`);
+    ok(mid.label.nameLabel.width <= W * 1.15, `…spanning about labelFit of the spread (${mid.label.nameLabel.width.toFixed(0)} vs ${W.toFixed(0)})`);
+
+    const title = 'word '.repeat(60).trim() + ' Supercalifragilisticexpialidociouslylongunbrokentoken'.repeat(3);
+    const long = books.ensure('fit2', 'claude');
+    books.setLaneMeta('fit2', { title });
+    ok(long.label.nameLabel.lineHeight === cfg.labelMinLineHeight, 'a name too long even at the minimum holds the minimum…');
+    ok(long.label.nameText.includes('\n'), '…and WRAPS');
+    ok(long.label.nameText.replace(/\s+/g, '') === title.replace(/\s+/g, ''), 'wrapping keeps every character (no cut, no ellipsis)');
+    books.remove('fit1'); books.remove('fit2');
+}
+
+// ── hydrate stores meta + restages once ──
+{
+    let restages = 0;
+    const orig = books._refreshNameplate.bind(books);
+    books._refreshNameplate = (l) => { if (l.agentId === 'abc123') restages++; return orig(l); };
+    const lastTs = Date.now() - 4 * 60 * 1000;
+    await books.hydrate('abc123', [
+        { action: 'read', target: 'a.js', detail: '', result: '', meta: { lines: 3 } },
+        { action: 'bash', target: '', detail: 'ls -la', result: 'x\n', meta: { lines: 1 } },
+        { action: 'say', target: '', detail: '', result: 'Done — the plate reads.\nMore prose.', meta: null },
+    ], {
         sessionId: 'sess-1',
-        meta: { title: 'Fix the flurbit', cwd: '/home/ivan/dev/glyph3d-js', model: 'claude-opus-4', gitBranch: 'main' },
+        meta: { title: 'Fix the flurbit', cwd: '/home/ivan/dev/glyph3d-js', model: 'claude-opus-4', gitBranch: 'main', lastTs },
     });
+    books._refreshNameplate = orig;
+    ok(restages === 1, `hydrate restages the plate ONCE, after the batch (got ${restages})`);
     const lane = books.lanes.get('abc123');
     ok(lane.sessionId === 'sess-1', 'hydrate still stores sessionId');
     ok(lane.meta?.title === 'Fix the flurbit' && lane.meta?.model === 'claude-opus-4', 'hydrate stores lane.meta');
     ok(lane.cwd === '/home/ivan/dev/glyph3d-js', 'hydrate stores lane.cwd from meta.cwd');
-    ok(lane.label.text === 'Fix the flurbit\nglyph3d-js · claude\nclaude-opus-4 · main',
-        `hydrate rebakes the full provenance (got ${JSON.stringify(lane.label.text)})`);
+    ok(lane.label.nameText === 'Fix the flurbit', `the name is the title (got ${JSON.stringify(lane.label.nameText)})`);
+    const st = lane.label.statusText;
+    ok(st.startsWith('idle · step 3 · 4m ago'), `status row: idle · step · age from the record's lastTs (got ${JSON.stringify(st)})`);
+    ok(st.includes('say  Done — the plate reads.') && !st.includes('More prose'),
+        `the current call = the newest record's first line (got ${JSON.stringify(st)})`);
+    ok(st.includes('glyph3d-js · claude · claude-opus-4 · main'), 'where it runs: cwd · type · model · branch');
     const row = books.agents().find((a) => a.id === 'abc123');
     ok(row?.meta?.title === 'Fix the flurbit', 'agents() exposes meta per lane');
+    ok(row?.name === 'Fix the flurbit' && row?.status === 'idle' && row?.action === 'say  Done — the plate reads.' && row?.wallTs === lastTs,
+        `agents() rows carry the readout's name / status / action / wallTs (got ${JSON.stringify([row?.name, row?.status, row?.action])})`);
 }
 
 // ── hydrate accepts pre-normalized records (the codec's output shape) ──
@@ -110,26 +162,46 @@ const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, 
     ok(lane?.entries[1]?.record?.action === 'bash', 'the record rides the entry verbatim');
 }
 
-// ── setLaneMeta merges + rebakes; provenance omits absent lines ──
+// ── live activity restages the status ──
+{
+    books.activity('abc123', 'claude', { action: 'bash', target: '', detail: 'rg -n foo src/\n  | head -5', result: 'hit\n', meta: { lines: 1 } });
+    const lane = books.lanes.get('abc123');
+    const st = lane.label.statusText;
+    ok(st.startsWith('active · step 4 · now'), `live activity: active · step · now (got ${JSON.stringify(st)})`);
+    ok(st.includes('bash  rg -n foo src/'), 'the current call is the new command\'s first line');
+    const r = books.readout('abc123', lane.entries[0].sheetId);
+    ok(r.page.count === lane.entries.length && r.page.following === true, 'readout carries the book\'s page state');
+    ok(r.sheet?.verb === 'read' && r.sheet?.head === 'a.js', `readout(…, sheetId) describes that sheet (got ${JSON.stringify(r.sheet)})`);
+    ok(books.readout('agent:book:abc123')?.agentId === 'abc123' && books.readout(lane.book)?.agentId === 'abc123',
+        'readout resolves group ids and the Book itself (the hover paths)');
+    ok(books.readout('phantom') === null, 'readout of an unknown ref is null');
+    books.request('abc123', 'pick a branch');
+    ok(lane.label.statusText.split('\n')[0].endsWith('needs you: pick a branch'), 'a raised hand rides the status row');
+}
+
+// ── setLaneMeta merges + restages; gomux wins ──
 {
     ok(books.setLaneMeta('abc123', { model: 'kimi-k2' }) === true, 'setLaneMeta returns true for a live lane');
     const lane = books.lanes.get('abc123');
     ok(lane.meta.model === 'kimi-k2' && lane.meta.title === 'Fix the flurbit', 'setLaneMeta merges over existing meta');
-    ok(lane.label.text === 'Fix the flurbit\nglyph3d-js · claude\nkimi-k2 · main',
-        `setLaneMeta rebakes the plate (got ${JSON.stringify(lane.label.text)})`);
+    ok(lane.label.statusText.includes('claude · kimi-k2 · main'), `setLaneMeta restages the plate (got ${JSON.stringify(lane.label.statusText)})`);
     ok(books.setLaneMeta('phantom', { model: 'x' }) === false, 'setLaneMeta on an unknown lane is false');
 
-    // A sparse lane: only a slug — no cwd line, no model/branch line.
+    books.setLaneMeta('abc123', { gomux: { name: 'builder-2', parent: 'lead', backend: 'claude-code', status: 'waiting on review', detail: 'go test ./...', tool: 'bash', session: 's-9' } });
+    const st = lane.label.statusText;
+    ok(lane.label.nameText === 'builder-2', `gomux.name wins the name (got ${lane.label.nameText})`);
+    ok(st.startsWith('waiting on review · '), `gomux.status wins the status (got ${JSON.stringify(st)})`);
+    ok(st.includes('bash  go test ./...'), 'gomux tool + detail win the current call');
+    const flat = st.replace(/\s+/g, ' ');   // the plate wraps its rows to the book's width
+    ok(flat.includes('claude-code') && flat.includes('parent lead'), 'gomux backend + parent join where it runs');
+
+    // A sparse lane: only a slug.
     const lane2 = books.ensure('def456', 'kimi');
     books.setLaneMeta('def456', { slug: 'quiet-session' });
-    ok(lane2.label.text === 'quiet-session\nkimi',
-        `provenance omits absent lines (got ${JSON.stringify(lane2.label.text)})`);
-    ok(books.provenanceText(lane2) === lane2.label.text, 'provenanceText is the plate\'s source of truth');
-
-    // A bare lane falls back to '~<id>' on line 1.
-    const lane3 = books.ensure('zzz', 'agent');
-    ok(books.provenanceText(lane3) === '~zzz\nagent',
-        `no meta → '~<id>' + harness only (got ${JSON.stringify(books.provenanceText(lane3))})`);
+    ok(lane2.label.nameText === 'quiet-session', 'slug names a session with no title');
+    ok(lane2.label.statusText === 'active\nkimi', `a bare lane's status: lifecycle + harness only (got ${JSON.stringify(lane2.label.statusText)})`);
+    const t = books.nameplateText(lane2);
+    ok(t.name === lane2.label.nameText && t.status === lane2.label.statusText, 'nameplateText is the plate\'s source of truth');
 }
 
 // ── _kill disposes the nameplate ──
