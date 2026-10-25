@@ -188,6 +188,10 @@ function* parseClaudeSessionSteps(text, budgetMs = Infinity) {
         try { obj = JSON.parse(line); } catch { continue; }
         if (!obj || typeof obj !== 'object') continue;
         if (obj.isSidechain === true) continue;
+        // Claude Code's API-request log (api-request / -blob / -shape): what each model call
+        // was sent, as hash-addressed message copies — not conversation events. Its assistant
+        // blobs repeat tool calls already in the transcript (same ids).
+        if (typeof obj.type === 'string' && obj.type.startsWith('api-request')) continue;
         parsed.push(obj);
         lineOf.push(li);
     }

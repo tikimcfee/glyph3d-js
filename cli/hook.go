@@ -211,6 +211,7 @@ func sendTool(conn *websocket.Conn, id, typ, name string, input, response json.R
 // content blocks. We read `text` (the agent's reply) and `thinking` (its reasoning); tool_use blocks
 // arrive via the normal tool event, so we skip them here.
 type transcriptLine struct {
+	Type    string `json:"type"`
 	Message struct {
 		Role    string `json:"role"`
 		Content []struct {
@@ -310,7 +311,9 @@ func forwardConversation(conn *websocket.Conn, event *HookEvent) {
 		if err := json.Unmarshal(line, &tl); err != nil {
 			continue
 		}
-		if tl.Message.Role != "assistant" {
+		// Conversation lines only: Claude Code's API-request log (api-request-blob) repeats
+		// assistant messages already in the transcript, with role "assistant" and its own type.
+		if tl.Type != "assistant" || tl.Message.Role != "assistant" {
 			continue
 		}
 		for _, b := range tl.Message.Content {

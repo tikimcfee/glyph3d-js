@@ -52,6 +52,10 @@ const fixture = [
   // the result text rides in as `content`
   user({ timestamp: T(8), toolUseResult: { structuredPatch: SP } },
     { type: 'tool_result', tool_use_id: 'tu-edit', content: 'The file has been updated' }),
+  // Claude Code's API-request log: hash-addressed COPIES of messages already above — never events
+  JSON.stringify({ type: 'api-request-blob', sessionId: 's', hash: 'h1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu-bash', name: 'Bash', input: { command: 'ls' } }] } }),
+  JSON.stringify({ type: 'api-request-blob', sessionId: 's', hash: 'h2', message: { role: 'assistant', content: [{ type: 'text', text: 'all done' }] } }),
+  JSON.stringify({ type: 'api-request', sessionId: 's', id: 'r1', tail: '["h1","h2"]', timestamp: T(9) }),
   // trailing prose after the last tool
   asst({ timestamp: T(9) }, { type: 'text', text: 'all done' }),
 ].join('\n') + '\n';
@@ -59,7 +63,7 @@ const fixture = [
 const { events, cwd, firstTs, lastTs } = parseClaudeSession(fixture);
 
 // ── stream shape: 7 events, transcript order, tools at their tool_use positions ───────
-eq(events.length, 7, 'event count (skips: sidechain, malformed, non-message, user prompt, blank text)');
+eq(events.length, 7, 'event count (skips: sidechain, malformed, non-message, user prompt, blank text, api-request log)');
 eq(events.map((e) => e.kind), ['message', 'message', 'tool', 'tool', 'tool', 'tool', 'message'], 'kinds in transcript order');
 eq(events.filter((e) => e.kind === 'tool').map((e) => e.name), ['Edit', 'Bash', 'Grep', 'Read'],
   'tools emit at tool_use order, not result-arrival order');
