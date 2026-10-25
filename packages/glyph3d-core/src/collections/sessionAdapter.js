@@ -13,12 +13,17 @@
  *               — a fold over the EXPORTED incremental translator
  *               kimiWireLineToEvents(obj, state), so live wire lines (pushed by the kimi
  *               hook) and archive files run through the ONE dialect implementation.
+ *   adapter #3  parseAgySession(text, cwd)      Antigravity CLI (agy) conversation transcript
+ *               (~/.gemini/antigravity-cli/brain/<conv>/.system_generated/logs/transcript_full.jsonl)
+ *               — a fold over the exported step translator agyStepToEvents(obj, state).
  *
  *   parse<Harness>Session(...) → { events, cwd, firstTs, lastTs, meta }
+ *   parseSession(text, { harness, cwd })  — the ONE harness dispatch (throws on an unknown
+ *               harness); the parse codec and its main-thread fallback both ride it.
  *
  * meta is the provenance record the books' nameplates read (cwd/firstTs/lastTs also stay
  * top-level for backward compatibility until callers migrate):
- *   { harness: 'claude'|'kimi', cwd, slug, title, model, version, gitBranch, agentName,
+ *   { harness: 'claude'|'kimi'|'agy', cwd, slug, title, model, version, gitBranch, agentName,
  *     firstTs, lastTs, ... }   — harness-specific extras noted per adapter below.
  *
  * events, in transcript LINE order (block order within a line):
@@ -30,6 +35,7 @@
  *     transcript first, then the event is emitted at the tool_use's own position.
  *   { kind: 'message', mtype: 'text'|'thinking', text, ts } — one per assistant prose block
  *     (whitespace-only blocks dropped), mirroring what the live hook forwards as `agent.message`.
+ *     agy adds mtype 'system' — what the harness told the model (messages, compaction summaries).
  *
  * SKIPPED: sidechain lines (`isSidechain: true` — subagent work; the live hook gives subagents
  * their own lanes, so folding them into the main book would misattribute), malformed JSON lines,
@@ -293,7 +299,8 @@ export function kimiAgentIdForSession(sessionId) {
 
 /**
  * The lane id an archive entry opens under — the per-harness derivation (a kimi id's
- * `session_` prefix would collapse every kimi lane to one id under the claude rule).
+ * `session_` prefix would collapse every kimi lane to one id under the claude rule; an agy
+ * conversation id is a bare UUID, so the claude rule fits it as-is).
  * The ONE place an archive entry meets a lane: open, the panel's open-lane filter, and
  * restore of a prefix-only (hook-born) book all compare lane ids through it.
  * @param {{ id: string, harness?: string }} entry
@@ -501,4 +508,422 @@ function* parseKimiSessionSteps(text, cwd, budgetMs = Infinity) {
             firstTs: state.firstTs, lastTs: state.lastTs,
         },
     };
+}
+
+// --- adapter #3: Antigravity CLI (agy) conversation transcripts ------------------------------
+//
+// agy records a conversation as `~/.gemini/antigravity-cli/brain/<conversationId>/
+// .system_generated/logs/transcript_full.jsonl` — one STEP per line:
+//   { step_index, source: USER_EXPLICIT|MODEL|SYSTEM, type, status: DONE|RUNNING|ERROR|INVALID,
+//     created_at (ISO), content?, thinking?, tool_calls?: [{name, args}], error?,
+//     input_tokens?, cache_read_tokens?, output_tokens?, cwd? }
+// The step types:
+//   USER_INPUT        a turn's prompt: the typed text sits inside <USER_REQUEST>…</USER_REQUEST>,
+//                     followed by <ADDITIONAL_METADATA> / <USER_SETTINGS_CHANGE> blocks. Emits
+//                     nothing (the Claude adapter emits no user prose either); the first prompt
+//                     is the title fallback, a `Model Selection` settings change names the model.
+//                     Calls still awaiting a result when a new prompt lands are abandoned (an
+//                     interrupted turn) — their responses stay null.
+//   PLANNER_RESPONSE  the model's turn: `thinking` → message thinking, `content` → message text,
+//                     then one tool event per `tool_calls` entry.
+//   GENERIC           ONE TOOL RESULT. Results carry no call id: the next N GENERIC steps answer
+//                     the N pending calls IN ORDER (a FIFO), so the pair is positional. Each call
+//                     gets a synthesized id `step_<planner step_index>_tool_<j>` on its event.
+//                     The content leads with "Created At:" / "Completed At:" lines (stripped).
+//   SYSTEM_MESSAGE    the harness talking to the model: background-task completions and messages
+//                     from other conversations (`[Message] … sender=<id> … content=<text>`). A
+//                     completion whose task id names a backgrounded (RUNNING) call fills that
+//                     call's response in place — the result belongs to the command; everything
+//                     else becomes a `system` message (the timeline keeps what the model was told).
+//   CHECKPOINT        a compaction summary → a `system` message.
+// Any other type is COUNTED in meta.unknownSteps and warned once per parse — never silently
+// dropped (fail loud: a new agy step type must read as format drift, not as an empty book).
+// A GENERIC with no pending call (a tail window that opens mid-turn) is counted in
+// meta.orphanResults; a call whose result never lands keeps response null (live, or interrupted).
+//
+// TOOL NAMES stay agy's own (view_file, run_command, …) — the tool registry carries an entry per
+// agy name that reads agy's native arg keys (AbsolutePath, CommandLine, TargetFile, …). The
+// adapter's half: unwrap double-JSON-encoded path args, and reconstruct the Claude-shaped
+// RESPONSE fields the registry's shared meta readers look for, from agy's result TEXT:
+//   every result      { output } (+ is_error/error on ERROR|INVALID|error, + exitCode and
+//                     is_error on "The command exited with code N≠0", + running/taskId on RUNNING)
+//   run_command       stdout = output (line counts)
+//   view_file/read_file  file = { numLines, startLine, totalLines } off "Showing lines A-B of T" /
+//                     "Total Lines: T" (line-count meta + partial-read range highlight)
+//   replace_file_content  structuredPatch off the [diff_block_start]…[diff_block_end] unified diff
+//                     (skipped when agy truncated the preview — a partial patch would mislead the
+//                     delta books' base reconstruction)
+//   edit_file         replacement = { startLine, added, removed } off "Made 1 replacement in …
+//                     starting at line L (+A/-R lines)" (its Target is free text, not whole
+//                     lines, so no patch is synthesized)
+//   write_to_file/write_file  { type: 'create'|'update', content } off the content arg
+
+/** Step types the agy translator understands (anything else is counted as unknown). */
+const AGY_STEP_TYPES = new Set(['USER_INPUT', 'PLANNER_RESPONSE', 'GENERIC', 'SYSTEM_MESSAGE', 'CHECKPOINT']);
+
+/** Arg keys holding a PATH — the ones agy is seen to double-JSON-encode ("\"/a/b.go\""). Free-text
+ *  args (queries, commands, messages) can legitimately start and end with a quote, so they pass
+ *  through untouched. */
+const AGY_PATH_ARGS = ['AbsolutePath', 'Path', 'TargetFile', 'SearchPath', 'DirectoryPath', 'Cwd'];
+
+/** "\"/path\"" → "/path" when the value is a JSON-encoded string; anything else unchanged. */
+function agyUnquote(v) {
+    if (typeof v !== 'string' || v.length < 2 || v[0] !== '"' || v[v.length - 1] !== '"') return v;
+    try { const inner = JSON.parse(v); return typeof inner === 'string' ? inner : v; } catch { return v; }
+}
+
+/** A tool call's args → the event input: an object (a JSON-string args blob is decoded), path
+ *  args unquoted. Non-object args become {} (the call still emits, it just says less). */
+function agyInput(args) {
+    let a = args;
+    if (typeof a === 'string') { try { a = JSON.parse(a); } catch { a = null; } }
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return {};
+    const input = { ...a };
+    for (const k of AGY_PATH_ARGS) if (k in input) input[k] = agyUnquote(input[k]);
+    return input;
+}
+
+/** A tool result's text without the leading "Created At:" / "Completed At:" lines. */
+function agyOutput(content) {
+    let rest = typeof content === 'string' ? content : '';
+    for (;;) {
+        const nl = rest.indexOf('\n');
+        const line = nl < 0 ? rest : rest.slice(0, nl);
+        if (!line.startsWith('Created At:') && !line.startsWith('Completed At:')) break;
+        rest = nl < 0 ? '' : rest.slice(nl + 1);
+    }
+    return rest.trim();
+}
+
+/** The typed prompt of a USER_INPUT step (inside <USER_REQUEST>), else the whole content. */
+function agyPrompt(content) {
+    const m = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/.exec(content);
+    return (m ? m[1] : content).trim();
+}
+
+const AGY_EXIT_RE = /^(?:The c|C)ommand exited with code (\d+)\./m;
+const AGY_TASK_RE = /background task with task id: (\S+)/;
+const AGY_REPLACE_RE = /^Made 1 replacement in .* starting at line (\d+) \(\+(\d+)\/-(\d+) lines\)/m;
+
+/** "Showing lines A-B of T" / "Showing lines A to B" + "Total Lines: T" → Claude's file meta. */
+function agyReadFile(output, input) {
+    const show = /^Showing lines (\d+)\s*(?:-|to)\s*(\d+)(?: of (\d+))?/m.exec(output);
+    const total = /^Total Lines: (\d+)/m.exec(output);
+    const totalLines = show?.[3] != null ? Number(show[3]) : total ? Number(total[1]) : null;
+    if (show) {
+        const startLine = Number(show[1]);
+        return { numLines: Math.max(0, Number(show[2]) - startLine + 1), startLine, totalLines };
+    }
+    // No "Showing" header: count the numbered lines the body carries.
+    const numbered = output.split('\n').filter((l) => /^\d+: /.test(l));
+    if (!numbered.length) return null;
+    return { numLines: numbered.length, startLine: Number(input.StartLine) || 1, totalLines };
+}
+
+/** The [diff_block_start]…[diff_block_end] unified diff → Claude's structuredPatch hunks. */
+function agyDiffPatch(output) {
+    if (/middle of the output truncated/.test(output)) return null;
+    const m = /\[diff_block_start\]\n([\s\S]*?)\n?\[diff_block_end\]/.exec(output);
+    if (!m) return null;
+    const hunks = [];
+    let h = null;
+    for (const line of m[1].split('\n')) {
+        const hd = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        if (hd) {
+            h = { oldStart: Number(hd[1]), oldLines: hd[2] != null ? Number(hd[2]) : 1,
+                  newStart: Number(hd[3]), newLines: hd[4] != null ? Number(hd[4]) : 1, lines: [] };
+            hunks.push(h);
+        } else if (h && (line[0] === ' ' || line[0] === '+' || line[0] === '-' || line === '')) {
+            h.lines.push(line === '' ? ' ' : line);   // a blank context line can lose its leading space
+        }
+    }
+    return hunks.length ? hunks : null;
+}
+
+/**
+ * Per-tool enrichment of a response whose `output` is set — shared by GENERIC results and
+ * background-task completions. Mutates and returns `r`.
+ * @param {string} name @param {Object} input @param {Object} r
+ */
+function agyEnrich(name, input, r) {
+    const output = r.output;
+    const exit = AGY_EXIT_RE.exec(output);
+    if (exit) {
+        r.exitCode = Number(exit[1]);
+        if (r.exitCode !== 0) r.is_error = true;
+    }
+    switch (name) {
+        case 'run_command':
+            r.stdout = output;
+            break;
+        case 'view_file': case 'read_file': {
+            const file = agyReadFile(output, input);
+            if (file) r.file = file;
+            break;
+        }
+        case 'replace_file_content': {
+            const patch = agyDiffPatch(output);
+            if (patch) r.structuredPatch = patch;
+            break;
+        }
+        case 'edit_file': {
+            const m = AGY_REPLACE_RE.exec(output);
+            if (m) r.replacement = { startLine: Number(m[1]), added: Number(m[2]), removed: Number(m[3]) };
+            break;
+        }
+        case 'write_to_file': case 'write_file': {
+            const content = name === 'write_to_file' ? input.CodeContent : input.Content;
+            r.type = input.Overwrite ? 'update' : 'create';
+            if (typeof content === 'string') r.content = content;
+            break;
+        }
+    }
+    return r;
+}
+
+/**
+ * A GENERIC step → the Claude-shaped response the registry's meta readers understand.
+ * @param {string} name   agy tool name
+ * @param {Object} input  the call's (unquoted) args
+ * @param {Object} step   the GENERIC step (content/status/error)
+ * @returns {Object}
+ */
+function agyResponse(name, input, step) {
+    const r = { output: agyOutput(step.content) };
+    const err = typeof step.error === 'string' && step.error ? step.error : null;
+    if (step.status === 'ERROR' || step.status === 'INVALID' || err) {
+        r.is_error = true;
+        r.error = err || r.output || String(step.status);
+        return r;
+    }
+    if (step.status === 'RUNNING') {
+        r.running = true;
+        const t = AGY_TASK_RE.exec(r.output);
+        if (t) r.taskId = t[1];
+        return r;   // the output is the launch notice — no per-tool shape to read off it
+    }
+    return agyEnrich(name, input, r);
+}
+
+/** The `[Message] timestamp=… sender=… priority=… content=…` entries of a SYSTEM_MESSAGE.
+ *  @param {string} content */
+function agySystemEntries(content) {
+    // The preamble names the tag too ("The following is a <SYSTEM_MESSAGE> not actually sent
+    // by the user…"), so the body opens at the LAST opening tag before the closing one.
+    const close = content.lastIndexOf('</SYSTEM_MESSAGE>');
+    const open = close < 0 ? -1 : content.lastIndexOf('<SYSTEM_MESSAGE>', close);
+    const body = (open < 0 ? content : content.slice(open + '<SYSTEM_MESSAGE>'.length, close)).trim();
+    return body.split(/^(?=\[Message\] )/m).map((p) => p.trim()).filter(Boolean).map((p) => {
+        const h = /^\[Message\] (?:timestamp=\S+ )?sender=(\S+) (?:priority=\S+ )?content=([\s\S]*)$/.exec(p);
+        return h ? { sender: h[1], text: h[2].trim() } : { sender: null, text: p };
+    });
+}
+
+/**
+ * Fresh state for the incremental agy step translator — one per conversation. Carries the FIFO
+ * of calls awaiting their GENERIC result, the backgrounded calls awaiting a completion message,
+ * the harvested-meta accumulators, and the loud-skip counters.
+ * @returns {{
+ *   pending: Array<{name:string, input:Object, event:Object}>,
+ *   running: Map<string, {name:string, input:Object, event:Object}>,
+ *   cwd: string|null, title: string|null, model: string|null,
+ *   firstTs: number|null, lastTs: number|null,
+ *   unknownSteps: Object<string, number>, orphanResults: number
+ * }}
+ */
+export function createAgyState() {
+    return {
+        pending: [],          // calls emitted, GENERIC result not seen yet (FIFO)
+        running: new Map(),   // taskId -> call — backgrounded, completion message not seen yet
+        cwd: null, title: null, model: null,
+        firstTs: null, lastTs: null,
+        unknownSteps: {}, orphanResults: 0,
+    };
+}
+
+/**
+ * Translate ONE parsed agy step into stream events — the single dialect implementation the
+ * archive fold (parseAgySession) runs; a live tail can feed it line by line.
+ *
+ * Pairing is incremental, like the kimi translator: a call emits its event immediately
+ * (response null) and its GENERIC result fills that ALREADY-EMITTED event in place; a
+ * background-task completion fills a RUNNING call's event the same way.
+ * @param {Object} obj    one JSON.parsed transcript line (non-objects are a no-op)
+ * @param {Object} state  from createAgyState()
+ * @returns {Array} the events this step emitted
+ */
+export function agyStepToEvents(obj, state) {
+    const events = [];
+    if (!obj || typeof obj !== 'object') return events;
+    const ts = parseTs(obj.created_at);
+    const push = (e) => {
+        events.push(e);
+        if (e.ts != null) { if (state.firstTs === null) state.firstTs = e.ts; state.lastTs = e.ts; }
+    };
+    if (state.cwd === null && typeof obj.cwd === 'string' && obj.cwd) state.cwd = obj.cwd;
+    const type = obj.type;
+    if (!AGY_STEP_TYPES.has(type)) {
+        const k = String(type);
+        state.unknownSteps[k] = (state.unknownSteps[k] || 0) + 1;
+        return events;
+    }
+    const content = typeof obj.content === 'string' ? obj.content : '';
+
+    if (type === 'USER_INPUT') {
+        const prompt = agyPrompt(content);
+        if (state.title === null && prompt) state.title = prompt;
+        // The model in force is the LATEST selection (a settings change mid-conversation moves it).
+        const sel = /setting `Model Selection` from .*? to (.+?)\. /.exec(content);
+        if (sel) state.model = sel[1];
+        if (prompt) state.pending = [];   // a new turn: unanswered calls were interrupted
+        return events;
+    }
+    if (type === 'PLANNER_RESPONSE') {
+        if (typeof obj.thinking === 'string' && obj.thinking.trim()) {
+            push({ kind: 'message', mtype: 'thinking', text: obj.thinking, ts });
+        }
+        if (content.trim()) push({ kind: 'message', mtype: 'text', text: content, ts });
+        const calls = Array.isArray(obj.tool_calls) ? obj.tool_calls : [];
+        calls.forEach((tc, j) => {
+            const name = typeof tc?.name === 'string' && tc.name ? tc.name : 'unknown';
+            const input = agyInput(tc?.args);
+            if (state.cwd === null && name === 'run_command' && typeof input.Cwd === 'string' && input.Cwd) {
+                state.cwd = input.Cwd;
+            }
+            const event = { kind: 'tool', id: `step_${obj.step_index}_tool_${j}`, name, input, response: null, ts };
+            state.pending.push({ name, input, event });
+            push(event);
+        });
+        return events;
+    }
+    if (type === 'GENERIC') {
+        const call = state.pending.shift();
+        if (!call) { state.orphanResults++; return events; }
+        const r = agyResponse(call.name, call.input, obj);
+        call.event.response = r;
+        if (r.running && r.taskId) state.running.set(r.taskId, call);
+        return events;
+    }
+    if (type === 'SYSTEM_MESSAGE') {
+        const shown = [];
+        for (const { sender, text } of agySystemEntries(content)) {
+            const done = /^Task id "([^"]+)" finished with result:\n?([\s\S]*)$/.exec(text);
+            const call = done ? state.running.get(done[1]) : null;
+            if (call) {
+                // The backgrounded call's real result: fill its event in place.
+                state.running.delete(done[1]);
+                call.event.response = agyEnrich(call.name, call.input,
+                    { output: done[2].trim(), backgrounded: true, taskId: done[1] });
+                continue;
+            }
+            shown.push(sender ? `from ${sender}\n\n${text}` : text);
+        }
+        if (shown.length) push({ kind: 'message', mtype: 'system', text: shown.join('\n\n'), ts });
+        return events;
+    }
+    // CHECKPOINT — the compaction summary the model resumes from.
+    if (content.trim()) push({ kind: 'message', mtype: 'system', text: content, ts });
+    return events;
+}
+
+/**
+ * Parse an agy conversation transcript (JSONL text) into the ordered event stream — a fold over
+ * agyStepToEvents.
+ * @param {string} text  the whole transcript_full.jsonl (or a line-aligned tail window of it)
+ * @param {string} [cwd] the conversation's workspace from the archive index — WINS over the
+ *        transcript's own (a step `cwd`, else the first run_command Cwd arg), which is
+ *        per-command and may sit below the workspace targets should relativize against
+ * @returns {{
+ *   events: Array<{kind:'tool', id:string, name:string, input:Object, response:*, ts:number|null}
+ *                |{kind:'message', mtype:'text'|'thinking'|'system', text:string, ts:number|null}>,
+ *   cwd: string|null, firstTs: number|null, lastTs: number|null,
+ *   meta: { harness:'agy', cwd:string|null, title:string|null, model:string|null,
+ *           firstTs:number|null, lastTs:number|null,
+ *           unknownSteps:Object<string,number>, orphanResults:number, malformedLines:number }
+ * }}
+ * malformedLines counts unparseable lines (a live transcript's torn final line lands here).
+ */
+export function parseAgySession(text, cwd) {
+    return runSteps(parseAgySessionSteps(text, cwd));
+}
+
+/**
+ * Async, frame-sliced parse — the main-thread surface. Identical output to parseAgySession;
+ * see parseClaudeSessionAsync.
+ * @param {string} text @param {string} [cwd] @param {{budgetMs?: number}} [opts]
+ * @returns {Promise<ReturnType<typeof parseAgySession>>}
+ */
+export function parseAgySessionAsync(text, cwd, { budgetMs = PARSE_SLICE_MS } = {}) {
+    return runStepsAsync(parseAgySessionSteps(text, cwd, budgetMs));
+}
+
+/** The ONE agy parse implementation, as a generator (budgeted slices — see parseClaudeSessionSteps). */
+function* parseAgySessionSteps(text, cwd, budgetMs = Infinity) {
+    const overBudget = makeSliceBudget(budgetMs);
+    const state = createAgyState();
+    const events = [];
+    let malformedLines = 0;
+    let i = 0;
+    for (const line of String(text ?? '').split('\n')) {
+        if (overBudget(i++)) yield;
+        if (!line.trim()) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { malformedLines++; continue; }
+        for (const e of agyStepToEvents(obj, state)) events.push(e);
+    }
+    const unknown = Object.keys(state.unknownSteps);
+    if (unknown.length) {
+        console.warn('[sessionAdapter] agy: unknown step types skipped —',
+            unknown.map((k) => `${k}×${state.unknownSteps[k]}`).join(', '));
+    }
+    const cwdOut = (typeof cwd === 'string' && cwd) ? cwd : state.cwd;
+    return {
+        events, cwd: cwdOut, firstTs: state.firstTs, lastTs: state.lastTs,
+        meta: {
+            harness: 'agy', cwd: cwdOut, title: state.title, model: state.model,
+            firstTs: state.firstTs, lastTs: state.lastTs,
+            unknownSteps: state.unknownSteps, orphanResults: state.orphanResults, malformedLines,
+        },
+    };
+}
+
+// --- harness dispatch: the ONE place a harness name picks its parser --------------------------
+
+/** harness name → its sync + async parse; `cwd` is the archive index's working dir (claude's
+ *  lines carry their own, so its parser takes none). */
+const PARSERS = {
+    claude: { sync: (text) => parseClaudeSession(text), async: (text) => parseClaudeSessionAsync(text) },
+    kimi:   { sync: parseKimiSession, async: parseKimiSessionAsync },
+    agy:    { sync: parseAgySession,  async: parseAgySessionAsync },
+};
+
+/** The harnesses an archive entry may name — anything else is a caller or relay bug. */
+export const SESSION_HARNESSES = Object.freeze(Object.keys(PARSERS));
+
+/** @param {string} harness @returns {{sync: Function, async: Function}} */
+function parserFor(harness) {
+    const p = Object.hasOwn(PARSERS, harness) ? PARSERS[harness] : null;
+    if (!p) throw new Error(`unknown session harness '${harness}' (want ${SESSION_HARNESSES.join('|')})`);
+    return p;
+}
+
+/**
+ * Parse a transcript in its harness's dialect. THROWS on an unknown harness — a silent fallback
+ * to the claude dialect would render another harness's record as an empty book.
+ * @param {string} text
+ * @param {{harness?: string, cwd?: string|null}} [opts] cwd = the archive index's working dir
+ *        (kimi: fallback; agy: the workspace, which wins)
+ * @returns {{events: Array, cwd: string|null, firstTs: number|null, lastTs: number|null, meta: Object}}
+ */
+export function parseSession(text, { harness = 'claude', cwd = null } = {}) {
+    return parserFor(harness).sync(text, cwd ?? undefined);
+}
+
+/**
+ * Async, frame-sliced parseSession — the main-thread surface. Same throw contract.
+ * @param {string} text @param {{harness?: string, cwd?: string|null}} [opts]
+ * @returns {Promise<ReturnType<typeof parseSession>>}
+ */
+export function parseSessionAsync(text, { harness = 'claude', cwd = null } = {}) {
+    return parserFor(harness).async(text, cwd ?? undefined);
 }

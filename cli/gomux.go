@@ -648,7 +648,7 @@ func (h *FSHandler) handleGomuxRead(write writeFn, writeBin writeBinFn, id json.
 		h.sendRPCError(write, id, errFileNotFound, "no transcript for gomuxai agent: "+p.Name, map[string]string{"name": p.Name})
 		return
 	}
-	h.serveTranscriptWindow(write, writeBin, id, p.Name, a.Transcript, a.Cwd, p.transcriptWindow)
+	h.serveTranscriptWindow(write, writeBin, id, p.Name, a.Transcript, a.Cwd, "", p.transcriptWindow)
 }
 
 // ---- the agent's live screen ----

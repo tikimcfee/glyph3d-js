@@ -420,6 +420,12 @@ type FSHandler struct {
 	// empty archive, same philosophy as sessionsDir.
 	kimiIndex string
 
+	// agyHome is the Antigravity CLI state dir (~/.gemini/antigravity-cli) —
+	// the third harness's archive, matched to the served root through agy's own
+	// history + subagent index files (sessions.go). "" when home is unknown; a
+	// missing dir is an empty archive.
+	agyHome string
+
 	// extraRoots are additional absolute, symlink-resolved directories the
 	// handler may reach OUTSIDE the project root. Seeded at construction from
 	// the temp dirs (/tmp, /var/tmp, $TMPDIR) plus the --reach flag, and widened
@@ -495,7 +501,7 @@ func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 		extra = append(extra, r)
 	}
 
-	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved), kimiIndex: kimiSessionIndexPath()}, nil
+	return &FSHandler{root: resolved, extraRoots: extra, sessionsDir: agentSessionsDir(resolved), kimiIndex: kimiSessionIndexPath(), agyHome: agyHomeDir()}, nil
 }
 
 // evalRootOrEmpty resolves a candidate reach directory to its absolute,

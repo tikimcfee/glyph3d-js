@@ -17,9 +17,9 @@ export class AgentSessionProvider {
     }
 
     /**
-     * Enumerate archived sessions, newest first (server-ordered). Both harnesses
-     * ride the one list — each entry's `harness` field ("claude" | "kimi") says
-     * which adapter can open it.
+     * Enumerate archived sessions, newest first (server-ordered). Every harness
+     * rides the one list — each entry's `harness` field ("claude" | "kimi" | "agy")
+     * says which adapter can open it.
      * @returns {Promise<{ id: string, size: number, mtime: number, harness: string }[]>} mtime is unix ms
      */
     async list() {
@@ -41,10 +41,12 @@ export class AgentSessionProvider {
      * @param {number} [opts.maxBytes] - cursor window length (requires fromOffset; 0/absent = to EOF)
      * @param {string} [opts.harness] - which archive the id resolves against (default 'claude')
      * @returns {Promise<{ bytes: Uint8Array, offset: number, size: number|null,
-     *          truncated: boolean, mtime: number|null, cwd: string|null }>}
+     *          truncated: boolean, mtime: number|null, cwd: string|null, title: string|null }>}
      *          offset is the ABSOLUTE byte the payload starts at (the next backward
-     *          cursor; 0 = the file's start). cwd is the index's workDir for kimi
-     *          sessions (their transcript doesn't reliably carry one), null otherwise
+     *          cursor; 0 = the file's start). cwd is the archive index's working dir —
+     *          kimi's workDir (its transcript doesn't reliably carry one), agy's workspace
+     *          — null for claude. title is the index's conversation title (agy's
+     *          annotations / subagent role), null when the index has none
      */
     async read(id, opts = {}) {
         const params = { id, binary: true };
@@ -63,7 +65,8 @@ export class AgentSessionProvider {
         }
         const bytes = r?.bytes ?? new TextEncoder().encode(r?.content ?? '');
         return { bytes, offset: r?.offset ?? 0, size: r?.size ?? null,
-                 truncated: !!r?.truncated, mtime: r?.mtime ?? null, cwd: r?.cwd ?? null };
+                 truncated: !!r?.truncated, mtime: r?.mtime ?? null, cwd: r?.cwd ?? null,
+                 title: r?.title ?? null };
     }
 }
 

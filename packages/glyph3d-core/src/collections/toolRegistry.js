@@ -1,7 +1,9 @@
 /**
  * toolRegistry — the ONE home for per-tool-call knowledge, keyed by the RAW tool name the harness
- * adapter emits (Read, Edit, Bash, … — Claude-shaped; a second harness's adapter translates its
- * dialect into these names/arg shapes, so this file stays harness-agnostic). It turns a raw tool
+ * adapter emits (Read, Edit, Bash, … — Claude's; kimi's adapter renames its arg keys onto these
+ * entries, and a harness with its own tool names — agy's view_file, run_command, … — has its own
+ * entries reading its native arg keys). Either way the RESPONSE arrives Claude-shaped (the adapter
+ * reconstructs it), so the meta readers below are shared across harnesses. It turns a raw tool
  * event into the normalized record the agent books render, plus the highlight directives that
  * decorate a snapshot:
  *
@@ -135,10 +137,24 @@ function taskMeta(r) {
     return { tools: r.totalToolUseCount, tokens: r.totalTokens, ms: r.totalDurationMs };
 }
 
+/** agy edit_file: no patch (its Target is free text, not whole lines) — the adapter's
+ *  `replacement` = { startLine, added, removed } off "Made 1 replacement … (+A/-R lines)". */
+function replaceMeta(r) {
+    const x = r && r.replacement;
+    if (!x) return null;
+    return { added: x.added, removed: x.removed, ranges: x.added > 0 ? [[x.startLine, x.startLine + x.added - 1]] : [] };
+}
+
 /** The question(s) an AskUserQuestion posed — the meaningful input the watcher wants to see. */
 function askDetail(input) {
     const qs = input && Array.isArray(input.questions) ? input.questions : [];
     return qs.map((q) => q && q.question).filter(Boolean).join('\n');
+}
+
+/** agy invoke_subagent: the role(s) spawned — one `Subagents` list, or a single top-level spec. */
+function subagentDetail(input) {
+    const specs = Array.isArray(input.Subagents) ? input.Subagents : [input];
+    return specs.map((s) => s && (s.Role || s.TypeName)).filter(Boolean).join('\n');
 }
 
 // --- the registry: RAW tool name → normalized record fields ---------------------------------------
@@ -171,6 +187,26 @@ const TOOLS = {
     ToolSearch:   { noise: true },
     TaskGet:      { noise: true },
     TaskOutput:   { noise: true },
+    // agy (Antigravity CLI) — its own tool names and arg keys; the adapter reconstructs the
+    // Claude-shaped RESPONSE fields (file / structuredPatch / stdout / content) the shared
+    // meta readers take. view_file is the older name of read_file.
+    view_file:            { action: 'read',  target: (i) => i.AbsolutePath, meta: readMeta },
+    read_file:            { action: 'read',  target: (i) => i.Path,         meta: readMeta },
+    replace_file_content: { action: 'edit',  target: (i) => i.TargetFile,   meta: editMeta },
+    edit_file:            { action: 'edit',  target: (i) => i.Path,         meta: replaceMeta },
+    write_to_file:        { action: 'write', target: (i) => i.TargetFile,   meta: writeMeta },
+    write_file:           { action: 'write', target: (i) => i.Path,         meta: writeMeta },
+    run_command:          { action: 'bash',  detail: (i) => i.CommandLine,  meta: bashMeta },
+    invoke_subagent:      { action: 'task',  detail: subagentDetail },
+    manage_subagents:     { action: 'task',  detail: (i) => 'subagents: ' + (i.Action || '') },
+    manage_task:          { action: 'task',  detail: (i) => [i.Action, i.TaskId].filter(Boolean).join(' ') },
+    schedule:             { action: 'task',  detail: (i) => 'timer: ' + (i.Prompt || '') },
+    // A message to another conversation — the words ARE the meaningful input (a subagent's
+    // final report rides here), so the whole message is the detail, never clipped.
+    send_message:         { action: 'send',  detail: (i) => [i.Recipient && `→ ${i.Recipient}`, i.Message].filter(Boolean).join('\n') },
+    search_web:           { action: 'search', detail: (i) => i.query },
+    read_url_content:     { action: 'fetch', detail: (i) => i.Url },
+    ask_question:         { action: 'ask',   detail: askDetail },
 };
 
 // DECORATION is per-ACTION, not per-tool (an edit lights up the same whether Edit/MultiEdit produced it).
@@ -222,7 +258,8 @@ export function normalizeToolCall(name, input = {}, response = null, cwd = '') {
 /**
  * Normalize one assistant conversation block into the trail's record fields. Pure, so the replay
  * and the unit tests import it alongside normalizeToolCall.
- * @param {string} kind  the transcript block type: 'text' | 'thinking'
+ * @param {string} kind  the transcript block type: 'text' | 'thinking' | 'system' (what the
+ *        harness told the agent — agy's system messages and compaction summaries)
  * @param {string} text  the block's prose
  * @returns {{action:string, target:string, detail:string, result:string, meta:null}|null}
  *          null for an empty/whitespace block the caller should drop.
@@ -230,7 +267,8 @@ export function normalizeToolCall(name, input = {}, response = null, cwd = '') {
 export function normalizeMessage(kind, text) {
     const full = String(text ?? '').trim();
     if (!full) return null;
-    const action = String(kind).toLowerCase() === 'thinking' ? 'think' : 'say';
+    const k = String(kind).toLowerCase();
+    const action = k === 'thinking' ? 'think' : k === 'system' ? 'system' : 'say';
     // result = the whole block, verbatim; no detail/headline preview (that was a truncation seam).
     return { action, target: '', detail: '', result: full, meta: null };
 }
@@ -257,7 +295,8 @@ const ACTION_KIND = {
     edit: 'edit', write: 'write',
     bash: 'run', task: 'run',
     ask: 'ask', fetch: 'fetch',
-    say: 'say', think: 'think',
+    say: 'say', send: 'say', think: 'think',
+    system: 'system',
 };
 
 /** The identity bucket an action colors/sorts under. Unknown actions read as 'other'. */
@@ -277,6 +316,7 @@ export const ACTION_HUES = {
     fetch:  { r: 0.45, g: 0.82, b: 0.78 },   // teal — reaching out to the network
     say:    { r: 0.92, g: 0.94, b: 0.98 },   // near-white — the agent SPEAKING (its reply to you)
     think:  { r: 0.58, g: 0.52, b: 0.78 },   // dim violet — interior REASONING (the thinking turns)
+    system: { r: 0.80, g: 0.74, b: 0.52 },   // muted sand — the HARNESS speaking (system messages, compaction)
     other:  { r: 0.62, g: 0.64, b: 0.68 },
 };
 

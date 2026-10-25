@@ -7,12 +7,14 @@
 //   - runSessionParseJob (pure): bytes → { records, total, cwd, meta } — records
 //     equal manual normalization of the sync dialect's events; cap slices the
 //     event tail BEFORE normalizing (hydrate's exact order); total stays full
+//   - the harness dispatch: agy parses in its own dialect; an UNKNOWN harness
+//     throws (job) / rejects (pool) instead of parsing as claude
 //   - SessionParsePool end-to-end: same result through whichever backend runs,
 //     concurrent jobs don't cross-talk, and a real pool (>1 worker) serves them
 
 import { runSessionParseJob, eventsToRecords } from '../packages/glyph3d-core/src/workers/sessionParseJob.js';
 import { SessionParsePool } from '../packages/glyph3d-core/src/workers/SessionParsePool.js';
-import { parseClaudeSession, parseKimiSession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
+import { parseClaudeSession, parseKimiSession, parseAgySession } from '../packages/glyph3d-core/src/collections/sessionAdapter.js';
 import { normalizeToolCall, normalizeMessage } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
 
 let pass = 0, fail = 0;
@@ -38,6 +40,13 @@ const kimiText = [
   J({ type: 'context.append_loop_event', event: { type: 'tool.call', toolCallId: 'tc-1', name: 'Bash', args: { command: 'ls' }, display: { cwd: '/kimi/repo' } }, time: 1001 }),
   J({ type: 'context.append_loop_event', event: { type: 'tool.result', toolCallId: 'tc-1', result: { output: 'ok\n' } }, time: 1002 }),
   J({ type: 'context.append_loop_event', event: { type: 'content.part', part: { type: 'text', text: 'done' } }, time: 1003 }),
+].join('\n') + '\n';
+
+const agyText = [
+  J({ step_index: 0, type: 'USER_INPUT', created_at: T(0), content: '<USER_REQUEST>\nls\n</USER_REQUEST>' }),
+  J({ step_index: 1, type: 'PLANNER_RESPONSE', created_at: T(1), tool_calls: [{ name: 'run_command', args: { CommandLine: 'ls', Cwd: '/index/ws/sub' } }] }),
+  J({ step_index: 2, type: 'GENERIC', created_at: T(2), content: 'Created At: x\nThe command exited with code 0.\nOutput:\na' }),
+  J({ step_index: 3, type: 'PLANNER_RESPONSE', created_at: T(3), content: 'done' }),
 ].join('\n') + '\n';
 
 const enc = (s) => new TextEncoder().encode(s);
@@ -82,6 +91,27 @@ const enc = (s) => new TextEncoder().encode(s);
     'kimi records === sync parse + normalize');
   eq(job.cwd, '/kimi/repo', 'display.cwd wins over the index fallback');
   eq(job.meta.model, 'kimi-k2', 'kimi meta harvested');
+}
+
+// ── runSessionParseJob: agy — dialect + the index workspace WINS ──────────────
+{
+  const job = runSessionParseJob({ bytes: enc(agyText), harness: 'agy', cwd: '/index/ws' });
+  eq(job.records, eventsToRecords(parseAgySession(agyText, '/index/ws').events, '/index/ws'),
+    'agy records === sync parse + normalize');
+  eq(job.cwd, '/index/ws', 'the index workspace wins over run_command Cwd');
+  eq(job.records.map((r) => r.action), ['bash', 'say'], 'agy actions');
+}
+
+// ── an unknown harness fails LOUD at the codec seam (no silent claude parse) ──
+{
+  let threw = null;
+  try { runSessionParseJob({ bytes: enc(claudeText), harness: 'gemini' }); } catch (e) { threw = e.message; }
+  ok(threw && threw.includes("unknown session harness 'gemini'"), 'job: unknown harness throws');
+  const pool = new SessionParsePool();
+  let rejected = null;
+  try { await pool.parse(enc(claudeText), { harness: 'gemini' }); } catch (e) { rejected = e.message; }
+  ok(rejected && rejected.includes('gemini'), `pool: unknown harness rejects (workers: ${pool.workerCount})`);
+  pool.dispose();
 }
 
 // ── the pool: same result through whichever backend runs; jobs fan out ────────

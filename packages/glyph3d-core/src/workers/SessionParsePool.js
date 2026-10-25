@@ -11,12 +11,12 @@
  *     noise-filtered record tail clones back. A restore's 6-wide book pour fans
  *     out across the pool instead of serializing on one thread.
  *   - the main-thread sliced parsers (fallback: no Worker — tests, headless):
- *     parseClaudeSessionAsync / parseKimiSessionAsync, frame-budgeted, then the
+ *     parseSessionAsync (the adapter's harness dispatch), frame-budgeted, then the
  *     same eventsToRecords.
  */
 
 import { runSessionParseJob, eventsToRecords } from './sessionParseJob.js';
-import { parseClaudeSessionAsync, parseKimiSessionAsync } from '../collections/sessionAdapter.js';
+import { parseSessionAsync } from '../collections/sessionAdapter.js';
 
 // The pool is DEMAND-DRIVEN: one worker at first job, spawning another whenever
 // work queues behind busy workers, capped at the project's hardware convention
@@ -64,9 +64,7 @@ export class SessionParsePool {
         // Fallback: decode + parse on the main thread, frame-budgeted; the
         // normalize pass over the capped tail is trivial at any sane cap.
         const text = new TextDecoder().decode(bytes);
-        const out = harness === 'kimi'
-            ? await parseKimiSessionAsync(text, cwd)
-            : await parseClaudeSessionAsync(text);
+        const out = await parseSessionAsync(text, { harness, cwd });
         const total = out.events.length;
         const slice = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
         const records = eventsToRecords(slice, out.cwd ?? cwd ?? '');

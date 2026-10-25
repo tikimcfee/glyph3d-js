@@ -8,7 +8,7 @@
 // Claude Code shapes (file.numLines, structuredPatch, stdout, …). decorateForAction(action, meta) is
 // the per-action highlight mapping (0-based, inclusive). Adding a tool? add an entry AND a case here.
 
-import { normalizeToolCall, decorateForAction } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
+import { normalizeToolCall, normalizeMessage, decorateForAction } from '../packages/glyph3d-core/src/collections/toolRegistry.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) { pass++; } else { fail++; console.error(`  ✗ ${msg}`); } };
@@ -127,6 +127,24 @@ const CWD = '/home/ivan/dev/glyph3d-js/';
   const sk = normalizeToolCall('Skill', { skill: 'pdf' }, null, CWD);
   eq(sk.action, 'skill', 'Skill → skill');
   eq(sk.detail, 'pdf', 'Skill: detail is the skill name');
+}
+
+// ── agy names: own entries reading agy's native arg keys, shared meta readers ─────────
+{
+  const v = normalizeToolCall('view_file', { AbsolutePath: CWD + 'src/a.js' }, { file: { numLines: 2, startLine: 5, totalLines: 9 } }, CWD);
+  eq([v.action, v.target, v.result, v.meta], ['read', 'src/a.js', '', { lines: 2, range: [5, 6] }], 'view_file → read (AbsolutePath, readMeta)');
+  eq(normalizeToolCall('read_file', { Path: CWD + 'b.md' }, null, CWD).target, 'b.md', 'read_file → target Path');
+  const e = normalizeToolCall('edit_file', { Path: CWD + 'c.js' }, { replacement: { startLine: 10, added: 0, removed: 2 } }, CWD);
+  eq([e.action, e.meta], ['edit', { added: 0, removed: 2, ranges: [] }], 'edit_file: a pure deletion lights no range');
+  eq(normalizeToolCall('replace_file_content', { TargetFile: CWD + 'd.js' }, {}, CWD).target, 'd.js', 'replace_file_content → target TargetFile');
+  eq(normalizeToolCall('write_file', { Path: CWD + 'e.txt' }, { type: 'update', content: 'a\nb' }, CWD).meta, { kind: 'update', lines: 2 }, 'write_file → writeMeta');
+  const b = normalizeToolCall('run_command', { CommandLine: 'make' }, { stdout: 'ok\n', output: 'ok\n' }, CWD);
+  eq([b.action, b.detail, b.result], ['bash', 'make', 'ok\n'], 'run_command → bash');
+  eq(normalizeToolCall('manage_task', { Action: 'kill', TaskId: 'c/task-3' }, { output: 'cancelled' }, CWD).detail, 'kill c/task-3', 'manage_task detail');
+  eq(normalizeToolCall('invoke_subagent', { Role: 'R', Prompt: 'p' }, null, CWD).detail, 'R', 'invoke_subagent: a single top-level spec');
+  eq(normalizeToolCall('search_web', { query: 'q' }, { output: 'hits' }, CWD).action, 'search', 'search_web → search');
+  eq(normalizeToolCall('read_url_content', { Url: 'http://x' }, null, CWD).detail, 'http://x', 'read_url_content → fetch detail Url');
+  eq(normalizeMessage('system', ' told ').action, 'system', "normalizeMessage('system') → system");
 }
 
 // ── noise tools drop entirely (null → caller skips) ───────────────────────────────────

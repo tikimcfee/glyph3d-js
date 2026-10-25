@@ -29,7 +29,7 @@
 
 import { canonicalPath } from './pathResolve.js';
 import { normalizeToolCall, normalizeMessage } from '@glyph3d/core/collections/toolRegistry.js';
-import { agentIdForEntry,
+import { agentIdForEntry, SESSION_HARNESSES,
          createKimiWireState, kimiWireLineToEvents }
     from '@glyph3d/core/collections/sessionAdapter.js';
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
@@ -52,7 +52,7 @@ const noBooks = { text: 'ERR: agent books not wired', data: null };
  * @param {string} sessionId full session id (the record's filename stem)
  * @param {{limit?: number, harness?: string}} [opts] limit = turns to keep (0 = all) —
  *        becomes the book's retention override; omitted → the book's cap (its override,
- *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi').
+ *        else cfg.maxSheets). harness = which archive/adapter ('claude' default | 'kimi' | 'agy').
  * @returns {Promise<{agentId: string, added: number, total: number, bytes: number,
  *   offset: number, ms: {read: number, parse: number, hydrate: number}}>}
  * `bytes` is the window size parsed, `total` the events in it, `offset` the absolute
@@ -65,9 +65,11 @@ export async function openAgentSession(ctx, sessionId, { limit, harness = 'claud
     if (!provider) throw new Error('no session provider (relay offline — the archive is a relay feature)');
     if (!ctx.agentBooks) throw new Error('agent books not wired');
     const r1 = (n) => Math.round(n * 10) / 10;
-    const isKimi = harness === 'kimi';
+    if (!SESSION_HARNESSES.includes(harness)) {
+        throw new Error(`unknown session harness '${harness}' (want ${SESSION_HARNESSES.join('|')})`);
+    }
     const agentId = agentIdForEntry({ id: sessionId, harness });
-    const agentType = isKimi ? 'kimi' : 'claude';
+    const agentType = harness;   // the lane's type IS the harness that wrote its record
 
     // Transport: TAIL-GROW over the binary result plane — the relay line-aligns
     // the final tailReadBytes, and the window doubles until it holds the book's
@@ -292,7 +294,7 @@ export default function registerAgentCommands(router) {
         const open = new Set([...(ctx.agentBooks?.lanes.keys() ?? [])]);
         const rows = sessions.map((s) => {
             const isOpen = open.has(agentIdForEntry(s));
-            const tag = s.harness === 'kimi' ? 'kimi   ' : '';
+            const tag = s.harness && s.harness !== 'claude' ? s.harness.padEnd(7) : '';
             return `${agentIdForEntry(s)}  ${tag}${fmtAge(s.mtime).padStart(4)}  ${fmtSize(s.size).padStart(6)}${isOpen ? '  · open' : ''}`;
         });
         return {

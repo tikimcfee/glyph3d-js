@@ -13,10 +13,12 @@
  * Provenance: the tail's meta is the session's PRESENT (a renamed/resumed
  * session's ai-title lines repeat through the file — the tail carries the
  * CURRENT title, where whole-file first-seen showed the oldest). But the sparse
- * provenance lines (claude ai-title/agent-name, kimi metadata/turn.prompt)
- * cluster near the transcript's start, so a tail that carries NO title would
- * silently demote its nameplate to a slug — one bounded fromOffset:0 head read
- * gap-fills what the tail lacks (records discarded, tail values kept).
+ * provenance lines (claude ai-title/agent-name, kimi metadata/turn.prompt, agy's
+ * first USER_INPUT) cluster near the transcript's start, so a tail that carries
+ * NO title would silently demote its nameplate to a slug — one bounded
+ * fromOffset:0 head read gap-fills what the tail lacks (records discarded, tail
+ * values kept). A title the archive INDEX supplies (the read's `title` — agy's
+ * annotations) wins outright, and makes the head read unnecessary.
  *
  * Pure transport+codec composition: the read is the provider's, the parse is
  * the caller's (the session parse pool in the app; the main-thread codec in
@@ -52,7 +54,7 @@ function warnIfTornFirstLine(sessionId, bytes, offset) {
  * @param {{ read: Function }} provider - AgentSessionProvider (or a test double)
  * @param {string} sessionId
  * @param {Object} opts
- * @param {string} [opts.harness] - 'claude' | 'kimi'
+ * @param {string} [opts.harness] - 'claude' | 'kimi' | 'agy'
  * @param {number} [opts.cap] - the book's event quota (Infinity = whole record)
  * @param {number} [opts.startBytes] - first tail window size (doubles per retry)
  * @param {number} [opts.headMetaBytes] - head window re-harvesting first-seen
@@ -89,6 +91,9 @@ export async function readSessionTail(provider, sessionId, {
         const t1 = now();
         const out = await parse(r.bytes, { harness, cwd: r.cwd, cap });
         parseMs += now() - t1;
+        // The archive index's title (agy's annotations) is the conversation's CURRENT name —
+        // it wins over whatever the transcript window yields (a first prompt, or nothing).
+        if (r.title) out.meta = { ...(out.meta || {}), title: r.title };
         if (wantWhole || out.total >= cap || r.offset === 0) {
             if (r.offset > 0 && headMetaBytes > 0 && out.meta?.title == null) {
                 const t2 = now();

@@ -1,6 +1,8 @@
 // session-schema-tolerance-check.mjs — Slice 0 of the state-consolidation migration.
 // Asserts SessionStore.restore is FORWARD-ADDITIVE (a current OR future-version blob is NOT
-// wiped — only the v1 cliff is) and that WorkspaceModel.clear() empties sheets + resets fields.
+// wiped — only the v1 cliff is), that a saved agent book reopens through the harness it names
+// (agy) while an unknown harness quarantines the section, and that WorkspaceModel.clear()
+// empties sheets + resets fields.
 // SessionStore/WorkspaceModel are import-free, so this needs no browser/relay.
 //
 //   bun tools/session-schema-tolerance-check.mjs
@@ -71,6 +73,42 @@ function makeStore(writes) {
   const ss = makeStore(writes);
   await ss.restore({ version: 1, files: [{ path: 'whole/field/dumped/here.js' }] });
   ok(writes.length === 1 && writes[0].version === 2, 'v1 blob is wiped to an empty v2 snapshot');
+}
+
+// ---- 2b. agent books: an agy entry restores through its OWN harness; an unknown harness
+//          quarantines the section (fails loud) instead of parsing as claude ----
+{
+  const agyLine = (o) => JSON.stringify({ source: 'MODEL', status: 'DONE', created_at: '2026-10-25T00:00:00Z', ...o });
+  const bytes = new TextEncoder().encode([
+    agyLine({ step_index: 0, type: 'USER_INPUT', content: '<USER_REQUEST>\nhi\n</USER_REQUEST>' }),
+    agyLine({ step_index: 1, type: 'PLANNER_RESPONSE', content: 'hello', tool_calls: [{ name: 'view_file', args: { AbsolutePath: '/w/a.js' } }] }),
+    agyLine({ step_index: 2, type: 'GENERIC', content: 'Showing lines 1-1 of 1\n1: x' }),
+  ].join('\n') + '\n');
+  const hydrated = [];
+  const reads = [];
+  const ctx = makeCtx();
+  ctx.sessionProvider = {
+    list: async () => [],
+    read: async (id, opts) => { reads.push({ id, ...opts }); return { bytes: bytes.slice(), offset: 0, size: bytes.length, cwd: '/w', title: 'Agy Title' }; },
+  };
+  ctx.agentBooks = {
+    cfg: { tailReadBytes: 1 << 20, headMetaBytes: 0 },
+    lanes: new Map(),
+    capForHydration: () => 50,
+    hydrate: async (agentId, records, opts) => { hydrated.push({ agentId, records, opts }); return records.length; },
+  };
+  const ss = new SessionStore({ ctx, router: { execute: async () => ({ text: 'OK' }) }, bridge: { rpcRequest: async () => ({}) } });
+  await ss._restoreAgents({ agents: [
+    { session: '83d95154-d7a6-496b-a811-2496b2c39a84', harness: 'agy', following: true },
+    { session: 'ffff0000-0000-4000-8000-000000000000', harness: 'gemini', following: true },
+  ] });
+  const h = hydrated[0];
+  ok(hydrated.length === 1 && h.agentId === '83d95154' && h.opts.agentType === 'agy',
+     'agy entry: hydrated under the claude-rule lane id with agentType agy');
+  ok(reads.length === 1 && reads[0].harness === 'agy', 'agy entry: the archive read names the agy harness');
+  ok(h && h.records.map((r) => r.action).join(',') === 'say,read' && h.opts.meta?.title === 'Agy Title',
+     'agy entry: records through the agy dialect; the index title rides the meta');
+  ok(ss._failedSections.has('agents'), 'unknown harness entry: the agents section is quarantined (loud), not parsed as claude');
 }
 
 // ---- 3. WorkspaceModel.clear() empties sheets + resets fields, and emits once ----

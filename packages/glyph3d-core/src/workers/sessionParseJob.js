@@ -20,7 +20,7 @@
  * move an inch. `total` always reports the FULL pre-slice count.
  */
 
-import { parseClaudeSession, parseKimiSession } from '../collections/sessionAdapter.js';
+import { parseSession } from '../collections/sessionAdapter.js';
 import { normalizeToolCall, normalizeMessage } from '../collections/toolRegistry.js';
 
 const _utf8 = new TextDecoder();
@@ -47,15 +47,15 @@ export function eventsToRecords(events, cwd = '') {
 /**
  * @param {Object} job
  * @param {Uint8Array} job.bytes - raw transcript bytes (JSONL)
- * @param {string} [job.harness='claude'] - 'claude' | 'kimi'
- * @param {string} [job.cwd] - kimi: the archive index's workDir fallback
+ * @param {string} [job.harness='claude'] - 'claude' | 'kimi' | 'agy' (unknown → throws)
+ * @param {string} [job.cwd] - the archive index's working dir (kimi: fallback; agy: the workspace)
  * @param {number} [job.cap=Infinity] - keep only the newest N events (Infinity = all)
  * @returns {{ records: Array, total: number, cwd: string|null, meta: Object,
  *             firstTs: number|null, lastTs: number|null }}
  */
 export function runSessionParseJob({ bytes, harness = 'claude', cwd = null, cap = Infinity }) {
     const text = _utf8.decode(bytes);
-    const out = harness === 'kimi' ? parseKimiSession(text, cwd) : parseClaudeSession(text);
+    const out = parseSession(text, { harness, cwd });
     const total = out.events.length;
     const slice = Number.isFinite(cap) && total > cap ? out.events.slice(-cap) : out.events;
     const records = eventsToRecords(slice, out.cwd ?? cwd ?? '');
