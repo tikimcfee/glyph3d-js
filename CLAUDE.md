@@ -223,17 +223,23 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   opens through SessionBooks: `read {tail}` (doubling until it holds the book's cap) → hydrate →
   `follow {from: the last at}` → each pushed batch through `AgentEventReader` → `applyEvents`
   (an add is a sheet, an update rebuilds its sheet in place); paging back reads
-  `read {from, until}` windows by `at`; `agentEvents/ended` (or a reconnect) drops the book's
-  provisional replies and re-follows from the last `at`. A live call that lands ok taps the
-  delta books' watch lane with its event record (meta carries an edit's patch). Lane ids:
-  a workgroup agent's gomuxai name, else the session id (`laneForSession`). The **agents desk**
-  (`app/client/SessionDesk.js`) is the `agents` cylinder: every local session (no workgroup)
-  that is live or written within `gomux.historyHours` gets a book, a session's subagents sit on
-  its own `agents/<session id>` team desk (DeskTree, the hub's rule), older sessions open on
-  demand (`agent.open <session|prefix|name>`, the Agents panel's archive — the whole session
-  list) and are seated there too; a book you clear stays closed. Restore reopens saved books
-  (by session) through the same path. Gates: `tools/session-books.test.mjs`,
-  `tools/agent-events.test.mjs`.
+  `read {until, tail}` windows before each oldest `at`. A FOLLOW only while the session runs
+  (not exited — a follower is a relay process, and the relay caps them; `setLive` as the status
+  moves); every follow drops the book's provisional replies first, and `agentEvents/ended` (or a
+  reconnect) re-follows from the last `at`, backing off. A result far from its call (a
+  background call's, megabytes on) is read or followed BEFORE its call: the lane holds it as an
+  orphan and the call adopts it when it pages in. A failed open keeps its book and retries; a
+  refused follow or a failed open says so on the book (its notice, also in the Agents panel). A
+  live call that lands ok taps the delta books' watch lane with its event record (meta carries
+  an edit's patch). Lane ids: a workgroup agent's gomuxai name (its main session — its
+  subagents carry its workgroup too), else the session id (`laneForSession`). The **agents
+  desk** (`app/client/SessionDesk.js`) is the `agents` cylinder: the local sessions (no
+  workgroup) live or written within `gomux.historyHours` — the newest `agents.maxBooks`
+  (default 24) — get books, a session's subagents sit on its own `agents/<session id>` team
+  desk (DeskTree, the hub's rule), older sessions open on demand (`agent.open
+  <session|prefix|name>`, the Agents panel's archive — the whole session list) and are seated
+  there too; a book you clear stays closed. Restore reopens saved books (by session) through
+  the same path. Gates: `tools/session-books.test.mjs`, `tools/agent-events.test.mjs`.
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
   find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
@@ -306,10 +312,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   waits as a parsed record), past its newest slides it forward, `book.page last` slides it to the
   live end. Sheets outside the window are records, not GPU objects; every record carries its
   source line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches
-  older records. The first page back reads from the transcript's start — the sheets before it
-  are counted, so numbers are exact, and their line starts index later reads (a read's `from`
-  must be a line start); every window reads `historyOverlapBytes` past its end so an edge call
-  pairs with its result. While the window is held away from the live end, live sheets wait beyond it (the HUD's
+  older records: `read {until, tail}` — the last ~`historySliceBytes` before the oldest record
+  (doubling until it holds `historyTurns`), reading `historyOverlapBytes` past it so an edge call
+  pairs with its result (a farther one is an adopted orphan). Sheet numbers are an estimate
+  until paging reaches the run's start, which makes them exact; a page whose read fails says so
+  (`headState.failed`) and isn't re-read on every page. While the window is held away from the live end, live sheets wait beyond it (the HUD's
   `+N newer`) — the book never grows or shifts under the reader.
   Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`,
   `tools/agent-events.test.mjs` (gomuxai's corpus).

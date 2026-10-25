@@ -48,6 +48,7 @@ const { default: SessionDesk, AGENTS_DESK } = await import('../app/client/Sessio
 const { default: GomuxHub, GOMUX_HUB } = await import('../app/client/GomuxHub.js');
 const { default: SessionStore } = await import('../app/client/SessionStore.js');
 const { default: registerAgentCommands } = await import('../app/commands/handlers/agentCommands.js');
+const { setSetting, resetSetting } = await import('../app/client/settings.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error(`  ✗ ${m}`); } };
@@ -82,7 +83,7 @@ function makeRelay() {
     let notify = null;
     const calls = [];
     const relay = {
-        calls, transcripts, sessions: [], beforeOk: null,
+        calls, transcripts, sessions: [], beforeOk: null, onRpc: null,
         add(info, events = []) { transcripts.set(info.session_id, { info, events: [...events] }); return info; },
         size(id) { const t = transcripts.get(id); return t.events.length ? Math.max(...t.events.map((e) => e.at)) + LINE : 0; },
         push(id, frames) { for (const f of frames) if (f.type === 'event') relay.transcripts.get(id).events.push(f); notify('agentEvents/lines', { session: id, lines: frames.map(J) }); },
@@ -93,6 +94,7 @@ function makeRelay() {
         onRpcNotification(fn) { notify = fn; return () => { notify = null; }; },
         async rpcRequest(method, params) {
             calls.push({ method, params });
+            if (relay.onRpc) { const r = relay.onRpc(method, params); if (r !== undefined) return r; }   // a test's hook: a refusal, a hang
             if (method === 'agentSessions/list') return { gen: 1, sessions: relay.sessions };
             const t = transcripts.get(params.session);
             if (method === 'agentEvents/follow') {
@@ -104,9 +106,9 @@ function makeRelay() {
                 if (!t) throw new Error(`no session ${params.session}`);
                 const size = relay.size(params.session);
                 let lo = -1, hi = size;
-                if (params.tail > 0) lo = Math.max(-1, size - params.tail - 1);
                 if (params.from != null) lo = params.from;
                 if (params.until != null) hi = Math.min(size, params.until);
+                if (params.tail > 0) lo = Math.max(-1, hi - params.tail - 1);   // the last ~tail bytes before until (else the end)
                 const evs = t.events.filter((e) => e.at > lo && e.at < hi);
                 return { lines: [sessionLine({ ...t.info, size }), ...evs].map(J), size };
             }
@@ -205,19 +207,21 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     w.relay.push('S1', [say(16, 'provisional', { final: true, provisional: true })]);
     ok(lane.entries.at(-1).record.provisional, 'a provisional reply is a sheet');
     w.relay.end('S1', -1);
-    ok(!lane.entries.some((e) => e.record.provisional), 'ended: the provisional reply drops');
+    ok(/^not live, retrying: its follower exited \(code -1\)/.test(lane.notice ?? ''), `ended: the book says it isn't live (${lane.notice})`);
     await sleep(1100);
+    ok(!lane.entries.some((e) => e.record.provisional), 'the resume drops the provisional reply');
     eq(follows(w, 'S1').at(-1), { session: 'S1', from: 15 * LINE }, 'and the book re-follows from its last `at` (not the provisional line)');
     w.relay.push('S1', [say(17, 'after resume')]);
     eq(ids(lane).at(-1), 'say-17', 'lines after the re-follow land');
+    ok(lane.notice == null, 'live again: the notice clears');
 
-    // paging back: from the start once (exact), windowed after
+    // paging back: bounded windows (until + tail) up to the start, which makes the numbers exact
     const n0 = w.relay.calls.length;
     lane.book.pageTo(0);
     for (let i = 0; i < 50 && lane.history.loading; i++) await lane.history.loading;
     const back = w.relay.calls.slice(n0).filter((c) => c.method === 'agentEvents/read').map((c) => c.params);
-    ok(back.length === 1 && back[0].from === undefined && Number.isFinite(back[0].until), `the first page back reads from the start (${J(back)})`);
-    ok(w.books.headState('coord').exact && lane.older.length > 0, 'and makes the numbers exact');
+    ok(back.length >= 1 && back.every((p) => Number.isFinite(p.until) && p.tail > 0 && p.from === undefined), `paging back reads {until, tail} windows (${J(back)})`);
+    ok(w.books.headState('coord').exact && lane.older.length > 0, 'reaching the start makes the numbers exact');
 
     // the agent moves on to a new session: same book, the old stream closed
     w.relay.add(session('S2', { workgroup: { name: 'coord' } }), [say(0, 'fresh session')]);
@@ -279,11 +283,27 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const r = await w.run('agent.open', '0ld5e55', '1');
     ok(/^OK: opened 0ld5e55-1on as 0ld5e55-1on/.test(r.text), `agent.open by prefix (${r.text})`);
     ok(holderName(w, '0ld5e55-1on') === AGENTS_DESK && w.books.lanes.get('0ld5e55-1on').maxSheets === 1, 'seated at the agents desk, with its limit as the cap');
-    eq(follows(w, '0ld5e55-1on'), [{ session: '0ld5e55-1on', from: LINE }], 'and following from its last `at`');
+    ok(follows(w, '0ld5e55-1on').length === 0 && /not followed/.test(r.text), 'an exited session opens as its record: no follower');
+    w.relay.list([L1, SUB, { ...OLD, status: 'idle' }, WG, { ...RECENT, size: 5 }]);
+    await tick();
+    eq(follows(w, '0ld5e55-1on'), [{ session: '0ld5e55-1on', from: LINE }], 'its status turning live: it follows, from its last `at`');
+    w.relay.list([L1, SUB, { ...OLD, status: 'exited' }, WG, { ...RECENT, size: 5 }]);
+    ok(w.relay.calls.filter((c) => c.method === 'agentEvents/unfollow' && c.params.session === '0ld5e55-1on').length === 1
+        && !w.sb.streams.get('0ld5e55-1on').wantLive, 'and exiting again: it stops following (the follower freed)');
+    // A workgroup agent's subagent carries the parent's workgroup name: its own book, never the agent's.
+    const WGSUB = { ...session('agent-wsub', { workgroup: { name: 'builder' }, parent_session: { session_id: 'W1' }, status: 'idle' }) };
+    w.relay.add(WGSUB, [say(0, 'wg helper')]);
+    w.relay.sessions = [WGSUB, L1, SUB, OLD, WG, RECENT];   // newest first: the subagent ahead of its agent
+    w.ctx.sessionProvider.latest = null;
     const r2 = await w.run('agent.open', 'builder');
-    ok(r2.data?.lane === 'builder' && w.books.lanes.has('builder') && holderName(w, 'builder') !== AGENTS_DESK + '/x',
-        "a workgroup agent's session opens under its name");
-    ok(laneForSession(WG) === 'builder' && laneForSession(L1) === 'L1-aaaa', 'laneForSession: the name for a workgroup agent, else the session id');
+    ok(r2.data?.lane === 'builder' && r2.data?.sessionId === 'W1' && w.books.lanes.has('builder'),
+        "agent.open <name>: the workgroup agent's own session, not its newer subagent's");
+    ok(laneForSession(WG) === 'builder' && laneForSession(L1) === 'L1-aaaa' && laneForSession(WGSUB) === 'agent-wsub',
+        'laneForSession: the name for a workgroup agent\'s main session, else the session id (its subagents included)');
+    await w.run('agent.open', 'agent-wsub');
+    ok(ids(w.books.lanes.get('agent-wsub') ?? { entries: [] }).length === 1 && w.books.lanes.get('builder').entries.length === 1
+        && !w.books.lanes.get('builder').history.done,
+        "a workgroup subagent opens into its own book; the agent's book (and its history) untouched");
     let threw = '';
     try { resolveSession([L1, OLD, session('0ld5e55-2')], '0ld5e55'); } catch (e) { threw = e.message; }
     ok(/ambiguous/.test(threw), 'a prefix that matches two sessions is refused');
@@ -303,7 +323,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     await ss._restoreAgents({ agents: [{ session: '0ld5e55-1on', limit: 3, following: false, head: 0 }, { session: 'vanished', following: true }] });
     const lane = w2.books.lanes.get('0ld5e55-1on');
     ok(lane && ids(lane).length === 3 && lane.maxSheets === 3 && lane.book.head === 0, 'restore reopens a saved book through the open path (limit, head)');
-    ok(follows(w2, '0ld5e55-1on').length === 1, 'and follows it');
+    ok(follows(w2, '0ld5e55-1on').length === 0, 'an exited session restores as its record: no follower');
     ok(!ss._failedSections.has('agents'), 'a vanished session stays closed without quarantining the section');
     const w3 = makeWorld();
     w3.ctx.sessionProvider.list = async () => { throw new Error('relay gone'); };
@@ -322,7 +342,173 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     await opened(w, 'H1');
     const saved = new SessionStore({ ctx: w.ctx, router: null, bridge: null }).capture();
     ok(saved.agents.length === 0, "capture skips the hub's books");
+    // a departed agent's book is its record: no follower; one that comes back follows
+    w.relay.add(session('H2', { workgroup: { name: 'gone' } }), [say(0, 'y')]);
+    const gone = { name: 'gone', parent: '', sessionId: 'H2', harness: 'claude', live: false, status: 'exited', createdAt: new Date().toISOString() };
+    const lead = { name: 'lead', parent: '', sessionId: 'H1', harness: 'claude', live: true, status: 'idle', createdAt: new Date().toISOString() };
+    hub.apply({ gen: 2, dirs: [], agents: [lead, gone] });
+    await opened(w, 'H2');
+    ok(w.books.lanes.has('gone') && follows(w, 'H2').length === 0, "a departed hub agent's book opens without a follower");
+    ok(follows(w, 'H1').length === 1, 'a live one follows');
     hub.dispose();
+}
+
+// ── 6. results far from their calls: held until the call pages in ────────────────────
+{
+    // call c at line 1; its result lands at line 40 — farther than any window's overlap.
+    const evs = [say(0, 'start'), bash(1, 'agent in background', { status: 'background' })];
+    for (let k = 2; k < 40; k++) evs.push(say(k, `s${k}`));
+    evs.push(bash(1, 'agent in background', { status: 'ok', output: 'the report' }, 'update', 40 * LINE));
+    for (let k = 41; k < 44; k++) evs.push(say(k, `s${k}`));
+    // (a) the tail window holds the result but not its call; paging back adopts it
+    const w = makeWorld();
+    w.books.cfg.historyOverlapBytes = LINE;
+    w.books.cfg.historySliceBytes = 4 * LINE;
+    w.books.cfg.historyTurns = 4;
+    w.relay.add(session('F1', { status: 'exited' }), evs);
+    await w.sb.open('F1', { follow: false });
+    const lane = w.books.lanes.get('F1');
+    ok(lane.orphans?.get('tool-1')?.status === 'ok', 'the tail read holds the far result as an orphan (its call isn\'t in the window)');
+    lane.book.pageTo(0);
+    for (let g = 0; g < 40; g++) { lane.book.scroll(-50); for (let i = 0; i < 50 && lane.history.loading; i++) await lane.history.loading; if (lane.history.done) break; }
+    const call = lane.entries.find((e) => e.record.id === 'tool-1') ?? lane.older.find((x) => x.record.id === 'tool-1');
+    const rec = call?.record;
+    ok(rec?.status === 'ok' && rec.result === 'the report' && rec.at === LINE,
+        `paged in, the call carries its far result, at its own place (got ${rec?.status} at ${rec?.at})`);
+    ok(!lane.orphans.has('tool-1'), 'and the orphan is spent');
+
+    // (b) live: the result arrives on the follow while its call is still unread
+    const w2 = makeWorld();
+    w2.books.cfg.historyOverlapBytes = LINE;
+    w2.books.cfg.historySliceBytes = 4 * LINE;
+    w2.books.cfg.historyTurns = 4;
+    w2.relay.add(session('F2'), evs.slice(0, 40));
+    await w2.sb.open('F2');
+    const l2 = w2.books.lanes.get('F2');
+    w2.relay.push('F2', [evs[40]]);
+    ok(l2.orphans?.get('tool-1')?.status === 'ok', 'a followed result for an unread call is held');
+    l2.book.pageTo(0);
+    for (let g = 0; g < 40; g++) { l2.book.scroll(-50); for (let i = 0; i < 50 && l2.history.loading; i++) await l2.history.loading; if (l2.history.done) break; }
+    const c2 = (l2.entries.find((e) => e.record.id === 'tool-1') ?? l2.older.find((x) => x.record.id === 'tool-1'))?.record;
+    ok(c2?.status === 'ok' && c2.result === 'the report', `paged in, it carries the followed result (got ${c2?.status})`);
+
+    // (d) neither in the tail: a page-back window holds the result, an older one the call
+    const w4 = makeWorld();
+    w4.books.cfg.historyOverlapBytes = LINE;
+    w4.books.cfg.historySliceBytes = 4 * LINE;
+    w4.books.cfg.historyTurns = 4;
+    const longer = [...evs];
+    for (let k = 44; k < 80; k++) longer.push(say(k, `s${k}`));
+    w4.relay.add(session('F4', { status: 'exited' }), longer);
+    await w4.sb.open('F4', { follow: false });
+    const l4 = w4.books.lanes.get('F4');
+    ok(!l4.orphans?.has('tool-1'), 'the tail holds neither the call nor its result');
+    l4.book.pageTo(0);
+    for (let g = 0; g < 60; g++) { l4.book.scroll(-50); for (let i = 0; i < 50 && l4.history.loading; i++) await l4.history.loading; if (l4.history.done) break; }
+    const c4 = (l4.entries.find((e) => e.record.id === 'tool-1') ?? l4.older.find((x) => x.record.id === 'tool-1'))?.record;
+    ok(c4?.status === 'ok' && c4.result === 'the report', `a result met in one older window is adopted when its call's window comes (got ${c4?.status})`);
+
+    // (c) a call the cap leaves out of the open's window keeps that window's fold
+    const w3 = makeWorld();
+    w3.relay.add(session('F3', { status: 'exited' }), [say(0, 'a'), bash(1, 'make'), bash(1, 'make', { status: 'ok', output: 'built' }, 'update', 2 * LINE),
+        say(3, 'b'), say(4, 'c'), say(5, 'd'), say(6, 'e')]);
+    w3.books.cfg.tailReadBytes = 100 * LINE;
+    await w3.sb.open('F3', { follow: false });
+    const l3 = w3.books.lanes.get('F3');
+    const held = l3.older.find((x) => x.record.id === 'tool-1');
+    ok(held?.record.status === 'ok' && held.record.result === 'built', "the cap's older records wait in the buffer as the window folded them (no re-read)");
+}
+
+// ── 7. the agents desk's cap ─────────────────────────────────────────────────────────
+{
+    const w = makeWorld();
+    setSetting(w.ctx, 'agents.maxBooks', 2);
+    const desk = new SessionDesk(w.ctx, w.ctx.sessionProvider, w.sb);
+    const ss = ['A', 'B', 'C', 'D'].map((id) => w.relay.add(session(id, { status: id === 'D' ? 'exited' : 'idle' }), [say(0, id)]));
+    w.relay.list(ss);
+    await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
+    eq([...w.books.lanes.keys()], ['A', 'B'], 'agents.maxBooks: the newest N local sessions get books, no more');
+    w.run('agent.clear', 'A');
+    w.relay.list([...ss.slice(0, 3), { ...ss[3], title: 'changed' }]);
+    await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
+    eq([...w.books.lanes.keys()].sort(), ['B', 'C'], 'a cleared book frees its slot for the next newest');
+    resetSetting(w.ctx, 'agents.maxBooks');
+    desk.dispose();
+}
+
+// ── 8. failures say so on the book, and retry ────────────────────────────────────────
+{
+    // an open that fails keeps its book, says so, and retries
+    const w = makeWorld();
+    w.relay.add(session('O1'), [say(0, 'x')]);
+    let refuse = true;
+    w.relay.onRpc = (m, p) => (m === 'agentEvents/read' && p.session === 'O1' && refuse ? Promise.reject(new Error('relay busy')) : undefined);
+    await w.sb.open('O1').catch(() => {});
+    ok(w.books.lanes.has('O1') && w.sb.streams.get('O1')?.phase === 'failed' && /^open failed, retrying: relay busy/.test(w.books.lanes.get('O1').notice),
+        `a failed open: its book stays and says so (${w.books.lanes.get('O1').notice})`);
+    refuse = false;
+    await sleep(2100);
+    await w.sb.streams.get('O1').opening;
+    ok(w.sb.streams.get('O1').phase === 'open' && ids(w.books.lanes.get('O1')).length === 1 && w.books.lanes.get('O1').notice == null,
+        'it retries on its own and opens; the notice clears');
+
+    // a page back whose read fails: said, and not re-read on every page
+    const wp = makeWorld();
+    const pev = [];
+    for (let k = 0; k < 12; k++) pev.push(say(k, `p${k}`));
+    wp.relay.add(session('PB', { status: 'exited' }), pev);
+    await wp.sb.open('PB', { follow: false });
+    const pl = wp.books.lanes.get('PB');
+    wp.relay.onRpc = (m) => (m === 'agentEvents/read' ? Promise.reject(new Error('output over 64 MB')) : undefined);
+    const nr = () => wp.relay.calls.filter((c) => c.method === 'agentEvents/read').length;
+    const r0 = nr();
+    pl.book.pageTo(0);
+    for (let i = 0; i < 20 && pl.history.loading; i++) await pl.history.loading;
+    const r1 = nr();
+    pl.book.scroll(-1); pl.book.pageTo(0); pl.book.scroll(-1);
+    for (let i = 0; i < 20 && pl.history.loading; i++) await pl.history.loading;
+    ok(r1 === r0 + 1 && nr() === r1 && wp.books.headState('PB').failed, `a failed page read is marked (headState.failed) and not retried on every page (${r1 - r0} then ${nr() - r1})`);
+
+    // a follow the relay refuses (its follower cap): the book says it isn't live
+    const w2 = makeWorld();
+    w2.relay.add(session('C1'), [say(0, 'x')]);
+    w2.relay.onRpc = (m) => (m === 'agentEvents/follow' ? Promise.reject(new Error('follower cap reached (64)')) : undefined);
+    await w2.sb.open('C1');
+    ok(/^not live, retrying: follower cap reached/.test(w2.books.lanes.get('C1').notice ?? ''), `a refused follow shows on the book (${w2.books.lanes.get('C1').notice})`);
+    w2.sb.close('C1');
+
+    // close always unfollows — even while the follow is still in flight
+    const w3 = makeWorld();
+    w3.relay.add(session('U1'), [say(0, 'x')]);
+    let release;
+    w3.relay.onRpc = (m) => (m === 'agentEvents/follow' ? new Promise((r) => { release = r; }) : undefined);
+    const p = w3.sb.open('U1');
+    for (let i = 0; i < 20 && !release; i++) await tick();
+    w3.sb.close('U1');
+    release({ ok: true });
+    await p;
+    ok(w3.relay.calls.some((c) => c.method === 'agentEvents/unfollow' && c.params.session === 'U1'), 'close during a follow in flight still unfollows (no leaked follower)');
+
+    // a reconnect re-opens what was still opening (the bridge never answers an RPC lost with the socket)
+    const w4 = makeWorld();
+    w4.relay.add(session('R9'), [say(0, 'x')]);
+    let hang = true;
+    w4.relay.onRpc = (m) => (m === 'agentEvents/read' && hang ? new Promise(() => {}) : undefined);
+    w4.sb.open('R9');
+    await tick();
+    hang = false;
+    w4.sb.reconnect();
+    await w4.sb.streams.get('R9').opening;
+    ok(ids(w4.books.lanes.get('R9')).length === 1 && w4.sb.streams.get('R9').phase === 'open', 'a reconnect re-opens a book stuck opening');
+}
+
+// ── 9. the first follow after an open drops the tail's provisional reply ─────────────
+{
+    const w = makeWorld();
+    w.relay.add(session('P1'), [say(0, 'a'), say(1, 'final', { final: true, provisional: true })]);
+    await w.sb.open('P1');
+    ok(!w.books.lanes.get('P1').entries.some((e) => e.record.provisional), 'the open\'s provisional reply drops before the follow (its copy comes on the stream)');
+    eq(follows(w, 'P1'), [{ session: 'P1', from: 0 }], 'and the follow resumes from the last non-provisional line');
 }
 
 console.log(`session-books: ${pass} passed, ${fail} failed`);

@@ -27,6 +27,7 @@
 
 import { canonicalPath } from './pathResolve.js';
 import { laneForSession, resolveSession } from '../../client/SessionBooks.js';
+import { followable } from '../../client/SessionDesk.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 /** @import { AgentSession } from '@glyph3d/core/services/data/AgentSessionProvider.js' */
 
@@ -43,7 +44,10 @@ const noSessions = { text: 'ERR: no agent sessions (the session list is a relay 
  */
 export function openSession(ctx, session, { limit } = {}) {
     if (!ctx.sessionBooks) return Promise.reject(new Error('no session books (relay offline — sessions are a relay feature)'));
-    return ctx.sessionBooks.open(session.session_id, { lane: laneForSession(session), agentType: session.harness, limit });
+    // A session that ended needs no follower (the relay caps them): its book is its record.
+    return ctx.sessionBooks.open(session.session_id, {
+        lane: laneForSession(session), agentType: session.harness, limit, follow: followable(session.status),
+    });
 }
 
 /**
@@ -138,7 +142,7 @@ export default function registerAgentCommands(router) {
             const r = await openSession(ctx, s, { limit });
             const capped = r.whole ? (r.added < r.total ? ` (of ${r.total} — tail)` : '') : ' (tail)';
             return {
-                text: `OK: opened ${s.session_id} as ${r.lane} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}, following`,
+                text: `OK: opened ${s.session_id} as ${r.lane} — ${r.added} sheet${r.added === 1 ? '' : 's'}${capped}${followable(s.status) ? ', following' : ' (ended — not followed)'}`,
                 data: { sessionId: s.session_id, harness: s.harness, ...r },
             };
         } catch (e) {

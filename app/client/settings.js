@@ -716,7 +716,10 @@ export const SETTINGS = [
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: "Space between books / teams at the hub's desks when they're built (world units)", group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },
-  { key: 'gomux.historyHours', label: "Show finished agents, and local sessions at the 'agents' desk, from the last (h, 0 = all)", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
+  { key: 'gomux.historyHours', label: "Show finished agents, and local sessions at the 'agents' desk (up to its book cap), from the last (h, 0 = all)", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
+  // agents.maxBooks — read by SessionDesk at each session-list push: how many local sessions the
+  // agents desk opens by itself (newest first). Books already open stay; on-demand opens don't count.
+  { key: 'agents.maxBooks', label: "Books the 'agents' desk opens by itself: the newest N live or recent local sessions (0 = none; agent.open and the archive still open any)", group: 'Agent Books', type: 'number', default: 24, min: 0, max: 5000, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and

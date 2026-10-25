@@ -12,13 +12,17 @@ import { getSetting } from './settings.js';
  * file tree, as the gomuxai hub is for the workgroup.
  *
  * WHICH BOOKS: from the relay's session list (agentSessions/changed — gomuxai's
- * `agent sessions --json`), every local session that is LIVE (idle, processing, waiting or
- * error) or was written within `gomux.historyHours` gets a book of its own (lane id = its
- * session id), opened through SessionBooks — tail read, hydrate, follow. Older sessions open
- * on demand (agent.open, the Agents panel's archive, a saved book's restore) and are seated
- * here too. A session's subagents sit on its own team desk (`agents/<session id>`, titled
- * `<name> · N helpers`) — the DeskTree rule the hub's teams follow. A book you cleared stays
- * closed while its session lives on.
+ * `agent sessions --json`), the local sessions that are LIVE (idle, processing, waiting or
+ * error) or were written within `gomux.historyHours` — the newest `agents.maxBooks` of them
+ * (default 24; the list is newest first) — get a book of their own (lane id = the session
+ * id), opened through SessionBooks: tail read, hydrate, and a FOLLOW only while the session
+ * isn't exited (a follower is a relay process and the relay caps them; a book whose session
+ * ends stops following, one whose session comes back follows again). Older sessions open on
+ * demand (agent.open, the Agents panel's archive, a saved book's restore) and are seated here
+ * too, outside the cap. A session's subagents sit on its own team desk (`agents/<session id>`,
+ * titled `<name> · N helpers`) — the DeskTree rule the hub's teams follow. A book you cleared
+ * stays closed while its session lives on. A failed open retries (SessionBooks), its book
+ * saying why.
  *
  * Status rides the lane: the session's status (its list row, or its stream's newest session
  * line) maps onto the book's lifecycle as the hub's does, and `waiting` raises its hand.
@@ -32,6 +36,10 @@ export const AGENTS_DESK = 'agents';
 /** A session status that says it runs now (`unknown` doesn't: a session's status is unknown
  *  when the harness can't be asked — the history window decides those). */
 const LIVE = new Set(['idle', 'processing', 'waiting', 'error']);
+
+/** Whether a session with this status wants a follower: anything but exited (`unknown` may
+ *  be running — an agy conversation held open, a Kimi session written lately). */
+export const followable = (status) => status !== 'exited';
 
 /** Session status → the book's lifecycle (the hub's table). */
 export const LIFECYCLE = { processing: 'active', waiting: 'active', idle: 'idle', error: 'stalled', exited: 'done', unknown: 'idle' };
@@ -51,6 +59,8 @@ export default class SessionDesk {
         this.sessions = new Map();
         /** Session ids this desk opened or seats (an on-demand open joins) — a cleared one stays here, closed. */
         this.known = new Set();
+        /** Session ids the desk opened by itself — what agents.maxBooks counts. */
+        this._autoOpened = new Set();
         /** Session id → the newest status word on it (list row or session line). */
         this._statusOf = new Map();
         this._offList = provider.onSessions((list) => this.apply(list));
@@ -67,7 +77,8 @@ export default class SessionDesk {
         }
     }
 
-    /** The sessions the desk opens by itself: local, and live or recently written. @param {AgentSession[]} sessions */
+    /** The sessions the desk would open by itself: local, and live or recently written —
+     *  newest first, as the list comes. @param {AgentSession[]} sessions */
     _auto(sessions) {
         const hours = Number(getSetting('gomux.historyHours'));
         const since = Number.isFinite(hours) && hours > 0 ? Date.now() - hours * 3600e3 : -Infinity;
@@ -76,19 +87,25 @@ export default class SessionDesk {
     }
 
     /**
-     * Converge on a session list: a book for every local session shown, the desk tree,
-     * status onto lanes.
+     * Converge on a session list: a book for each local session shown (up to the cap), the
+     * desk tree, status onto lanes (and their following).
      * @param {AgentSessionList} list
      */
     apply(list) {
         if (this._disposed || !this.ctx.agentBooks || !Array.isArray(list?.sessions)) return;
         this.sessions = new Map(list.sessions.map((s) => [s.session_id, s]));
+        const max = Math.max(0, Math.floor(Number(getSetting('agents.maxBooks'))) || 0);
+        let open = [...this._autoOpened].filter((id) => this.ctx.agentBooks.lanes.has(id)).length;
         let opened = false;
         for (const s of this._auto(list.sessions)) {
+            if (open >= max) break;
             if (this.known.has(s.session_id)) continue;
             this.known.add(s.session_id);
+            this._autoOpened.add(s.session_id);
+            open++;
             opened = true;
-            this.sessionBooks.open(s.session_id, { agentType: s.harness }).catch(() => { /* SessionBooks said it */ });
+            this.sessionBooks.open(s.session_id, { agentType: s.harness, follow: followable(s.status) })
+                .catch(() => { /* SessionBooks said it (and retries) */ });
         }
         // The list arrives whole (every session on the host, re-pushed whenever any of it
         // moves): the desks rebuild only when what they show changed.
@@ -145,8 +162,10 @@ export default class SessionDesk {
         const books = this.ctx.agentBooks;
         const lane = books?.lanes.get(id);
         const st = this.sessionBooks.streams.get(id);
-        if (!lane || !st || st.phase === 'opening') return;
+        if (!lane || !st) return;
         status = this._statusOf.get(id) || 'unknown';
+        this.sessionBooks.setLive(id, followable(status));   // a follower only while it can say something
+        if (st.phase === 'opening') return;
         const life = LIFECYCLE[status] ?? 'idle';
         if (lane.state !== life) books.state(id, life);
         if (status === 'waiting') {

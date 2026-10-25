@@ -185,13 +185,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
 - **`agent-book-history.test.mjs`** (headless) — an agent book's sliding window over a synthetic
-  100-turn event stream and a mock `agentEvents/read` (lines after `from`, before `until`;
-  `tail`): records carry their line's byte offset; paging near
+  100-turn event stream and a mock `agentEvents/read {until, tail}`: records carry their line's
+  byte offset; paging near
   the oldest sheet prefetches records (no sheets); pushing past it slides the window one turn back
   (same size, the deck parallel to the entries, the head on the turn paged to, the newest waiting
-  as a record); a slide wider than the buffer waits for reads (windows by the line-start index)
-  and completes; a call at a window edge pairs with its result (the overlap read); the first page
-  back reads from the start and makes numbers exact; live
+  as a record); a slide wider than the buffer waits for reads (bounded windows, never the whole
+  prefix) and completes; a call at a window edge pairs with its result (the overlap read); numbers
+  stay an estimate until the start makes them exact; live
   turns while held wait beyond the window; `live` slides to the end and resumes following; the
   run's start ends history. Mutation-checked (no evict, no freeze, no pending slide).
 - **`agent-events.test.mjs`** (headless) — agent books fed by gomuxai's event stream
@@ -207,9 +207,9 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   stream's events land in its own book (a subagent's stream in the subagent's — its events'
   `agent` is not its session id; an old transcript's sidechain records in a book named by their
   agent); a redacted thought says so; the sliding-window history pages back by `at` over
-  `agentEvents/read` windows of a long corpus-derived stream (the first from the start, later
-  ones by the line-start index; every paged record equals the full fold — results paired across
-  window edges), and updates to buffered records replace them there.
+  `agentEvents/read {until, tail}` windows of a long corpus-derived stream (every paged record
+  equals the full fold — results paired across window edges; exact numbers at the start), and
+  updates to buffered records replace them there.
   Mutation-checked (12 mutants: no in-place replace, position lost, generic tag, no subagent
   routing, orphan update as add, no overlap read, turn dropped, buffered update ignored, …).
   ```
@@ -220,21 +220,31 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   the real AgentSessionProvider over a fake bridge playing the relay (agentSessions/list|changed,
   agentEvents/read|follow|unfollow, agentEvents/lines|ended), real AgentBooks, Carrel, Holding,
   SessionBooks, GomuxHub, SessionDesk, agent.open and SessionStore. Open = a tail read (doubled
-  to the cap) → hydrate → follow from the last `at`; live lines append, a result update rebuilds
-  its sheet in place, lines that beat the follow's {ok} are taken; ended (code -1 too) drops the
-  provisional replies and re-follows from the last non-provisional `at`; paging back reads from
-  the start once (exact numbers); the hub's book is the agent's name, its status wins over a
-  live batch, a new session opens into the same book (the old unfollowed), a live edit taps the
-  delta books with its patch; the agents desk opens live + recent local sessions (not old, not
-  workgroup), seats a subagent on its parent's team desk, rebuilds nothing on a re-push that
-  changes nothing shown, leaves a cleared book closed; agent.open by prefix / workgroup name;
-  restore reopens saved books (limit, head), a vanished one stays closed, no list quarantines;
-  capture saves books by session, never the hub's. Mutation-checked with agent-events and
-  agent-book-history (16 mutants: resume from a provisional reply, routing by agent id, no
-  sidechain routing, ended keeping provisionals, delta tap on pending calls, no tail growth,
-  follow from the start, clear still following, desk rebuild every push, workgroup/old sessions
-  on the desk, no teams, batch status winning, old session left followed, history never
-  windowed, no overlap read). The relay side is `cd cli && go test -run Gomux` (export's tree) and
+  to the cap) → hydrate → follow from the last `at` (only a session that isn't exited — the hub's
+  departed agents and exited local sessions open as records; a status turning live follows,
+  exiting unfollows); live lines append, a result update rebuilds its sheet in place, lines that
+  beat the follow's {ok} are taken; every follow drops the provisional replies (the open's
+  included); ended (code -1 too) says "not live" on the book and re-follows from the last
+  non-provisional `at`; paging back reads {until, tail} windows up to the start (exact numbers);
+  a failed page read is marked, not re-read every page; results far from their calls (in the
+  tail, followed live, or met in an older window) are held and adopted when the call pages in,
+  and the cap's older records wait buffered as their window folded them; the hub's book is the
+  agent's name, its status wins over a live batch, a new session opens into the same book (the
+  old unfollowed, history sealed), a live edit taps the delta books with its patch; the agents
+  desk opens live + recent local sessions (not old, not workgroup) up to `agents.maxBooks`,
+  seats a subagent on its parent's team desk, rebuilds nothing on a re-push that changes nothing
+  shown, leaves a cleared book closed; agent.open by prefix / workgroup name (its main session,
+  never a subagent; a workgroup subagent opens into its own book); a failed open keeps its book,
+  says so and retries; a refused follow says so; close always unfollows; a reconnect re-opens a
+  stuck open; restore reopens saved books (limit, head), a vanished one stays closed, no list
+  quarantines; capture saves books by session, never the hub's. Mutation-checked with
+  agent-events and agent-book-history (35 mutants across two rounds — among them: resume from a
+  provisional reply, routing by agent id, ended keeping provisionals, delta tap on pending
+  calls, follow from the start, clear still following, desk rebuild every push, no teams, batch
+  status winning, no overlap read, orphans dropped (window / followed / older window) or never
+  adopted, page back reading the whole prefix, failed page re-read, no book cap, exited sessions
+  followed, subagent into the agent's book, open never retried, reconnect skipping stuck opens,
+  close unfollowing only when live, silent notices). The relay side is `cd cli && go test -run Gomux` (export's tree) and
   `go test -run 'AgentEvents|TailFrom|Children'` (the event wire, tail math, child cleanup).
   ```
   bun tools/session-books.test.mjs

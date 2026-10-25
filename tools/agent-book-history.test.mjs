@@ -5,7 +5,7 @@
 //
 // A book is a fixed-size window (its cap of sheets) sliding over the run; turns outside
 // it wait as parsed records. This gate locks, over a synthetic 100-turn event stream and a
-// mock `agentEvents/read` (gomuxai's `agent transcript --from --until` window):
+// mock `agentEvents/read {until, tail}` (the lines of the last ~tail bytes before until):
 //   - every record carries its line's byte offset (`at`), a line start;
 //   - paging near the oldest sheet PREFETCHES older records — no sheets added;
 //   - pushing past the oldest sheet slides the window one turn back: the older turn at the
@@ -13,8 +13,8 @@
 //     deck stays parallel to the entries, the head lands on the turn paged to;
 //   - a slide wider than the buffer waits for reads and completes;
 //   - a call at a window edge pairs with its result (the overlap read past the window);
-//   - the first page back reads from the start and counts the turns before it (exact
-//     numbers); the run's start ends history (turn 1 = the first);
+//   - every page back reads a bounded window (never the whole prefix); numbers stay an
+//     estimate until the run's start, which ends history (turn 1 = the first) and makes them exact;
 //   - live turns while held wait in the newer buffer (the book doesn't shift); `live`
 //     slides the window to the end and resumes following.
 //
@@ -58,15 +58,13 @@ function stream(n) {
 const frames = stream(100);
 const SESSION = { type: 'session', session_id: 'h', harness: 'claude', cwd: '/p' };
 
-/** agentEvents/read: the lines after the line at `from`, before byte `until`; `tail`: the lines at or after size - tail. */
+/** agentEvents/read: the lines before byte `until` (the end when omitted) starting at or after `until - tail`. */
 const reads = [];
-function read({ from, until, tail } = {}) {
-    reads.push({ from, until, tail });
+function read({ until, tail } = {}) {
+    reads.push({ until, tail });
     const size = at;
-    let lo = -1, hi = size;
-    if (tail > 0) lo = Math.max(-1, size - tail - 1);
-    if (from != null) lo = from;
-    if (until != null) hi = Math.min(size, until);
+    const hi = until != null ? Math.min(size, until) : size;
+    const lo = tail > 0 ? Math.max(-1, hi - tail - 1) : -1;
     return Promise.resolve({ lines: [SESSION, ...frames.filter((f) => f.at > lo && f.at < hi)].map(J), size });
 }
 const label = (r) => r.action === 'say' ? r.result.split(' ')[1] : `bash${r.detail.split(' ')[1]}`;
@@ -75,6 +73,7 @@ const kept = (lane) => lane.entries.map((e) => label(e.record));
 // ── open: the tail (20 turns), as SessionBooks does ──
 const books = new AgentBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null });
 books.cfg.historyOverlapBytes = 1024;
+books.cfg.historySliceBytes = 4000;   // small windows so the grow loop runs
 const tail = await read({ tail: 12000 });
 const first = parseEventSlice(tail.lines, { cap: 20 });
 await books.hydrate('a', first.records, { agentType: 'claude', seqBase: first.total - 20, seqExact: false });
@@ -93,10 +92,10 @@ lane.book.pageTo(2);
 ok(!!lane.history.loading, 'paging within historyLead prefetches');
 ok(books.loadOlder('a') === lane.history.loading, 'a second ask joins the read in flight');
 await settle();
-ok(lane.entries.length === W && lane.older.length === 20, `prefetch fills the older buffer only (window ${lane.entries.length}, buffer ${lane.older.length})`);
+ok(lane.entries.length === W && lane.older.length >= 20, `prefetch fills the older buffer only (window ${lane.entries.length}, buffer ${lane.older.length})`);
 const turnOf = (i) => lane.book.sheets[i].meta.seq + (lane.sheetBase || 0) + 1;
-ok(lane.seqExact && turnOf(0) === 81, `the first page back counts the turns before it: exact (sheet 0 = turn ${turnOf(0)}, want 81)`);
-ok(books.headState('a').sheets === 100, 'sheet 100 of 100 is the newest');
+ok(!lane.seqExact && !books.headState('a').exact, 'short of the start, the sheet numbers stay an estimate');
+ok(reads.slice(1).length > 0 && reads.slice(1).every((w) => Number.isFinite(w.until) && w.tail > 0), `a page back reads a bounded window — until + tail, never the whole prefix (${J(reads.slice(1))})`);
 
 // ── push past the oldest sheet: slide one turn back ──
 lane.book.pageTo(0);
@@ -104,7 +103,7 @@ lane.book.scroll(-1);
 eq(kept(lane).slice(0, 2), ['bash79', 'bash80'], 'the window slid one turn back: the older turn at the front');
 ok(lane.entries.length === W, `the window keeps its size (${lane.entries.length})`);
 eq(lane.newer.map((x) => label(x.record)), ['99'], 'the newest turn left for the newer buffer');
-ok(lane.book.head === 0 && turnOf(0) === 80, 'the head is on the turn paged to (turn 80)');
+ok(lane.book.head === 0, 'the head is on the turn paged to');
 ok(parallel(), 'the deck stays parallel to the entries');
 const b79 = lane.entries[0].record;
 ok(String(b79.result).includes('out 79') && b79.status === 'ok', 'a call at the window edge pairs with a result written past it (the overlap read)');
@@ -116,7 +115,7 @@ await settle();
 eq(kept(lane)[0], '29', `slid 50 turns back across reads (oldest now ${kept(lane)[0]})`);
 ok(lane.entries.length === W && parallel(), 'still the same window, still parallel');
 ok(lane.newer.length === 51, `everything newer waits as records (${lane.newer.length})`);
-ok(reads.length > 0 && reads.every((w) => Number.isFinite(w.from) && Number.isFinite(w.until)), 'later reads are windows by the line-start index');
+ok(reads.length > 0 && reads.every((w) => Number.isFinite(w.until) && w.tail > 0), 'every older read is a bounded window');
 
 // ── a live turn while held waits; `live` slides to the end ──
 const seqBefore = lane.seq;
@@ -137,6 +136,7 @@ lane.book.scroll(-500);
 await settle();
 eq(kept(lane)[0], '0', 'slid back to the first turn');
 ok(lane.history.done && turnOf(0) === 1, `the start: history done, sheet 0 is turn ${turnOf(0)}`);
+ok(lane.seqExact && books.headState('a').sheets === 102, `numbers exact from the start: ${books.headState('a').sheets} sheets (100 + 2 live)`);
 ok(lane.entries.length === W && parallel(), 'the window is the same size at the start');
 
 console.log(`agent-book-history: ${pass} passed, ${fail} failed`);

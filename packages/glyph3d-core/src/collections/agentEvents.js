@@ -163,7 +163,7 @@ export class AgentEventReader {
             this.session = session;
             return { op: 'session', session };
         }
-        if (!isProvisional(f) && !(this.lastAt >= f.at)) this.lastAt = f.at;
+        if (!isProvisional(f) && (this.lastAt == null || f.at > this.lastAt)) this.lastAt = f.at;   // (null >= 0 is true in JS: compare explicitly)
         if (!this.retain) {
             return f.op === 'add'
                 ? { op: 'add', event: f, pos: { at: f.at, line: f.line, seq: f.seq } }
@@ -341,20 +341,30 @@ export function eventLane(ev, streamLane, streamIsSubagent) {
 
 /**
  * A WINDOW of a stream (the lines an `agentEvents/read` returned) → its folded records, the
- * parse half of a book's open and history reads. Events fold by id in arrival order; an
- * update whose add lies before the window belongs to an older window and is dropped here.
+ * parse half of a book's open and history reads. Events fold by id in arrival order. An
+ * update whose add lies before the window (a result landing far from its call) is not a
+ * record of this window — it comes back in `orphans`, the event's state as of the window's
+ * end, for the book to hold until that add pages in (AgentBooks adopts it then).
  * @param {Uint8Array|string|string[]} lines stream lines (an array: one line each, no newline)
  * @param {{cap?:number, showNoise?:boolean}} [opts] cap keeps the newest N records
- * @returns {{records:Object[], count:number, total:number, session:Object|null, lastAt:number|null}}
- *          total: the window's records before the cap; lastAt: where a follow resumes
- *          after this window (AgentEventReader.lastAt)
+ * @returns {{records:Object[], count:number, total:number, session:Object|null, lastAt:number|null,
+ *            orphans:Map<string, Object>}}
+ *          total: the window's records before the cap; lastAt: where a follow resumes after
+ *          this window (AgentEventReader.lastAt); orphans: id → the record of an update whose
+ *          add isn't in the window (hidden noise left out)
  */
 export function parseEventSlice(lines, { cap = Infinity, showNoise = true } = {}) {
     const r = new AgentEventReader();
-    r.push(Array.isArray(lines) ? (lines.length ? lines.join('\n') + '\n' : '') : lines);
-    r.end();
+    const changes = r.push(Array.isArray(lines) ? (lines.length ? lines.join('\n') + '\n' : '') : lines);
+    changes.push(...r.end());
+    const orphans = new Map();
+    for (const c of changes) {
+        if (c.op !== 'update' || c.pos) continue;
+        const rec = eventRecord(c.event, null, { showNoise });
+        if (rec) orphans.set(rec.id, rec);
+    }
     const all = r.records({ showNoise });
     const total = all.length;
     const records = Number.isFinite(cap) && total > cap ? all.slice(-cap) : all;
-    return { records, count: records.length, total, session: r.session, lastAt: r.lastAt };
+    return { records, count: records.length, total, session: r.session, lastAt: r.lastAt, orphans };
 }
