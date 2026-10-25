@@ -12,6 +12,7 @@ import { LAYER_BAND, setBandDistance, getBandDistance } from '@glyph3d/core/core
 import { AGENT_BOOKS_DEFAULTS } from '@glyph3d/core/collections/AgentBooks.js';
 import { DELTA_BOOKS_DEFAULTS } from '@glyph3d/core/collections/DeltaBooks.js';
 import { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from '@glyph3d/core/collections/Book.js';
+import { WHEEL_DETENT_DEFAULTS } from './wheelDetent.js';
 import { LABEL_DEFAULTS } from '@glyph3d/core/collections/ContentTreeLabels.js';
 import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js';
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
@@ -779,6 +780,14 @@ export const SETTINGS = [
   // (0 = a pure cut, no slide at all).
   { key: 'books.turnedPitch', label: 'Turned pages pressed (× pitch)', group: 'Books', scheme: 'library', type: 'number', default: DECK_DEFAULTS.turned, min: 0.01, max: 1, step: 0.01, apply: bookPageParam('turnedPitch', 'turnedPitch') },
   { key: 'books.turnSlide', label: 'Turn slide (pitches, 0 = cut)', group: 'Books', scheme: 'library', type: 'number', default: DECK_DEFAULTS.slide, min: 0, max: 100, step: 0.25, apply: bookPageParam('turnSlide', 'turnSlide') },
+  // The paging wheel's DETENT (shift+wheel / two-finger drag over a book): wheel travel
+  // accumulates into page steps — one page per `wheelNotch` px of travel (line/page
+  // deltas normalized to px), the remainder carried; a gesture's first page turns at
+  // `wheelLead` × notch (a mouse click turns at once, trackpad jitter doesn't), and
+  // `wheelIdleMs` of quiet ends the gesture (the carry resets).
+  { key: 'books.wheelNotch', label: 'Wheel travel per page (px)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.notch, min: 1, max: 5000, step: 5, apply: (ctx, v) => ctx.pageDetent?.configure({ notch: v }) },
+  { key: 'books.wheelLead', label: 'First page of a gesture at (× notch)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.lead, min: 0, max: 1, step: 0.05, apply: (ctx, v) => ctx.pageDetent?.configure({ lead: v }) },
+  { key: 'books.wheelIdleMs', label: 'Wheel gesture ends after (ms)', group: 'Books', type: 'number', default: WHEEL_DETENT_DEFAULTS.idleMs, min: 0, max: 5000, step: 10, apply: (ctx, v) => ctx.pageDetent?.configure({ idleMs: v }) },
   // Edge tabs — one per sheet on a bound library volume (Book.bindTabs). Live geometry:
   // Book.syncTabs re-reads these every frame.
   { key: 'tab.steps', label: 'Tab stagger (0 = left-to-right, ≥2 = slots)', group: 'Books', type: 'number', default: TAB_DEFAULTS.steps, min: 0, max: 12, step: 1, apply: (_ctx, v) => setTabParam({ steps: v }) },

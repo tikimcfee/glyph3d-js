@@ -42,6 +42,7 @@ import Holding from './Holding.js';
 import { getSetting, applyGroupSettings } from './settings.js';
 import { scheduleCarrelSweep } from '../commands/handlers/carrelCommands.js';
 import { wheelScrollCommand, wheelPageCommand } from './surfaceInteractions.js';
+import { createWheelDetent } from './wheelDetent.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
@@ -227,6 +228,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('./GomuxHub.js').default|null} */ gomuxHub: null,
     /** @type {((dy: number) => boolean)|null} */ tryScrollHovered: null,
     /** @type {((dy: number) => boolean)|null} */ tryPageHovered: null,
+    // The paging wheel's notch (books.wheel* settings): travel → whole page steps.
+    pageDetent: createWheelDetent(),
     /** @type {import('./SessionStore.js').default|null} */ session: null,
     /** @type {{ components: string[], toJSON: () => Object, fromJSON: (layout: Object) => void, buildDefaults: Function }|null} */ dockLayout: null,
     /** @type {{ open: (id: string) => ({open: boolean}|null), close: (id: string) => ({open: boolean}|null), toggle: (id: string) => ({open: boolean}|null), list: () => Array<{id: string, title: string, open: boolean}> }|null} */ dock: null,
@@ -745,13 +748,18 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // The PAGING wheel (shift+scroll): turns the book under the cursor. A separate gate from
     // tryScrollHovered because movement and page-turning are separate gestures — the camera
     // controller routes plain wheel there and shift+wheel here, and never mixes the two.
+    // `dy` is TRAVEL (px, from the wheel or a two-finger drag); the detent notches it into
+    // whole page steps keyed by the book addressed (cmd[1]) — gliding across one book's
+    // cards continues a gesture, a different book starts a fresh one. A pageable surface
+    // consumes the travel even between notches (no camera fallthrough mid-gesture).
     state.ctx.tryPageHovered = (dy) => {
       if (!dy) return false;
       const hov = state.ctx.attentionManager?.get('hover');
       const entry = hov?.id ? state.registry.get(hov.id) : null;
-      const cmd = wheelPageCommand(entry, dy);
-      if (!cmd) return false;
-      state.router.execute(cmd);
+      const probe = wheelPageCommand(entry, 1);
+      if (!probe) { state.ctx.pageDetent.reset(); return false; }
+      const notches = state.ctx.pageDetent.feed(dy, performance.now(), probe[1]);
+      if (notches) state.router.execute(wheelPageCommand(entry, notches));
       return true;
     };
 

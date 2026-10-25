@@ -34,6 +34,7 @@
  */
 
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
+import { normalizeWheelDelta } from '../../utils/wheelDelta.js';
 import { stateController } from '../state/StateController.js';
 import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
 import { worldBounds } from '../spatial/sceneBounds.js';
@@ -196,7 +197,7 @@ export class ViewerCameraController {
             },
             wheel: {
                 dy: 0,                    // accumulated wheel delta since last drain (dolly / surface scroll)
-                pageDy: 0,                // accumulated SHIFT+wheel delta (paging — turns the book under the cursor)
+                pageDy: 0,                // accumulated SHIFT+wheel travel, px (paging — the book under the cursor; the app's detent notches it)
             },
         };
     }
@@ -325,9 +326,11 @@ export class ViewerCameraController {
             // your view axis — or scrolls the framed surface under the cursor); SHIFT+wheel
             // is PAGING intent (turns the book under the cursor) and never moves the camera.
             // Browsers remap shift+wheel to a HORIZONTAL delta on most platforms, so the
-            // paging delta reads deltaY with a deltaX fallback.
-            if (e.shiftKey) input.wheel.pageDy += (e.deltaY || e.deltaX);
-            else input.wheel.dy += e.deltaY;
+            // paging delta reads deltaY with a deltaX fallback. Travel is normalized to
+            // px here (line/page deltaModes), once, for every consumer downstream.
+            const { dx, dy } = normalizeWheelDelta(e, () => getCanvasViewportSize(canvas).height);
+            if (e.shiftKey) input.wheel.pageDy += (dy || dx);
+            else input.wheel.dy += dy;
         }, { passive: false });
 
         // --- Window resize ---
@@ -491,10 +494,12 @@ export class ViewerCameraController {
     _applyWheel() {
         const wheel = this.input.wheel;
 
-        // Paging drain (shift+wheel): turn the book under the cursor. The modifier means
-        // paging and ONLY paging — an unconsumed paging wheel (open space, a non-book
-        // surface) is discarded rather than falling through to the dolly, so shift+scroll
-        // never surprises with camera movement. Drained before the plain wheel so a frame
+        // Paging drain (shift+wheel): hand the frame's travel (px) to the book under the
+        // cursor — the app's paging gate notches it into whole page steps (wheelDetent),
+        // so this drain passes travel, never a page count. The modifier means paging and
+        // ONLY paging — an unconsumed paging wheel (open space, a non-book surface) is
+        // discarded rather than falling through to the dolly, so shift+scroll never
+        // surprises with camera movement. Drained before the plain wheel so a frame
         // carrying both keeps the two gestures apart.
         if (wheel.pageDy !== 0) {
             this.ctx?.tryPageHovered?.(wheel.pageDy);

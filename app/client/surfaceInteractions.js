@@ -9,7 +9,10 @@
  *     everything else falls through to the camera dolly.
  *   shift+wheel  (wheelPage)   — PAGING: turns the BOOK under the cursor — an agent book
  *     (cover or card) or a library volume (cover or any page) — wheel-down dives deeper
- *     into the deck (older for a recency deck, the next page for a volume).
+ *     into the deck (older for a recency deck, the next page for a volume). Paging is
+ *     NOTCHED: the paging gate (CommandProvider.tryPageHovered) runs the wheel's travel
+ *     through a detent (wheelDetent.js) and hands a record whole notches — the record
+ *     turns exactly that many sheets, never one per frame that carried any delta.
  * The "framed vs not" verdict is a property of the surface, not a special case the gates
  * should re-derive — so it lives here.
  *
@@ -23,6 +26,9 @@
  * @typedef {Object} SurfaceRecord
  * @property {(entry: Object, dy: number) => (string[]|null)} [wheelScroll] - command (array form,
  *   id may contain spaces) to scroll the surface by a wheel delta, or null if it doesn't scroll.
+ * @property {(entry: Object, notches: number) => (string[]|null)} [wheelPage] - command to turn
+ *   the book this surface belongs to by `notches` whole wheel notches (signed: + = wheel-down),
+ *   or null if it doesn't page.
  * @property {string} [moveVerb] - the verb that repositions this surface (drag-to-move);
  *   absent = the surface doesn't drag.
  * @property {(entry: Object) => boolean} [pinnedInPlace] - true when THIS instance is laid out
@@ -61,9 +67,9 @@ const RECORDS = {
     // Any page of a book IS the book: SHIFT+wheel over a grid riding a library VOLUME
     // turns the directory — one notch, one file, down dives deeper into the deck —
     // the same paging grammar as an agent book's cards. Plain wheel stays movement.
-    wheelPage(entry, dy) {
+    wheelPage(entry, notches) {
       const vol = volumeOf(entry.grid);
-      return vol ? ['book.scroll', vol.userData.path, String(dy > 0 ? 1 : -1)] : null;
+      return vol ? ['book.scroll', vol.userData.path, String(notches)] : null;
     },
     moveVerb: 'grid.move',
     // A page of a library volume is laid out by its book — dragging it out tore it from
@@ -74,26 +80,26 @@ const RECORDS = {
     // Any page of a book IS the book: SHIFT+wheel turns it from wherever you're
     // reading — no aiming at the cover's margins. A plain wheel stays the camera's
     // (movement and paging are separate gestures). The card's meta names its lane.
-    wheelPage(entry, dy) {
+    wheelPage(entry, notches) {
       const id = entry.meta?.agentId;
-      return id ? ['book.scroll', id, String(dy > 0 ? -1 : 1)] : null;
+      return id ? ['book.scroll', id, String(-notches)] : null;
     },
   },
   volume: {
     // A library volume's COVER is the directory's book: SHIFT+wheel anywhere on it
     // turns the pages — one notch, one file, down dives deeper into the deck — the
     // same paging grammar as an agent book's cover. Plain wheel stays the camera's.
-    wheelPage(entry, dy) {
+    wheelPage(entry, notches) {
       const p = entry.meta?.path;
-      return p !== undefined ? ['book.scroll', p, String(dy > 0 ? 1 : -1)] : null;
+      return p !== undefined ? ['book.scroll', p, String(notches)] : null;
     },
   },
   agent: {
     // An agent book. SHIFT+wheel over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.
     // One notch = one sheet: a page turn is a discrete act, not a glide.
-    wheelPage(entry, dy) {
-      return ['book.scroll', entry.id, String(dy > 0 ? -1 : 1)];
+    wheelPage(entry, notches) {
+      return ['book.scroll', entry.id, String(-notches)];
     },
     // Drag the cover to reposition the whole deck. Ephemeral observation state, so the
     // move verb pins it in-place (no workspace persistence).
@@ -104,9 +110,9 @@ const RECORDS = {
     // files, up = fresher; landing on the newest resumes follow-the-change.
     // The book address is the DELTA form (a watch set's id is also an agent id —
     // the bare id would page the agent's run book instead).
-    wheelPage(entry, dy) {
+    wheelPage(entry, notches) {
       const id = entry.meta?.deltaId;
-      return id ? ['book.scroll', `delta:${id}`, String(dy > 0 ? -1 : 1)] : null;
+      return id ? ['book.scroll', `delta:${id}`, String(-notches)] : null;
     },
     moveVerb: 'book.move',
   },
@@ -118,9 +124,9 @@ const RECORDS = {
   'delta-page': {
     // Any page of a delta book IS the book — SHIFT+wheel over a base/head grid turns
     // the file sheets from wherever you're reading.
-    wheelPage(entry, dy) {
+    wheelPage(entry, notches) {
       const id = entry.meta?.deltaId;
-      return id ? ['book.scroll', `delta:${id}`, String(dy > 0 ? -1 : 1)] : null;
+      return id ? ['book.scroll', `delta:${id}`, String(-notches)] : null;
     },
   },
 };
@@ -142,13 +148,13 @@ export function wheelScrollCommand(entry, dy) {
  * surface under the cursor doesn't page. Distinct from wheelScrollCommand — movement scroll
  * and page-turn scroll are separate gestures (the modifier is the split).
  * @param {Object|null} entry - a registry entry ({ id, type, grid, meta }) or null
- * @param {number} dy - wheel delta (shift+wheel arrives as deltaX on most platforms;
- *   the camera controller normalizes before it reaches here)
+ * @param {number} notches - whole wheel notches, signed (+ = wheel-down) — the paging
+ *   gate's detent output, never a raw delta
  * @returns {string[]|null}
  */
-export function wheelPageCommand(entry, dy) {
+export function wheelPageCommand(entry, notches) {
   const rec = entry ? RECORDS[entry.role || entry.type] : null;
-  return rec?.wheelPage ? rec.wheelPage(entry, dy) : null;
+  return rec?.wheelPage ? rec.wheelPage(entry, notches) : null;
 }
 
 /**
