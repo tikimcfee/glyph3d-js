@@ -166,10 +166,10 @@ function contextEsc(e, env) {
     return !!resolveGesture({ type: 'esc', target: null }, env.gestureEnv);
 }
 
-/** Tier 3 — NAV mode: a bare key (hjkl / ui) maps to a focus verb. Holding a key doesn't sweep
- *  the field, so auto-repeats are ignored — one press = one jump. */
+/** Tier 3 — NAV mode: a bare key (hjkl / ui, the book keys) maps to a verb. Holding a key
+ *  doesn't sweep the field — auto-repeats resolve only for bindings that opt in (book
+ *  paging: hold to flip); otherwise one press = one jump. */
 function navKeymap(e, env) {
-    if (e.repeat) return false;
     const cmd = resolveKeyBinding(e);
     if (!cmd) return false;
     env.exec(cmd);

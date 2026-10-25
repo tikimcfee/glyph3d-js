@@ -16,10 +16,13 @@
  *
  * Keys the camera owns (W/A/S/D flight, Q/E, Space) are deliberately avoided.
  *
- * @typedef {{ key: string, command: string[], label: string }} Binding
- *   key     — KeyboardEvent.key to match (bare; no modifier in this layer yet)
+ * @typedef {{ key: string, command: string[], label: string, repeat?: boolean }} Binding
+ *   key     — KeyboardEvent.key to match (bare: no Ctrl/Alt/Meta; Shift is part of the
+ *             key itself — '<' is Shift+',')
  *   command — token array for router.execute (array form survives spaces)
  *   label   — human description, for the future which-key overlay
+ *   repeat  — a held key auto-repeats the verb (paging: hold to flip); default one
+ *             press = one jump
  */
 
 /**
@@ -32,6 +35,11 @@
  *                    from the vertical sibling keys. Changing directory is ONLY this
  *                    (or the palette).
  * Directories are first-class focus targets — u/i land focus on a directory itself.
+ *
+ * BOOKS — the bare book verbs page the book in FOCUS (the focused card / cover / page,
+ * else the hovered one — bookFocus.js), so these keys turn whatever book you're reading:
+ *   , / .          — previous / next sheet (older / newer in an agent run; held, they flip)
+ *   < / >          — first sheet / last sheet (the newest — live-follow resumes)
  */
 export const NAV_BINDINGS = [
     { key: 'h', command: ['focus.neighbor', 'left'],  label: 'sibling left' },
@@ -40,10 +48,15 @@ export const NAV_BINDINGS = [
     { key: 'l', command: ['focus.neighbor', 'right'], label: 'sibling right' },
     { key: 'u', command: ['focus.parent'],            label: 'out to parent directory' },
     { key: 'i', command: ['focus.child'],             label: 'into child directory' },
+    { key: ',', command: ['book.page', 'prev'],       label: 'book: previous sheet', repeat: true },
+    { key: '.', command: ['book.page', 'next'],       label: 'book: next sheet', repeat: true },
+    { key: '<', command: ['book.page', 'first'],      label: 'book: first sheet' },
+    { key: '>', command: ['book.page', 'last'],       label: 'book: last sheet (live)' },
 ];
 
 /**
- * Resolve a KeyboardEvent to its bound command line, or null if unbound.
+ * Resolve a KeyboardEvent to its bound command line, or null if unbound — an
+ * auto-repeat resolves only for a binding that asks for repeats.
  * This layer matches a single bare key (no Ctrl/Alt/Meta) — modified chords and
  * prefix layers (the z-layer) land here next, as more data.
  * @param {KeyboardEvent} e
@@ -53,5 +66,6 @@ export const NAV_BINDINGS = [
 export function resolveKeyBinding(e, bindings = NAV_BINDINGS) {
     if (e.ctrlKey || e.altKey || e.metaKey) return null;
     const b = bindings.find((b) => b.key === e.key);
-    return b ? b.command : null;
+    if (!b || (e.repeat && !b.repeat)) return null;
+    return b.command;
 }
