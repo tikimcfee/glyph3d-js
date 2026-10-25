@@ -721,12 +721,27 @@ export const SETTINGS = [
   { key: 'book.maxUpscale', label: 'Max content upscale', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxUpscale, min: 0.1, max: 100, step: 0.1, apply: agentBookParam('maxUpscale') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.zPitch, min: 1, max: 4000, step: 5, apply: agentBookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pagerLerp, min: 0, max: 60, step: 0.5, apply: agentBookParam('pagerLerp') },
-  // Card scales — pre-fit proportions inside an agent page (the readable HEADLINE, the
-  // subordinate info card, the fine-print snapshot / output / prose, and the image recto).
-  { key: 'book.callScale', label: 'Headline card size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callScale, min: 0.05, max: 50, step: 0.1, apply: agentBookParam('callScale') },
-  { key: 'book.infoScale', label: 'Info card size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.infoScale, min: 0.05, max: 50, step: 0.05, apply: agentBookParam('infoScale') },
+  // The description page (verso) — WORLD row pitches, never shrunk by long content: the
+  // action HEADLINE (`[verb]` + the call's first line, wrapped to the page), the call's
+  // remaining lines, and the info rows. The headline steps down toward its minimum only
+  // when its wrapped call would take more than its page share.
+  { key: 'book.callLineHeight', label: 'Headline row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callLineHeight, min: 0.5, max: 400, step: 0.5, apply: agentBookParam('callLineHeight') },
+  { key: 'book.callMinLineHeight', label: 'Headline min row height (long calls)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callMinLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('callMinLineHeight') },
+  { key: 'book.callMaxFrac', label: 'Headline page share before stepping down', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callMaxFrac, min: 0.05, max: 1, step: 0.05, apply: agentBookParam('callMaxFrac') },
+  { key: 'book.callTextLift', label: 'Headline text brightness (0 hue, 1 white; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.callTextLift, min: 0, max: 1, step: 0.05, apply: agentBookParam('callTextLift') },
+  { key: 'book.bodyLineHeight', label: 'Call body row height (multi-line commands)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.bodyLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('bodyLineHeight') },
+  { key: 'book.bodyMinLineHeight', label: 'Call body min row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.bodyMinLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('bodyMinLineHeight') },
+  { key: 'book.infoLineHeight', label: 'Info row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.infoLineHeight, min: 0.1, max: 400, step: 0.5, apply: agentBookParam('infoLineHeight') },
+  { key: 'book.pageMargin', label: 'Description page margin', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pageMargin, min: 0, max: 1000, step: 1, apply: agentBookParam('pageMargin') },
+  { key: 'book.rowGap', label: 'Description row gap', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.rowGap, min: 0, max: 1000, step: 1, apply: agentBookParam('rowGap') },
+  // The content page (recto): a file snapshot FRAMES the touched range (± context, at most
+  // the window height; applies to snapshots loaded after the change), then the fine-print
+  // card sizes for snapshot / output / prose, and the image recto.
+  { key: 'book.snapContextRows', label: 'Snapshot context rows (around the touched lines)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapContextRows, min: 0, max: 5000, step: 1, apply: agentBookParam('snapContextRows') },
+  { key: 'book.snapMaxRows', label: 'Snapshot window rows (0 = whole file)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapMaxRows, min: 0, max: 100000, step: 1, apply: agentBookParam('snapMaxRows') },
   { key: 'book.artifactWorldScale', label: 'Snapshot / output size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.artifactWorldScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('artifactWorldScale') },
   { key: 'book.messageScale', label: 'Message (say / think) size', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.messageScale, min: 0.001, max: 5, step: 0.005, apply: agentBookParam('messageScale') },
+  { key: 'book.proseWrapCols', label: 'Message (say / think) wrap columns (0 = none; new sheets)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.proseWrapCols, min: 0, max: 2000, step: 1, apply: agentBookParam('proseWrapCols') },
   { key: 'book.snapshotImageWidth', label: 'Image page width', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.snapshotImageWidth, min: 1, max: 2000, step: 5, apply: agentBookParam('snapshotImageWidth') },
   // Books — the SHARED base every Book carrier wears, fanned to ALL THREE owners (agent
   // shelf, delta shelf, library volumes): the page face + the COVER (the translucent
