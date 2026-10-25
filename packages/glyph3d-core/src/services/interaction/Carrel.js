@@ -157,6 +157,14 @@ export class Carrel extends THREE.Object3D {
         this.glowStrength = glowStrength;
         this.animDur = animDur;
         this.yawRate = yawRate;
+        /** What this desk was BORN as — every knob's value at construction. A desk's own
+         *  values (the app's per-desk tuning) are set over these; a knob returned to its
+         *  default comes back here, and serialize() saves these, never the tuned ones. */
+        this.born = Object.freeze({
+            radius, boxH, boxAspect, gapFrac, growCap, maxArcDeg,
+            mode: this.mode, seat: this.seat, ringMaxRows, facing: this.facing,
+            tableFrac, shadowSoft, glowColor, glowStrength, animDur, yawRate,
+        });
 
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
         this._rows = 1;          // last layout's row count — bounds read the stack height off it
@@ -872,9 +880,9 @@ export class Carrel extends THREE.Object3D {
     }
 
     /**
-     * The carrel as SERIALIZABLE STATE — pose, knobs, membership. What persistence
-     * reads (the getState side of the load-is-not-replay pattern; applyState is the
-     * restore pass's future work).
+     * The carrel as SERIALIZABLE STATE — pose and what it was BORN as (`born`). Its own
+     * values (tuned on this desk) are not here: the app keeps them as the desk's tuning
+     * and lays them over the born values whenever the desk is built — restore included.
      */
     serialize() {
         return {
@@ -882,14 +890,7 @@ export class Carrel extends THREE.Object3D {
             managed: this.worldManaged,   // placed by a world grouping — restore re-registers, pose is the layout's
             position: { x: this.position.x, y: this.position.y, z: this.position.z },
             yaw: this.rotation.y,
-            params: {
-                radius: this.radius, boxH: this.boxH, boxAspect: this.boxAspect,
-                gapFrac: this.gapFrac, growCap: this.growCap, maxArcDeg: this.maxArcDeg,
-                seat: this.seat, ringMaxRows: this.ringMaxRows,
-                mode: this.mode, facing: this.facing,
-                tableFrac: this.tableFrac, shadowSoft: this.shadowSoft,
-                glowColor: this.glowColor, glowStrength: this.glowStrength,
-            },
+            params: { ...this.born },
             // No members here — carrel residence is the MODEL's authority (view.carrel).
             // Capture reads listCarreled(); restore writes view.carrel directly.
         };

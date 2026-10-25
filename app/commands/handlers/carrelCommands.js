@@ -17,21 +17,41 @@
  * auto-created on first agent sight (scheduleCarrelSweep's auto-shelf pass, driven by
  * AgentBooks.onChange). Settings ▸ Agent Books `book.autoShelf` turns it off.
  *
- * Desks PERSIST: SessionStore captures each carrel's serialize() (pose, knobs,
- * membership) and restores desks FIRST — restoreCarrel stands them back up at
- * their saved pose, pre-shaped for their member complement, and the sweep's
- * manifest pass seats each member IN PLACE as its window materializes. The desk
- * loads, then loads its elements — content never flies across the room.
+ * KNOBS (client/tuning.js): Settings ▸ Carrel are the values a NEW desk is born with,
+ * then its owner's form (the hub's and the agents desk's cylinder — cylinderForm), then
+ * the desk's OWN values (carrel.set), which win from then on: nothing re-stamps them, and
+ * they persist by desk name — the gomuxai hub's derived desks included.
+ *
+ * Desks PERSIST: SessionStore captures each carrel's serialize() (pose, what it was
+ * born as) and restores desks FIRST — restoreCarrel stands them back up at
+ * their saved pose wearing their own values, pre-shaped for their member complement,
+ * and the sweep's manifest pass seats each member IN PLACE as its window materializes.
+ * The desk loads, then loads its elements — content never flies across the room.
  */
 
 import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { getSetting } from '../../client/settings.js';
+import { DESK_KNOBS, tuneOf, applyDeskTune, tuneDesk, readDesk, forgetTune } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
-/** The knobs Settings ▸ Carrel stores — folded into a NEW desk at birth. */
+/** The knobs Settings ▸ Carrel stores — the values a NEW desk is born with. */
 const CARREL_KNOBS = ['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg',
                       'tableFrac', 'shadowSoft', 'glowStrength'];
+
+/**
+ * The CYLINDER form an owner gives a desk at birth — the gomuxai hub, the agents desk: a
+ * ring of members at their own size, stacking Settings ▸ Carrel `carrel.cylinderMaxRows`
+ * rows before it widens past its least radius, `carrel.cylinderRadius`.
+ * @returns {{mode:'ring', seat:'natural', radius:number, ringMaxRows:number}}
+ */
+export function cylinderForm() {
+    return {
+        mode: 'ring', seat: 'natural',
+        radius: Number(getSetting('carrel.cylinderRadius')),
+        ringMaxRows: Number(getSetting('carrel.cylinderMaxRows')),
+    };
+}
 
 /** @param {AppContext} ctx */
 function carrels(ctx) {
@@ -64,11 +84,13 @@ function worldTouch(ctx, carrel) {
 
 /**
  * Construct a desk, dress it, set it down, make it a world citizen — the shared
- * birth path for carrel.create and the auto-created agent shelf.
+ * birth path for carrel.create, the auto-created agent shelf and the gomuxai hub's desks.
  *
- * Stored Settings ▸ Carrel knobs are the DEFAULTS for a new desk — folded into
- * THIS desk only (existing desks keep their per-desk carrel.set tweaks); an
- * explicit radius wins over the stored one. A FREE desk lands ON the camera's
+ * What it's born as, later layers winning: Settings ▸ Carrel (the defaults — read now,
+ * never pushed onto a live desk), an explicit radius, the owner's `form` (the hub and the
+ * agents desk are cylinders: cylinderForm). Then the desk's OWN values (its tuning record,
+ * kept by name — a derived hub desk rebuilt from the tree wears what was set on it last
+ * time). A FREE desk lands ON the camera's
  * view ray — where you're looking, not a floor projection of it (which parked
  * the desk at y=0 far below an elevated gaze, reading tiny-in-the-distance);
  * the tabletop sits half a slot below the ray point so row 0 rises into your
@@ -85,13 +107,15 @@ function worldTouch(ctx, carrel) {
  * @param {AppContext} ctx
  * @returns {Carrel}
  */
-export function buildCarrel(ctx, name, { radius, managed = false, nested = false } = {}) {
-    const carrel = new Carrel({ name });
+export function buildCarrel(ctx, name, { radius, managed = false, nested = false, form = null } = {}) {
+    const born = {};
     for (const k of CARREL_KNOBS) {
         const v = getSetting(`carrel.${k}`);
-        if (Number.isFinite(v)) carrel.setParam(k, v);
+        if (Number.isFinite(v)) born[k] = v;
     }
-    if (Number.isFinite(radius)) carrel.setParam('radius', radius);
+    if (Number.isFinite(radius)) born.radius = radius;
+    const carrel = new Carrel({ name, ...born, ...(form || {}) });
+    applyDeskTune(carrel, tuneOf(ctx, carrel.name));
 
     if (nested) {
         // Seated at another desk by its owner (a gomuxai team inside the hub) — the
@@ -120,10 +144,11 @@ const AGENT_SHELF = 'agents';
 
 /**
  * Rebuild a desk from its serialized record — the restore path (SessionStore's
- * carrels phase). The saved pose and knobs are authoritative: no camera-ray
+ * carrels phase). The saved pose and born values are authoritative: no camera-ray
  * placement, no Settings fold — the desk stands back up exactly where it lived,
- * dressed as it was, and pre-shaped (expect) for the member complement the
- * model claims for it, which seats as windows materialize.
+ * born as it was and wearing its own values (the tuning record, restored first), and
+ * pre-shaped (expect) for the member complement the model claims for it, which seats
+ * as windows materialize.
  * @param {AppContext} ctx
  * @param {{name:string, managed?:boolean, position?:{x,y,z}, yaw?:number, params?:Object}} saved
  * @param {number} [expected=0] members the model claims for this desk
@@ -134,6 +159,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
     if (!map || !ctx.scene || !saved?.name) return null;
     if (map.has(saved.name)) return map.get(saved.name);
     const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
+    applyDeskTune(carrel, tuneOf(ctx, carrel.name));
     // A world-MANAGED desk re-registers as its grouping — the layout owns its pose
     // (saved pose ignored).
     const managed = !!saved.managed && !!ctx.world;
@@ -164,7 +190,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
  *    seat. Unserved claims persist as residence memory: a window reopened much
  *    later still comes home to its desk.
  * 2. AUTO-SHELF (the default residence): every NEW agent book seats at the
- *    'agents' desk, a cylinder auto-created on first need (and re-dressed each pass). Once per lane
+ *    'agents' desk, a cylinder auto-created on first need. Once per lane
  *    BIRTH, never a leash — released/re-seated/docked/pinned books stay where the
  *    user put them. Settings ▸ Agent Books `book.autoShelf` off disarms this pass.
  * @param {AppContext} ctx
@@ -197,7 +223,6 @@ function autoShelf(ctx, map) {
     const lanes = ctx.agentBooks?.lanes;
     if (!lanes) return;
     const existing = map.get(AGENT_SHELF);
-    if (existing) dressShelf(ctx, existing);
     const seen = (ctx._agentShelfSeen ??= new Set());
     for (const id of [...seen]) if (!ctx.registry?.has?.(id)) seen.delete(id);   // cleared books may be reborn
     if (getSetting('book.autoShelf') === false) return;
@@ -214,31 +239,14 @@ function autoShelf(ctx, map) {
     }
     if (!newcomers.length) return;
 
-    const shelf = existing ?? dressShelf(ctx, buildCarrel(ctx, AGENT_SHELF, { managed: true }));   // a world sibling of the tree
+    // A world sibling of the tree, born a cylinder like the gomuxai hub.
+    const shelf = existing ?? buildCarrel(ctx, AGENT_SHELF, { managed: true, form: cylinderForm() });
     if (shelf._dissolving) return;   // folding — the newcomers keep their cluster spots
 
     for (const lane of newcomers) {
         seen.add(lane.groupId);
         ctx.holding.seat({ id: lane.groupId, grid: lane.book }, shelf);
     }
-}
-
-/**
- * The agents desk is a cylinder like the gomuxai hub: members at their own size around
- * you, rows stacking to book.shelfMaxRows before the ring widens. Dressed every sweep, so
- * a desk restored from a save (where it was a grid) stands back up as a ring. A changed
- * shape re-places it in the world, so a grown ring doesn't overlap its neighbors.
- * @param {AppContext} ctx @param {Carrel} shelf @returns {Carrel}
- */
-function dressShelf(ctx, shelf) {
-    let changed = false;
-    if (shelf.mode !== 'ring') changed = shelf.setMode('ring');
-    changed = shelf.setSeat('natural') || changed;
-    const r = Number(getSetting('book.shelfRadius')), rows = Number(getSetting('book.shelfMaxRows'));
-    if (Number.isFinite(r) && r > 0 && shelf.radius !== r) changed = shelf.setParam('radius', r) || changed;
-    if (Number.isFinite(rows) && rows >= 1 && shelf.ringMaxRows !== rows) changed = shelf.setParam('ringMaxRows', rows) || changed;
-    if (changed) worldTouch(ctx, shelf);
-    return shelf;
 }
 
 /**
@@ -367,6 +375,7 @@ export default function registerCarrelCommands(router) {
             ctx.scene?.add(carrel);
         }
         carrel.dissolve(); // members slide home; the runner sweeps the desk once drained
+        forgetTune(ctx, carrel.name);   // a desk set down later under this name starts fresh
         if (ctx.activeCarrel === carrel.carrelName) ctx.activeCarrel = null;
         return { text: `OK: carrel '${carrel.carrelName}' dissolving (${members.length} member(s) sent home)`, data: { name: carrel.carrelName, released: members.length } };
     }, { description: 'Fold a carrel: every member slides home, then the desk vanishes', usage: '<name>', returns: '{ name, released }' });
@@ -391,23 +400,30 @@ export default function registerCarrelCommands(router) {
         const carrel = findCarrel(ctx, args[0]);
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const key = String(args[1] ?? '');
-        if (key === 'facing') {
-            const f = String(args[2] ?? '');
-            if (!carrel.setFacing(f)) return { text: 'ERR: carrel.set <name> facing <in|out>', data: null };
-            worldTouch(ctx, carrel);
-            return { text: `OK: carrel '${carrel.carrelName}' facing ${f}`, data: { name: carrel.carrelName, key, value: f } };
-        }
-        if (key === 'mode') {
-            const m = String(args[2] ?? '');
-            if (!carrel.setMode(m)) return { text: 'ERR: carrel.set <name> mode <ring|grid>', data: null };
-            worldTouch(ctx, carrel);
-            return { text: `OK: carrel '${carrel.carrelName}' mode ${m}`, data: { name: carrel.carrelName, key, value: m } };
-        }
-        const value = parseFloat(args[2]);
-        if (!carrel.setParam(key, value)) {
-            return { text: 'ERR: usage: carrel.set <name> <radius|boxH|boxAspect|gapFrac|maxArcDeg|tableFrac|shadowSoft|glowStrength|animDur|yawRate|mode|facing> <value>', data: null };
-        }
+        const r = tuneDesk(ctx, carrel, key, args[2] ?? '');
+        if (!r.ok) return { text: `ERR: ${r.error} — usage: carrel.set <name> <knob> <value|default>`, data: null };
         worldTouch(ctx, carrel);
-        return { text: `OK: carrel '${carrel.carrelName}' ${key} = ${value}`, data: { name: carrel.carrelName, key, value } };
-    }, { description: 'Tune a carrel layout/chrome parameter live', usage: '<name> <param> <value>', returns: '{ name, key, value }' });
+        const tag = r.own ? '' : ' (what it was born as)';
+        return { text: `OK: carrel '${carrel.carrelName}' ${key} = ${r.value}${tag}`, data: { name: carrel.carrelName, key, value: r.value, own: r.own } };
+    }, {
+        description: "Give ONE desk its own value for a knob — it wins over the Settings defaults and every owner's dressing, and persists; 'default' hands the knob back to what the desk was born as",
+        usage: `<name> <${DESK_KNOBS.map((k) => k.key).join('|')}> <value|default>`,
+        returns: '{ name, key, value, own }',
+    });
+
+    router.register('carrel.get', (args, ctx) => {
+        const carrel = findCarrel(ctx, args[0]);
+        if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
+        const d = readDesk(ctx, carrel);
+        const lines = DESK_KNOBS.map((k) => {
+            const v = d.values[k.key];
+            const shown = typeof v === 'number' ? Math.round(v * 1000) / 1000 : v;
+            return `${k.key in d.own ? '*' : ' '}${k.key} = ${shown}${k.key in d.own ? ` (born ${d.born[k.key]})` : ''}`;
+        });
+        return { text: `OK: carrel '${d.name}' (* = its own value)\n${lines.join('\n')}`, data: d };
+    }, {
+        description: "Read one desk's knobs — the live value of each, what it was born as, and which are its own",
+        usage: '[name]',
+        returns: '{ name, values, born, own }',
+    });
 }

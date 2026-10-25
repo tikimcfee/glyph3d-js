@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { DESK_KNOBS } from './client/tuning.js';
 /** @import { AppClient, AppContext } from './client/CommandProvider.jsx' */
 
 /**
@@ -107,14 +108,9 @@ const S = {
     },
 };
 
-/** The per-desk dials the ⚙ strip exposes — same knobs as carrel.set / Settings ▸ Carrel. */
-const KNOB_DEFS = [
-    { k: 'gapFrac', label: 'spacing', min: 0, max: 2, step: 0.05 },
-    { k: 'boxH', label: 'seat size', min: 20, max: 600, step: 5 },
-    { k: 'radius', label: 'radius', min: 20, max: 2000, step: 10 },
-    { k: 'maxArcDeg', label: 'arc°', min: 60, max: 360, step: 5 },
-    { k: 'glowStrength', label: 'glow', min: 0, max: 2, step: 0.05 },
-];
+/** The per-desk dials the ⚙ strip exposes — the HUD's Desk knobs (client/tuning.js) that
+ *  matter for the desk's current shape; each edit is that desk's own value (carrel.set). */
+const stripKnobs = (d) => DESK_KNOBS.filter((k) => k.type === 'number' && k.hud !== false && (!k.shows || k.shows(d)));
 
 const basename = (p) => {
     const s = String(p || '').replace(/\/+$/, '');
@@ -174,9 +170,10 @@ export default function CarrelsPanel({ client }) {
             active: c.carrelName === ctx.activeCarrel,
             glow: hex(c.glowColor),
             mode: c.mode,
+            seat: c.seat,
             dissolving: !!c._dissolving,
             members: c.list().map((m) => m.id),
-            knobs: Object.fromEntries(KNOB_DEFS.map(({ k }) => [k, c[k]])),
+            knobs: Object.fromEntries(DESK_KNOBS.map(({ key }) => [key, c[key]])),
         })));
     }, [client]);
 
@@ -252,13 +249,13 @@ export default function CarrelsPanel({ client }) {
                                 </span>
                             </div>
                         )}
-                        {knobsFor === d.name && KNOB_DEFS.map(({ k, label, min, max, step }) => (
-                            <div key={k} style={S.knobRow}>
-                                <span style={S.knobLabel}>{label}</span>
+                        {knobsFor === d.name && stripKnobs(d).map(({ key, short, label, min, max, step }) => (
+                            <div key={key} style={S.knobRow} title={label}>
+                                <span style={S.knobLabel}>{short}</span>
                                 <input type="range" style={S.knobSlider} min={min} max={max} step={step}
-                                    value={d.knobs[k] ?? min}
-                                    onChange={(e) => after(['carrel.set', d.name, k, e.target.value])} />
-                                <span style={S.knobVal}>{d.knobs[k] ?? '—'}</span>
+                                    value={d.knobs[key] ?? min}
+                                    onChange={(e) => after(['carrel.set', d.name, key, e.target.value])} />
+                                <span style={S.knobVal}>{Number.isFinite(d.knobs[key]) ? Math.round(d.knobs[key] * 100) / 100 : '—'}</span>
                             </div>
                         ))}
                         {d.members.map((id) => (

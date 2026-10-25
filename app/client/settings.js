@@ -34,13 +34,6 @@ import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
  *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
 const dockParam = (param) => (ctx, v) => ctx.cameraDock?.setParam?.(param, v);
 
-/** apply() for a carrel knob: push it onto EVERY live desk. New desks pick the stored
- *  values up at birth (buildCarrel reads each carrel.* setting), so these are both the
- *  live dial and the defaults; carrel.set <name> stays the per-desk verb. */
-const carrelParam = (param) => (ctx, v) => {
-  for (const c of ctx.carrels?.values?.() || []) c.setParam?.(param, v);
-};
-
 /** apply() for a strata dial: push the bare param name (not the `strata.` key) to the global
  *  StrataLayout params — re-applies live to every on-screen strata view, no ctx needed. */
 const strataParam = (param) => (_ctx, v) => setStrataParam(param, v);
@@ -62,15 +55,6 @@ const gridBgGapParam = (ctx, v) => {
  *  geometry. An agent book is a SUBSET of the Books base (it inherits face + cover) plus
  *  these additive agent-specific knobs. */
 const agentBookParam = (param) => (ctx, v) => { const b = ctx.agentBooks; if (!b) return; b.cfg[param] = v; b.applyScales?.(); };
-
-/** apply() for a desk's ring knob: push it to that desk live (its owner dresses the same
- *  value at its next pass, and a desk not built yet takes it at birth); a world-placed desk
- *  is re-placed so its new size doesn't overlap its neighbors. */
-const deskParam = (desk, param) => (ctx, v) => {
-  const c = ctx.carrels?.get(desk);
-  if (!c || !Number.isFinite(v) || !c.setParam(param, v)) return;
-  if (c.worldManaged) ctx.world?.relayout();
-};
 
 /** apply() for a DELTA-book knob: push the value to DeltaBooks.cfg (the bare param name,
  *  not the `delta.` key) and re-apply — every sheet re-fits, the shelf re-flows. Mirrors
@@ -173,7 +157,7 @@ export const GROUPS = [
   },
   { name: 'Tree & labels',      subtitle: 'ownership wires · container-name plates & approach fade', columns: 2 },
   { name: 'Dock & frame',       subtitle: 'pinned-window tile bar · ghost slots · nameplates · view-pane', columns: 2 },
-  { name: 'Carrel',             subtitle: 'world-anchored reading desks', columns: 2 },
+  { name: 'Carrel',             subtitle: 'what a NEW desk is born with — one desk is tuned in the HUD (its Desk section)', columns: 2 },
   { name: 'Books',              subtitle: 'the shared base · page faces (all shelves) · covers / directory boxes · edge tabs', columns: 2 },
   { name: 'Agent Books',        subtitle: 'the agent shelf · page geometry · deck · card scales · retention', columns: 2 },
   { name: 'Delta Books',        subtitle: 'the delta shelf · page geometry · deck', columns: 2 },
@@ -486,17 +470,22 @@ export const SETTINGS = [
   { key: 'frame.marginTop', label: 'Margin top', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginTop') },
   { key: 'frame.marginBottom', label: 'Margin bottom', group: 'Dock & frame', type: 'number', default: 0.06, min: 0, max: 0.49, step: 0.01, apply: dockParam('frameMarginBottom') },
   { key: 'frame.depth', label: 'Frame pull-in', group: 'Dock & frame', type: 'number', default: 0.7, min: 0.3, max: 1, step: 0.02, apply: dockParam('frameDistFrac') },
-  // Carrel — the world-anchored reading desks. Applied to every live desk AND picked up
-  // as the defaults for new ones (carrel.create); carrel.set <name> tunes one desk.
-  { key: 'carrel.radius', label: 'Ring radius', group: 'Carrel', type: 'number', default: 240, min: 20, max: 2000, step: 10, apply: carrelParam('radius') },
-  { key: 'carrel.boxH', label: 'Seat size', group: 'Carrel', type: 'number', default: 110, min: 20, max: 600, step: 5, apply: carrelParam('boxH') },
-  { key: 'carrel.boxAspect', label: 'Seat aspect (w:h)', group: 'Carrel', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05, apply: carrelParam('boxAspect') },
-  { key: 'carrel.gapFrac', label: 'Item spacing', group: 'Carrel', type: 'number', default: 0.9, min: 0, max: 2, step: 0.05, apply: carrelParam('gapFrac') },
-  { key: 'carrel.growCap', label: 'Fit growth cap', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 4, step: 0.05, apply: carrelParam('growCap') },
-  { key: 'carrel.maxArcDeg', label: 'Ring arc span°', group: 'Carrel', type: 'number', default: 300, min: 60, max: 360, step: 5, apply: carrelParam('maxArcDeg') },
-  { key: 'carrel.tableFrac', label: 'Shadow overhang', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05, apply: carrelParam('tableFrac') },
-  { key: 'carrel.shadowSoft', label: 'Shadow edge softness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 1, step: 0.05, apply: carrelParam('shadowSoft') },
-  { key: 'carrel.glowStrength', label: 'Glow strength', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05, apply: carrelParam('glowStrength') },
+  // Carrel — the world-anchored reading desks. These are the values a NEW desk is BORN with
+  // (buildCarrel reads them at birth); a desk already standing keeps its own — tune one desk
+  // in the HUD's Desk section (carrel.set). No apply: nothing here pushes onto a live desk.
+  { key: 'carrel.radius', label: 'How far a new ring stands from its center', group: 'Carrel', type: 'number', default: 240, min: 20, max: 2000, step: 10 },
+  { key: 'carrel.boxH', label: 'Seat height a new desk fits members into', group: 'Carrel', type: 'number', default: 110, min: 20, max: 600, step: 5 },
+  { key: 'carrel.boxAspect', label: 'Seat shape (width ÷ height)', group: 'Carrel', type: 'number', default: 1.15, min: 0.5, max: 3, step: 0.05 },
+  { key: 'carrel.gapFrac', label: 'Space between members (× seat height)', group: 'Carrel', type: 'number', default: 0.9, min: 0, max: 2, step: 0.05 },
+  { key: 'carrel.growCap', label: 'Most a small member grows to fill its seat (×)', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 4, step: 0.05 },
+  { key: 'carrel.maxArcDeg', label: 'How far around you a ring wraps (°)', group: 'Carrel', type: 'number', default: 300, min: 60, max: 360, step: 5 },
+  { key: 'carrel.tableFrac', label: 'Floor shadow reach past the members (× radius)', group: 'Carrel', type: 'number', default: 1.25, min: 1, max: 2, step: 0.05 },
+  { key: 'carrel.shadowSoft', label: 'Floor shadow edge softness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 1, step: 0.05 },
+  { key: 'carrel.glowStrength', label: 'Floor shadow brightness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05 },
+  // A CYLINDER desk — the gomuxai hub and the agents desk are born one (cylinderForm): every
+  // member at its own size around you, rows stacking before the ring widens past its radius.
+  { key: 'carrel.cylinderRadius', label: "A new cylinder desk's least radius (the gomuxai hub, the agents desk — it widens to fit)", group: 'Carrel', type: 'number', default: 900, min: 50, max: 50000, step: 50 },
+  { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },
   // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued
   // last frame. monitor.stats / scene stats are the verb-side twins.
   {
@@ -716,22 +705,18 @@ export const SETTINGS = [
   // autoShelf has no apply: the carrel sweep's auto-shelf pass reads this at each lane
   // birth (scheduleCarrelSweep) — toggled ON it also gathers existing unseated books on
   // the next agent event.
-  // gomuxai — read by GomuxHub at each tree push (the next push converges; the ring knobs
-  // also apply live, so they answer while no agent is running).
+  // gomuxai — read by GomuxHub at each tree push. The hub's FORM and spacing are what its
+  // desks are BORN with (a desk already standing keeps its own — the HUD's Desk section);
+  // its ring's radius and rows are Settings ▸ Carrel's cylinder defaults.
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.autoScreens', label: "Open each live agent's screen beside its book", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.screenGap', label: "Gap between a book and its agent's screen", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 2000, step: 2 },
-  { key: 'gomux.hubForm', label: "The hub's form: ring (a cylinder around you) or grid (a wall)", group: 'gomuxai', type: 'enum', options: ['ring', 'grid'], default: 'ring' },
-  { key: 'gomux.radius', label: "Hub ring's least radius (it widens to fit)", group: 'gomuxai', type: 'number', default: 900, min: 50, max: 50000, step: 50, apply: deskParam('gomux', 'radius') },
-  { key: 'gomux.ringMaxRows', label: 'Hub ring: most rows stacked before it widens around you', group: 'gomuxai', type: 'number', default: 3, min: 1, max: 20, step: 1, apply: deskParam('gomux', 'ringMaxRows') },
+  { key: 'gomux.hubForm', label: "The hub's form when it's built: ring (a cylinder around you) or grid (a wall)", group: 'gomuxai', type: 'enum', options: ['ring', 'grid'], default: 'ring' },
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
-  { key: 'gomux.gap', label: 'Space between books / teams (world units)', group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
+  { key: 'gomux.gap', label: "Space between books / teams at the hub's desks when they're built (world units)", group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },
   { key: 'gomux.historyHours', label: 'Show finished agents from the last (h, 0 = all)', group: 'gomuxai', type: 'number', default: 24, min: 0, max: 8760, step: 1 },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
-  // The agents desk is a cylinder like the gomuxai hub — the carrel sweep dresses it.
-  { key: 'book.shelfRadius', label: "Agents desk ring's least radius (it widens to fit)", group: 'Agent Books', type: 'number', default: 900, min: 50, max: 50000, step: 50, apply: deskParam('agents', 'radius') },
-  { key: 'book.shelfMaxRows', label: 'Agents desk: most rows stacked before it widens around you', group: 'Agent Books', type: 'number', default: 3, min: 1, max: 20, step: 1, apply: deskParam('agents', 'ringMaxRows') },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, contain-fit cap, and
   // the deck pitch / page-turn easing. These are the agent card's dims (delta books

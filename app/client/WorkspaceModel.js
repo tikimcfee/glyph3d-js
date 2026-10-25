@@ -52,6 +52,9 @@ export const COMPONENT_SCHEMA = {
   Orientation:     { table: 'durable', keys: ['orientation'] },
   Zoom:            { table: 'durable', keys: ['zoom'] },
   TerminalGeometry:{ table: 'durable', keys: ['cols', 'rows'] },
+  // An instance's OWN knob values (a desk, a shelf book) — they win over the defaults it was
+  // born with; client/tuning.js reads and writes them, SessionStore saves them as `tunings`.
+  Tuning:          { table: 'durable', keys: ['tune'] },
 
   // ── live: measured/derived, never serialized (declared for documentation; Slice B+ grows these) ──
   // Object3D handle, Home, Extent, Tags, Chrome, Controls, PickTarget

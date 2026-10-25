@@ -316,10 +316,7 @@ export default class AgentBooks {
             book.name = `agent:${agentId}`;
             // A layout LEAF for the cluster scheme: name = ordering key, isDir = false.
             book.userData = { ...book.userData, name: agentId, isDir: false };
-            book.deck.zPitch = this.cfg.zPitch;
-            book.deck.lerp = this.cfg.pagerLerp;
-            book.deck.turned = this.cfg.turnedPitch;
-            book.deck.slide = this.cfg.turnSlide;
+            book.setDeckDefaults(this._deckDefaults());
             this.root.add(book);
             const hueIdx = this.lanes.size;
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
@@ -891,6 +888,13 @@ export default class AgentBooks {
         return { agentId: id, override: lane.maxSheets, cap: Number.isFinite(cap) ? cap : 0, count: lane.book.sheets.length };
     }
 
+    /** The shelf's deck defaults, in the deck's own terms — every book here is born with
+     *  them, and a re-apply restamps them on every knob a book wasn't given itself. */
+    _deckDefaults() {
+        const c = this.cfg;
+        return { zPitch: c.zPitch, lerp: c.pagerLerp, turned: c.turnedPitch, slide: c.turnSlide };
+    }
+
     /**
      * Re-apply the current cfg SIZES to every live card — the one entry the config verb
      * and the Settings rows both route through. Verso cards re-size to their world line
@@ -903,10 +907,7 @@ export default class AgentBooks {
     applyScales() {
         for (const lane of this.lanes.values()) {
             this._trimLane(lane);
-            lane.book.deck.zPitch = this.cfg.zPitch;
-            lane.book.deck.lerp = this.cfg.pagerLerp;
-            lane.book.deck.turned = this.cfg.turnedPitch;
-            lane.book.deck.slide = this.cfg.turnSlide;
+            lane.book.setDeckDefaults(this._deckDefaults());
             if (this.cfg.tabs) lane.book.bindTabs(this._tabOpts(lane));   // a diff — tabs re-true in place
             else lane.book.dropTabs();
             for (const e of lane.entries) {

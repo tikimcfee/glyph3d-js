@@ -6,7 +6,7 @@ import { readSessionTail } from '@glyph3d/core/services/data/sessionTailRead.js'
 import { parseSessionOffThread } from '@glyph3d/core/workers/SessionParsePool.js';
 import { parseSession, SESSION_HARNESSES, agentIdForSession } from '@glyph3d/core/collections/sessionAdapter.js';
 import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
-import { buildCarrel } from '../commands/handlers/carrelCommands.js';
+import { buildCarrel, cylinderForm } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
 
 /**
@@ -22,13 +22,15 @@ import { getSetting } from './settings.js';
  *                    where its book would be: its own book first, then its helpers (books,
  *                    or their own teams) in spawn order. Nesting is as deep as the tree.
  *
- * The hub is a CYLINDER by default (`gomux.hubForm`: a natural-seat ring — every book and
- * team at its own size around you, so seeing them is a turn of the camera, not a flight;
- * rows stack up to `gomux.ringMaxRows`, then the ring widens);
- * team desks are flat walls standing on it. Each desk wears a title (the hub: `gomuxai`; a
- * team: `<name> · N helpers`), and the hub's desks space their members `gomux.gap` apart —
- * books are seated by the room they draw in (Book.getSeatBounds: nameplate, tabs, cover,
- * screen), so nothing overlaps.
+ * The hub is BORN a CYLINDER by default (`gomux.hubForm`: a natural-seat ring — every book
+ * and team at its own size around you, so seeing them is a turn of the camera, not a flight;
+ * rows stack up to Settings ▸ Carrel's cylinder rows, then the ring widens);
+ * team desks are born flat walls standing on it. Each desk wears a title (the hub: `gomuxai`; a
+ * team: `<name> · N helpers`), and the hub's desks are born spacing their members `gomux.gap`
+ * apart — books are seated by the room they draw in (Book.getSeatBounds: nameplate, tabs,
+ * cover, screen), so nothing overlaps. The form is chosen at birth only: a value set on one
+ * hub desk (the HUD's Desk section, carrel.set) is that desk's own — no tree push re-stamps
+ * it, and it persists by desk name though the desks themselves are rebuilt every boot.
  *
  * CENTER ON LOAD: once per page load (`gomux.centerOnLoad`), when the tree has arrived,
  * every shown book has opened, the desks have stopped moving and the world has stopped
@@ -353,37 +355,24 @@ export default class GomuxHub {
 
     // ── desks ────────────────────────────────────────────────────────────────
 
-    /** A desk by name — built (grid mode, derived) when absent. The hub is world-managed;
-     *  a team desk is built loose and seated into its parent's desk by the layout. */
+    /** A desk by name — built (derived) when absent, BORN in the hub's form: the hub world-
+     *  managed and a cylinder (or a wall), a team built loose as a wall and seated into its
+     *  parent's desk by the layout; every one spaced gomux.gap apart. A desk that already
+     *  stands keeps whatever it has — including values set on it by hand. */
     _desk(name) {
         const map = this.ctx.carrels;
         const have = map?.get(name);
         if (have && !have._dissolving) return have;
-        const desk = buildCarrel(this.ctx, name, { managed: name === GOMUX_HUB, nested: name !== GOMUX_HUB });
-        desk.setMode(name === GOMUX_HUB && getSetting('gomux.hubForm') !== 'grid' ? 'ring' : 'grid');
-        desk.derived = true;
-        this._dress(desk);
-        return desk;
-    }
-
-    /** The hub's form and spacing on a desk: the hub a natural-seat ring (or a flat wall),
-     *  teams flat walls; gomux.gap world units between members. */
-    _dress(desk) {
-        if (desk.carrelName === GOMUX_HUB) {
-            const ring = getSetting('gomux.hubForm') !== 'grid';
-            desk.setMode(ring ? 'ring' : 'grid');
-            if (ring) {
-                desk.setSeat('natural');
-                const r = Number(getSetting('gomux.radius')), rows = Number(getSetting('gomux.ringMaxRows'));
-                if (Number.isFinite(r) && r > 0 && desk.radius !== r) desk.setParam('radius', r);
-                if (Number.isFinite(rows) && rows >= 1 && desk.ringMaxRows !== rows) desk.setParam('ringMaxRows', rows);
-            }
-        }
+        const hub = name === GOMUX_HUB;
         const gap = Number(getSetting('gomux.gap'));
-        if (Number.isFinite(gap) && gap >= 0) {
-            const frac = gap / Math.max(desk.boxH, 1e-3);
-            if (Math.abs(desk.gapFrac - frac) > 1e-6) desk.setParam('gapFrac', frac);
-        }
+        const boxH = Number(getSetting('carrel.boxH'));
+        const form = {
+            ...(hub && getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
+            ...(Number.isFinite(gap) && gap >= 0 && boxH > 0 ? { gapFrac: gap / boxH } : {}),
+        };
+        const desk = buildCarrel(this.ctx, name, { managed: hub, nested: !hub, form });
+        desk.derived = true;
+        return desk;
     }
 
     /** Set a desk's title text (a FieldLabel in the hub's chrome tint), built on first need. */
@@ -424,7 +413,6 @@ export default class GomuxHub {
         const place = (parentDesk, a, order) => {
             if (hasTeam(a.name)) {
                 const team = this._desk(teamDesk(a.name));
-                this._dress(team);
                 const n = (kids.get(a.name) || []).length;
                 this._title(team, `${a.name} · ${n} helper${n === 1 ? '' : 's'}`);
                 this._seatDesk(parentDesk, team, order);
@@ -435,7 +423,6 @@ export default class GomuxHub {
             }
         };
         const hub = this._desk(GOMUX_HUB);
-        this._dress(hub);
         this._title(hub, 'gomuxai');
         (kids.get('') || []).forEach((a, i) => place(hub, a, i));
     }

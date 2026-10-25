@@ -187,13 +187,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
   hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
   without its result yet is held until the result lands). The tree is desks: the world-managed
-  `gomux` carrel — a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
-  stack up to `gomux.ringMaxRows` before it widens; everything around you is a camera turn
-  away); an agent with helpers gets a flat `gomux/<name>` team carrel seated in its parent's
-  desk (its book first, then its helpers), titled `<name> · N helpers`, spaced `gomux.gap` apart.
+  `gomux` carrel — born a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
+  stack up to `carrel.cylinderMaxRows` before it widens past `carrel.cylinderRadius`; everything
+  around you is a camera turn away); an agent with helpers gets a flat `gomux/<name>` team carrel
+  seated in its parent's desk (its book first, then its helpers), titled `<name> · N helpers`,
+  born `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
-  rebuilt from the tree, never saved. Status rides `lane.meta.gomux`. One book per Claude
+  rebuilt from the tree, never saved — yet a value set on one is its own and comes back with it
+  (per-instance knobs, below). Status rides `lane.meta.gomux`. One book per Claude
   session: the relay names a claude agent's session by its transcript when export reports none,
   and the hub claims it — the project hook's events for a claimed session defer to the hub
   (`GomuxHub.follows`) and a hook book already born for one is cleared. `gomux.attach <name>`
@@ -213,6 +215,21 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   times, since the load is part events, part state.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
+- **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book
+  is BORN with — a Settings change never pushes onto a live one. A value set on ONE instance
+  (`carrel.set <name> <knob> <v>`, `book.set [id] <knob> <v>`, `book.form`) is its own and wins:
+  no owner re-stamps it (the hub's tree push, the agents desk's sweep, a shelf's Settings
+  re-apply — `Book.setDeckDefaults` passes a book's own deck values by); `default` hands a knob
+  back (a desk to `Carrel.born`, a book to its shelf's default); `carrel.get` / `book.get` read
+  value · born · own. Own values are the workspace model's durable `Tuning` component
+  (`view.tune`, keyed by registry id: `carrel:<name>`, `agent:book:<id>`, `delta:book:<id>`),
+  saved as the snapshot's `tunings` and restored FIRST — so a saved desk (whose `serialize()`
+  holds what it was born as) and a derived hub desk (rebuilt each boot) both stand up wearing
+  them, and anything registering later is projected. The HUD's collapsible **Desk** section (the
+  desk the focused thing sits at) and **Book** section (the focused agent/delta book) show and
+  edit them through those verbs. The hub and the agents desk are born cylinders
+  (`cylinderForm`: `carrel.cylinderRadius`, `carrel.cylinderMaxRows`).
+  Gate: `tools/desk-tuning.test.mjs`.
 - **Books** (`collections/Book.js`) — library volumes, agent runs, delta sets: a deck of
   sheets whose one nav state is the head. The open sheet fronts at z = 0, the sheets still
   ahead recede a pitch each, the sheets turned past lie pressed in a block at the deck's

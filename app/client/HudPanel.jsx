@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
 import { bookInSlot } from './bookFocus.js';
+import { DESK_KNOBS, BOOK_KNOBS, deskInSlot, readDesk, readBook } from './tuning.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 /**
@@ -23,6 +24,13 @@ import { bookInSlot } from './bookFocus.js';
  *   controls      camera row · dir-volume splay⇄collapse · agent/delta book paging
  *                 (◂ ▸ live + where you are: turn in the run, sheet, live|held) ·
  *                 layout modes · edit + readout
+ *   Desk          (collapsible) the desk the focused thing sits at — or the focused desk —
+ *                 and ITS knobs: shape, seats, facing, radius, rows, arc, spacing… Each
+ *                 edit is carrel.set on that desk alone (its own value, persisted); ↺
+ *                 hands a knob back to what the desk was born as.
+ *   Book          (collapsible) the focused agent/delta book's own knobs: form, deck
+ *                 spacing / press / slide / glide (book.set, book.form), and for an agent
+ *                 book the turns it keeps (book.limit).
  *
  * The HUD owns no behavior: every control is a thin { fire: a bus verb, reflect:
  * live state } binding. Reflection subscribes to InteractionContext + LspNavigator +
@@ -95,9 +103,17 @@ function readFocus(client) {
     addr: bk.kind === 'agent' ? bk.agentId : `delta:${bk.setId}`,
     ...(bk.kind === 'agent' ? bk.books.headState(bk.agentId) : bk.book.headState()),
   } : null;
+  // The desk in play: the focused desk, or the one the focused thing sits at (a book, a card
+  // on its page, a team desk inside the gomuxai hub) — and its knobs, live.
+  const desk = deskInSlot(client.ctx, 'primary');
   return {
     id,
     type: type || (isGrid ? 'grid' : 'window'),
+    desk: desk ? readDesk(client.ctx, desk) : null,
+    bookTune: bk && bk.kind !== 'volume' ? {
+      ...readBook(client.ctx, bk),
+      limit: bk.kind === 'agent' ? bk.books.limitOf(bk.agentId) : null,
+    } : null,
     name: grid.getFilename?.() || grid.userData?.name || id,
     isGrid,
     volume: volume ? {
@@ -123,6 +139,8 @@ export default function HudPanel({ client }) {
   const [addr, setAddr] = useState(() => !!stateController.get('hud.addr', false)); // address bar open
   const [hoverSeg, setHoverSeg] = useState(-1); // address-bar segment under the cursor
   const [pos, setPos] = useState(() => stateController.get('hud.pos', null)); // {x,y} once dragged
+  const [deskOpen, setDeskOpen] = useState(() => !!stateController.get('hud.deskOpen', false));
+  const [bookOpen, setBookOpen] = useState(() => !!stateController.get('hud.bookOpen', false));
   const posRef = useRef(pos);
   const rootRef = useRef(null);
 
@@ -149,6 +167,10 @@ export default function HudPanel({ client }) {
   }, [client]);
 
   const fire = useCallback((...argv) => client?.router?.execute(argv), [client]);
+  // A knob edit re-reads at once, so a dragged slider tracks the desk instead of the poll.
+  const tune = useCallback((...argv) => {
+    Promise.resolve(client?.router?.execute(argv)).finally(() => setF(readFocus(client)));
+  }, [client]);
 
   // Drag by the grip: fixed-position move clamped to the viewport; position
   // persists on release. Until first drag it anchors bottom-right above the
@@ -184,6 +206,9 @@ export default function HudPanel({ client }) {
     stateController.set('hud.addr', !a);
     return !a;
   });
+
+  const toggleDesk = () => setDeskOpen((o) => { stateController.set('hud.deskOpen', !o); return !o; });
+  const toggleBook = () => setBookOpen((o) => { stateController.set('hud.bookOpen', !o); return !o; });
 
   // Jump to an ancestor directory (or the focused entity itself) by its full
   // path — the same absolute focus the keyboard walk lands on, via the bus.
@@ -314,6 +339,40 @@ export default function HudPanel({ client }) {
               </span>
             </div>
           )}
+          {f.desk && (
+            <Section name="desk" title={f.desk.name} open={deskOpen} onToggle={toggleDesk}
+              own={Object.keys(f.desk.own).length > 0}
+              hint={`the desk ${f.desk.name} — its own knobs (carrel.set ${f.desk.name} …); new desks take Settings ▸ Carrel`}>
+              {DESK_KNOBS.filter((k) => k.hud !== false && (!k.shows || k.shows(f.desk.values))).map((k) => (
+                <KnobRow key={k.key} knob={k} value={f.desk.values[k.key]} own={k.key in f.desk.own}
+                  resetHint={`back to what ${f.desk.name} was born as (${f.desk.born[k.key]})`}
+                  onSet={(v) => tune('carrel.set', f.desk.name, k.key, String(v))}
+                  onReset={() => tune('carrel.set', f.desk.name, k.key, 'default')} />
+              ))}
+            </Section>
+          )}
+          {f.bookTune && f.book && (
+            <Section name="book" title={f.book.addr} open={bookOpen} onToggle={toggleBook}
+              own={Object.keys(f.bookTune.own).length > 0 || f.bookTune.limit?.override != null}
+              hint={`the book ${f.book.addr} — its own knobs (book.set ${f.book.addr} …); new books take Settings ▸ Books`}>
+              <KnobRow knob={FORM_KNOB} value={f.bookTune.form} own={'form' in f.bookTune.own}
+                resetHint="back to a deck"
+                onSet={(v) => tune('book.form', f.book.addr, v)}
+                onReset={() => tune('book.form', f.book.addr, 'default')} />
+              {BOOK_KNOBS.map((k) => (
+                <KnobRow key={k.key} knob={k} value={f.bookTune.values[k.key]} own={k.key in f.bookTune.own}
+                  resetHint="back to the shelf's default (Settings)"
+                  onSet={(v) => tune('book.set', f.book.addr, k.key, String(v))}
+                  onReset={() => tune('book.set', f.book.addr, k.key, 'default')} />
+              ))}
+              {f.bookTune.limit && (
+                <KnobRow knob={LIMIT_KNOB} value={f.bookTune.limit.cap} own={f.bookTune.limit.override != null}
+                  resetHint="back to the shelf's default (Settings ▸ Agent Books)"
+                  onSet={(v) => tune('book.limit', f.book.addr, String(v))}
+                  onReset={() => tune('book.limit', f.book.addr, 'default')} />
+              )}
+            </Section>
+          )}
           {f.isGrid && (
             <>
               <div style={S.row}>
@@ -338,7 +397,66 @@ export default function HudPanel({ client }) {
   );
 }
 
+/** The book's form as a knob row (book.form), and an agent book's kept turns (book.limit). */
+const FORM_KNOB = { key: 'form', type: 'enum', options: ['deck', 'splay'], names: { deck: 'deck', splay: 'laid open' },
+  label: 'Form — a deck of pages, or laid open as a grid' };
+const LIMIT_KNOB = { key: 'limit', type: 'count', min: 0, step: 1,
+  label: 'Turns this book keeps (0 = every turn) — Enter to apply; fewer sheds the oldest' };
+
 // ── composable primitives — each a thin binding of { onClick: fire(verb), reflect: on } ──
+
+/** A collapsible HUD section: a header line (caret · NAME · subject · ● when the subject has
+ *  values of its own) over its rows. */
+function Section({ name, title, hint, open, onToggle, own, children }) {
+  return (
+    <div style={S.section} data-g3d-tune={name}>
+      <button type="button" style={S.secHdr} title={hint} onClick={onToggle}>
+        <span style={S.caret}>{open ? '▾' : '▸'}</span>
+        <span style={S.secName}>{name}</span>
+        <span style={S.secTitle}>{title}</span>
+        {own && <span style={S.secDot} title="has values of its own">●</span>}
+      </button>
+      {open && <div style={S.secBody}>{children}</div>}
+    </div>
+  );
+}
+
+/** One knob: its effect as the label; option buttons (enum), a slider + value (number), or a
+ *  typed count committed on Enter / leaving the field (count — a change too heavy to fire per
+ *  drag tick); ↺ when the value is the instance's own. Fires onSet / onReset — the caller's verbs. */
+function KnobRow({ knob, value, own, resetHint, onSet, onReset }) {
+  const shown = typeof value === 'number' ? Math.round(value * 100) / 100 : value;
+  return (
+    <div style={S.knob} data-knob={knob.key}>
+      <div style={S.knobHead}>
+        <span style={S.knobLabel} title={knob.key}>{knob.label}</span>
+        {own && <button type="button" style={S.knobReset} title={resetHint} onClick={onReset}>↺</button>}
+      </div>
+      {knob.type === 'enum' ? (
+        <div style={S.row}>
+          {knob.options.map((o) => (
+            <Mode key={o} on={value === o} onClick={() => onSet(o)}>{knob.names?.[o] ?? o}</Mode>
+          ))}
+        </div>
+      ) : knob.type === 'count' ? (
+        <div style={S.row}>
+          <input key={String(value)} type="number" style={S.count} min={knob.min} step={knob.step}
+            defaultValue={Number.isFinite(value) ? value : ''}
+            onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') e.currentTarget.blur(); }}
+            onBlur={(e) => { const n = Number(e.currentTarget.value); if (Number.isFinite(n) && n !== value) onSet(n); }} />
+        </div>
+      ) : (
+        <div style={S.row}>
+          <input type="range" style={S.slider} min={knob.min} max={knob.max} step={knob.step}
+            value={Number.isFinite(value) ? value : knob.min}
+            onChange={(e) => onSet(e.target.value)} />
+          <span style={{ ...S.knobVal, ...(own ? S.knobOwn : null) }}>{shown ?? '—'}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Btn({ onClick, children }) {
   return <button type="button" style={S.btn} onClick={onClick}>{children}</button>;
 }
@@ -388,6 +506,28 @@ const S = {
   liveOn: { color: '#08140c', background: '#7fe0a0', border: '1px solid #7fe0a0' },  // green = riding live
   readout: { color: '#6b7785', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' },
   header: { display: 'flex', alignItems: 'center', gap: 6 },
+  section: { display: 'flex', flexDirection: 'column', gap: 4, borderTop: '1px solid #1c222c', paddingTop: 5 },
+  secHdr: {
+    display: 'flex', alignItems: 'center', gap: 6, width: '100%', margin: 0, padding: 0,
+    font: 'inherit', fontSize: 10, textAlign: 'left', color: '#8893a3',
+    background: 'transparent', border: 'none', cursor: 'pointer',
+  },
+  caret: { flex: '0 0 auto', width: 9, fontSize: 8 },
+  secName: { flex: '0 0 auto', textTransform: 'uppercase', letterSpacing: '0.08em' },
+  secTitle: { flex: '1 1 auto', minWidth: 0, color: '#cdd6e2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  secDot: { flex: '0 0 auto', fontSize: 8, color: '#9aa3b2' },
+  secBody: { display: 'flex', flexDirection: 'column', gap: 5, paddingLeft: 15 },
+  knob: { display: 'flex', flexDirection: 'column', gap: 2 },
+  knobHead: { display: 'flex', alignItems: 'flex-start', gap: 4 },
+  knobLabel: { flex: '1 1 auto', minWidth: 0, fontSize: 10, color: '#8893a3', whiteSpace: 'normal', overflowWrap: 'break-word', lineHeight: 1.3 },
+  knobReset: { flex: '0 0 auto', font: 'inherit', fontSize: 12, lineHeight: 1, color: '#7c8596', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px' },
+  slider: { flex: '1 1 auto', minWidth: 0, accentColor: '#6c8fc0', height: 12 },
+  knobVal: { flex: '0 0 44px', textAlign: 'right', color: '#6b7785', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
+  knobOwn: { color: '#cdd6e2' },
+  count: {
+    width: 72, font: 'inherit', fontSize: 11, color: '#c8ccd6', background: '#0f141b',
+    border: '1px solid #232b34', borderRadius: 4, padding: '1px 5px', outline: 'none', textAlign: 'right',
+  },
   grip: { cursor: 'grab', color: '#4a5468', letterSpacing: -1, padding: '0 2px' },
   htitle: { color: '#9fd2ff', fontWeight: 600, fontSize: 11, letterSpacing: 0.4, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   collapse: { font: 'inherit', color: '#9ab', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0 2px', lineHeight: 1 },

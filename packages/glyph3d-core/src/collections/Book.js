@@ -100,6 +100,10 @@ export const PAGE_FACE_DEFAULTS = Object.freeze({ surface: true, surfacePad: 0, 
  *  far, in pitches, the reading deck visibly slides on a turn — the rest is a cut. */
 export const DECK_DEFAULTS = Object.freeze({ zPitch: 90, lerp: 9, order: -1, turned: 0.25, slide: 1 });
 
+/** The deck knobs ONE book may be given its own value for (tuneDeck) — the owner's shelf
+ *  defaults (setDeckDefaults) pass a knob by once the book has its own. */
+export const DECK_TUNABLE = Object.freeze(['zPitch', 'lerp', 'turned', 'slide']);
+
 /** Splay (m×n grid) defaults. cols 0 derives the column count from the aspect target
  *  (grid w/h ≈ aspect); lift is the head page's forward float — the bookmark you can
  *  see across the whole grid. */
@@ -147,6 +151,10 @@ export default class Book extends BoundedObject3D {
         this.following = true;
         /** @type {{zPitch:number, lerp:number, order:number, turned:number, slide:number}} deck knobs (multi-sheet books) */
         this.deck = { ...DECK_DEFAULTS };
+        /** @type {Object<string, number>} deck knobs given to THIS book (tuneDeck) — they win over the owner's defaults */
+        this.deckOwn = {};
+        /** @type {Object<string, number>} the owner's latest deck defaults (setDeckDefaults) — what an untuned knob returns to */
+        this._deckBase = {};
         /** @type {'deck'|'splay'} the presentation form — the slot law sheets ease to */
         this.form = 'deck';
         /** @type {{cols:number,gapX:number,gapY:number,aspect:number,lift:number}} splay knobs */
@@ -374,6 +382,34 @@ export default class Book extends BoundedObject3D {
         this.form = form === 'splay' ? 'splay' : 'deck';
         Object.assign(this.splay, opts);
         return this;
+    }
+
+    /** The OWNER's deck defaults (its shelf cfg — at birth and on every re-apply): stamped
+     *  onto each knob this book hasn't been given its own value for.
+     *  @param {{zPitch?:number, lerp?:number, turned?:number, slide?:number}} d */
+    setDeckDefaults(d) {
+        for (const k of DECK_TUNABLE) {
+            if (!Number.isFinite(d[k])) continue;
+            this._deckBase[k] = d[k];
+            if (!(k in this.deckOwn)) this.deck[k] = d[k];
+        }
+        return this;
+    }
+
+    /** Give THIS book its own value for a deck knob (DECK_TUNABLE); null drops it, back to
+     *  the owner's default. Sheets ease to the new slots in update(dt).
+     *  @param {string} key @param {number|null} value @returns {boolean} */
+    tuneDeck(key, value) {
+        if (!DECK_TUNABLE.includes(key)) return false;
+        if (value == null) {
+            delete this.deckOwn[key];
+            this.deck[key] = this._deckBase[key] ?? DECK_DEFAULTS[key];
+            return true;
+        }
+        if (!Number.isFinite(value)) return false;
+        this.deckOwn[key] = value;
+        this.deck[key] = value;
+        return true;
     }
 
     /** Every sheet's LIVE pose (mid-ease included), keyed by its content path — captured

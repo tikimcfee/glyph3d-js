@@ -199,6 +199,17 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   side is `cd cli && go test -run Gomux` (export's snapshot / spawned / changed / removed /
   store / host lines folded into the tree, a live agent beating a departed namesake, a real
   follower process, the transcript allow-list, gomux/read's window).
+- **`desk-tuning.test.mjs`** (headless) — per-instance knobs (client/tuning.js): a Settings ▸
+  Carrel default reaches only desks born after it; `carrel.set` tunes one desk, `carrel.get`
+  reads value · born · own, `default` returns to what the desk was born as; the gomuxai hub's
+  desks are born in its form (cylinder hub, wall teams) and an own value survives the next tree
+  push, the agents desk's survives the sweep; capture saves desks born-as-they-were plus every
+  own value (`tunings`, derived hub desks included) and restore puts them back — onto a hub desk
+  built before the restore ran, and into one built after; dissolve forgets; a shelf book's own
+  deck value survives its shelf's re-apply, `book.form` records a shelf book's form, a book
+  registering later is projected; deskOf finds a seated card's desk. Mutation-checked (no tune
+  at birth, the hub re-stamping, a Settings push, the deck restamp ignoring own values, serialize
+  saving live values, no `tunings` capture, no projector).
 - **`scene-transforms.test.mjs`** (headless) — SceneTransforms on a random 400-node tree: after
   every kind of pose write (vector writes, rotations, three's transform helpers, attach / add /
   detached moves, a subtree built off-scene, a hand-written matrix, a camera, a pivot) every world

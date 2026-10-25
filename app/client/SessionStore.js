@@ -11,6 +11,8 @@
  * launch overlaps their relay round-trips instead of queueing them). Every phase
  * stays individually awaited + guarded + timed:
  *   1  substrate    layout scheme + world-grouping order (direct state, empty scene)
+ *      ∥ carrels    every instance's own values into the model (tunings), then the
+ *                   saved desks stand back up wearing them
  *   2  panels       2D dockview layout FIRST — the chrome rises while content loads
  *                   behind it (prunes by component type, never by entity)
  *      ∥ field→tabs replay fieldSources (bulk fetch, one batch-window settle), then
@@ -22,8 +24,9 @@
  *      settle       one projection pass over surfaces that re-adopted mid-restore
  *      focus        attention primary/key slots, last — the scene is as live as it gets
  * The registry PROJECTOR is always on (attached at connect, before restore): an
- * entity arriving in ANY lane is projected — viewport applied, dock tile adopted —
- * the moment it registers, so docked windows are born docked, never seen jumping.
+ * entity arriving in ANY lane is projected — viewport applied, dock tile adopted, its
+ * own knob values (a desk's, a book's: tuning.js) laid on — the moment it registers, so
+ * docked windows are born docked, never seen jumping.
  *
  * A failed phase is REPORTED (console + ctx.status + this.lastRestore; the
  * `session.status` verb reads it) and QUARANTINED, not swallowed: later phases
@@ -56,6 +59,7 @@ import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 import { openAgentSession } from '../commands/handlers/agentCommands.js';
 import { agentIdForEntry } from '@glyph3d/core/collections/sessionAdapter.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
+import { listTunings, projectTune } from './tuning.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
@@ -305,8 +309,9 @@ export default class SessionStore {
       agents.push(entry);
     }
 
-    // Carrels: world furniture — each desk's serialize() carries pose and knobs
-    // (NO members — residence is the MODEL's authority via view.carrel).
+    // Carrels: world furniture — each desk's serialize() carries pose and what it was born
+    // as (NO members — residence is the MODEL's authority via view.carrel; NO own values —
+    // those are its tuning, below).
     const carrels = ctx.carrels instanceof Map
       ? [...ctx.carrels.values()].filter((c) => !c._dissolving && !c.derived).map((c) => c.serialize())
       : [];
@@ -318,6 +323,12 @@ export default class SessionStore {
     const carrelMembers = ws?.listCarreled
       ? ws.listCarreled().map((s) => ({ id: s.id, name: s.view.carrel.name, order: s.view.carrel.order ?? 0 }))
       : [];
+
+    // Tunings: every desk's and shelf book's OWN values (the model's Tuning component,
+    // client/tuning.js), keyed by registry id — saved whether or not the instance is live
+    // now, so the gomuxai hub's derived desks (never saved themselves) and a team desk
+    // that comes and goes keep theirs.
+    const tunings = listTunings(ctx);
 
     const snap = {
       version: SCHEMA_VERSION,
@@ -334,6 +345,7 @@ export default class SessionStore {
       agents,
       carrels,
       carrelMembers,
+      tunings,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -477,7 +489,7 @@ export default class SessionStore {
         // pre-shaped for its complement, and files a membership manifest — so
         // stage 2's windows (books, terminals, grids) seat IN PLACE the moment
         // they materialize instead of flying to a desk that arrived late.
-        ['carrels', () => this._restoreCarrels(snap), ['carrels']]]],
+        ['carrels', () => { this._restoreTunings(snap); this._restoreCarrels(snap); }, ['tunings', 'carrels']]]],
       [
         [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],
@@ -516,8 +528,26 @@ export default class SessionStore {
     );
   }
 
-  // carrels — world furniture, stage 1: each saved desk stands back up at its saved pose
-  // wearing its saved knobs (restoreCarrel — no camera-ray placement, no Settings fold).
+  // tunings — every instance's own values back into the model (the Tuning component), FIRST:
+  // the desks restored next, the gomuxai hub's desks whenever the tree builds them, and the
+  // books as they open all read them at birth. One built before this ran (the hub can beat the
+  // restore to the relay) is projected here; one registering later, by the projector.
+  _restoreTunings(snap) {
+    const list = Array.isArray(snap.tunings) ? snap.tunings : [];
+    const ws = this.ctx.workspace;
+    for (const t of list) {
+      if (typeof t?.id !== 'string' || !t.tune || typeof t.tune !== 'object') {
+        console.warn('[session] dropped a malformed tuning record:', t);
+        continue;
+      }
+      ws?.setSurfaceView?.(t.id, undefined, { tune: { ...t.tune } });
+      projectTune(this.ctx, t.id, t.tune);
+    }
+  }
+
+  // carrels — world furniture, stage 1: each saved desk stands back up at its saved pose,
+  // born as it was and wearing its own values (restoreCarrel — no camera-ray placement, no
+  // Settings fold).
   // Carrel membership (view.carrel) is written to the MODEL here, so the sweep seats
   // members from model authority as windows materialize — no manifest, no parallel pipeline.
   _restoreCarrels(snap) {
@@ -858,6 +888,8 @@ export default class SessionStore {
         if (!this.ctx.registry.has(s.id)) continue;
         const grid = this.ctx.registry.get(s.id)?.grid;
         if (grid) SURFACE_PROJECTORS[s.kind]?.(this, s, grid);
+        // An instance's own values (a desk, a shelf book) — whatever its kind; idempotent.
+        if (s.view?.tune) projectTune(this.ctx, s.id, s.view.tune);
       }
     }
     // Dock = f(model), additive (Holding.dock.reconcile): a window whose desk is still waiting

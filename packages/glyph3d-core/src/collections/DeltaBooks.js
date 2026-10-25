@@ -126,10 +126,7 @@ export default class DeltaBooks {
             const book = new Book();
             book.name = `delta:${setId}`;
             book.userData = { ...book.userData, name: setId, isDir: false };   // a layout LEAF
-            book.deck.zPitch = this.cfg.zPitch;
-            book.deck.lerp = this.cfg.pagerLerp;
-            book.deck.turned = this.cfg.turnedPitch;
-            book.deck.slide = this.cfg.turnSlide;
+            book.setDeckDefaults(this._deckDefaults());
             this.root.add(book);
             const hueIdx = this.sets.size;
             const hue = this.cfg.palette[hueIdx % this.cfg.palette.length];
@@ -383,6 +380,13 @@ export default class DeltaBooks {
 
     update(dt) { for (const set of this.sets.values()) set.book.update(dt); }
 
+    /** The shelf's deck defaults, in the deck's own terms — every book here is born with
+     *  them, and a re-apply restamps them on every knob a book wasn't given itself. */
+    _deckDefaults() {
+        const c = this.cfg;
+        return { zPitch: c.zPitch, lerp: c.pagerLerp, turned: c.turnedPitch, slide: c.turnSlide };
+    }
+
     /**
      * Re-apply the current cfg to every live set — the entry the Settings rows and the
      * config verb route through (mirrors AgentBooks.applyScales). Deck knobs re-seat,
@@ -390,10 +394,7 @@ export default class DeltaBooks {
      */
     applyScales() {
         for (const set of this.sets.values()) {
-            set.book.deck.zPitch = this.cfg.zPitch;
-            set.book.deck.lerp = this.cfg.pagerLerp;
-            set.book.deck.turned = this.cfg.turnedPitch;
-            set.book.deck.slide = this.cfg.turnSlide;
+            set.book.setDeckDefaults(this._deckDefaults());
             set.book.fit(this._pageOpts(set));
         }
         this._relayout();

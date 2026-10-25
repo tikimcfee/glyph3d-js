@@ -7,12 +7,18 @@
  *   book.list <path|id>  → one book's full record (form, page, sheets, head, world position)
  *   book.page   [id] <next|prev|first|last|N>   turn a book's head (1-based index; N of M)
  *   book.scroll [id] <delta>                    turn by ±N sheets (− older / + newer)
- *   book.form   [id] <deck|splay|toggle>        the presentation form: rolodex deck, or the
+ *   book.form   [id] <deck|splay|toggle|default> the presentation form: rolodex deck, or the
  *                                               book laid OPEN as an m×n page grid (the
  *                                               many-file overview). A library volume's form
  *                                               persists on its dir node and re-lays the tree
- *                                               (the footprint honestly changes); the head
+ *                                               (the footprint honestly changes); an agent or
+ *                                               delta book's is its own (tuning, persisted;
+ *                                               'default' drops it — a deck again); the head
  *                                               stays the bookmark in both forms.
+ *   book.set    [id] <knob> <value|default>     give ONE agent/delta book its own deck value
+ *                                               (client/tuning.js BOOK_KNOBS) — it wins over
+ *                                               the shelf's Settings default and persists
+ *   book.get    [id]                            one book's deck knobs, form, and which are its own
  *   book.move   <id> <x> <y> <z>                pin an agent book where you put it (drag-release / CLI)
  *   book.config [key value]                     get/set an agent-shelf constant — re-flows live
  *   book.limit  [id] [n|all|default]            get/set ONE book's kept-turns cap (overrides the
@@ -31,6 +37,7 @@
 
 import { box, kvLines } from '../formatResponse.js';
 import { bookInFocus } from '../../client/bookFocus.js';
+import { BOOK_KNOBS, tuneBook, readBook } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -183,10 +190,11 @@ export default function registerBookCommands(router) {
         if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book to form', data: null };
         const bk = hit.book;
         const a = String(arg ?? '').toLowerCase();
-        if (!['deck', 'splay', 'toggle'].includes(a)) {
-            return { text: `ERR: usage: book.form [id] <deck|splay|toggle> (current: ${bk.form})`, data: { form: bk.form } };
+        const shelf = hit.kind === 'agent' || hit.kind === 'delta';
+        if (!['deck', 'splay', 'toggle', ...(shelf ? ['default'] : [])].includes(a)) {
+            return { text: `ERR: usage: book.form [id] <deck|splay|toggle${shelf ? '|default' : ''}> (current: ${bk.form})`, data: { form: bk.form } };
         }
-        const form = a === 'toggle' ? (bk.form === 'splay' ? 'deck' : 'splay') : a;
+        const form = a === 'toggle' ? (bk.form === 'splay' ? 'deck' : 'splay') : a === 'default' ? 'deck' : a;
         if (hit.kind === 'volume') {
             // A volume is a per-pass husk — the form lives on the DIR NODE (beside
             // volumeHead) and the re-lay rebuilds the volume wearing it. The footprint
@@ -195,13 +203,56 @@ export default function registerBookCommands(router) {
             bk.parent.userData.volumeForm = form;
             ctx.contentTree.relayoutAndRest(0);
             ctx.contentTreeLabels?.rebuild?.();
+        } else if (shelf) {
+            // A shelf book (agent/delta) owns its own frame — its form is its own value
+            // (tuning: set now, persisted; 'default' drops it); its update() eases the pages
+            // and the cover re-wraps live. No relayout to run.
+            tuneBook(ctx, hit, 'form', a === 'default' ? 'default' : form);
         } else {
-            // A shelf book (agent/delta) owns its own frame — setForm now; its update()
-            // eases the pages and the cover re-wraps live. No relayout to run.
             bk.setForm(form);
         }
         return { text: `OK: ${hit.kind === 'volume' ? bk.userData.path : id ?? 'book'} → ${form}`, data: { form } };
     }, { description: 'Set a book\'s presentation form — rolodex deck or the laid-open m×n page grid', usage: '[id] <deck|splay|toggle>' });
+
+    router.register('book.set', (args, ctx) => {
+        // `book.set <knob> <value>` is the focused book; `book.set <id> <knob> <value>` names one.
+        const [id, key, raw] = args.length >= 3 ? args : [undefined, args[0], args[1]];
+        const hit = resolveBook(ctx, id);
+        if (!hit) return { text: id ? `ERR: no book '${id}'` : 'ERR: no book in focus', data: null };
+        if (hit.kind !== 'agent' && hit.kind !== 'delta') {
+            return { text: `ERR: '${id ?? 'the focused book'}' is a ${hit.kind} book — only agent and delta books take their own deck values`, data: null };
+        }
+        if (key === 'form') return { text: 'ERR: a book\'s form is book.form [id] <deck|splay|toggle|default>', data: null };
+        const r = tuneBook(ctx, hit, String(key ?? ''), raw ?? '');
+        if (!r.ok) return { text: `ERR: ${r.error} — usage: book.set [id] <knob> <value|default>`, data: null };
+        const who = hit.kind === 'agent' ? hit.agentId : `delta:${hit.setId}`;
+        return {
+            text: `OK: ${who} ${key} = ${r.value}${r.own ? '' : ' (the shelf default)'}`,
+            data: { book: who, key, value: r.value, own: r.own },
+        };
+    }, {
+        description: "Give ONE agent/delta book its own deck value — it wins over the shelf's Settings default and persists; 'default' hands it back",
+        usage: `[id] <${BOOK_KNOBS.map((k) => k.key).join('|')}> <value|default>`,
+        returns: '{ book, key, value, own }',
+    });
+
+    router.register('book.get', (args, ctx) => {
+        const hit = resolveBook(ctx, args[0]);
+        if (!hit) return { text: args[0] ? `ERR: no book '${args[0]}'` : 'ERR: no book in focus', data: null };
+        if (hit.kind !== 'agent' && hit.kind !== 'delta') {
+            return { text: `ERR: a ${hit.kind} book has no knobs of its own (its form: book.form)`, data: null };
+        }
+        const d = readBook(ctx, hit);
+        const lines = [`${'form' in d.own ? '*' : ' '}form = ${d.form}`,
+            ...BOOK_KNOBS.map((k) => `${k.key in d.own ? '*' : ' '}${k.key} = ${d.values[k.key]}`)];
+        const cap = hit.kind === 'agent' ? hit.books.limitOf(hit.agentId) : null;
+        if (cap) lines.push(`${cap.override == null ? ' ' : '*'}limit = ${cap.cap || 'all'} (book.limit)`);
+        return { text: `OK: ${d.id} (* = its own value)\n${lines.join('\n')}`, data: { ...d, ...(cap ? { limit: cap } : {}) } };
+    }, {
+        description: "Read one agent/delta book's knobs — deck values, form, kept turns, and which are its own",
+        usage: '[id]',
+        returns: '{ id, form, values, own, limit? }',
+    });
 
     router.register('book.move', (args, ctx) => {
         const books = ctx.agentBooks;
