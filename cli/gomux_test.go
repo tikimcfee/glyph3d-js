@@ -1,59 +1,20 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// gomuxFixtureStore builds a .gomuxai dir with gomuxai's schema (as of the
-// spawned_by column) and returns its path. rows are executed as-is.
-func gomuxFixtureStore(t *testing.T, withSpawnedBy bool, rows ...string) string {
+// newGomuxTestWatcher: home pinned so the transcript allow-list is the test's.
+func newGomuxTestWatcher(t *testing.T, home string) *GomuxWatcher {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), ".gomuxai")
-	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "gomuxai.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	agents := `CREATE TABLE agents (name TEXT PRIMARY KEY, session_name TEXT NOT NULL, backend TEXT NOT NULL,
-		task_file TEXT, log_file TEXT, created_at TEXT NOT NULL`
-	if withSpawnedBy {
-		agents += `, spawned_by TEXT`
-	}
-	stmts := append([]string{agents + `)`,
-		`CREATE TABLE state (agent_name TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
-			updated_at TEXT NOT NULL, PRIMARY KEY (agent_name, key))`,
-		`CREATE TABLE command_log (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
-			duration_ms INTEGER NOT NULL, host TEXT NOT NULL, agent TEXT NOT NULL, parent TEXT NOT NULL,
-			cwd TEXT NOT NULL, args TEXT NOT NULL, exit_code INTEGER NOT NULL, error TEXT NOT NULL, build TEXT NOT NULL)`,
-	}, rows...)
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("%s: %v", s, err)
-		}
-	}
-	return dir
-}
-
-func spawnRow(at, caller, cwd, argv string, exit int) string {
-	return `INSERT INTO command_log (started_at,duration_ms,host,agent,parent,cwd,args,exit_code,error,build) VALUES ('` +
-		at + `',1,'h','` + caller + `','','` + cwd + `','` + argv + `',` + map[bool]string{true: "0", false: "1"}[exit == 0] + `,'','b')`
-}
-
-// newGomuxTestWatcher: no tmux (sessions never attached), home pinned so the
-// transcript allow-list is the test's.
-func newGomuxTestWatcher(t *testing.T, home string, dirs ...string) *GomuxWatcher {
-	t.Helper()
-	w := NewGomuxWatcher(dirs)
+	w := NewGomuxWatcher(nil)
 	w.tmuxBin = ""
-	w.agentBin = ""
 	w.home = home
 	return w
 }
@@ -66,101 +27,155 @@ func gomuxByName(s gomuxSnapshot) map[string]gomuxAgent {
 	return m
 }
 
-func TestGomuxSnapshot_TreeAcrossStores(t *testing.T) {
-	home := t.TempDir()
-	proj := filepath.Join(home, ".claude", "projects", "-p")
-	os.MkdirAll(proj, 0o755)
-	coordT := filepath.Join(proj, "c.jsonl")
-	os.WriteFile(coordT, []byte("{}\n{}\n"), 0o644)
-	childT := filepath.Join(proj, "t1.jsonl")
-	os.WriteFile(childT, []byte("{}\n"), 0o644)
-
-	// Store A: a live coord (local-offset created_at) with reported state, and a
-	// departed helper spawned by a person.
-	a := gomuxFixtureStore(t, true,
-		`INSERT INTO agents VALUES ('coord','agent-coord','claude','','','2026-10-24T20:28:43-05:00','')`,
-		`INSERT INTO state VALUES ('coord','_status','processing','2026-10-24T20:57:33.68-05:00')`,
-		`INSERT INTO state VALUES ('coord','_detail','Bash: rg foo','2026-10-24T20:57:33.68-05:00')`,
-		`INSERT INTO state VALUES ('coord','_tool','Bash','2026-10-24T20:57:33.68-05:00')`,
-		`INSERT INTO state VALUES ('coord','_transcript','`+coordT+`','2026-10-24T20:57:33.68-05:00')`,
-		`INSERT INTO state VALUES ('coord','note','user keys are not reserved','2026-10-24T20:57:33.68-05:00')`,
-		spawnRow("2026-10-25T01:28:43.772Z", "", "/w/coord", `["spawn","coord","--backend","claude"]`, 0),
-		spawnRow("2026-10-24T23:00:00.000Z", "", "/w/old", `["spawn","old","--backend=agy"]`, 0),
-		spawnRow("2026-10-24T23:00:01.000Z", "", "/w/x", `["spawn","failed"]`, 1),
-	)
-	// Store B (a dev build coord ran): its helper, recorded only here.
-	b := gomuxFixtureStore(t, true,
-		spawnRow("2026-10-25T01:41:31.002Z", "coord", "/w/coord", `["spawn","coord-t1","--backend","claude"]`, 0),
-	)
-	os.WriteFile(filepath.Join(b, "logs", "coord-t1.transcripts"),
-		[]byte("claude\t/elsewhere/first.jsonl\nclaude\t"+childT+"\n"), 0o644)
-
-	w := newGomuxTestWatcher(t, home, a, b)
-	reached := map[string]int{}
-	w.SetReachHook(func(dir string) { reached[dir]++ })
-	w.discover()
-	w.refresh()
-	w.refresh()
-	if reached["/w/coord"] != 1 || reached["/w/old"] != 1 || len(reached) != 2 {
-		t.Errorf("each agent's cwd is handed to reach once: %v", reached)
-	}
-	s := w.Snapshot()
-	got := gomuxByName(s)
-
-	if len(s.Dirs) != 2 || len(s.Agents) != 3 {
-		t.Fatalf("dirs=%v agents=%v", s.Dirs, s.Agents)
-	}
-	c := got["coord"]
-	if !c.Live || c.Status != "processing" || c.Tool != "Bash" || c.Detail != "Bash: rg foo" ||
-		c.Cwd != "/w/coord" || c.Harness != "claude" || c.TranscriptSize != 6 {
-		t.Errorf("coord = %+v", c)
-	}
-	if c.CreatedAt != "2026-10-25T01:28:43.000Z" {
-		t.Errorf("created_at not normalized to UTC: %s", c.CreatedAt)
-	}
-	if o := got["old"]; o.Live || o.Status != "exited" || o.Backend != "agy" || o.Harness != "agy" || o.Transcript != "" {
-		t.Errorf("old = %+v", o)
-	}
-	if _, ok := got["failed"]; ok {
-		t.Errorf("a failed spawn must not list")
-	}
-	k := got["coord-t1"]
-	if k.Parent != "coord" || k.Transcript != childT || k.TranscriptSize != 3 || k.DataDir != b {
-		t.Errorf("coord-t1 = %+v", k)
-	}
-	// Ordered by creation: old, coord, coord-t1.
-	if s.Agents[0].Name != "old" || s.Agents[2].Name != "coord-t1" {
-		t.Errorf("order = %v", s.Agents)
-	}
-
-	// A quiet tick changes nothing (gen holds); a transcript append does.
-	gen := s.Gen
-	w.refresh()
-	if w.Snapshot().Gen != gen {
-		t.Errorf("quiet refresh moved gen")
-	}
-	f, _ := os.OpenFile(childT, os.O_APPEND|os.O_WRONLY, 0)
-	f.WriteString("{}\n")
-	f.Close()
-	w.refresh()
-	if s2 := w.Snapshot(); s2.Gen != gen+1 || gomuxByName(s2)["coord-t1"].TranscriptSize != 6 {
-		t.Errorf("append not seen: gen %d→%d %+v", gen, s2.Gen, gomuxByName(s2)["coord-t1"])
+func mustApply(t *testing.T, w *GomuxWatcher, line string) {
+	t.Helper()
+	if err := w.applyLine([]byte(line)); err != nil {
+		t.Fatalf("apply %s: %v", line, err)
 	}
 }
 
-func TestGomuxSnapshot_PreSpawnedByStoreAndOutsideTranscript(t *testing.T) {
-	home := t.TempDir()
-	d := gomuxFixtureStore(t, false,
-		`INSERT INTO agents VALUES ('a','agent-a','claude','','','2026-10-24T20:00:00Z')`,
-		`INSERT INTO state VALUES ('a','_transcript','/etc/passwd','2026-10-24T20:00:00Z')`,
-	)
-	w := newGomuxTestWatcher(t, home, d)
-	w.discover()
-	w.refresh()
-	a := gomuxByName(w.Snapshot())["a"]
-	if !a.Live || a.Parent != "" || a.Transcript != "" {
-		t.Errorf("a = %+v (an outside transcript must not be served)", a)
+// exportFixture: a home with two claude transcripts, and export lines over two stores.
+func exportFixture(t *testing.T) (home, coordT, childT string) {
+	t.Helper()
+	home = t.TempDir()
+	proj := filepath.Join(home, ".claude", "projects", "-p")
+	os.MkdirAll(proj, 0o755)
+	coordT = filepath.Join(proj, "c.jsonl")
+	childT = filepath.Join(proj, "t1.jsonl")
+	os.WriteFile(coordT, []byte("{}\n"), 0o644)
+	os.WriteFile(childT, []byte("{}\n"), 0o644)
+	return
+}
+
+func agentJSON(fields map[string]any) string {
+	b, _ := json.Marshal(fields)
+	return string(b)
+}
+
+func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
+	home, coordT, childT := exportFixture(t)
+	w := newGomuxTestWatcher(t, home)
+	var pushes []gomuxSnapshot
+	w.SetNotifyHook(func(method string, params any) {
+		if method == "gomux/changed" {
+			pushes = append(pushes, params.(gomuxSnapshot))
+		}
+	})
+	reached := map[string]int{}
+	w.SetReachHook(func(dir string) { reached[dir]++ })
+
+	coord := agentJSON(map[string]any{"name": "coord", "host": "h", "kind": "tmux", "run": 3, "backend": "claude",
+		"session": "agent-coord", "store": "/s/a", "cwd": "/w/coord", "created_at": "2026-10-25T01:28:43Z",
+		"live": true, "attached": true, "status": "processing", "detail": "Bash: rg foo", "tool": "Bash",
+		"status_at": "2026-10-25T01:30:00.25Z", "session_id": "sid", "transcript": coordT, "dialect": "claude",
+		"transcript_size": 3, "transcript_mtime": "2026-10-25T01:30:00.5Z"})
+	old := agentJSON(map[string]any{"name": "old", "host": "h", "kind": "tmux", "run": 1, "backend": "agy",
+		"session": "agent-old", "store": "/s/a", "cwd": "/w/old", "created_at": "2026-10-24T23:00:00Z",
+		"ended_at": "2026-10-24T23:30:00Z", "live": false, "transcript": "/etc/passwd", "dialect": "agy"})
+	mustApply(t, w, `{"type":"snapshot","host":"h","stores":[{"dir":"/s/a","this":true}],"agents":[`+coord+`,`+old+`]}`)
+
+	s := w.Snapshot()
+	got := gomuxByName(s)
+	c := got["coord"]
+	if !c.Live || !c.Attached || c.Status != "processing" || c.Detail != "Bash: rg foo" || c.Harness != "claude" ||
+		c.DataDir != "/s/a" || c.Cwd != "/w/coord" || c.TranscriptSize != 3 || c.Run != 3 ||
+		c.TranscriptMtime != time.Date(2026, 10, 25, 1, 30, 0, 5e8, time.UTC).UnixMilli() {
+		t.Errorf("coord = %+v", c)
 	}
+	if o := got["old"]; o.Live || o.Status != "exited" || o.Harness != "agy" || o.Transcript != "" || o.EndedAt == "" {
+		t.Errorf("old = %+v (departed: exited; a transcript outside the harness homes isn't served)", o)
+	}
+	if s.Agents[0].Name != "old" || len(pushes) != 1 || len(s.Dirs) != 1 {
+		t.Errorf("order/pushes/dirs: %v %d %v", s.Agents, len(pushes), s.Dirs)
+	}
+	if reached["/w/coord"] != 1 || reached["/w/old"] != 1 {
+		t.Errorf("each cwd handed to reach once: %v", reached)
+	}
+
+	// a spawn in a store found mid-follow, then a status change, then a quiet repeat
+	child := agentJSON(map[string]any{"name": "coord-t1", "host": "h", "kind": "tmux", "run": 1, "parent": "coord",
+		"backend": "claude", "session": "agent-coord-t1", "store": "/s/b", "cwd": "/w/coord",
+		"created_at": "2026-10-25T01:41:31Z", "live": true, "attached": true, "status": "idle",
+		"transcript": childT, "dialect": "claude"})
+	mustApply(t, w, `{"type":"store","store":{"dir":"/s/b","cursor":0,"events":false},"agents":[`+child+`]}`)
+	k := gomuxByName(w.Snapshot())["coord-t1"]
+	if k.Parent != "coord" || k.DataDir != "/s/b" || k.Transcript != childT {
+		t.Errorf("coord-t1 = %+v", k)
+	}
+	if !strings.Contains(strings.Join(w.Snapshot().Dirs, ","), "/s/b") {
+		t.Errorf("a store line adds its store: %v", w.Snapshot().Dirs)
+	}
+	waiting := strings.Replace(child, `"status":"idle"`, `"status":"waiting","tool_input":"{\"command\":\"ls\"}"`, 1)
+	mustApply(t, w, `{"type":"changed","id":4,"store":"/s/b","at":"x","reason":"status","agent":`+waiting+`}`)
+	if k := gomuxByName(w.Snapshot())["coord-t1"]; k.Status != "waiting" || k.ToolInput == "" {
+		t.Errorf("changed: %+v", k)
+	}
+	n := len(pushes)
+	mustApply(t, w, `{"type":"changed","store":"/s/b","at":"x","reason":"transcript","agent":`+waiting+`}`)
+	if len(pushes) != n {
+		t.Errorf("an unchanged agent pushes nothing (pushes %d → %d)", n, len(pushes))
+	}
+
+	// cleanup keeps the agent (with --all), now departed
+	gone := strings.Replace(strings.Replace(waiting, `"live":true`, `"live":false,"ended_at":"2026-10-25T02:00:00Z"`, 1),
+		`"attached":true`, `"attached":false`, 1)
+	if !strings.Contains(gone, `"live":false`) || !strings.Contains(gone, `"attached":false`) {
+		t.Fatal("fixture: live/attached not found to flip")
+	}
+	mustApply(t, w, `{"type":"removed","id":9,"store":"/s/b","at":"x","agent":`+gone+`}`)
+	if k := gomuxByName(w.Snapshot())["coord-t1"]; k.Live || k.Status != "waiting" {
+		t.Errorf("removed: %+v (keeps its last report, live=false)", k)
+	}
+
+	// a replacement store line drops the store's agents not listed again
+	mustApply(t, w, `{"type":"store","store":{"dir":"/s/b"},"agents":[]}`)
+	if _, ok := gomuxByName(w.Snapshot())["coord-t1"]; ok {
+		t.Errorf("store line replaces that store's agents")
+	}
+
+	// another host's agents (no store) aren't served; unknown types fail loud
+	mustApply(t, w, `{"type":"host","host":{"host":"mac","agents":1},"agents":[{"name":"far","host":"mac","live":true,"status":"idle"}]}`)
+	if _, ok := gomuxByName(w.Snapshot())["far"]; ok {
+		t.Errorf("another host's agent has no transcript or screen to serve")
+	}
+	if err := w.applyLine([]byte(`{"type":"mystery"}`)); err == nil {
+		t.Errorf("an unknown line type must error")
+	}
+}
+
+func TestGomuxExport_LiveBeatsDepartedNamesake(t *testing.T) {
+	w := newGomuxTestWatcher(t, t.TempDir())
+	mustApply(t, w, `{"type":"snapshot","stores":[{"dir":"/a"},{"dir":"/b"}],"agents":[`+
+		`{"name":"x","store":"/a","created_at":"2026-10-25T03:00:00Z","live":false},`+
+		`{"name":"x","store":"/b","created_at":"2026-10-25T01:00:00Z","live":true,"status":"idle"}]}`)
+	if x := gomuxByName(w.Snapshot())["x"]; !x.Live || x.DataDir != "/b" {
+		t.Errorf("live namesake should win: %+v", x)
+	}
+}
+
+// The follower runs a real process: a fake `agent` printing a snapshot and a change.
+func TestGomuxExport_FollowsAProcess(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "agent")
+	body := "#!/bin/sh\n" +
+		"[ \"$1\" = export ] || exit 3\n" +
+		`echo '{"type":"snapshot","stores":[{"dir":"/a"}],"agents":[{"name":"p","store":"/a","live":true,"status":"idle"}]}'` + "\n" +
+		`echo '{"type":"changed","store":"/a","reason":"status","agent":{"name":"p","store":"/a","live":true,"status":"processing"}}'` + "\n" +
+		"sleep 30\n"
+	os.WriteFile(script, []byte(body), 0o755)
+	w := newGomuxTestWatcher(t, t.TempDir())
+	w.agent = script
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.Start(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if p := gomuxByName(w.Snapshot())["p"]; p.Status == "processing" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("the follower never applied the change: %+v", w.Snapshot())
 }
 
 func TestGomuxRead_ServesOnlyTheNamedTranscript(t *testing.T) {
@@ -169,14 +184,10 @@ func TestGomuxRead_ServesOnlyTheNamedTranscript(t *testing.T) {
 	os.MkdirAll(proj, 0o755)
 	tp := filepath.Join(proj, "s.jsonl")
 	os.WriteFile(tp, []byte("{\"a\":1}\n{\"b\":2}\n"), 0o644)
-	d := gomuxFixtureStore(t, true,
-		`INSERT INTO agents VALUES ('a','agent-a','claude','','','2026-10-24T20:00:00Z','')`,
-		`INSERT INTO state VALUES ('a','_transcript','`+tp+`','2026-10-24T20:00:00Z')`,
-	)
 	h, _, _ := newTestHandler(t)
-	h.gomux = newGomuxTestWatcher(t, home, d)
-	h.gomux.discover()
-	h.gomux.refresh()
+	h.gomux = newGomuxTestWatcher(t, home)
+	mustApply(t, h.gomux, `{"type":"snapshot","stores":[{"dir":"/a"}],"agents":[{"name":"a","store":"/a","live":true,"transcript":`+
+		string(mustJSON(t, tp))+`,"dialect":"claude"}]}`)
 
 	write, c := captureRPC(t)
 	h.handleGomuxRead(write, func([]byte) {}, json.RawMessage("1"), json.RawMessage(`{"name":"a","tailBytes":9}`))

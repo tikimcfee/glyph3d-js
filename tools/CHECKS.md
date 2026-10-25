@@ -197,8 +197,9 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   and commits once, with its result; past the pending cap a dangling call commits anyway; a push
   mid-read re-reads once; status rides the lane (meta.gomux, processing → active, waiting raises
   the hand, cleaned up → done). Mutation-checked (no hold; cursor past the torn line). The relay
-  side is `cd cli && go test -run Gomux` (the tree across stores, departed agents rebuilt from
-  spawn records, UTC-normalized times, the transcript allow-list, gomux/read's window).
+  side is `cd cli && go test -run Gomux` (export's snapshot / spawned / changed / removed /
+  store / host lines folded into the tree, a live agent beating a departed namesake, a real
+  follower process, the transcript allow-list, gomux/read's window).
 - **`scene-transforms.test.mjs`** (headless) — SceneTransforms on a random 400-node tree: after
   every kind of pose write (vector writes, rotations, three's transform helpers, attach / add /
   detached moves, a subtree built off-scene, a hand-written matrix, a camera, a pivot) every world

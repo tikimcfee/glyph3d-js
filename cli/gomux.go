@@ -3,53 +3,33 @@ package main
 // gomuxai — the agent orchestrator's tree, served to the display.
 //
 // gomuxai (the `agent` CLI) runs AI coding agents in their own tmux sessions and
-// records them in a per-binary SQLite store: `.gomuxai/gomuxai.db` next to the
-// symlink-resolved `agent` executable. Every copy of the binary keeps its own
-// store, and an agent that spawns helpers with a different copy (a dev build in a
-// worktree) records them in THAT copy's store — so one tree spans several data
-// dirs. All agents share one tmux server (the default socket), session
-// `agent-<name>`.
+// records them in per-binary stores. Its `agent export --json --follow --all` is the
+// supported way to watch that: a snapshot line, then one JSON line per change
+// (spawned / changed / removed agents, whole-store and whole-host replacements), each
+// carrying the whole agent. It reads every store it can find (the binary's own, and
+// each live agent-* session's spawning binary's), runs no backend CLI, and logs one
+// command-history row per run however long it follows.
 //
-// This file READS that state and never writes it: every DB opens `mode=ro`, no
-// `agent` subcommand runs (each one logs a command_log row, and status probes
-// can spawn backend CLIs). Discovery:
-//   - the `agent` on PATH (symlinks resolved) → its .gomuxai dir, plus any
-//     operator-supplied dirs;
-//   - every live `agent-*` tmux session → `show-environment PATH`'s first
-//     entry is the dir of the binary that spawned it (gomuxai prepends it) →
-//     that dir's .gomuxai. This finds the worktree builds' stores too, which
-//     is how a cross-store parent link (coord in one store, coord-t1 in
-//     another) stitches into one tree.
-//
-// The snapshot is the tree: live agents (the `agents` table + the reserved
-// `_status`/`_tool`/`_transcript`/… keys in `state`), plus DEPARTED agents —
-// cleanup deletes the row, but the store keeps each spawn in command_log
-// (`args[0]=="spawn"`, the caller's AGENT_NAME as `agent`) and each transcript
-// path in logs/<name>.transcripts, so a finished agent's run stays readable.
-//
-// Change detection is a 1s poll: PRAGMA data_version per store (bumps on any
-// other connection's commit), the live tmux session set, and each transcript's
-// size. A changed snapshot pushes `gomux/changed` (the whole snapshot — it's a
-// few KB) to the display. gomuxai's own push channel is its NATS bus, which
-// needs keys and a running daemon, and misses stores without a bus; polling a
-// pragma is cheaper than either.
+// The watcher keeps ONE such follower running (restarting it, with a fresh snapshot,
+// if it exits), folds its lines into the tree, and pushes `gomux/changed` (the whole
+// snapshot — a few KB) to the display whenever the tree it serves moves. Agents are
+// keyed host+store+name; the served tree has one node per name (a live agent beats a
+// departed namesake, then the newest run).
 //
 // RPCs (fs.go dispatch):
 //   gomux/list  {}                                  → snapshot
 //   gomux/read  {name, tailBytes?|fromOffset?, maxBytes?, binary?}
 //               → the agent's transcript window, agentSessions/read's shape.
-//               Only a path the snapshot names for that agent is served, and
-//               only under the harness homes (~/.claude/projects,
+//               Only a path the tree names for that agent is served, and only
+//               under the harness homes (~/.claude/projects,
 //               ~/.gemini/antigravity-cli/brain).
 
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
+	"io"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,32 +41,32 @@ import (
 	"time"
 )
 
-// gomuxPollInterval is the change-detection tick. A var so tests can shorten it.
-var gomuxPollInterval = time.Second
+// gomuxRestartDelay is how long the watcher waits before restarting an export that
+// exited (or before retrying when there's no `agent` yet). A var so tests can shorten it.
+var gomuxRestartDelay = 5 * time.Second
 
-// gomuxRediscoverEvery re-runs data-dir discovery every N ticks (new worktree
-// builds appear as their first agent spawns).
-const gomuxRediscoverEvery = 10
-
-// gomuxAgent is one node of the tree. Status fields are gomuxai's REPORTED
-// state (hook-written), not its native-resolved status — the store is what we
-// can read without running the CLI.
+// gomuxAgent is one node of the served tree — the display's shape (camelCase), mapped
+// from export's agent object. Status fields are gomuxai's REPORTED state (the last hook
+// report), not its resolved status: export runs no backend CLI.
 type gomuxAgent struct {
 	Name      string `json:"name"`
+	Host      string `json:"host,omitempty"`
 	Parent    string `json:"parent"`              // spawner's name; "" = a person
 	Backend   string `json:"backend"`             // claude | agy | aider | custom
 	Session   string `json:"session"`             // tmux session (agent-<name>)
-	DataDir   string `json:"dataDir"`             // the .gomuxai dir that records it
-	Cwd       string `json:"cwd,omitempty"`       // spawn cwd (command_log), when known
+	DataDir   string `json:"dataDir"`             // the .gomuxai store that records it
+	Cwd       string `json:"cwd,omitempty"`       // spawn cwd
 	CreatedAt string `json:"createdAt"`           // RFC3339, UTC
-	Live      bool   `json:"live"`                // a row in agents (not cleaned up)
+	EndedAt   string `json:"endedAt,omitempty"`   // departed agents: when it was cleaned up
+	Run       int64  `json:"run,omitempty"`       // spawn id within its store (two runs of one name)
+	Live      bool   `json:"live"`                // not cleaned up
 	Attached  bool   `json:"attached"`            // its tmux session exists right now
 	Status    string `json:"status,omitempty"`    // idle|processing|waiting|error|exited|unknown
 	Event     string `json:"event,omitempty"`     // last hook event (PostToolUse, Stop, …)
 	Detail    string `json:"detail,omitempty"`    // e.g. "Bash: rg foo"
 	Tool      string `json:"tool,omitempty"`      // tool in flight
 	ToolInput string `json:"toolInput,omitempty"` // a pending permission prompt's full call
-	StatusAt  string `json:"statusAt,omitempty"`  // when _status was written
+	StatusAt  string `json:"statusAt,omitempty"`  // when the status was reported
 	SessionID string `json:"sessionId,omitempty"`
 	// Transcript is the harness's own record of the run (newest known path).
 	Transcript      string `json:"transcript,omitempty"`
@@ -101,56 +81,79 @@ type gomuxSnapshot struct {
 	Agents []gomuxAgent `json:"agents"`
 }
 
-type gomuxStore struct {
-	dir     string
-	db      *sql.DB
-	version int64
-	// hasSpawnedBy: stores created before the column (and never reopened by a
-	// newer binary) lack it.
-	hasSpawnedBy bool
-	// cached is the last read, valid while data_version holds — a quiet store
-	// costs one pragma per tick.
-	cached []gomuxAgent
+// exportAgent is export's agent object (snake_case, gomuxai's convention).
+type exportAgent struct {
+	Name            string `json:"name"`
+	Host            string `json:"host"`
+	Kind            string `json:"kind"`
+	Run             int64  `json:"run"`
+	Parent          string `json:"parent"`
+	Backend         string `json:"backend"`
+	Session         string `json:"session"`
+	Store           string `json:"store"`
+	Cwd             string `json:"cwd"`
+	CreatedAt       string `json:"created_at"`
+	EndedAt         string `json:"ended_at"`
+	Live            bool   `json:"live"`
+	Attached        bool   `json:"attached"`
+	Status          string `json:"status"`
+	Event           string `json:"event"`
+	Detail          string `json:"detail"`
+	Tool            string `json:"tool"`
+	ToolInput       string `json:"tool_input"`
+	StatusAt        string `json:"status_at"`
+	SessionID       string `json:"session_id"`
+	Transcript      string `json:"transcript"`
+	Dialect         string `json:"dialect"`
+	TranscriptSize  int64  `json:"transcript_size"`
+	TranscriptMtime string `json:"transcript_mtime"`
 }
 
-// GomuxWatcher owns discovery, the read-only store handles, and the snapshot.
+type exportStore struct {
+	Dir string `json:"dir"`
+}
+
+type exportHost struct {
+	Host string `json:"host"`
+}
+
+// exportLine is any line export --follow prints; Type says which fields are set.
+type exportLine struct {
+	Type   string        `json:"type"` // snapshot | spawned | changed | removed | store | host | unrecorded
+	Host   any           `json:"host"` // snapshot: this host's name; host line: an exportHost
+	Stores []exportStore `json:"stores"`
+	Store  any           `json:"store"` // event lines: the store dir; store line: an exportStore
+	Agents []exportAgent `json:"agents"`
+	Agent  *exportAgent  `json:"agent"`
+}
+
+// GomuxWatcher follows `agent export` and serves the tree.
 type GomuxWatcher struct {
-	mu       sync.Mutex
-	stores   map[string]*gomuxStore // by data dir
-	explicit []string               // operator-supplied data dirs (always watched)
-	sessEnv  map[string]string      // tmux session → discovered data dir ("" = none)
-	snap     gomuxSnapshot
-	notify   func(method string, params any)
-	// reach, if set, widens the file handler's reach to an agent's working dir — its
-	// books' snapshots read the files it touched, which live in ITS repo, not ours.
-	reach    func(dir string)
-	reached  map[string]bool
-	tmuxBin  string // "" = no tmux: nothing is attached, no session discovery
-	agentBin string // the `agent` on PATH ("" = none): its store is always watched
-	home     string
+	mu      sync.Mutex
+	agents  map[string]exportAgent // by host|store|name
+	stores  []string
+	snap    gomuxSnapshot
+	notify  func(method string, params any)
+	reach   func(dir string) // widens the file handler's reach to an agent's cwd
+	reached map[string]bool
+	stores0 []string // operator-supplied stores (--gomuxai), passed as --store
+	tmuxBin string   // "" = no tmux: screens can't be drawn
+	agent   string   // the `agent` binary export runs from ("" = look it up on PATH)
+	home    string
 }
 
-// NewGomuxWatcher builds a watcher over the discoverable stores plus `dirs`
-// (each a .gomuxai dir, or a dir/binary next to one). It does no I/O until Start.
+// NewGomuxWatcher builds a watcher whose export also reads `dirs` (each a .gomuxai dir,
+// the dir holding one, or an agent binary — export's --store). No I/O until Start.
 func NewGomuxWatcher(dirs []string) *GomuxWatcher {
 	home, _ := os.UserHomeDir()
 	tmuxBin, _ := exec.LookPath("tmux")
-	agentBin, _ := exec.LookPath("agent")
-	w := &GomuxWatcher{
-		stores:   map[string]*gomuxStore{},
-		sessEnv:  map[string]string{},
-		tmuxBin:  tmuxBin,
-		agentBin: agentBin,
-		home:     home,
+	return &GomuxWatcher{
+		agents:  map[string]exportAgent{},
+		reached: map[string]bool{},
+		stores0: dirs,
+		tmuxBin: tmuxBin,
+		home:    home,
 	}
-	for _, d := range dirs {
-		if dd := gomuxDataDirFor(d); dd != "" {
-			w.explicit = append(w.explicit, dd)
-		} else {
-			log.Printf("[gomux] --gomuxai %s: no .gomuxai/gomuxai.db there — ignored", d)
-		}
-	}
-	return w
 }
 
 // SetReachHook wires the file handler's reach: each agent's spawn cwd is handed
@@ -160,229 +163,159 @@ func (w *GomuxWatcher) SetReachHook(fn func(dir string)) { w.reach = fn }
 // SetNotifyHook wires the display push channel (gomux/changed).
 func (w *GomuxWatcher) SetNotifyHook(fn func(method string, params any)) { w.notify = fn }
 
-// gomuxDataDirFor maps a .gomuxai dir, the dir holding one, or an `agent`
-// binary to its data dir — "" when no store is there.
-func gomuxDataDirFor(p string) string {
-	if p == "" {
-		return ""
-	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		p = r
-	}
-	cands := []string{p, filepath.Join(p, ".gomuxai")}
-	if info, err := os.Stat(p); err == nil && !info.IsDir() {
-		cands = []string{filepath.Join(filepath.Dir(p), ".gomuxai")}
-	}
-	for _, c := range cands {
-		if info, err := os.Stat(filepath.Join(c, "gomuxai.db")); err == nil && !info.IsDir() {
-			return c
-		}
-	}
-	return ""
-}
-
-// Start runs the poll loop until ctx ends.
+// Start keeps one export follower running until ctx ends.
 func (w *GomuxWatcher) Start(ctx context.Context) {
 	go func() {
-		tick := 0
-		// Twice: the second discovery follows the first snapshot's spawn cwds.
-		w.discover()
-		w.refresh()
-		w.discover()
-		w.refresh()
-		t := time.NewTicker(gomuxPollInterval)
-		defer t.Stop()
-		for {
+		for ctx.Err() == nil {
+			if err := w.follow(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("[gomux] %v — retrying in %s", err, gomuxRestartDelay)
+			}
 			select {
 			case <-ctx.Done():
-				w.close()
-				return
-			case <-t.C:
-				tick++
-				if tick%gomuxRediscoverEvery == 0 {
-					w.discover()
-				}
-				w.refresh()
+			case <-time.After(gomuxRestartDelay):
 			}
 		}
 	}()
 }
 
-func (w *GomuxWatcher) close() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, s := range w.stores {
-		s.db.Close()
-	}
-	w.stores = map[string]*gomuxStore{}
-}
-
-// tmux runs a read-only query against the DEFAULT tmux server (gomuxai's). TMUX
-// is unset so a relay started inside some other tmux server still asks the
-// default one.
-func (w *GomuxWatcher) tmux(args ...string) (string, error) {
-	if w.tmuxBin == "" {
-		return "", fmt.Errorf("tmux not on PATH")
-	}
-	cmd := exec.Command(w.tmuxBin, args...)
-	env := os.Environ()
-	out := env[:0]
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, "TMUX=") {
-			out = append(out, kv)
+// follow runs one `agent export --json --follow --all` and folds its lines in until it
+// exits. A restart begins with a fresh snapshot, which replaces the whole tree.
+func (w *GomuxWatcher) follow(ctx context.Context) error {
+	bin := w.agent
+	if bin == "" {
+		var err error
+		if bin, err = exec.LookPath("agent"); err != nil {
+			return errMsg("no gomuxai `agent` on PATH")
 		}
 	}
-	cmd.Env = out
-	b, err := cmd.Output()
-	return string(b), err
-}
-
-// liveSessions lists the default server's `agent-*` sessions. No server (no
-// tmux running) is an empty set, not an error.
-func (w *GomuxWatcher) liveSessions() map[string]bool {
-	set := map[string]bool{}
-	out, err := w.tmux("list-sessions", "-F", "#{session_name}")
+	args := []string{"export", "--json", "--follow", "--all", "-q"}
+	for _, d := range w.stores0 {
+		args = append(args, "--store", d)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &limitedWriter{w: &stderr, n: 4096}
+	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return set
+		return err
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "agent-") {
-			set[line] = true
+	if err := cmd.Start(); err != nil {
+		return errMsg("start " + bin + " export: " + err.Error())
+	}
+	log.Printf("[gomux] following %s %s", bin, strings.Join(args, " "))
+	sc := bufio.NewScanner(out)
+	sc.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	for sc.Scan() {
+		if err := w.applyLine(sc.Bytes()); err != nil {
+			log.Printf("[gomux] export line: %v", err)
 		}
 	}
-	return set
+	err = cmd.Wait()
+	if ctx.Err() != nil {
+		return nil
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if err != nil {
+		return errMsg(bin + " export exited: " + err.Error() + orEmpty(" — "+msg, msg != ""))
+	}
+	return errMsg(bin + " export ended" + orEmpty(" — "+msg, msg != ""))
 }
 
-// discover opens any store not yet open: the PATH binary's, the explicit ones,
-// and each live agent session's spawning binary's.
-func (w *GomuxWatcher) discover() {
-	dirs := append([]string{}, w.explicit...)
-	if dd := gomuxDataDirFor(w.agentBin); dd != "" {
-		dirs = append(dirs, dd)
+// applyLine folds one export line into the tree and pushes the tree if it moved.
+func (w *GomuxWatcher) applyLine(raw []byte) error {
+	var l exportLine
+	if err := json.Unmarshal(raw, &l); err != nil {
+		return err
 	}
-	// A dev build's store sits in its repo's bin/ (gomuxai's `make build`), and
-	// the agents that ran it were spawned from that repo — so each known
-	// agent's spawn cwd names a candidate. This keeps a departed team's store
-	// (no live session left to point at it) in the tree.
 	w.mu.Lock()
-	for _, a := range w.snap.Agents {
-		if a.Cwd != "" {
-			if dd := gomuxDataDirFor(filepath.Join(a.Cwd, "bin")); dd != "" {
-				dirs = append(dirs, dd)
+	switch l.Type {
+	case "snapshot":
+		w.agents = map[string]exportAgent{}
+		w.stores = w.stores[:0]
+		for _, s := range l.Stores {
+			w.stores = append(w.stores, s.Dir)
+		}
+		for _, a := range l.Agents {
+			w.agents[exportKey(a)] = a
+		}
+	case "spawned", "changed", "removed":
+		if l.Agent != nil {
+			w.agents[exportKey(*l.Agent)] = *l.Agent
+		}
+	case "store":
+		var st exportStore
+		if b, err := json.Marshal(l.Store); err == nil {
+			json.Unmarshal(b, &st)
+		}
+		for k, a := range w.agents {
+			if a.Store == st.Dir {
+				delete(w.agents, k)
 			}
 		}
+		for _, a := range l.Agents {
+			w.agents[exportKey(a)] = a
+		}
+		if st.Dir != "" && !containsString(w.stores, st.Dir) {
+			w.stores = append(w.stores, st.Dir)
+		}
+	case "host":
+		var h exportHost
+		if b, err := json.Marshal(l.Host); err == nil {
+			json.Unmarshal(b, &h)
+		}
+		for k, a := range w.agents {
+			if a.Host == h.Host && a.Store == "" {
+				delete(w.agents, k)
+			}
+		}
+		for _, a := range l.Agents {
+			w.agents[exportKey(a)] = a
+		}
+	case "unrecorded":
+		// agent-* sessions no store records — nothing to draw
+	default:
+		w.mu.Unlock()
+		return errMsg("unknown line type " + strconv.Quote(l.Type))
 	}
 	w.mu.Unlock()
-	for sess := range w.liveSessions() {
-		w.mu.Lock()
-		dd, seen := w.sessEnv[sess]
-		w.mu.Unlock()
-		if !seen {
-			out, err := w.tmux("show-environment", "-t", sess, "PATH")
-			if err == nil {
-				// "PATH=/first/dir:/…" — gomuxai prepends its binary's dir.
-				v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "PATH="))
-				first, _, _ := strings.Cut(v, string(os.PathListSeparator))
-				dd = gomuxDataDirFor(first)
-			}
-			w.mu.Lock()
-			w.sessEnv[sess] = dd
-			w.mu.Unlock()
-		}
-		if dd != "" {
-			dirs = append(dirs, dd)
-		}
-	}
-	for _, dd := range dirs {
-		w.mu.Lock()
-		_, open := w.stores[dd]
-		w.mu.Unlock()
-		if open {
-			continue
-		}
-		s, err := openGomuxStore(dd)
-		if err != nil {
-			log.Printf("[gomux] open %s: %v", dd, err)
-			continue
-		}
-		w.mu.Lock()
-		w.stores[dd] = s
-		w.mu.Unlock()
-		log.Printf("[gomux] watching %s", dd)
-	}
+	w.publish()
+	return nil
 }
 
-// openGomuxStore opens a store read-only. Not `immutable`: the DB is WAL-mode
-// and live, and data_version must see other connections' commits. One
-// connection, so data_version compares against a stable handle.
-func openGomuxStore(dir string) (*gomuxStore, error) {
-	dsn := "file:" + (&url.URL{Path: filepath.Join(dir, "gomuxai.db")}).EscapedPath() + "?mode=ro&_pragma=busy_timeout(2000)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'spawned_by'`).Scan(&n); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return &gomuxStore{dir: dir, db: db, version: -1, hasSpawnedBy: n > 0}, nil
-}
+func exportKey(a exportAgent) string { return a.Host + "|" + a.Store + "|" + a.Name }
 
-// refresh rebuilds the snapshot and pushes it when anything differs.
-func (w *GomuxWatcher) refresh() {
+// publish rebuilds the served tree (one node per name) and pushes it when it moved.
+func (w *GomuxWatcher) publish() {
 	w.mu.Lock()
-	stores := make([]*gomuxStore, 0, len(w.stores))
-	for _, s := range w.stores {
-		stores = append(stores, s)
-	}
-	w.mu.Unlock()
-	sort.Slice(stores, func(i, j int) bool { return stores[i].dir < stores[j].dir })
-
-	live := w.liveSessions()
-	byName := map[string]gomuxAgent{}
-	dirs := make([]string, 0, len(stores))
-	for _, s := range stores {
-		dirs = append(dirs, s.dir)
-		agents, err := w.readStore(s)
-		if err != nil {
-			log.Printf("[gomux] read %s: %v", s.dir, err)
+	byName := map[string]exportAgent{}
+	for _, a := range w.agents {
+		if a.Store == "" {
+			continue // another host's agent: no store, transcript, or screen to serve
+		}
+		if prev, ok := byName[a.Name]; ok && !exportPrefer(a, prev) {
 			continue
 		}
-		for _, a := range agents {
-			// A name can appear in several stores (a departed agent in one, its
-			// reborn namesake in another): the live row wins, then the newest.
-			if prev, ok := byName[a.Name]; ok && !gomuxPrefer(a, prev) {
-				continue
-			}
-			byName[a.Name] = a
-		}
+		byName[a.Name] = a
 	}
+	dirs := append([]string{}, w.stores...)
+	w.mu.Unlock()
+
 	agents := make([]gomuxAgent, 0, len(byName))
 	for _, a := range byName {
-		a.Attached = live[a.Session]
-		if a.Transcript != "" {
-			if info, err := os.Stat(a.Transcript); err == nil {
-				a.TranscriptSize = info.Size()
-				a.TranscriptMtime = info.ModTime().UnixMilli()
-			}
-		}
-		agents = append(agents, a)
+		agents = append(agents, w.toNode(a))
 	}
 	sort.Slice(agents, func(i, j int) bool {
-		if agents[i].CreatedAt != agents[j].CreatedAt {
-			return agents[i].CreatedAt < agents[j].CreatedAt
+		ti, tj := parseTime(agents[i].CreatedAt), parseTime(agents[j].CreatedAt)
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
 		}
 		return agents[i].Name < agents[j].Name
 	})
+	sort.Strings(dirs)
 
 	if w.reach != nil {
 		for _, a := range agents {
 			if a.Cwd != "" && !w.reached[a.Cwd] {
-				if w.reached == nil {
-					w.reached = map[string]bool{}
-				}
 				w.reached[a.Cwd] = true
 				w.reach(a.Cwd)
 			}
@@ -401,203 +334,99 @@ func (w *GomuxWatcher) refresh() {
 	}
 }
 
-// gomuxPrefer: should a replace b for the same name?
-func gomuxPrefer(a, b gomuxAgent) bool {
+// exportPrefer: should a replace b for the same name? A live agent beats a departed
+// namesake, then the newer run.
+func exportPrefer(a, b exportAgent) bool {
 	if a.Live != b.Live {
 		return a.Live
 	}
-	return a.CreatedAt > b.CreatedAt
+	return parseTime(a.CreatedAt).After(parseTime(b.CreatedAt))
 }
 
-// readStore reads one store's agents (cached while the store is quiet) — live rows with their reserved state
-// keys, then departed ones rebuilt from command_log spawns + transcript logs.
-func (w *GomuxWatcher) readStore(s *gomuxStore) ([]gomuxAgent, error) {
-	// data_version moves when ANY other connection commits (every `agent`
-	// command logs a row, so it's noisy — but a quiet store is skipped). The
-	// departed agents' transcripts can still move without a commit only if the
-	// log file is appended without a state write, which gomuxai never does.
-	var v int64
-	if err := s.db.QueryRow(`PRAGMA data_version`).Scan(&v); err != nil {
-		return nil, err
+// toNode maps export's agent to the display's node, dropping a transcript outside the
+// harness homes (it would never be served).
+func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
+	n := gomuxAgent{
+		Name: a.Name, Host: a.Host, Parent: a.Parent, Backend: a.Backend, Session: a.Session,
+		DataDir: a.Store, Cwd: a.Cwd, CreatedAt: a.CreatedAt, EndedAt: a.EndedAt, Run: a.Run,
+		Live: a.Live, Attached: a.Attached, Status: a.Status, Event: a.Event, Detail: a.Detail,
+		Tool: a.Tool, ToolInput: a.ToolInput, StatusAt: a.StatusAt, SessionID: a.SessionID,
+		Transcript: a.Transcript, Harness: a.Dialect, TranscriptSize: a.TranscriptSize,
 	}
-	if v == s.version && s.cached != nil {
-		return s.cached, nil
+	if !a.Live && n.Status == "" {
+		n.Status = "exited"
 	}
-	agents, err := w.readStoreRows(s)
-	if err != nil {
-		return nil, err
+	if t := parseTime(a.TranscriptMtime); !t.IsZero() {
+		n.TranscriptMtime = t.UnixMilli()
 	}
-	s.version, s.cached = v, agents
-	return agents, nil
+	if n.Transcript != "" && !w.transcriptAllowed(n.Transcript) {
+		log.Printf("[gomux] %s: transcript outside the harness homes, not served: %s", a.Name, n.Transcript)
+		n.Transcript = ""
+	}
+	return n
 }
 
-// readStoreRows does readStore's actual reads.
-func (w *GomuxWatcher) readStoreRows(s *gomuxStore) ([]gomuxAgent, error) {
-
-	q := `SELECT name, session_name, backend, created_at, ` +
-		map[bool]string{true: `COALESCE(spawned_by, '')`, false: `''`}[s.hasSpawnedBy] + ` FROM agents`
-	rows, err := s.db.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	byName := map[string]*gomuxAgent{}
-	var order []string
-	for rows.Next() {
-		a := &gomuxAgent{DataDir: s.dir, Live: true}
-		if err := rows.Scan(&a.Name, &a.Session, &a.Backend, &a.CreatedAt, &a.Parent); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		a.CreatedAt = gomuxUTC(a.CreatedAt)
-		byName[a.Name] = a
-		order = append(order, a.Name)
-	}
-	rows.Close()
-
-	st, err := s.db.Query(`SELECT agent_name, key, value, updated_at FROM state WHERE key IN
-		('_status','_event','_detail','_tool','_tool_input','_session_id','_transcript')`)
-	if err != nil {
-		return nil, err
-	}
-	for st.Next() {
-		var name, key, value, at string
-		if err := st.Scan(&name, &key, &value, &at); err != nil {
-			st.Close()
-			return nil, err
-		}
-		a := byName[name]
-		if a == nil {
-			continue
-		}
-		switch key {
-		case "_status":
-			a.Status, a.StatusAt = value, gomuxUTC(at)
-		case "_event":
-			a.Event = value
-		case "_detail":
-			a.Detail = value
-		case "_tool":
-			a.Tool = value
-		case "_tool_input":
-			a.ToolInput = value
-		case "_session_id":
-			a.SessionID = value
-		case "_transcript":
-			a.Transcript = value
-		}
-	}
-	st.Close()
-
-	// Spawns: the newest per name gives cwd for live agents and the whole
-	// record for departed ones. The caller's AGENT_NAME is the parent.
-	sp, err := s.db.Query(`SELECT started_at, agent, cwd, args FROM command_log
-		WHERE args LIKE '["spawn",%' AND exit_code = 0 ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	for sp.Next() {
-		var at, parent, cwd, args string
-		if err := sp.Scan(&at, &parent, &cwd, &args); err != nil {
-			sp.Close()
-			return nil, err
-		}
-		at = gomuxUTC(at)
-		name, backend := gomuxSpawnArgs(args)
-		if name == "" {
-			continue
-		}
-		if a := byName[name]; a != nil {
-			if a.Live && a.Cwd == "" {
-				a.Cwd = cwd
-			}
-			if !a.Live {
-				a.Parent, a.Cwd, a.CreatedAt, a.Backend = parent, cwd, at, backend
-			}
-			continue
-		}
-		a := &gomuxAgent{Name: name, Parent: parent, Backend: backend, Session: "agent-" + name,
-			DataDir: s.dir, Cwd: cwd, CreatedAt: at, Status: "exited"}
-		byName[name] = a
-		order = append(order, name)
-	}
-	sp.Close()
-
-	out := make([]gomuxAgent, 0, len(order))
-	for _, name := range order {
-		a := byName[name]
-		if a.Transcript == "" {
-			a.Transcript, a.Harness = gomuxLastTranscript(filepath.Join(s.dir, "logs", name+".transcripts"))
-		}
-		if a.Harness == "" {
-			a.Harness = gomuxHarnessOf(a.Backend, a.Transcript)
-		}
-		if a.Transcript != "" && !w.transcriptAllowed(a.Transcript) {
-			log.Printf("[gomux] %s: transcript outside the harness homes, not served: %s", name, a.Transcript)
-			a.Transcript = ""
-		}
-		out = append(out, *a)
-	}
-	return out, nil
-}
-
-// gomuxUTC normalizes a store timestamp to UTC RFC3339 (millisecond
-// precision) — agents rows carry a local offset, command_log rows UTC, and the
-// tree sorts by the string.
-func gomuxUTC(s string) string {
+func parseTime(s string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func containsString(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func orEmpty(s string, keep bool) string {
+	if keep {
 		return s
 	}
-	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
-}
-
-// gomuxSpawnArgs pulls the name and --backend out of a logged spawn's argv.
-func gomuxSpawnArgs(raw string) (name, backend string) {
-	var argv []string
-	if json.Unmarshal([]byte(raw), &argv) != nil || len(argv) < 2 || argv[0] != "spawn" {
-		return "", ""
-	}
-	backend = "claude"
-	for i := 2; i < len(argv); i++ {
-		switch {
-		case argv[i] == "--backend" && i+1 < len(argv):
-			backend = argv[i+1]
-			i++
-		case strings.HasPrefix(argv[i], "--backend="):
-			backend = strings.TrimPrefix(argv[i], "--backend=")
-		}
-	}
-	return argv[1], backend
-}
-
-// gomuxLastTranscript reads logs/<name>.transcripts (`<backend>\t<path>` per
-// line, appended as the session moves) and returns the newest path.
-func gomuxLastTranscript(path string) (string, string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", ""
-	}
-	defer f.Close()
-	var tp, harness string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		b, p, ok := strings.Cut(sc.Text(), "\t")
-		if ok && p != "" {
-			harness, tp = b, p
-		}
-	}
-	return tp, harness
-}
-
-// gomuxHarnessOf names the dialect a transcript is written in.
-func gomuxHarnessOf(backend, transcript string) string {
-	switch {
-	case backend == "claude" || strings.Contains(transcript, "/.claude/projects/"):
-		return "claude"
-	case backend == "agy" || strings.Contains(transcript, "/antigravity-cli/brain/"):
-		return "agy"
-	}
 	return ""
+}
+
+type errMsg string
+
+func (e errMsg) Error() string { return string(e) }
+
+// limitedWriter keeps the first n bytes written (an exited export's stderr, for the log).
+type limitedWriter struct {
+	w io.Writer
+	n int
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.n > 0 {
+		k := min(len(p), l.n)
+		l.w.Write(p[:k])
+		l.n -= k
+	}
+	return len(p), nil
+}
+
+// tmux runs a read-only query against the DEFAULT tmux server (gomuxai's) — the
+// screens' pane size. TMUX is unset so a relay started inside another server asks the
+// default one.
+func (w *GomuxWatcher) tmux(args ...string) (string, error) {
+	if w.tmuxBin == "" {
+		return "", errMsg("tmux not on PATH")
+	}
+	cmd := exec.Command(w.tmuxBin, args...)
+	env := os.Environ()
+	out := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "TMUX=") {
+			out = append(out, kv)
+		}
+	}
+	cmd.Env = out
+	b, err := cmd.Output()
+	return string(b), err
 }
 
 // transcriptAllowed: only the harness homes are served, symlinks resolved.

@@ -180,9 +180,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
   recompute. Gate: `tools/scene-transforms.test.mjs`.
-- **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay reads the
-  gomuxai stores (the `agent` orchestrator's `.gomuxai/gomuxai.db`, read-only — the PATH binary's,
-  each live `agent-*` session's spawning binary's, `--gomuxai <dir>`) and pushes the agent tree
+- **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
+  `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
+  find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
   (`gomux/changed`; `gomux/list`, `gomux/read` for a transcript window). Each agent shown (live,
   or finished within `gomux.historyHours`) is an agent book whose lane id is its gomuxai name,
   hydrated from the harness's own transcript and followed forward from a byte cursor (a tool call
