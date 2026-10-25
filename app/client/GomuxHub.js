@@ -51,7 +51,9 @@ import { getSetting } from './settings.js';
  *
  * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
  * (gomux.attach) riding beside its book — the book's aside, height-fit to the spread — as
- * soon as the book is open.
+ * soon as the book is open. A screen READS its agent's pane size (the relay pushes
+ * `gomux/paneSize` when it moves) and a resize WRITES back (terminal.resize → the relay
+ * resizes the agent's tmux window, and its CLI reflows).
  * Detaching one (gomux.detach) is remembered: the hub won't reopen it.
  *
  * Read-only by construction: nothing here types into, starts, or stops an agent.
@@ -101,6 +103,7 @@ export default class GomuxHub {
         /** Team desks the hub built, by agent name → the desk the team sits at. */
         this._teamParent = new Map();
         this._off = provider.onChange((snap) => this.apply(snap));
+        this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._disposed = false;
     }
 
@@ -433,6 +436,15 @@ export default class GomuxHub {
         return 'gx-' + String(name).replace(/[^A-Za-z0-9_-]/g, '_');
     }
 
+    /** An agent's pane changed size elsewhere: its screen follows (terminal.resize — whose
+     *  write-back to the agent is then a no-op at the same size). @private */
+    _paneSize({ id, cols, rows } = {}) {
+        const grid = this.ctx.terminals?.get(id);
+        if (!grid || !this._exec || (grid.cols === cols && grid.rows === rows)) return;
+        Promise.resolve(this._exec(['terminal.resize', id, String(cols), String(rows)]))
+            .catch((e) => console.warn(`[gomux] ${id}: following the agent's pane size failed —`, e?.message || e));
+    }
+
     /** The agent whose screen terminal `id` is, or null — a lookup over the tree. */
     screenAgent(id) {
         for (const a of this.snapshot?.agents || []) if (this.screenId(a.name) === id) return a.name;
@@ -481,6 +493,7 @@ export default class GomuxHub {
 
     dispose() {
         this._disposed = true;
+        this._offPane?.();
         this._off?.();
     }
 }

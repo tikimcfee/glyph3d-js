@@ -28,6 +28,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -140,6 +141,8 @@ type GomuxWatcher struct {
 	tmuxBin string   // "" = no tmux: screens can't be drawn
 	agent   string   // the `agent` binary export runs from ("" = look it up on PATH)
 	home    string
+	// paneSizes: each screened agent's pane size as last seen or set (watchPaneSizes)
+	paneSizes map[string][2]int
 }
 
 // NewGomuxWatcher builds a watcher whose export also reads `dirs` (each a .gomuxai dir,
@@ -163,8 +166,12 @@ func (w *GomuxWatcher) SetReachHook(fn func(dir string)) { w.reach = fn }
 // SetNotifyHook wires the display push channel (gomux/changed).
 func (w *GomuxWatcher) SetNotifyHook(fn func(method string, params any)) { w.notify = fn }
 
-// Start keeps one export follower running until ctx ends.
+// Start keeps one export follower running until ctx ends, and watches screened agents'
+// pane sizes.
 func (w *GomuxWatcher) Start(ctx context.Context) {
+	if w.tmuxBin != "" {
+		go w.watchPaneSizes(ctx)
+	}
 	go func() {
 		for ctx.Err() == nil {
 			if err := w.follow(ctx); err != nil && ctx.Err() == nil {
@@ -446,6 +453,74 @@ func (w *GomuxWatcher) transcriptAllowed(p string) bool {
 	return false
 }
 
+// agentByName returns the served node for a name.
+func (w *GomuxWatcher) agentByName(name string) (gomuxAgent, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, a := range w.snap.Agents {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return gomuxAgent{}, false
+}
+
+// notePaneSize records an agent pane's size as seen (so a size we set isn't echoed back).
+func (w *GomuxWatcher) notePaneSize(name string, cols, rows int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.paneSizes == nil {
+		w.paneSizes = map[string][2]int{}
+	}
+	w.paneSizes[name] = [2]int{cols, rows}
+}
+
+// watchPaneSizes reads each SCREENED agent's pane size every 2s and pushes
+// `gomux/paneSize` when it moved — a screen follows its agent's pane wherever the size
+// was changed. Only agents with a screen session on our socket are asked.
+func (w *GomuxWatcher) watchPaneSizes(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		for _, a := range w.Snapshot().Agents {
+			if !a.Attached {
+				continue
+			}
+			if exec.Command("tmux", "-L", tmuxSocket, "has-session", "-t", "glyph-"+sanitizeSession(gomuxTerminalID(a.Name))).Run() != nil {
+				continue
+			}
+			out, err := w.tmux("display-message", "-p", "-t", a.Session, "#{pane_width} #{pane_height}")
+			if err != nil {
+				continue
+			}
+			f := strings.Fields(strings.TrimSpace(out))
+			if len(f) != 2 {
+				continue
+			}
+			c, e1 := strconv.Atoi(f[0])
+			r, e2 := strconv.Atoi(f[1])
+			if e1 != nil || e2 != nil {
+				continue
+			}
+			w.mu.Lock()
+			prev, seen := w.paneSizes[a.Name]
+			w.mu.Unlock()
+			if seen && prev == [2]int{c, r} {
+				continue
+			}
+			w.notePaneSize(a.Name, c, r)
+			if seen && w.notify != nil {
+				w.notify("gomux/paneSize", map[string]any{"name": a.Name, "id": gomuxTerminalID(a.Name), "cols": c, "rows": r})
+			}
+		}
+	}
+}
+
 // Snapshot returns the current tree.
 func (w *GomuxWatcher) Snapshot() gomuxSnapshot {
 	w.mu.Lock()
@@ -598,6 +673,35 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		err := cmd.Wait()
 		log.Printf("[gomux] %s: screen adapter '%s' (pid %d) exited: %v", name, id, pid, err)
 	}()
+}
+
+// resizeGomuxAgent resizes an agent's own tmux window (its pane) — a screen's resize
+// writing back, so the agent's CLI reflows to the size you're viewing it at. It's a
+// server command (resize-window), no client: nothing attaches to the agent's session.
+// The window's size goes manual, which is what a pane with no clients wants anyway.
+func (r *Relay) resizeGomuxAgent(send func(any), name string, cols, rows int) {
+	reply := func(err string) {
+		send(map[string]any{"event": "gomux.resized", "name": name, "cols": cols, "rows": rows, "error": err})
+	}
+	if r.fs == nil || r.fs.gomux == nil {
+		reply("gomuxai watcher not running")
+		return
+	}
+	if cols < 2 || rows < 2 || cols > 1000 || rows > 1000 {
+		reply(fmt.Sprintf("size %dx%d out of range", cols, rows))
+		return
+	}
+	a, ok := r.fs.gomux.agentByName(name)
+	if !ok || !a.Attached {
+		reply("agent " + name + " has no tmux session")
+		return
+	}
+	if _, err := r.fs.gomux.tmux("resize-window", "-t", a.Session, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)); err != nil {
+		reply("resize-window: " + err.Error())
+		return
+	}
+	r.fs.gomux.notePaneSize(name, cols, rows)
+	reply("")
 }
 
 // gomuxScreenLive reports whether a screen's adapter exists — its session (on our socket)

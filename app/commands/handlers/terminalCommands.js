@@ -299,11 +299,12 @@ export default function registerTerminalCommands(router) {
         if (isNaN(cols) || isNaN(rows) || cols < 1 || rows < 1) {
             return { text: 'ERR: cols and rows must be positive integers', data: null };
         }
-        // An agent's screen shows the agent's OWN pane, drawn at that pane's size — resizing
-        // the viewer can't reflow it. Say so (scale the window instead).
+        // An agent's screen shows the agent's OWN pane: a resize writes back — the relay resizes
+        // the agent's tmux window (no client), its CLI reflows, and the redraw streams in at the
+        // new size — while the screen's own PTY follows below like any terminal's.
         const screenOf = ctx.gomuxHub?.screenAgent?.(id);
-        if (screenOf) {
-            return { text: `ERR: '${id}' is ${screenOf}'s screen — it shows the agent's own ${grid.cols}x${grid.rows} pane; scale it (window.scale / the scale grip) instead`, data: null };
+        if (screenOf && ctx.wsbridge?.connected) {
+            ctx.wsbridge.send(JSON.stringify({ relay: 'gomux.resize', name: screenOf, cols, rows }));
         }
 
         // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the dock

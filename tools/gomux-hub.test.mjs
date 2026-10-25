@@ -43,6 +43,7 @@ function makeProvider() {
             return { bytes: all.slice(fromOffset), offset: fromOffset, size: all.byteLength, truncated: fromOffset > 0, mtime: 0, cwd: null };
         },
         onChange() { return () => {}; },
+        onPaneSize() { return () => {}; },
         async list() { return { gen: 0, dirs: [], agents: [] }; },
     };
     return p;

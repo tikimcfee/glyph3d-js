@@ -746,6 +746,9 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 	case "gomux.attach":
 		r.attachGomuxAgent(reply, m.Name)
 
+	case "gomux.resize":
+		r.resizeGomuxAgent(reply, m.Name, m.Cols, m.Rows)
+
 	case "log.follow":
 		if role != "controller" || clientID == "" {
 			reply(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})

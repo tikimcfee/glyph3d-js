@@ -73,6 +73,17 @@ export class GomuxProvider {
             if (method === 'gomux/changed') fn(params);
         });
     }
+
+    /**
+     * Subscribe to screened agents' pane sizes changing (`gomux/paneSize` — the relay reads
+     * them every couple of seconds). Returns the unsubscribe fn.
+     * @param {(e: {name: string, id: string, cols: number, rows: number}) => void} fn
+     */
+    onPaneSize(fn) {
+        return this._bridge.onRpcNotification((method, params) => {
+            if (method === 'gomux/paneSize') fn(params);
+        });
+    }
 }
 
 export default GomuxProvider;
