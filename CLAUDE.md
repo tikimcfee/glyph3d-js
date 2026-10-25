@@ -243,18 +243,26 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   and slides the reading deck at most `books.turnSlide` pitches: nothing flies through the
   deck. Shift+wheel / two-finger drag page through a detent (`app/client/wheelDetent.js`,
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus
-  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (turn number in the
-  run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held.
+  (`app/client/bookFocus.js`). An agent book's tabs are its timeline (each sheet's number in
+  the run, hued by action kind, the open one raised); the HUD reads turn · sheet · live|held
+  (the turn = the open sheet's event's prompt). Fed by gomuxai's event stream
+  (`collections/agentEvents.js` reads it; `AgentBooks.applyEvents`), a book is one sheet per
+  EVENT, never grouped: prompts of every origin are first-class sheets (tagged by whose words —
+  `[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
+  `[harness]` — in the prompt hue), bookkeeping tool calls are sheets too, set in a dim noise
+  hue (`book.showNoise` off hides them), every sheet carries its turn id + index, and an event's
+  update (a tool's result, a confirmed reply) rebuilds its sheet IN PLACE (`Book.replaceSheet`).
   An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
   (`AgentBooks.setHistory` — agent.open and the gomuxai hub give it the record): pushing past its
-  oldest sheet slides it one turn back (the older turn materializes at the front, the newest
+  oldest sheet slides it one sheet back (the older one materializes at the front, the newest
   waits as a parsed record), past its newest slides it forward, `book.page last` slides it to the
-  live end. Turns outside the window are records, not GPU objects; every parsed record carries its
-  line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches older
-  records from the transcript. The first page back counts the turns before it (off-thread) so
-  numbers are exact. While the window is held away from the live end, live turns wait beyond it
-  (the HUD's `+N newer`) — the book never grows or shifts under the reader.
-  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`.
+  live end. Sheets outside the window are records, not GPU objects; every record carries its
+  source line's byte offset (`at`), and paging within `historyLead` of the oldest sheet prefetches
+  older records. The first page back counts the sheets before it (off-thread) so numbers are
+  exact. While the window is held away from the live end, live sheets wait beyond it (the HUD's
+  `+N newer`) — the book never grows or shifts under the reader.
+  Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`,
+  `tools/agent-events.test.mjs` (gomuxai's corpus).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

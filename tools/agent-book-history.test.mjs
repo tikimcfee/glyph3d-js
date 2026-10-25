@@ -101,9 +101,9 @@ ok(books.loadOlder('a') === lane.history.loading, 'a second ask joins the read i
 await settle();
 await lane.history.counting;
 ok(lane.entries.length === W && lane.older.length === 20, `prefetch fills the older buffer only (window ${lane.entries.length}, buffer ${lane.older.length})`);
-const turnOf = (i) => lane.book.sheets[i].meta.seq + (lane.turnBase || 0) + 1;
+const turnOf = (i) => lane.book.sheets[i].meta.seq + (lane.sheetBase || 0) + 1;
 ok(lane.seqExact && turnOf(0) === 81, `the first page back counts the turns before it: exact (sheet 0 = turn ${turnOf(0)}, want 81)`);
-ok(books.headState('a').turns === 100, 'turn 100 of 100 is the newest');
+ok(books.headState('a').sheets === 100, 'sheet 100 of 100 is the newest');
 
 // ── push past the oldest sheet: slide one turn back ──
 lane.book.pageTo(0);
