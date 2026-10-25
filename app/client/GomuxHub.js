@@ -140,7 +140,13 @@ export default class GomuxHub {
                 parse: (bytes, opts) => parseSessionOffThread(bytes, opts),
             });
             if (this._disposed) return;
-            await books.hydrate(a.name, r.records, { agentType: harness, sessionId: a.sessionId || null, cwd: r.cwd || a.cwd || '', meta: r.meta });
+            // Turn numbers count from the whole run: the cap's sliced-off events come first
+            // (a floor unless the window reached the transcript's start) — agent.open's rule.
+            const skipped = Number.isFinite(cap) ? Math.max(0, r.total - cap) : 0;
+            await books.hydrate(a.name, r.records, {
+                agentType: harness, sessionId: a.sessionId || null, cwd: r.cwd || a.cwd || '', meta: r.meta,
+                seqBase: skipped, seqExact: r.offset === 0 && skipped === 0,
+            });
             hl.cursor = r.end;
             hl.phase = 'open';
             const node = this.nodes.get(a.name);
