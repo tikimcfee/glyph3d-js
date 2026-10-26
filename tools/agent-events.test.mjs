@@ -26,6 +26,7 @@
 import * as THREE from 'three';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { homedir } from 'node:os';
 import './headless-canvas.mjs';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 const { default: AgentBooks, AGENT_BOOKS_DEFAULTS } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
@@ -39,7 +40,7 @@ const J = (v) => JSON.stringify(v);
 const eq = (a, b, m) => ok(J(a) === J(b), `${m}\n      got  ${J(a)}\n      want ${J(b)}`);
 
 // ── the corpus ──────────────────────────────────────────────────────────────────────
-const GOMUXAI = process.env.GOMUXAI_DIR || join(process.env.HOME || '/home/ivan', 'dev/gomuxai');
+const GOMUXAI = process.env.GOMUXAI_DIR || join(homedir(), 'dev/gomuxai');
 const CORPUS = join(GOMUXAI, 'internal/transcript/testdata/corpus');
 if (!existsSync(CORPUS)) {
     console.error(`agent-events: FAIL — no event corpus at ${CORPUS}.\n  Set GOMUXAI_DIR to a gomuxai checkout (branch events) holding internal/transcript/testdata/corpus.`);
