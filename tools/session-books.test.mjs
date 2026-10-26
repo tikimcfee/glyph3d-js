@@ -375,7 +375,12 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const rec = call?.record;
     ok(rec?.status === 'ok' && rec.result === 'the report' && rec.at === LINE,
         `paged in, the call carries its far result, at its own place (got ${rec?.status} at ${rec?.at})`);
-    ok(!lane.orphans.has('tool-1'), 'and the orphan is spent');
+    ok(lane.orphans.get('tool-1')?.result === 'the report', 'and the result stays held — a call dropped from the buffer and re-read adopts it again');
+    // the held results are bounded: past historyOrphans the least recently used drop
+    w.books.cfg.historyOrphans = 2;
+    for (const id of ['x1', 'x2']) w.books._holdOrphan(lane, id, { id, status: 'ok' });
+    ok(lane.orphans.size === 2 && !lane.orphans.has('tool-1') && lane.orphans.has('x2'),
+        `past historyOrphans the least recently used held result drops (held ${[...lane.orphans.keys()]})`);
 
     // (b) live: the result arrives on the follow while its call is still unread
     const w2 = makeWorld();

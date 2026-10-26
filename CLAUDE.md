@@ -222,7 +222,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (`agentEvents/follow|unfollow|read` RPCs; `agentEvents/lines|ended` pushes). Every agent book
   opens through SessionBooks: `read {tail}` (doubling until it holds the book's cap) → hydrate →
   `follow {from: the last at}` → each pushed batch through `AgentEventReader` → `applyEvents`
-  (an add is a sheet, an update rebuilds its sheet in place); paging back reads
+  (an add is a sheet, an update rebuilds its sheet in place; a file sheet shows the event's
+  `file` text — what the call read, or the file as it left it — else reads its target joined
+  to the session's cwd, and a refused read says why on the page); paging back reads
   `read {until, tail}` windows before each oldest `at`. A FOLLOW only while the session runs
   (not exited — a follower is a relay process, and the relay caps them; `setLive` as the status
   moves); every follow drops the book's provisional replies first, and `agentEvents/ended` (or a

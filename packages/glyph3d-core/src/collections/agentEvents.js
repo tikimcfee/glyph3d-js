@@ -217,6 +217,17 @@ function outputOf(result) {
 }
 
 /**
+ * An event's target as a path to read: gomuxai relativizes a target under the session's
+ * cwd, so a relative one joins it; an absolute one (or one with no cwd) stays as it is.
+ * @param {string} target @param {string|null} [cwd] @returns {string}
+ */
+export function sessionPath(target, cwd) {
+    const t = String(target || '');
+    if (!t || !cwd || t.startsWith('/') || /^[A-Za-z]:[\\/]/.test(t)) return t;
+    return `${String(cwd).replace(/[\\/]+$/, '')}/${t}`;
+}
+
+/**
  * One event → the record a sheet renders: the book's `action/target/detail/result/meta`
  * (what the verso and recto draw), plus the event's own facts. Text is carried whole.
  *
@@ -224,8 +235,10 @@ function outputOf(result) {
  *   think   action 'think', result = the text; a redacted block has detail 'redacted'
  *   say     action 'say', result = the text; final / provisional ride as flags
  *   tool    the tool table's action/target/detail/meta as gomuxai sent them; result = the
- *           output, except a file target that succeeded (its snapshot is the content). A
- *           call the table calls noise keeps action 'noise' and heads with its tool's name
+ *           output, except a file target that succeeded (its snapshot is the content); file =
+ *           the target's text as the call saw or left it ({text, start, total}), when the
+ *           event carries it. A call the table calls noise keeps action 'noise' and heads
+ *           with its tool's name
  *   system  action 'system', detail = the subtype, result = the text (else the data as JSON)
  *   request action 'request', detail = the model (only a `--requests` stream has these)
  *
@@ -269,6 +282,9 @@ export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
                 target, detail: String(b.detail ?? ''),
                 result: target && status !== 'error' ? '' : out,
                 meta: b.meta && typeof b.meta === 'object' ? b.meta : null,
+                file: typeof b.file?.text === 'string'
+                    ? { text: b.file.text, start: Math.max(1, Math.floor(b.file.start) || 1), total: b.file.total > 0 ? b.file.total : null }
+                    : null,
                 status, subSessions: Array.isArray(b.sub_sessions) ? b.sub_sessions.map(String) : [],
             };
         }

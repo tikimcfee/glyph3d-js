@@ -105,5 +105,23 @@ ok(setB.book.sheets.length === 0, 'binary/empty-patch files never sheet');
 ok(deltas.remove('delta:dev') === true, 'remove accepts the display form');
 ok(deltas.sets.size === 1 && deltas.clear() === 1 && deltas.sets.size === 0, 'clear empties the shelf');
 
+// --- the watch lane: the head is the file as the call left it ----------------------
+{
+    const reads = [];
+    const live = new DeltaBooks({ scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: null,
+        fileProvider: { getFile: async (p) => { reads.push(p); return 'one\nTWO\nthree\n'; } } });
+    const w = live.ensure('agent-1', { kind: 'watch' });
+    const patch = [{ oldStart: 2, oldLines: 1, newStart: 2, newLines: 1, lines: ['-two', '+2'] }];
+    live.ingestTool('agent-1', { action: 'edit', target: 'src/a.txt', meta: { patch },
+        file: { text: 'one\n2\nthree\n', start: 1, total: 3 } }, '/elsewhere/proj');
+    await w.jobs.get('/elsewhere/proj/src/a.txt');
+    const e = w.entries.get('/elsewhere/proj/src/a.txt');
+    ok(reads.length === 0, `an edit carrying its file text reads nothing from disk (read ${reads})`);
+    ok(e?.baseText === 'one\ntwo\nthree\n', `its base walks back from the file it left (got ${JSON.stringify(e?.baseText)})`);
+    live.ingestTool('agent-1', { action: 'write', target: '/abs/b.txt', meta: null, file: null }, '/elsewhere/proj');
+    await w.jobs.get('/abs/b.txt');
+    ok(reads[0] === '/abs/b.txt', `without file text the head is read from disk, an absolute target as it is (read ${reads})`);
+}
+
 console.log(`\ndelta-books.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

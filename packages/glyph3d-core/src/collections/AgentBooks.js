@@ -81,7 +81,7 @@ import { computeCellMetrics } from '../core/cellMetrics.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { toFileUri } from '../core/fileUri.js';
 import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from './toolRegistry.js';
-import { eventRecord, eventFacts, eventLane, sessionMeta, parseEventSlice } from './agentEvents.js';
+import { eventRecord, eventFacts, eventLane, sessionMeta, parseEventSlice, sessionPath } from './agentEvents.js';
 /** @import { EventChange } from './agentEvents.js' */
 import { yieldToFrame } from '../utils/frameYield.js';
 
@@ -141,6 +141,8 @@ export const AGENT_BOOKS_DEFAULTS = {
     historySliceBytes: 256 * 1024, // first span an older read asks for (agentEvents/read {until, tail}; doubles until it holds historyTurns)
     historyOverlapBytes: 256 * 1024, // bytes read PAST the window's end so its last tool calls pair with their results
     historyBuffer: 400,         // parsed records a book keeps BESIDE its window (older + newer) — no GPU cost; past it the far ones drop (re-readable)
+    historyOrphans: 256,        // results a book holds for calls it read before them (a far background result), kept after
+                                // their call adopts one so a re-read call gets it again; past it the least recently used drop
     // -- identity ------------------------------------------------------------------
     cover: true,                // translucent identity box around each book's deck (also the drag handle)
     coverPad: 16,               // XY inflation beyond the deck bounds
@@ -250,6 +252,18 @@ export function snapshotWindow(meta, total, { context, maxRows }) {
     if (first < 0) { last -= first; first = 0; }
     if (last > total - 1) { first -= last - (total - 1); last = total - 1; }
     return { first: Math.max(0, first), last };
+}
+
+/** meta with its touched runs (range / ranges, 1-based file lines) moved by `delta` lines —
+ *  a snapshot holding a slice frames them in its own rows. Pure. */
+function shiftRanges(meta, delta) {
+    if (!meta || !delta) return meta;
+    const mv = (r) => [r[0] + delta, r[1] + delta];
+    return {
+        ...meta,
+        ...(meta.range ? { range: mv(meta.range) } : {}),
+        ...(Array.isArray(meta.ranges) ? { ranges: meta.ranges.map(mv) } : {}),
+    };
 }
 
 /** A wall-clock age, terse: now / 12s / 4m / 3h / 2d. */
@@ -469,7 +483,7 @@ export default class AgentBooks {
         if (record.target && !record.result) {
             const kind = classifyByExtension(record.target);
             if (kind?.kind === 'image') {
-                recto = this._imageSnapshot(record.target, kind.format, lane, sheetId);
+                recto = this._imageSnapshot(sessionPath(record.target, lane.cwd), kind.format, lane, sheetId);
             } else {
                 rectoRole = 'file';   // its text arrives with the load (_loadSnapshot)
                 recto = this._makeGrid(record.target, {
@@ -543,7 +557,7 @@ export default class AgentBooks {
             lane.meta = { ...(lane.meta || {}), ...meta };
             if (meta.cwd) lane.cwd = meta.cwd;
         }
-        if (orphans) for (const [id, r] of orphans) if (!lane.orphans?.has(id)) (lane.orphans ??= new Map()).set(id, r);
+        if (orphans) for (const [id, r] of orphans) if (!lane.orphans?.has(id)) this._holdOrphan(lane, id, r);
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
         const cap = this._capFor(lane);
@@ -626,7 +640,7 @@ export default class AgentBooks {
                     // An update of a call this book doesn't hold (it lies before everything
                     // read so far — a background call's result, megabytes later): held for
                     // when that call pages in.
-                    if (held) (held.orphans ??= new Map()).set(rec.id, rec);
+                    if (held) this._holdOrphan(held, rec.id, rec);
                     continue;
                 }
                 const lane = this.activity(id, held?.agentType || agentType, this._adopt(held, rec));
@@ -653,6 +667,7 @@ export default class AgentBooks {
      * @returns {boolean} whether the lane held it
      */
     _replaceRecord(lane, rec) {
+        if (lane.orphans?.has(rec.id)) this._holdOrphan(lane, rec.id, rec);
         const i = lane.entries.findIndex((e) => e.record.id === rec.id);
         if (i >= 0) {
             const old = lane.entries[i];
@@ -682,8 +697,21 @@ export default class AgentBooks {
     _adopt(lane, rec) {
         const o = lane?.orphans?.get(rec.id);
         if (!o) return rec;
-        lane.orphans.delete(rec.id);
+        this._holdOrphan(lane, rec.id, o);   // kept, most recently used: a call dropped from the buffer and re-read adopts it again
         return { ...o, at: rec.at };
+    }
+
+    /**
+     * Hold an update for a call the lane hasn't (or no longer) paged in, as its most recently
+     * used; past `historyOrphans` the least recently used drop (its call, read again, shows the
+     * state its own window gives). @private
+     */
+    _holdOrphan(lane, id, rec) {
+        const m = (lane.orphans ??= new Map());
+        m.delete(id);
+        m.set(id, rec);
+        const max = Math.max(0, this.cfg.historyOrphans);
+        for (const k of m.keys()) { if (m.size <= max) break; m.delete(k); }
     }
 
     /** A lane's age is its newest event's own timestamp (an event record's `ts`). @private */
@@ -1625,7 +1653,7 @@ export default class AgentBooks {
         const now = lane.older[0]?.record ?? lane.entries[0]?.record;
         if (this.lanes.get(lane.agentId) !== lane || now?.id !== oldest.id) return 0;
         // Updates whose calls lie further back still: held, unless a newer read holds one already.
-        for (const [id, r] of out.orphans) if (!lane.orphans?.has(id)) (lane.orphans ??= new Map()).set(id, r);
+        for (const [id, r] of out.orphans) if (!lane.orphans?.has(id)) this._holdOrphan(lane, id, r);
         lane.older.unshift(...recs.map((record, j) => ({ record: this._adopt(lane, record), seq: fromSeq - recs.length + j })));
         const max = Math.max(0, c.historyBuffer);
         if (lane.older.length > max) lane.older.splice(0, lane.older.length - max);   // the far ones re-read later
@@ -1699,19 +1727,31 @@ export default class AgentBooks {
      * at their window rows. The page then shows a legible window instead of a whole file
      * shrunk to fit; the verso's info rows name the window (`shown L…–… of N`). The slice
      * is sized by the page-text rule before its one load (_rectoSize) and kept on the entry
-     * (rectoText) for later re-fits. Registers as a pickable card after load. @private
+     * (rectoText) for later re-fits. Registers as a pickable card after load.
+     * The content is the event's file text when it carries one (what the call read, or the
+     * file as it left it — exact, and readable wherever the session ran); otherwise the
+     * file on disk, at the target resolved against the session's cwd. A read the relay
+     * refuses (a path outside its roots) says why on the page. @private
      */
     _loadSnapshot(grid, record, pick, lane, sheetId) {
-        const path = record.target;
+        const path = sessionPath(record.target, lane.cwd);
         const wire = () => { if (pick && lane.entries.some((e) => e.sheetId === sheetId)) this._wireCardPick(grid, pick.id, pick.meta); };
+        const given = record.file;
         let win = null;
-        Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
-            .then((content) => this._resolveSnapshotText(path, String(content ?? '')))
+        (given ? Promise.resolve(given.text)
+            : Promise.resolve(this.ctx.fileProvider?.getFile?.(path))
+                .then((content) => this._resolveSnapshotText(path, String(content ?? ''))))
             .then((text) => {
                 const lines = text.split('\n');
-                const w = snapshotWindow(record.meta, lines.length,
+                // The lines held start at file line `offset + 1` (a partial read's slice); the
+                // window frames them in their own rows and names them in the file's.
+                const offset = given ? given.start - 1 : 0;
+                const held = text.endsWith('\n') ? lines.length - 1 : lines.length;
+                const total = Math.max(given?.total ?? 0, offset + held);
+                const w = snapshotWindow(shiftRanges(record.meta, -offset), lines.length,
                     { context: this.cfg.snapContextRows, maxRows: this.cfg.snapMaxRows });
-                if (w) win = { ...w, total: lines.length };
+                if (w) win = { first: w.first + offset, last: w.last + offset, total };
+                else if (offset > 0 || held < total) win = { first: offset, last: offset + Math.max(0, held - 1), total };
                 const shown = w ? lines.slice(w.first, w.last + 1).join('\n') : text;
                 const e = lane.entries.find((x) => x.sheetId === sheetId);
                 if (e) e.rectoText = shown;
@@ -1726,7 +1766,7 @@ export default class AgentBooks {
                 if (win) this._noteWindow(lane, sheetId, win);
                 this._settle(lane, sheetId);
             })
-            .catch(() => grid.loadFile(path, '(could not load)').then(() => { wire(); this._settle(lane, sheetId); }).catch(() => {}));
+            .catch((err) => grid.loadFile(path, `(could not load ${path}: ${err?.message || err})`).then(() => { wire(); this._settle(lane, sheetId); }).catch(() => {}));
     }
 
     /**

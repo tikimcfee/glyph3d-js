@@ -29,7 +29,7 @@ import { join, relative } from 'node:path';
 import './headless-canvas.mjs';
 import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 const { default: AgentBooks, AGENT_BOOKS_DEFAULTS } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
-const { AgentEventReader, parseEventSlice, PROMPT_ORIGINS } =
+const { AgentEventReader, parseEventSlice, PROMPT_ORIGINS, eventRecord, sessionPath } =
     await import('../packages/glyph3d-core/src/collections/agentEvents.js');
 const { ACTION_HUES } = await import('../packages/glyph3d-core/src/collections/toolRegistry.js');
 
@@ -504,6 +504,18 @@ for (const c of CASES.keys()) {
     ok(lane.newer.at(-1).record.result === 'live, confirmed' && lane.newer.length === 1, 'its update replaces it in the newer buffer');
     lane.book.pageTo(Infinity);
     ok(lane.entries.at(-1).record.result === 'live, confirmed' && lane.book.following, '`live` slides to it, confirmed');
+}
+
+// ── a tool event's file text, and its target as a path to read ──────────────────────
+{
+    const ev = (file) => ({ id: 't1', op: 'update', seq: 0, at: 0, kind: 'tool',
+        tool: { name: 'Read', input: {}, action: 'read', target: 'a.go', result: { status: 'ok' }, ...(file ? { file } : {}) } });
+    const r = eventRecord(ev({ text: 'five\nsix\n', start: 5, total: 9 }));
+    ok(r.file?.text === 'five\nsix\n' && r.file.start === 5 && r.file.total === 9, `a record carries the event's file text (got ${JSON.stringify(r.file)})`);
+    ok(eventRecord(ev(null)).file === null, 'and none when the event has none');
+    ok(sessionPath('src/a.go', '/p/proj/') === '/p/proj/src/a.go', 'a relative target joins the session cwd');
+    ok(sessionPath('/abs/a.go', '/p/proj') === '/abs/a.go' && sessionPath('C:/x/a.go', '/p') === 'C:/x/a.go', 'an absolute target stays as it is');
+    ok(sessionPath('a.go', null) === 'a.go', 'no cwd: the target as it is');
 }
 
 console.log(`agent-events: ${pass} passed, ${fail} failed`);

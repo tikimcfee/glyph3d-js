@@ -196,6 +196,36 @@ const worldLh = (card) => card.scale.y * ls;   // a card's world row pitch (its 
     ok(read.info && read.info.content === read.infoText, 'the info card re-loaded with the window note');
 }
 
+// ── the recto from the event's file text; a disk read against the session's cwd ──
+{
+    const reads = [];
+    const fb = new AgentBooks({ ...ctx, scene: new THREE.Scene(), fileProvider: { getFile: async (p) => {
+        reads.push(p);
+        throw new Error(`path escapes reachable roots: ${p}`);
+    } } });
+    const slice = Array.from({ length: 21 }, (_, i) => `const line${300 + i} = ${300 + i};`).join('\n') + '\n';
+    const whole = 'a\nb changed\nc\n';
+    await fb.hydrate('x1', [
+        { action: 'read', target: 'src/big.js', detail: '', result: '', meta: { lines: 21, range: [300, 320] },
+          file: { text: slice, start: 300, total: 600 } },
+        { action: 'edit', target: 'src/e.js', detail: '', result: '', meta: { added: 1, removed: 1, ranges: [[2, 2]] },
+          file: { text: whole, start: 1, total: 3 } },
+        { action: 'read', target: 'src/gone.js', detail: '', result: '', meta: { lines: 3 } },
+    ], { meta: { cwd: '/elsewhere/proj' } });
+    await tick(60);
+    const [r, ed, gone] = fb.lanes.get('x1').entries;
+    ok(r.snapshot.content.startsWith('const line300 ') && r.snapshot.content.includes('const line320 '),
+        `a read shows the lines it read, from the event (got ${JSON.stringify(r.snapshot.content.slice(0, 20))})`);
+    ok(r.window?.first === 299 && r.window.last === 319 && r.window.total === 600 && r.infoText.includes('shown L300–320 of 600'),
+        `the slice is named in the file's lines (got ${JSON.stringify(r.window)})`);
+    ok(ed.snapshot.content === whole && !ed.window, 'an edit shows the file it left, whole');
+    ok(reads.length === 1 && reads[0] === '/elsewhere/proj/src/gone.js',
+        `only the call without file text reads disk, at its target against the session's cwd (read ${reads})`);
+    ok(gone.snapshot.content.includes('could not load /elsewhere/proj/src/gone.js: path escapes reachable roots'),
+        `a refused read says why on the page (got ${JSON.stringify(gone.snapshot.content)})`);
+    fb.dispose();
+}
+
 // ── decoration lands at window rows ──
 {
     const lit = [];

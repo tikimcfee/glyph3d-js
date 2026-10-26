@@ -35,6 +35,7 @@ import FieldLabel from './FieldLabel.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { alignTexts, alignPatch, reconstructBase } from '../services/state/deltaSource.js';
+import { sessionPath } from './agentEvents.js';
 
 export const DELTA_BOOKS_DEFAULTS = {
     // -- the page ------------------------------------------------------------------
@@ -270,24 +271,25 @@ export default class DeltaBooks {
      * The LIVE lane: an agent's tool call that landed ok, as its event record (the app's
      * SessionBooks taps every live call of a followed session; unwatched agents fall
      * straight through). Edits and writes to real files update the agent's watch set —
-     * base captured once per file (an edit's event meta carries its patch), head re-read
-     * from disk, the cumulative pair re-aligned. Async work serializes per file so a burst
+     * base captured once per file (an edit's event meta carries its patch), head = the file
+     * as the call left it (the event's file text, else re-read from disk), the cumulative
+     * pair re-aligned. Async work serializes per file so a burst
      * of edits lands in order.
      * @param {string} agentId the agent book's lane id
-     * @param {{action: string, target?: string, meta?: Object}} rec  eventRecord's record
+     * @param {{action: string, target?: string, meta?: Object, file?: {text: string, start: number}|null}} rec  eventRecord's record
      * @param {string} [cwd]  the session's working dir — absolutizes the relative target
      */
     ingestTool(agentId, rec, cwd = '') {
         const set = this.sets.get(agentId);
         if (!set || set.kind !== 'watch') return;
         if ((rec.action !== 'edit' && rec.action !== 'write') || !rec.target) return;
-        const abs = rec.target.startsWith('/') ? rec.target
-                  : cwd ? `${cwd.replace(/\/+$/, '')}/${rec.target}` : rec.target;
+        const abs = sessionPath(rec.target, cwd);
         // Serialize per file: a burst of edits to one path lands in event order, and the
         // second event's base read waits for the first to have captured the baseline.
         const chain = set.jobs.get(abs) || Promise.resolve();
         const job = chain.then(async () => {
-            const head = String((await this.ctx.fileProvider?.getFile?.(abs)) ?? '');
+            const head = rec.file?.start === 1 ? rec.file.text   // an edit's or write's whole file after it
+                : String((await this.ctx.fileProvider?.getFile?.(abs)) ?? '');
             let baseText = set.entries.get(abs)?.baseText;
             if (baseText == null) {
                 // First sight of this file: walk back to its pre-edit text. An edit's
