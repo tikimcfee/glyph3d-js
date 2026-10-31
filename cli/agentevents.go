@@ -196,10 +196,11 @@ func (a *AgentEvents) DisplayGone(display uint64) {
 // error, not a follower that dies). Idempotent; a follow from another byte, or of a name
 // that now resolves to another transcript, replaces the display's follower for it.
 func (a *AgentEvents) Follow(ctx context.Context, display uint64, session string, from int64) error {
-	path, err := a.resolveSession(ctx, session)
+	ref, err := a.resolveSession(ctx, session)
 	if err != nil {
 		return err
 	}
+	path := ref.path
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.displays[display] {
@@ -571,7 +572,7 @@ func (a *AgentEvents) applySessionsLocked(raw []byte) error {
 			Name string `json:"name"`
 		}
 		json.Unmarshal(s.Workgroup, &wg)
-		refs[i] = sessionRef{id: s.ID, path: s.Path, workgroup: wg.Name, sub: isJSONSet(s.ParentSession)}
+		refs[i] = sessionRef{id: s.ID, path: s.Path, workgroup: wg.Name, status: s.Status, sub: isJSONSet(s.ParentSession)}
 		k, _ := json.Marshal(s)
 		keys[i] = string(k)
 	}
@@ -615,8 +616,14 @@ func (a *AgentEvents) List(ctx context.Context) (agentSessionsList, error) {
 // sessionRef is what resolveSession reads of a listed session.
 type sessionRef struct {
 	id, path, workgroup string
-	sub                 bool // a subagent's session (parent_session set)
+	status              string // gomuxai's: idle|processing|waiting|error|exited|unknown
+	sub                 bool   // a subagent's session (parent_session set)
 }
+
+// runs: the list says the session hasn't exited. gomuxai lists a running session with
+// its transcript's path before the harness writes the file (Claude creates it at the
+// first prompt); only "exited" says it's gone, so "unknown" runs and no status doesn't.
+func (r sessionRef) runs() bool { return r.status != "" && r.status != "exited" }
 
 // errSessionMiss: no listed session answers to the name (asking again may help;
 // an ambiguous name is a different error, which asking again won't fix).
@@ -628,33 +635,33 @@ func (e errSessionMiss) Error() string { return string(e) }
 // `agent sessions` list: an exact session_id, an exact path, a workgroup agent's name
 // (its newest session that isn't a subagent's — the list is newest first), or the
 // start of exactly one session_id. A miss asks `agent sessions` again once. An unknown
-// or ambiguous name, or a session with no transcript yet, is an error.
-func (a *AgentEvents) resolveSession(ctx context.Context, session string) (string, error) {
+// or ambiguous name, or a session with no transcript path yet, is an error.
+func (a *AgentEvents) resolveSession(ctx context.Context, session string) (sessionRef, error) {
 	if session == "" {
-		return "", errMsg("session required")
+		return sessionRef{}, errMsg("session required")
 	}
 	a.sessMu.Lock()
 	polled := a.polled
 	a.sessMu.Unlock()
 	if !polled {
 		if err := a.refreshSessions(ctx); err != nil {
-			return "", err
+			return sessionRef{}, err
 		}
 	}
 	ref, err := a.lookupSession(session)
 	if _, miss := err.(errSessionMiss); miss {
 		if rerr := a.refreshSessions(ctx); rerr != nil {
-			return "", rerr
+			return sessionRef{}, rerr
 		}
 		ref, err = a.lookupSession(session)
 	}
 	if err != nil {
-		return "", err
+		return sessionRef{}, err
 	}
 	if ref.path == "" {
-		return "", errMsg("agent session " + strconv.Quote(session) + " (" + ref.id + ") has no transcript yet")
+		return sessionRef{}, errMsg("agent session " + strconv.Quote(session) + " (" + ref.id + ") has no transcript yet")
 	}
-	return ref.path, nil
+	return ref, nil
 }
 
 func (a *AgentEvents) lookupSession(s string) (sessionRef, error) {
@@ -712,13 +719,18 @@ type agentEventsReadResult struct {
 // Read runs one bounded `agent transcript --until` over a session's transcript
 // (resolveSession). The window ends at the size it saw, or `until` if lower; `tail: N`
 // starts it at the first line start at or after end-N (see tailFrom) — with `until`, the
-// last ~N bytes before it.
+// last ~N bytes before it. A running session whose transcript isn't written yet reads as
+// empty (no lines, size 0); a missing transcript of an exited one is an error.
 func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentEventsReadResult, error) {
-	path, err := a.resolveSession(ctx, p.Session)
+	ref, err := a.resolveSession(ctx, p.Session)
 	if err != nil {
 		return agentEventsReadResult{}, err
 	}
+	path := ref.path
 	file, err := os.Open(path)
+	if os.IsNotExist(err) && ref.runs() {
+		return agentEventsReadResult{Lines: []string{}, Size: 0}, nil
+	}
 	if err != nil {
 		return agentEventsReadResult{}, err
 	}

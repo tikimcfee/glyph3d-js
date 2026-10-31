@@ -593,6 +593,51 @@ func TestAgentEvents_ReadWindows(t *testing.T) {
 	}
 }
 
+// gomuxai lists a running session with its transcript's path before the harness writes
+// the file: reading it answers empty (nothing ran, nothing to hydrate) until the file
+// appears, by the session's status — a missing transcript of an exited session, or of one
+// the list gives no status, is still an error.
+func TestAgentEvents_ReadUnwrittenTranscript(t *testing.T) {
+	f := newAgentFixture(t)
+	path := func(s string) string { return filepath.Join(f.dir, s+".unwritten.jsonl") }
+	f.setSessions(t,
+		map[string]any{"session_id": "fresh", "path": path("fresh"), "status": "idle"},
+		map[string]any{"session_id": "unsure", "path": path("unsure"), "status": "unknown"},
+		map[string]any{"session_id": "gone", "path": path("gone"), "status": "exited"},
+		map[string]any{"session_id": "bare", "path": path("bare")},
+	)
+	i64 := func(v int64) *int64 { return &v }
+	for _, s := range []string{"fresh", "unsure"} {
+		for _, p := range []agentEventsReadParams{{Session: s}, {Session: s, Tail: i64(4096)}, {Session: s, Until: i64(10), Tail: i64(5)}} {
+			r, err := f.a.Read(bg, p)
+			if err != nil || r.Size != 0 || r.Lines == nil || len(r.Lines) != 0 {
+				t.Errorf("%+v of a running session's unwritten transcript: %+v %v, want no lines, size 0", p, r, err)
+			}
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.dir, "calls")); strings.Contains(string(b), "transcript ") {
+		t.Errorf("an unwritten transcript ran agent transcript: %s", b)
+	}
+	for _, s := range []string{"gone", "bare"} {
+		if _, err := f.a.Read(bg, agentEventsReadParams{Session: s}); !os.IsNotExist(err) {
+			t.Errorf("%s: a missing transcript of a session not known to run must fail: %v", s, err)
+		}
+	}
+	// once written it reads as any other
+	os.WriteFile(path("fresh"), []byte("aaaa\n"), 0o644)
+	if r, err := f.a.Read(bg, agentEventsReadParams{Session: "fresh"}); err != nil || r.Size != 5 || len(r.Lines) != 1 {
+		t.Errorf("the written transcript: %+v %v", r, err)
+	}
+	// the handler answers the empty read as a result, with lines a JSON array
+	h, _, _ := newTestHandler(t)
+	h.agents = f.a
+	write, c := captureRPC(t)
+	h.handleAgentEventsRead(write, json.RawMessage("1"), json.RawMessage(`{"session":"unsure","tail":4096}`))
+	if c.Error != nil || !strings.Contains(string(c.Result), `"lines":[]`) || !strings.Contains(string(c.Result), `"size":0`) {
+		t.Errorf("handler: %+v %s", c.Error, c.Result)
+	}
+}
+
 func TestAgentEvents_ReadHandlerValidates(t *testing.T) {
 	h, _, _ := newTestHandler(t)
 	h.agents = newAgentFixture(t).a
@@ -788,8 +833,8 @@ func TestAgentEvents_ResolveSession(t *testing.T) {
 		{"dead", "/t/dead.jsonl"},        // a unique id prefix
 		{"agent-s", "/t/sub1.jsonl"},
 	} {
-		if got, err := f.a.resolveSession(bg, c.in); err != nil || got != c.want {
-			t.Errorf("resolve %q = %q (%v), want %q", c.in, got, err, c.want)
+		if got, err := f.a.resolveSession(bg, c.in); err != nil || got.path != c.want {
+			t.Errorf("resolve %q = %q (%v), want %q", c.in, got.path, err, c.want)
 		}
 	}
 	for _, c := range []struct{ in, want string }{
@@ -813,8 +858,8 @@ func TestAgentEvents_ResolveSession(t *testing.T) {
 		t.Errorf("an ambiguous name re-polled")
 	}
 	f.setSessions(t, map[string]any{"session_id": "fresh", "path": "/t/fresh.jsonl"})
-	if got, err := f.a.resolveSession(bg, "fresh"); err != nil || got != "/t/fresh.jsonl" || calls() != n+1 {
-		t.Errorf("a new session: %q %v after %d polls", got, err, calls()-n)
+	if got, err := f.a.resolveSession(bg, "fresh"); err != nil || got.path != "/t/fresh.jsonl" || calls() != n+1 {
+		t.Errorf("a new session: %q %v after %d polls", got.path, err, calls()-n)
 	}
 }
 

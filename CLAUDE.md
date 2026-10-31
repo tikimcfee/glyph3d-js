@@ -126,7 +126,8 @@ that leaves a push waiting 10 s loses the subscription rather than the relay buf
 on that plane as long as the display stays, behind the lines queued before it — a display
 always learns. Followers' stderr lands in the relay log as `[agent-transcript]`.
 `agentEvents/read {session, from?, until?, tail?}` → `{lines, size}` is a bounded one-shot
-ending at min(until, size); `tail` (not with `from`) starts at the first line start at/after
+ending at min(until, size) (a running session's not-yet-written transcript reads as
+`{lines: [], size: 0}`; an exited one's missing file is an error); `tail` (not with `from`) starts at the first line start at/after
 `end - tail` (`--from` the line before), so `{until, tail}` pages back without the prefix.
 
 The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →

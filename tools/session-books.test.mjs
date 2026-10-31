@@ -247,6 +247,32 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     eq(ids(w.books.lanes.get('E1')), ['say-0', 'say-1', 'say-2'], 'lines pushed before the follow answered are taken');
 }
 
+// ── 2b. a running session whose transcript isn't written yet reads empty ──────────────
+// (the relay answers {lines: [], size: 0} — not even a session line — until the harness
+// writes the file at its first prompt): the book opens with nothing, follows from the start.
+{
+    const w = makeWorld();
+    w.relay.add(session('N1', { status: 'idle' }));
+    w.relay.onRpc = (method, params) => (method === 'agentEvents/read' && params.session === 'N1' && !w.relay.transcripts.get('N1').events.length
+        ? { lines: [], size: 0 } : undefined);
+    const warns = [];
+    const warn = console.warn;
+    console.warn = (...a) => { warns.push(a.join(' ')); };
+    let r;
+    try { r = await w.sb.open('N1'); } finally { console.warn = warn; }
+    const lane = w.books.lanes.get('N1');
+    const st = w.sb.streams.get('N1');
+    eq(reads(w, 'N1'), [{ session: 'N1', tail: 3 * LINE }], 'one tail read: size 0 is the whole run, no doubling');
+    ok(st?.phase === 'open' && lane && lane.entries.length === 0 && lane.notice == null && !warns.length,
+        `an empty read opens a book with no sheets, no failure, no notice (${st?.phase}, ${J(warns)})`);
+    ok(r?.added === 0 && r.whole && lane.sessionId === 'N1' && w.books.headState('N1').exact, 'nothing hydrated; the run is whole, its numbering exact');
+    eq(follows(w, 'N1'), [{ session: 'N1' }], 'it follows with no `from`: the transcript from its start');
+    ok(st.live, 'and is live');
+    w.relay.push('N1', [sessionLine({ ...w.relay.transcripts.get('N1').info, title: 'first prompt' }), say(0, 'hello'), say(1, 'there')]);
+    eq(ids(lane), ['say-0', 'say-1'], 'the first lines the follow brings are its first sheets');
+    ok(lane.meta?.title === 'first prompt', 'and their session line is its meta');
+}
+
 // ── 3. the agents desk: which sessions get books, teams, a quiet re-push, clear ───────
 {
     const w = makeWorld();
