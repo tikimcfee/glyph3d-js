@@ -720,6 +720,10 @@ export const SETTINGS = [
   // agents.maxBooks — read by SessionDesk at each session-list push: how many local sessions the
   // agents desk opens by itself (newest first). Books already open stay; on-demand opens don't count.
   { key: 'agents.maxBooks', label: "Books the 'agents' desk opens by itself: the newest N live or recent local sessions (0 = none; agent.open and the archive still open any)", group: 'Agent Books', type: 'number', default: 24, min: 0, max: 5000, step: 1 },
+  // The hover card — what an agent book is and is doing, beside the cursor while it rests on
+  // the book. Read live by HoverReadout: shown only while this key is held ('always' = on
+  // every hover, 'never' = off).
+  { key: 'book.hoverCardKey', label: 'Hover card shows while holding (always = on every hover)', group: 'Agent Books', type: 'enum', options: ['alt', 'ctrl', 'shift', 'meta', 'always', 'never'], default: 'alt' },
   { key: 'book.autoShelf', label: "Seat new books at the 'agents' desk", group: 'Agent Books', type: 'bool', default: true },
   { key: 'book.maxSheets', label: 'Turns kept per book (0 = all)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.maxSheets, min: 0, max: 5000, step: 1, apply: agentBookParam('maxSheets') },
   // Page geometry + deck — the AGENT card's page rect, spread spine, and the deck pitch /
@@ -731,6 +735,8 @@ export const SETTINGS = [
   { key: 'book.gutter', label: 'Spread gutter (spine gap)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.gutter, min: 0, max: 500, step: 2, apply: agentBookParam('gutter') },
   { key: 'book.zPitch', label: 'Sheet depth spacing (Z)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.zPitch, min: 1, max: 4000, step: 5, apply: agentBookParam('zPitch') },
   { key: 'book.pagerLerp', label: 'Page-turn speed', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.pagerLerp, min: 0, max: 60, step: 0.5, apply: agentBookParam('pagerLerp') },
+  { key: 'book.deckRise', label: 'Rise per sheet behind the open one (its headline shows over the page in front; 0 = flat deck)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.deckRise, min: 0, max: 2000, step: 2, apply: agentBookParam('deckRise') },
+  { key: 'book.deckRiseRows', label: 'Sheets that rise (0 = all; the rest stand behind the last)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.deckRiseRows, min: 0, max: 5000, step: 1, apply: agentBookParam('deckRiseRows') },
   // Page text — each side's text size (a world row height) and how its lines break: these
   // are the DEFAULTS every agent book shows; one book may carry its own (the HUD's Book
   // section / book.set — it wins, and a change here passes it by). One rule sizes every

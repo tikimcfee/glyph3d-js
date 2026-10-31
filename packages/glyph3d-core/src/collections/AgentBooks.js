@@ -99,6 +99,9 @@ export const AGENT_BOOKS_DEFAULTS = {
     pagerLerp: 9,               // per-sheet z-slot easing rate (higher = snappier)
     turnedPitch: DECK_DEFAULTS.turned, // the turned block's pitch, × zPitch (pressed pages)
     turnSlide: DECK_DEFAULTS.slide,    // how far a turn visibly slides the deck (pitches; the rest cuts)
+    deckRise: 48,               // each sheet behind the open one stands this much higher (world units) — its headline
+                                // shows over the page in front, the deck reading like a list (0 = flat deck)
+    deckRiseRows: 6,            // how many sheets behind the open one step up (0 = all); the rest stand behind the last
     // -- page text: sizes are WORLD row heights, each the most a block is set at — one that
     //    doesn't fit its page scales down (fitTextStack). Per-book overrides: tuneText. ----
     pageMargin: 16,             // inset of each page's text from the page edge
@@ -1094,7 +1097,7 @@ export default class AgentBooks {
      *  them, and a re-apply restamps them on every knob a book wasn't given itself. */
     _deckDefaults() {
         const c = this.cfg;
-        return { zPitch: c.zPitch, lerp: c.pagerLerp, turned: c.turnedPitch, slide: c.turnSlide };
+        return { zPitch: c.zPitch, lerp: c.pagerLerp, turned: c.turnedPitch, slide: c.turnSlide, rise: c.deckRise, riseRows: c.deckRiseRows };
     }
 
     /**

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { getSetting } from './settings.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 /**
@@ -15,10 +16,14 @@ import React, { useEffect, useRef, useState } from 'react';
  *   this page: verb  head  (L…–… framed)       ← when the hovered page isn't the newest
  *
  * Re-reads on hover changes, on AgentBooks changes, and once a second (ages move).
- * Text wraps; nothing is cut.
+ * Text wraps; nothing is cut. It shows only while the `book.hoverCardKey` modifier is
+ * held (read live; 'always' shows it on every hover) — it watches the key, never claims it.
  */
 
 const OFFSET = 16;   // px from the cursor
+
+/** The modifier a key/pointer event reports for each `book.hoverCardKey` choice. */
+const MOD_FLAG = { alt: 'altKey', ctrl: 'ctrlKey', shift: 'shiftKey', meta: 'metaKey' };
 
 function read(client) {
     const ctx = client?.ctx;
@@ -50,8 +55,11 @@ export default function HoverReadout({ client }) {
 
     useEffect(() => {
         if (!client) return undefined;
+        const held = { now: false };   // the card's modifier, as the last key/pointer event reported it
         const refresh = () => {
-            const next = read(client);
+            const want = getSetting('book.hoverCardKey');
+            const show = want === 'always' || (want !== 'never' && held.now);
+            const next = show ? read(client) : null;
             shownRef.current = !!next;
             if (next) setPos(posRef.current);
             setR(next);
@@ -60,13 +68,31 @@ export default function HoverReadout({ client }) {
         const offHover = am?.on?.('change:hover', refresh);
         const offBooks = client.ctx?.agentBooks?.onChange?.(refresh);
         const iv = setInterval(refresh, 1000);
+        // Track the modifier from every key and pointer event (it may go down while the
+        // window was unfocused); a change re-reads. Capture phase, observe only.
+        const track = (e) => {
+            const flag = MOD_FLAG[getSetting('book.hoverCardKey')];
+            const now = !!(flag && e[flag]);
+            if (now !== held.now) { held.now = now; refresh(); }
+        };
+        const drop = () => { if (held.now) { held.now = false; refresh(); } };
         const move = (e) => {
             posRef.current = { x: e.clientX, y: e.clientY };
+            track(e);
             if (shownRef.current) setPos(posRef.current);
         };
         window.addEventListener('pointermove', move, { passive: true });
+        window.addEventListener('keydown', track, { capture: true, passive: true });
+        window.addEventListener('keyup', track, { capture: true, passive: true });
+        window.addEventListener('blur', drop);
         refresh();
-        return () => { offHover?.(); offBooks?.(); clearInterval(iv); window.removeEventListener('pointermove', move); };
+        return () => {
+            offHover?.(); offBooks?.(); clearInterval(iv);
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('keydown', track, { capture: true });
+            window.removeEventListener('keyup', track, { capture: true });
+            window.removeEventListener('blur', drop);
+        };
     }, [client]);
 
     if (!r) return null;

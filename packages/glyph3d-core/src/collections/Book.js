@@ -97,12 +97,16 @@ export const PAGE_FACE_DEFAULTS = Object.freeze({ surface: true, surfacePad: 0, 
  *  reads by PAGE ORDER (a library volume — page 1, 2, 3 recede in sequence; turned
  *  pages press onto the block). `turned` is the turned block's pitch as a fraction of
  *  zPitch (pressed pages, distinct from the spaced reading deck); `slide` caps how
- *  far, in pitches, the reading deck visibly slides on a turn — the rest is a cut. */
-export const DECK_DEFAULTS = Object.freeze({ zPitch: 90, lerp: 9, order: -1, turned: 0.25, slide: 1 });
+ *  far, in pitches, the reading deck visibly slides on a turn — the rest is a cut.
+ *  `rise` lifts each sheet of the reading deck that far above the one in front of it
+ *  (world units), so the top of every sheet ahead — an agent sheet's headline — shows
+ *  over the open page like the rows of a list; `riseRows` is how many sheets step up
+ *  (0 = every one), the rest stand behind the last step. 0 rise = a flat deck. */
+export const DECK_DEFAULTS = Object.freeze({ zPitch: 90, lerp: 9, order: -1, turned: 0.25, slide: 1, rise: 0, riseRows: 0 });
 
 /** The deck knobs ONE book may be given its own value for (tuneDeck) — the owner's shelf
  *  defaults (setDeckDefaults) pass a knob by once the book has its own. */
-export const DECK_TUNABLE = Object.freeze(['zPitch', 'lerp', 'turned', 'slide']);
+export const DECK_TUNABLE = Object.freeze(['zPitch', 'lerp', 'turned', 'slide', 'rise', 'riseRows']);
 
 /** Splay (m×n grid) defaults. cols 0 derives the column count from the aspect target
  *  (grid w/h ≈ aspect); lift is the head page's forward float — the bookmark you can
@@ -149,7 +153,7 @@ export default class Book extends BoundedObject3D {
         this.head = 0;
         /** @type {boolean} live-follow: ride each appended sheet to the front */
         this.following = true;
-        /** @type {{zPitch:number, lerp:number, order:number, turned:number, slide:number}} deck knobs (multi-sheet books) */
+        /** @type {{zPitch:number, lerp:number, order:number, turned:number, slide:number, rise:number, riseRows:number}} deck knobs (multi-sheet books) */
         this.deck = { ...DECK_DEFAULTS };
         /** @type {Object<string, number>} deck knobs given to THIS book (tuneDeck) — they win over the owner's defaults */
         this.deckOwn = {};
@@ -566,14 +570,16 @@ export default class Book extends BoundedObject3D {
         c.mesh.visible = c.opts.visible !== false;
         c.edges.visible = c.opts.visible !== false && c.opts.edgeOpacity > 0;
         // The nameplate rides the cover's top edge (the dock's tile-label idiom:
-        // edge + small gap + half the plate), re-anchored every sync.
+        // edge + small gap + half the plate) on the cover's FRONT face — where a reader
+        // facing the book (or a shelf of them) sees it, not halfway back in the deck.
+        // Re-anchored every sync.
         const np = this.nameplate;
         if (np) {
             np.visible = true;
             np.position.set(
                 _coverCenter.x,
                 _coverCenter.y + (_coverSize.y + 2 * c.opts.pad) / 2 + np.height * 0.8,
-                _coverCenter.z);
+                _coverCenter.z + _coverSize.z / 2 + c.opts.zPad);
         }
         this._placeAside(b, c.opts.pad);
         return this;
@@ -928,9 +934,9 @@ export default class Book extends BoundedObject3D {
         const np = this.nameplate;
         if (np && np.visible !== false) {
             // syncCover's placement: centered over the cover, its center 0.8 plate-heights
-            // above the cover's top edge.
+            // above the cover's top edge, on the cover's front face.
             const cy = lb.max.y + pad + np.height * 0.8;
-            const cx = (lb.min.x + lb.max.x) / 2, cz = (lb.min.z + lb.max.z) / 2;
+            const cx = (lb.min.x + lb.max.x) / 2, cz = lb.max.z + zPad;
             _furn.min.set(cx - np.width / 2, cy - np.height / 2, cz);
             _furn.max.set(cx + np.width / 2, cy + np.height / 2, cz);
             b.union(_furn);
@@ -973,7 +979,8 @@ export default class Book extends BoundedObject3D {
 
     /** Where sheet `i` RESTS in the book's local frame — the form IS the slot law.
      *  deck: rank = order · (i − head). The READING deck (rank ≥ 0 — the open sheet
-     *    and those still ahead) sits at z = −rank·zPitch. The TURNED block (rank < 0)
+     *    and those still ahead) sits at z = −rank·zPitch, lifted y = min(rank, riseRows)·rise
+     *    (riseRows 0 = no cap) — each sheet ahead peeks over the one before it. The TURNED block (rank < 0)
      *    is pressed at the deck's back: the first-turned sheet (the far end of the
      *    order: the newest for a recency deck, page 1 for a volume) anchors at
      *    z = −(n−1)·zPitch and each later turn lands turned·zPitch in front of the
@@ -1005,6 +1012,8 @@ export default class Book extends BoundedObject3D {
         out.x = 0; out.y = 0;
         if (rank >= 0) {
             out.z = -rank * pitch;
+            const rows = this.deck.riseRows > 0 ? Math.min(rank, this.deck.riseRows) : rank;
+            out.y = rows * (this.deck.rise || 0);
         } else {
             // Position inside the block, counted from its anchored back: the far end of
             // the reading order is 0 — independent of head, so a block sheet stays put.

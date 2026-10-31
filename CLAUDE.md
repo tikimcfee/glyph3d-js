@@ -300,8 +300,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Gate: `tools/desk-tuning.test.mjs`.
 - **Books** (`collections/Book.js`) — library volumes, agent runs, delta sets: a deck of
   sheets whose one nav state is the head. The open sheet fronts at z = 0, the sheets still
-  ahead recede a pitch each, the sheets turned past lie pressed in a block at the deck's
-  back — the deck's box never depends on the head. A turn CUTS the sheets changing sides
+  ahead recede a pitch each — and RISE a step each (`deck.rise`, the first `riseRows`; agent
+  books `book.deckRise`), so every headline ahead peeks over the page in front like a list
+  row and a run's rhythm reads at a glance — the sheets turned past lie pressed in a block
+  at the deck's back — the deck's box never depends on the head. A turn CUTS the sheets changing sides
   and slides the reading deck at most `books.turnSlide` pitches: nothing flies through the
   deck. Shift+wheel / two-finger drag page through a detent (`app/client/wheelDetent.js`,
   `books.wheel*`); bare `book.*` verbs and the `, . < >` keys page the book in focus

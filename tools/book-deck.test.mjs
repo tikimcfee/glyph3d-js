@@ -201,5 +201,36 @@ function eq6(a, b, m) { ok(a.length === b.length && a.every((v, i) => near(v, b[
     ok(win.parent === shelf, "dispose hands the aside to the book's parent, never disposes it");
 }
 
+// ---- RISE: the reading deck steps up like the rows of a list; the turned block stays flat ----
+{
+    const bk = deck(8);
+    bk.tuneDeck('rise', 10);
+    bk.pageTo(4);                     // recency deck: ranks 0..4 read (sheets 4..0), 5..7 turned
+    for (let f = 0; f < 240; f++) bk.update(1 / 60);
+    const ys = bk.sheets.map((s) => s.node.position.y);
+    eq6(ys, [40, 30, 20, 10, 0, 0, 0, 0], 'each sheet ahead stands one rise above the one in front; turned sheets stay level');
+    bk.tuneDeck('riseRows', 2);
+    for (let f = 0; f < 240; f++) bk.update(1 / 60);
+    eq6(bk.sheets.map((s) => s.node.position.y), [20, 20, 20, 10, 0, 0, 0, 0], 'riseRows caps the steps; the rest stand behind the last');
+    const b = bk.deckBounds();
+    ok(near(b.max.y, 20 + 15, 0.01), `the deck box grows to hold the risen sheets (max.y ${b.max.y})`);
+    bk.tuneDeck('rise', null); bk.tuneDeck('riseRows', null);
+    for (let f = 0; f < 240; f++) bk.update(1 / 60);
+    ok(bk.sheets.every((s) => near(s.node.position.y, 0, 0.06)), 'rise 0 (the default) is a flat deck');
+}
+
+// ---- the NAMEPLATE stands on the cover's FRONT face, not halfway back in the deck ----
+{
+    const bk = deck(5);
+    bk.bindCover({ pad: 2, zPad: 3 });
+    const np = new THREE.Object3D();
+    np.height = 4; np.width = 8;
+    bk.setNameplate(np);
+    const lb = bk.layoutBounds();
+    ok(near(np.position.z, lb.max.z + 3, 1e-6), `the nameplate sits on the cover's front face (z ${np.position.z}, want ${lb.max.z + 3})`);
+    const seat = bk.getSeatBounds();
+    ok(seat.max.z >= np.position.z - 1e-6 && seat.max.y >= np.position.y + 2 - 1e-6, 'the seat box holds the nameplate where it draws');
+}
+
 console.log(`\nbook-deck.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
