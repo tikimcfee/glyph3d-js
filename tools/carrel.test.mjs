@@ -439,5 +439,45 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(uneven.rows <= 3, `uneven widths never spill past the cap (rows ${uneven.rows})`);
 }
 
+// ---- CALM SEATS: a member's seat only grows until the desk re-learns; a claim is taken as given ----
+{
+    const scene = new THREE.Scene();
+    // the hub's form: a natural-seat cylinder, wide enough that the members share one row
+    const c = new Carrel({ name: 'calm', mode: 'ring', seat: 'natural', radius: 200, boxH: 9, gapFrac: 0.5 });
+    scene.add(c);
+    const a = makeGrid(10, 6), b = makeGrid(10, 6);
+    scene.add(a, b);
+    c.lock('a', a, { immediate: true });
+    c.lock('b', b, { immediate: true });
+    settle(c);
+    const at = (g) => g.position.clone();
+    const moved = (p, q) => p.distanceTo(q);
+    const a0 = at(a), b0 = at(b);
+    ok(Math.abs(a0.y - b0.y) < 1e-6 && moved(a0, b0) > 5, 'the two members share one row');
+    a._dims.w = 4; c.refit(); settle(c);
+    ok(moved(at(b), b0) < 1e-9 && moved(at(a), a0) < 1e-9, `a member shrinking keeps its room — nothing moves (b moved ${moved(at(b), b0)})`);
+    a._dims.w = 10; c.refit(); settle(c);
+    ok(moved(at(b), b0) < 1e-9, 'growing back into its room moves nothing either');
+    a._dims.w = 16; c.refit(); settle(c);
+    ok(moved(at(b), b0) > 1, 'growing PAST every size it has had re-packs the row');
+    const b1 = at(b);
+    a._dims.w = 4; c.settle(); settle(c);
+    ok(moved(at(b), b1) > 1, 'settle re-learns: the shrunk member gives its room back');
+    const b2 = at(b);
+    a._dims.w = 16; c.refit(); settle(c);
+    a._dims.w = 4; c.refit(); settle(c);
+    const held = at(b);
+    const g = makeGrid(10, 6); scene.add(g);
+    c.lock('g', g, { immediate: true }); settle(c);
+    c.release('g'); settle(c);
+    ok(moved(held, b2) > 1 && moved(at(b), b2) < 1e-6, `a member joining/leaving re-learns every seat (held off by ${moved(held, b2)}, after ${moved(at(b), b2)})`);
+    // a member that CLAIMS its room is seated by it as given — its shrink is honored at once
+    a.claimsSeat = true;
+    a._dims.w = 16; c.refit(); settle(c);
+    const wide = at(b);
+    a._dims.w = 4; c.refit(); settle(c);
+    ok(moved(at(b), wide) > 1, 'a claimed seat is taken as stated (no grow-only hold)');
+}
+
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

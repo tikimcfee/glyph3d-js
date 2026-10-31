@@ -316,6 +316,14 @@ export default function registerCarrelCommands(router) {
         return { text: `OK: '${id}' sent home from '${owner.carrelName}'`, data: { id, carrel: owner.carrelName } };
     }, { description: 'Send a seated surface home from its carrel', usage: '<id|index>', returns: '{ id, carrel }' });
 
+    router.register('carrel.settle', (args, ctx) => {
+        const carrel = findCarrel(ctx, args[0]);
+        if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
+        carrel.settle();
+        worldTouch(ctx, carrel);
+        return { text: `OK: '${carrel.carrelName}' re-seated from its members' sizes now`, data: { carrel: carrel.carrelName } };
+    }, { description: "Re-seat a desk's members by their sizes now — a seat otherwise only grows (a member shrinking keeps its room until the desk re-learns)", usage: '[name]', returns: '{ carrel }' });
+
     router.register('carrel.list', (_args, ctx) => {
         const map = carrels(ctx);
         if (!map) return { text: 'ERR: carrels not ready', data: null };

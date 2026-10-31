@@ -45,6 +45,14 @@
  * takes its hands off the transform (no relayout placement, no yaw slerp) until
  * the object returns, at which point the next update() re-seats everyone.
  *
+ * CALM SEATS: a member's seat is the room it CLAIMS, not what it draws this frame. A
+ * member that states its room (`claimsSeat` — a reserved Book, a desk) is seated by that
+ * claim as given. Any other member (a code grid, a terminal, an unreserved book) is
+ * seated by the UNION of every box it has measured since the desk last re-learned — a
+ * seat that only grows: content shrinking never pulls its neighbors in, and only growth
+ * past every size it has had re-packs the row. The desk re-learns at its structural
+ * moments — a member joining or leaving, and settle() (`carrel.settle`).
+ *
  * @typedef {Object} CarrelEntry
  * @property {string} id
  * @property {Object} grid - the live Object3D (CodeGrid / TerminalGrid / Book)
@@ -56,6 +64,7 @@
  * @property {number} slot  - dense 0..n-1 display rank, derived from `order`
  * @property {THREE.Quaternion} quatTarget - orientation the member slerps toward
  * @property {boolean} _borrowed - parent observed elsewhere; hands off until it returns
+ * @property {THREE.Box3|null} _seatBox - a non-claiming member's grow-only seat (local frame); null = re-learn
  */
 
 import * as THREE from 'three';
@@ -257,6 +266,7 @@ export class Carrel extends THREE.Object3D {
             slot: this.entries.size, // provisional; _relayout re-ranks by `order` immediately
             quatTarget: new THREE.Quaternion(),
             _borrowed: false,
+            _seatBox: null,
         };
 
         // Reparent preserving world transform — the member stays put this frame,
@@ -265,6 +275,7 @@ export class Carrel extends THREE.Object3D {
         entry.unsubscribeResize = grid.onResize?.(() => this.reflow(id)) ?? null;
 
         this.entries.set(id, entry);
+        this._relearnSeats();   // a member joining is a structural moment — every seat re-learns
         this._relayout();
         // Immediate seating: place the member AT its seat and drop the slide tweens
         // the relayout just issued for it. With expect() holding the wrap stable
@@ -301,6 +312,7 @@ export class Carrel extends THREE.Object3D {
 
         e.unsubscribeResize?.();
         this.entries.delete(id);
+        this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
 
         if (e.grid.parent !== this) {
             this._relayout();
@@ -353,6 +365,7 @@ export class Carrel extends THREE.Object3D {
         if (!e) return null;
         e.unsubscribeResize?.();
         this.entries.delete(id);
+        this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
         this._releasing.delete(id);
         if (e.grid.parent === this) this.animator.cancelAll(e.grid);
         this._relayout();
@@ -372,6 +385,7 @@ export class Carrel extends THREE.Object3D {
 
         e.unsubscribeResize?.();
         this.entries.delete(id);
+        this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
         this._releasing.delete(id);
         this.animator.cancelAll?.(e.grid);
         if (e.grid && e.grid.parent === this) this.remove(e.grid);
@@ -490,17 +504,40 @@ export class Carrel extends THREE.Object3D {
     /** Gap between slots in world units. */
     get _gap() { return this.boxH * this.gapFrac; }
 
-    /** The member's content extent, derived LIVE from the grid. A successful read
-     *  becomes the new fallback, so a TRANSIENT empty read (a book mid-mutation
-     *  between sheets) holds the last-good form instead of flashing the lock-time
-     *  guess — form is continuous even when measurement briefly isn't. */
+    /** The member's SEAT extent (see CALM SEATS): a claiming member's stated room, else
+     *  the union of every box it has measured since the last re-learn — read live, grown,
+     *  never shrunk. A successful read becomes the new fallback, so a TRANSIENT empty read
+     *  (a book mid-mutation between sheets) holds the last-good form instead of flashing
+     *  the lock-time guess — form is continuous even when measurement briefly isn't. */
     _extentOf(e) {
         // A member that knows the room it draws in (a Book: nameplate, tabs, cover) is
         // seated by that; anything else by its content box.
-        const live = extentFromBox(e.grid.getSeatBounds?.() ?? e.grid.getLocalBounds?.());
+        const lb = e.grid.getSeatBounds?.() ?? e.grid.getLocalBounds?.();
+        let box = lb;
+        if (lb && !lb.isEmpty() && !e.grid.claimsSeat) {
+            if (e._seatBox) e._seatBox.union(lb); else e._seatBox = lb.clone();
+            box = e._seatBox;
+        }
+        const live = extentFromBox(box);
         if (live) e._extentFallback = live;
         return live || e._extentFallback;
     }
+
+    /** Forget every grow-only seat — the next layout measures members as they stand. @private */
+    _relearnSeats() {
+        for (const e of this.entries.values()) e._seatBox = null;
+    }
+
+    /** Re-learn every member's seat from its size NOW (a grown-then-shrunk member gives
+     *  its room back) and re-seat — the explicit settle (`carrel.settle`). */
+    settle() {
+        this._relearnSeats();
+        this._relayout();
+        return this;
+    }
+
+    /** A desk states its room: its footprint is what it holds — seated as-is at an outer desk. */
+    get claimsSeat() { return true; }
 
     /** The uniform zoom a member's grid carries (ScaleModel `user`); 1 when absent. The ring
      *  works in RENDERED scale and divides this out of the placement it animates. */

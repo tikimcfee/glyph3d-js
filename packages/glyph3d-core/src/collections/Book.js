@@ -592,6 +592,10 @@ export default class Book extends BoundedObject3D {
     /** True while the frame is the reserve (a reserved, fitted deck) — not the live box. @private */
     get _framed() { return !!(this.reserve && this._fitOpts && this.form === 'deck'); }
 
+    /** A framed book CLAIMS its seat: getSeatBounds is its stated room, so a desk seats it
+     *  as given (an unframed book's seat is grown-only at the desk — Carrel CALM SEATS). */
+    get claimsSeat() { return this._framed; }
+
     /**
      * The book's FRAME (local): what it claims, not what it draws this frame. Reserved
      * and fitted as a deck: the page (or spread) rect around the origin, as deep as its

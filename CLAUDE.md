@@ -264,7 +264,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   room (`Book.setReserve`, at its sheet cap): its frame (`frameBounds` — the spread, the deck
   at the cap, the full rise; set by its settings, never by what's on screen) is what the cover
   wraps, the nameplate (bottom pinned, `book.labelGap` above; its band only grows), tabs and
-  aside anchor to, and the seat measures — sheets landing and pages turning move none of it. Hub desks are `derived` —
+  aside anchor to, and the seat measures — sheets landing and pages turning move none of it.
+  Seats are CALM (`Carrel`): a member that claims its room (`claimsSeat` — a framed book, a
+  desk) is seated as stated; any other (a grid, a terminal) by a seat that only GROWS (the
+  union of its sizes), so a shrink never pulls its neighbors in. A desk re-learns its seats
+  when a member joins or leaves, or on `carrel.settle [name]`. Hub desks are `derived` —
   rebuilt from the tree, never saved — yet a value set on one is its own and comes back with it
   (per-instance knobs, below). Status rides `lane.meta.gomux` (the agent's own status wins
   over what a live batch did to the book). The relay names a claude agent's session by its
