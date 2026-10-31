@@ -17,7 +17,8 @@
  * @property {string} createdAt       RFC3339 UTC
  * @property {boolean} live           not cleaned up
  * @property {boolean} attached       its tmux session exists now
- * @property {string} [status]        idle|processing|waiting|error|exited|unknown
+ * @property {string} [status]        idle|processing|waiting|error|ended|unknown (gomuxai's `agent statuses`)
+ * @property {string} [endReason]     with ended: quit|gone|replaced|finished|parent|closed
  * @property {string} [event] @property {string} [detail] @property {string} [tool]
  * @property {string} [toolInput]     a pending permission prompt's full call
  * @property {string} [statusAt]

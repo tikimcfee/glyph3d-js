@@ -220,8 +220,8 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   the real AgentSessionProvider over a fake bridge playing the relay (agentSessions/list|changed,
   agentEvents/read|follow|unfollow, agentEvents/lines|ended), real AgentBooks, Carrel, Holding,
   SessionBooks, GomuxHub, SessionDesk, agent.open and SessionStore. Open = a tail read (doubled
-  to the cap) → hydrate → follow from the last `at` (only a session that isn't exited — the hub's
-  departed agents and exited local sessions open as records; a status turning live follows,
+  to the cap) → hydrate → follow from the last `at` (only a session that hasn't ended — the hub's
+  departed agents and ended local sessions open as records; a status turning live follows,
   exiting unfollows); live lines append, a result update rebuilds its sheet in place, lines that
   beat the follow's {ok} are taken; every follow drops the provisional replies (the open's
   included); ended (code -1 too) says "not live" on the book and re-follows from the last
@@ -242,7 +242,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   provisional reply, routing by agent id, ended keeping provisionals, delta tap on pending
   calls, follow from the start, clear still following, desk rebuild every push, no teams, batch
   status winning, no overlap read, orphans dropped (window / followed / older window) or never
-  adopted, page back reading the whole prefix, failed page re-read, no book cap, exited sessions
+  adopted, page back reading the whole prefix, failed page re-read, no book cap, ended sessions
   followed, subagent into the agent's book, open never retried, reconnect skipping stuck opens,
   close unfollowing only when live, silent notices). The relay side is `cd cli && go test -run Gomux` (export's tree) and
   `go test -run 'AgentEvents|TailFrom|Children'` (the event wire, tail math, child cleanup).

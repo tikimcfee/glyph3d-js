@@ -58,7 +58,8 @@ type gomuxAgent struct {
 	Run       int64  `json:"run,omitempty"`       // spawn id within its store (two runs of one name)
 	Live      bool   `json:"live"`                // not cleaned up
 	Attached  bool   `json:"attached"`            // its tmux session exists right now
-	Status    string `json:"status,omitempty"`    // idle|processing|waiting|error|exited|unknown
+	Status    string `json:"status,omitempty"`    // idle|processing|waiting|error|ended|unknown (agent statuses)
+	EndReason string `json:"endReason,omitempty"` // with ended: quit|gone|replaced|finished|parent|closed
 	Event     string `json:"event,omitempty"`     // last hook event (PostToolUse, Stop, …)
 	Detail    string `json:"detail,omitempty"`    // e.g. "Bash: rg foo"
 	Tool      string `json:"tool,omitempty"`      // tool in flight
@@ -94,6 +95,7 @@ type exportAgent struct {
 	Live            bool   `json:"live"`
 	Attached        bool   `json:"attached"`
 	Status          string `json:"status"`
+	EndReason       string `json:"end_reason"`
 	Event           string `json:"event"`
 	Detail          string `json:"detail"`
 	Tool            string `json:"tool"`
@@ -349,12 +351,14 @@ func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
 	n := gomuxAgent{
 		Name: a.Name, Host: a.Host, Parent: a.Parent, Backend: a.Backend, Session: a.Session,
 		DataDir: a.Store, Cwd: a.Cwd, CreatedAt: a.CreatedAt, EndedAt: a.EndedAt, Run: a.Run,
-		Live: a.Live, Attached: a.Attached, Status: a.Status, Event: a.Event, Detail: a.Detail,
+		Live: a.Live, Attached: a.Attached, Status: a.Status, EndReason: a.EndReason, Event: a.Event, Detail: a.Detail,
 		Tool: a.Tool, ToolInput: a.ToolInput, StatusAt: a.StatusAt, SessionID: a.SessionID,
 		Transcript: a.Transcript, Harness: a.Dialect, TranscriptSize: a.TranscriptSize,
 	}
 	if !a.Live && n.Status == "" {
-		n.Status = "exited"
+		// gomuxai's export says ended (closed) for a departed agent; one from a store
+		// that predates it says nothing.
+		n.Status, n.EndReason = "ended", "closed"
 	}
 	if t := parseTime(a.TranscriptMtime); !t.IsZero() {
 		n.TranscriptMtime = t.UnixMilli()

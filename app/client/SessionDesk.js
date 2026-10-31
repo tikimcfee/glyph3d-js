@@ -16,7 +16,7 @@ import { getSetting } from './settings.js';
  * error) or were written within `gomux.historyHours` — the newest `agents.maxBooks` of them
  * (default 24; the list is newest first) — get a book of their own (lane id = the session
  * id), opened through SessionBooks: tail read, hydrate, and a FOLLOW only while the session
- * isn't exited (a follower is a relay process and the relay caps them; a book whose session
+ * hasn't ended (a follower is a relay process and the relay caps them; a book whose session
  * ends stops following, one whose session comes back follows again). Older sessions open on
  * demand (agent.open, the Agents panel's archive, a saved book's restore) and are seated here
  * too, outside the cap — a workgroup's session (a hub agent's subagent) excepted: it sits at
@@ -38,12 +38,12 @@ export const AGENTS_DESK = 'agents';
  *  when the harness can't be asked — the history window decides those). */
 const LIVE = new Set(['idle', 'processing', 'waiting', 'error']);
 
-/** Whether a session with this status wants a follower: anything but exited (`unknown` may
+/** Whether a session with this status wants a follower: anything but ended (`unknown` may
  *  be running — an agy conversation held open, a Kimi session written lately). */
-export const followable = (status) => status !== 'exited';
+export const followable = (status) => status !== 'ended';
 
 /** Session status → the book's lifecycle (the hub's table). */
-export const LIFECYCLE = { processing: 'active', waiting: 'active', idle: 'idle', error: 'stalled', exited: 'done', unknown: 'idle' };
+export const LIFECYCLE = { processing: 'active', waiting: 'active', idle: 'idle', error: 'stalled', ended: 'done', unknown: 'idle' };
 
 export default class SessionDesk {
     /**

@@ -34,7 +34,7 @@ export const PROMPT_ORIGINS = Object.freeze({
     delivered: 'delivered',             // gomuxai's held delivery (its text names the sender)
     'task-notification': 'notification', // the harness: a background task finished
     peer: 'peer',                       // another agent (a subagent's task is its parent's words)
-    command: 'command',                 // a slash command
+    command: 'command',                 // a slash command, or a shell escape (`! cmd`, command "!")
     system: 'harness',                  // hook context the harness injected
 });
 

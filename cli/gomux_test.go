@@ -80,8 +80,8 @@ func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
 		c.TranscriptMtime != time.Date(2026, 10, 25, 1, 30, 0, 5e8, time.UTC).UnixMilli() {
 		t.Errorf("coord = %+v", c)
 	}
-	if o := got["old"]; o.Live || o.Status != "exited" || o.Harness != "agy" || o.Transcript != "/etc/passwd" || o.EndedAt == "" {
-		t.Errorf("old = %+v (departed: exited; export's transcript passes through)", o)
+	if o := got["old"]; o.Live || o.Status != "ended" || o.EndReason != "closed" || o.Harness != "agy" || o.Transcript != "/etc/passwd" || o.EndedAt == "" {
+		t.Errorf("old = %+v (departed: ended (closed); export's transcript passes through)", o)
 	}
 	if s.Agents[0].Name != "old" || len(pushes) != 1 || len(s.Dirs) != 1 {
 		t.Errorf("order/pushes/dirs: %v %d %v", s.Agents, len(pushes), s.Dirs)

@@ -595,7 +595,7 @@ func TestAgentEvents_ReadWindows(t *testing.T) {
 
 // gomuxai lists a running session with its transcript's path before the harness writes
 // the file: reading it answers empty (nothing ran, nothing to hydrate) until the file
-// appears, by the session's status — a missing transcript of an exited session, or of one
+// appears, by the session's status — a missing transcript of an ended session, or of one
 // the list gives no status, is still an error.
 func TestAgentEvents_ReadUnwrittenTranscript(t *testing.T) {
 	f := newAgentFixture(t)
@@ -603,7 +603,7 @@ func TestAgentEvents_ReadUnwrittenTranscript(t *testing.T) {
 	f.setSessions(t,
 		map[string]any{"session_id": "fresh", "path": path("fresh"), "status": "idle"},
 		map[string]any{"session_id": "unsure", "path": path("unsure"), "status": "unknown"},
-		map[string]any{"session_id": "gone", "path": path("gone"), "status": "exited"},
+		map[string]any{"session_id": "gone", "path": path("gone"), "status": "ended"},
 		map[string]any{"session_id": "bare", "path": path("bare")},
 	)
 	i64 := func(v int64) *int64 { return &v }

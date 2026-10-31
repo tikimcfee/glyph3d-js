@@ -629,18 +629,18 @@ export default class SessionStore {
         console.warn('[session] agent restore failed:', a?.session, e?.message || e);
       }
     };
-    // AGING: a saved book whose session has exited and was last written before the history
+    // AGING: a saved book whose session has ended and was last written before the history
     // window (gomux.historyHours — the window the desks open books by) stays closed, unless
     // you pinned it or gave it values of its own; the Agents panel's history still opens it.
-    // `exited` here is the SESSION's status (no CLI holds it), not a gomuxai agent's.
+    // `ended` here is the SESSION's status (no CLI holds it), not a gomuxai agent's.
     const hours = Number(getSetting('gomux.historyHours'));
     const since = Number.isFinite(hours) && hours > 0 ? Date.now() - hours * 3600e3 : -Infinity;
     const kept = (a) => {
       const s = typeof a?.session === 'string' ? sessions.get(a.session) : null;
-      if (!s || s.status !== 'exited' || !(Date.parse(s.mtime) < since)) return true;
+      if (!s || s.status !== 'ended' || !(Date.parse(s.mtime) < since)) return true;
       const own = a.pinned || a.limit != null
         || Object.keys(tuneOf(this.ctx, `agent:book:${laneForSession(s)}`)).length > 0;
-      if (!own) console.info('[session] agent book aged out (exited, outside the history window):', a.session);
+      if (!own) console.info('[session] agent book aged out (ended, outside the history window):', a.session);
       return own;
     };
     // Parents before their subagents: a session's book opens before the books of the sessions

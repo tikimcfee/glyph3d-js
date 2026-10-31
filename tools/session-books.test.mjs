@@ -22,7 +22,7 @@
 //     doesn't reopen it; agent.open opens an older session (by prefix; a workgroup agent by
 //     its name) and the desk seats it;
 //   - restore reopens saved books through the same path (limit, head), parents before their
-//     subagents; an exited session past the history window stays closed unless pinned or
+//     subagents; an ended session past the history window stays closed unless pinned or
 //     tuned; capture saves them by session, never the hub's;
 //   - a team whose helpers' books all close folds its desk; a workgroup's subagent opened from
 //     history sits on its agent's team desk at the hub, never at the agents desk;
@@ -283,9 +283,9 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const L1 = w.relay.add(session('L1-aaaa', { status: 'idle' }), [say(0, 'main'), say(1, 'more')]);
     const SUB = w.relay.add(session('agent-x1', { status: 'unknown', parent_session: { session_id: 'L1-aaaa' }, title: 'helper' }),
         [{ ...say(0, 'sub work'), agent: 'x1' }]);
-    const OLD = w.relay.add(session('0ld5e55-1on', { status: 'exited', mtime: ago(72) }), [say(0, 'long ago'), say(1, 'still')]);
+    const OLD = w.relay.add(session('0ld5e55-1on', { status: 'ended', mtime: ago(72) }), [say(0, 'long ago'), say(1, 'still')]);
     const WG = w.relay.add(session('W1', { workgroup: { name: 'builder' }, status: 'processing' }), [say(0, 'wg')]);
-    const RECENT = w.relay.add(session('R1', { status: 'exited', mtime: ago(1) }), [say(0, 'recent')]);
+    const RECENT = w.relay.add(session('R1', { status: 'ended', mtime: ago(1) }), [say(0, 'recent')]);
     w.relay.list([L1, SUB, OLD, WG, RECENT]);
     await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
     eq([...w.books.lanes.keys()].sort(), ['L1-aaaa', 'R1', 'agent-x1'], 'live + recently written local sessions get books, under their session ids');
@@ -294,7 +294,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     eq([holderName(w, 'L1-aaaa'), holderName(w, 'agent-x1'), holderName(w, 'R1')], ['agents/L1-aaaa', 'agents/L1-aaaa', AGENTS_DESK],
         "a session with a subagent sits on its own team desk with it; the others at the agents desk");
     ok(w.ctx.carrels.get('agents/L1-aaaa')?.title?.text === 'title L1-aaaa · 1 helper', 'the team desk wears `<name> · N helpers`');
-    ok(w.books.lanes.get('L1-aaaa').state === 'idle' && w.books.lanes.get('R1').state === 'done', 'session status → lifecycle (idle; exited → done)');
+    ok(w.books.lanes.get('L1-aaaa').state === 'idle' && w.books.lanes.get('R1').state === 'done', 'session status → lifecycle (idle; ended → done)');
 
     let layouts = 0;
     const inner = desk.tree.layout.bind(desk.tree);
@@ -314,11 +314,11 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const r = await w.run('agent.open', '0ld5e55', '1');
     ok(/^OK: opened 0ld5e55-1on as 0ld5e55-1on/.test(r.text), `agent.open by prefix (${r.text})`);
     ok(holderName(w, '0ld5e55-1on') === AGENTS_DESK && w.books.lanes.get('0ld5e55-1on').maxSheets === 1, 'seated at the agents desk, with its limit as the cap');
-    ok(follows(w, '0ld5e55-1on').length === 0 && /not followed/.test(r.text), 'an exited session opens as its record: no follower');
+    ok(follows(w, '0ld5e55-1on').length === 0 && /not followed/.test(r.text), 'an ended session opens as its record: no follower');
     w.relay.list([L1, SUB, { ...OLD, status: 'idle' }, WG, { ...RECENT, size: 5 }]);
     await tick();
     eq(follows(w, '0ld5e55-1on'), [{ session: '0ld5e55-1on', from: LINE }], 'its status turning live: it follows, from its last `at`');
-    w.relay.list([L1, SUB, { ...OLD, status: 'exited' }, WG, { ...RECENT, size: 5 }]);
+    w.relay.list([L1, SUB, { ...OLD, status: 'ended' }, WG, { ...RECENT, size: 5 }]);
     ok(w.relay.calls.filter((c) => c.method === 'agentEvents/unfollow' && c.params.session === '0ld5e55-1on').length === 1
         && !w.sb.streams.get('0ld5e55-1on').wantLive, 'and exiting again: it stops following (the follower freed)');
     // A workgroup agent's subagent carries the parent's workgroup name: its own book, never the agent's.
@@ -354,7 +354,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     await ss._restoreAgents({ agents: [{ session: '0ld5e55-1on', limit: 3, following: false, head: 0 }, { session: 'vanished', following: true }] });
     const lane = w2.books.lanes.get('0ld5e55-1on');
     ok(lane && ids(lane).length === 3 && lane.maxSheets === 3 && lane.book.head === 0, 'restore reopens a saved book through the open path (limit, head)');
-    ok(follows(w2, '0ld5e55-1on').length === 0, 'an exited session restores as its record: no follower');
+    ok(follows(w2, '0ld5e55-1on').length === 0, 'an ended session restores as its record: no follower');
     ok(!ss._failedSections.has('agents'), 'a vanished session stays closed without quarantining the section');
     const w3 = makeWorld();
     w3.ctx.sessionProvider.list = async () => { throw new Error('relay gone'); };
@@ -375,7 +375,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     ok(saved.agents.length === 0, "capture skips the hub's books");
     // a departed agent's book is its record: no follower; one that comes back follows
     w.relay.add(session('H2', { workgroup: { name: 'gone' } }), [say(0, 'y')]);
-    const gone = { name: 'gone', parent: '', sessionId: 'H2', harness: 'claude', live: false, status: 'exited', createdAt: new Date().toISOString() };
+    const gone = { name: 'gone', parent: '', sessionId: 'H2', harness: 'claude', live: false, status: 'ended', createdAt: new Date().toISOString() };
     const lead = { name: 'lead', parent: '', sessionId: 'H1', harness: 'claude', live: true, status: 'idle', createdAt: new Date().toISOString() };
     hub.apply({ gen: 2, dirs: [], agents: [lead, gone] });
     await opened(w, 'H2');
@@ -396,7 +396,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     w.books.cfg.historyOverlapBytes = LINE;
     w.books.cfg.historySliceBytes = 4 * LINE;
     w.books.cfg.historyTurns = 4;
-    w.relay.add(session('F1', { status: 'exited' }), evs);
+    w.relay.add(session('F1', { status: 'ended' }), evs);
     await w.sb.open('F1', { follow: false });
     const lane = w.books.lanes.get('F1');
     ok(lane.orphans?.get('tool-1')?.status === 'ok', 'the tail read holds the far result as an orphan (its call isn\'t in the window)');
@@ -435,7 +435,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     w4.books.cfg.historyTurns = 4;
     const longer = [...evs];
     for (let k = 44; k < 80; k++) longer.push(say(k, `s${k}`));
-    w4.relay.add(session('F4', { status: 'exited' }), longer);
+    w4.relay.add(session('F4', { status: 'ended' }), longer);
     await w4.sb.open('F4', { follow: false });
     const l4 = w4.books.lanes.get('F4');
     ok(!l4.orphans?.has('tool-1'), 'the tail holds neither the call nor its result');
@@ -446,7 +446,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
 
     // (c) a call the cap leaves out of the open's window keeps that window's fold
     const w3 = makeWorld();
-    w3.relay.add(session('F3', { status: 'exited' }), [say(0, 'a'), bash(1, 'make'), bash(1, 'make', { status: 'ok', output: 'built' }, 'update', 2 * LINE),
+    w3.relay.add(session('F3', { status: 'ended' }), [say(0, 'a'), bash(1, 'make'), bash(1, 'make', { status: 'ok', output: 'built' }, 'update', 2 * LINE),
         say(3, 'b'), say(4, 'c'), say(5, 'd'), say(6, 'e')]);
     w3.books.cfg.tailReadBytes = 100 * LINE;
     await w3.sb.open('F3', { follow: false });
@@ -460,7 +460,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const w = makeWorld();
     setSetting(w.ctx, 'agents.maxBooks', 2);
     const desk = new SessionDesk(w.ctx, w.ctx.sessionProvider, w.sb);
-    const ss = ['A', 'B', 'C', 'D'].map((id) => w.relay.add(session(id, { status: id === 'D' ? 'exited' : 'idle' }), [say(0, id)]));
+    const ss = ['A', 'B', 'C', 'D'].map((id) => w.relay.add(session(id, { status: id === 'D' ? 'ended' : 'idle' }), [say(0, id)]));
     w.relay.list(ss);
     await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
     eq([...w.books.lanes.keys()], ['A', 'B'], 'agents.maxBooks: the newest N local sessions get books, no more');
@@ -492,7 +492,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const wp = makeWorld();
     const pev = [];
     for (let k = 0; k < 12; k++) pev.push(say(k, `p${k}`));
-    wp.relay.add(session('PB', { status: 'exited' }), pev);
+    wp.relay.add(session('PB', { status: 'ended' }), pev);
     await wp.sb.open('PB', { follow: false });
     const pl = wp.books.lanes.get('PB');
     wp.relay.onRpc = (m) => (m === 'agentEvents/read' ? Promise.reject(new Error('output over 64 MB')) : undefined);
@@ -571,7 +571,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const hdesk = new SessionDesk(h.ctx, h.ctx.sessionProvider, h.sb);
     h.ctx.sessionDesk = hdesk;
     const W1 = h.relay.add(session('W1', { workgroup: { name: 'builder' }, status: 'processing' }), [say(0, 'wg')]);
-    const WSUB = h.relay.add(session('agent-wsub', { workgroup: { name: 'builder' }, parent_session: { session_id: 'W1' }, status: 'exited', mtime: ago(72) }),
+    const WSUB = h.relay.add(session('agent-wsub', { workgroup: { name: 'builder' }, parent_session: { session_id: 'W1' }, status: 'ended', mtime: ago(72) }),
         [say(0, 'wg helper')]);
     const hub = new GomuxHub(h.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, h.sb);
     h.ctx.gomuxHub = hub;
@@ -591,12 +591,12 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     hub.dispose();
     hdesk.dispose();
 
-    // (c) restore: an exited session outside the history window stays closed unless pinned or
+    // (c) restore: an ended session outside the history window stays closed unless pinned or
     //     given values of its own; parents open before their subagents
     const r = makeWorld();
-    const STALE = r.relay.add(session('stale', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
-    const PINNED = r.relay.add(session('pinned', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
-    const TUNED = r.relay.add(session('tuned', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
+    const STALE = r.relay.add(session('stale', { status: 'ended', mtime: ago(72) }), [say(0, 'old')]);
+    const PINNED = r.relay.add(session('pinned', { status: 'ended', mtime: ago(72) }), [say(0, 'old')]);
+    const TUNED = r.relay.add(session('tuned', { status: 'ended', mtime: ago(72) }), [say(0, 'old')]);
     const IDLE = r.relay.add(session('idle-old', { status: 'idle', mtime: ago(72) }), [say(0, 'old but live')]);
     const PARENT = r.relay.add(session('parent', { status: 'idle' }), [say(0, 'p')]);
     const CHILD = r.relay.add(session('child', { status: 'idle', parent_session: { session_id: 'parent' } }), [say(0, 'c')]);
@@ -607,7 +607,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
         session: s, following: true, ...(s === 'pinned' ? { pinned: [1, 2, 3] } : {}),
     })) });
     eq([...r.books.lanes.keys()].sort(), ['child', 'idle-old', 'parent', 'pinned', 'tuned'],
-        'restore: an exited session past the history window ages out; pinned, tuned and live ones reopen');
+        'restore: an ended session past the history window ages out; pinned, tuned and live ones reopen');
     const firstRead = (sid) => r.relay.calls.findIndex((c) => c.method === 'agentEvents/read' && c.params.session === sid);
     ok(firstRead('parent') >= 0 && firstRead('parent') < firstRead('child'), 'the parent\'s book opens before its subagent\'s, saved order aside');
     ok(!rs._failedSections.has('agents'), 'an aged-out book is a clean skip, not a failure');

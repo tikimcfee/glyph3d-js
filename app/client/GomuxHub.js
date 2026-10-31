@@ -42,7 +42,8 @@ import { getSetting } from './settings.js';
  *
  * Status rides the lane: `lane.meta.gomux` is the agent's node (status/detail/tool/…),
  * its lifecycle maps onto the book's (processing → active, idle → idle, error → stalled,
- * exited or cleaned up → done), and `waiting` (blocked on a person) raises the book's hand.
+ * ended → done, whatever its end reason: quit, gone, replaced, closed by cleanup…), and
+ * `waiting` (blocked on a person) raises the book's hand.
  * The agent's own status wins over what a live batch did to the book.
  *
  * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
@@ -171,7 +172,7 @@ export default class GomuxHub {
 
     /** Whether an agent runs now — its book follows only then. @private */
     _runs(a) {
-        return !!a.live && a.status !== 'exited';
+        return !!a.live && a.status !== 'ended';
     }
 
     /** SessionBooks' events for the hub's books: once open, status + screen; after a live
@@ -278,7 +279,8 @@ export default class GomuxHub {
         if (!lane || this.phase(a.name) === 'opening') return;
         const g = {
             name: a.name, parent: a.parent, backend: a.backend, session: a.session,
-            status: a.live ? (a.status || 'unknown') : 'exited', detail: a.detail || '', tool: a.tool || '',
+            status: a.live ? (a.status || 'unknown') : 'ended', endReason: a.endReason || (a.live ? '' : 'closed'),
+            detail: a.detail || '', tool: a.tool || '',
             live: a.live, attached: a.attached, statusAt: a.statusAt || null,
         };
         this.sessionBooks.setLive(this.lanes.get(a.name)?.session, this._runs(a));

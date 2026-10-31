@@ -24,7 +24,8 @@
  * @property {string} [cwd] @property {string} [project] @property {string} [title]
  * @property {string} [agent_name] @property {string} [model]
  * @property {{name:string, parent?:string, store?:string, host?:string}|null} workgroup
- * @property {string} status  idle|processing|waiting|error|exited|unknown
+ * @property {string} status  idle|processing|waiting|error|ended|unknown (gomuxai's `agent statuses`)
+ * @property {string} [end_reason]  with ended: quit|gone|replaced|finished|parent|closed
  * @property {string} [status_at]
  * @property {{session_id:string, tool_id?:string}} [parent_session]  set on a subagent's session
  * @property {string} [continued_in]

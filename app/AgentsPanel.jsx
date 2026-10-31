@@ -41,7 +41,7 @@ function phaseOf(status, beacon) {
     if (beacon || status === 'waiting') return 'waiting';
     if (status === 'processing' || status === 'active') return 'working';
     if (status === 'error' || status === 'stalled') return 'error';
-    if (status === 'exited' || status === 'done') return 'done';
+    if (status === 'ended' || status === 'done') return 'done';
     return 'idle';
 }
 
@@ -162,11 +162,18 @@ const sessionText = (s) => [sessionName(s), s.session_id, s.project, s.cwd, s.wo
 /** History rows drawn at once — the filter narrows the rest. */
 const HISTORY_ROWS = 150;
 
-/** @param {{ a: Object, depth: number, selected: boolean, onSelect: Function, onClose: Function }} props */
-function BookRow({ a, depth, selected, onSelect, onClose }) {
+/** How a book's session ended, as gomuxai says it (`agent statuses`): the hub agent's node,
+ *  else the agents desk's session row. */
+function endReasonOf(ctx, a) {
+    return ctx?.gomuxHub?.nodes.get(a.id)?.endReason || ctx?.sessionDesk?.sessions.get(a.id)?.end_reason || '';
+}
+
+/** @param {{ a: Object, depth: number, selected: boolean, endReason: string, onSelect: Function, onClose: Function }} props */
+function BookRow({ a, depth, selected, endReason, onSelect, onClose }) {
     const [hover, setHover] = useState(false);
     const phase = phaseOf(a.status, a.beacon);
     const lamp = LAMP[phase];
+    const word = phase === 'done' && endReason ? `ended · ${endReason}` : lamp.word;
     const beacon = a.beacon && a.beacon !== 'waiting' ? a.beacon : 'needs you';
     const sub = a.notice ? { text: a.notice, color: '#e8908a' }
         : phase === 'waiting' ? { text: beacon, color: '#f2a25c' }
@@ -181,7 +188,7 @@ function BookRow({ a, depth, selected, onSelect, onClose }) {
                 <span style={S.lamp(lamp.color, phase === 'done')} />
                 <span style={S.name(phase === 'done')}>{a.name}</span>
                 {a.type && a.type !== 'claude' && <span style={S.tag}>{a.type}</span>}
-                <span style={S.word(lamp.color)}>{lamp.word}</span>
+                <span style={S.word(lamp.color)}>{word}</span>
                 <span style={S.age}>{wallAgo(a.wallTs)}</span>
                 <span style={S.x(hover || selected)} title={`Close this book (agent.clear ${a.id})`}
                     onClick={(e) => { e.stopPropagation(); onClose(a.id); }}>✕</span>
@@ -197,7 +204,7 @@ function SessionRow({ s, opening, onOpen }) {
     const lamp = LAMP[phase];
     return (
         <div style={S.row(false, false, 0)} onClick={() => !opening && onOpen(s)}
-            title={`${s.session_id}${s.cwd ? '\n' + s.cwd : ''}\n${s.status || ''} — open as a book (agent.open)`}>
+            title={`${s.session_id}${s.cwd ? '\n' + s.cwd : ''}\n${s.status || ''}${s.end_reason ? ` (${s.end_reason})` : ''} — open as a book (agent.open)`}>
             <div style={S.line}>
                 <span style={S.lamp(lamp.color, phase === 'done')} />
                 <span style={S.name(true)}>{sessionName(s)}</span>
@@ -305,7 +312,7 @@ export default function AgentsPanel({ client }) {
         </div>
     );
     const bookRows = (rows) => rows.map(({ a, depth }) => (
-        <BookRow key={a.id} a={a} depth={depth} selected={a.id === selected} onSelect={select} onClose={close} />
+        <BookRow key={a.id} a={a} depth={depth} selected={a.id === selected} endReason={endReasonOf(ctx, a)} onSelect={select} onClose={close} />
     ));
 
     return (

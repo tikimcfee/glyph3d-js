@@ -552,6 +552,7 @@ type sessionShape struct {
 	Title         string          `json:"title"`
 	AgentName     string          `json:"agent_name"`
 	Status        string          `json:"status"`
+	EndReason     string          `json:"end_reason"`
 	Workgroup     json.RawMessage `json:"workgroup"`
 	ParentSession json.RawMessage `json:"parent_session"`
 	ContinuedIn   string          `json:"continued_in"`
@@ -616,14 +617,14 @@ func (a *AgentEvents) List(ctx context.Context) (agentSessionsList, error) {
 // sessionRef is what resolveSession reads of a listed session.
 type sessionRef struct {
 	id, path, workgroup string
-	status              string // gomuxai's: idle|processing|waiting|error|exited|unknown
+	status              string // gomuxai's: idle|processing|waiting|error|ended|unknown
 	sub                 bool   // a subagent's session (parent_session set)
 }
 
-// runs: the list says the session hasn't exited. gomuxai lists a running session with
+// runs: the list says the session hasn't ended. gomuxai lists a running session with
 // its transcript's path before the harness writes the file (Claude creates it at the
-// first prompt); only "exited" says it's gone, so "unknown" runs and no status doesn't.
-func (r sessionRef) runs() bool { return r.status != "" && r.status != "exited" }
+// first prompt); only "ended" says it's over, so "unknown" runs and no status doesn't.
+func (r sessionRef) runs() bool { return r.status != "" && r.status != "ended" }
 
 // errSessionMiss: no listed session answers to the name (asking again may help;
 // an ambiguous name is a different error, which asking again won't fix).
@@ -720,7 +721,7 @@ type agentEventsReadResult struct {
 // (resolveSession). The window ends at the size it saw, or `until` if lower; `tail: N`
 // starts it at the first line start at or after end-N (see tailFrom) — with `until`, the
 // last ~N bytes before it. A running session whose transcript isn't written yet reads as
-// empty (no lines, size 0); a missing transcript of an exited one is an error.
+// empty (no lines, size 0); a missing transcript of an ended one is an error.
 func (a *AgentEvents) Read(ctx context.Context, p agentEventsReadParams) (agentEventsReadResult, error) {
 	ref, err := a.resolveSession(ctx, p.Session)
 	if err != nil {

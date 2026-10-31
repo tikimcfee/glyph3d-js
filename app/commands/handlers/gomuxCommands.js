@@ -30,6 +30,13 @@ const ago = (iso) => {
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
+/** An agent's status as gomuxai words it: `ended (quit)` for an end (`agent statuses`). */
+function statusWords(a) {
+    const status = a.live ? (a.status || 'unknown') : 'ended';
+    const reason = a.endReason || (a.live ? '' : 'closed');
+    return status === 'ended' && reason ? `ended (${reason})` : status;
+}
+
 export default function registerGomuxCommands(router) {
     router.register('gomux.list', (_args, ctx) => {
         const hub = ctx.gomuxHub;
@@ -37,8 +44,8 @@ export default function registerGomuxCommands(router) {
         if (!hub.snapshot) return { text: 'gomuxai: no tree yet (relay offline, or no stores found)', data: { agents: [] } };
         const rows = hub.rows();
         const lines = rows.map(({ depth, agent: a, shown, book }) => {
-            const status = a.live ? (a.status || 'unknown') : 'exited';
-            const bits = [status.padEnd(10), (a.detail || '').slice(0, 72)];
+            const status = statusWords(a);
+            const bits = [status.padEnd(16), (a.detail || '').slice(0, 72)];
             const tags = [!shown && 'hidden', book && `book:${book}`, a.attached && 'tmux'].filter(Boolean).join(' ');
             return `${'  '.repeat(depth)}${a.name.padEnd(Math.max(1, 22 - depth * 2))} ${bits.join(' ')}${tags ? `  [${tags}]` : ''}  ${ago(a.statusAt || a.createdAt)}`;
         });
@@ -57,7 +64,7 @@ export default function registerGomuxCommands(router) {
         const a = hub.snapshot?.agents.find((x) => x.name === name);
         if (!a) return { text: `ERR: no gomuxai agent '${name}'`, data: null };
         const lines = [
-            `${a.name}  ${a.live ? (a.status || 'unknown') : 'exited'}${a.attached ? '  (tmux ' + a.session + ')' : ''}`,
+            `${a.name}  ${statusWords(a)}${a.attached ? '  (tmux ' + a.session + ')' : ''}`,
             a.parent ? `parent   ${a.parent}` : 'parent   (a person)',
             `backend  ${a.backend}${a.harness ? ' · ' + a.harness : ''}`,
             a.cwd && `cwd      ${a.cwd}`,

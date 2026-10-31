@@ -112,7 +112,7 @@ is a queued-reload recovery:
 Agent sessions and their events ride relay↔display JSON-RPC (`cli/agentevents.go`), the
 relay moving gomuxai's lines without reading them: `agentSessions/list` (the latest
 `agent sessions --json`, re-run while a display is connected) and the `agentSessions/changed`
-push, sent only when a session appears or leaves or a field a display shows changes (status,
+push, sent only when a session appears or leaves or a field a display shows changes (status and end reason,
 title, workgroup, parent, agent name, harness, cwd/project) — size/mtime/status_at ride the
 next push and the list. Follow and read name a session through ONE resolver over that list
 (exact session_id, exact path, a workgroup agent's name = its newest non-subagent session, a
@@ -127,7 +127,7 @@ on that plane as long as the display stays, behind the lines queued before it �
 always learns. Followers' stderr lands in the relay log as `[agent-transcript]`.
 `agentEvents/read {session, from?, until?, tail?}` → `{lines, size}` is a bounded one-shot
 ending at min(until, size) (a running session's not-yet-written transcript reads as
-`{lines: [], size: 0}`; an exited one's missing file is an error); `tail` (not with `from`) starts at the first line start at/after
+`{lines: [], size: 0}`; an ended one's missing file is an error); `tail` (not with `from`) starts at the first line start at/after
 `end - tail` (`--from` the line before), so `{until, tail}` pages back without the prefix.
 
 The LOAD FLOW self-reports: every load runs a staged trace (`[load]` console lines →
@@ -227,7 +227,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `file` text — what the call read, or the file as it left it — else reads its target joined
   to the session's cwd, and a refused read says why on the page); paging back reads
   `read {until, tail}` windows before each oldest `at`. A FOLLOW only while the session runs
-  (not exited — a follower is a relay process, and the relay caps them; `setLive` as the status
+  (not ended — a follower is a relay process, and the relay caps them; `setLive` as the status
   moves); every follow drops the book's provisional replies first, and `agentEvents/ended` (or a
   reconnect) re-follows from the last `at`, backing off. A result far from its call (a
   background call's, megabytes on) is read or followed BEFORE its call: the lane holds it as an
@@ -244,7 +244,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   there too — a workgroup's subagent (a hub agent's, opened from history) sits on its agent's
   team desk at the hub instead; a book you clear stays closed, and a team desk whose helpers'
   books have all closed folds. Restore reopens saved books (by session) through the same path,
-  parents before subagents; a session that exited before the `gomux.historyHours` window stays
+  parents before subagents; a session that ended before the `gomux.historyHours` window stays
   closed unless its book was pinned or tuned (the Agents panel's history opens it). Gates: `tools/session-books.test.mjs`, `tools/agent-events.test.mjs`.
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
