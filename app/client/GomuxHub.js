@@ -92,6 +92,7 @@ export default class GomuxHub {
         this._off = provider.onChange((snap) => this.apply(snap));
         this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
+        this._offCloses = this.tree.watchCloses(() => this._layout());
         this._disposed = false;
     }
 
@@ -171,7 +172,11 @@ export default class GomuxHub {
     _stream(event, st) {
         if (this._disposed || (event !== 'opened' && event !== 'applied')) return;
         const node = this.nodes.get(st.lane);
-        if (!node || this.lanes.get(st.lane)?.session !== st.session) return;
+        if (!node) {
+            if (event === 'opened' && this._helperSession(st.lane)) this._layout();   // its workgroup is known now
+            return;
+        }
+        if (this.lanes.get(st.lane)?.session !== st.session) return;
         this._status(node);
         if (event === 'opened') this._autoScreens([node]);
     }
@@ -263,10 +268,38 @@ export default class GomuxHub {
 
     /** Seat every book and team at its desk — spawn order is seat order (DeskTree). @private */
     _layout() {
-        this.tree.layout([...this.nodes.values()].map((a) => ({
+        const books = this.ctx.agentBooks;
+        const nodes = [...this.nodes.values()].map((a) => ({
             id: a.name, parent: a.parent, label: a.name,
-            book: this.lanes.has(a.name) && this.ctx.agentBooks?.lanes.has(a.name) ? a.name : null,
-        })));
+            book: this.lanes.has(a.name) && books?.lanes.has(a.name) ? a.name : null,
+        }));
+        // A workgroup's other open books — its agents' subagents, opened from history or a
+        // restore — sit under the book of the session that spawned them: the agent's, or
+        // another subagent's; failing both, under their workgroup's agent (or the hub).
+        const bySession = new Map([...this.lanes.values()].map((hl) => [hl.session, hl.name]));
+        for (const [id, lane] of books?.lanes || []) {
+            if (this.lanes.has(id)) continue;
+            const s = this._helperSession(id);
+            if (!s) continue;
+            const ps = s.parentSession;
+            const parent = (ps && (bySession.get(ps) ?? (books.lanes.has(ps) ? ps : null))) ?? s.workgroup;
+            const meta = lane.meta || {};
+            nodes.push({ id, parent, label: meta.title || meta.agentName || id, book: id });
+        }
+        this.tree.layout(nodes);
+    }
+
+    /**
+     * A non-hub book that belongs to the workgroup: its workgroup's name and the session that
+     * spawned it (from the lane's own session line, else the relay's session list), or null.
+     * @param {string} laneId @returns {{workgroup: string, parentSession: string|null}|null} @private
+     */
+    _helperSession(laneId) {
+        const meta = this.ctx.agentBooks?.lanes.get(laneId)?.meta;
+        const row = this.ctx.sessionProvider?.sessions?.find?.((x) => x.session_id === laneId);
+        const workgroup = meta?.workgroup?.name ?? row?.workgroup?.name;
+        if (!workgroup) return null;
+        return { workgroup, parentSession: meta?.parentSession?.session_id ?? row?.parent_session?.session_id ?? null };
     }
 
     // ── screens ──────────────────────────────────────────────────────────────
@@ -336,5 +369,6 @@ export default class GomuxHub {
         this._offPane?.();
         this._off?.();
         this._offStream?.();
+        this._offCloses?.();
     }
 }

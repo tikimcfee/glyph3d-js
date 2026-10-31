@@ -58,7 +58,9 @@ import { canonicalPath } from '../commands/handlers/pathResolve.js';
 import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 import { openSession, sessionList } from '../commands/handlers/agentCommands.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
-import { listTunings, projectTune } from './tuning.js';
+import { listTunings, projectTune, tuneOf } from './tuning.js';
+import { getSetting } from './settings.js';
+import { laneForSession } from './SessionBooks.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
@@ -627,12 +629,34 @@ export default class SessionStore {
         console.warn('[session] agent restore failed:', a?.session, e?.message || e);
       }
     };
+    // AGING: a saved book whose session has exited and was last written before the history
+    // window (gomux.historyHours — the window the desks open books by) stays closed, unless
+    // you pinned it or gave it values of its own; the Agents panel's history still opens it.
+    // `exited` here is the SESSION's status (no CLI holds it), not a gomuxai agent's.
+    const hours = Number(getSetting('gomux.historyHours'));
+    const since = Number.isFinite(hours) && hours > 0 ? Date.now() - hours * 3600e3 : -Infinity;
+    const kept = (a) => {
+      const s = typeof a?.session === 'string' ? sessions.get(a.session) : null;
+      if (!s || s.status !== 'exited' || !(Date.parse(s.mtime) < since)) return true;
+      const own = a.pinned || a.limit != null
+        || Object.keys(tuneOf(this.ctx, `agent:book:${laneForSession(s)}`)).length > 0;
+      if (!own) console.info('[session] agent book aged out (exited, outside the history window):', a.session);
+      return own;
+    };
+    // Parents before their subagents: a session's book opens before the books of the sessions
+    // it spawned, so the desks seat a team around a book that's already there.
+    const isChild = (a) => !!sessions.get(a?.session)?.parent_session;
+    const restoring = list.filter(kept);
     const POUR_WIDTH = 6;
-    const queue = [...list];
+    const pour = async (entries) => {
+      const queue = [...entries];
+      await Promise.all(Array.from({ length: Math.min(POUR_WIDTH, queue.length) }, async () => {
+        while (queue.length) await open(queue.shift());
+      }));
+    };
     const t0 = performance.now();
-    await Promise.all(Array.from({ length: Math.min(POUR_WIDTH, queue.length) }, async () => {
-      while (queue.length) await open(queue.shift());
-    }));
+    await pour(restoring.filter((a) => !isChild(a)));
+    await pour(restoring.filter(isChild));
 
     // QUARANTINE on entry-level failure: the phase "completed" with books missing
     // from the scene — autosave must keep the loaded blob for the section instead

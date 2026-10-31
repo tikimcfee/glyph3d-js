@@ -19,7 +19,8 @@ import { getSetting } from './settings.js';
  * isn't exited (a follower is a relay process and the relay caps them; a book whose session
  * ends stops following, one whose session comes back follows again). Older sessions open on
  * demand (agent.open, the Agents panel's archive, a saved book's restore) and are seated here
- * too, outside the cap. A session's subagents sit on its own team desk (`agents/<session id>`,
+ * too, outside the cap — a workgroup's session (a hub agent's subagent) excepted: it sits at
+ * the hub under its agent. A session's subagents sit on its own team desk (`agents/<session id>`,
  * titled `<name> · N helpers`) — the DeskTree rule the hub's teams follow. A book you cleared
  * stays closed while its session lives on. A failed open retries (SessionBooks), its book
  * saying why.
@@ -65,6 +66,7 @@ export default class SessionDesk {
         this._statusOf = new Map();
         this._offList = provider.onSessions((list) => this.apply(list));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
+        this._offCloses = this.tree.watchCloses(() => this._layout());
         this._disposed = false;
     }
 
@@ -124,7 +126,7 @@ export default class SessionDesk {
         if (this._disposed) return;
         const s = this.sessions.get(st.session);
         if (event === 'open') {
-            if (s?.workgroup || st.lane !== st.session) return;   // a workgroup agent's book: the hub's, or yours
+            if (st.lane !== st.session) return;   // a workgroup agent's book (named for it): the hub's
             this.known.add(st.session);
             this._layout();
         } else if (event === 'opened' || event === 'session' || event === 'applied') {
@@ -137,7 +139,9 @@ export default class SessionDesk {
     }
 
     /** The desk nodes: every known session whose book is open, its subagents under it, in
-     *  the order the desk first saw them (seats never reshuffle as sessions are written). @private */
+     *  the order the desk first saw them (seats never reshuffle as sessions are written). A
+     *  workgroup's session — a hub agent's subagent, opened from history or a restore — sits
+     *  at the hub under its agent (GomuxHub), so it isn't seated here. @private */
     _layout() {
         const books = this.ctx.agentBooks;
         if (!books) return;
@@ -146,6 +150,7 @@ export default class SessionDesk {
             if (!books.lanes.has(id)) continue;
             const s = this.sessions.get(id);
             const meta = books.lanes.get(id).meta || {};
+            if (s?.workgroup || meta.workgroup) continue;
             const parent = s?.parent_session?.session_id ?? meta.parentSession?.session_id ?? '';
             nodes.push({ id, parent, book: id, label: s?.title || s?.agent_name || meta.title || meta.agentName || id });
         }
@@ -179,5 +184,6 @@ export default class SessionDesk {
         this._disposed = true;
         this._offList?.();
         this._offStream?.();
+        this._offCloses?.();
     }
 }

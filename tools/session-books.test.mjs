@@ -21,8 +21,11 @@
 //     that changes nothing shown rebuilds nothing; agent.clear stops following and the desk
 //     doesn't reopen it; agent.open opens an older session (by prefix; a workgroup agent by
 //     its name) and the desk seats it;
-//   - restore reopens saved books through the same path (limit, head); capture saves them by
-//     session, never the hub's.
+//   - restore reopens saved books through the same path (limit, head), parents before their
+//     subagents; an exited session past the history window stays closed unless pinned or
+//     tuned; capture saves them by session, never the hub's;
+//   - a team whose helpers' books all close folds its desk; a workgroup's subagent opened from
+//     history sits on its agent's team desk at the hub, never at the agents desk.
 
 import './headless-canvas.mjs';
 import * as THREE from 'three';
@@ -514,6 +517,72 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     await w.sb.open('P1');
     ok(!w.books.lanes.get('P1').entries.some((e) => e.record.provisional), 'the open\'s provisional reply drops before the follow (its copy comes on the stream)');
     eq(follows(w, 'P1'), [{ session: 'P1', from: 0 }], 'and the follow resumes from the last non-provisional line');
+}
+
+// ── 10. tidy desks: empty teams fold, a workgroup's subagents sit under their agent, restore ages ──
+{
+    // (a) a team whose helpers all close folds its desk; its agent's book goes back to the desk
+    const w = makeWorld();
+    const desk = new SessionDesk(w.ctx, w.ctx.sessionProvider, w.sb);
+    w.ctx.sessionDesk = desk;
+    const L1 = w.relay.add(session('L1-aaaa', { status: 'idle' }), [say(0, 'main')]);
+    const SUB = w.relay.add(session('agent-x1', { status: 'idle', parent_session: { session_id: 'L1-aaaa' } }), [say(0, 'sub')]);
+    w.relay.list([L1, SUB]);
+    await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
+    ok(holderName(w, 'agent-x1') === 'agents/L1-aaaa', 'a subagent sits on its session\'s team desk');
+    const team = w.ctx.carrels.get('agents/L1-aaaa');
+    w.run('agent.clear', 'agent-x1');
+    ok(team._dissolving && !w.ctx.carrels.get(AGENTS_DESK).has(team.name),
+        'its helper\'s book closed (agent.clear, no list push): the empty team desk folds, out of the agents desk');
+    ok(holderName(w, 'L1-aaaa') === AGENTS_DESK, 'and the session\'s book sits at the agents desk again');
+    desk.dispose();
+
+    // (b) a hub agent's subagent, opened from history, sits on the agent's team desk at the
+    //     hub — not at the agents desk, whichever learns of it first
+    const h = makeWorld();
+    const hdesk = new SessionDesk(h.ctx, h.ctx.sessionProvider, h.sb);
+    h.ctx.sessionDesk = hdesk;
+    const W1 = h.relay.add(session('W1', { workgroup: { name: 'builder' }, status: 'processing' }), [say(0, 'wg')]);
+    const WSUB = h.relay.add(session('agent-wsub', { workgroup: { name: 'builder' }, parent_session: { session_id: 'W1' }, status: 'exited', mtime: ago(72) }),
+        [say(0, 'wg helper')]);
+    const hub = new GomuxHub(h.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, h.sb);
+    h.ctx.gomuxHub = hub;
+    hub.apply({ gen: 1, dirs: [], agents: [{ name: 'builder', parent: '', sessionId: 'W1', harness: 'claude', live: true, status: 'processing', createdAt: new Date().toISOString() }] });
+    await opened(h, 'W1');
+    h.relay.sessions = [WSUB, W1];
+    const ro = await h.run('agent.open', 'agent-wsub');
+    ok(/^OK/.test(ro.text), `agent.open the subagent (${ro.text})`);
+    ok(holderName(h, 'agent-wsub') === `${GOMUX_HUB}/builder` && holderName(h, 'builder') === `${GOMUX_HUB}/builder`,
+        `a workgroup subagent opened from history sits with its agent on the agent's team desk (${holderName(h, 'agent-wsub')})`);
+    h.relay.list([WSUB, W1].map((x) => ({ ...x, size: 7 })));
+    ok(holderName(h, 'agent-wsub') === `${GOMUX_HUB}/builder` && !h.ctx.carrels.get(AGENTS_DESK)?.list().length,
+        'and a session list push doesn\'t move it to the agents desk');
+    h.run('agent.clear', 'agent-wsub');
+    ok(h.ctx.carrels.get(`${GOMUX_HUB}/builder`)?._dissolving === true && holderName(h, 'builder') === GOMUX_HUB,
+        'closing it folds the agent\'s team desk; the agent\'s book sits at the hub again');
+    hub.dispose();
+    hdesk.dispose();
+
+    // (c) restore: an exited session outside the history window stays closed unless pinned or
+    //     given values of its own; parents open before their subagents
+    const r = makeWorld();
+    const STALE = r.relay.add(session('stale', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
+    const PINNED = r.relay.add(session('pinned', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
+    const TUNED = r.relay.add(session('tuned', { status: 'exited', mtime: ago(72) }), [say(0, 'old')]);
+    const IDLE = r.relay.add(session('idle-old', { status: 'idle', mtime: ago(72) }), [say(0, 'old but live')]);
+    const PARENT = r.relay.add(session('parent', { status: 'idle' }), [say(0, 'p')]);
+    const CHILD = r.relay.add(session('child', { status: 'idle', parent_session: { session_id: 'parent' } }), [say(0, 'c')]);
+    r.relay.sessions = [CHILD, STALE, PINNED, TUNED, IDLE, PARENT];
+    r.ctx.workspace.setSurfaceView('agent:book:tuned', undefined, { tune: { versoTextSize: 30 } });
+    const rs = new SessionStore({ ctx: r.ctx, router: { execute: async () => ({ text: 'OK' }) }, bridge: { rpcRequest: async () => ({}) } });
+    await rs._restoreAgents({ agents: ['child', 'stale', 'pinned', 'tuned', 'idle-old', 'parent'].map((s) => ({
+        session: s, following: true, ...(s === 'pinned' ? { pinned: [1, 2, 3] } : {}),
+    })) });
+    eq([...r.books.lanes.keys()].sort(), ['child', 'idle-old', 'parent', 'pinned', 'tuned'],
+        'restore: an exited session past the history window ages out; pinned, tuned and live ones reopen');
+    const firstRead = (sid) => r.relay.calls.findIndex((c) => c.method === 'agentEvents/read' && c.params.session === sid);
+    ok(firstRead('parent') >= 0 && firstRead('parent') < firstRead('child'), 'the parent\'s book opens before its subagent\'s, saved order aside');
+    ok(!rs._failedSections.has('agents'), 'an aged-out book is a clean skip, not a failure');
 }
 
 console.log(`session-books: ${pass} passed, ${fail} failed`);

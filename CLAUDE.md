@@ -239,9 +239,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   workgroup) live or written within `gomux.historyHours` — the newest `agents.maxBooks`
   (default 24) — get books, a session's subagents sit on its own `agents/<session id>` team
   desk (DeskTree, the hub's rule), older sessions open on demand (`agent.open
-  <session|prefix|name>`, the Agents panel's archive — the whole session list) and are seated
-  there too; a book you clear stays closed. Restore reopens saved books (by session) through
-  the same path. Gates: `tools/session-books.test.mjs`, `tools/agent-events.test.mjs`.
+  <session|prefix|name>`, the Agents panel's history — the whole session list) and are seated
+  there too — a workgroup's subagent (a hub agent's, opened from history) sits on its agent's
+  team desk at the hub instead; a book you clear stays closed, and a team desk whose helpers'
+  books have all closed folds. Restore reopens saved books (by session) through the same path,
+  parents before subagents; a session that exited before the `gomux.historyHours` window stays
+  closed unless its book was pinned or tuned (the Agents panel's history opens it). Gates: `tools/session-books.test.mjs`, `tools/agent-events.test.mjs`.
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
   find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it

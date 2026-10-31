@@ -13,7 +13,8 @@ import { getSetting } from './settings.js';
  *   the hub   — one world-managed desk, a sibling of the file tree;
  *   a team    — a node with shown helpers gets its own desk, `<hub>/<id>`, seated where its
  *               book would be: its own book first, then its helpers (books, or their own
- *               teams) in the order given. Nesting is as deep as the tree.
+ *               teams) in the order given. Nesting is as deep as the tree. A team whose
+ *               helpers have all gone folds its desk.
  *
  * Every desk the tree builds is `derived` — rebuilt from its owner's data every boot, never
  * saved (each keeps the values set on it by hand: those persist by desk name). A book the
@@ -72,6 +73,10 @@ export default class DeskTree {
             kids.get(p).push(n);
         }
         const hasTeam = (id) => (kids.get(id) || []).some((k) => k.book || kids.has(k.id));
+        const books = this.ctx.agentBooks?.lanes;
+        for (const id of [...this.seated.keys()]) if (!books?.has(id)) this.seated.delete(id);
+        const teams = new Set(nodes.filter((n) => hasTeam(n.id)).map((n) => this.teamDesk(n.id)));
+        for (const d of this.desks()) if (d.carrelName !== this.hub && !teams.has(d.carrelName)) this._retire(d);
         if (!nodes.some((n) => n.book)) return;   // nothing to seat yet — no empty hub
 
         const place = (parentDesk, n, order) => {
@@ -145,6 +150,31 @@ export default class DeskTree {
         // dragged, or seated at your own desk, it's yours.
         if ((holder && !holder.derived) || lane.pinned) return;
         if (holding.seat({ id: lane.groupId, grid: lane.book }, desk, { order }) === 'seated') this.seated.set(laneId, desk.carrelName);
+    }
+
+    /**
+     * Fold a team desk the tree no longer has a team for (its helpers' books closed or
+     * moved on): out of its parent desk where it stands, then dissolved — the runner sweeps
+     * it once its last member has gone home. Its own values stay with its name. @private
+     */
+    _retire(desk) {
+        const parent = this.ctx.carrels.get(this._teamParent.get(desk.carrelName));
+        parent?.release(desk.name, { inPlace: true });
+        this._teamParent.delete(desk.carrelName);
+        this.ctx.holding.fold(desk);
+        this.ctx.registry?.unregister?.(`carrel:${desk.carrelName}`);
+        desk.dissolve();
+    }
+
+    /**
+     * Re-seat when a book the tree seated closes (agent.clear, the panel's ✕) — the owners'
+     * own pushes don't announce that. @param {() => void} relayout @returns {() => void} unsubscribe
+     */
+    watchCloses(relayout) {
+        return this.ctx.agentBooks?.onChange?.(() => {
+            const lanes = this.ctx.agentBooks?.lanes;
+            for (const id of this.seated.keys()) if (!lanes?.has(id)) { relayout(); return; }
+        }) ?? (() => {});
     }
 
     /** Seat a team desk inside its parent desk (desks aren't cargo — the tree holds them). @private */
