@@ -1,385 +1,353 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { laneForSession } from './client/SessionBooks.js';
-/** @import { AppClient } from './client/CommandProvider.jsx' */
+import { bookInSlot } from './client/bookFocus.js';
+/** @import { AppClient, AppContext } from './client/CommandProvider.jsx' */
 
 /**
- * AgentsPanel — the one 2D browser onto AgentBooks. ONE list of agent sessions, no
- * master-detail split: every OPEN book is a row (identity color, the session's NAME
- * with its lane id dimmed beside it, status, raised-hand beacon, sheet count, liveness,
- * and under it what the session is doing NOW — all from AgentBooks.readout, the source
- * the 3D nameplate reads too) that EXPANDS IN PLACE to its
- * detail — the scrub bar, the kept-turns cap, and the scrollable stream of its
- * sheets (oldest → newest) — and CLOSES via its ✕. One lane expanded at a time;
- * expanding a row folds whichever was open.
+ * AgentsPanel — a list of the agent books in space, grouped by the desk they sit at,
+ * with every other session on the host underneath.
  *
- * Below the open books, separated by a slim divider, sits the ARCHIVE: every other agent
- * session on the host (the relay's session list, ctx.sessionProvider — pushed as it
- * changes; every harness, non-claude tagged): its name (title, else agent name, else
- * project), workgroup, age, size. Clicking one opens it as a book (agent.open — the
- * recent tail, then live) and expands it; sessions already open are not listed twice —
- * their lane row above IS their row. The archive group exists only when a session
- * provider is connected.
+ *   gomuxai   the hub's agents (GomuxHub), each one's helpers indented under it
+ *   local     the `agents` desk's sessions (SessionDesk), subagents under their session,
+ *             and any other open book
+ *   history   every session on the host with no open book (the relay's session list),
+ *             folded until opened or filtered
  *
- * It owns no agent state; it reads agents()/getStream() and fires the same command bus
- * the 3D shelf obeys (the [[project_2d_companion_views]] model: the book owns the deck,
- * the panel turns it). Each book live-follows its newest sheet until you page back;
- * NOTHING here moves the camera.
+ * A row is a status lamp, the name, the status word and its age; a working agent's
+ * current action, the reason a waiting one needs you, or a failure sits under it.
  *
- *   click a lane row   → expand / collapse its sheet stream
- *   ✕ on a lane row    → agent.clear <id>
- *   + summon           → agent.spawn (an empty book — request an instance)
- *   clear done         → agent.clear done
- *   click a sheet row  → book.page <agent> <n>   (open that sheet)
- *   ⏮ ◀ ▶ ⏭            → book.page first|prev|next|last
- *   keep [n] / ↺       → book.limit <agent> <n|default>   (this book's kept-turns cap;
- *                        0 keeps everything, ↺ follows the shelf default again)
- *   click an archive row → agent.open <session-id>   (open that session as a book)
+ *   click a row          → agent.focus <id>   (primary slot → the HUD; the camera flies there)
+ *   ✕ on a row           → agent.clear <id>   (the book closes; history still lists it)
+ *   close done           → agent.clear done
+ *   click a history row  → agent.open <session>, then agent.focus
+ *   filter               → narrows every group by name, id, project or workgroup
  *
- * Identity dots come from getStream()'s per-row `color` — the live hue table in
- * AgentBooks.cfg.hues (seeded from the tool registry's ONE action-hue home), so the 2D
- * dots and the 3D cards can never drift apart.
+ * The selected row is whatever book holds the primary slot, so clicking a book in space
+ * selects its row too. The panel owns no agent state: it reads AgentBooks.agents(), the
+ * hub and desk rosters and the session list, and acts through verbs.
  */
 
-const STATE_STYLE = {
-    active:  { color: '#7ad79a', label: 'active' },
-    idle:    { color: '#8fa0b8', label: 'idle' },
-    stalled: { color: '#e8c25a', label: 'STALLED' },
-    done:    { color: '#8a8f98', label: 'done' },
+/** Status → lamp colour and word. */
+const LAMP = {
+    waiting: { color: '#f2a25c', word: 'waiting' },
+    working: { color: '#7ad79a', word: 'working' },
+    error:   { color: '#e8908a', word: 'error' },
+    idle:    { color: '#8fa0b8', word: 'idle' },
+    done:    { color: '#4f5661', word: 'done' },
 };
+
+/** A book's (or a session's) status words → one of LAMP's keys. */
+function phaseOf(status, beacon) {
+    if (beacon || status === 'waiting') return 'waiting';
+    if (status === 'processing' || status === 'active') return 'working';
+    if (status === 'error' || status === 'stalled') return 'error';
+    if (status === 'exited' || status === 'done') return 'done';
+    return 'idle';
+}
 
 const S = {
     content: {
         width: '100%', height: '100%',
         background: 'rgba(8,10,14,0.92)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        font: '12px/1.55 ui-monospace, "JetBrains Mono", Menlo, monospace',
+        font: '12px/1.5 ui-monospace, "JetBrains Mono", Menlo, monospace',
         color: '#c8ccd6',
     },
     header: {
-        padding: '8px', borderBottom: '1px solid #1b1f29', color: '#7c8596',
-        letterSpacing: '0.04em', flex: '0 0 auto',
-        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '7px 8px 5px', flex: '0 0 auto',
+        display: 'flex', alignItems: 'center', gap: 8, color: '#7c8596',
     },
-    title: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', whiteSpace: 'nowrap' },
-
-    // -- the ONE scroll: lane rows (each with its expandable detail) and archive rows
-    //    flow at natural height in a single scrolling column. No nested scrollboxes.
-    body: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto' },
-
-    // -- lane rows: an open book, collapsed to one line --
-    agentRow: (on) => ({
-        padding: '3px 8px', cursor: 'pointer', userSelect: 'none',
-        borderLeft: `2px solid ${on ? '#6c8fc0' : 'transparent'}`,
-        background: on ? 'rgba(120,150,200,0.12)' : 'transparent',
-    }),
-    aline: { display: 'flex', alignItems: 'center', gap: 7 },
-    acaret: { flex: '0 0 auto', width: 10, textAlign: 'center', fontSize: 9, color: '#5a616c' },
-    adot: { flex: '0 0 auto', fontSize: 9 },
-    aname: { flex: '1 1 auto', minWidth: 0, color: '#dfe3ea', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    aid: { flex: '0 0 auto', color: '#4a515c', fontSize: 10 },
-    asub: { display: 'flex', alignItems: 'center', gap: 7, paddingLeft: 34 },
-    anow: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    aharness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
-    astate: (c) => ({ flex: '0 0 auto', color: c, fontSize: 10 }),
-    abeacon: { flex: '0 0 auto', color: '#f2a25c', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '35%', whiteSpace: 'nowrap' },
-    anotice: { flex: '0 0 auto', color: '#e8908a', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '45%', whiteSpace: 'nowrap' },
-    acount: { flex: '0 0 auto', color: '#7c8596', fontSize: 11 },
-    alive: { flex: '0 0 auto', color: '#7ad79a', fontSize: 11 },
-    aage: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 26, textAlign: 'right' },
-    ax: { flex: '0 0 auto', cursor: 'pointer', color: '#5a616c', padding: '0 2px' },
-
-    // -- a lane's expanded detail: scrub bar + kept-turns cap + the sheet stream --
-    detail: { borderBottom: '1px solid #1b1f29', background: 'rgba(255,255,255,0.015)' },
-    scrub: {
-        display: 'flex', alignItems: 'center', gap: 2, padding: '4px 8px', flex: '0 0 auto',
-        borderBottom: '1px solid #1b1f29',
+    title: { flex: '0 0 auto', color: '#aeb6c4', letterSpacing: '0.04em' },
+    summary: { flex: '1 1 auto', minWidth: 0, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', fontSize: 11, whiteSpace: 'nowrap' },
+    filterWrap: { padding: '0 8px 6px', flex: '0 0 auto', borderBottom: '1px solid #1b1f29' },
+    filter: {
+        width: '100%', boxSizing: 'border-box', font: 'inherit', fontSize: 11, color: '#c8ccd6',
+        background: '#0f141b', border: '1px solid #232b34', borderRadius: 4, padding: '2px 6px', outline: 'none',
     },
-    nav: (dim) => ({
-        cursor: dim ? 'default' : 'pointer', padding: '0 6px', borderRadius: 3,
-        color: dim ? '#444b56' : '#9aa6ba', fontSize: 13, userSelect: 'none',
-    }),
-    pos: { flex: '1 1 auto', textAlign: 'center', color: '#7c8596', fontSize: 11 },
-    keep: {
-        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px', flex: '0 0 auto',
-        borderBottom: '1px solid #1b1f29', color: '#5a616c', fontSize: 11,
-    },
-    keepInput: {
-        width: 46, font: 'inherit', color: '#c8ccd6', background: '#0f141b',
-        border: '1px solid #232b34', borderRadius: 4, padding: '1px 5px', outline: 'none', textAlign: 'right',
-    },
-    keepHint: { flex: '1 1 auto', color: '#444b56', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    keepReset: { flex: '0 0 auto', cursor: 'pointer', padding: '0 4px', borderRadius: 3, color: '#7c8596' },
-    live: { color: '#7ad79a' },
-    list: { padding: '4px 0' },
-    msg: { padding: '12px', color: '#7c8596' },
-    row: (on) => ({
-        display: 'flex', alignItems: 'center', gap: 7, padding: '3px 8px',
-        cursor: 'pointer', userSelect: 'none',
-        borderLeft: `2px solid ${on ? '#7ad7a0' : 'transparent'}`,
-        background: on ? 'rgba(122,215,154,0.09)' : 'transparent',
-    }),
-    seq: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 22, textAlign: 'right' },
-    dot: { flex: '0 0 auto', fontSize: 9 },
-    verb: { flex: '0 0 auto', color: '#aeb6c4', minWidth: 52 },
-    label: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    age: { flex: '0 0 auto', color: '#5a616c', fontSize: 11 },
+    body: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', paddingBottom: 8 },
+    msg: { padding: '10px 12px', color: '#5a616c', fontSize: 11 },
 
-    // -- archive: stored session transcripts, dimmer rows under a slim divider --
-    divider: {
-        display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px',
+    group: {
+        display: 'flex', alignItems: 'center', gap: 6, padding: '8px 8px 3px',
         color: '#5a616c', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
-        borderTop: '1px solid #1b1f29', marginTop: 2,
+        cursor: 'pointer', userSelect: 'none',
     },
-    dividerHint: { color: '#444b56', fontSize: 10, textTransform: 'none', letterSpacing: 0 },
-    sessRow: {
-        display: 'flex', alignItems: 'center', gap: 7, padding: '2px 8px', userSelect: 'none',
-        cursor: 'pointer',
-    },
-    sessId: { flex: '1 1 auto', minWidth: 0, color: '#8a92a0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    sessHarness: { flex: '0 0 auto', color: '#5a616c', fontSize: 10 },
-    sessAge: { flex: '0 0 auto', textAlign: 'right', color: '#5a616c', fontSize: 11, minWidth: 26 },
-    sessSize: { flex: '0 0 auto', color: '#5a616c', fontSize: 11, minWidth: 38, textAlign: 'right' },
+    groupCount: { color: '#444b56' },
+
+    row: (selected, waiting, depth) => ({
+        padding: `3px 8px 3px ${8 + depth * 14}px`, cursor: 'pointer', userSelect: 'none',
+        borderLeft: `2px solid ${selected ? '#6c8fc0' : waiting ? '#f2a25c' : 'transparent'}`,
+        background: selected ? 'rgba(120,150,200,0.13)' : 'transparent',
+    }),
+    line: { display: 'flex', alignItems: 'center', gap: 7 },
+    lamp: (color, hollow) => ({
+        flex: '0 0 auto', width: 7, height: 7, borderRadius: '50%', boxSizing: 'border-box',
+        background: hollow ? 'transparent' : color, border: `1.5px solid ${color}`,
+    }),
+    name: (dim) => ({
+        flex: '1 1 auto', minWidth: 0, color: dim ? '#7c8596' : '#dfe3ea',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }),
+    word: (color) => ({ flex: '0 0 auto', color, fontSize: 10 }),
+    age: { flex: '0 0 auto', color: '#5a616c', fontSize: 10, minWidth: 24, textAlign: 'right' },
+    x: (show) => ({ flex: '0 0 auto', cursor: 'pointer', color: show ? '#7c8596' : 'transparent', padding: '0 2px', fontSize: 11 }),
+    sub: (color) => ({
+        paddingLeft: 14, color, fontSize: 11,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }),
+    tag: { flex: '0 0 auto', color: '#4f5661', fontSize: 10 },
 };
 
-function ago(ts) {
-    if (!ts) return '';
-    const s = Math.max(0, Math.round((performance.now() - ts) / 1000));
-    return s < 1 ? 'now' : s < 60 ? `${s}s` : `${Math.round(s / 60)}m`;
-}
-
-// Wall-clock age (unix ms, not performance.now() ticks) — days-scale.
+/** Wall-clock age, compact. */
 function wallAgo(ms) {
-    if (!ms) return '';
+    if (!Number.isFinite(ms)) return '';
     const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
     if (s < 60) return `${s}s`;
     const m = Math.round(s / 60);
     if (m < 60) return `${m}m`;
     const h = Math.round(m / 60);
-    if (h < 48) return `${h}h`;
-    return `${Math.round(h / 24)}d`;
+    return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
 }
 
-function humanSize(n) {
-    if (!Number.isFinite(n) || n < 0) return '';
-    if (n < 1024) return `${n}b`;
-    const kb = n / 1024;
-    if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)}k`;
-    const mb = kb / 1024;
-    return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)}M`;
+/**
+ * Lay out a group as a tree: each book under its parent when the parent is in the same
+ * group, in the order the books opened.
+ * @param {Object[]} list @param {(a: Object) => string|null} parentOf
+ * @returns {{a: Object, depth: number}[]}
+ */
+function asTree(list, parentOf) {
+    const ids = new Set(list.map((a) => a.id));
+    const kids = new Map();
+    const roots = [];
+    for (const a of list) {
+        const p = parentOf(a);
+        if (p && p !== a.id && ids.has(p)) {
+            if (!kids.has(p)) kids.set(p, []);
+            kids.get(p).push(a);
+        } else roots.push(a);
+    }
+    const out = [];
+    const seen = new Set();
+    const walk = (a, depth) => {
+        if (seen.has(a.id)) return;
+        seen.add(a.id);
+        out.push({ a, depth });
+        for (const k of kids.get(a.id) || []) walk(k, depth + 1);
+    };
+    for (const r of roots) walk(r, 0);
+    for (const a of list) walk(a, 0);   // a parent cycle leaves nobody out
+    return out;
+}
+
+/** @param {AppContext} ctx @param {Object[]} agents */
+function groupBooks(ctx, agents) {
+    const hub = ctx?.gomuxHub;
+    const desk = ctx?.sessionDesk;
+    const inHub = (a) => !!hub?.lanes.has(a.id);
+    const parentOf = (a) => (inHub(a)
+        ? hub.nodes.get(a.id)?.parent || null
+        : desk?.sessions.get(a.id)?.parent_session?.session_id ?? a.meta?.parentSession?.session_id ?? null);
+    return {
+        gomux: asTree(agents.filter(inHub), parentOf),
+        local: asTree(agents.filter((a) => !inHub(a)), parentOf),
+    };
+}
+
+/** The text a filter matches a book or session against. */
+const bookText = (a) => [a.name, a.id, a.meta?.cwd, a.meta?.project].filter(Boolean).join(' ').toLowerCase();
+const sessionName = (s) => s.title || s.agent_name || s.project || s.session_id;
+const sessionText = (s) => [sessionName(s), s.session_id, s.project, s.cwd, s.workgroup?.name].filter(Boolean).join(' ').toLowerCase();
+
+/** History rows drawn at once — the filter narrows the rest. */
+const HISTORY_ROWS = 150;
+
+/** @param {{ a: Object, depth: number, selected: boolean, onSelect: Function, onClose: Function }} props */
+function BookRow({ a, depth, selected, onSelect, onClose }) {
+    const [hover, setHover] = useState(false);
+    const phase = phaseOf(a.status, a.beacon);
+    const lamp = LAMP[phase];
+    const beacon = a.beacon && a.beacon !== 'waiting' ? a.beacon : 'needs you';
+    const sub = a.notice ? { text: a.notice, color: '#e8908a' }
+        : phase === 'waiting' ? { text: beacon, color: '#f2a25c' }
+        : phase === 'working' && a.action ? { text: a.action, color: '#8a92a0' }
+        : null;
+    return (
+        <div style={S.row(selected, phase === 'waiting', depth)}
+            onClick={() => onSelect(a.id)}
+            onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+            title={`${a.name}\n${a.id}${a.meta?.cwd ? '\n' + a.meta.cwd : ''}\n${a.count} sheet${a.count === 1 ? '' : 's'}`}>
+            <div style={S.line}>
+                <span style={S.lamp(lamp.color, phase === 'done')} />
+                <span style={S.name(phase === 'done')}>{a.name}</span>
+                {a.type && a.type !== 'claude' && <span style={S.tag}>{a.type}</span>}
+                <span style={S.word(lamp.color)}>{lamp.word}</span>
+                <span style={S.age}>{wallAgo(a.wallTs)}</span>
+                <span style={S.x(hover || selected)} title={`Close this book (agent.clear ${a.id})`}
+                    onClick={(e) => { e.stopPropagation(); onClose(a.id); }}>✕</span>
+            </div>
+            {sub && <div style={S.sub(sub.color)} title={sub.text}>{sub.text}</div>}
+        </div>
+    );
+}
+
+/** @param {{ s: Object, opening: boolean, onOpen: Function }} props */
+function SessionRow({ s, opening, onOpen }) {
+    const phase = phaseOf(s.status);
+    const lamp = LAMP[phase];
+    return (
+        <div style={S.row(false, false, 0)} onClick={() => !opening && onOpen(s)}
+            title={`${s.session_id}${s.cwd ? '\n' + s.cwd : ''}\n${s.status || ''} — open as a book (agent.open)`}>
+            <div style={S.line}>
+                <span style={S.lamp(lamp.color, phase === 'done')} />
+                <span style={S.name(true)}>{sessionName(s)}</span>
+                {s.workgroup && <span style={S.tag}>{s.workgroup.name}</span>}
+                {s.harness && s.harness !== 'claude' && <span style={S.tag}>{s.harness}</span>}
+                <span style={S.word(opening ? '#8fa0b8' : '#4f5661')}>{opening ? 'opening…' : ''}</span>
+                <span style={S.age}>{wallAgo(Date.parse(s.mtime))}</span>
+            </div>
+        </div>
+    );
 }
 
 /** @param {{ client: AppClient | null }} props */
 export default function AgentsPanel({ client }) {
-    const books = () => client?.ctx?.agentBooks || null;
+    const ctx = client?.ctx || null;
     const [agents, setAgents] = useState([]);
-    const [expanded, setExpanded] = useState(null);   // the ONE lane whose detail is open
-    const [stream, setStream] = useState([]);
-    const [sessions, setSessions] = useState(null);   // null = no provider (group absent), [] = provider + empty
-    const focusRef = useRef(null);
-    const aliveRef = useRef(true);
-
-    // Roster + expansion: sticky to the user's open row, collapsing when its lane goes
-    // away (cleared). Recomputed each refresh.
-    const refresh = useCallback(() => {
-        const b = books();
-        if (!b) { setAgents([]); setStream([]); return; }
-        const list = b.agents?.() || [];
-        setAgents(list);   // new array ref each poll → the stream effect below re-reads, staying live
-        setExpanded((cur) => (cur && list.some((a) => a.id === cur)) ? cur : null);
-    }, [client]);
-
-    useEffect(() => {
-        refresh();
-        const off = books()?.onChange?.(refresh);
-        const t = setInterval(refresh, 1000);   // liveness ("Xs ago") + a net for head moves with no event
-        return () => { off?.(); clearInterval(t); };
-    }, [client, refresh]);
-
-    // Re-read the expanded book's stream whenever the expansion or roster moves (the poll hands
-    // us a fresh `agents` array, so this also re-reads on every tick — stream + head stay live).
-    useEffect(() => {
-        const b = books();
-        setStream(expanded && b ? (b.getStream?.(expanded) || []) : []);
-    }, [expanded, agents, client]);
-
-    // Archive: the relay's session list, pushed as it changes (agentSessions/changed). A
-    // list failure (relay reconnecting, a mid-reload window) keeps the last-good listing —
-    // only an ABSENT provider hides the group.
-    useEffect(() => {
-        aliveRef.current = true;
-        const p = client?.ctx?.sessionProvider;
-        if (!p) { setSessions(null); return () => { aliveRef.current = false; }; }
-        const off = p.onSessions((list) => { if (aliveRef.current) setSessions(list.sessions); });
-        if (p.latest) setSessions(p.sessions);
-        else p.list().catch(() => { /* the provider said it; pushes fill the list when the relay has one */ });
-        return () => { aliveRef.current = false; off(); };
-    }, [client]);
-
-    const sel = agents.find((a) => a.id === expanded) || null;
-
-    // Keep the open sheet in view as the head turns.
-    useEffect(() => { focusRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [sel?.head, expanded]);
+    const [sessions, setSessions] = useState(null);   // null = no session provider
+    const [selected, setSelected] = useState(null);
+    const [filter, setFilter] = useState('');
+    const [folded, setFolded] = useState({ history: true });
+    const [opening, setOpening] = useState(() => new Set());
 
     const exec = useCallback((cmd) => client?.router?.execute(cmd), [client]);
-    const after = useCallback((cmd) => { const r = exec(cmd); refresh(); return r; }, [exec, refresh]);
 
-    const summon = useCallback(() => {
-        after(['agent.spawn', `visitor-${Math.random().toString(36).slice(2, 6)}`]);
-    }, [after]);
+    // The roster: AgentBooks' change event, plus a 1 s tick for ages and hub status.
+    useEffect(() => {
+        const books = ctx?.agentBooks;
+        if (!books) { setAgents([]); return undefined; }
+        const read = () => setAgents(books.agents());
+        read();
+        const off = books.onChange?.(read);
+        const t = setInterval(read, 1000);
+        return () => { off?.(); clearInterval(t); };
+    }, [ctx]);
 
-    // Turn the expanded book (keyword or 1-based index). No camera, no dock — just paging.
-    const page = useCallback((arg) => { if (expanded) after(['book.page', expanded, String(arg)]); }, [expanded, after]);
-    const onRow = useCallback((index) => { if (expanded) after(['book.page', expanded, String(index + 1)]); }, [expanded, after]);
+    // Selection = the book in the primary slot.
+    useEffect(() => {
+        const am = ctx?.attentionManager;
+        if (!am) return undefined;
+        const read = () => {
+            const hit = bookInSlot(ctx, 'primary');
+            setSelected(hit?.kind === 'agent' ? hit.agentId : null);
+        };
+        read();
+        return am.on('change:primary', read);
+    }, [ctx]);
 
-    // Kept-turns cap: a draft string while editing (so the 1s poll can't snap the field
-    // mid-keystroke), committed on Enter/blur as `book.limit <id> <n>` — the same verb
-    // the CLI speaks. Escape abandons the draft; ↺ returns the book to the shelf default.
-    const [capDraft, setCapDraft] = useState(null);
-    useEffect(() => setCapDraft(null), [expanded]);
-    const commitCap = useCallback((liveCap) => {
-        const t = capDraft?.trim?.();
-        setCapDraft(null);
-        if (!expanded || t == null || t === '' || t === String(liveCap)) return;
-        const n = Number(t);
-        if (!Number.isFinite(n) || n < 0) return;   // the field mirrors live state again
-        after(['book.limit', expanded, String(Math.floor(n))]);
-    }, [capDraft, expanded, after]);
+    // History: the relay's session list, pushed as it changes. A failed list keeps the last one.
+    useEffect(() => {
+        const p = ctx?.sessionProvider;
+        if (!p) { setSessions(null); return undefined; }
+        let alive = true;
+        const off = p.onSessions((list) => { if (alive) setSessions(list.sessions); });
+        if (p.latest) setSessions(p.sessions);
+        else p.list().catch(() => { /* the provider says why; a push fills the list */ });
+        return () => { alive = false; off(); };
+    }, [ctx]);
 
-    // Open a session as a book (fire-and-forget — the book is born at once and fills as its
-    // tail read lands) and expand its row; it leaves the archive group as its lane appears.
-    const openSession = useCallback((s) => {
-        exec(['agent.open', s.session_id]);
-        setExpanded(laneForSession(s));
+    const select = useCallback((id) => {
+        setSelected(id);
+        exec(['agent.focus', id]);
     }, [exec]);
 
-    const atFirst = !sel || sel.head <= 0;
-    const atLast = !sel || sel.head >= (sel.count - 1);
-    const anyDone = agents.some((a) => a.state === 'done');
-    // Sessions already open as lanes are not listed again — their lane row IS their row.
-    const openLanes = new Set(agents.map((a) => a.id));
-    const archived = (sessions || []).filter((s) => !openLanes.has(laneForSession(s)));
+    const close = useCallback((id) => exec(['agent.clear', id]), [exec]);
+
+    const open = useCallback(async (s) => {
+        setOpening((o) => new Set(o).add(s.session_id));
+        try {
+            const r = await exec(['agent.open', s.session_id]);
+            if (String(r?.text ?? '').startsWith('OK')) select(laneForSession(s));
+        } finally {
+            setOpening((o) => { const n = new Set(o); n.delete(s.session_id); return n; });
+        }
+    }, [exec, select]);
+
+    const q = filter.trim().toLowerCase();
+    const shown = useMemo(() => (q ? agents.filter((a) => bookText(a).includes(q)) : agents), [agents, q]);
+    const groups = useMemo(() => groupBooks(ctx, shown), [ctx, shown]);
+    const history = useMemo(() => {
+        if (!sessions) return null;
+        const open = new Set(agents.map((a) => a.id));
+        const rest = sessions.filter((s) => !open.has(laneForSession(s)));
+        return q ? rest.filter((s) => sessionText(s).includes(q)) : rest;
+    }, [sessions, agents, q]);
+
+    const counts = { working: 0, waiting: 0, done: 0 };
+    for (const a of agents) {
+        const ph = phaseOf(a.status, a.beacon);
+        if (ph in counts) counts[ph]++;
+    }
+    const summary = [
+        counts.waiting ? `${counts.waiting} waiting` : null,
+        counts.working ? `${counts.working} working` : null,
+        `${agents.length} open`,
+    ].filter(Boolean).join(' · ');
+
+    const toggle = (key) => setFolded((f) => ({ ...f, [key]: !f[key] }));
+    const isFolded = (key) => (key === 'history' && q ? false : !!folded[key]);
+
+    const groupHeader = (key, label, n) => (
+        <div style={S.group} onClick={() => toggle(key)}>
+            <span>{isFolded(key) ? '▸' : '▾'}</span>
+            <span>{label}</span>
+            <span style={S.groupCount}>{n}</span>
+        </div>
+    );
+    const bookRows = (rows) => rows.map(({ a, depth }) => (
+        <BookRow key={a.id} a={a} depth={depth} selected={a.id === selected} onSelect={select} onClose={close} />
+    ));
 
     return (
         <div style={S.content}>
             <div style={S.header}>
-                <span style={S.title}>Agents{agents.length ? ` (${agents.length})` : ''}</span>
-                <span style={S.btn} onClick={summon} title="Summon an empty agent book (agent.spawn)">+ summon</span>
-                {anyDone && (
-                    <span style={S.btn} onClick={() => after(['agent.clear', 'done'])}
-                        title="Clear finished agents (agent.clear done)">clear done</span>
+                <span style={S.title}>Agents</span>
+                <span style={S.summary} title={summary}>
+                    {counts.waiting ? <span style={{ color: LAMP.waiting.color }}>{counts.waiting} waiting · </span> : null}
+                    {counts.working ? <span style={{ color: LAMP.working.color }}>{counts.working} working · </span> : null}
+                    {agents.length} open
+                </span>
+                {counts.done > 0 && (
+                    <span style={S.btn} onClick={() => exec(['agent.clear', 'done'])}
+                        title="Close every finished book (agent.clear done)">close done ({counts.done})</span>
                 )}
+            </div>
+            <div style={S.filterWrap}>
+                <input style={S.filter} placeholder="filter" value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setFilter(''); }} />
             </div>
 
             <div style={S.body}>
-                {agents.length === 0 && archived.length === 0 && (
-                    <div style={S.msg}>No agents yet. Activity pages a book in here.</div>
-                )}
+                {groups.gomux.length > 0 && (<>
+                    {groupHeader('gomux', 'gomuxai', groups.gomux.length)}
+                    {!isFolded('gomux') && bookRows(groups.gomux)}
+                </>)}
+                {groups.local.length > 0 && (<>
+                    {groupHeader('local', 'local', groups.local.length)}
+                    {!isFolded('local') && bookRows(groups.local)}
+                </>)}
+                {!agents.length && <div style={S.msg}>No agent books open.</div>}
+                {agents.length > 0 && !shown.length && <div style={S.msg}>No open book matches.</div>}
 
-                {/* open books — one row per lane, expanding in place to its sheet stream */}
-                {agents.map((a) => {
-                    const st = STATE_STYLE[a.state] || STATE_STYLE.active;
-                    const on = a.id === expanded;
-                    return (
-                        <React.Fragment key={a.id}>
-                            <div style={S.agentRow(on)} onClick={() => setExpanded(on ? null : a.id)}
-                                title={`${a.name}\n${a.type}:${a.id} — ${a.count} sheet(s)${a.action ? '\nnow: ' + a.action : ''}${a.recent?.length ? '\n' + a.recent.join('\n') : ''}`}>
-                                <div style={S.aline}>
-                                    <span style={S.acaret}>{on ? '▾' : '▸'}</span>
-                                    <span style={{ ...S.adot, color: a.color }}>●</span>
-                                    <span style={S.aname}>{a.name}</span>
-                                    <span style={S.aid}>{a.id}</span>
-                                    {a.type && a.type !== 'claude' && <span style={S.aharness}>{a.type}</span>}
-                                    <span style={S.ax} onClick={(e) => { e.stopPropagation(); after(['agent.clear', a.id]); }}
-                                        title={`Clear ${a.id} (agent.clear)`}>✕</span>
-                                </div>
-                                <div style={S.asub}>
-                                    <span style={S.astate(st.color)}>{a.status === a.state ? st.label : a.status}</span>
-                                    <span style={S.acount}>{a.count}</span>
-                                    {a.following && <span style={S.alive}>live</span>}
-                                    <span style={S.aage}>{a.wallTs != null ? wallAgo(a.wallTs) : ago(a.lastTs)}</span>
-                                    {a.beacon && <span style={S.abeacon} title={a.beacon}>(!) {a.beacon}</span>}
-                                    {a.notice && <span style={S.anotice} title={a.notice}>{a.notice}</span>}
-                                    {a.action && <span style={S.anow}>{a.action}</span>}
-                                </div>
-                            </div>
-
-                            {on && sel && (
-                                <div style={S.detail}>
-                                    <div style={S.scrub}>
-                                        <span style={S.nav(atFirst)} onClick={() => !atFirst && page('first')} title="Oldest (book.page first)">⏮</span>
-                                        <span style={S.nav(atFirst)} onClick={() => !atFirst && page('prev')} title="Older (book.page prev)">◀</span>
-                                        <span style={S.pos}>
-                                            sheet {sel.head + 1} / {sel.count}{sel.following && <span style={S.live}> · live</span>}
-                                        </span>
-                                        <span style={S.nav(atLast)} onClick={() => !atLast && page('next')} title="Newer (book.page next)">▶</span>
-                                        <span style={S.nav(atLast)} onClick={() => !atLast && page('last')} title="Newest — resume live (book.page last)">⏭</span>
-                                    </div>
-
-                                    {/* retention — this book's kept-turns cap (older sheets shed as new turns land) */}
-                                    <div style={S.keep}
-                                        title="Turns kept in space for this book — older sheets shed as new ones land. 0 keeps everything; ↺ follows the shelf default (Settings ▸ Agent Books). Fires book.limit.">
-                                        <span>keep</span>
-                                        <input
-                                            type="number" min={0} step={1} style={S.keepInput}
-                                            value={capDraft ?? String(sel.cap)}
-                                            onChange={(e) => setCapDraft(e.target.value)}
-                                            onBlur={() => commitCap(sel.cap)}
-                                            onKeyDown={(e) => {
-                                                e.stopPropagation();
-                                                if (e.key === 'Enter') e.currentTarget.blur();
-                                                else if (e.key === 'Escape') setCapDraft(null);
-                                            }}
-                                        />
-                                        <span>turns</span>
-                                        <span style={S.keepHint}>
-                                            {sel.limit == null ? 'shelf default' : sel.cap === 0 ? 'this book · keeps everything' : 'this book'}
-                                        </span>
-                                        {sel.limit != null && (
-                                            <span style={S.keepReset} onClick={() => after(['book.limit', expanded, 'default'])}
-                                                title="Follow the shelf default again (book.limit default)">↺</span>
-                                        )}
-                                    </div>
-
-                                    <div style={S.list}>
-                                        {stream.length === 0 && (
-                                            <div style={S.msg}>No sheets yet. An agent's tool calls and replies page in here as they arrive.</div>
-                                        )}
-                                        {stream.map((m) => (
-                                            <div key={m.index} ref={m.focused ? focusRef : null} style={S.row(m.focused)}
-                                                onClick={() => onRow(m.index)} title={m.label}>
-                                                <span style={S.seq}>{m.index + 1}</span>
-                                                <span style={{ ...S.dot, color: m.color }}>●</span>
-                                                <span style={S.verb}>{m.action}</span>
-                                                <span style={S.label}>{m.label || '—'}</span>
-                                                <span style={S.age}>{ago(m.ts)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </React.Fragment>
-                    );
-                })}
-
-                {/* archive — past session transcripts on the relay (only when a provider is
-                    connected and something isn't already open) */}
-                {sessions && archived.length > 0 && (<>
-                    <div style={S.divider}>
-                        <span>archive</span>
-                        <span style={S.dividerHint}>click to open</span>
-                    </div>
-                    {archived.map((s) => (
-                        <div key={s.session_id} style={S.sessRow}
-                            onClick={() => openSession(s)}
-                            title={`${s.session_id}${s.cwd ? '\n' + s.cwd : ''}${s.status ? '\n' + s.status : ''} — open as a book (agent.open)`}>
-                            <span style={S.sessId}>{s.title || s.agent_name || s.project || s.session_id}</span>
-                            {s.workgroup && <span style={S.sessHarness}>{s.workgroup.name}</span>}
-                            {s.harness && s.harness !== 'claude' && <span style={S.sessHarness}>{s.harness}</span>}
-                            <span style={S.sessAge}>{wallAgo(Date.parse(s.mtime))}</span>
-                            <span style={S.sessSize}>{humanSize(s.size)}</span>
-                        </div>
+                {history && (<>
+                    {groupHeader('history', 'history', history.length)}
+                    {!isFolded('history') && history.slice(0, HISTORY_ROWS).map((s) => (
+                        <SessionRow key={s.session_id} s={s} opening={opening.has(s.session_id)} onOpen={open} />
                     ))}
+                    {!isFolded('history') && history.length > HISTORY_ROWS && (
+                        <div style={S.msg}>{history.length - HISTORY_ROWS} more — filter to narrow</div>
+                    )}
                 </>)}
             </div>
         </div>

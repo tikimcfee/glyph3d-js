@@ -150,6 +150,21 @@ export default function registerAgentCommands(router) {
         }
     }, { description: 'Open an agent session as a book (its event stream: the recent tail, then live). limit = records to keep (0 = all) — sets the book\'s cap', usage: '<session|prefix|name> [limit]' });
 
+    router.register('agent.focus', async (args, ctx) => {
+        const books = ctx.agentBooks;
+        if (!books) return noBooks;
+        const [ref] = args;
+        if (!ref) return { text: 'ERR: usage: agent.focus <id>', data: null };
+        const hit = books.resolveLane(ref);
+        if (!hit) return { text: `ERR: no agent book '${ref}'`, data: null };
+        const [id, lane] = hit;
+        // What a click on the book does: it takes the primary slot (the HUD reads it), then
+        // the camera flies to it.
+        await router.execute(['attention.set', 'primary', lane.groupId]);
+        await router.execute(['camera.focus', lane.groupId]);
+        return { text: `OK: focused ${id}`, data: { id, groupId: lane.groupId } };
+    }, { description: "Focus an agent's book: it takes the primary slot and the camera flies to it", usage: '<id>' });
+
     router.register('agent.spawn', (args, ctx) => {
         const books = ctx.agentBooks;
         if (!books) return noBooks;

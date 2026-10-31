@@ -80,7 +80,7 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { toFileUri } from '../core/fileUri.js';
-import { decorateForAction, kindForAction, ACTION_HUES, cssHue } from './toolRegistry.js';
+import { decorateForAction, kindForAction, ACTION_HUES } from './toolRegistry.js';
 import { eventRecord, eventFacts, eventLane, sessionMeta, parseEventSlice, sessionPath } from './agentEvents.js';
 /** @import { EventChange } from './agentEvents.js' */
 import { yieldToFrame } from '../utils/frameYield.js';
@@ -289,14 +289,6 @@ const setAs = (text, cols) => (cols > 0 ? wrapText(text, cols) : String(text ?? 
  *  heights (the page text sizes, fitted by fitTextStack) and converted through the atlas
  *  metrics into each card's gridScale, so this only fixes the field's internal unit. */
 const CARD_WORLD_SCALE = 0.025;
-
-/** One record as a single glanceable roster line: `read  src/foo.js`, `bash  rg -n TODO → 3`. */
-function fmtEntry(e) {
-    const head = e.target ? `${e.action}  ${e.target}` : e.action;
-    const mid = e.detail ? `  ${e.detail}` : '';
-    const tail = e.result ? `   → ${String(e.result).split('\n')[0]}` : '';
-    return `${head}${mid}${tail}`;
-}
 
 const STATES = new Set(['active', 'idle', 'stalled', 'done']);
 
@@ -1041,30 +1033,6 @@ export default class AgentBooks {
                 head: l.book.head,
                 following: l.book.following,
                 lastTs: l.entries.length ? l.entries[l.entries.length - 1].ts : l.lastActivityTs,
-                recent: l.entries.slice(-3).map((e) => fmtEntry(e.record)),
-            };
-        });
-    }
-
-    /**
-     * A book's sheet stream as terse rows (oldest first), for the panel's detail pane:
-     * { index, action, kind, color, label, ts, focused } — enough to render a clickable
-     * log without reaching into the scene graph. `focused` flags the open sheet.
-     */
-    getStream(agentId) {
-        const lane = this.lanes.get(agentId);
-        if (!lane) return [];
-        const head = lane.book.head;
-        return lane.entries.map((e, j) => {
-            const kind = kindForAction(e.record?.action);
-            return {
-                index: j,
-                action: e.record?.action || 'act',
-                kind,
-                color: cssHue(this.cfg.hues[kind] || this.cfg.hues.other),
-                label: [e.record?.tag, e.record?.target, e.record?.detail].filter(Boolean).join(' · '),
-                ts: e.ts,
-                focused: j === head,
             };
         });
     }
