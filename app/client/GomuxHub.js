@@ -47,7 +47,11 @@ import { getSetting } from './settings.js';
  *
  * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
  * (gomux.attach) riding beside its book — the book's aside, height-fit to the spread — as
- * soon as the book is open. A screen READS its agent's pane size (the relay pushes
+ * soon as the book is open. Seating CONVERGES: whenever the tree is applied, a book opens or a
+ * terminal registers, every shown agent's screen that is up but not riding its book is given
+ * to it — so a screen re-adopted on reload before its book exists, one whose adapter connected
+ * after gomux.attach stopped waiting, and one whose book was rebuilt all find their book.
+ * A screen READS its agent's pane size (the relay pushes
  * `gomux/paneSize` when it moves) and a resize WRITES back (terminal.resize → the relay
  * resizes the agent's tmux window, and its CLI reflows).
  * Detaching one (gomux.detach) is remembered: the hub won't reopen it.
@@ -93,6 +97,8 @@ export default class GomuxHub {
         this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
         this._offCloses = this.tree.watchCloses(() => this._layout());
+        this._onRegistry = () => this._seatScreens();   // a screen (re-)adopted: seat it
+        ctx.registry?.addChangeListener?.(this._onRegistry);
         this._disposed = false;
     }
 
@@ -148,6 +154,7 @@ export default class GomuxHub {
         }
         this._layout();
         for (const a of shown) this._status(a);
+        this._seatScreens();
         this._autoScreens(shown);
         this._centerWhenSettled();
     }
@@ -178,7 +185,7 @@ export default class GomuxHub {
         }
         if (this.lanes.get(st.lane)?.session !== st.session) return;
         this._status(node);
-        if (event === 'opened') this._autoScreens([node]);
+        if (event === 'opened') { this._seatScreens(); this._autoScreens([node]); }
     }
 
     /**
@@ -237,6 +244,27 @@ export default class GomuxHub {
             Promise.resolve(this._exec(['gomux.attach', a.name])).then((r) => {
                 if (String(r?.text ?? '').startsWith('ERR')) console.warn(`[gomux] ${a.name}: screen —`, r.text);
             }).catch((e) => console.warn(`[gomux] ${a.name}: screen failed —`, e?.message || e));
+        }
+    }
+
+    /**
+     * Give every shown agent's screen that is up but not riding its book to that book — the
+     * convergence that makes seating independent of arrival order (a reload re-adopts screens
+     * before their books open; an adapter can connect after gomux.attach stopped waiting; a
+     * rebuilt book starts without its aside). A held screen (docked, seated by hand) is left
+     * to its holder (seatScreen). @private
+     */
+    _seatScreens() {
+        if (this._disposed) return;
+        const lanes = this.ctx.agentBooks?.lanes;
+        if (!lanes?.size) return;
+        for (const name of this.nodes.keys()) {
+            const book = lanes.get(name)?.book;
+            if (!book) continue;
+            const id = this.screenId(name);
+            const grid = this.ctx.registry?.get(id)?.grid;
+            if (!grid || book.aside === grid) continue;   // riding it (or docked from it — it comes home to the book)
+            this.seatScreen(name, id);
         }
     }
 
@@ -370,5 +398,6 @@ export default class GomuxHub {
         this._off?.();
         this._offStream?.();
         this._offCloses?.();
+        this.ctx.registry?.removeChangeListener?.(this._onRegistry);
     }
 }

@@ -275,7 +275,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   pushes `gomux/paneSize` when it moves) and a resize writes back (`gomux.resize` → tmux
   `resize-window` on the agent's session — a server command, no client — and its CLI reflows).
   With `gomux.autoScreens` (default on) every live agent's screen opens beside its book; a
-  detached one stays closed.
+  detached one stays closed. Seating converges (`GomuxHub._seatScreens`, on every tree push, book
+  open and terminal registration): a screen up but not riding its book is given to it, whichever
+  arrived first — a reload re-adopts screens before their books open.
   Once per load (`gomux.centerOnLoad`) the camera stands at the hub's center (`carrel.enter`)
   when the tree, the books and the desks have stopped moving — polled to the same answer three
   times, since the load is part events, part state.
