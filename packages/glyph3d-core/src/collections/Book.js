@@ -52,6 +52,14 @@
  * across the grid. The book live-follows its newest sheet (`following`) until paged
  * back; landing on the newest resumes following. A one-sheet deck is a no-op.
  *
+ * A book may RESERVE its room (setReserve — an agent book does, at its sheet cap): its
+ * FRAME (frameBounds) is then the box it claims at capacity — the spread, the deck's
+ * depth at the cap, the full rise — computed from its settings, never from what's on
+ * screen. The open page's center at z = 0 is the book's locked origin; the cover wraps
+ * the frame, and every piece of furniture (nameplate, tabs, the aside) anchors to it, so
+ * sheets landing, pages turning, and a deck easing never move them. Without a reserve
+ * (tree volumes, delta sets) and in splay, the frame is the live layout box.
+ *
  * ContentTree._normalize releases every tree book before a layout pass, so each scheme
  * starts from the canonical natural form and switching lenses stays lossless.
  *
@@ -178,6 +186,14 @@ export default class Book extends BoundedObject3D {
         this._asideGap = 24;
         /** @type {Object|null} a nameplate plate (Label3D) parked above the cover box (setNameplate) */
         this.nameplate = null;
+        /** @type {number|null} world gap between the cover's top and the nameplate's bottom (null = the cover pad) */
+        this._npGap = null;
+        /** @type {{w:number, h:number}} the nameplate band a framed book holds — the plate's high-water
+         *  size (it only grows; setReserve resets it), so a status line wrapping and unwrapping
+         *  never resizes the seat */
+        this._npBand = { w: 0, h: 0 };
+        /** @type {{sheets:number, spread:boolean}|null} the room this book claims (setReserve) — null: the live layout box */
+        this.reserve = null;
         /** @type {Array<{sheet:Object, tab:Tab3D, key:string}>|null} per-sheet edge tabs (null until bindTabs) */
         this.tabs = null;
         this._tabOpts = null;
@@ -548,14 +564,68 @@ export default class Book extends BoundedObject3D {
         return this;
     }
 
+    /**
+     * Claim this book's room: the frame it holds at `sheets` sheets (0 = as many as it
+     * has), as a spread (both sides) or a single page. The cover, the furniture and the
+     * seat (getSeatBounds) use that frame from now on — see frameBounds. Re-stating the
+     * same reserve is a no-op. null releases it.
+     * @param {{sheets?:number, spread?:boolean}|null} r
+     */
+    setReserve(r) {
+        const next = r ? { sheets: Math.max(0, Math.floor(r.sheets || 0)), spread: r.spread !== false } : null;
+        const cur = this.reserve;
+        if (cur === next || (cur && next && cur.sheets === next.sheets && cur.spread === next.spread)) return this;
+        this.reserve = next;
+        this.resetNameplateBand();
+        return this;
+    }
+
+    /** Let the nameplate band shrink back to the plate as it stands (it otherwise only
+     *  grows) — the owner calls this when the plate's sizing settings change. */
+    resetNameplateBand() {
+        this._npBand.w = 0;
+        this._npBand.h = 0;
+        this.syncCover();
+        return this;
+    }
+
+    /** True while the frame is the reserve (a reserved, fitted deck) — not the live box. @private */
+    get _framed() { return !!(this.reserve && this._fitOpts && this.form === 'deck'); }
+
+    /**
+     * The book's FRAME (local): what it claims, not what it draws this frame. Reserved
+     * and fitted as a deck: the page (or spread) rect around the origin, as deep as its
+     * deck at the reserved sheet count (or its live count, if more), raised by the full
+     * rise (deck.rise × the steps that count allows) — fixed by its settings, so sheets
+     * landing, pages turning and easing leave it be. Otherwise the live layout box.
+     * @returns {THREE.Box3}
+     */
+    frameBounds() {
+        if (!this._framed) return this.layoutBounds();
+        const o = this._fitOpts;
+        const n = Math.max(this.reserve.sheets, this.sheets.length, 1);
+        const zPad = (o.surfaceDepth ?? PAGE_FACE_DEFAULTS.surfaceDepth) + 2;
+        const hw = this.reserve.spread ? o.pageW + (o.gutter ?? 0) / 2 : o.pageW / 2;
+        const hh = o.pageH / 2;
+        const steps = this.deck.riseRows > 0 ? Math.min(this.deck.riseRows, n - 1) : n - 1;
+        const rise = (this.deck.rise || 0) * steps;
+        return new THREE.Box3(
+            new THREE.Vector3(-hw, -hh + Math.min(0, rise), -(n - 1) * this.deck.zPitch - zPad),
+            new THREE.Vector3(hw, hh + Math.max(0, rise), zPad));
+    }
+
+    /** The nameplate's gap above the cover. @private */
+    _nameplateGap() { return this._npGap ?? (this.cover ? this.cover.opts.pad : 0); }
+
     /** Wrap the cover around the LIVE deck bounds (mid-ease included) — for a fitted
      *  sheetless book that's the closed-cover rect (deckBounds), so an empty book
-     *  still shows a spine. Runs from update() every frame while bound; call
-     *  directly after an out-of-band reshape. */
+     *  still shows a spine — or, for a RESERVED book, around its frame (frameBounds):
+     *  the cover holds still while the deck moves inside it. Runs from update() every
+     *  frame while bound; call directly after an out-of-band reshape. */
     syncCover() {
         const c = this.cover;
         if (!c) return this;
-        const b = this.layoutBounds();
+        const b = this.frameBounds();
         if (b.isEmpty()) {
             c.mesh.visible = false;
             if (this.nameplate) this.nameplate.visible = false;
@@ -569,17 +639,22 @@ export default class Book extends BoundedObject3D {
         // mesh.visible=false write would be re-asserted here next update).
         c.mesh.visible = c.opts.visible !== false;
         c.edges.visible = c.opts.visible !== false && c.opts.edgeOpacity > 0;
-        // The nameplate rides the cover's top edge (the dock's tile-label idiom:
-        // edge + small gap + half the plate) on the cover's FRONT face — where a reader
-        // facing the book (or a shelf of them) sees it, not halfway back in the deck.
-        // Re-anchored every sync.
+        // The nameplate stands on the cover's top edge, its BOTTOM pinned a gap above it
+        // (a taller status grows up into the air, never down onto the book), on the
+        // cover's FRONT face — where a reader facing the book (or a shelf of them) sees
+        // it, not halfway back in the deck. Re-anchored every sync; a framed book keeps
+        // the plate's high-water size as its band (getSeatBounds).
         const np = this.nameplate;
         if (np) {
             np.visible = true;
             np.position.set(
                 _coverCenter.x,
-                _coverCenter.y + (_coverSize.y + 2 * c.opts.pad) / 2 + np.height * 0.8,
+                _coverCenter.y + (_coverSize.y + 2 * c.opts.pad) / 2 + this._nameplateGap() + np.height / 2,
                 _coverCenter.z + _coverSize.z / 2 + c.opts.zPad);
+            if (this._framed) {
+                if (np.height > this._npBand.h) this._npBand.h = np.height;
+                if (np.width > this._npBand.w) this._npBand.w = np.width;
+            }
         }
         this._placeAside(b, c.opts.pad);
         return this;
@@ -637,10 +712,12 @@ export default class Book extends BoundedObject3D {
     }
 
     /** Give the book a nameplate (a Label3D): parented in (rides every transform),
-     *  parked just above the cover box by syncCover() each frame, and disposed with
-     *  the cover. Replacing an existing plate disposes it; null detaches without
-     *  disposing (the caller keeps it). */
-    setNameplate(label) {
+     *  parked `gap` above the cover box by syncCover() each frame (its bottom edge
+     *  pinned; default gap = the cover pad), and disposed with the cover. Replacing an
+     *  existing plate disposes it; null detaches without disposing (the caller keeps it).
+     *  @param {Object|null} label @param {{gap?: number}} [opts] */
+    setNameplate(label, { gap = null } = {}) {
+        this._npGap = Number.isFinite(gap) ? gap : null;
         if (this.nameplate && this.nameplate !== label) {
             this.remove(this.nameplate);
             this.nameplate.dispose?.();
@@ -768,7 +845,7 @@ export default class Book extends BoundedObject3D {
         if (!this.tabs) return;
         const o = this._tabOpts;
         const { steps, placement, protrusion, raise: raiseRows } = TAB_CONFIG;   // live `tab.*` dials (re-read each frame)
-        const b = this.layoutBounds();
+        const b = this.frameBounds();   // a reserved book's ruler holds still on its frame
         if (b.isEmpty()) { for (const t of this.tabs) t.tab.visible = false; return; }
         const cx = (b.min.x + b.max.x) / 2, cy = (b.min.y + b.max.y) / 2;
         const sx = b.max.x - b.min.x, sy = b.max.y - b.min.y;
@@ -913,10 +990,12 @@ export default class Book extends BoundedObject3D {
      * tab ruler on the top (or fore) edge, and the nameplate above the cover. A carrel
      * seats and packs members by this when they offer it, so neighbors never overlap a
      * nameplate; framing, markers and the tree keep measuring the pages (getLocalBounds).
+     * A reserved book is seated by its FRAME and its nameplate band (the plate's
+     * high-water size) — what it claims, so its seat holds still while it works.
      * @returns {THREE.Box3}
      */
     getSeatBounds() {
-        const b = this.layoutBounds();
+        const b = this.frameBounds();
         if (b.isEmpty() || !this.fitted) return b;
         const lb = b.clone();
         const c = this.cover;
@@ -933,12 +1012,15 @@ export default class Book extends BoundedObject3D {
         }
         const np = this.nameplate;
         if (np && np.visible !== false) {
-            // syncCover's placement: centered over the cover, its center 0.8 plate-heights
-            // above the cover's top edge, on the cover's front face.
-            const cy = lb.max.y + pad + np.height * 0.8;
+            // syncCover's placement: centered over the cover, its bottom a gap above the
+            // cover's top edge, on the cover's front face — at its band size when framed.
+            const framed = this._framed;
+            const w = framed ? Math.max(np.width, this._npBand.w) : np.width;
+            const h = framed ? Math.max(np.height, this._npBand.h) : np.height;
+            const y0 = lb.max.y + pad + this._nameplateGap();
             const cx = (lb.min.x + lb.max.x) / 2, cz = lb.max.z + zPad;
-            _furn.min.set(cx - np.width / 2, cy - np.height / 2, cz);
-            _furn.max.set(cx + np.width / 2, cy + np.height / 2, cz);
+            _furn.min.set(cx - w / 2, y0, cz);
+            _furn.max.set(cx + w / 2, y0 + h, cz);
             b.union(_furn);
         }
         const ap = this._asidePose(lb, pad);

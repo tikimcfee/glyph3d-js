@@ -157,6 +157,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     labelMaxLineHeight: 40,     // nameplate name: largest world row pitch (a short name stops growing)
     labelStatusRatio: 0.5,      // nameplate status block row pitch, × the name's
     labelTickMs: 1000,          // how often the nameplates' ages re-read (text that didn't change is a no-op)
+    labelGap: 16,               // nameplate: world gap between the cover's top and the plate's bottom
     palette: [                  // per-agent identity hues, indexed by lane creation order
         0x3a6ea5, 0xa56a3a, 0x4a9a6a, 0x8a5aa5, 0xa54a5a, 0x5a8aa5,
     ],
@@ -368,6 +369,7 @@ export default class AgentBooks {
                 pinned: false, pinnedPos: null,
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
+            this._reserveRoom(lane);           // the frame it claims at its cap — the cover and furniture hold still
             // The timeline: bound ONCE at birth — Book keeps the tabs parallel to the
             // sheets from here (a tab per appended sheet, freed with each shed one).
             if (this.cfg.tabs) book.bindTabs(this._tabOpts(lane));
@@ -379,7 +381,7 @@ export default class AgentBooks {
                 color: this.cfg.palette[hueIdx % this.cfg.palette.length],
             });
             lane.label.name = `agent-label:${agentId}`;
-            book.setNameplate(lane.label);
+            book.setNameplate(lane.label, { gap: this.cfg.labelGap });
             this._refreshNameplate(lane);
             this.lanes.set(agentId, lane);
             this._registerGroup(agentId, lane);
@@ -555,6 +557,7 @@ export default class AgentBooks {
         if (orphans) for (const [id, r] of orphans) if (!lane.orphans?.has(id)) this._holdOrphan(lane, id, r);
         const v = Number(limit);
         if (limit != null && Number.isFinite(v)) lane.maxSheets = Math.max(0, Math.floor(v));
+        this._reserveRoom(lane);
         const cap = this._capFor(lane);
         const slice = records.length > cap ? records.slice(-cap) : records;
         if (fresh && slice.length < records.length) {
@@ -1077,6 +1080,7 @@ export default class AgentBooks {
         const [id, lane] = hit;
         const v = Number(n);
         lane.maxSheets = (n == null || !Number.isFinite(v)) ? null : Math.max(0, Math.floor(v));
+        this._reserveRoom(lane);
         const evicted = this._trimLane(lane);
         if (evicted) this._relayout();
         this._emitChange();
@@ -1116,7 +1120,10 @@ export default class AgentBooks {
             else lane.book.dropTabs();
             this._refitText(lane);
             lane.book.fit(this._pageOpts(lane));
+            this._reserveRoom(lane);
+            lane.book.setNameplate(lane.label, { gap: this.cfg.labelGap });
             this._refreshNameplate(lane);
+            lane.book.resetNameplateBand();   // the plate's sizing may have moved — its band re-learns
         }
         this._relayout();
     }
@@ -1395,6 +1402,13 @@ export default class AgentBooks {
 
     /** The lane's effective sheet cap — its override, else the shelf default; 0 (either
      *  level) means unbounded. @private */
+    /** State the room a book claims (Book.setReserve): a spread deck at its sheet cap
+     *  (an unbounded book claims what it holds). A changed cap re-frames it. @private */
+    _reserveRoom(lane) {
+        const cap = this._capFor(lane);
+        lane.book.setReserve({ sheets: Number.isFinite(cap) ? cap : 0, spread: true });
+    }
+
     _capFor(lane) {
         const n = lane.maxSheets ?? this.cfg.maxSheets;
         return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;

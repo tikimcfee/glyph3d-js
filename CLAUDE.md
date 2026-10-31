@@ -260,7 +260,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   seated in its parent's desk (its book first, then its helpers), titled `<name> · N helpers`,
   born `gomux.gap` apart.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
-  — while framing and the tree keep its page box (`getLocalBounds`). Hub desks are `derived` —
+  — while framing and the tree keep its page box (`getLocalBounds`). An agent book RESERVES its
+  room (`Book.setReserve`, at its sheet cap): its frame (`frameBounds` — the spread, the deck
+  at the cap, the full rise; set by its settings, never by what's on screen) is what the cover
+  wraps, the nameplate (bottom pinned, `book.labelGap` above; its band only grows), tabs and
+  aside anchor to, and the seat measures — sheets landing and pages turning move none of it. Hub desks are `derived` —
   rebuilt from the tree, never saved — yet a value set on one is its own and comes back with it
   (per-instance knobs, below). Status rides `lane.meta.gomux` (the agent's own status wins
   over what a live batch did to the book). The relay names a claude agent's session by its

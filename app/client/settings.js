@@ -775,6 +775,7 @@ export const SETTINGS = [
   { key: 'book.labelMinLineHeight', label: 'Nameplate min name row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelMinLineHeight, min: 0.5, max: 1000, step: 0.5, apply: agentBookParam('labelMinLineHeight') },
   { key: 'book.labelMaxLineHeight', label: 'Nameplate max name row height', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelMaxLineHeight, min: 0.5, max: 1000, step: 0.5, apply: agentBookParam('labelMaxLineHeight') },
   { key: 'book.labelStatusRatio', label: 'Nameplate status size (× name)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelStatusRatio, min: 0.05, max: 5, step: 0.05, apply: agentBookParam('labelStatusRatio') },
+  { key: 'book.labelGap', label: 'Nameplate gap above the cover', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelGap, min: 0, max: 1000, step: 1, apply: agentBookParam('labelGap') },
   { key: 'book.labelTickMs', label: 'Nameplate age refresh (ms)', group: 'Agent Books', type: 'number', default: AGENT_BOOKS_DEFAULTS.labelTickMs, min: 50, max: 600000, step: 50, apply: agentBookParam('labelTickMs') },
   // Books — the SHARED base every Book carrier wears, fanned to ALL THREE owners (agent
   // shelf, delta shelf, library volumes): the page face + the COVER (the translucent

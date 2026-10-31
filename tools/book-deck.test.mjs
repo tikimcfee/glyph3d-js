@@ -19,6 +19,7 @@
 import * as THREE from 'three';
 const BOOK_PATH = process.env.BOOK_PATH ?? '../packages/glyph3d-core/src/collections/Book.js';
 const { default: Book } = await import(BOOK_PATH);
+const { HEADLESS_ATLAS } = await import('./headless-atlas.mjs');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -230,6 +231,51 @@ function eq6(a, b, m) { ok(a.length === b.length && a.every((v, i) => near(v, b[
     ok(near(np.position.z, lb.max.z + 3, 1e-6), `the nameplate sits on the cover's front face (z ${np.position.z}, want ${lb.max.z + 3})`);
     const seat = bk.getSeatBounds();
     ok(seat.max.z >= np.position.z - 1e-6 && seat.max.y >= np.position.y + 2 - 1e-6, 'the seat box holds the nameplate where it draws');
+}
+
+// ---- a RESERVED book is CALM: sheets landing, pages turning and easing, a status line
+//      wrapping — none of it moves the cover, the nameplate, the tabs, or the seat ----
+{
+    const bk = new Book();
+    bk.deck.zPitch = PITCH;
+    bk.deck.rise = 10; bk.deck.riseRows = 3;
+    const two = () => ({ verso: leaf(), recto: leaf() });
+    bk.addSheet(two()); bk.addSheet(two());
+    bk.fit({ pageW: 20, pageH: 30, gutter: 4, surface: false });
+    bk.seatAll();
+    bk.setReserve({ sheets: 8, spread: true });
+    bk.bindCover({ pad: 2, zPad: 3 });
+    bk.bindTabs({ atlas: HEADLESS_ATLAS, lineHeight: 2, ride: 'front' });
+    const np = new THREE.Object3D();
+    np.height = 4; np.width = 8;
+    bk.setNameplate(np, { gap: 1 });
+    const fb = bk.frameBounds();
+    eq6([fb.min.x, fb.max.x, fb.min.y, fb.max.y, fb.min.z, fb.max.z], [-22, 22, -15, 45, -360, 10],
+        'the frame: the spread, the full rise (3 steps of 10), the deck 8 sheets deep');
+    const snap = () => {
+        const seat = bk.getSeatBounds(), m = bk.cover.mesh;
+        return [seat.min.x, seat.min.y, seat.min.z, seat.max.x, seat.max.y, seat.max.z,
+            m.position.x, m.position.y, m.position.z, m.scale.x, m.scale.y, m.scale.z,
+            np.position.x, np.position.y - np.height / 2, np.position.z,   // the plate's BOTTOM edge
+            Math.min(...bk.tabs.map((t) => t.tab.position.y))];   // the ruler (the head's tab stands raised by design)
+    };
+    const step = (frames = 30) => { for (let f = 0; f < frames; f++) { bk.update(1 / 60); const s = snap(); s.forEach((v, i) => { const d = Math.abs(v - base[i]); if (d > worst) { worst = d; worstAt = i; } }); } };
+    np.height = 9; bk.syncCover();   // the plate's tallest status — the band learns it
+    np.height = 4; bk.update(1 / 60);   // one sync places the tabs
+    const base = snap();
+    let worst = 0, worstAt = -1;
+    for (let k = 0; k < 4; k++) { bk.addSheet(two()); step(); }      // sheets land below the cap
+    bk.pageTo(0); step(5); bk.pageTo(5); step(5); bk.pageTo(2); step(60);   // turns, mid-ease
+    np.height = 7; bk.syncCover(); step(2); np.height = 4; bk.syncCover(); step(2);   // a status wraps and unwraps
+    ok(worst < 1e-6, `nothing the reader sees outside the pages moves (worst drift ${worst} at snap[${worstAt}])`);
+    ok(near(np.position.y - np.height / 2, fb.max.y + 2 + 1, 1e-6), "the nameplate's bottom stands a gap above the cover");
+    bk.addSheet(two()); bk.addSheet(two()); bk.addSheet(two());   // 9 > the reserve of 8: the frame grows, honestly
+    ok(bk.frameBounds().min.z < fb.min.z - 1, 'past its reserve the frame grows to hold the deck');
+    bk.resetNameplateBand();
+    np.height = 4; bk.syncCover();
+    ok(near(bk.getSeatBounds().max.y, bk.frameBounds().max.y + 2 + 1 + 4, 1e-6), 'a reset band shrinks back to the plate');
+    bk.setReserve(null);
+    ok(bk.frameBounds().equals(bk.layoutBounds()), 'unreserved, the frame is the live layout box');
 }
 
 console.log(`\nbook-deck.test: ${pass} passed, ${fail} failed`);
