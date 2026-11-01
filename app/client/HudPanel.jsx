@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
 import { bookInSlot } from './bookFocus.js';
@@ -10,7 +10,9 @@ import { DESK_KNOBS, BOOK_KNOBS, deskInSlot, readDesk, readBook } from './tuning
  * what you can do about it. The old pair (a bottom-center context breadcrumb that
  * REFLECTED focus/edit/key state, a bottom-right panel that CONTROLLED the focused
  * window) merged into one deterministic window — bottom-right by default, draggable,
- * collapsible, position + toggles persisted as hud.*.
+ * collapsible, position + toggles persisted as hud.*. The saved position is where you put
+ * it; the panel shows at that spot pulled inside the window (a smaller window, or the panel
+ * growing, never leaves it off-screen), and a window big enough shows it there again.
  *
  * Top-down, each row earning its place only when its subject is in play:
  *
@@ -139,6 +141,7 @@ export default function HudPanel({ client }) {
   const [addr, setAddr] = useState(() => !!stateController.get('hud.addr', false)); // address bar open
   const [hoverSeg, setHoverSeg] = useState(-1); // address-bar segment under the cursor
   const [pos, setPos] = useState(() => stateController.get('hud.pos', null)); // {x,y} once dragged
+  const [shown, setShown] = useState(null);     // pos pulled inside the window, as drawn
   const [deskOpen, setDeskOpen] = useState(() => !!stateController.get('hud.deskOpen', false));
   const [bookOpen, setBookOpen] = useState(() => !!stateController.get('hud.bookOpen', false));
   const posRef = useRef(pos);
@@ -197,6 +200,22 @@ export default function HudPanel({ client }) {
     window.addEventListener('pointerup', up, { once: true });
   };
 
+  // Fit the drawn spot inside the window: after every render (the panel's size follows its
+  // rows) and on a window resize. The saved pos is left alone.
+  useLayoutEffect(() => {
+    const fit = () => {
+      const el = rootRef.current;
+      if (!el || !pos) { setShown(null); return; }
+      const r = el.getBoundingClientRect();
+      const x = Math.max(0, Math.min(window.innerWidth - r.width, pos.x));
+      const y = Math.max(0, Math.min(window.innerHeight - r.height, pos.y));
+      setShown((s) => (s && s.x === x && s.y === y ? s : { x, y }));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  });
+
   const toggle = () => setCollapsed((c) => {
     stateController.set('hud.collapsed', !c);
     return !c;
@@ -229,7 +248,8 @@ export default function HudPanel({ client }) {
 
   // Until first drag: bottom-right over the canvas, raised to clear the inline
   // status bar. A drag switches to explicit x/y.
-  const place = pos ? { left: pos.x, top: pos.y } : { right: 12, bottom: 30 };
+  const at = pos ? (shown || pos) : null;
+  const place = at ? { left: at.x, top: at.y } : { right: 12, bottom: 30 };
 
   return (
     <div ref={rootRef} style={{ ...S.panel, ...place }}
