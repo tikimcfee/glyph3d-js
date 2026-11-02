@@ -439,10 +439,14 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
   switches: `labels.fadeMs` default 0. Placement at `labels.placeHz` and on camera rest, with
   hysteresis at each threshold. Once a thing's own title projects at least as large as its label, the
   thing names itself.
-- **The strip.** Carrel cards at the left edge of an entered plane, ordered by bearing (the ring
-  unrolled: the seat layout that rolls into the cylinder at curvature 1/R lays out the strip at
-  curvature 0), with waiting badges; at most 6 per edge, the rest as a cluster. It reads Holding
-  membership; it is not a second roster.
+- **The strip.** A collapsible, scrollable list of every desk at the left edge, in the open world and
+  in a plane alike (asked for live: "a collapsible, scrollable list — that way it's much easier to access each
+  set"). Each row is a carrel card with its waiting badge; the entered desk is highlighted in place.
+  Order is the desk tree by default (`strip.order tree`: the hub, its team desks indented under their
+  parent, then the rest — rows never reshuffle as the camera moves), or by bearing (`strip.order
+  bearing`: the ring unrolled). The wheel over the list scrolls it, never the view; its header (or
+  `strip.collapse on|off|toggle`, durable as `strip.collapsed`) folds it to a thin bar, and the plane's
+  reserved column gives the room back. It reads Holding membership; it is not a second roster.
 - **Locus hints, since lines, visit marks**: later dials, born when a pixel asks.
 - **Verbs** (NEW). `maplabel.list` (every candidate: class, rect, px, state, why hidden),
   `maplabel.explain <id>`, `maplabel.freeze on|off`, `carrel.neighbor <h|l|j|k|parent|child>` (by
@@ -1033,8 +1037,8 @@ log store (`carrel.enter`, `carrel.leave`, `agent.say`, time entered), so "uses 
    alike.
 4. **The prefix chord and Esc.** Which chord is the plane prefix for your hands? And is "first Esc
    releases the focused screen, second Esc leaves" right, or should leave have its own key only?
-5. **The strip's order.** By bearing (where the carrels stand, so memory holds) with `carrel.back` for
-   recency, or Stage Manager's recency order?
+5. **The strip's order.** ANSWERED (2026-11-02, live): a collapsible, scrollable list of every desk;
+   desk-tree order by default, bearing as `strip.order bearing`; recency stays `carrel.back`.
 6. **The hand arc's code.** You dropped hand control entirely; its code (`hand/`, `HandCalib.js`,
    `handCommands.js`) is committed on main and still reads the camera's fov. Delete it from the branch,
    or leave it and scope the camera gates around it?

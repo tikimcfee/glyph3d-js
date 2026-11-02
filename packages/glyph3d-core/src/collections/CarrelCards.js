@@ -1296,7 +1296,7 @@ export class CarrelCards {
             }
 
             const entry = this._ensureEntry(carrel);
-            if (!entered && entry.stripRequested && (now - (entry.stripRequestedAt || 0)) > 200) {
+            if (Boolean(this.ctx?.renderPasses) && entry.stripRequested && (now - (entry.stripRequestedAt || 0)) > 200) {
                 entry.stripRequested = false;
             }
             const rect = getCardRect(carrel);
@@ -1343,20 +1343,23 @@ export class CarrelCards {
         const swapOut = Math.max(0.1, Number(this.cfg.swapOutRatio) || CARREL_CARDS_DEFAULTS.swapOutRatio);
         const hasRenderLoop = Boolean(this.ctx?.renderPasses);
         if (ranked.length > 0 && budgetMs > 0) {
-            for (let pass = 0; pass < 2; pass++) {
+            for (let pass = 0; pass < 3; pass++) {
                 if (spentMs >= budgetMs || capturesThisFrame >= 1) break;
                 for (let k = 0; k < ranked.length; k++) {
                     const idx = (this._rrIndex + k) % ranked.length;
                     const item = ranked[idx];
                     const { entry, carrel, rect, projLongPx, isEntered } = item;
-                    if (isEntered) continue;
                     const isStrip = Boolean(entry.stripRequested);
                     const uncaptured = !entry.target || entry.capturedAt <= 0;
                     if (pass === 0) {
-                        // Pass 0 prioritizes strip-requested cards that have no texture yet so every
-                        // strip card populates within ~N capture intervals.
-                        if (!uncaptured || !isStrip) continue;
+                        // Pass 0 prioritizes non-entered strip-requested cards that have no texture yet
+                        // so every other strip card populates within ~N capture intervals.
+                        if (isEntered || !uncaptured || !isStrip) continue;
+                    } else if (pass === 1) {
+                        // Pass 1 populates the entered desk's own strip thumbnail if still uncaptured.
+                        if (!isEntered || !uncaptured || !isStrip) continue;
                     } else {
+                        if (isEntered) continue;
                         if (!isStrip && (!entry.nearLive || !isCardableCarrel(carrel))) continue;
                     }
                     // A desk whose cheapest tier (256) still exceeds budgetMs is not near-live-refreshed;

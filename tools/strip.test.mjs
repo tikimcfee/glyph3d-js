@@ -29,6 +29,7 @@ import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js'
 import CarrelCards from '../packages/glyph3d-core/src/collections/CarrelCards.js';
 import PlaneOverlay from '../app/client/PlaneOverlay.js';
 import Deixis from '../app/client/Deixis.js';
+import { getSetting, setSetting } from '../app/client/settings.js';
 import registerPlaneCommands from '../app/commands/handlers/planeCommands.js';
 import {
     Strip,
@@ -36,12 +37,24 @@ import {
     computeSeatMap,
     rollSeat,
     carrelBearingFrom,
+    orderCarrelsForStrip,
     resolveCarrelNeighbor,
     registerStripCommands,
 } from '../app/client/Strip.js';
 
 let passed = 0;
 let failed = 0;
+
+if (typeof globalThis.localStorage === 'undefined') {
+    const store = new Map();
+    globalThis.localStorage = {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => { store.set(k, String(v)); },
+        removeItem: (k) => { store.delete(k); },
+        key: (i) => [...store.keys()][i] ?? null,
+        get length() { return store.size; },
+    };
+}
 
 function check(cond, msg) {
     if (cond) {
@@ -333,15 +346,38 @@ console.log('=== strip.test.mjs ===');
 }
 
 // ----------------------------------------------------------------------------
-// 3. Strip left-edge cards: true bearing order, max 6 cards + cluster, click-to-enter, waiting badge
+// 3. Strip collapsible, scrollable desk list: open-world visibility, all desks
+//    listed (no maxCards cap), stable desk-tree order vs bearing order,
+//    entered desk highlighted, waiting badge, and click-to-enter
 // ----------------------------------------------------------------------------
 {
-    const { ctx, router, scene, carrels } = makeTestContext(1600, 1000);
+    const { ctx, router, scene, camera, carrels } = makeTestContext(1600, 1000);
     const overlay = new PlaneOverlay({ width: 1600, height: 1000, dpr: 1 });
     const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
-    // Create 1 entered carrel at origin facing -Z (normal = +Z) and 8 other carrels at known bearings
+    // Hub `gomux` with two nested team desks (`gomux/alpha`, `gomux/beta`), plus `agents` shelf
+    const hub = new Carrel({ name: 'gomux', mode: 'ring', seat: 'natural', radius: 30 });
+    scene.add(hub);
+    carrels.set('gomux', hub);
+
+    for (const [idx, tName] of ['gomux/alpha', 'gomux/beta'].entries()) {
+        const team = new Carrel({ name: tName, mode: 'plane', radius: 10 });
+        team.setPlaneUnit(makePlaneUnit());
+        team.lock(`${tName}:m`, makeBoundedMember(`${tName}:m`, 24, 15), { order: 0 });
+        hub.lock(team.name, team, { order: idx });
+        carrels.set(tName, team);
+    }
+    hub.updateWorldMatrix(true, true);
+
+    const agentsShelf = new Carrel({ name: 'agents', mode: 'ring', seat: 'natural', radius: 22 });
+    agentsShelf.position.set(-80, 0, -40);
+    agentsShelf.lock('agents:m', makeBoundedMember('agents:m', 24, 15), { order: 0 });
+    agentsShelf.updateWorldMatrix(true, true);
+    scene.add(agentsShelf);
+    carrels.set('agents', agentsShelf);
+
+    // Create `home` and 8 peer carrels at known bearings (`peer-0`..`peer-7`) = 13 desks total
     const home = new Carrel({ name: 'home', mode: 'plane', radius: 10 });
     home.setPlaneUnit(makePlaneUnit());
     home.position.set(0, 0, 0);
@@ -351,14 +387,12 @@ console.log('=== strip.test.mjs ===');
     scene.add(home);
     carrels.set('home', home);
 
-    // 8 other carrels sweeping from left (-70 deg) to right (+70 deg) in front of `home` (-Z)
     const degs = [-70, -50, -30, -10, 10, 30, 50, 70];
     degs.forEach((deg, i) => {
         const rad = (deg * Math.PI) / 180;
         const name = `peer-${i}`;
         const c = new Carrel({ name, mode: 'plane', radius: 10 });
         c.setPlaneUnit(makePlaneUnit());
-        // Looking -Z: +X is right, -X is left, -Z is forward
         c.position.set(Math.sin(rad) * 50, 0, -Math.cos(rad) * 50);
         c.lock(`${name}:m`, makeBoundedMember(`${name}:m`, 24, 15), { order: 0 });
         c.updateWorldMatrix(true, true);
@@ -366,40 +400,102 @@ console.log('=== strip.test.mjs ===');
         carrels.set(name, c);
     });
 
-    // Make `peer-7` (at +70 deg, normally 8th) have a waiting agent!
+    // Make `peer-7` have a waiting agent
     ctx.gomuxHub.snapshot.agents = [
         { name: 'agent-wait-7', live: true, status: 'waiting', detail: 'permission prompt', statusAt: new Date(Date.now() - 15000).toISOString() },
     ];
     ctx.holding.holderOf = (groupId) => (groupId === 'agent:book:agent-wait-7' ? carrels.get('peer-7') : null);
 
-    await router.execute('carrel.enter home');
+    // 3a. Open-world visibility (before entering any plane) + Teeth
+    check(ctx.enteredCarrel === null && !ctx.cameraController.isInPlane(), 'initially in the open world (not in a plane)');
+    const legacyInPlaneOnlyGate = Boolean(ctx.enteredCarrel || ctx.cameraController.planeState());
+    check(legacyInPlaneOnlyGate === false, 'teeth: legacy inPlane-only guard hid the strip completely in the open world');
+
     strip.update();
+    const openWorldState = strip.getState();
+    check(openWorldState.cards.length === 13, `open-world strip lists all 13 live desks with no maxCards cap (got ${openWorldState.cards.length})`);
+    check(openWorldState.cluster === null, `no '+N more' cluster pill (got ${JSON.stringify(openWorldState.cluster)})`);
+    check(Boolean(openWorldState.header && overlay.items.has('strip:header')), 'strip renders collapsible strip:header row in open world');
 
+    // Teeth for maxCards cap: a 6-card cap would hide 7 of the 13 desks
+    const legacyCappedCount = Math.min(6, openWorldState.cards.length);
+    check(openWorldState.cards.length > legacyCappedCount, `teeth: legacy maxCards=6 cap hid ${openWorldState.cards.length - legacyCappedCount} desks; all ${openWorldState.cards.length} are now listed`);
+
+    // Clicking a card in the OPEN WORLD enters that desk
+    const openTarget = openWorldState.cards.find((c) => c.name === 'home');
+    const openHit = overlay.clickAt(openTarget.rect.x + openTarget.rect.w / 2, openTarget.rect.y + openTarget.rect.h / 2);
+    check(Boolean(openHit) && ctx.enteredCarrel === 'home', `clicking 'home' row in the open world enters 'home' (enteredCarrel='${ctx.enteredCarrel}')`);
+
+    // 3b. Stable desk-TREE order (`strip.order = 'tree'` default) vs `'bearing'` order
+    strip.update();
     const st = strip.getState();
-    const shownCards = st.cards.filter((c) => c.shown);
-    check(shownCards.length === 6, `strip shows at most 6 cards on the edge (got ${shownCards.length})`);
-    check(st.cluster != null && st.cluster.count === 2, `remaining 2 carrels form a '+2 more' cluster (got ${JSON.stringify(st.cluster)})`);
+    const treeNames = st.cards.map((c) => c.name);
+    check(
+        treeNames[0] === 'gomux' && treeNames[1] === 'gomux/alpha' && treeNames[2] === 'gomux/beta' && treeNames[3] === 'agents',
+        `tree order places hub 'gomux', then indented team desks 'gomux/alpha', 'gomux/beta', then 'agents', then other desks (got ${treeNames.slice(0, 5).join(', ')})`
+    );
+    const gomuxCard = st.cards[0];
+    const alphaCard = st.cards[1];
+    check(
+        alphaCard.depth === 1 && alphaCard.parent === 'gomux' && alphaCard.rect.x > gomuxCard.rect.x && (alphaCard.rect.x + alphaCard.rect.w) === (gomuxCard.rect.x + gomuxCard.rect.w),
+        `nested team desk 'gomux/alpha' has depth=1, parent='gomux', and indented left edge (${alphaCard.rect.x} > ${gomuxCard.rect.x})`
+    );
 
-    // Check that shown cards are strictly ordered by bearing ascending
-    for (let i = 1; i < shownCards.length; i++) {
+    // Move and rotate camera + switch entered desk: tree order must NOT reshuffle!
+    camera.position.set(140, 25, -90);
+    camera.lookAt(-60, 0, 40);
+    camera.updateMatrixWorld();
+    await router.execute('carrel.enter peer-2');
+    strip.update();
+    const treeNamesAfterMove = strip.getState().cards.map((c) => c.name);
+    check(
+        JSON.stringify(treeNamesAfterMove) === JSON.stringify(treeNames),
+        'tree order stays 100% invariant when the camera moves/rotates or entered desk switches'
+    );
+
+    // Teeth: bearing order DOES reshuffle when viewer pose changes
+    const bearingAtHome = orderCarrelsForStrip(ctx, 'bearing', { x: 0, z: 0 }, { x: 0, z: -1 }).map((d) => d.name);
+    const bearingAtMoved = orderCarrelsForStrip(ctx, 'bearing', { x: 140, z: -90 }, { x: -1, z: 0.5 }).map((d) => d.name);
+    check(
+        JSON.stringify(bearingAtHome) !== JSON.stringify(bearingAtMoved),
+        'teeth: bearing-ordered rows reshuffle when the viewer moves/rotates, whereas tree order is invariant'
+    );
+
+    // Configurable `strip.order = 'bearing'` sorts by bearing ascending
+    await router.execute('carrel.enter home');
+    strip.configure({ order: 'bearing' });
+    strip.update();
+    const bearingCards = strip.getState().cards;
+    for (let i = 1; i < bearingCards.length; i++) {
         check(
-            shownCards[i].bearing > shownCards[i - 1].bearing,
-            `shown strip cards ordered by true bearing: ${shownCards[i - 1].name} (${shownCards[i - 1].bearing.toFixed(2)}) < ${shownCards[i].name} (${shownCards[i].bearing.toFixed(2)})`
+            bearingCards[i].bearing >= bearingCards[i - 1].bearing - 1e-6,
+            `bearing order sorts ascending: ${bearingCards[i - 1].name} (${bearingCards[i - 1].bearing.toFixed(2)}) <= ${bearingCards[i].name} (${bearingCards[i].bearing.toFixed(2)})`
         );
     }
+    strip.configure({ order: 'tree' });
+    strip.update();
 
-    // Check that `peer-7` (which has a waiting agent) was promoted into the visible 6 cards with a waiting badge!
-    const peer7Card = shownCards.find((c) => c.name === 'peer-7');
-    check(Boolean(peer7Card && peer7Card.waitingCount === 1), 'carrel with waiting agent (peer-7) is shown on the strip with waitingCount=1');
+    // 3c. Entered desk highlighted + waiting badge + click-to-enter
+    const treeState = strip.getState();
+    const enteredCard = treeState.cards.find((c) => c.name === 'home');
+    const enteredOverlayItem = overlay.items.get('strip:card:home');
+    check(
+        Boolean(enteredCard?.entered && enteredOverlayItem?.borderColor === 0x6ee7a0),
+        `entered desk 'home' stays in its row and is highlighted (entered=${enteredCard?.entered}, borderColor=0x${enteredOverlayItem?.borderColor?.toString(16)})`
+    );
+
+    // Scroll down so `peer-7` (at the bottom of the 13-desk list) is in view, verify its waiting badge and click it
+    strip.setScroll(strip.maxScrollPx());
+    const scrolledState = strip.getState();
+    const peer7Card = scrolledState.cards.find((c) => c.name === 'peer-7');
+    check(Boolean(peer7Card && peer7Card.waitingCount === 1 && peer7Card.shown), 'peer-7 is reachable by scrolling and has waitingCount=1');
     const peer7OverlayItem = overlay.items.get('strip:card:peer-7');
     check(peer7OverlayItem?.badge === '1 waiting', `peer-7 overlay card has '1 waiting' badge (got '${peer7OverlayItem?.badge}')`);
 
-    // Click the second visible card via `overlay.clickAt` -> switches entered carrel!
-    const targetCard = shownCards[1];
-    const clickX = targetCard.rect.x + targetCard.rect.w / 2;
-    const clickY = targetCard.rect.y + targetCard.rect.h / 2;
+    const clickX = peer7Card.rect.x + peer7Card.rect.w / 2;
+    const clickY = peer7Card.rect.y + peer7Card.rect.h / 2;
     const hitItem = overlay.clickAt(clickX, clickY);
-    check(Boolean(hitItem) && ctx.enteredCarrel === targetCard.name, `clicking strip card '${targetCard.name}' enters '${targetCard.name}' (enteredCarrel='${ctx.enteredCarrel}')`);
+    check(Boolean(hitItem) && ctx.enteredCarrel === 'peer-7', `clicking strip card 'peer-7' enters 'peer-7' (enteredCarrel='${ctx.enteredCarrel}')`);
 }
 
 // ----------------------------------------------------------------------------
@@ -520,6 +616,35 @@ console.log('=== strip.test.mjs ===');
     check(
         pinScreenLeftAfter >= stripRight - 1e-3,
         `dynamic strip.update() insets plane aim so focused pin left (${pinScreenLeftAfter.toFixed(1)} px) >= stripRightPx (${stripRight} px)`
+    );
+
+    // Collapse / Expand gate (`strip.collapse on|off|toggle` + header click + reserve shrinks when collapsed):
+    // Teeth: if collapsing did not release `stripRightPx` / `leftInsetForCarrel`, the 172px left column would remain reserved.
+    const collapseRes = await router.execute('strip.collapse on');
+    check(collapseRes.text.startsWith('OK:') && strip.isCollapsed() === true, `strip.collapse on collapses the strip (${collapseRes.text})`);
+    check(getSetting('strip.collapsed') === true, 'strip.collapse persists strip.collapsed=true in settings');
+    check(strip.stripRightPx() === 0 && strip.leftInsetForCarrel(mainDesk) === 0, `collapsed strip shrinks reserve to 0 (stripRightPx=${strip.stripRightPx()}, leftInset=${strip.leftInsetForCarrel(mainDesk)})`);
+    check(
+        overlay.items.has('strip:header') && !overlay.items.has('strip:backdrop') && ![...overlay.items.keys()].some((id) => id.startsWith('strip:card:')),
+        'collapsed strip renders only strip:header (no backdrop or desk cards)'
+    );
+    const aimWhenCollapsed = ctx.cameraController.planeState().aim;
+    const pinScreenLeftCollapsed = vpW / 2 + (pinLeftWorld - aimWhenCollapsed.x) * k;
+    check(
+        pinScreenLeftCollapsed < stripRight - 50,
+        `collapsing the strip gives the reserved column back to the plane (pinScreenLeft=${pinScreenLeftCollapsed.toFixed(1)} px vs expanded ${stripRight} px)`
+    );
+
+    // Clicking `strip:header` expands the strip back and restores the reserved column
+    const headerRec = overlay.items.get('strip:header');
+    overlay.clickAt(headerRec.rect.x + headerRec.rect.w / 2, headerRec.rect.y + headerRec.rect.h / 2);
+    check(strip.isCollapsed() === false && getSetting('strip.collapsed') === false, 'clicking strip:header expands the strip and persists strip.collapsed=false');
+    check(strip.stripRightPx() === stripRight && strip.leftInsetForCarrel(mainDesk) === stripRight, `expanding restores stripRightPx=${strip.stripRightPx()}`);
+    const aimReexpanded = ctx.cameraController.planeState().aim;
+    const pinScreenLeftReexpanded = vpW / 2 + (pinLeftWorld - aimReexpanded.x) * k;
+    check(
+        pinScreenLeftReexpanded >= stripRight - 1e-3,
+        `re-expanding the strip clears the focused pin again (pinScreenLeft=${pinScreenLeftReexpanded.toFixed(1)} px >= ${stripRight} px)`
     );
 }
 
@@ -663,9 +788,9 @@ console.log('=== strip.test.mjs ===');
     const carrelCards = new CarrelCards(ctx, { live: 3, budgetMs: 0.001, nearLiveHz: 2 });
     ctx.carrelCards = carrelCards;
 
-    // 1. Right after entering the plane (before carrelCards.update runs), strip shows placeholders for all N cards
+    // 1. Right after entering the plane (before carrelCards.update runs), strip shows placeholders for all N other cards
     strip.update();
-    const initialCards = strip.getState().cards.filter((c) => c.shown);
+    const initialCards = strip.getState().cards.filter((c) => c.shown && !c.entered);
     check(initialCards.length === N, `strip shows all ${N} other desks (got ${initialCards.length})`);
     const allPlaceholders = initialCards.every((c) => {
         const item = overlay.items.get(`strip:card:${c.name}`);
@@ -679,7 +804,7 @@ console.log('=== strip.test.mjs ===');
         strip.update();
     }
 
-    const afterCards = strip.getState().cards.filter((c) => c.shown);
+    const afterCards = strip.getState().cards.filter((c) => c.shown && !c.entered);
     const allPopulated = afterCards.every((c) => {
         const item = overlay.items.get(`strip:card:${c.name}`);
         const entry = carrelCards.cards.get(c.name);
@@ -693,6 +818,67 @@ console.log('=== strip.test.mjs ===');
     });
     check(allPopulated, `after ${N} capture intervals, all ${N}/${N} strip cards (including ring desk 'gomux') have 256-tier textures and cleared placeholders`);
     carrelCards.dispose();
+}
+
+// ----------------------------------------------------------------------------
+// 8. Scrollable desk list: wheel scrolling over the band, scroll offset
+//    clamping to [0, maxScrollPx], and persistence across strip.update()
+// ----------------------------------------------------------------------------
+{
+    const vpW = 1200, vpH = 520;
+    const { ctx, router, scene, carrels } = makeTestContext(vpW, vpH);
+    const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
+    ctx.planeOverlay = overlay;
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
+    ctx.strip = strip;
+
+    const unit = makePlaneUnit();
+    const totalDesks = 10;
+    for (let i = 0; i < totalDesks; i++) {
+        const name = `scroll-desk-${i}`;
+        const c = new Carrel({ name, mode: 'plane', radius: 10 });
+        c.setPlaneUnit(unit);
+        c.lock(`${name}:m`, makeBoundedMember(`${name}:m`, 24, 15), { order: 0 });
+        c.updateWorldMatrix(true, true);
+        scene.add(c);
+        carrels.set(name, c);
+    }
+
+    strip.update();
+    const st0 = strip.getState();
+    check(st0.cards.length === totalDesks, `all ${totalDesks} desks listed in strip state`);
+    check(st0.maxScrollPx > 0, `10 desks in 520px viewport has positive maxScrollPx (${st0.maxScrollPx} px)`);
+    check(st0.scrollPx === 0, `initial scrollPx is 0 (got ${st0.scrollPx})`);
+    const first0 = st0.cards[0];
+    const last0 = st0.cards[totalDesks - 1];
+    check(first0.inView === true && last0.inView === false, 'at scrollPx=0, first desk is inView and last desk is below viewport');
+
+    // Teeth: without scrolling, the last desk's unscrolled Y lies below vpH (520px) and is unreachable
+    check(last0.rect.y >= vpH, `teeth: without scroll offset, last desk rect.y (${last0.rect.y}) >= vpH (${vpH}) and cannot be clicked`);
+
+    // Clamping below 0
+    strip.setScroll(-300);
+    check(strip.scrollPx() === 0, `setScroll(-300) clamps to 0 (got ${strip.scrollPx()})`);
+
+    // Wheel inside strip band scrolls down and returns true (consumed)
+    const consumedInside = overlay.wheelAt(60, 200, 180);
+    check(consumedInside === true && strip.scrollPx() === 180, `overlay.wheelAt inside strip band consumes event and sets scrollPx=180 (got ${strip.scrollPx()})`);
+
+    // Wheel outside strip band is NOT consumed and does not alter scrollPx
+    const consumedOutside = overlay.wheelAt(strip.stripRightPx() + 80, 200, 180);
+    check(consumedOutside === false && strip.scrollPx() === 180, `overlay.wheelAt outside strip band returns false and leaves scrollPx=180`);
+
+    // Scroll offset is preserved across subsequent strip.update() calls
+    strip.update();
+    check(strip.scrollPx() === 180, `scrollPx=180 is preserved across strip.update() (got ${strip.scrollPx()})`);
+
+    // Clamping above maxScrollPx brings the last desk into view and makes it clickable
+    strip.setScroll(99999);
+    check(strip.scrollPx() === st0.maxScrollPx, `setScroll(99999) clamps to maxScrollPx=${st0.maxScrollPx} (got ${strip.scrollPx()})`);
+    const lastScrolled = strip.getState().cards[totalDesks - 1];
+    check(lastScrolled.inView === true && overlay.items.has(`strip:card:${lastScrolled.name}`), `at maxScrollPx, last desk '${lastScrolled.name}' is inView and in overlay.items`);
+    overlay.clickAt(lastScrolled.rect.x + lastScrolled.rect.w / 2, lastScrolled.rect.y + lastScrolled.rect.h / 2);
+    check(ctx.enteredCarrel === lastScrolled.name, `clicking scrolled-into-view last desk enters '${lastScrolled.name}' (got '${ctx.enteredCarrel}')`);
 }
 
 console.log(`ok strip: ${passed}/${passed + failed} checks passed`);

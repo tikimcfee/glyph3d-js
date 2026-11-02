@@ -297,7 +297,11 @@ export function CanvasPicker() {
       }
       const id = entry?.id ?? null;
       s.hoverEntry = entry ?? null;
-      if (id === s.hoverId) return;
+      if (id === s.hoverId) {
+        const wantCursor = id ? 'pointer' : 'default';
+        if (dom.style.cursor !== wantCursor) dom.style.cursor = wantCursor;
+        return;
+      }
       s.hoverId = id;
       client.router.execute(`attention.set hover ${id || 'none'}`);
       dom.style.cursor = id ? 'pointer' : 'default';

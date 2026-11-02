@@ -175,6 +175,8 @@ export default class PlaneOverlay {
         this._dotGeo = null;
 
 
+        /** @type {{handleWheelAt:(x:number,y:number,dy:number)=>boolean}|null} the desk strip: it takes a wheel over its band (it sets itself here) */
+        this._strip = null;
         /** @type {{x:number,y:number}|null} where the primary press went down (a drag is never a click) */
         this._downClient = null;
 
@@ -197,8 +199,16 @@ export default class PlaneOverlay {
                 hit.onClick(hit);
             }
         };
+        this._onDomWheel = (e) => {
+            if (this.wheelAtClient(e.clientX, e.clientY, e.deltaY, e.deltaMode)) {
+                e.preventDefault?.();
+                e.stopImmediatePropagation?.();
+                e.stopPropagation?.();
+            }
+        };
         this._domCanvas?.addEventListener?.('pointerdown', this._onDomPointerDown, true);
         this._domCanvas?.addEventListener?.('click', this._onDomClick, true);
+        this._domCanvas?.addEventListener?.('wheel', this._onDomWheel, { capture: true, passive: false });
     }
 
 
@@ -733,6 +743,41 @@ export default class PlaneOverlay {
     }
 
     /**
+     * Dispatch a wheel delta (`deltaY` in device pixels, positive = scroll down) at
+     * device-pixel coordinates `(devX, devY)`. Returns `true` if consumed by an overlay
+     * band (such as the desk strip), so the caller suppresses camera/plane zoom.
+     *
+     * @param {number} devX
+     * @param {number} devY
+     * @param {number} deltaY
+     * @returns {boolean}
+     */
+    wheelAt(devX, devY, deltaY) {
+        return Boolean(this._strip?.handleWheelAt(devX, devY, deltaY));
+    }
+
+    /**
+     * Convert CSS client coordinates `(clientX, clientY)` and wheel `deltaY` into device
+     * pixels and dispatch to `wheelAt`.
+     *
+     * @param {number} clientX
+     * @param {number} clientY
+     * @param {number} deltaY
+     * @param {number} [deltaMode=0]
+     * @returns {boolean}
+     */
+    wheelAtClient(clientX, clientY, deltaY, deltaMode = 0) {
+        const vp = this.viewport();
+        const canvas = this._domCanvas ?? this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
+        const rect = canvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+        const devX = (Number(clientX) - rect.left) * vp.dpr;
+        const devY = (Number(clientY) - rect.top) * vp.dpr;
+        const modeScale = deltaMode === 1 ? 16 : (deltaMode === 2 ? 200 : 1);
+        const devDeltaY = (Number(deltaY) || 0) * modeScale * vp.dpr;
+        return this.wheelAt(devX, devY, devDeltaY);
+    }
+
+    /**
      * Remove and dispose one overlay item by id.
      * @param {string} id
      * @returns {boolean}
@@ -858,9 +903,11 @@ export default class PlaneOverlay {
     dispose() {
         this._domCanvas?.removeEventListener?.('pointerdown', this._onDomPointerDown, true);
         this._domCanvas?.removeEventListener?.('click', this._onDomClick, true);
+        this._domCanvas?.removeEventListener?.('wheel', this._onDomWheel, true);
         this._domCanvas = null;
         this._onDomPointerDown = null;
         this._onDomClick = null;
+        this._onDomWheel = null;
         this._downClient = null;
         this.clear();
         this._dotGeo?.dispose();

@@ -1,28 +1,31 @@
 /**
- * Strip — Left-edge carrel cards, off-screen edge marks, and neighbor navigation
- * inside an entered plane (`docs/planes/DESIGN.md` §3.14, Slice 8).
+ * Strip — Left-edge collapsible, scrollable desk list, off-screen edge marks, and
+ * neighbor navigation (`docs/planes/DESIGN.md` §3.14, Slice 8).
  *
- * Inside an entered plane (`ctx.enteredCarrel`):
- * 1. Renders the OTHER live carrels as quiet cards along the left edge of `PlaneOverlay`,
- *    ordered by TRUE BEARING from where you stand (the ring unrolled: the seat layout that
- *    rolls into the cylinder at curvature 1/R lays out the strip at curvature 0).
- * 2. Shows at most `maxCards` (default 6) cards on the edge, with the remainder summarized in a
- *    cluster pill (`+N more` or `+N more · M waiting` — a waiting count never aggregates away).
- *    Carrels with waiting agents carry a waiting badge and are guaranteed to be either shown
- *    as a card or edge-marked.
- * 3. Clicking a card (`overlay.clickAt` / `pickAt`) invokes `carrel.enter <name>` (the switch cut).
- * 4. Off-screen deixis points (`ctx.deixis.list()`) and off-screen waiting agents receive
- *    high-contrast edge marks clamped to the viewport boundary.
- * 5. Never covers the focused pin: if the entered plane is a pin board (`planeArrange === 'pins'`)
- *    and the focused pin's screen rect overlaps `[0, stripRightPx]`, insets the plane's aim so
- *    the focused pin clears the strip.
+ * Whenever `strip.enabled` is true and live desks exist:
+ * 1. Renders a collapsible, scrollable desk list along the left edge of `PlaneOverlay`
+ *    in both the open world and inside an entered plane.
+ * 2. Lists EVERY live desk (no `maxCards` cap or `+N more` cluster) in stable desk-TREE
+ *    order (`strip.order = 'tree'` default: the hub `gomux`, its nested team desks indented
+ *    under their parent, then `agents` and other desks; or `'bearing'` order by true bearing).
+ *    The entered desk stays in its row and is highlighted (`entered: true`).
+ * 3. Collapsible via the top header row (`strip:header` with `▾`/`▸` chevron) or the
+ *    `strip.collapse [on|off|toggle]` verb; durable across reloads via `strip.collapsed`.
+ *    When collapsed, only the thin header is shown and the plane's reserved column (`stripRightPx`)
+ *    shrinks to `0`, giving the room back.
+ * 4. Wheel over the strip band scrolls the desk list (preserving and clamping scroll offset
+ *    across updates) without moving the camera or plane behind.
+ * 5. Clicking a card invokes `carrel.enter <name>`.
+ * 6. Inside an entered plane, off-screen deixis points (`ctx.deixis.list()`) and off-screen
+ *    waiting agents receive high-contrast edge marks clamped to the viewport boundary, and the
+ *    strip never covers the focused pin when expanded.
  *
  * Also provides `seatMap()` / `rollSeat()` on `Carrel` and `carrel.neighbor <h|l|j|k|parent|child>`.
  */
 
 import * as THREE from 'three';
 import { flowBoxes, squareWrap } from '@glyph3d/core/collections/layouts/flowBoxes.js';
-import { getSetting } from './settings.js';
+import { getSetting, setSetting } from './settings.js';
 import { waitingAgents } from '../commands/handlers/gomuxCommands.js';
 /** @import Carrel from '@glyph3d/core/services/interaction/Carrel.js' */
 
@@ -33,12 +36,17 @@ const _tmpNdc = new THREE.Vector3();
 
 export const DEFAULT_STRIP_CONFIG = Object.freeze({
     enabled: true,
-    maxCards: 6,
+    collapsed: false,
+    order: 'tree',
     cardWidthPx: 148,
     cardMaxHeightPx: 96,
     cardMinHeightPx: 54,
+    headerHeightPx: 26,
+    headerGapPx: 6,
+    treeIndentPx: 14,
     edgeLeftPx: 12,
     edgeTopPx: 52,
+    edgeBottomPx: 16,
     cardGapPx: 10,
     pinClearancePx: 12,
     edgeMarkInsetPx: 8,
@@ -349,6 +357,12 @@ export function parentCarrelOf(ctx, carrel) {
             return c;
         }
     }
+    const cname = String(carrel.carrelName || '');
+    const slash = cname.lastIndexOf('/');
+    if (slash > 0) {
+        const p = map.get(cname.slice(0, slash));
+        if (p && p !== carrel && !p._dissolving) return p;
+    }
     return null;
 }
 
@@ -387,7 +401,96 @@ export function childCarrelsOf(ctx, parentCarrel) {
             out.push(e.grid);
         }
     }
+    if (map) {
+        for (const c of map.values()) {
+            if (!c || c._dissolving || c === parentCarrel || seen.has(c.carrelName)) continue;
+            if (parentCarrelOf(ctx, c) === parentCarrel) {
+                seen.add(c.carrelName);
+                out.push(c);
+            }
+        }
+    }
     return out;
+}
+
+/**
+ * Order all live carrels for the strip according to `orderMode` (`'tree'` or `'bearing'`).
+ * - `'tree'` (default): stable desk-tree order — the hub (`gomux`), its nested team desks indented
+ *   under their parent (`depth = 1..`), then `agents`, then remaining top-level desks in stable
+ *   registration order (with any nested children indented under them). Invariant under camera motion.
+ * - `'bearing'`: sorted by true bearing from `(viewerPos, viewerFwd)` ascending.
+ *
+ * @param {Object} ctx
+ * @param {'tree'|'bearing'} orderMode
+ * @param {{x:number,y?:number,z:number}} viewerPos
+ * @param {{x:number,y?:number,z:number}} viewerFwd
+ * @returns {Array<{carrel: Carrel, name: string, bearing: number, depth: number, parent: string|null}>}
+ */
+export function orderCarrelsForStrip(ctx, orderMode = 'tree', viewerPos = { x: 0, z: 0 }, viewerFwd = { x: 0, z: -1 }) {
+    const map = ctx?.carrels instanceof Map ? ctx.carrels : null;
+    if (!map || !map.size) return [];
+    const live = [...map.values()].filter((c) => c && !c._dissolving);
+    if (!live.length) return [];
+
+    if (orderMode === 'bearing') {
+        const list = live.map((c) => {
+            const p = parentCarrelOf(ctx, c);
+            return {
+                carrel: c,
+                name: c.carrelName,
+                bearing: carrelBearingFrom(c, viewerPos, viewerFwd),
+                depth: 0,
+                parent: p?.carrelName ?? null,
+            };
+        });
+        list.sort((a, b) => {
+            if (Math.abs(a.bearing - b.bearing) > 1e-6) return a.bearing - b.bearing;
+            return a.name.localeCompare(b.name);
+        });
+        return list;
+    }
+
+    // Default: stable desk-tree order ('tree')
+    const roots = live.filter((c) => !parentCarrelOf(ctx, c));
+    const rootPriority = (c) => {
+        if (c.carrelName === 'gomux') return 0;
+        if (c.carrelName === 'agents') return 1;
+        return 2;
+    };
+    const orderedRoots = [...roots].sort((a, b) => {
+        const pa = rootPriority(a);
+        const pb = rootPriority(b);
+        return pa !== pb ? pa - pb : 0;
+    });
+
+    const visited = new Set();
+    const ordered = [];
+    const visit = (c, depth, parentName) => {
+        if (!c || c._dissolving || visited.has(c.carrelName)) return;
+        visited.add(c.carrelName);
+        ordered.push({
+            carrel: c,
+            name: c.carrelName,
+            bearing: carrelBearingFrom(c, viewerPos, viewerFwd),
+            depth,
+            parent: parentName,
+        });
+        const children = childCarrelsOf(ctx, c);
+        for (const child of children) {
+            visit(child, depth + 1, c.carrelName);
+        }
+    };
+
+    for (const r of orderedRoots) {
+        visit(r, 0, null);
+    }
+    for (const c of live) {
+        if (!visited.has(c.carrelName)) {
+            const p = parentCarrelOf(ctx, c);
+            visit(c, p ? 1 : 0, p?.carrelName ?? null);
+        }
+    }
+    return ordered;
 }
 
 /**
@@ -671,9 +774,29 @@ export class Strip {
         if (typeof exec !== 'function') throw new Error('Strip: opts.exec (the command bus) is required');
         this.ctx = ctx;
         this.overlay = overlay;
+        if (overlay) overlay._strip = this;
         this._exec = exec;
         this.config = { ...DEFAULT_STRIP_CONFIG, ...cfgOpts };
-        /** @type {Array<{name:string, bearing:number, waitingCount:number, waitingNames:string[], shown:boolean, rect:{x:number,y:number,w:number,h:number}|null}>} */
+        if (cfgOpts?.enabled === undefined) {
+            const s = getSetting('strip.enabled');
+            if (s != null) this.config.enabled = Boolean(s);
+        }
+        if (cfgOpts?.order === undefined) {
+            const o = getSetting('strip.order');
+            if (o === 'tree' || o === 'bearing') this.config.order = o;
+        }
+        this._collapsed = cfgOpts?.collapsed !== undefined
+            ? Boolean(cfgOpts.collapsed)
+            : Boolean(getSetting('strip.collapsed') ?? DEFAULT_STRIP_CONFIG.collapsed);
+        this.config.collapsed = this._collapsed;
+
+        this._scrollPx = 0;
+        this._maxScrollPx = 0;
+        this._contentHeightPx = 0;
+        this._listViewportHeightPx = 0;
+        this._listTopY = 0;
+        this._lastHeader = null;
+        /** @type {Array<{name:string, bearing:number, depth:number, parent:string|null, entered:boolean, waitingCount:number, waitingNames:string[], shown:boolean, inView:boolean, rect:{x:number,y:number,w:number,h:number}|null}>} */
         this._lastCards = [];
         /** @type {Array<{id:string, kind:'deixis'|'waiting', edge:'left'|'right'|'top'|'bottom', x:number, y:number, text:string}>} */
         this._lastEdgeMarks = [];
@@ -686,11 +809,148 @@ export class Strip {
      * @param {Partial<typeof DEFAULT_STRIP_CONFIG>} opts
      */
     configure(opts = {}) {
-        Object.assign(this.config, opts);
+        if (!opts || typeof opts !== 'object') return;
+        const { collapsed, ...rest } = opts;
+        Object.assign(this.config, rest);
+        if (collapsed !== undefined) {
+            this.setCollapsed(collapsed, { persist: false });
+        }
     }
 
     /**
-     * The right-most device-pixel X coordinate occupied by the left-edge strip cards (0 when hidden).
+     * Whether the strip is enabled (`strip.enabled`).
+     * @returns {boolean}
+     */
+    isEnabled() {
+        return Boolean(this.config.enabled);
+    }
+
+    /**
+     * Whether the strip is collapsed (`strip.collapsed`).
+     * @returns {boolean}
+     */
+    isCollapsed() {
+        return Boolean(this._collapsed);
+    }
+
+    /**
+     * Current desk ordering mode (`'tree'` or `'bearing'`).
+     * @returns {'tree'|'bearing'}
+     */
+    orderMode() {
+        return this.config.order === 'bearing' ? 'bearing' : 'tree';
+    }
+
+    /**
+     * Collapse or expand the strip, optionally persisting `strip.collapsed` in settings.
+     * When collapsed, `stripRightPx()` and `leftInsetForCarrel()` become `0`, giving the
+     * reserved column back to the active plane.
+     *
+     * @param {boolean} collapsed
+     * @param {{ persist?: boolean }} [opts]
+     * @returns {boolean}
+     */
+    setCollapsed(collapsed, { persist = true } = {}) {
+        const next = Boolean(collapsed);
+        const prev = this._collapsed;
+        this._collapsed = next;
+        this.config.collapsed = next;
+        if (persist) {
+            setSetting(this.ctx, 'strip.collapsed', next);
+        }
+        this.update();
+        if (prev !== next) {
+            this._reaimPlaneForReserveChange();
+        }
+        return this._collapsed;
+    }
+
+    /**
+     * Toggle the strip collapsed state.
+     * @param {{ persist?: boolean }} [opts]
+     * @returns {boolean}
+     */
+    toggleCollapsed(opts) {
+        return this.setCollapsed(!this._collapsed, opts);
+    }
+
+    /**
+     * Current vertical scroll offset in device pixels (clamped to `[0, maxScrollPx]`).
+     * @returns {number}
+     */
+    scrollPx() {
+        return this._scrollPx;
+    }
+
+    /**
+     * Maximum vertical scroll offset in device pixels (`>= 0`).
+     * @returns {number}
+     */
+    maxScrollPx() {
+        return this._maxScrollPx;
+    }
+
+    /**
+     * Set vertical scroll offset in device pixels, clamped to `[0, maxScrollPx]`.
+     * @param {number} px
+     * @returns {number}
+     */
+    setScroll(px) {
+        const raw = Number(px);
+        if (!Number.isFinite(raw)) return this._scrollPx;
+        this._scrollPx = Math.max(0, Math.round(raw));
+        this.update();
+        return this._scrollPx;
+    }
+
+    /**
+     * Scroll the strip list by `deltaPx` device pixels (`+` scrolls down, `-` scrolls up).
+     * @param {number} deltaPx
+     * @returns {number}
+     */
+    scrollBy(deltaPx) {
+        const d = Number(deltaPx);
+        if (!Number.isFinite(d) || d === 0) return this._scrollPx;
+        return this.setScroll(this._scrollPx + d);
+    }
+
+    /**
+     * Handle a mouse wheel event at device-pixel coordinates `(devX, devY)`.
+     * If the strip is expanded and `(devX, devY)` lies inside the strip band `[0, stripRightPx]`,
+     * scrolls the desk list and returns `true` so the camera/plane behind never moves.
+     *
+     * @param {number} devX
+     * @param {number} devY
+     * @param {number} deltaY - wheel delta in device pixels
+     * @returns {boolean}
+     */
+    handleWheelAt(devX, devY, deltaY) {
+        if (!this.isEnabled() || this.isCollapsed()) return false;
+        if (!(this._lastStripRightPx > 0)) return false;
+        const vp = this.overlay?.viewport?.() || { width: 1600, height: 1000, dpr: 1 };
+        const vpH = vp.height || 1000;
+        if (devX < 0 || devX > this._lastStripRightPx || devY < 0 || devY > vpH) {
+            return false;
+        }
+        this.scrollBy(deltaY);
+        return true;
+    }
+
+    /**
+     * Handle a mouse wheel event at CSS client coordinates `(clientX, clientY)`.
+     * @param {number} clientX
+     * @param {number} clientY
+     * @param {number} deltaY
+     * @param {number} [deltaMode=0]
+     * @returns {boolean}
+     */
+    handleWheelAtClient(clientX, clientY, deltaY, deltaMode = 0) {
+        return Boolean(this.overlay?.wheelAtClient?.(clientX, clientY, deltaY, deltaMode));
+    }
+
+    /**
+     * The right-most device-pixel X coordinate occupied by the left-edge strip cards
+     * (`0` when disabled or collapsed).
      * Used by `enterPlaneDesk` / `pinAim` and `_ensureFocusedPinClear` so the strip never covers
      * the focused pin.
      * @returns {number}
@@ -701,23 +961,20 @@ export class Strip {
 
     /**
      * Compute the left inset in device pixels needed if `forCarrel` (or a standalone surface when null)
-     * is entered right now.
-     * @param {Carrel|null} [forCarrel]
+     * is entered right now. Returns `0` when the strip is disabled or collapsed.
+     * @param {Carrel|null} [_forCarrel]
      * @returns {number}
      */
-    leftInsetForCarrel(forCarrel = null) {
-        const enabledSetting = getSetting('strip.enabled');
-        const enabled = enabledSetting != null ? Boolean(enabledSetting) : this.config.enabled;
-        if (!enabled) return 0;
+    leftInsetForCarrel(_forCarrel = null) {
+        if (!this.isEnabled() || this.isCollapsed()) return 0;
         const map = this.ctx?.carrels instanceof Map ? this.ctx.carrels : null;
         if (!map) return 0;
-        const targetName = forCarrel ? forCarrel.carrelName : null;
-        let others = 0;
+        let liveCount = 0;
         for (const c of map.values()) {
-            if (!c || c._dissolving || c.carrelName === targetName) continue;
-            others++;
+            if (!c || c._dissolving) continue;
+            liveCount++;
         }
-        if (others === 0) return 0;
+        if (liveCount === 0) return 0;
         const vp = this.overlay?.viewport?.() || { width: 1600, height: 1000, dpr: 1 };
         const dpr = vp.dpr || 1;
         return Math.round((this.config.edgeLeftPx + this.config.cardWidthPx + this.config.pinClearancePx) * dpr);
@@ -728,8 +985,16 @@ export class Strip {
      */
     getState() {
         return {
+            enabled: this.isEnabled(),
+            collapsed: this.isCollapsed(),
+            order: this.orderMode(),
             enteredCarrel: this.ctx?.enteredCarrel ?? null,
             stripRightPx: this._lastStripRightPx,
+            scrollPx: this._scrollPx,
+            maxScrollPx: this._maxScrollPx,
+            contentHeightPx: this._contentHeightPx,
+            viewportHeightPx: this._listViewportHeightPx,
+            header: this._lastHeader ? { ...this._lastHeader, rect: { ...this._lastHeader.rect } } : null,
             cards: this._lastCards.map((c) => ({ ...c, rect: c.rect ? { ...c.rect } : null })),
             cluster: this._lastCluster ? { ...this._lastCluster } : null,
             edgeMarks: this._lastEdgeMarks.map((m) => ({ ...m })),
@@ -751,9 +1016,8 @@ export class Strip {
     }
 
     /**
-     * Per-frame update. Renders strip cards, cluster summary, and off-screen edge marks into
-     * `this.overlay` when inside an entered plane (`ctx.enteredCarrel` or any `plane.enter` view),
-     * and enforces that the focused pin is never covered by the strip.
+     * Per-frame update. Renders the collapsible header row, scrollable desk cards, and
+     * (when inside a plane) off-screen edge marks into `this.overlay`.
      */
     update() {
         const overlay = this.overlay;
@@ -761,228 +1025,326 @@ export class Strip {
         if (!overlay || !ctx) return;
 
         const activeIds = new Set();
+        this._lastHeader = null;
         this._lastCards = [];
         this._lastEdgeMarks = [];
         this._lastStripRightPx = 0;
         this._lastCluster = null;
 
-        const enabledSetting = getSetting('strip.enabled');
-        const enabled = enabledSetting != null ? Boolean(enabledSetting) : this.config.enabled;
-        const enteredName = ctx.enteredCarrel;
-        const entered = enteredName && ctx.carrels instanceof Map ? ctx.carrels.get(enteredName) : null;
-        const planeState = ctx.cameraController?.planeState?.() ?? null;
-        const inPlane = Boolean((entered && !entered._dissolving) || (planeState && !planeState.leaving));
-        if (!enabled || !inPlane || !(ctx.carrels instanceof Map)) {
+        const enabled = this.isEnabled();
+        if (!enabled || !(ctx.carrels instanceof Map)) {
             this._pruneStripOverlay(activeIds);
             return;
         }
 
-        const maxCardsSetting = Number(getSetting('strip.maxCards'));
-        const maxCards = Number.isFinite(maxCardsSetting) && maxCardsSetting >= 1
-            ? Math.floor(maxCardsSetting)
-            : this.config.maxCards;
+        const enteredName = ctx.enteredCarrel;
+        const entered = enteredName ? ctx.carrels.get(enteredName) : null;
+        const planeState = ctx.cameraController?.planeState?.() ?? null;
+        const inPlane = Boolean((entered && !entered._dissolving) || (planeState && !planeState.leaving));
 
         const vp = this.overlay?.viewport?.() || { width: 1600, height: 1000, dpr: 1 };
         const dpr = vp.dpr || 1;
         const vpW = vp.width || 1600;
         const vpH = vp.height || 1000;
 
-        // 1. Viewer position and forward direction for true bearing
+        // 1. Viewer position and forward direction for bearing calculations
         const { viewerPos, viewerFwd } = this._viewerFrame(entered);
 
-        // 2. Collect other live carrels, ordered by true bearing from viewer
+        // 2. Collect ALL live carrels in configured order ('tree' default or 'bearing')
+        const orderMode = this.orderMode();
+        const orderedDesks = orderCarrelsForStrip(ctx, orderMode, viewerPos, viewerFwd);
+        if (orderedDesks.length === 0) {
+            this._scrollPx = 0;
+            this._maxScrollPx = 0;
+            this._contentHeightPx = 0;
+            if (inPlane) {
+                const waitingMap = collectWaitingAgents(ctx);
+                this._renderOffscreenEdgeMarks(entered, waitingMap, vpW, vpH, dpr, activeIds);
+            }
+            this._pruneStripOverlay(activeIds);
+            return;
+        }
+
         const waitingMap = collectWaitingAgents(ctx);
-        const candidates = [];
-        const enteredParent = entered ? parentCarrelOf(ctx, entered) : null;
-        for (const c of ctx.carrels.values()) {
-            if (!c || c._dissolving || (entered && c.carrelName === entered.carrelName)) continue;
-            // Skip child carrels that are already represented inside another non-entered parent carrel,
-            // unless we are currently inside their parent or sibling in the same parent!
-            const parent = parentCarrelOf(ctx, c);
-            if (parent && parent !== entered && parent !== enteredParent) continue;
-
-            const bearing = carrelBearingFrom(c, viewerPos, viewerFwd);
-            const waitInfo = waitingOnCarrel(ctx, c, waitingMap);
-            candidates.push({
-                carrel: c,
-                name: c.carrelName,
-                bearing,
-                waitingCount: waitInfo.count,
-                waitingNames: waitInfo.names,
-            });
-        }
-
-        // Sort by true bearing ascending (left-to-right across the horizon), tie-break by name
-        candidates.sort((a, b) => {
-            if (Math.abs(a.bearing - b.bearing) > 1e-6) return a.bearing - b.bearing;
-            return a.name.localeCompare(b.name);
-        });
-
-        // 3. Select up to `maxCards` cards to show on the left edge.
-        // Invariant: waiting carrels are prioritized into the visible set (preserving bearing order)
-        // so a waiting agent is always shown on a card (or if > maxCards all waiting, edge-marked + counted in cluster).
-        let shownSet;
-        if (candidates.length <= maxCards) {
-            shownSet = new Set(candidates.map((c) => c.name));
-        } else {
-            const picked = new Set();
-            for (const c of candidates) {
-                if (c.waitingCount > 0 && picked.size < maxCards) picked.add(c.name);
-            }
-            for (const c of candidates) {
-                if (picked.size >= maxCards) break;
-                picked.add(c.name);
-            }
-            shownSet = picked;
-        }
-
-        // 4. Layout visible cards along the left edge
-        const cardW = Math.round(this.config.cardWidthPx * dpr);
+        const baseCardW = Math.round(this.config.cardWidthPx * dpr);
         const leftX = Math.round(this.config.edgeLeftPx * dpr);
+        const topY = Math.round(this.config.edgeTopPx * dpr);
+        const headerH = Math.round(this.config.headerHeightPx * dpr);
+        const headerGap = Math.round(this.config.headerGapPx * dpr);
         const gapY = Math.round(this.config.cardGapPx * dpr);
-        let curY = Math.round(this.config.edgeTopPx * dpr);
+        const bottomMargin = Math.round(this.config.edgeBottomPx * dpr);
+        const indentUnitPx = Math.round(this.config.treeIndentPx * dpr);
 
-        for (const item of candidates) {
-            if (!shownSet.has(item.name)) {
-                this._lastCards.push({
-                    name: item.name,
-                    bearing: item.bearing,
-                    waitingCount: item.waitingCount,
-                    waitingNames: item.waitingNames,
-                    shown: false,
-                    rect: null,
-                });
-                continue;
-            }
+        const listTopY = topY + headerH + headerGap;
+        const listBottomY = Math.max(listTopY + Math.round(this.config.cardMinHeightPx * dpr), vpH - bottomMargin);
+        const listViewportH = Math.max(1, listBottomY - listTopY);
+        this._listTopY = listTopY;
+        this._listViewportHeightPx = listViewportH;
 
-            // Ensure CarrelCards has a card entry / aspect ratio for this carrel
-            const cardEntry = ctx.carrelCards?.ensureCard?.(item.carrel, this.config.cardWidthPx) ?? null;
-            const tex = cardEntry?.target?.texture ?? null;
-            const placeholder = !tex;
-            const pr = item.carrel.getPlaneRect?.();
+        const waitingIdsOnStrip = new Set();
+        const candidates = [];
+        let curOffset = 0;
+        for (const d of orderedDesks) {
+            const waitInfo = waitingOnCarrel(ctx, d.carrel, waitingMap);
+            for (const wn of waitInfo.names) waitingIdsOnStrip.add(wn);
+            const indentPx = orderMode === 'tree' ? Math.min(d.depth, 3) * indentUnitPx : 0;
+            const cardX = leftX + indentPx;
+            const cardW = Math.max(Math.round(64 * dpr), baseCardW - indentPx);
+            const pr = d.carrel.getPlaneRect?.();
             const aspect = pr && pr.height > 0 ? pr.width / pr.height : 16 / 10;
-            const rawH = Math.round(cardW / Math.max(0.5, Math.min(3.0, aspect)));
+            const rawH = Math.round(baseCardW / Math.max(0.5, Math.min(3.0, aspect)));
             const cardH = Math.max(
                 Math.round(this.config.cardMinHeightPx * dpr),
                 Math.min(Math.round(this.config.cardMaxHeightPx * dpr), rawH)
             );
-
-            const rect = { x: leftX, y: curY, w: cardW, h: cardH };
-            const badge = item.waitingCount > 0
-                ? `${item.waitingCount} waiting`
-                : (item.carrel.carrelName === ctx.carrelBack ? 'back' : (placeholder ? '…' : ''));
-            const borderColor = item.waitingCount > 0
-                ? 0xf59e0b
-                : (item.carrel.carrelName === ctx.carrelBack ? 0x60a5fa : 0x334155);
-
-            const targetName = item.name;
-            const cardId = `strip:card:${targetName}`;
-            activeIds.add(cardId);
-            overlay.setCard(cardId, {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: rect.h,
-                title: targetName,
-                badge,
-                borderColor,
-                color: 0x0b1220,
-                badgeColor: item.waitingCount > 0 ? 0xf59e0b : (placeholder ? 0x475569 : 0x3b82f6),
-                opacity: 1.0,
-                z: 5,
-                texture: tex,
-                placeholder,
-                kind: 'strip',
-                data: {
-                    carrel: targetName,
-                    bearing: item.bearing,
-                    waiting: item.waitingCount,
-                    waitingNames: item.waitingNames,
-                    placeholder,
-                    stale: cardEntry ? cardEntry.stale : true,
-                },
-                onClick: () => this._exec(`carrel.enter ${JSON.stringify(targetName)}`),
+            candidates.push({
+                ...d,
+                waitingCount: waitInfo.count,
+                waitingNames: waitInfo.names,
+                cardX,
+                cardW,
+                cardH,
+                offsetY: curOffset,
             });
+            curOffset += cardH + gapY;
+        }
+
+        const contentHeightPx = candidates.length > 0 ? curOffset - gapY : 0;
+        const maxScrollPx = Math.max(0, contentHeightPx - listViewportH);
+        this._contentHeightPx = contentHeightPx;
+        this._maxScrollPx = maxScrollPx;
+        this._scrollPx = Math.max(0, Math.min(maxScrollPx, Math.round(this._scrollPx || 0)));
+
+        // 3. Header row (`strip:header`) with chevron and click-to-toggle
+        const collapsed = this.isCollapsed();
+        const totalWaiting = waitingIdsOnStrip.size;
+        const chevron = collapsed ? '▶' : '▼';
+        const headerTitle = `${chevron} Desks (${candidates.length})`;
+        const headerBadge = totalWaiting > 0
+            ? `${totalWaiting} waiting`
+            : (collapsed && entered ? entered.carrelName : '');
+        const headerRect = { x: leftX, y: topY, w: baseCardW, h: headerH };
+        this._lastHeader = {
+            id: 'strip:header',
+            title: headerTitle,
+            badge: headerBadge,
+            collapsed,
+            count: candidates.length,
+            waitingCount: totalWaiting,
+            rect: headerRect,
+        };
+        activeIds.add('strip:header');
+        overlay.setCard('strip:header', {
+            x: headerRect.x,
+            y: headerRect.y,
+            w: headerRect.w,
+            h: headerRect.h,
+            title: headerTitle,
+            badge: headerBadge,
+            color: 0x0f172a,
+            borderColor: totalWaiting > 0 ? 0xf59e0b : 0x475569,
+            borderWidth: 1.5,
+            badgeColor: totalWaiting > 0 ? 0xf59e0b : 0x6ee7a0,
+            opacity: 1.0,
+            z: 8,
+            kind: 'strip',
+            interactive: true,
+            data: {
+                kind: 'header',
+                collapsed,
+                count: candidates.length,
+                waitingCount: totalWaiting,
+            },
+            onClick: () => this._exec('strip.collapse toggle'),
+        });
+
+        // 4. When collapsed, only the thin header is shown and `stripRightPx` is 0
+        if (collapsed) {
+            this._lastStripRightPx = 0;
+            for (const item of candidates) {
+                const isEntered = Boolean(entered && item.name === entered.carrelName);
+                const cardEntry = ctx.carrelCards?.get?.(item.name) ?? null;
+                const tex = cardEntry?.target?.texture ?? null;
+                this._lastCards.push({
+                    name: item.name,
+                    bearing: item.bearing,
+                    depth: item.depth,
+                    parent: item.parent,
+                    entered: isEntered,
+                    waitingCount: item.waitingCount,
+                    waitingNames: item.waitingNames,
+                    shown: false,
+                    inView: false,
+                    hasTexture: !!tex,
+                    placeholder: !tex,
+                    rect: null,
+                });
+            }
+            if (inPlane) {
+                this._renderOffscreenEdgeMarks(entered, waitingMap, vpW, vpH, dpr, activeIds);
+            }
+            this._pruneStripOverlay(activeIds);
+            return;
+        }
+
+        // 5. Expanded: reserve left band `[0, stripRightPx]` and render scrollable desk cards
+        this._lastStripRightPx = leftX + baseCardW + Math.round(this.config.pinClearancePx * dpr);
+        activeIds.add('strip:backdrop');
+        overlay.setCard('strip:backdrop', {
+            x: 0,
+            y: 0,
+            w: this._lastStripRightPx,
+            h: vpH,
+            title: '',
+            badge: '',
+            color: 0x050608,
+            borderColor: 0x050608,
+            borderWidth: 0,
+            opacity: 1.0,
+            z: 1,
+            kind: 'strip',
+            interactive: false,
+        });
+
+        const minVisibleCardH = Math.round(24 * dpr);
+        for (const item of candidates) {
+            const isEntered = Boolean(entered && item.name === entered.carrelName);
+            const rawY = listTopY + item.offsetY - this._scrollPx;
+            const rawBottom = rawY + item.cardH;
+            const drawY = Math.max(listTopY, rawY);
+            const drawBottom = Math.min(vpH - Math.round(4 * dpr), rawBottom);
+            const drawH = drawBottom - drawY;
+            const inView = drawH >= minVisibleCardH && rawBottom > listTopY && rawY < vpH - Math.round(4 * dpr);
+
+            const cardEntry = inView
+                ? (ctx.carrelCards?.ensureCard?.(item.carrel, this.config.cardWidthPx) ?? null)
+                : (ctx.carrelCards?.get?.(item.name) ?? null);
+            const tex = cardEntry?.target?.texture ?? null;
+            const placeholder = !tex;
+
+            const rect = { x: item.cardX, y: inView ? drawY : rawY, w: item.cardW, h: inView ? drawH : item.cardH };
+            const targetName = item.name;
+            const shortName = item.depth > 0 && item.parent && targetName.startsWith(`${item.parent}/`)
+                ? `└ ${targetName.slice(item.parent.length + 1)}`
+                : (item.depth > 0 ? `└ ${targetName}` : targetName);
+
+            if (inView) {
+                const badge = item.waitingCount > 0
+                    ? `${item.waitingCount} waiting`
+                    : (placeholder
+                        ? '…'
+                        : (isEntered
+                            ? 'entered'
+                            : (targetName === ctx.carrelBack ? 'back' : '')));
+                const borderColor = item.waitingCount > 0
+                    ? 0xf59e0b
+                    : (isEntered
+                        ? 0x6ee7a0
+                        : (targetName === ctx.carrelBack ? 0x60a5fa : 0x334155));
+                const badgeColor = item.waitingCount > 0
+                    ? 0xf59e0b
+                    : (placeholder
+                        ? 0x475569
+                        : (isEntered ? 0x6ee7a0 : 0x3b82f6));
+
+                const cardId = `strip:card:${targetName}`;
+                activeIds.add(cardId);
+                overlay.setCard(cardId, {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    title: shortName,
+                    badge,
+                    borderColor,
+                    borderWidth: isEntered ? 2.5 : 1.5,
+                    color: isEntered ? 0x112233 : 0x0b1220,
+                    badgeColor,
+                    opacity: 1.0,
+                    z: 5,
+                    texture: tex,
+                    placeholder,
+                    kind: 'strip',
+                    data: {
+                        carrel: targetName,
+                        bearing: item.bearing,
+                        depth: item.depth,
+                        parent: item.parent,
+                        entered: isEntered,
+                        waiting: item.waitingCount,
+                        waitingNames: item.waitingNames,
+                        placeholder,
+                        stale: cardEntry ? cardEntry.stale : true,
+                    },
+                    onClick: () => this._exec(`carrel.enter ${JSON.stringify(targetName)}`),
+                });
+            }
 
             this._lastCards.push({
                 name: targetName,
                 bearing: item.bearing,
+                depth: item.depth,
+                parent: item.parent,
+                entered: isEntered,
                 waitingCount: item.waitingCount,
                 waitingNames: item.waitingNames,
-                shown: true,
+                shown: inView,
+                inView,
                 hasTexture: !!tex,
                 placeholder,
                 rect,
             });
-            curY += cardH + gapY;
         }
 
-        if (shownSet.size > 0) {
-            this._lastStripRightPx = leftX + cardW + Math.round(this.config.pinClearancePx * dpr);
-            // Opaque backdrop across the reserved left-edge strip band `[0, stripRightPx]` so
-            // panned-off columns or adjacent pins on a desk never show through behind/between cards.
-            activeIds.add('strip:backdrop');
-            overlay.setCard('strip:backdrop', {
-                x: 0,
-                y: 0,
-                w: this._lastStripRightPx,
-                h: vpH,
-                title: '',
-                badge: '',
-                color: 0x050608,
-                borderColor: 0x050608,
-                borderWidth: 0,
-                opacity: 1.0,
-                z: 1,
-                kind: 'strip',
-                interactive: false,
-            });
+        // 6. Off-screen edge marks for Deixis points and off-screen waiting agents (when in a plane)
+        if (inPlane) {
+            this._renderOffscreenEdgeMarks(entered, waitingMap, vpW, vpH, dpr, activeIds);
         }
 
-        // 5. Cluster pill if more than `maxCards` other carrels exist
-        const hidden = this._lastCards.filter((c) => !c.shown);
-        if (hidden.length > 0) {
-            const hiddenWaiting = hidden.reduce((sum, c) => sum + c.waitingCount, 0);
-            const clusterText = hiddenWaiting > 0
-                ? `+${hidden.length} more · ${hiddenWaiting} waiting`
-                : `+${hidden.length} more`;
-            const clusterRect = {
-                x: leftX,
-                y: curY,
-                w: cardW,
-                h: Math.round(24 * dpr),
-            };
-            activeIds.add('strip:cluster');
-            overlay.setCard('strip:cluster', {
-                x: clusterRect.x,
-                y: clusterRect.y,
-                w: clusterRect.w,
-                h: clusterRect.h,
-                title: clusterText,
-                badge: hiddenWaiting > 0 ? `${hiddenWaiting} waiting` : '',
-                color: hiddenWaiting > 0 ? 0x30200c : 0x0e141e,
-                borderColor: hiddenWaiting > 0 ? 0xf59e0b : 0x334155,
-                badgeColor: 0xf59e0b,
-                opacity: 1.0,
-                z: 5,
-                kind: 'strip',
-                data: { hiddenCount: hidden.length, waitingCount: hiddenWaiting },
-            });
-            this._lastCluster = {
-                count: hidden.length,
-                waitingCount: hiddenWaiting,
-                text: clusterText,
-                rect: clusterRect,
-            };
-        }
-
-        // 6. Off-screen edge marks for Deixis points and off-screen waiting agents
-        this._renderOffscreenEdgeMarks(entered, waitingMap, vpW, vpH, dpr, activeIds);
-
-        // 7. Focused-pin non-overlap: ensure the strip never covers the entered plane's focused pin
+        // 7. Focused-pin non-overlap: ensure the expanded strip never covers the entered plane's focused pin
         this._ensureFocusedPinClear(entered, vpW);
 
         this._pruneStripOverlay(activeIds);
+    }
+
+    /**
+     * Re-aim the active plane view when the strip collapses or expands so collapsing gives the
+     * reserved column back to the plane and expanding clears the strip again.
+     * @private
+     */
+    _reaimPlaneForReserveChange() {
+        const cc = this.ctx?.cameraController;
+        const st = cc?.planeState?.();
+        if (!st || st.leaving) return;
+
+        const vp = cc.planeViewport?.() || this.overlay?.viewport?.() || { width: 1600, height: 1000, dpr: 1 };
+        const dpr = vp.dpr || 1;
+        const enteredName = this.ctx?.enteredCarrel;
+        const entered = enteredName && this.ctx?.carrels instanceof Map ? this.ctx.carrels.get(enteredName) : null;
+
+        if (entered && entered.mode === 'plane' && entered.planeArrange === 'pins' && entered.planeUnit) {
+            const focusId = entered.focusedPin?.();
+            if (!focusId) return;
+            const topMarginPx = Number(getSetting('plane.topMarginPx') ?? 0) * dpr;
+            const leftInset = this.leftInsetForCarrel(entered);
+            const aim = entered.pinAim(focusId, vp, topMarginPx, leftInset);
+            if (aim) cc.setPlaneAim?.(aim.x, st.aim.y);
+            return;
+        }
+
+        const targetId = this.ctx?.planeTarget;
+        if (targetId && !String(targetId).startsWith('carrel:')) {
+            const entry = this.ctx?.registry?.get?.(targetId);
+            const plane = entry?.grid ? cc.planeOf?.(entry.grid) : null;
+            if (plane && st.pxPerUnit > 0) {
+                const leftInset = this.leftInsetForCarrel(null);
+                const viewW = vp.width / st.pxPerUnit;
+                const leftMargin = (Number(getSetting('plane.leftMarginPx') ?? 0) * dpr) / st.pxPerUnit;
+                const ax0 = plane.width <= viewW ? 0 : -plane.width / 2 + viewW / 2 - leftMargin;
+                const ax = leftInset > 0 ? Math.min(ax0, -plane.width / 2 + viewW / 2 - leftInset / st.pxPerUnit) : ax0;
+                cc.setPlaneAim?.(ax, st.aim.y);
+            }
+        }
     }
 
     /**
@@ -1077,7 +1439,7 @@ export class Strip {
         //    - OR a waiting agent on another carrel whose card wasn't shown directly on the strip
         const shownWaitingNames = new Set();
         for (const c of this._lastCards) {
-            if (c.shown) {
+            if (c.shown && !c.entered) {
                 for (const name of c.waitingNames) shownWaitingNames.add(name);
             }
         }
@@ -1261,44 +1623,83 @@ function hueToHex(hue) {
 // ============================================================================
 
 /**
- * Register `carrel.neighbor` on the command router if not already registered.
+ * Register `carrel.neighbor` and `strip.collapse` on the command router if not already registered.
  * @param {import('./CommandProvider.jsx').AppRouter} router
  */
 export function registerStripCommands(router) {
-    if (!router || router._commands?.has?.('carrel.neighbor')) return;
+    if (!router) return;
 
-    router.register('carrel.neighbor', async (args, ctx) => {
-        const dir = args[0];
-        if (!dir) {
-            return { text: 'ERR: usage: carrel.neighbor <h|l|j|k|parent|child> [from]', data: null };
-        }
-        const fromArg = args[1] ? String(args[1]) : null;
-        const resolved = resolveCarrelNeighbor(ctx, dir, fromArg);
-        if (resolved.error || !resolved.carrel) {
-            return { text: `ERR: ${resolved.error || 'no neighbor found'}`, data: null };
-        }
+    if (!router._commands?.has?.('carrel.neighbor')) {
+        router.register('carrel.neighbor', async (args, ctx) => {
+            const dir = args[0];
+            if (!dir) {
+                return { text: 'ERR: usage: carrel.neighbor <h|l|j|k|parent|child> [from]', data: null };
+            }
+            const fromArg = args[1] ? String(args[1]) : null;
+            const resolved = resolveCarrelNeighbor(ctx, dir, fromArg);
+            if (resolved.error || !resolved.carrel) {
+                return { text: `ERR: ${resolved.error || 'no neighbor found'}`, data: null };
+            }
 
-        const next = resolved.carrel;
-        const fromName = resolved.from?.carrelName ?? null;
-        const enterRes = typeof ctx.execute === 'function'
-            ? await ctx.execute(['carrel.enter', next.carrelName])
-            : await router.execute(`carrel.enter ${JSON.stringify(next.carrelName)}`);
-        return {
-            text: `OK: carrel.neighbor ${resolved.dir} '${fromName}' → '${next.carrelName}'`,
-            data: {
-                from: fromName,
-                to: next.carrelName,
-                name: next.carrelName,
-                dir: resolved.dir,
-                bearing: resolved.bearing ?? 0,
-                enter: enterRes?.data ?? null,
-            },
-        };
-    }, {
-        description: 'Step to the neighboring carrel by bearing / seat geometry (h/l around the ring or shelf, j/k between rows, parent/child for nested desks)',
-        usage: '<h|l|j|k|parent|child> [from]',
-        returns: '{ from, to, name, dir, bearing }',
-    });
+            const next = resolved.carrel;
+            const fromName = resolved.from?.carrelName ?? null;
+            const enterRes = typeof ctx.execute === 'function'
+                ? await ctx.execute(['carrel.enter', next.carrelName])
+                : await router.execute(`carrel.enter ${JSON.stringify(next.carrelName)}`);
+            return {
+                text: `OK: carrel.neighbor ${resolved.dir} '${fromName}' → '${next.carrelName}'`,
+                data: {
+                    from: fromName,
+                    to: next.carrelName,
+                    name: next.carrelName,
+                    dir: resolved.dir,
+                    bearing: resolved.bearing ?? 0,
+                    enter: enterRes?.data ?? null,
+                },
+            };
+        }, {
+            description: 'Step to the neighboring carrel by bearing / seat geometry (h/l around the ring or shelf, j/k between rows, parent/child for nested desks)',
+            usage: '<h|l|j|k|parent|child> [from]',
+            returns: '{ from, to, name, dir, bearing }',
+        });
+    }
+
+    if (!router._commands?.has?.('strip.collapse')) {
+        router.register('strip.collapse', (args, ctx) => {
+            const strip = ctx?.strip;
+            if (!strip) {
+                return { text: 'ERR: strip not initialized', data: null };
+            }
+            const raw = String(args[0] ?? 'toggle').trim().toLowerCase();
+            let next;
+            if (!raw || raw === 'toggle') {
+                next = !strip.isCollapsed();
+            } else if (raw === 'on' || raw === 'true' || raw === '1' || raw === 'yes') {
+                next = true;
+            } else if (raw === 'off' || raw === 'false' || raw === '0' || raw === 'no') {
+                next = false;
+            } else {
+                return { text: `ERR: usage: strip.collapse [on|off|toggle] (got '${args[0]}')`, data: null };
+            }
+            strip.setCollapsed(next, { persist: true });
+            const st = strip.getState();
+            return {
+                text: `OK: strip ${st.collapsed ? 'collapsed' : 'expanded'} (stripRightPx=${st.stripRightPx}, desks=${st.cards.length})`,
+                data: {
+                    collapsed: st.collapsed,
+                    stripRightPx: st.stripRightPx,
+                    order: st.order,
+                    scrollPx: st.scrollPx,
+                    maxScrollPx: st.maxScrollPx,
+                    count: st.cards.length,
+                },
+            };
+        }, {
+            description: 'Collapse or expand the left-edge desk strip (durable setting strip.collapsed)',
+            usage: '[on|off|toggle]',
+            returns: '{ collapsed, stripRightPx, order, scrollPx, maxScrollPx, count }',
+        });
+    }
 }
 
 export default Strip;

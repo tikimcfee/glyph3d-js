@@ -525,8 +525,10 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
 
 - **`strip.test.mjs`** and **`carrel-cards.test.mjs`** — the strip (`app/client/Strip.js`: the
-  left-edge band of carrel cards in every plane view, ordered by true bearing, max `strip.maxCards` + a
-  cluster, waiting badges, off-screen deixis and waiting edge marks, the band reserved so a surface's
+  left-edge collapsible, scrollable list of every desk's card, open world and plane alike: desk-tree
+  order (`strip.order tree`, team desks indented; camera moves never reshuffle it) or bearing, the
+  entered desk highlighted in place, `strip.collapse` + the header (durable `strip.collapsed`; the plane
+  reserve shrinks to 0 collapsed), scroll offset clamped and kept, waiting badges, off-screen deixis and waiting edge marks, the band reserved so a surface's
   column 0 lands right of it, `carrel.neighbor <h|l|j|k|parent|child>`) and carrel impostor cards
   (`CarrelCards`: an FBO capture on `CARD_LAYER = 29` that dirties neither GlyphBatch nor PanelBatch,
   an LRU pool cap, world-scaled nested-desk native px, render-target sizes validated at the seam; the
@@ -542,8 +544,10 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   cursor (CanvasInteraction's hover loop yields to an interactive overlay item), and `page.mouse.click`
   at its `overlay.list` screenRect runs `carrel.enter <that desk>` (the strip runs verbs through the
   `exec` it's built with), lands `plane.state` on it, and its card back returns; the 3D scene behind a
-  card neither hovers nor clicks. Teeth: the strip reaching for a router on the raw ctx (the old click)
-  enters nothing.
+  card neither hovers nor clicks. A click on a row in the OPEN WORLD enters too; the real wheel over the
+  list scrolls it with the camera unmoved; a click on the header collapses it (the band gives its
+  column back, the setting persists) and re-expands it. Teeth: the strip reaching for a router on the
+  raw ctx (the old click) enters nothing; a wheel the overlay doesn't consume moves the camera.
   ```
   bun tools/strip-click.test.mjs
   ```
