@@ -21,8 +21,8 @@
 // signals the shell that launched it).
 //
 // MEMORY: a sampling heap profiler runs from every page load (CDP HeapProfiler, one sample per
-// --heap-sample bytes allocated, default 64 KiB). SIGUSR2 writes what is RETAINED now — the exact
-// JS heap (Runtime.getHeapUsage) and the live sampled bytes by allocation site, largest first — to
+// --heap-sample bytes allocated, default 64 KiB). SIGUSR2 forces a GC, then writes what is RETAINED
+// now — the exact JS heap (Runtime.getHeapUsage) and the live sampled bytes by allocation site, largest first — to
 // <--heap-dir>/agent-display-heap-<time>.txt (and .json, the raw profile): which code holds the
 // heap. Sampling costs little; it only sees allocations since the last load.
 // Launch it with `exec` so no wrapper shell sits in between:
@@ -110,6 +110,7 @@ function heapSites(profile) {
 }
 process.on('SIGUSR2', async () => {
   try {
+    await cdp.send('HeapProfiler.collectGarbage');   // retained, not retained-plus-garbage
     const usage = await cdp.send('Runtime.getHeapUsage');
     const { profile } = await cdp.send('HeapProfiler.getSamplingProfile');
     const sites = heapSites(profile);

@@ -941,6 +941,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.agentVisibility = null;
       state.ctx.sessionProvider?.dispose();
       state.ctx.sessionProvider = null;
+      // The world asks its regions for bounds on its own schedule: they leave it before they go.
+      state.ctx.world?.unregister?.('agents');
+      state.ctx.world?.unregister?.('deltas');
       state.ctx.agentBooks?.dispose();
       state.ctx.agentBooks = null;
       state.ctx.deltaBooks?.dispose();
