@@ -8,6 +8,17 @@ All run under Bun (the repo runtime). The dev loop must be up for browser tools:
 `tools/dev.sh` (Vite :5173 + relay :8080), `tools/dev.sh vite` to restart + clear cache
 after editing core, `make dev-status` to check.
 
+## Committing from a shared tree
+
+- **`verify-staged.sh`** — run the headless gates on the git INDEX alone (what the commit would hold),
+  with `@glyph3d/*` resolving to the snapshot's own packages. Use it whenever you stage some hunks of a
+  tree other sessions or helpers are editing (with `pick-hunks.mjs`, or a HEAD-plus-yours blob via
+  `git hash-object -w` + `git update-index --cacheinfo`).
+  ```
+  tools/verify-staged.sh                          # every tools/*.test.mjs on the staged snapshot
+  tools/verify-staged.sh carrel-plane overlay     # just these
+  ```
+
 ## Browser drive-loop
 
 - **`smoke.mjs`** — boot the app in a real (WebGPU) browser, capture every console
