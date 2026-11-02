@@ -432,6 +432,18 @@ void main() {
 }
 `;
 
+// The placeholders a material reads before its real textures exist (an atlas still loading, no
+// emoji, no frame): ONE of each kind for every material — shared, never disposed — instead of a
+// fresh 1×1 per field (thousands of texture objects, each a GPU texture once drawn, none freed).
+let _placeholderUint = null;
+let _placeholderRGBA = null;
+
+/** The shared 1×1 RGBAInteger placeholder (curve / glyph-map slots before an atlas). */
+export function glyphPlaceholderUint() { return (_placeholderUint ??= makePlaceholderUintTexture()); }
+
+/** The shared 1×1 RGBA placeholder (emoji / frame slots with nothing to show). */
+export function glyphPlaceholderRGBA() { return (_placeholderRGBA ??= makePlaceholderRGBATexture()); }
+
 /**
  * Create a placeholder 1x1 RGBAInteger texture.
  */
@@ -490,16 +502,15 @@ export function getGlyphGreekPx() {
  * @param {THREE.DataTexture} [options.curveTexture]
  * @param {THREE.DataTexture} [options.glyphMapTexture]
  * @param {THREE.DataTexture} [options.groupTexture]
- * @param {number} [options.maxGroups=64]
+ * @param {number} [options.maxGroups=1]  the group table's rows (its texture height)
  * @returns {THREE.RawShaderMaterial}
  */
 export function createGlyphMaterial(options = {}) {
-    const curveTex = options.curveTexture || makePlaceholderUintTexture();
-    const glyphMapTex = options.glyphMapTexture || makePlaceholderUintTexture();
-    const placeholderRGBA = makePlaceholderRGBATexture();
-    const emojiTex = options.emojiTexture || placeholderRGBA;
-    const frameTex = options.frameTexture || placeholderRGBA;
-    const maxGroups = options.maxGroups || 64;
+    const curveTex = options.curveTexture || glyphPlaceholderUint();
+    const glyphMapTex = options.glyphMapTexture || glyphPlaceholderUint();
+    const emojiTex = options.emojiTexture || glyphPlaceholderRGBA();
+    const frameTex = options.frameTexture || glyphPlaceholderRGBA();
+    const maxGroups = options.maxGroups || 1;
 
     const uniforms = {
         curveTexture: { value: curveTex },
@@ -532,7 +543,6 @@ export function createGlyphMaterial(options = {}) {
         side: THREE.DoubleSide,
         forceSinglePass: true,   // planar quads: three's back/front two-pass would only re-derive the program twice per draw
     });
-    material.userData.placeholderRGBA = placeholderRGBA;
 
     _activeMaterials.add(material);
     material.addEventListener('dispose', () => {

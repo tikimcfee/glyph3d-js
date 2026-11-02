@@ -43,7 +43,8 @@ const row = (g, col, lane) => field._groupData[(g * GROUP_STRIDE + col) * 4 + la
 
 // ── exhaustion: loud, returns the dead group, counter stops marching ──
 {
-    const f2 = new InstancedField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, maxGroups: 4 });
+    // The wall is the table's ceiling (groupCap): below it a table grows on demand.
+    const f2 = new InstancedField(new THREE.Object3D(), HEADLESS_ATLAS, { maxInstances: 64, groupCap: 4 });
     const got = [];
     for (let i = 0; i < 8; i++) got.push(f2.createGroup());
     ok(got.slice(0, 3).every((g) => g > 0 && g < 4), 'ids hand out to the wall');

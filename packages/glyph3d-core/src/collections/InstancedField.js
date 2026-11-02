@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import {
     InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID,
 } from '../core/InstancedSlotBuffer.js';
-import { createGlyphMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
+import { createGlyphMaterial, GROUP_STRIDE, glyphPlaceholderRGBA } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
@@ -26,13 +26,29 @@ export function liveInstancedFields() {
 /** sRGB byte → linear, the shader's pow(c, 2.2) decode. */
 const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, k) => Math.pow(k / 255, 2.2));
 
+/**
+ * A group table's texture: GROUP_STRIDE texels across, one row per group, float RGBA, nearest.
+ * @param {Float32Array} data @param {number} rows @returns {THREE.DataTexture}
+ */
+function makeGroupTexture(data, rows) {
+    const tex = new THREE.DataTexture(data, GROUP_STRIDE, rows, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
 export default class InstancedField {
     /**
      * @param {THREE.Scene} scene
      * @param {Object} [atlas] - GlyphAtlas (contains _slugData, _shaper, getCharSize)
      * @param {Object} [options]
      * @param {number} [options.maxInstances]
-     * @param {number} [options.maxGroups=64]
+     * @param {number} [options.maxGroups=1]  the group table's rows to start with (group 0 is
+     *   every field's own); createGroup past them doubles the table, up to `groupCap`
+     * @param {number} [options.groupCap=4096]  the most rows the table may grow to (a field
+     *   creating more without releasing is a leak: it fails loud)
      * @param {Object} [options.slugData]
      * @param {Object} [options.shaper]
      * @param {number} [options.worldScale=0.025]
@@ -48,7 +64,10 @@ export default class InstancedField {
 
         this.worldScale = options.worldScale || 0.025;
         this.maxInstances = options.maxInstances || PERF_THRESHOLDS.maxInstancesPerMesh || 50000;
-        this.maxGroups = Math.max(1, options.maxGroups || 64);
+        // The group table's live rows (its texture height — the shaders clamp to it). Most fields only
+        // ever use group 0, so a table starts at the rows asked for and grows on demand.
+        this.maxGroups = Math.max(1, options.maxGroups || 1);
+        this.groupCap = Math.max(this.maxGroups, options.groupCap || 4096);
         this._defaultColor = options.defaultColor || { r: 0.0, g: 1.0, b: 0.0 };
 
         this._cachedGlyphCount = 0;
@@ -67,7 +86,7 @@ export default class InstancedField {
         // Slot buffer (32-byte RenderSlot records)
         this.slotBuffer = new InstancedSlotBuffer(Math.max(this.maxInstances, 256));
 
-        // Group transform table: 6 columns x maxGroups rows (Float DataTexture)
+        // Group transform table: GROUP_STRIDE columns x maxGroups rows (Float DataTexture)
         // col 0: offset.xyz (w free)
         // col 1: rotation quaternion xyzw (identity 0,0,0,1)
         // col 2: color.rgb + alpha (default 1,1,1,1)
@@ -76,17 +95,7 @@ export default class InstancedField {
         // col 5: bg_color.rgba (default 0,0,0,0)
         this._groupData = new Float32Array(this.maxGroups * GROUP_STRIDE * 4);
         this._initGroupDefaults();
-        this._groupTexture = new THREE.DataTexture(
-            this._groupData,
-            GROUP_STRIDE,
-            this.maxGroups,
-            THREE.RGBAFormat,
-            THREE.FloatType
-        );
-        this._groupTexture.minFilter = THREE.NearestFilter;
-        this._groupTexture.magFilter = THREE.NearestFilter;
-        this._groupTexture.generateMipmaps = false;
-        this._groupTexture.needsUpdate = true;
+        this._groupTexture = makeGroupTexture(this._groupData, this.maxGroups);
 
         // Highlight texture (RGBA8 DataTexture, 1024 wide, wrapped)
         this._highlightTexture = null;
@@ -410,7 +419,7 @@ export default class InstancedField {
         if (!L) return null;
         const slotV = this._interleavedBuffer?.version ?? 0, groupV = this._groupTexture.version;
         const c = this._farTint;
-        if (c && c.slotBuffer === this._interleavedBuffer && c.slotV === slotV && c.groupV === groupV) return c.tint;
+        if (c && c.slotBuffer === this._interleavedBuffer && c.slotV === slotV && c.groupTex === this._groupTexture && c.groupV === groupV) return c.tint;
 
         const f32 = this.slotBuffer.f32, n = this.slotBuffer.count, G = this._groupData, gs = GROUP_STRIDE * 4;
         let r = 0, g = 0, b = 0, cells = 0, area = 0, alpha = 0;
@@ -441,7 +450,7 @@ export default class InstancedField {
         const tint = cells === 0
             ? { r: 0, g: 0, b: 0, cover: 0 }
             : { r: r / cells, g: g / cells, b: b / cells, cover: Math.min(area / boxArea, 1) * (alpha / cells) };
-        this._farTint = { slotBuffer: this._interleavedBuffer, slotV, groupV, tint };
+        this._farTint = { slotBuffer: this._interleavedBuffer, slotV, groupTex: this._groupTexture, groupV, tint };
         return tint;
     }
 
@@ -502,16 +511,37 @@ export default class InstancedField {
             return reused;
         }
         const id = this._groupCount++;
+        if (id >= this.maxGroups && this.maxGroups < this.groupCap) this._growGroups(Math.min(this.groupCap, this.maxGroups * 2));
         if (id >= this.maxGroups) {
             if (!this._groupExhaustionNoted) {
                 this._groupExhaustionNoted = true;
-                console.error(`InstancedField: group table EXHAUSTED (${this.maxGroups} live groups) — new content renders INVISIBLE (dead group 0). This is a leak or a churn storm: something creates groups without releasing them.`);
+                console.error(`InstancedField: group table EXHAUSTED (${this.maxGroups} live groups, the cap) — new content renders INVISIBLE (dead group 0). This is a leak or a churn storm: something creates groups without releasing them.`);
             }
             this._groupCount = this.maxGroups;
             return 0;
         }
         this._resetGroupRow(id);
         return id;
+    }
+
+    /**
+     * Grow the group table to `rows`: every existing row kept bit-exact, the new ones at their
+     * defaults, a new texture of the new height (the old one disposed), and the material told —
+     * the same table, taller; the shaders clamp to maxGroups. @private
+     * @param {number} rows
+     */
+    _growGroups(rows) {
+        const old = this._groupData;
+        this._groupData = new Float32Array(rows * GROUP_STRIDE * 4);
+        this._groupData.set(old);
+        const from = this.maxGroups;
+        this.maxGroups = rows;
+        for (let g = from; g < rows; g++) this._resetGroupRow(g);
+        const tex = makeGroupTexture(this._groupData, rows);
+        this._groupTexture.dispose();
+        this._groupTexture = tex;
+        const u = this.material?.uniforms;
+        if (u) { u.groupTexture.value = tex; u.maxGroups.value = rows; }
     }
 
     /**
@@ -921,7 +951,7 @@ export default class InstancedField {
                 u.uFrameFlipY.value = flipY;
                 u.uRenderMode.value = 1;
             } else {
-                u.frameTexture.value = this.material.userData?.placeholderRGBA || null;
+                u.frameTexture.value = glyphPlaceholderRGBA();
                 u.uRenderMode.value = 0;
             }
             this.material.needsUpdate = true;
