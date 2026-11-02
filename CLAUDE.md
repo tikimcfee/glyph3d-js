@@ -302,6 +302,23 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   times, since the load is part events, part state.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
   Read-only: nothing here types into, starts, or stops an agent.
+- **Plane view** (`services/camera/planeView.js`, `ViewerCameraController.enterPlane|leavePlane|
+  setPlaneFov`, verbs `plane.enter <target> [cellPx]` / `plane.leave` / `plane.fov` / `plane.aim` /
+  `plane.state`): READING a surface pixel-exact. A perspective camera squared to a plane shows it at
+  one uniform scale, so the camera eases (one continuous lens tween — a dolly zoom) to a narrow fov
+  (`plane.fov`, 1°) at the depth where a text column is `plane.cellPx` whole device pixels (8 → the
+  8×15 cell), the surface's top-left snapped to a device-pixel corner, near/far a SLAB around the
+  surface (`plane.front`/`plane.back`) so nothing in front of it draws. It stays the one perspective
+  camera every system already handles (picking, culling, far-LOD, batches). Inside, drag pans 1:1,
+  the wheel scrolls the surface under the cursor (else the plane), flight/look/dolly are off; a fly or
+  a restore drops it; `getState` answers with the pose it was entered from (a save mid-plane restores
+  to the open world). A wider `plane.fov` keeps the scale and fans layers off the plane by depth
+  (parallax). `onPlaneChange` marks its life: space-layer chrome (the tree's ownership traces) is
+  suppressed for exactly that span. `pick.at <x> <y>` (the GPU pick) and `scene.at <x> <y>` (a
+  raycast naming every object under a point, all layers) say what is on screen where. Gates:
+  `tools/plane-view.test.mjs` (the math vs three's projection), `tools/plane-camera.test.mjs` (the
+  controller, frame by frame). `tools/agent-display.mjs` is a self-healing headless display (real
+  GPU) for agents to drive and screenshot while no person has the app open.
 - **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book
   is BORN with — a Settings change never pushes onto a live one. A value set on ONE instance
   (`carrel.set <name> <knob> <v>`, `book.set [id] <knob> <v>`, `book.form`) is its own and wins:

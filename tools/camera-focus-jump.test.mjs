@@ -87,7 +87,7 @@ const mockAtlas = {
     ok(pose !== null, 'computeGridFocus returned valid pose for FileRow');
 
     // With 100 lines and readable lines cap of 35, fitHeight must be capped!
-    const plane = cc._planeOf(row);
+    const plane = cc.planeOf(row);
     const expectedFitHeight = (35 / 100) * plane.height;
     // Check that standoff distance reflects readable lines (~35 lines) instead of all 100 lines
     ok(pose.pitch !== undefined && pose.yaw !== undefined, 'pose has pitch and yaw');

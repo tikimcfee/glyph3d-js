@@ -27,6 +27,8 @@ import registerLoadCommands from './loadCommands.js';
 import registerPanelCommands from './panelCommands.js';
 import registerDockCommands from './dockCommands.js';
 import registerCarrelCommands from './carrelCommands.js';
+import registerPlaneCommands from './planeCommands.js';
+import registerPickCommands from './pickCommands.js';
 import registerMonitorCommands from './monitorCommands.js';
 import registerHandCommands from './handCommands.js';
 import registerCalibCommands from './calibCommands.js';
@@ -80,6 +82,8 @@ export function registerAllCommands(router) {
     registerPanelCommands(router);
     registerDockCommands(router);
     registerCarrelCommands(router);
+    registerPlaneCommands(router);
+    registerPickCommands(router);
     registerMonitorCommands(router);
     registerHandCommands(router);
     registerCalibCommands(router);

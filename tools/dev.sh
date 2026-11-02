@@ -84,7 +84,7 @@ start_relay() {
   echo "→ relay: rebuild Go + (re)start on :$RELAY_PORT   (note: this kills live terminals)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & disown )
+  ( cd "$ROOT" && nohup ./glyph3d-cli serve --port "$RELAY_PORT" "$ROOT" >"$RELAY_LOG" 2>&1 & disown )
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServe), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".

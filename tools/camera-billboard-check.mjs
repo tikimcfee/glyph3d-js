@@ -2,7 +2,7 @@
 //
 // Focus used to fly straight down +Z and frame a world AABB. A rotated grid (jellyfish files,
 // angled cards) then read as a foreshortened SLIVER — its AABB is a fat box but the content plane
-// is edge-on. _planeOf + _billboardPose now square the camera to the object's OWN front face
+// is edge-on. planeOf + _billboardPose now square the camera to the object's OWN front face
 // (local +Z), framing its TRUE width/height. The invariant under test, for ANY orientation:
 //   camera forward (rebuilt from the pose's pitch/yaw, YXZ) == -plane.normal, camera in front.
 // Plus: axis-aligned focus still matches the old head-on formula (regression), and the sliver
@@ -51,7 +51,7 @@ function makeGrid({ pos = [0, 0, 0], yaw = 0, pitch = 0, scale = 1, w = 80, h = 
 // The core invariant: rebuild the camera's forward from the pose (the SAME YXZ _applyRotation uses)
 // and assert it's anti-parallel to the plane normal, with the camera on the front side.
 function assertSquared(cc, g, label, { centerAim = false } = {}) {
-  const plane = cc._planeOf(g);
+  const plane = cc.planeOf(g);
   const camPos = vec(cc.captured.position);
   const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(cc.captured.pitch, cc.captured.yaw, 0, 'YXZ'));
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
@@ -74,7 +74,7 @@ function assertSquared(cc, g, label, { centerAim = false } = {}) {
   const cc = makeCC(); const g = makeGrid({ yaw: (80 * Math.PI) / 180, w: 120, h: 30, scale: 1.5 });
   cc.focusOnObject(g);
   assertSquared(cc, g, 'sliver80', { centerAim: true });
-  const plane = cc._planeOf(g);
+  const plane = cc.planeOf(g);
   const along = vec(cc.captured.position).sub(plane.center).length();
   const want = Math.max(zDistanceForFit(camera, plane.width, plane.height, 0.85), 5) + plane.depth / 2;
   near(along, want, 'sliver80: distance fits the TRUE plane width (not the AABB sliver)', 1e-3);

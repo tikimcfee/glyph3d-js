@@ -10,6 +10,13 @@
  *   - shift+wheel → page (turn the book under the cursor — paging intent, never camera motion)
  *   - WASD/QE     → strafe / dolly / rise
  *
+ * PLANE VIEW (`enterPlane` / `leavePlane`, driven by `carrel.enter` on a plane-form desk): the
+ * camera squares to a flat surface and eases — a dolly zoom, see `planeView.js` — to a narrow fov
+ * at the depth where the plane shows at an exact CSS-px-per-unit scale, its pane origin on a
+ * device-pixel corner, with near/far bracketing the plane so nothing in front of it draws.
+ * Inside, drag pans the plane, the wheel scrolls the surface under the cursor (else the plane),
+ * and flight/look/dolly are off. `getState` keeps answering with the pose you entered from.
+ *
  * Movement scales to the distance down your forward axis to whatever you're looking at
  * (`_lookDistance()`). PAN holds a STILL anchor — it SAMPLES that distance once when the
  * drag starts (clamped to the engagement band by `_panDistance()`) and holds it for the
@@ -36,7 +43,8 @@
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { normalizeWheelDelta } from '../../utils/wheelDelta.js';
 import { stateController } from '../state/StateController.js';
-import { zDistanceForFit, worldPerPixel, tweenPose } from '../spatial/spatialMath.js';
+import { zDistanceForFit, worldPerPixel, tweenPose, easeInOutCubic } from '../spatial/spatialMath.js';
+import { planeDistance, planeSlab, snapAim } from './planeView.js';
 import { worldBounds } from '../spatial/sceneBounds.js';
 /** @import SceneContext from '../SceneContext.js' */
 
@@ -178,6 +186,15 @@ export class ViewerCameraController {
         // pose actually changes this frame. Debounced downstream, so a continuous flight collapses
         // to one save ~when the camera settles. Null until armed (and during/after dispose).
         this.onMoved = null;
+
+        // Plane view: null in the open world; while entered, the plane's frame, the view's aim
+        // (plane coordinates), scale, fov and slab, and `home` — the pose and lens it was entered
+        // from. `_lens` is the running enter/leave/fov tween (it owns the frame while it runs).
+        this._plane = null;
+        this._lens = null;
+        // Told when a plane view begins (true) and when it is over (false: a leave landed, or a fly
+        // or restore dropped it) — the app hides space-layer chrome for exactly that span.
+        this.onPlaneChange = null;
 
         // Listener registry for clean teardown.
         this._listeners = [];
@@ -369,6 +386,10 @@ export class ViewerCameraController {
      * the external entry point because the animate loop already calls it.
      */
     applyCamera(deltaTime) {
+        // A plane view (or its enter/leave lens) owns the camera outright: no fly, flight, look,
+        // dolly or soft bounds; camera.lock only freezes its panning. Its moves aren't saves —
+        // getState answers with the home pose.
+        if (this._plane || this._lens) { this._applyPlane(deltaTime); return; }
         if (this.locked) {
             // Camera frozen (camera.lock). Still drain the wheel so a focused framed grid/
             // terminal scrolls — that is NOT camera motion, and _applyWheel self-gates its zoom
@@ -415,6 +436,8 @@ export class ViewerCameraController {
      * @returns {{pos:{x:number,y:number,z:number}, pitch:number, yaw:number, speed:number}}
      */
     getState() {
+        const home = this._plane?.home;
+        if (home) return { pos: { x: home.position.x, y: home.position.y, z: home.position.z }, pitch: home.pitch, yaw: home.yaw, speed: this.cameraSpeed };
         const p = this.ctx.camera.position;
         return { pos: { x: p.x, y: p.y, z: p.z }, pitch: this.pitch, yaw: this.yaw, speed: this.cameraSpeed };
     }
@@ -429,6 +452,7 @@ export class ViewerCameraController {
     applyState(s) {
         if (!s) return;
         this._tween = null;
+        this._dropPlane();
         const p = s.pos;
         if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
             this.ctx.camera.position.set(p.x, p.y, p.z);
@@ -447,6 +471,7 @@ export class ViewerCameraController {
      * @param {{ms?:number}} [opts]
      */
     flyTo(to, { ms = 300 } = {}) {
+        this._dropPlane();   // a fly is open-world motion: the plane's lens goes back to the home lens first
         const cam = this.ctx.camera;
         this._tween = {
             from: { position: { x: cam.position.x, y: cam.position.y, z: cam.position.z }, pitch: this.pitch, yaw: this.yaw },
@@ -474,6 +499,285 @@ export class ViewerCameraController {
         this._applyRotation();
         if (t >= 1) this._tween = null;
         return true;
+    }
+
+    // ============ Plane view ============
+
+    /**
+     * Enter a plane view: square to a flat surface and ease (one continuous lens tween from wherever
+     * the camera is) to the depth and fov where the plane shows at exactly `pxPerUnit` CSS px per
+     * world unit, the aim snapped so `origin` lands on a device-pixel corner. Re-entering while
+     * entered retargets and keeps the original home.
+     * @param {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number},
+     *          up:{x:number,y:number,z:number}, pxPerUnit:number, fovDeg:number, front:number,
+     *          back:number, aim?:{x:number,y:number}, origin?:{x:number,y:number}}} plane
+     *   center/normal/up: the plane's frame in world space (normal faces the viewer); aim: the plane
+     *   point at the view center (plane coords, world units, +y up; default its center); origin:
+     *   the plane point to pixel-snap (a pane's top-left); front/back: the depth slab around it.
+     * @param {{ms?:number}} [opts]
+     */
+    enterPlane(plane, { ms = 700 } = {}) {
+        const THREE = this.THREE, cam = this.ctx.camera;
+        for (const k of ['pxPerUnit', 'fovDeg', 'front', 'back']) {
+            if (!(Number.isFinite(plane?.[k]) && plane[k] >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${plane?.[k]})`);
+        }
+        const n = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z).normalize();
+        const up = new THREE.Vector3(plane.up.x, plane.up.y, plane.up.z);
+        up.addScaledVector(n, -up.dot(n));
+        if (up.lengthSq() < 1e-12) throw new Error('enterPlane: up is parallel to the normal');
+        up.normalize();
+        const home = this._plane?.home ?? {
+            position: cam.position.clone(), pitch: this.pitch, yaw: this.yaw,
+            fov: cam.fov, near: cam.near, far: cam.far, dist: 0,
+        };
+        const from = this._lensNow(new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z), n);
+        const entering = !this._plane;
+        if (entering) home.dist = from.dist;   // the leave lands back along this same ray
+        this._plane = {
+            center: new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z),
+            normal: n, up, right: up.clone().cross(n),
+            aim: { x: plane.aim?.x ?? 0, y: plane.aim?.y ?? 0 },
+            origin: plane.origin ? { x: plane.origin.x, y: plane.origin.y } : null,
+            pxPerUnit: plane.pxPerUnit, fovDeg: plane.fovDeg, front: plane.front, back: plane.back,
+            home,
+        };
+        this._snapPlaneAim();
+        this._tween = null;
+        this._startLens(from, this._planeLens(), ms, null);
+        if (entering) this.onPlaneChange?.(true);
+    }
+
+    /**
+     * Leave the plane view: ease back to the pose and lens it was entered from.
+     * @param {{ms?:number}} [opts]
+     * @returns {boolean} false when not in a plane view
+     */
+    leavePlane({ ms = 600 } = {}) {
+        const view = this._plane;
+        if (!view) return false;
+        const THREE = this.THREE;
+        const h = view.home;
+        const fwd = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(h.pitch, h.yaw, 0, 'YXZ'));
+        const dist = Math.max(h.dist, 1e-3);
+        const to = {
+            aim: h.position.clone().addScaledVector(fwd, dist), dist, pitch: h.pitch, yaw: h.yaw,
+            fov: h.fov, near: h.near, far: h.far,
+        };
+        this._startLens(this._planeLens(), to, ms, () => {
+            this._plane = null;
+            this._setHome(h);
+            this.onPlaneChange?.(false);
+        });
+        return true;
+    }
+
+    /**
+     * Set the plane view's fov, keeping its scale: the parallax fan. A wider fov spreads layers
+     * off the plane apart with depth; the default narrow one flattens them back.
+     * @param {number} fovDeg @param {{ms?:number}} [opts]
+     * @returns {boolean} false when not in a plane view
+     */
+    setPlaneFov(fovDeg, { ms = 400 } = {}) {
+        const view = this._plane;
+        if (!view || this._lens?.leaving) return false;
+        if (!(fovDeg > 0 && fovDeg < 179)) throw new Error(`setPlaneFov: fov must be in (0, 179) degrees (got ${fovDeg})`);
+        const from = this._planeLens();
+        view.fovDeg = fovDeg;
+        this._startLens(from, this._planeLens(), ms, null);
+        return true;
+    }
+
+    /**
+     * Move the plane view's aim (plane coordinates) — panning without the mouse; snapped.
+     * @param {number} x @param {number} y
+     * @returns {boolean} false when not in a plane view
+     */
+    setPlaneAim(x, y) {
+        if (!this._plane || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+        this._plane.aim = { x, y };
+        this._snapPlaneAim();
+        if (!this._lens) this._setPlanePose();
+        return true;
+    }
+
+    /**
+     * The plane view, for verbs and gates: where it looks, its scale and lens, and whether a tween
+     * is running. Null in the open world.
+     */
+    planeState() {
+        const v = this._plane;
+        if (!v) return null;
+        const cam = this.ctx.camera;
+        const { width, height } = getCanvasViewportSize(this.ctx.canvas);
+        return {
+            aim: { ...v.aim }, origin: v.origin ? { ...v.origin } : null,
+            pxPerUnit: v.pxPerUnit, fovDeg: v.fovDeg, front: v.front, back: v.back,
+            viewport: { width, height, dpr: this.planeViewport().dpr },
+            camera: { fov: cam.fov, near: cam.near, far: cam.far, distance: planeDistance({ fovDeg: v.fovDeg, viewportH: height, pxPerUnit: v.pxPerUnit }) },
+            tweening: !!this._lens, leaving: !!this._lens?.leaving,
+            tween: this._lens ? { elapsed: this._lens.elapsed, ms: this._lens.ms } : null,
+            locked: this.locked,
+        };
+    }
+
+    /**
+     * The viewport a plane view fits: CSS size, and the drawing buffer's device px per CSS px
+     * (what pixel snapping must hit — read from the buffer, not window.devicePixelRatio).
+     * @returns {{width:number, height:number, dpr:number}}
+     */
+    planeViewport() {
+        const canvas = this.ctx.canvas;
+        const { width, height } = getCanvasViewportSize(canvas);
+        return { width, height, dpr: canvas?.width && width ? canvas.width / width : 1 };
+    }
+
+    /** Snap the aim so the plane's origin (else its center) lands on a device-pixel corner. @private */
+    _snapPlaneAim() {
+        const v = this._plane;
+        const { width, height } = getCanvasViewportSize(this.ctx.canvas);
+        v.aim = snapAim({ aim: v.aim, origin: v.origin ?? { x: 0, y: 0 }, viewportW: width, viewportH: height, dpr: this.planeViewport().dpr, pxPerUnit: v.pxPerUnit });
+    }
+
+    /** The lens the plane view sits at now (its target while still). @private */
+    _planeLens() {
+        const v = this._plane;
+        const { height } = getCanvasViewportSize(this.ctx.canvas);
+        const dist = planeDistance({ fovDeg: v.fovDeg, viewportH: height, pxPerUnit: v.pxPerUnit });
+        const { near, far } = planeSlab({ distance: dist, front: v.front, back: v.back });
+        const aim = v.center.clone().addScaledVector(v.right, v.aim.x).addScaledVector(v.up, v.aim.y);
+        const fwd = v.normal.clone().multiplyScalar(-1);
+        return {
+            aim, dist, fov: v.fovDeg, near, far,
+            pitch: Math.asin(Math.max(-1, Math.min(1, fwd.y))), yaw: Math.atan2(-fwd.x, -fwd.z),
+        };
+    }
+
+    /**
+     * The camera's lens now, as an aim + distance: the aim is where its view ray meets the plane
+     * (else the point as far ahead as the plane's center), so position = aim − forward·dist is
+     * exactly where the camera is — a lens tween starting here starts without a jump. @private
+     */
+    _lensNow(center, normal) {
+        const THREE = this.THREE, cam = this.ctx.camera;
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        const denom = fwd.dot(normal);
+        let dist = denom < -0.05 ? center.clone().sub(cam.position).dot(normal) / denom : -1;
+        if (!(dist > 1e-3)) dist = Math.max(center.distanceTo(cam.position), 1);
+        return {
+            aim: cam.position.clone().addScaledVector(fwd, dist), dist,
+            pitch: this.pitch, yaw: this.yaw, fov: cam.fov, near: cam.near, far: cam.far,
+        };
+    }
+
+    /** @private */
+    _startLens(from, to, ms, onDone) {
+        // Turn the short way round.
+        let dyaw = to.yaw - from.yaw;
+        dyaw -= Math.round(dyaw / (2 * Math.PI)) * 2 * Math.PI;
+        this._lens = { from, to: { ...to, yaw: from.yaw + dyaw }, ms: Math.max(1, ms), elapsed: 0, onDone, leaving: !!onDone };
+    }
+
+    /**
+     * One frame of the lens tween. The aim, pitch/yaw and fov ease; the distance, near and far ease
+     * in log space (a dolly over orders of magnitude reads even). Near stays in front of the aim by
+     * an eased clearance, so the plane is never clipped on the way in or out. @private
+     */
+    _stepLens(dt) {
+        const L = this._lens;
+        L.elapsed += dt * 1000;
+        const t = Math.min(L.elapsed / L.ms, 1);
+        const e = easeInOutCubic(t);
+        const a = L.from, b = L.to;
+        if (t >= 1) {
+            // Land ON the target, not on an exp/log round trip of it (still must be bit-still).
+            this._setLens(b);
+            this._lens = null;
+            L.onDone?.();
+            return;
+        }
+        const lerp = (x, y) => x + (y - x) * e;
+        const loglerp = (x, y) => Math.exp(Math.log(x) + (Math.log(y) - Math.log(x)) * e);
+        const dist = loglerp(a.dist, b.dist);
+        const clear = lerp(a.dist - a.near, b.dist - b.near);
+        const back = lerp(a.far - a.dist, b.far - b.dist);
+        this._setLens({
+            aim: a.aim.clone().lerp(b.aim, e), dist, pitch: lerp(a.pitch, b.pitch), yaw: lerp(a.yaw, b.yaw),
+            fov: lerp(a.fov, b.fov), near: Math.max(dist * 1e-3, dist - clear), far: Math.max(dist + back, dist * 1.001),
+        });
+    }
+
+    /** Put the camera at a lens: position = aim − forward·dist. @private */
+    _setLens(l) {
+        const THREE = this.THREE, cam = this.ctx.camera;
+        this.pitch = l.pitch;
+        this.yaw = l.yaw;
+        this._applyRotation();
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        cam.position.copy(l.aim).addScaledVector(fwd, -l.dist);
+        if (cam.fov !== l.fov || cam.near !== l.near || cam.far !== l.far) {
+            cam.fov = l.fov; cam.near = l.near; cam.far = l.far;
+            cam.updateProjectionMatrix();
+        }
+    }
+
+    /** Put the camera exactly at the plane view (recomputed each still frame: a resize re-fits). @private */
+    _setPlanePose() { this._setLens(this._planeLens()); }
+
+    /** Restore a home pose + lens exactly. @private */
+    _setHome(h) {
+        const cam = this.ctx.camera;
+        cam.position.copy(h.position);
+        this.pitch = h.pitch;
+        this.yaw = h.yaw;
+        this._applyRotation();
+        cam.fov = h.fov; cam.near = h.near; cam.far = h.far;
+        cam.updateProjectionMatrix();
+    }
+
+    /** Drop the plane view on the spot (an open-world fly or a restore takes over): the home lens comes back, the pose stays. @private */
+    _dropPlane() {
+        this._lens = null;
+        const h = this._plane?.home;
+        if (!h) return;
+        this._plane = null;
+        const cam = this.ctx.camera;
+        cam.fov = h.fov; cam.near = h.near; cam.far = h.far;
+        cam.updateProjectionMatrix();
+        this.onPlaneChange?.(false);
+    }
+
+    /**
+     * Input inside a plane view. Drag (either button) pans the plane — the content follows the
+     * cursor 1:1. The wheel scrolls the surface under the cursor; over anything else it scrolls
+     * the plane. Shift+wheel pages the book under the cursor. Flight keys do nothing. @private
+     */
+    _applyPlane(dt) {
+        const input = this.input;
+        if (this._lens) {
+            // A tween owns the frame; input during it is dropped (an enter/leave always lands).
+            input.drag.dx = 0; input.drag.dy = 0; input.wheel.dy = 0;
+            if (input.wheel.pageDy !== 0) { this.ctx?.tryPageHovered?.(input.wheel.pageDy); input.wheel.pageDy = 0; }
+            this._stepLens(dt);
+            return;
+        }
+        const v = this._plane;
+        let moved = false;
+        if (!this.locked && input.drag.active && (input.drag.dx || input.drag.dy)) {
+            v.aim.x -= input.drag.dx / v.pxPerUnit;
+            v.aim.y += input.drag.dy / v.pxPerUnit;
+            moved = true;
+        }
+        input.drag.dx = 0; input.drag.dy = 0;
+        if (input.wheel.pageDy !== 0) { this.ctx?.tryPageHovered?.(input.wheel.pageDy); input.wheel.pageDy = 0; }
+        if (input.wheel.dy !== 0) {
+            if (!this.ctx?.tryScrollHovered?.(input.wheel.dy) && !this.locked) {
+                v.aim.y -= (this.settings.invertScroll ? -input.wheel.dy : input.wheel.dy) / v.pxPerUnit;
+                moved = true;
+            }
+            input.wheel.dy = 0;
+        }
+        if (moved) this._snapPlaneAim();
+        this._setPlanePose();
     }
 
     /** @private */
@@ -913,9 +1217,8 @@ export class ViewerCameraController {
      * if the object exposes no local bounds.
      * @param {Object} obj an Object3D with getLocalBounds()
      * @returns {{center:Object, normal:Object, up:Object, width:number, height:number, depth:number}|null}
-     * @private
      */
-    _planeOf(obj) {
+    planeOf(obj) {
         const THREE = this.THREE;
         const lb = obj?.getLocalBounds?.();
         if (!lb || lb.isEmpty?.()) return null;
@@ -981,7 +1284,7 @@ export class ViewerCameraController {
         if (index < 0 || index >= grids.length) return null;
         const grid = grids[index];
 
-        const plane = this._planeOf(grid);
+        const plane = this.planeOf(grid);
         if (!plane) {
             // Defensive fallback: no local bounds → old axis-aligned AABB framing, head-on.
             grid.updateWorldMatrix(true, false);   // fresh: getBounds reads matrixWorld as three last left it
@@ -1029,7 +1332,7 @@ export class ViewerCameraController {
         // Reverse-billboard: square the camera to the object's OWN plane so a rotated grid/terminal
         // is framed head-on (true width/height), never an edge-on sliver. Falls back to the AABB
         // path only when the object exposes no local bounds (no orientation to read).
-        const plane = this._planeOf(obj);
+        const plane = this.planeOf(obj);
         if (!plane) { obj?.updateWorldMatrix?.(true, false); return this.focusOnBox(obj?.getBounds?.()); }
         const pose = this._billboardPose({
             center: plane.center, normal: plane.normal, up: plane.up,
@@ -1043,7 +1346,7 @@ export class ViewerCameraController {
      * Frame a world-space AABB head-on, centered — the orientation-FREE focus. A box carries no
      * facing, so this squares straight down +Z. dock.focus passes a docked window's captured HOME
      * bounds (frames where it'll land, not its live mid-slide tile); a loose object's own facing
-     * comes through focusOnObject/_planeOf instead.
+     * comes through focusOnObject/planeOf instead.
      * @param {Object} bounds THREE.Box3
      * @returns {boolean}
      */

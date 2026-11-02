@@ -89,6 +89,7 @@ export default class ContentTreeArrows {
         this.opts = { ...ARROW_DEFAULTS, ...opts };
         this.showFiles = true;      // hub → file lines (settings: tree.fileLines)
         this.showDirs = true;       // hub → child-dir lines (settings: tree.dirLines)
+        this.suppressed = false;    // hidden while a plane view reads a surface (space chrome); settings untouched
         this._links = new Map();    // dir path → { mesh, geo, count, thick }
         this._alpha = { value: this.opts.opacity };
         this._thinMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, opacity: this.opts.opacity });
@@ -125,6 +126,10 @@ export default class ContentTreeArrows {
 
     /** Master toggle — both line kinds at once (layout.arrows on|off). */
     setEnabled(on) { this.showFiles = this.showDirs = !!on; this.update(); return this; }
+
+    /** Hide every line while a plane view is up (the traces are space-layer chrome) without touching
+     *  the line settings; false brings back whatever they say. */
+    setSuppressed(on) { if (this.suppressed === !!on) return this; this.suppressed = !!on; this.update(); return this; }
 
     /** Toggle hub→file lines independently (settings: tree.fileLines). */
     setShowFiles(on) { this.showFiles = !!on; this.update(); return this; }
@@ -165,7 +170,7 @@ export default class ContentTreeArrows {
         const colFile = new THREE.Color(o.colorA);
         const colDir = new THREE.Color(o.colorB);
         const seen = new Set();
-        const showF = this.showFiles, showD = this.showDirs;
+        const showF = this.showFiles && !this.suppressed, showD = this.showDirs && !this.suppressed;
 
         for (const [path, node] of this.tree._dirs.entries()) {
             const { files, dirs } = partitionChildren(node);   // markers excluded
