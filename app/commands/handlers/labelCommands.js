@@ -1,16 +1,20 @@
 /**
- * Screen overlay and map label commands:
+ * Screen overlay, map label, and carrel card commands:
  *   overlay.text <id> <x> <y> <px> <text...>
  *   overlay.clear [id]
  *   overlay.list
  *   label.list
  *   label.explain <id>
  *   label.freeze [on|off]
+ *   carrel.card <name> [tier] [--show card|live]
+ *   card.list
  */
 
 import { box, table, kvLines } from '../formatResponse.js';
 import PlaneOverlay from '../../client/PlaneOverlay.js';
 import MapLabels from '../../client/MapLabels.js';
+import { registerStripCommands } from '../../client/Strip.js';
+import CarrelCards from '../../../packages/glyph3d-core/src/collections/CarrelCards.js';
 
 /**
  * Ensure `ctx.planeOverlay` exists (supports both live client and headless tests).
@@ -35,6 +39,18 @@ export function ensureMapLabels(ctx) {
         ctx.mapLabels = new MapLabels(ctx);
     }
     return ctx.mapLabels;
+}
+
+/**
+ * Ensure `ctx.carrelCards` exists (supports both live client and headless tests).
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
+ * @returns {CarrelCards}
+ */
+export function ensureCarrelCards(ctx) {
+    if (!ctx.carrelCards) {
+        ctx.carrelCards = new CarrelCards(ctx);
+    }
+    return ctx.carrelCards;
 }
 
 /**
@@ -220,4 +236,84 @@ export default function registerLabelCommands(router) {
         description: 'Freeze or unfreeze map-label placement decisions',
         usage: '[on|off]',
     });
+
+    // ================================================================
+    //  carrel.card <name> [tier] [--show card|live]
+    // ================================================================
+    router.register('carrel.card', (args, ctx) => {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: carrel.card <name> [256|512|1024|2048|native] [--show card|live]', data: null };
+        }
+        const rawName = String(args[0]).replace(/^carrel:/, '');
+        const carrel = ctx.carrels?.get?.(rawName) ?? null;
+        if (!carrel) {
+            return { text: `ERR: no carrel "${rawName}"`, data: null };
+        }
+
+        let tier;
+        let showMode = null;
+        for (let i = 1; i < args.length; i++) {
+            const a = String(args[i]);
+            if (a === '--show' && args[i + 1]) {
+                showMode = String(args[++i]).toLowerCase();
+            } else if (a === 'native') {
+                tier = 'native';
+            } else if (/^\d+$/.test(a)) {
+                tier = Number(a);
+            }
+        }
+
+        const cards = ensureCarrelCards(ctx);
+        const info = cards.capture(carrel, { tier, reason: 'manual' });
+        if (!info) {
+            return { text: `ERR: failed to capture card for "${rawName}"`, data: null };
+        }
+        if (showMode === 'card' || showMode === 'live') {
+            cards.setDisplayMode(carrel, showMode);
+            info.showing = cards.get(rawName)?.showing ?? info.showing;
+        }
+        return {
+            text: `OK: carrel.card "${rawName}" ${info.width}×${info.height} (tier=${info.tier}, ${info.captureMs}ms, ${(info.bytes / 1024).toFixed(1)}KB, showing=${info.showing})`,
+            data: info,
+        };
+    }, {
+        description: 'Force-refresh a carrel impostor card into its WebGLRenderTarget',
+        usage: '<name> [256|512|1024|2048|native] [--show card|live]',
+    });
+
+    // ================================================================
+    //  card.list
+    // ================================================================
+    router.register('card.list', (_args, ctx) => {
+        const cards = ensureCarrelCards(ctx);
+        const snap = cards.list();
+        if (snap.cards.length === 0) {
+            return {
+                text: box('CARREL CARDS', ['(no cards)'], 48) + '\nOK: 0 carrel cards',
+                data: snap,
+            };
+        }
+        const headers = ['name', 'mode', 'showing', 'tier', 'dims', 'ageMs', 'KB', 'stale', 'captureMs'];
+        const rows = snap.cards.map((c) => [
+            c.name,
+            c.mode || '—',
+            c.showing,
+            String(c.tier ?? '—'),
+            c.width && c.height ? `${c.width}×${c.height}` : '—',
+            c.ageMs != null ? `${c.ageMs}ms` : '—',
+            (c.bytes / 1024).toFixed(1),
+            c.stale ? 'stale' : (c.nearLive ? 'live' : 'postcard'),
+            `${c.captureMs ?? 0}ms`,
+        ]);
+        const mbUsed = (snap.totalBytes / (1024 * 1024)).toFixed(2);
+        const mbCap = (snap.maxBytes / (1024 * 1024)).toFixed(0);
+        return {
+            text: table(headers, rows) + `\nOK: ${snap.cards.length} card(s), ${mbUsed} / ${mbCap} MB`,
+            data: snap,
+        };
+    }, {
+        description: 'List all carrel impostor cards with tier, age, bytes, and liveness state',
+    });
+
+    registerStripCommands(router);
 }

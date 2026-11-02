@@ -111,6 +111,7 @@ export function enterPlaneView(ctx, target, p) {
         switchMs: Number(getSetting('plane.switchMs')),
     });
     ctx.planeTarget = target;
+    if (!String(target).startsWith('carrel:')) ctx.enteredCarrel = null;
     const s = cc.planeState();
     const vp = s.viewport;
     let notice = null;
@@ -124,15 +125,18 @@ export function enterPlaneView(ctx, target, p) {
 /**
  * The aim that opens a surface of `width` × `height` world units where it is read from: wider
  * than the view, at its left edge (`plane.leftMarginPx` in); taller, at its top
- * (`plane.topMarginPx` down); an axis that fits centers.
+ * (`plane.topMarginPx` down); an axis that fits centers; a left-edge overlay (`leftInsetPx`
+ * device px wide — the strip) never covers the surface's left edge.
  * @returns {{x:number, y:number}}
  */
-function openAim(width, height, pxPerUnit, vp) {
+export function openAim(width, height, pxPerUnit, vp, leftInsetPx = 0) {
     const viewW = vp.width / pxPerUnit, viewH = vp.height / pxPerUnit;   // device px ÷ device px per unit
     const left = Number(getSetting('plane.leftMarginPx')) * vp.dpr / pxPerUnit;   // the knobs are CSS px
     const top = Number(getSetting('plane.topMarginPx')) * vp.dpr / pxPerUnit;
+    const ax0 = width <= viewW ? 0 : -width / 2 + viewW / 2 - left;
+    const ax = leftInsetPx > 0 ? Math.min(ax0, -width / 2 + viewW / 2 - leftInsetPx / pxPerUnit) : ax0;
     return {
-        x: width <= viewW ? 0 : -width / 2 + viewW / 2 - left,
+        x: ax,
         y: height <= viewH ? 0 : height / 2 - viewH / 2 + top,
     };
 }
@@ -165,13 +169,19 @@ export default function registerPlaneCommands(router) {
         }
         // Entering never loses your place: the surface point you are looking at stays where it is
         // on screen. Looking elsewhere (or switching from another plane), it opens where it is read
-        // from: a surface wider than the view at its left edge, taller at its top (openAim).
+        // from: a surface wider than the view at its left edge, taller at its top (openAim), clear
+        // of the strip's reserved left band.
         const look = cc.planePointAtView(plane);
         const onIt = look && Math.abs(look.x) <= plane.width / 2 && Math.abs(look.y) <= plane.height / 2;
+        const forCarrel = t.id.startsWith('carrel:') ? (ctx.carrels?.get?.(t.id.slice(7)) ?? null) : null;
+        const leftInset = ctx.strip?.leftInsetForCarrel?.(forCarrel) ?? 0;
+        const aim = openAim(plane.width, plane.height, pxPerUnit, vp, leftInset);
+        const fits = plane.width <= (vp.width - leftInset) / pxPerUnit && plane.height <= vp.height / pxPerUnit;
+        const clearOfStrip = !(leftInset > 0) || (look && look.x <= aim.x);
         const s = enterPlaneView(ctx, t.id, {
             center: plane.center, normal: plane.normal, up: plane.up, pxPerUnit, depth,
-            aim: openAim(plane.width, plane.height, pxPerUnit, vp),
-            ...(onIt && !cc.planeState() ? { referent: look } : {}),
+            aim,
+            ...(onIt && !cc.planeState() && fits && clearOfStrip ? { referent: look } : {}),
             origin,
         });
         return {

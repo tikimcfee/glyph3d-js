@@ -279,7 +279,8 @@ function enterPlaneDesk(ctx, carrel) {
     let focus = null;
     if (carrel.planeArrange === 'pins') {
         focus = carrel.focusedPin();
-        aim = (focus && carrel.pinAim(focus, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1))) || aim;
+        const leftInset = ctx.strip?.leftInsetForCarrel?.(carrel) ?? 0;   // the strip's band stays clear of the pin
+        aim = (focus && carrel.pinAim(focus, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1), leftInset)) || aim;
         setFocusTo(ctx, focus);
     } else {
         focus = focusPaneFront(ctx, carrel);

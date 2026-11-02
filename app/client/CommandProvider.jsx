@@ -55,6 +55,8 @@ import Deixis from './Deixis.js';
 import Participants from './Participants.js';
 import FileWatch from './FileWatch.js';
 import MapLabels from './MapLabels.js';
+import Strip from './Strip.js';
+import CarrelCards from '@glyph3d/core/collections/CarrelCards.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -276,6 +278,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {Map<string, import('@glyph3d/core/collections/TerminalGrid.js').default>|null} */ terminals: null,
     /** @type {import('./PlaneOverlay.js').default|null} */ planeOverlay: null,
     /** @type {import('./MapLabels.js').default|null} */ mapLabels: null,
+    /** @type {import('@glyph3d/core/collections/CarrelCards.js').default|null} */ carrelCards: null,
+    /** @type {import('./Strip.js').default|null} */ strip: null,
   };
 }
 
@@ -336,7 +340,9 @@ function DockRunner({ stateRef }) {
     c?.handCalib?.update(state.camera);
     // Far-LOD last: every system above has moved what it moves this frame.
     c?.glyphFarLod?.update(state.camera, state.size.height);
+    c?.carrelCards?.update(state.camera, state.size.height);
     c?.mapLabels?.update(state.camera, dt);
+    c?.strip?.update();
   });
   return null;
 }
@@ -485,7 +491,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Labels (book tabs, nameplates, dock titles) draw as ranges of one glyph field, one draw for all.
     state.ctx.glyphBatch = new GlyphBatch(scene, atlas);
     state.ctx.planeOverlay = new PlaneOverlay(state.ctx);
+    state.ctx.carrelCards = new CarrelCards(state.ctx);
     state.ctx.mapLabels = new MapLabels(state.ctx);
+    state.ctx.strip = new Strip(state.ctx, state.ctx.planeOverlay);
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Labels');             // fold persisted map-label declutter dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
@@ -929,6 +937,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
+      state.ctx.strip = null;
+      state.ctx.carrelCards?.dispose?.();
+      state.ctx.carrelCards = null;
       state.ctx.mapLabels?.dispose?.();
       state.ctx.mapLabels = null;
       state.ctx.planeOverlay?.dispose?.();

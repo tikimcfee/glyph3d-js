@@ -1098,6 +1098,13 @@ export const SETTINGS = [
   { key: 'labels.pxP6', label: 'P6 file size (px)', group: 'Labels', type: 'number', default: 12, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP6: v }) },
   { key: 'labels.pxP7', label: 'P7 directory size (px)', group: 'Labels', type: 'number', default: 12, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP7: v }) },
   { key: 'labels.pxP8', label: 'P8 ended agent size (px)', group: 'Labels', type: 'number', default: 11, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP8: v }) },
+  { key: 'strip.enabled', label: 'Plane strip cards', group: 'Labels', type: 'bool', default: true, apply: (ctx, v) => ctx.strip?.configure?.({ enabled: v }) },
+  { key: 'strip.maxCards', label: 'Max strip cards per edge', group: 'Labels', type: 'number', default: 6, min: 1, max: 16, step: 1, apply: (ctx, v) => ctx.strip?.configure?.({ maxCards: v }) },
+  { key: 'carrel.card.enabled', label: 'Carrel impostor cards', group: 'Labels', type: 'bool', default: false, apply: (ctx, v) => ctx.carrelCards?.configure?.({ enabled: v }) },
+  { key: 'carrel.card.budgetMs', label: 'Card capture budget (ms/frame)', group: 'Labels', type: 'number', default: 1.5, min: 0.2, max: 16, step: 0.1, apply: (ctx, v) => ctx.carrelCards?.configure?.({ budgetMs: v }) },
+  { key: 'carrel.card.maxBytes', label: 'Card FBO pool cap (bytes)', group: 'Labels', type: 'number', default: 67108864, min: 4194304, max: 268435456, step: 1048576, apply: (ctx, v) => ctx.carrelCards?.configure?.({ maxBytes: v }) },
+  { key: 'carrel.card.nearLiveK', label: 'Near-live carrel cards (K)', group: 'Labels', type: 'number', default: 3, min: 0, max: 12, step: 1, apply: (ctx, v) => ctx.carrelCards?.configure?.({ nearLiveCount: v }) },
+  { key: 'carrel.card.nearLiveHz', label: 'Near-live card refresh (Hz)', group: 'Labels', type: 'number', default: 2, min: 0.5, max: 10, step: 0.5, apply: (ctx, v) => ctx.carrelCards?.configure?.({ nearLiveHz: v }) },
 ];
 
 /**

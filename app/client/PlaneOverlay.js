@@ -176,6 +176,21 @@ export default class PlaneOverlay {
         if (ctx?.scene?.isScene) {
             this.hookScene(ctx.scene);
         }
+
+        this._domCanvas = ctx?.renderer?.domElement ?? ctx?.canvas ?? null;
+        this._onDomClick = (e) => {
+            if (e.button != null && e.button !== 0) return;
+            const vp = this.viewport();
+            const rect = this._domCanvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+            const devX = (e.clientX - rect.left) * vp.dpr;
+            const devY = (e.clientY - rect.top) * vp.dpr;
+            const hit = this.hitTest(devX, devY);
+            if (hit && typeof hit.onClick === 'function') {
+                e.stopPropagation?.();
+                hit.onClick(hit);
+            }
+        };
+        this._domCanvas?.addEventListener?.('click', this._onDomClick, true);
     }
 
     /**
@@ -225,8 +240,8 @@ export default class PlaneOverlay {
                 cssH = canvas.clientHeight || 0;
             }
         }
-        const width = canvas?.width || cssW || 1600;
-        const height = canvas?.height || cssH || 1000;
+        const width = canvas?.width || this.ctx?.width || cssW || 1600;
+        const height = canvas?.height || this.ctx?.height || cssH || 1000;
         if (!(cssW > 0)) cssW = width;
         if (!(cssH > 0)) cssH = height;
         return {
@@ -479,6 +494,245 @@ export default class PlaneOverlay {
     }
 
     /**
+     * Create or update a screen-overlay card item (used by Strip for carrel cards).
+     *
+     * @param {string} id
+     * @param {Object} opts
+     * @param {number} opts.x - device-pixel top-left x
+     * @param {number} opts.y - device-pixel top-left y
+     * @param {number} [opts.w=132] - device-pixel width
+     * @param {number} [opts.h=80] - device-pixel height
+     * @param {THREE.Texture|null} [opts.texture=null] - optional card thumbnail texture
+     * @param {string} [opts.title=''] - card title text
+     * @param {string} [opts.badge=''] - optional badge text (e.g. waiting badge)
+     * @param {number} [opts.color=0x0b1220] - backing panel fill color
+     * @param {number} [opts.borderColor=0x334155] - border hairline color
+     * @param {number} [opts.borderWidth=1.5] - border width in device pixels (0 disables border)
+     * @param {number} [opts.badgeColor=0xf59e0b] - badge plate color
+     * @param {number} [opts.opacity=1.0] - opacity `0..1`
+     * @param {number} [opts.z=5] - overlay z order
+     * @param {string} [opts.kind='strip'] - owner kind
+     * @param {boolean} [opts.interactive=true] - whether `hitTest` / `clickAt` can hit this item
+     * @param {Function|null} [opts.onClick=null] - click handler `(rec) => void`
+     * @param {Object|null} [opts.data=null] - arbitrary metadata (e.g. `{ carrel, waiting, stale }`)
+     */
+    setCard(id, {
+        x = 0,
+        y = 0,
+        w = 132,
+        h = 80,
+        texture = null,
+        title = '',
+        badge = '',
+        color = 0x0b1220,
+        borderColor = 0x334155,
+        borderWidth = 1.5,
+        badgeColor = 0xf59e0b,
+        opacity = 1.0,
+        z = 5,
+        kind = 'strip',
+        interactive = true,
+        onClick = null,
+        data = null,
+    } = {}) {
+        if (!id) throw new Error('PlaneOverlay.setCard: id is required');
+        const atlas = this.atlas ?? this.ctx?.atlas;
+        const snapped = snapOverlayOrigin(x, y);
+        const snapW = Math.max(8, Math.round(Number(w) || 132));
+        const snapH = Math.max(8, Math.round(Number(h) || 80));
+
+        let rec = this.items.get(id);
+        if (rec && rec.type !== 'card') {
+            this.remove(id);
+            rec = null;
+        }
+
+        if (!this._dotGeo) this._dotGeo = new THREE.PlaneGeometry(1, 1);
+
+        if (!rec) {
+            const group = new THREE.Group();
+            group.name = `overlay-card:${id}`;
+
+            const panel = createPanelMaterial({
+                color,
+                opacity,
+                side: THREE.DoubleSide,
+                depthWrite: true,
+            });
+            panel.setBorder({ color: borderColor, width: borderWidth, intensity: borderWidth > 0 ? 0.9 : 0 });
+            panel.setBorderFlag(BORDER_FLAGS.EDGE, borderWidth > 0);
+            const bgMesh = new THREE.Mesh(this._dotGeo, panel.material);
+            bgMesh.name = `overlay-card-bg:${id}`;
+            group.add(bgMesh);
+
+            const thumbMat = new THREE.MeshBasicMaterial({
+                map: texture || null,
+                transparent: true,
+                opacity: texture ? opacity : 0,
+                depthTest: true,
+                depthWrite: false,
+            });
+            const thumbMesh = new THREE.Mesh(this._dotGeo, thumbMat);
+            thumbMesh.name = `overlay-card-thumb:${id}`;
+            thumbMesh.visible = !!texture && opacity > 0;
+            group.add(thumbMesh);
+
+            this.scene.add(group);
+            rec = {
+                id,
+                type: 'card',
+                kind,
+                x: snapped.x,
+                y: snapped.y,
+                z,
+                px: snapH,
+                scale: 1,
+                text: String(title ?? ''),
+                badge: String(badge ?? ''),
+                color,
+                borderColor,
+                borderWidth,
+                badgeColor,
+                opacity,
+                interactive: interactive !== false,
+                cols: 0,
+                rows: 0,
+                textRect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
+                rect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
+                object: group,
+                onClick,
+                data,
+                _panel: panel,
+                _bgMesh: bgMesh,
+                _thumbMesh: thumbMesh,
+                _thumbMat: thumbMat,
+                _titleLabel: null,
+                _badgeLabel: null,
+            };
+            this.items.set(id, rec);
+        }
+
+        const group = /** @type {THREE.Group} */ (rec.object);
+        group.position.set(snapped.sceneX, snapped.sceneY, z);
+        group.visible = opacity > 0;
+
+        rec._panel.setFill(color, opacity);
+        rec._panel.setBorder({ color: borderColor, width: borderWidth, intensity: borderWidth > 0 ? 0.9 : 0 });
+        rec._panel.setBorderFlag(BORDER_FLAGS.EDGE, borderWidth > 0);
+        rec._bgMesh.scale.set(snapW, snapH, 1);
+        rec._bgMesh.position.set(snapW * 0.5, -snapH * 0.5, 0);
+
+        const pad = 2;
+        const innerW = Math.max(2, snapW - pad * 2);
+        const innerH = Math.max(2, snapH - pad * 2);
+        rec._thumbMesh.scale.set(innerW, innerH, 1);
+        rec._thumbMesh.position.set(snapW * 0.5, -snapH * 0.5, 0.2);
+        if (rec._thumbMat.map !== (texture || null)) {
+            rec._thumbMat.map = texture || null;
+            rec._thumbMat.needsUpdate = true;
+        }
+        rec._thumbMat.opacity = texture ? opacity : 0;
+        rec._thumbMesh.visible = !!texture && opacity > 0;
+
+        const titleStr = String(title ?? '');
+        if (!rec._titleLabel && atlas && titleStr) {
+            const titleLabel = new FieldLabel({
+                atlas,
+                text: titleStr,
+                lineHeight: 11,
+                textColor: 0xe2e8f0,
+                plate: { color: 0x070d18, opacity: 1.0, hairline: false },
+            });
+            titleLabel.name = `overlay-card-title:${id}`;
+            group.add(titleLabel);
+            rec._titleLabel = titleLabel;
+        }
+        if (rec._titleLabel) {
+            if (titleStr && rec._titleLabel.text !== titleStr) rec._titleLabel.setText(titleStr);
+            rec._titleLabel._anchor.position.set(0, 0, 0);
+            rec._titleLabel.position.set(6, -(snapH - 16), 0.6);
+            this._applyLabelOpacity(rec._titleLabel, titleStr ? opacity : 0, { opacity: 1.0 });
+        }
+
+        const badgeStr = String(badge ?? '');
+        if (!rec._badgeLabel && atlas && badgeStr) {
+            const badgeLabel = new FieldLabel({
+                atlas,
+                text: badgeStr,
+                lineHeight: 10,
+                textColor: 0x080c14,
+                plate: { color: badgeColor, opacity: 1.0, hairline: true },
+            });
+            badgeLabel.name = `overlay-card-badge:${id}`;
+            group.add(badgeLabel);
+            rec._badgeLabel = badgeLabel;
+        }
+        if (rec._badgeLabel) {
+            if (badgeStr && rec._badgeLabel.text !== badgeStr) rec._badgeLabel.setText(badgeStr);
+            rec._badgeLabel.setPlateColor(badgeColor);
+            rec._badgeLabel._anchor.position.set(0, 0, 0);
+            const bw = rec._badgeLabel.width || 16;
+            rec._badgeLabel.position.set(Math.max(6, snapW - bw - 6), -6, 0.8);
+            this._applyLabelOpacity(rec._badgeLabel, badgeStr ? opacity : 0, { opacity: 1.0 });
+        }
+
+        setOverlayLayers(group);
+
+        rec.kind = kind;
+        rec.x = snapped.x;
+        rec.y = snapped.y;
+        rec.z = z;
+        rec.px = snapH;
+        rec.text = titleStr;
+        rec.badge = badgeStr;
+        rec.color = color;
+        rec.borderColor = borderColor;
+        rec.borderWidth = borderWidth;
+        rec.badgeColor = badgeColor;
+        rec.opacity = opacity;
+        rec.interactive = interactive !== false;
+        rec.onClick = onClick;
+        rec.data = data;
+        rec.textRect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };
+        rec.rect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };
+
+        return rec;
+    }
+
+    /**
+     * Dispatch a click at device-pixel coordinates `(devX, devY)`.
+     * If the topmost hit overlay item has an `onClick` callback, invokes it and returns the item.
+     *
+     * @param {number} devX
+     * @param {number} devY
+     * @returns {Object|null}
+     */
+    clickAt(devX, devY) {
+        const hit = this.hitTest(devX, devY);
+        if (hit && typeof hit.onClick === 'function') {
+            hit.onClick(hit);
+        }
+        return hit;
+    }
+
+    /**
+     * Convert CSS client coordinates `(clientX, clientY)` relative to the canvas into
+     * device pixels and invoke `clickAt`.
+     *
+     * @param {number} clientX
+     * @param {number} clientY
+     * @returns {Object|null}
+     */
+    pickAt(clientX, clientY) {
+        const vp = this.viewport();
+        const canvas = this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
+        const rect = canvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+        const devX = (clientX - rect.left) * vp.dpr;
+        const devY = (clientY - rect.top) * vp.dpr;
+        return this.clickAt(devX, devY);
+    }
+
+    /**
      * Remove and dispose one overlay item by id.
      * @param {string} id
      * @returns {boolean}
@@ -489,6 +743,12 @@ export default class PlaneOverlay {
         this.items.delete(id);
         if (rec.type === 'text') {
             rec.object?.dispose?.();
+        } else if (rec.type === 'card') {
+            rec._titleLabel?.dispose?.();
+            rec._badgeLabel?.dispose?.();
+            rec._thumbMat?.dispose?.();
+            rec._panel?.material?.dispose?.();
+            rec.object?.parent?.remove(rec.object);
         } else if (rec.object) {
             rec.object.material?.dispose?.();
             rec.object.parent?.remove(rec.object);
@@ -553,7 +813,7 @@ export default class PlaneOverlay {
     hitTest(devX, devY) {
         let best = null;
         for (const rec of this.items.values()) {
-            if (rec.opacity <= 0 || !rec.object?.visible) continue;
+            if (rec.interactive === false || rec.opacity <= 0 || !rec.object?.visible) continue;
             const r = rec.rect;
             if (devX >= r.x && devX <= r.x + r.w && devY >= r.y && devY <= r.y + r.h) {
                 if (!best || rec.z >= best.z) best = rec;
@@ -585,6 +845,9 @@ export default class PlaneOverlay {
     }
 
     dispose() {
+        this._domCanvas?.removeEventListener?.('click', this._onDomClick, true);
+        this._domCanvas = null;
+        this._onDomClick = null;
         this.unhookScene();
         this.clear();
         this._dotGeo?.dispose();

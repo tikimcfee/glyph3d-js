@@ -400,6 +400,19 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/carrel-session.test.mjs
   ```
 
+- **`strip.test.mjs`** and **`carrel-cards.test.mjs`** — the strip (`app/client/Strip.js`: the
+  left-edge band of carrel cards in every plane view, ordered by true bearing, max `strip.maxCards` + a
+  cluster, waiting badges, off-screen deixis and waiting edge marks, the band reserved so a surface's
+  column 0 lands right of it, `carrel.neighbor <h|l|j|k|parent|child>`) and carrel impostor cards
+  (`CarrelCards`: an FBO capture on `CARD_LAYER = 29` that dirties neither GlyphBatch nor PanelBatch,
+  an LRU pool cap, world-scaled nested-desk native px, render-target sizes validated at the seam; the
+  GPU half compares a native card with the live terminal pixel for pixel). Cards are off by default
+  (`carrel.card.enabled`).
+  ```
+  bun tools/strip.test.mjs
+  bun tools/carrel-cards.test.mjs
+  ```
+
 - **`deixis-lite.test.mjs`** (headless) — pointing, lite (`app/client/Deixis.js`,
   `deixisCommands.js`) on a real CodeGrid and TerminalGrid line model: a code glyph resolves to
   `path:line «token»`, a terminal glyph to `<terminal> line N «text»` by its running line number;
