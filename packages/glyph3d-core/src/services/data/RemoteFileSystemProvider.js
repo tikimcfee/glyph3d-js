@@ -155,6 +155,17 @@ export class RemoteFileSystemProvider {
     }
 
     /**
+     * A file's revisions, newest first (fs/gitLog — `git log --follow`): each commit's sha, time,
+     * author, subject and the file's name there, and with `text` the file's text at that commit
+     * (later revisions past the relay's text budget come back `textOmitted`).
+     * @param {{uri:string, n?:number, text?:boolean}} p
+     * @returns {Promise<{root:string, path:string, commits:Array<{sha:string, parents:string[], time:number, author:string, subject:string, path:string, text?:string, textOmitted?:boolean}>}>}
+     */
+    async gitLog({ uri, n = 5, text = false }) {
+        return this._rpc('fs/gitLog', { uri, n, text });
+    }
+
+    /**
      * START a directory content search. Resolves as soon as the relay has ACKNOWLEDGED
      * the walk — not when it finishes. Matches arrive as `fs/searchMatch` notifications
      * carrying this same `id`, and the run ends with exactly one `fs/searchDone`; wire

@@ -54,6 +54,7 @@ import registerLspCommands from './lspCommands.js';
 import registerStructureCommands from './structureCommands.js';
 import registerViewCommands from './viewCommands.js';
 import registerLabelCommands from './labelCommands.js';
+import registerLayerCommands from './layerCommands.js';
 
 /**
  * Register all built-in commands on a router.
@@ -111,6 +112,7 @@ export function registerAllCommands(router) {
     registerStructureCommands(router);
     registerViewCommands(router);
     registerLabelCommands(router);
+    registerLayerCommands(router);
 }
 
 // Dev ergonomics: handlers register imperatively ONCE per page load (CommandProvider's

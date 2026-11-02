@@ -1577,6 +1577,29 @@ export default class AgentBooks {
     }
 
     /**
+     * A scroll book's run by TURN, as depth layers (LayerStack): one page per turn the window
+     * holds — the newest turn first — each the turn's events as the document composes them (the
+     * same blocks, rows, hues), from its first row. Records no event carried a turn for are their
+     * own turn each. null: no scroll book.
+     * @param {string} agentId
+     * @returns {Array<{id:string, label:string, kind:'history', rows:Object[], turn:number|null}>|null}
+     */
+    turnLayers(agentId) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!this._scrolling(lane)) return null;
+        if (lane.doc.dirty) lane.doc.flush();
+        const turns = [];
+        let cur = null;
+        lane.entries.forEach((e, i) => {
+            const t = e.record.turn, key = t?.id ?? `seq:${lane.book.sheets[i].meta.seq}`;
+            if (!cur || cur.key !== key) turns.push(cur = { key, turn: t?.index ?? null, rows: [] });
+            const blk = lane.doc.blocks[i];
+            for (const r of blk.rows) cur.rows.push({ segs: r.segs, indent: r.indent });
+        });
+        return turns.reverse().map((t) => ({ id: `turn:${t.key}`, label: t.turn != null ? `turn ${t.turn}` : t.key, kind: 'history', rows: t.rows, turn: t.turn }));
+    }
+
+    /**
      * What a pointer RAY hits on a book's scroll document: the event (its run step) and the row
      * part under it — a click on a `summary` row is the expand gesture (`book.expand <step>`).
      * @param {string} agentId @param {THREE.Ray} ray world space

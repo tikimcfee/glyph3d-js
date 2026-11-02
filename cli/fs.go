@@ -605,6 +605,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleWriteFile(write, rawID, params)
 			case "fs/gitDiff":
 				h.handleGitDiff(write, rawID, params)
+			case "fs/gitLog":
+				h.handleGitLog(write, rawID, params)
 			case "fs/search":
 				h.handleSearch(write, rawID, params)
 			case "fs/searchCancel":

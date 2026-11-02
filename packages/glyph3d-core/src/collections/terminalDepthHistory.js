@@ -348,3 +348,45 @@ export function syncTerminalBuffers({
     return true;
 }
 
+
+/**
+ * A terminal's scrollback as DEPTH LAYERS (LayerStack): `pages` screens of history, the newest
+ * page first, each `rows` rows tall with its oldest line at the top (as it stood on screen before
+ * it scrolled off). `history` is TerminalGrid's (index 0 = the newest scrolled-off row, each
+ * `{cp, r, g, b}` per cell); a row's runs of one colour become one segment, trailing blanks
+ * dropped. Pure.
+ * @param {Array<{cp:ArrayLike<number>, r:ArrayLike<number>, g:ArrayLike<number>, b:ArrayLike<number>}>} history
+ * @param {number} rows @param {number} pages
+ * @returns {Array<{id:string, label:string, kind:'history', rows:Array<{segs:Array<{text:string, color:{r:number,g:number,b:number}}>}>}>}
+ */
+export function terminalPageLayers(history, rows, pages) {
+    const out = [];
+    const h = Math.max(1, Math.floor(rows));
+    for (let p = 0; p < pages && p * h < history.length; p++) {
+        const page = [];
+        for (let j = 0; j < h; j++) {
+            const entry = history[p * h + (h - 1 - j)];   // oldest of the page at the top
+            page.push(entry ? { segs: rowSegs(entry) } : { segs: [] });
+        }
+        out.push({ id: `page-${p + 1}`, label: `${p + 1} screen${p ? 's' : ''} back`, kind: 'history', rows: page });
+    }
+    return out;
+}
+
+/** One history row's runs of equal colour, trailing blanks dropped. @private */
+function rowSegs(entry) {
+    const cp = entry.cp;
+    let end = cp.length;
+    while (end > 0 && (cp[end - 1] === 32 || cp[end - 1] === 0)) end--;
+    const segs = [];
+    let run = '', col = null;
+    for (let x = 0; x < end; x++) {
+        const c = { r: entry.r?.[x] ?? 1, g: entry.g?.[x] ?? 1, b: entry.b?.[x] ?? 1 };
+        const ch = String.fromCodePoint(cp[x] > 0 ? cp[x] : 32);
+        if (col && c.r === col.r && c.g === col.g && c.b === col.b) { run += ch; continue; }
+        if (run) segs.push({ text: run, color: col });
+        run = ch; col = c;
+    }
+    if (run) segs.push({ text: run, color: col });
+    return segs;
+}

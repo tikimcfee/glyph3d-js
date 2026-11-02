@@ -229,9 +229,17 @@ function planeCommandFor(e) {
  *  `env.planePrefixMs`), the next key runs its pane command — or, unknown, disarms and is
  *  consumed (a stray prefixed key never reaches the terminal as a surprise). */
 function planePrefix(e, env) {
-    if (!env.planeEntered?.()) { env._planeArmed = 0; return false; }
+    if (!env.planeEntered?.()) { env._planeArmed = 0; env._fanning = false; return false; }
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return false;
     if (matchesChord(e, env.planePrefix ?? PLANE_PREFIX)) {
+        // HELD past the key-repeat delay, the chord is the FAN quasimode (depth as time): the plane's
+        // lens widens (plane.fov env.planeFanFov) so the layers behind a page spread by depth; its
+        // release flattens it (onKeyUp). A tap stays the prefix.
+        if (e.repeat) {
+            env._planeArmed = 0;
+            if (!env._fanning) { env._fanning = true; env.exec(`plane.fov ${env.planeFanFov ?? 30}`); }
+            return true;
+        }
         env._planeArmed = Date.now() + (env.planePrefixMs ?? 1500);
         return true;
     }
@@ -306,6 +314,18 @@ export function installKeyboardRouter(env) {
     };
     doc.addEventListener('keydown', onKeyDown, { capture: true });
 
+    // The FAN quasimode ends on the chord's release — its key or any of its modifiers lifting.
+    const onKeyUp = (e) => {
+        if (!env._fanning) return;
+        const c = env.planePrefix ?? PLANE_PREFIX;
+        const parts = [c.key, c.ctrl && 'Control', c.shift && 'Shift', c.alt && 'Alt', c.meta && 'Meta'].filter(Boolean);
+        if (!parts.includes(e.key)) return;
+        env._fanning = false;
+        env.exec('plane.fov default');
+        e.preventDefault();
+    };
+    doc.addEventListener('keyup', onKeyUp, { capture: true });
+
     // PASTE: the browser's own clipboard event, which is why keyEncoding declines the paste
     // chord — a claimed keystroke is a suppressed one, and a suppressed one never becomes a
     // `paste`. Reading e.clipboardData inside the event needs no permission and no async
@@ -338,6 +358,7 @@ export function installKeyboardRouter(env) {
 
     return () => {
         doc.removeEventListener('keydown', onKeyDown, { capture: true });
+        doc.removeEventListener('keyup', onKeyUp, { capture: true });
         doc.removeEventListener('paste', onPaste);
         if (typeof offChangeKey === 'function') offChangeKey();
     };

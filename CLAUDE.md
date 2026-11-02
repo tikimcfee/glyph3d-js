@@ -381,6 +381,19 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   once the desk stands, the hub's load centering standing down meanwhile). A save records a member's
   OWN view, never its holder's (`Holding.ownViewOf`). Gates: `tools/carrel-plane.test.mjs`,
   `tools/plane-keys.test.mjs`.
+- **Depth as time** (`collections/LayerStack.js`, `app/client/layerSources.js`, `app/client/LayerStacks.js`,
+  verbs `layer.show|hide|list|where`, `pane.layer`, `pane.blink`, `grid.history`): a member's past as PAGES standing
+  behind it on its own cell grid (`layerFrameOf`: a code grid's text, a scroll book's body, a terminal's screen) — a
+  file's revisions (the relay's read-only `fs/gitLog`: `git log --follow` + each revision's text, `cli/gitlog.go`;
+  leading copies of what's shown skipped), an agent scroll's turns (`AgentBooks.turnLayers`), a terminal's
+  scrollback by screen (`terminalPageLayers`). History at z = −rank·pitch (`layers.pitchRows`, floored so page text
+  never pokes through), raised `layers.riseRows` per rank so each page's top row peeks over the one in front; suggest
+  strips in front, exactly over the lines they'd replace. Every page and the member itself get an opaque backing, so
+  a translucent member never shows what's behind. `pane.layer <id> <n>` fronts a page at EXACTLY z = 0 (the member's
+  glyph meshes hide meanwhile); `now` restores the member. The fan is the plane lens: holding the pane prefix
+  (Ctrl+Space) past key-repeat sets `plane.fov layers.fanFov`, release flattens. Stacks are saved
+  (`LayerStacks.serialize` → the snapshot's `layerStacks`) and re-shown once each member stands up again. Gates:
+  `tools/layer-stack.test.mjs`, `tools/layer-fan.test.mjs`, `cli/gitlog_test.go`.
 - **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book
   is BORN with — a Settings change never pushes onto a live one. A value set on ONE instance
   (`carrel.set <name> <knob> <v>`, `book.set [id] <knob> <v>`, `book.form`) is its own and wins:

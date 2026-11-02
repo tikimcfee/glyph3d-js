@@ -208,6 +208,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
+- **`layer-stack.test.mjs`** (headless, the real font chain + gomuxai's corpus) — depth as time: a suggest strip
+  proposing a code grid's lines lays EXACTLY its slots (teeth: a frame 0.001 off fails); history order, z, rise,
+  pitch floor; every page states its extent (else culled / far-LOD'd — teeth shown); opaque backs; a fronted page at
+  exactly z = 0 with the member's glyphs hidden and shown again; revisions / agent turns / terminal screens as
+  layers; the verbs over a fake relay; serialize + restore (waits for the member, refronts).
+- **`layer-fan.test.mjs`** (headless) — holding the pane prefix fans (`plane.fov layers.fanFov`), releasing it
+  flattens, a tap is still the prefix.
 - **`scroll-form.test.mjs`** (headless, gomuxai's corpus + the real font chain) — the agent scroll
   form: every event's headline, call, info rows and body rejoin from the document's rows to the
   record's text (CRLF → LF, one trailing newline dropped); long outputs are one summary row until

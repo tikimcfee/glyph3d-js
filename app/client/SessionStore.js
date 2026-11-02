@@ -66,6 +66,7 @@ import { getSetting } from './settings.js';
 import { laneForSession } from './SessionBooks.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
+import { layerStacksOf } from './LayerStacks.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
@@ -373,6 +374,8 @@ export default class SessionStore {
       entered,
       agentVisibility,
       agentScrollViews,
+      // Depth layers shown behind members (slice 10a): which members, how deep, the layer at z = 0.
+      layerStacks: this.ctx.layerStacks?.serialize?.() ?? [],
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -538,6 +541,7 @@ export default class SessionStore {
         [['surfaces', () => this._restoreSurfaces(snap), ['terminals', 'dock3d']]],
       ],
       [[['settle', () => this._projectSurfaces(), []],
+        ['layers', () => { layerStacksOf(this.ctx).restore(snap.layerStacks); }, ['layerStacks']],
         ['focus', () => this._restoreFocus(snap.focus), ['focus']]]],
     ];
 

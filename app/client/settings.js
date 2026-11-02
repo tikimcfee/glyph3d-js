@@ -686,6 +686,14 @@ export const SETTINGS = [
   { key: 'plane.restoreWaitMs', label: 'After a reload, how long to wait for the plane you were reading to stand up before giving up (ms)', group: 'Planes', type: 'number', default: 60000, min: 1000, max: 600000, step: 1000 },
   { key: 'plane.prefixMs', label: 'Pane prefix (Ctrl+Space): how long it waits for its command key (ms)', group: 'Planes', type: 'number', default: 1500, min: 200, max: 10000, step: 100 },
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },
+  // Depth as time (slice 10a): a member's past as pages behind it (layer.show / pane.layer / pane.blink /
+  // grid.history). A stack is born with these; layer.show again re-reads them.
+  { key: 'layers.count', label: 'Depth layers: how many past pages a member shows (revisions, turns, screens)', group: 'Planes', type: 'number', default: 5, min: 1, max: 50, step: 1 },
+  { key: 'layers.pitchRows', label: 'Depth layers: depth between pages, in text rows (the plane slab, plane.back, must hold them)', group: 'Planes', type: 'number', default: 1, min: 0.1, max: 100, step: 0.1 },
+  { key: 'layers.riseRows', label: 'Depth layers: how far each page behind stands above the one in front, in rows (0 = registered)', group: 'Planes', type: 'number', default: 1, min: 0, max: 20, step: 1 },
+  { key: 'layers.backOpacity', label: 'Depth layers: page backing opacity (1 = opaque — overlaps stay legible)', group: 'Planes', type: 'number', default: 1, min: 0, max: 1, step: 0.05 },
+  { key: 'layers.fanFov', label: 'Depth layers: the fan — the plane lens (°) while the pane prefix is HELD (layers spread by depth; release = plane.fov)', group: 'Planes', type: 'number', default: 30, min: 1, max: 90, step: 1 },
+  { key: 'layers.blinkMs', label: 'Depth layers: pane.blink alternation (ms)', group: 'Planes', type: 'number', default: 500, min: 50, max: 10000, step: 50 },
   { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },
   // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued
   // last frame. monitor.stats / scene stats are the verb-side twins.

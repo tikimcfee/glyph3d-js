@@ -103,6 +103,43 @@ export function rowCells(text, cellsOf, tabWidth = DEFAULT_LAYOUT.tabWidth) {
 
 const packOf = (c) => packRgba8(c?.r ?? 1, c?.g ?? 1, c?.b ?? 1, 1);
 
+/**
+ * Lay ONE row of coloured segments at the end of `slots` — the cell grid's rule (LayoutGenerator,
+ * no wrap): its glyphs from x = indent·charWidth, its cell center at `y`. Codepoints the live
+ * atlas hasn't seen are encoded first. A row with no text lays nothing. Shared by every surface
+ * that sets rows of runs (a ScrollDocument, a LayerStack page), so they lay text identically.
+ * @param {Object} slots InstancedSlotBuffer @param {ScrollRow} row
+ * @param {{atlas:Object, shaper:Object|null, metrics:Object, y:number, tabWidth?:number, sizes?:Float32Array|null}} o
+ * @returns {ReturnType<typeof generateLayout>|null}
+ */
+export function layRow(slots, row, { atlas, shaper, metrics, y, tabWidth = DEFAULT_LAYOUT.tabWidth, sizes = null }) {
+    let text = '';
+    const spans = [];
+    let cp = 0;
+    for (const s of row.segs || []) {
+        const n = Array.from(s.text).length;
+        if (!n) continue;
+        spans.push({ start: cp, end: cp + n, color: packOf(s.color) });
+        text += s.text;
+        cp += n;
+    }
+    if (!text) return null;
+    const live = atlas?._live;
+    if (live && shaper) {
+        const seen = (atlas._seenCodepoints ??= new Set());
+        let fresh = null;
+        for (const ch of text) {
+            const c = ch.codePointAt(0);
+            if (c > 32 && !seen.has(c)) { seen.add(c); (fresh ??= []).push(c); }
+        }
+        if (fresh) live.ensureCodepoints(fresh, shaper);
+    }
+    return generateLayout([text], {
+        shaper, metrics, origin: { x: (row.indent || 0) * metrics.charWidth, y, z: 0 },
+        wrapWidth: 0, zWrapSpacing: 0, tabWidth, spans, targetBuffer: slots, targetSizes: sizes ?? undefined, append: true,
+    });
+}
+
 export default class ScrollDocument extends BoundedObject3D {
     /**
      * @param {GlyphAtlas} atlas
@@ -412,43 +449,11 @@ export default class ScrollDocument extends BoundedObject3D {
         return this._sizes;
     }
 
-    /** Lay one row's glyphs at the end of `slots`. @private */
+    /** Lay one row's glyphs at the end of `slots` (layRow, at this document's grid). @private */
     _layRow(slots, sizes, row, r, title) {
-        const segs = row.segs || [];
-        let text = '';
-        const spans = [];
-        let cp = 0;
-        for (const s of segs) {
-            const n = Array.from(s.text).length;
-            if (!n) continue;
-            spans.push({ start: cp, end: cp + n, color: packOf(s.color) });
-            text += s.text;
-            cp += n;
-        }
-        if (!text) return;
-        this._ensureEncoded(text);
-        const m = this.metrics;
-        const y = title ? 0 : this._bodyY - r * m.lineSpacing;
-        const res = generateLayout([text], {
-            shaper: this._shaper, metrics: m,
-            origin: { x: (row.indent || 0) * m.charWidth, y, z: 0 },
-            wrapWidth: 0, zWrapSpacing: 0, tabWidth: this.cfg.tabWidth,
-            spans, targetBuffer: slots, targetSizes: sizes ?? undefined, append: true,
-        });
-        if (sizes && res.sizes !== sizes) this._sizes = res.sizes;
-    }
-
-    /** Encode never-seen codepoints' curves into the live atlas (CodeGrid's rule). @private */
-    _ensureEncoded(text) {
-        const atlas = this.atlas, live = atlas?._live;
-        if (!live || !this._shaper) return;
-        const seen = (atlas._seenCodepoints ??= new Set());
-        let fresh = null;
-        for (const ch of text) {
-            const c = ch.codePointAt(0);
-            if (c > 32 && !seen.has(c)) { seen.add(c); (fresh ??= []).push(c); }
-        }
-        if (fresh) live.ensureCodepoints(fresh, this._shaper);
+        const y = title ? 0 : this._bodyY - r * this.metrics.lineSpacing;
+        const res = layRow(slots, row, { atlas: this.atlas, shaper: this._shaper, metrics: this.metrics, y, tabWidth: this.cfg.tabWidth, sizes });
+        if (sizes && res && res.sizes !== sizes) this._sizes = res.sizes;
     }
 
     // -- the view -------------------------------------------------------------------------------
