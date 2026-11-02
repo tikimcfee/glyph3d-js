@@ -155,5 +155,44 @@ const load = (w, lines) => quiet(() => w.code.loadText(lines.join('\n')));
     ok(/agent-v \[suggest · resolved\] src\/x\.js:2/.test(list.text), `point.list shows the status (${list.text})`);
 }
 
+// ── the SNAPSHOT RING: a terminal row pointed at resolves to the row AS DRAWN (slice 9) ─────────────
+{
+    const { default: TerminalGrid } = await import('../packages/glyph3d-core/src/collections/TerminalGrid.js');
+    const { HEADLESS_ATLAS } = await import('./headless-atlas.mjs');
+    const { terminalRef, seenOf } = await import('../app/client/Deixis.js');
+    const COLS = 16, ROWS = 4;
+    const screen = (lines, alt = false, cols = COLS) => ({ cols, rows: lines.length, alt,
+        cells: lines.map((t) => Array.from({ length: cols }, (_, x) => ({ codepoint: (t[x] ?? ' ').codePointAt(0) }))) });
+    const term = new TerminalGrid(new THREE.Scene(), HEADLESS_ATLAS, { id: 't1', cols: COLS, rows: ROWS, depthMax: 8, snapshotFrames: 64 });
+    let lines = ['$ make', 'building a', 'building b', ''];
+    term.applyScreen(screen(lines));
+    const ref = terminalRef('t1', term, 2, 0, 'agent-x');
+    ok(ref.durable.frame === term.frameSeq && ref.quote === 'building b', `a terminal ref records the frame it was drawn in (${JSON.stringify(ref.durable)})`);
+    // 30 lines stream past (each frame scrolls one), well beyond the 8-line depth history.
+    for (let k = 0; k < 30; k++) { lines = [...lines.slice(1, ROWS - 1), `out ${k}`, '']; term.applyScreen(screen(lines)); }
+    ok(term.lineText(2) === null, 'teeth: 30 lines later the line is no longer drawn (past the depth history) — the live grid has no answer');
+    const s1 = seenOf(term, ref);
+    ok(s1.asDrawn === 'building b' && s1.overdrawn && !s1.gone, `30 lines later it resolves to the row AS DRAWN (${JSON.stringify(s1)})`);
+    // A full-screen app redraws in place (alt screen, no scroll): the same line number shows something else.
+    const t2 = new TerminalGrid(new THREE.Scene(), HEADLESS_ATLAS, { id: 't2', cols: COLS, rows: ROWS, snapshotFrames: 64 });
+    t2.applyScreen(screen(['top - 10:00', 'PID USER', '101 alice 3%', ''], true));
+    const r2 = terminalRef('t2', t2, 2, 0, 'agent-x');
+    t2.applyScreen(screen(['top - 10:01', 'PID USER', '202 root 90%', ''], true));
+    const s2 = seenOf(t2, r2);
+    ok(t2.lineText(2) === '202 root 90%', 'teeth: the live line now reads the redraw');
+    ok(s2.asDrawn === '101 alice 3%' && s2.now === '202 root 90%' && s2.overdrawn, `an in-place redraw: resolves to the row as drawn, flagged overdrawn (${JSON.stringify(s2)})`);
+    // A resize after the point: the remembered row keeps its own width.
+    t2.resize?.(24, ROWS);
+    ok(t2.seenText(r2.durable.frame, 2) === '101 alice 3%', 'a resize later: the row as drawn keeps its own width');
+    // The resolver: a ref's JSON resolves to the row as drawn, with what it shows now beside it.
+    const reg = new SceneRegistry();
+    reg.register('t1', term, { type: 'terminal' });
+    const rr = resolveRef({ registry: reg }, JSON.parse(JSON.stringify(ref)));
+    ok(rr.quote === 'building b' && rr.seen?.overdrawn === true && rr.text.includes('t1 line 2'), `resolveRef: the as-drawn row (${rr.text})`);
+    // Past the ring: gone — said so, falling back to the line as it reads now.
+    for (let k = 0; k < 70; k++) { lines = [...lines.slice(1, ROWS - 1), `more ${k}`, '']; term.applyScreen(screen(lines)); }
+    ok(seenOf(term, ref).gone === true && term.seenFrames().oldest > ref.durable.frame, 'its frame left the ring: gone (only the live line is known)');
+}
+
 console.log(`${fails ? 'FAIL' : 'ok'} deixis-ref: ${checks - fails}/${checks} checks`);
 process.exit(fails ? 1 : 0);

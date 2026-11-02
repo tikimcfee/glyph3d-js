@@ -22,7 +22,7 @@
  */
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
-import { terminalTheme } from '../../client/settings.js';
+import { terminalTheme, getSetting } from '../../client/settings.js';
 import { agentSurfacesOf } from '../../client/AgentSurfaces.js';
 import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
@@ -214,6 +214,8 @@ export default function registerTerminalCommands(router) {
                 rows,
                 gridScale,
                 title: id,
+                // The snapshot ring: the last N screens as drawn — a point at a row reads as it was drawn (Deixis).
+                snapshotFrames: Number(getSetting('terminal.snapshotFrames')),
                 ...terminalTheme(),
             });
 

@@ -109,7 +109,26 @@ export function codeRef(ctx, id, grid, line0, col0, who = null) {
 export function terminalRef(id, grid, line, col0, who = null) {
     const text = grid?.lineText?.(line);
     if (text == null) return { error: `'${id}' no longer draws line ${line} (scrolled past its depth history)` };
-    return makeRef('terminal', id, { terminal: id, line, col: col0 + 1 }, text.trim(), who);
+    // The screen it was pointed at in (the grid's snapshot ring): resolving later reads the line AS DRAWN then.
+    const frame = Number.isInteger(grid?.frameSeq) && grid.frameSeq > 0 ? grid.frameSeq : undefined;
+    return makeRef('terminal', id, { terminal: id, line, col: col0 + 1, ...(frame ? { frame } : {}) }, text.trim(), who);
+}
+
+/**
+ * A terminal ref resolved against what was DRAWN when it was made: the line as it read in its frame
+ * (the grid's snapshot ring) — after 30 lines streamed past, a full-screen app redrawing in place, or a
+ * resize — beside what that line shows now. `overdrawn`: it reads differently now (or isn't drawn);
+ * `gone`: its frame left the ring (only the line as it reads now is known).
+ * @param {Object} grid a TerminalGrid @param {{durable:{line:number, frame?:number}}} ref
+ * @returns {{asDrawn:string|null, now:string|null, overdrawn:boolean, gone:boolean}}
+ */
+export function seenOf(grid, ref) {
+    const d = ref?.durable || {};
+    const nowRaw = grid?.lineText?.(d.line);
+    const now = nowRaw == null ? null : nowRaw.trim();
+    const drawnRaw = Number.isInteger(d.frame) ? grid?.seenText?.(d.frame, d.line) : null;
+    const asDrawn = drawnRaw == null ? null : drawnRaw.trim();
+    return { asDrawn, now, overdrawn: asDrawn != null && asDrawn !== now, gone: asDrawn == null };
 }
 
 /**
@@ -190,6 +209,15 @@ function fromJson(ctx, j, who) {
     if (j?.kind === 'terminal' && d?.terminal && Number.isInteger(d.line)) {
         const e = ctx.registry?.get?.(d.terminal);
         if (!e) return { error: `no terminal '${d.terminal}'` };
+        // Pointed at in a frame the grid still remembers: the line AS DRAWN then (`seen`), even once it
+        // has scrolled out or been drawn over; else the line as it reads now.
+        if (Number.isInteger(d.frame)) {
+            const seen = seenOf(e.grid, j);
+            if (!seen.gone) {
+                const r = makeRef('terminal', d.terminal, { terminal: d.terminal, line: d.line, col: d.col ?? 1, frame: d.frame }, seen.asDrawn, j.origin?.who ?? who);
+                return { ...r, seen };
+            }
+        }
         const r = terminalRef(d.terminal, e.grid, d.line, (d.col ?? 1) - 1, j.origin?.who ?? who);
         return 'error' in r || j.quote == null ? r : withQuote(r, String(j.quote));
     }

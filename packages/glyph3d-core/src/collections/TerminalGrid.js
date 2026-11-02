@@ -147,6 +147,13 @@ export default class TerminalGrid extends FramedGlyphField {
         this._scrolled = 0;       // lines seen scroll off the top: the running line number's base (lineOfSlot)
         this._rowMarks = new Map();   // key → { line, color, opacity }: fills re-applied on every buffer write
         this._prevRows = null;    // last live-screen snapshot, for scroll detection
+        // The SNAPSHOT RING: the last `snapshotFrames` screens as drawn — each frame's live rows (the
+        // immutable per-row snapshot scroll detection already makes) and the history then — so a line
+        // pointed at in frame f reads as it was drawn, after streaming, a full-screen redraw or a resize.
+        this._frameSeq = 0;
+        this._ringMax = Math.max(0, Math.floor(options.snapshotFrames ?? 120));
+        /** @type {Array<{frame:number, scrolled:number, alt:boolean, ts:number, rows:Array<{cp:Float32Array}>, history:Array<{cp:Float32Array}>}>} */
+        this._ring = [];
         this._altActive = false;  // current frame is an alt-screen (TUI) repaint
         this._depthYStep = 0;     // world rise per page (set once metrics exist)
         this._depthZStep = 0;     // world recede per page (set once metrics exist)
@@ -383,6 +390,7 @@ export default class TerminalGrid extends FramedGlyphField {
         // paint the depth-history block from the ring. (Snapshot rows are fresh arrays
         // each frame, so aliasing one into _history is safe — it is never mutated.)
         this._snapshotLive();
+        this._remember();
         this._paintHistory();
 
         // Project canonical arrays (live + history) → GPU attribute arrays.
@@ -1244,6 +1252,47 @@ export default class TerminalGrid extends FramedGlyphField {
     /** Lines seen scroll off the top since this grid started. @returns {number} */
     get linesScrolled() { return this._scrolled; }
 
+    /** The number of the screen drawn last (0 before the first) — a point records it. @returns {number} */
+    get frameSeq() { return this._frameSeq; }
+
+    /**
+     * A line as it was DRAWN in frame `frame` (its running number then; live or in that frame's depth
+     * history), trailing blanks trimmed — or null once that frame has left the ring (or the line wasn't
+     * drawn in it). @param {number} frame @param {number} line @returns {string|null}
+     */
+    seenText(frame, line) {
+        const snap = this._snapshotOf(frame);
+        if (!snap) return null;
+        const row = line - snap.scrolled;
+        if (row >= 0 && row < snap.rows.length) return this._rowText(snap.rows[row].cp, 0, snap.rows[row].cp.length);
+        const h = snap.scrolled - 1 - line;
+        const entry = h >= 0 ? snap.history[h] : null;
+        return entry ? this._rowText(entry.cp, 0, entry.cp.length) : null;
+    }
+
+    /** The frames the ring still holds: `{oldest, newest}` (null before the first frame). */
+    seenFrames() {
+        return this._ring.length ? { oldest: this._ring[0].frame, newest: this._ring[this._ring.length - 1].frame } : null;
+    }
+
+    /** @private */
+    _snapshotOf(frame) {
+        const r = this._ring;
+        if (!r.length) return null;
+        const i = frame - r[0].frame;   // frames are consecutive
+        return i >= 0 && i < r.length && r[i].frame === frame ? r[i] : null;
+    }
+
+    /** Keep this frame in the snapshot ring (the live rows' snapshot is fresh and immutable; the
+     *  history entries are too — the ring holds references, never copies). @private */
+    _remember() {
+        this._frameSeq++;
+        if (!this._ringMax) return;
+        this._ring.push({ frame: this._frameSeq, scrolled: this._scrolled, alt: this._altActive, ts: Date.now(),
+            rows: this._prevRows, history: this._history.slice() });
+        if (this._ring.length > this._ringMax) this._ring.splice(0, this._ring.length - this._ringMax);
+    }
+
     /**
      * The line a glyph slot draws: its running number, its live row (null in the depth history),
      * its column, and the line's text (trailing blanks trimmed). Null for a slot past what is drawn.
@@ -1298,9 +1347,10 @@ export default class TerminalGrid extends FramedGlyphField {
         return null;
     }
 
-    /** One row of codepoints as text, trailing blanks trimmed. @private */
-    _rowText(cp, offset) {
-        let end = this.cols;
+    /** One row of codepoints as text, trailing blanks trimmed (`width` cells — the grid's, or a
+     *  remembered row's own, from before a resize). @private */
+    _rowText(cp, offset, width = this.cols) {
+        let end = width;
         while (end > 0 && (cp[offset + end - 1] ?? 32) === 32) end--;
         let out = '';
         for (let x = 0; x < end; x++) out += String.fromCodePoint(cp[offset + x] || 32);

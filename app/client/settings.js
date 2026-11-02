@@ -689,6 +689,7 @@ export const SETTINGS = [
   // Depth as time (slice 10a): a member's past as pages behind it (layer.show / pane.layer / pane.blink /
   // grid.history). A stack is born with these; layer.show again re-reads them.
   // A team's channel (team.channel): every message between its agents and you, one scroll at its desk.
+  { key: 'terminal.snapshotFrames', label: 'Terminal: screens remembered as drawn (a point at a row resolves to it as it was drawn — after streaming, a full-screen redraw, a resize)', group: 'Planes', type: 'number', default: 120, min: 0, max: 5000, step: 10 },
   { key: 'channel.cols', label: 'Team channel: width in columns (messages wrap to it)', group: 'Planes', type: 'number', default: 100, min: 20, max: 1000, step: 1 },
   { key: 'channel.rows', label: 'Team channel: rows in its frame', group: 'Planes', type: 'number', default: 30, min: 4, max: 1000, step: 1 },
   { key: 'layers.count', label: 'Depth layers: how many past pages a member shows (revisions, turns, screens)', group: 'Planes', type: 'number', default: 5, min: 1, max: 50, step: 1 },
