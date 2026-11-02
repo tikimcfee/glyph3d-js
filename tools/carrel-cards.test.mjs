@@ -369,15 +369,16 @@ console.log('=== carrel-cards.test.mjs ===');
     const cards = new CarrelCards(ctx, { live: 6, budgetMs: 1.5, maxBytes: 64 * 1024 * 1024 });
     ctx.carrelCards = cards;
 
-    // 4.0 Default enabled=false gates per-frame update and leave-captures
-    ok(cards.cfg.enabled === false, 'CarrelCards defaults to enabled=false');
+    // 4.0 Default enabled=true; configure({ enabled: false }) gates per-frame update and leave-captures
+    ok(cards.cfg.enabled === true, 'CarrelCards defaults to enabled=true');
+    cards.configure({ enabled: false });
     ctx.enteredCarrel = 'desk-0';
     for (const fn of planeListeners) fn(true);
     ctx.enteredCarrel = null;
     for (const fn of planeListeners) fn(false);
     ok(cards.get('desk-0') === null, 'when enabled=false, carrel.leave does not auto-capture');
 
-    // Enable CarrelCards for lifecycle checks
+    // Re-enable CarrelCards for lifecycle checks
     cards.configure({ enabled: true });
 
     // Validate RT size seam check (throws loudly when exceeding maxTextureSize)
@@ -472,6 +473,115 @@ console.log('=== carrel-cards.test.mjs ===');
     const resList = await router.execute('card.list');
     ok(resList.text.includes('OK:') && Array.isArray(resList.data?.cards) && resList.data.cards.length === 8,
         'card.list verb reports all cards with tier, age, and bytes');
+
+    // 4f. Slow-capture budget gate: tier drops (2048 -> 1024 -> 512) to fit budgetMs,
+    // desks whose cheapest tier (256) exceeds budgetMs do not near-live-refresh on timer
+    // (refreshing on leave only), and no frame's card work exceeds budgetMs.
+    {
+        let simNow = 10000;
+        const costTable = {
+            'desk-0': { 2048: 8.5, 1024: 2.4, 512: 0.8, 256: 0.4 },
+            'desk-1': { 2048: 12.0, 1024: 6.0, 512: 3.5, 256: 2.8 },
+            'desk-2': { 2048: 0.9, 1024: 0.5, 512: 0.3, 256: 0.2 },
+        };
+        const estimateCaptureMs = (carrel, tier) => {
+            const row = costTable[carrel.carrelName];
+            return row ? (row[tier] ?? 0.5) : 0.5;
+        };
+        let activeRenderCost = 0;
+        const slowRenderer = {
+            ...mockRenderer,
+            render: () => { simNow += activeRenderCost; },
+        };
+        const budgetListeners = [];
+        const budgetCtx = {
+            scene,
+            renderer: slowRenderer,
+            atlas: mockAtlas,
+            carrels: new Map([
+                ['desk-0', carrels.get('desk-0')],
+                ['desk-1', carrels.get('desk-1')],
+                ['desk-2', carrels.get('desk-2')],
+            ]),
+            cameraController: {
+                addPlaneListener: (fn) => budgetListeners.push(fn),
+                removePlaneListener: () => {},
+            },
+            enteredCarrel: null,
+        };
+        const budgetedCards = new CarrelCards(budgetCtx, {
+            enabled: true,
+            budgetMs: 1.5,
+            live: 6,
+            nearLiveHz: 2,
+            now: () => simNow,
+            estimateCaptureMs,
+        });
+        const origCapture = budgetedCards.capture.bind(budgetedCards);
+        budgetedCards.capture = function (c, opts = {}) {
+            const carrel = this._resolveCarrel(c);
+            const t = opts.tier ?? 1024;
+            activeRenderCost = estimateCaptureMs(carrel, t);
+            return origCapture(c, opts);
+        };
+
+        // Align desk-0, desk-1, desk-2 at the same Z plane so all three project to ~1200 px (rawWantTier = 2048)
+        carrels.get('desk-1').position.z = carrels.get('desk-0').position.z;
+        carrels.get('desk-2').position.z = carrels.get('desk-0').position.z;
+        carrels.get('desk-1').updateMatrixWorld(true);
+        carrels.get('desk-2').updateMatrixWorld(true);
+        const d0Rect = getCardRect(carrels.get('desk-0'));
+        const closeDepth = (Math.max(d0Rect.width, d0Rect.height) * e5 * 1000) / (2 * 1200);
+        cam.position.set(0, 0, d0Rect.center.z + closeDepth);
+        cam.updateMatrixWorld(true);
+
+        const frameWorkMs = [];
+        for (let f = 0; f < 6; f++) {
+            const tStart = simNow;
+            budgetedCards.update(cam, 1000);
+            frameWorkMs.push(+(simNow - tStart).toFixed(3));
+            simNow += 600;
+        }
+
+        const e0 = budgetedCards.get('desk-0');
+        const e2 = budgetedCards.get('desk-2');
+        ok(e0 && e0.tier === 512 && e0.maxTier === 512 && e0.captureMs <= 1.5,
+            `slow desk-0 drops tier 2048 -> 1024 -> 512 to fit 1.5ms budget (got tier=${e0?.tier}, captureMs=${e0?.captureMs})`);
+        ok(e0 && e0.showing === 'card',
+            `tier-downgraded desk-0 still displays its card at tier 512 (showing=${e0?.showing})`);
+        ok(e2 && e2.tier === 2048 && e2.captureMs <= 1.5,
+            `fast desk-2 keeps tier 2048 within budget (got tier=${e2?.tier}, captureMs=${e2?.captureMs})`);
+
+        const maxFrameMs = Math.max(...frameWorkMs);
+        ok(maxFrameMs <= 1.5,
+            `no frame's card work exceeds budgetMs=1.5ms across update ticks (max=${maxFrameMs}ms, frames=${JSON.stringify(frameWorkMs)})`);
+
+        // Verify desk-1 (whose cheapest tier 256 costs 2.8ms > 1.5ms) is marked overBudget
+        // and is NOT near-live-refreshed on timer when dirtied, but refreshes on carrel.leave.
+        const e1 = budgetedCards.get('desk-1');
+        ok(e1 && e1.overBudget === true,
+            `desk-1 whose cheapest tier (256: 2.8ms) exceeds 1.5ms is marked overBudget`);
+
+        // Leave desk-1 once so it has a postcard target
+        budgetCtx.enteredCarrel = 'desk-1';
+        for (const fn of budgetListeners) fn(true);
+        budgetCtx.enteredCarrel = null;
+        for (const fn of budgetListeners) fn(false);
+        const leaveCapturedAt = budgetedCards.get('desk-1').capturedAt;
+        ok(leaveCapturedAt > 0 && budgetedCards.get('desk-1').reason === 'leave',
+            'over-budget desk-1 still captures its postcard on carrel.leave');
+
+        // Dirty desk-1 and advance time past nearLiveHz: update() must skip periodic refresh
+        carrels.get('desk-1').entries.get('term:1').grid._cursor = { x: 9, y: 9 };
+        simNow += 2000;
+        const beforeTick = simNow;
+        budgetedCards.update(cam, 1000);
+        const afterTick = simNow;
+        ok(budgetedCards.get('desk-1').capturedAt === leaveCapturedAt && (afterTick - beforeTick) === 0,
+            'over-budget desk-1 is not near-live-refreshed on periodic update timer');
+
+        budgetedCards.dispose();
+    }
 
     cards.dispose();
     transforms.dispose();

@@ -327,6 +327,10 @@ export function carrelBearingFrom(carrel, viewerPos, viewerForward = { x: 0, z: 
     return Math.atan2(rightDot, fwdDot);
 }
 
+function isCarrelNode(obj) {
+    return Boolean(obj && (obj.isCarrel || typeof obj.carrelName === 'string'));
+}
+
 /**
  * Find the parent `Carrel` that seats `carrel` as a nested desk, or `null` if top-level.
  * @param {Object} ctx
@@ -335,7 +339,7 @@ export function carrelBearingFrom(carrel, viewerPos, viewerForward = { x: 0, z: 
  */
 export function parentCarrelOf(ctx, carrel) {
     if (!carrel) return null;
-    if (carrel.parent?.isCarrel && !carrel.parent._dissolving) return carrel.parent;
+    if (isCarrelNode(carrel.parent) && !carrel.parent._dissolving) return carrel.parent;
     const map = ctx?.carrels instanceof Map ? ctx.carrels : null;
     if (!map) return null;
     const entryKey = carrel.name || `carrel:${carrel.carrelName}`;
@@ -359,7 +363,7 @@ export function childCarrelsOf(ctx, parentCarrel) {
     const map = ctx?.carrels instanceof Map ? ctx.carrels : null;
     const resolveChild = (id) => {
         const entry = parentCarrel.entries?.get(id);
-        if (entry?.grid?.isCarrel && !entry.grid._dissolving) return entry.grid;
+        if (isCarrelNode(entry?.grid) && !entry.grid._dissolving) return entry.grid;
         if (map) {
             const stripped = String(id).startsWith('carrel:') ? String(id).slice('carrel:'.length) : String(id);
             const found = map.get(stripped);
@@ -378,7 +382,7 @@ export function childCarrelsOf(ctx, parentCarrel) {
         }
     }
     for (const e of parentCarrel.entries?.values() || []) {
-        if (e.grid?.isCarrel && !e.grid._dissolving && !seen.has(e.grid.carrelName)) {
+        if (isCarrelNode(e.grid) && !e.grid._dissolving && !seen.has(e.grid.carrelName)) {
             seen.add(e.grid.carrelName);
             out.push(e.grid);
         }
@@ -430,7 +434,7 @@ export function resolveCarrelNeighbor(ctx, dir, fromName = null) {
     if (parent) {
         const isChildCarrelSeat = (seat) => {
             const e = parent.entries?.get(seat.id);
-            if (e?.grid?.isCarrel && !e.grid._dissolving) return true;
+            if (isCarrelNode(e?.grid) && !e.grid._dissolving) return true;
             const stripped = String(seat.id).startsWith('carrel:') ? String(seat.id).slice(7) : String(seat.id);
             const c = map.get(stripped);
             return Boolean(c && !c._dissolving);
