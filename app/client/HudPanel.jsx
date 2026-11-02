@@ -3,6 +3,7 @@ import { stateController } from '@glyph3d/core/services/state';
 import { DEFAULT_LAYOUT } from '@glyph3d/core/workers/builders/index.js';
 import { bookInSlot } from './bookFocus.js';
 import { DESK_KNOBS, BOOK_KNOBS, deskInSlot, readDesk, readBook } from './tuning.js';
+import { waitingAgents } from '../commands/handlers/gomuxCommands.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 /**
@@ -144,12 +145,17 @@ export default function HudPanel({ client }) {
   const [shown, setShown] = useState(null);     // pos pulled inside the window, as drawn
   const [deskOpen, setDeskOpen] = useState(() => !!stateController.get('hud.deskOpen', false));
   const [bookOpen, setBookOpen] = useState(() => !!stateController.get('hud.bookOpen', false));
+  const [waiting, setWaiting] = useState([]);   // agents gomuxai reports waiting on you (agent.waiting)
   const posRef = useRef(pos);
   const rootRef = useRef(null);
 
   useEffect(() => {
     if (!client) return undefined;
-    const refresh = () => setF(readFocus(client));
+    const refresh = () => {
+      setF(readFocus(client));
+      const w = waitingAgents(client.ctx?.gomuxHub);
+      setWaiting((prev) => (prev.length === w.length && prev.every((p, i) => p.name === w[i].name && p.detail === w[i].detail) ? prev : w));
+    };
     const am = client.ctx?.attentionManager;
     const reg = client.ctx?.registry;
     const ic = client.ctx?.interactionContext;
@@ -238,7 +244,7 @@ export default function HudPanel({ client }) {
 
   const focusNode = nodes.find((n) => n.kind === 'focus') || null;
   const chips = nodes.filter((n) => n.kind !== 'focus');   // FOCUS lives in the title
-  if (!f && nodes.length === 0) return null;               // truly free → no helper
+  if (!f && nodes.length === 0 && waiting.length === 0) return null;   // truly free, nobody waiting → no helper
 
   const title = f?.name || (focusNode ? tailName(focusNode.path) : 'free');
   const segs = focusNode ? segmentsOf(focusNode.path) : [];
@@ -264,6 +270,17 @@ export default function HudPanel({ client }) {
         <button type="button" style={S.collapse} title={collapsed ? 'expand' : 'collapse'}
           onClick={toggle}>{collapsed ? '◂' : '▾'}</button>
       </div>
+      {/* The waiting line — who is waiting on you (gomuxai's status), one row; a name is
+          agent.focus. data-g3d-waiting is the itests' probe. */}
+      {waiting.length > 0 && (
+        <div style={S.waiting} data-g3d-waiting>
+          <span style={S.waitingMark}>waiting on you</span>
+          {waiting.map((w) => (
+            <span key={w.name} style={S.waitingName} title={[w.detail || 'needs you', w.toolInput].filter(Boolean).join(' — ')}
+              onClick={() => fire('agent.focus', w.name)}>{w.name}</span>
+          ))}
+        </div>
+      )}
       {/* Context chips — the locked-in state (AST scope, caret, key target), 1:1 from
           the InteractionContext. data-g3d-context is the itests' ground-truth probe. */}
       {showChips && (
@@ -501,6 +518,9 @@ const S = {
   controls: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid #1c222c', paddingTop: 6 },
   row: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },
   chips: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4, fontSize: 11 },
+  waiting: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, fontSize: 11, padding: '3px 0', borderTop: '1px solid #1c222c' },
+  waitingMark: { color: '#d4a24c' },
+  waitingName: { color: '#e8c07a', cursor: 'pointer', textDecoration: 'underline dotted' },
   chip: { padding: '0 5px', whiteSpace: 'nowrap', color: '#aeb8c6' },
   addr: {
     display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 3,

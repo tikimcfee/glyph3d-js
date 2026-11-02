@@ -15,12 +15,21 @@
 
 const SURFACE = 'view:plane';
 
-/** Record (or clear, null) the entered plane desk. @param {AppContext} ctx @param {string|null} name */
+/**
+ * Record (or clear, null) the entered plane desk — and say so in the relay's log store as a
+ * `[usage]` line (time entered on the way out), so "is it used daily" is a number log.search
+ * answers, quiet and local.
+ * @param {AppContext} ctx @param {string|null} name
+ */
 export function recordEntered(ctx, name) {
   const ws = ctx.workspace;
   if (!ws?.setSurfaceView) return;
   const cur = ws.getSurface?.(SURFACE)?.view?.entered ?? null;
   if ((cur?.carrel ?? null) === (name ?? null)) return;
+  const was = cur?.carrel ?? null;
+  if (was && ctx._enteredAt) console.info(`[usage] plane.leave ${was} after ${Math.round((performance.now() - ctx._enteredAt) / 1000)}s`);
+  if (name) { ctx._enteredAt = performance.now(); console.info(`[usage] plane.enter ${name}`); }
+  else ctx._enteredAt = null;
   if (!name && !ws.getSurface?.(SURFACE)) return;
   ws.setSurfaceView(SURFACE, undefined, { entered: name ? { carrel: name } : null });
   ctx.session?.scheduleSave?.();

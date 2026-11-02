@@ -28,6 +28,22 @@ const ago = (iso) => {
 };
 
 /**
+ * The live agents gomuxai reports WAITING (on a person): name, what for, the tool and its input if a
+ * permission prompt is pending, seconds since the status moved. One reading for agent.waiting and the
+ * HUD's waiting line.
+ * @param {Object} hub GomuxHub @returns {Array<{name:string, detail:string, tool:string, toolInput:string, since:number|null}>}
+ */
+export function waitingAgents(hub) {
+    const now = Date.now();
+    return (hub?.snapshot?.agents || [])
+        .filter((a) => a.live && a.status === 'waiting')
+        .map((a) => ({
+            name: a.name, detail: a.detail || '', tool: a.tool || '', toolInput: a.toolInput || '',
+            since: a.statusAt ? Math.max(0, Math.round((now - Date.parse(a.statusAt)) / 1000)) : null,
+        }));
+}
+
+/**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 /** An agent's status as gomuxai words it: `ended (quit)` for an end (`agent statuses`). */
@@ -76,6 +92,15 @@ export default function registerGomuxCommands(router) {
         ].filter(Boolean);
         return { text: lines.join('\n'), data: { ...a, book: hub.phase(a.name) } };
     }, { description: "One gomuxai agent's node — status, the tool in flight, a pending permission prompt", usage: '<name>' });
+
+    router.register('agent.waiting', (_args, ctx) => {
+        const hub = ctx.gomuxHub;
+        if (!hub) return noHub;
+        const waiting = waitingAgents(hub);
+        if (!waiting.length) return { text: 'OK: nobody is waiting on you', data: { waiting: [] } };
+        const lines = waiting.map((w) => `  ${w.name}  ${w.since != null ? `${w.since}s  ` : ''}${w.detail || 'needs you'}${w.toolInput ? `  — ${w.toolInput}` : ''}`);
+        return { text: `OK: ${waiting.length} waiting on you\n${lines.join('\n')}`, data: { waiting } };
+    }, { description: 'The agents gomuxai reports waiting on you — what for, since when', returns: '{ waiting:[{name, detail, tool, toolInput, since}] }' });
 
     router.register('gomux.attach', async (args, ctx) => {
         const hub = ctx.gomuxHub;
