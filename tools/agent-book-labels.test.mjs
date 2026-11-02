@@ -33,6 +33,7 @@ globalThis.window ??= { addEventListener() {} };
 const { default: Label3D } = await import('../packages/glyph3d-core/src/components/Label3D.js');
 const { default: AgentNameplate } = await import('../packages/glyph3d-core/src/collections/AgentNameplate.js');
 const { default: AgentBooks } = await import('../packages/glyph3d-core/src/collections/AgentBooks.js');
+const { hueIndexOf } = await import('../packages/glyph3d-core/src/core/identityHue.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -72,7 +73,7 @@ const cfg = books.cfg;
     ok(lane.label.nameText === '~abc123', `initial name is '~<id>' (got "${lane.label.nameText}")`);
     ok(lane.label.statusText === 'active\nclaude',
         `initial status names the lifecycle + harness (got ${JSON.stringify(lane.label.statusText)})`);
-    ok(lane.label.nameLabel._plateCfg.color === cfg.palette[0], 'name plate wears the lane palette hue');
+    ok(lane.label.nameLabel._plateCfg.color === cfg.palette[hueIndexOf('abc123', cfg.palette.length)], "name plate wears the lane's palette hue (its id's — core/identityHue)");
     ok(lane.book.nameplate === lane.label && lane.label.parent === lane.book,
         'nameplate is parented to the book (book.setNameplate)');
     ok(lane.label.userData.isMarker === true, 'nameplate is pick-inert');

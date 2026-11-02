@@ -189,6 +189,34 @@ const load = (w, lines) => quiet(() => w.code.loadText(lines.join('\n')));
     reg.register('t1', term, { type: 'terminal' });
     const rr = resolveRef({ registry: reg }, JSON.parse(JSON.stringify(ref)));
     ok(rr.quote === 'building b' && rr.seen?.overdrawn === true && rr.text.includes('t1 line 2'), `resolveRef: the as-drawn row (${rr.text})`);
+    // A point on a terminal line that gets drawn over: its mark stays on the line number, at HALF its fill,
+    // with a rule at the row's left edge, and point.list says 'overdrawn'; the line coming back undoes it.
+    {
+        const t3 = new TerminalGrid(new THREE.Scene(), HEADLESS_ATLAS, { id: 't3', cols: COLS, rows: ROWS, snapshotFrames: 64 });
+        const reg3 = new SceneRegistry();
+        reg3.register('t3', t3, { type: 'terminal' });
+        const cam = { position: new THREE.Vector3(1, 2, 3) };
+        const dx = new Deixis({ registry: reg3, agentBooks: null, camera: cam });
+        const base = ['top - 10:00', 'PID USER', '101 alice 3%', ''];
+        t3.applyScreen(screen(base, true));
+        const p = await quiet(() => dx.show('agent-x', terminalRef('t3', t3, 2, 0, 'agent-x'), { fill: 0.5, now: -1e9 }));
+        const mark = () => t3._rowMarks.get('point:agent-x');
+        ok(p.status === 'shown' && mark().opacity === 0.5 && !t3.rowRule('point:agent-x'), 'shown: the full fill, no rule');
+        t3.applyScreen(screen(['top - 10:01', 'PID USER', '202 root 90%', ''], true));
+        const rule = t3.rowRule('point:agent-x');
+        ok(p.status === 'overdrawn' && mark().opacity === 0.25 && mark().line === 2, `drawn over: overdrawn, half the fill, still on line 2 (${p.status}, ${mark()?.opacity})`);
+        ok(rule && rule.visible && Math.abs(rule.position.y + 2 * t3.metrics.lineSpacing) < 1e-9 && rule.position.x < 0
+            && Math.abs(rule.scale.x - t3.metrics.charWidth / Number(getSetting('plane.cellPx'))) < 1e-9, 'a rule one device px wide (in a plane) at the row\'s left edge');
+        const router3 = new CommandRouter({ registry: reg3, deixis: dx });
+        registerDeixisCommands(router3);
+        const list = await router3.execute(['point.list']);
+        ok(/agent-x \[look · overdrawn\] t3 line 2/.test(list.text), `point.list says overdrawn (${list.text.split('\n')[1]})`);
+        t3.applyScreen(screen(base, true));
+        ok(p.status === 'shown' && mark().opacity === 0.5 && !t3.rowRule('point:agent-x'), 'the line reads as it did again: shown, full fill, no rule');
+        ok(cam.position.x === 1 && cam.position.y === 2 && cam.position.z === 3, "nothing of the person's moved");
+        dx.clear('agent-x');
+        ok(!mark() && !t3.rowRule('point:agent-x'), 'cleared: no mark, no rule');
+    }
     // Past the ring: gone — said so, falling back to the line as it reads now.
     for (let k = 0; k < 70; k++) { lines = [...lines.slice(1, ROWS - 1), `more ${k}`, '']; term.applyScreen(screen(lines)); }
     ok(seenOf(term, ref).gone === true && term.seenFrames().oldest > ref.durable.frame, 'its frame left the ring: gone (only the live line is known)');

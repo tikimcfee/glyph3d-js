@@ -145,7 +145,9 @@ export default class TerminalGrid extends FramedGlyphField {
         this._depthZFactor = options.depthZStep ?? 6;               // ×lineSpacing recede per PAGE
         this._history  = [];      // captured rows, index 0 = newest scrolled-off
         this._scrolled = 0;       // lines seen scroll off the top: the running line number's base (lineOfSlot)
-        this._rowMarks = new Map();   // key → { line, color, opacity }: fills re-applied on every buffer write
+        this._rowMarks = new Map();   // key → { line, color, opacity, rule }: fills re-applied on every buffer write
+        this._rules = new Map();      // key → the mark's RULE mesh (a thin bar at its row's left edge, when asked for)
+        this._frameFns = new Set();   // onFrame listeners — told after every drawn screen
         this._prevRows = null;    // last live-screen snapshot, for scroll detection
         // The SNAPSHOT RING: the last `snapshotFrames` screens as drawn — each frame's live rows (the
         // immutable per-row snapshot scroll detection already makes) and the history then — so a line
@@ -403,7 +405,15 @@ export default class TerminalGrid extends FramedGlyphField {
             this._cursor.y = screen.cursor.y;
             this._updateCursorMesh();
         }
+        this._placeRules();
+        for (const fn of this._frameFns) {
+            try { fn(this); } catch (e) { console.error('[TerminalGrid] onFrame listener failed', e); }
+        }
     }
+
+    /** Hear every drawn screen (a point re-checks what its line shows). @param {(grid: TerminalGrid) => void} fn
+     *  @returns {() => void} unsubscribe */
+    onFrame(fn) { this._frameFns.add(fn); return () => this._frameFns.delete(fn); }
 
     /**
      * Snapshot the live screen region of the canonical arrays into _prevRows — one
@@ -988,6 +998,9 @@ export default class TerminalGrid extends FramedGlyphField {
      * Call this when the terminal is permanently closed.
      */
     dispose() {
+        for (const mesh of this._rules.values()) { this.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
+        this._rules.clear();
+        this._frameFns.clear();
         // Tear down the emulator first (cancels its pending rAF read so it can't
         // call applyScreen on a half-disposed renderer).
         if (this._emulator) {
@@ -1325,15 +1338,51 @@ export default class TerminalGrid extends FramedGlyphField {
      * Fill one line (by running number) with a colour — a point — re-applied on every buffer
      * write, since each screen rewrites the highlight lane from the cells' own backgrounds. A
      * line that scrolls out of what is drawn keeps its mark but shows none.
+     * A mark may carry a RULE: a bar `rule` cells wide in its colour, standing just left of the row's
+     * first column while the line is live (a point on a line that now reads differently than it did).
      * @param {string} key  the mark's owner (one mark per key)
-     * @param {{line:number, color:{r:number,g:number,b:number}, opacity:number}|null} mark  null clears
+     * @param {{line:number, color:{r:number,g:number,b:number}, opacity:number, rule?:number}|null} mark  null clears
      */
     setRowMark(key, mark) {
         if (mark) {
-            if (!Number.isInteger(mark.line) || !(mark.opacity > 0)) throw new Error(`setRowMark: bad mark ${JSON.stringify(mark)}`);
-            this._rowMarks.set(key, { line: mark.line, color: { ...mark.color }, opacity: mark.opacity });
+            if (!Number.isInteger(mark.line) || !(mark.opacity > 0) || (mark.rule != null && !(mark.rule >= 0))) throw new Error(`setRowMark: bad mark ${JSON.stringify(mark)}`);
+            this._rowMarks.set(key, { line: mark.line, color: { ...mark.color }, opacity: mark.opacity, ...(mark.rule > 0 ? { rule: mark.rule } : {}) });
         } else if (!this._rowMarks.delete(key)) return;
+        this._placeRules();
         this._writeToInstanceBuffer();
+    }
+
+    /** A mark's rule mesh, if it has one (tests and the deixis read it). @param {string} key */
+    rowRule(key) { return this._rules?.get(key) ?? null; }
+
+    /** Pose each mark's rule at its line's live row (hidden while the line isn't live); drop the rest. @private */
+    _placeRules() {
+        const m = this._metrics;
+        this._rules ??= new Map();   // (a grid built without its constructor — a test stand-in — makes it here)
+        for (const [key, mesh] of this._rules) {
+            const mark = this._rowMarks.get(key);
+            if (mark && mark.rule > 0) continue;
+            this.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose();
+            this._rules.delete(key);
+        }
+        if (!m) return;
+        for (const [key, mark] of this._rowMarks) {
+            if (!(mark.rule > 0)) continue;
+            let mesh = this._rules.get(key);
+            if (!mesh) {
+                mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ transparent: false, depthWrite: false }));
+                mesh.name = `row-rule:${key}`;
+                mesh.renderOrder = 10;
+                this._rules.set(key, mesh);
+                this.add(mesh);
+            }
+            mesh.material.color.setRGB(mark.color.r, mark.color.g, mark.color.b);
+            const row = mark.line - this._scrolled;
+            mesh.visible = row >= 0 && row < this.rows;
+            const w = mark.rule * m.charWidth;
+            mesh.scale.set(w, m.lineSpacing, 1);
+            mesh.position.set(-w / 2, -row * m.lineSpacing, 0.01);
+        }
     }
 
     /** Where a line's cells live now: the codepoint array and the offset of its column 0. @private */

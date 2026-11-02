@@ -142,7 +142,7 @@ export default function registerDeixisCommands(router) {
         const pts = ctx.deixis?.list() ?? [];
         if (!pts.length) return { text: 'OK: no points', data: [] };
         return { text: `OK: ${pts.length} point(s)\n${pts.map((p) => `  ${p.id} [${p.kind}${p.status !== 'shown' ? ` · ${p.status}` : ''}] ${p.ref.text}${p.say ? ` — ${p.say}` : ''}`).join('\n')}`, data: pts };
-    }, { description: 'The live points (one per agent), newest first — each with its status (shown | held | orphan | resolved)', returns: 'Point[]' });
+    }, { description: 'The live points (one per agent), newest first — each with its status (shown | held | orphan | resolved | overdrawn)', returns: 'Point[]' });
 
     router.register('point.go', async (args, ctx) => {
         if (ctx.caller) return fail(`point.go is the person's verb — it moves attention and the camera; '${ctx.caller}' points (point.show) instead`);

@@ -78,6 +78,7 @@ import ScrollDocument, { wrapCells } from './ScrollDocument.js';
 import AgentNameplate from './AgentNameplate.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { hueIndexOf } from '../core/identityHue.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { classifyByExtension } from '../core/fileKind.js';
 import { toFileUri } from '../core/fileUri.js';
@@ -159,7 +160,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     labelStatusRatio: 0.5,      // nameplate status block row pitch, × the name's
     labelTickMs: 1000,          // how often the nameplates' ages re-read (text that didn't change is a no-op)
     labelGap: 16,               // nameplate: world gap between the cover's top and the plate's bottom
-    palette: [                  // per-agent identity hues, indexed by lane creation order
+    palette: [                  // per-agent identity hues, a lane's chosen by a hash of its id (core/identityHue)
         0x3a6ea5, 0xa56a3a, 0x4a9a6a, 0x8a5aa5, 0xa54a5a, 0x5a8aa5,
     ],
     // -- the scroll form (book.form scroll — the run read as ONE document at one size) ----------
@@ -372,7 +373,7 @@ export default class AgentBooks {
             // measures): a plane desk's book is born a scroll; null = it left the desk.
             book.onDeskMode = (mode) => this._deskMode(this.lanes.get(agentId), mode);
             this.root.add(book);
-            const hueIdx = this.lanes.size;
+            const hueIdx = hueIndexOf(agentId, this.cfg.palette.length);   // its id's hue — the same on every load (core/identityHue)
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
             lane = {
                 book, hueIdx,

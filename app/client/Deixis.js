@@ -282,8 +282,10 @@ function hsl(h, s, l) {
  * @property {{r:number,g:number,b:number}} hue
  * @property {number} ts
  * @property {number} seq       shown order (newest highest — ts ties within a millisecond)
- * @property {'shown'|'held'|'orphan'|'resolved'} status  held: waiting for the person to stop typing;
- *   orphan: its words are gone from the file; resolved: an edit made what it suggested
+ * @property {'shown'|'held'|'orphan'|'resolved'|'overdrawn'} status  held: waiting for the person to stop
+ *   typing; orphan: its words are gone from the file; resolved: an edit made what it suggested;
+ *   overdrawn: a terminal line that now reads differently than when it was pointed at (its mark stays on
+ *   the line number, at half its fill, with a rule at the row's left edge)
  * @property {string|null} anchor  a code point's line text as last seen (what re-anchoring looks for)
  * @property {string|null} replace a suggest point's proposed text (`--with`): seen in the file → resolved
  * @property {string|null} moved   how the last edit moved it ('kept'|'line'|'near'|'far'), null before
@@ -355,8 +357,9 @@ export default class Deixis {
         let n = 0;
         for (const p of this.points.values()) {
             if (p.status !== 'held') continue;
-            p.status = 'shown';
-            this._draw(p.ref, p.hue, p.fill, p.who);
+            const g = p.ref.kind === 'terminal' ? this.ctx.registry?.get?.(p.ref.entity)?.grid : null;
+            p.status = g && seenOf(g, p.ref).overdrawn ? 'overdrawn' : 'shown';
+            this._draw(p.ref, p.hue, p.fill, p.who, p.status === 'overdrawn');
             n++;
         }
         if (n) console.info(`[deixis] ${n} held point(s) drawn — the person stopped typing`);
@@ -382,10 +385,37 @@ export default class Deixis {
         const p = { id: who, who, kind, say, ref, hue, ts: Date.now(), seq: ++this._seq, fill,
                     status: typing ? 'held' : 'shown', anchor, replace: replace != null ? String(replace) : null, moved: null };
         this.points.set(who, p);
+        if (ref.kind === 'terminal' && !typing && seenOf(grid, ref).overdrawn) p.status = 'overdrawn';
         if (typing) this._scheduleFlush();
-        else this._draw(ref, hue, fill, who);
+        else this._draw(ref, hue, fill, who, p.status === 'overdrawn');
         if (ref.kind === 'code') this._watchText(ref.entity, grid);
+        if (ref.kind === 'terminal') this._watchFrames(ref.entity, grid);
         return p;
+    }
+
+    /** One frame listener per terminal a point is on. @private */
+    _watchFrames(entity, grid) {
+        if (this._watch.has(entity) || typeof grid?.onFrame !== 'function') return;
+        this._watch.set(entity, grid.onFrame((g) => this.recheck(entity, g)));
+    }
+
+    /**
+     * A terminal drew a screen: each point on it is SHOWN while its line reads as it did when pointed at,
+     * OVERDRAWN once it reads differently (a full-screen redraw, or scrolled out) — re-drawn as it flips.
+     * Moves nothing of the person's.
+     * @param {string} entity @param {Object} grid a TerminalGrid @returns {number} points that flipped
+     */
+    recheck(entity, grid) {
+        let n = 0;
+        for (const p of this.points.values()) {
+            if (p.ref.entity !== entity || p.ref.kind !== 'terminal' || (p.status !== 'shown' && p.status !== 'overdrawn')) continue;
+            const od = seenOf(grid, p.ref).overdrawn;
+            if (od === (p.status === 'overdrawn')) continue;
+            p.status = od ? 'overdrawn' : 'shown';
+            this._draw(p.ref, p.hue, p.fill, p.who, od);
+            n++;
+        }
+        return n;
     }
 
     /** One text listener per code surface a point is on. @private */
@@ -460,7 +490,7 @@ export default class Deixis {
     clear(who) {
         const p = this.points.get(who);
         if (!p) return false;
-        if (p.status === 'shown') this._draw(p.ref, null, 0, who);
+        if (p.status === 'shown' || p.status === 'overdrawn') this._draw(p.ref, null, 0, who);
         this.points.delete(who);
         this._unwatchIfIdle(p.ref.entity);
         return true;
@@ -475,13 +505,15 @@ export default class Deixis {
     /** Offer a draft line to the CommandBar. @param {string} text @returns {number} listeners told */
     draft(text) { for (const fn of this._draft) fn(text); return this._draft.size; }
 
-    /** Fill (hue) or unfill (null) a ref's line. @private */
-    _draw(ref, hue, fill, who) {
+    /** Fill (hue) or unfill (null) a ref's line — an overdrawn terminal line at half the fill, with a
+     *  rule one device px wide in a plane (1/plane.cellPx of a column) at its row's left edge. @private */
+    _draw(ref, hue, fill, who, overdrawn = false) {
         const e = this.ctx.registry?.get?.(ref.entity);
         const g = e?.grid;
         if (!g) return;
         if (ref.kind === 'terminal') {
-            g.setRowMark?.(`point:${who}`, hue ? { line: ref.durable.line, color: hue, opacity: fill } : null);
+            const rule = overdrawn ? 1 / Math.max(1, Number(getSetting('plane.cellPx')) || 8) : 0;
+            g.setRowMark?.(`point:${who}`, hue ? { line: ref.durable.line, color: hue, opacity: overdrawn ? fill / 2 : fill, rule } : null);
             return;
         }
         const line0 = ref.durable.line - 1;

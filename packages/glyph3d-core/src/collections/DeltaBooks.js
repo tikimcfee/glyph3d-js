@@ -34,6 +34,7 @@ import CodeGrid from './CodeGrid.js';
 import FieldLabel from './FieldLabel.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
+import { hueIndexOf } from '../core/identityHue.js';
 import { alignTexts, alignPatch, reconstructBase } from '../services/state/deltaSource.js';
 import { sessionPath } from './agentEvents.js';
 
@@ -129,7 +130,7 @@ export default class DeltaBooks {
             book.userData = { ...book.userData, name: setId, isDir: false };   // a layout LEAF
             book.setDeckDefaults(this._deckDefaults());
             this.root.add(book);
-            const hueIdx = this.sets.size;
+            const hueIdx = hueIndexOf(setId, this.cfg.palette.length);   // its id's hue — the same on every load (core/identityHue)
             const hue = this.cfg.palette[hueIdx % this.cfg.palette.length];
             book.bindCover(this._coverOpts(hue));
             set = {

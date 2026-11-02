@@ -147,5 +147,20 @@ ok(ctx.registry.get(channelId('lead'))?.grid === doc && ctx.holding.holderOf(cha
     ok(ctx.holding.holderOf(channelId('lead'))?.carrelName === 'gomux/lead', 'at its desk again');
 }
 
+// ── 5. hues are an identity's, not an opening order's (a reload reshuffles the order) ────────────
+{
+    const { callerHue } = await import('../app/client/Deixis.js');
+    const mk = (order) => {
+        const c = { scene: new THREE.Scene(), atlas: ATLAS, registry: new SceneRegistry() };
+        c.agentBooks = new AgentBooks(c);
+        for (const id of order) c.agentBooks.ensure(id, 'claude');
+        return c;
+    };
+    const names = ['lead', 'sub', 'queued', 'held', 'other', 'x-7'];
+    const a = mk(names), b = mk([...names].reverse());
+    ok(names.every((n) => J(callerHue(a, n)) === J(callerHue(b, n))), 'a sender\'s hue is the same whatever order the books opened in');
+    ok(names.every((n) => a.agentBooks.lanes.get(n).hueIdx === b.agentBooks.lanes.get(n).hueIdx), "a lane's palette slot is its id's (hash), one rule");
+}
+
 console.log(`team-channel: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
