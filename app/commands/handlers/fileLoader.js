@@ -215,6 +215,9 @@ export function materializeActor(ctx, id) {
             ctx.addGrid(grid, { id, type: 'grid' });
         }
     });
+    // A row seated at a desk or riding the dock: the actor takes its place there (the tree
+    // swap above only re-homed it) — else the desk keeps a row that is about to be disposed.
+    ctx.holding?.replace(id, grid);
 
     const load = grid.loadFile(path, row.content);
     grid.loadPromise = load;

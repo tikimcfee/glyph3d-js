@@ -321,6 +321,36 @@ export default class Holding {
     }
 
     /**
+     * The window under `id` is now another object — a row materialized into its actor
+     * (fileLoader.materializeActor). Every holder keeps its claim and carries the new object in
+     * the old one's place: the desk seats it in the same seat (the one it leaves is its ghost,
+     * same order, landing there this tick), the dock rides it in the same slot with the same home.
+     * The durable facts don't change — the window is the same. The old object is left where it
+     * hangs (the caller disposes it once the new one draws).
+     * @param {string} id @param {Object} grid the new object
+     * @returns {{desk: Carrel|null, docked: boolean}}
+     */
+    replace(id, grid) {
+        const desk = this.carrels.ownerOf(id);
+        const dock = this.dock.live;
+        const docked = this.dock.has(id);
+        // The ride first: a borrowed member's ride home is its seat, which the desk is about to re-take.
+        const ride = docked ? { order: dock.entries.get(id)?.order, home: dock.handOff(id) } : null;
+        if (desk) {
+            const order = desk.entries.get(id)?.order;
+            const home = desk.handOff(id);
+            if (!desk.lock(id, grid, { order, immediate: true, home })) {
+                throw new Error(`Holding.replace: '${id}' could not take its seat back at desk '${desk.carrelName}'`);
+            }
+        }
+        if (ride) {
+            if (!dock.lock(id, grid, { order: ride.order })) throw new Error(`Holding.replace: '${id}' could not take its dock slot back`);
+            if (ride.home) dock.rehome(id, ride.home);
+        }
+        return { desk, docked };
+    }
+
+    /**
      * A desk is folding: its members go home with it, so a borrowed member's ride must now
      * end at the desk's home (its seat is about to vanish). The caller dissolves the desk.
      * @param {Carrel} desk
