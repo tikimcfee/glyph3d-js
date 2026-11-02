@@ -27,7 +27,9 @@ import { landAgentEdit } from './AgentEdits.js';
  *                     add is a sheet, an update rebuilds its sheet in place).
  * Every follow first drops the book's provisional replies (EVENTS.md: a reader resuming
  * drops them — the first follow after an open is a resume of its tail read too).
- * ENDED / A FOLLOW REFUSED: re-followed from the last `at`, backing off (REFOLLOW_MS);
+ * ENDED / A FOLLOW REFUSED: re-followed from the last `at`, backing off (REFOLLOW_MS) — unless the
+ * relay's size for the transcript is now SHORTER than that `at` (a harness that rewrites its
+ * transcript in place): then the book is read again from scratch (_checkRewritten);
  * REFOLLOW_TRIES failures in a row stop it. Either way the book SAYS it isn't live (its
  * notice — "not live: <why>"), not only the console.
  * AN OPEN THAT FAILS keeps its book and retries, backing off (REOPEN_MS, REOPEN_TRIES), the
@@ -103,6 +105,8 @@ export default class SessionBooks {
         this.provider = provider;
         /** @type {Map<string, SessionStream>} session id → its stream */
         this.streams = new Map();
+        /** @type {Set<string>} sessions already read again for a rewritten transcript (_checkRewritten: once each) */
+        this._rewritten = new Set();
         this._listeners = new Set();
         this._disposed = false;
         // A lane removed (agent.clear, the panel's ✕) closes its stream.
@@ -367,6 +371,7 @@ export default class SessionBooks {
         const delay = REFOLLOW_MS[Math.min(st.tries, REFOLLOW_MS.length - 1)];
         if (st.tries === 0) {
             console.warn(`[sessions] ${st.session}: ${why}; re-following from byte ${st.last ?? 0}, backing off from ${delay}ms`);
+            if (st.last != null) this._checkRewritten(st);
         }
         st.tries++;
         this.ctx.agentBooks?.setNotice(st.lane, `not live, retrying: ${why}`);
@@ -374,6 +379,35 @@ export default class SessionBooks {
             st.timer = null;
             if (st.phase === 'open' && st.wantLive && this.streams.get(st.session) === st) this._follow(st);
         }, delay);
+    }
+
+    /**
+     * A follow that failed: is the transcript still the one the book read? Some harnesses rewrite
+     * theirs in place (an agy `transcript_full.jsonl` is regenerated whole), so the book's last
+     * `at` can lie past the new file's end, and re-following from it never succeeds. The relay's
+     * own size (a bounded read) decides: shorter than the book's last `at` → the book is re-read
+     * from the transcript as it is now (its lane removed and opened again through the one open
+     * path; its owner re-seats it, its tuning is keyed by id). @private
+     */
+    async _checkRewritten(st) {
+        const last = st.last;
+        let size = null;
+        try { size = (await this.provider.read(st.session, { tail: 1 })).size; } catch { return; }   // can't tell: the retries go on
+        if (this.streams.get(st.session) !== st || st.phase !== 'open' || size == null || !(size < last)) return;
+        // Once per session: a fresh read whose own `at`s run past the file it reports is the
+        // reader's contradiction, not a rewrite — re-reading again would loop. Say it; the
+        // follow's retries run out and the book says it isn't live.
+        if (this._rewritten.has(st.session)) {
+            console.error(`[sessions] ${st.session}: read again, and its book's last at (${last}) is still past the transcript's ${size} bytes — the event stream contradicts its own file; not re-reading again`);
+            return;
+        }
+        this._rewritten.add(st.session);
+        console.warn(`[sessions] ${st.session}: its transcript is ${size} bytes, shorter than where its book read to (${last}) — rewritten in place; the book (${st.lane}) is read again from it`);
+        const { session, lane, agentType, limit, wantLive } = st;
+        this.close(session);
+        this.ctx.agentBooks?.remove(lane);
+        this._emit('rewritten', st);
+        this.open(session, { lane, agentType, limit, follow: wantLive }).catch(() => { /* said by _openFailed */ });
     }
 
     /** @private */

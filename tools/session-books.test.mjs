@@ -11,7 +11,8 @@
 //   - live lines append; a tool's result update rebuilds its sheet in place; lines that beat
 //     the follow's {ok} are taken; a provisional reply never becomes the resume point;
 //   - ended (any code, -1 included) → the provisional replies drop and the book re-follows
-//     from its last `at`;
+//     from its last `at`; a transcript rewritten in place (now shorter than that `at`) is read
+//     again from scratch instead (one book, no stale or duplicate sheets);
 //   - paging back reads by `at`: from the start once (exact numbers), windowed after;
 //   - the hub: a workgroup agent's book is its name, opened from its session; its own status
 //     wins over a live batch; a new session opens into the same book (the old unfollowed);
@@ -517,6 +518,51 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     await w2.sb.open('C1');
     ok(/^not live, retrying: follower cap reached/.test(w2.books.lanes.get('C1').notice ?? ''), `a refused follow shows on the book (${w2.books.lanes.get('C1').notice})`);
     w2.sb.close('C1');
+
+    // a transcript REWRITTEN in place (shorter than the book's last `at` — an agy transcript_full
+    // regenerated): the follow can never resume, so the book is read again from it as it is now
+    {
+        const wr = makeWorld();
+        wr.relay.add(session('RW1'), Array.from({ length: 8 }, (_, k) => say(k, `old ${k}`)));
+        wr.relay.onRpc = (m, p) => (m === 'agentEvents/follow' && p.from >= wr.relay.size('RW1')
+            ? Promise.reject(new Error(`--from ${p.from} is past the transcript's end (${wr.relay.size('RW1')} bytes)`)) : undefined);
+        await wr.sb.open('RW1');
+        const lastBefore = wr.sb.streams.get('RW1').last;
+        wr.relay.transcripts.get('RW1').events = [say(0, 'new 0'), say(1, 'new 1'), say(2, 'new 2')];   // rewritten, 3 * LINE bytes
+        const warn = console.warn; const warned = []; console.warn = (...a) => warned.push(a.join(' '));
+        wr.relay.end('RW1', 1);
+        for (let i = 0; i < 40 && !(wr.books.lanes.get('RW1')?.entries.some((e) => e.record.result === 'new 2') && wr.sb.streams.get('RW1')?.live); i++) await tick();
+        console.warn = warn;
+        const lane = wr.books.lanes.get('RW1');
+        ok(lastBefore === 7 * LINE, `the book read the old transcript to its last at (${lastBefore})`);
+        ok(!!lane && J(lane.entries.map((e) => e.record.result)) === J(['new 0', 'new 1', 'new 2']), `rewritten: the book holds the transcript as it is now, no old sheets, no duplicates (${J(lane?.entries.map((e) => e.record.result))})`);
+        ok(follows(wr, 'RW1').at(-1)?.from === 2 * LINE && wr.sb.streams.get('RW1')?.live, `and follows the new transcript from its own last at (${J(follows(wr, 'RW1').at(-1))})`);
+        ok(warned.some((w) => /rewritten in place/.test(w)), 'it says why, once');
+        // a second contradiction for the same session is said, not re-read again (no reopen loop)
+        const nReads = reads(wr, 'RW1').length;
+        wr.sb.streams.get('RW1').last = 99 * LINE;
+        const e0 = console.error, w0 = console.warn; const errs = []; console.error = (...a) => errs.push(a.join(' ')); console.warn = () => {};
+        wr.relay.onRpc = (m) => (m === 'agentEvents/follow' ? Promise.reject(new Error('past the end')) : undefined);
+        wr.relay.end('RW1', 1);
+        for (let i = 0; i < 20; i++) await tick();
+        console.error = e0; console.warn = w0;
+        ok(reads(wr, 'RW1').length === nReads + 1 && errs.some((e) => /contradicts its own file/.test(e)), `a second rewrite of one session: one size probe, said loudly, no second re-read (${reads(wr, 'RW1').length - nReads} reads)`);
+        wr.sb.close('RW1');
+
+        // teeth: a refusal with the transcript intact (the follower cap) re-follows — no re-read
+        const wt = makeWorld();
+        wt.relay.add(session('RW2'), Array.from({ length: 4 }, (_, k) => say(k, `s ${k}`)));
+        await wt.sb.open('RW2');
+        const r0 = reads(wt, 'RW2').length;
+        wt.relay.onRpc = (m) => (m === 'agentEvents/follow' ? Promise.reject(new Error('follower cap reached (64)')) : undefined);
+        const w2 = console.warn; console.warn = () => {};
+        wt.relay.end('RW2', 1);
+        for (let i = 0; i < 20; i++) await tick();
+        console.warn = w2;
+        ok(reads(wt, 'RW2').length === r0 + 1 && J(reads(wt, 'RW2').at(-1)) === J({ session: 'RW2', tail: 1 }), `an intact transcript: one size probe, no re-read (${J(reads(wt, 'RW2').slice(r0))})`);
+        ok(wt.books.lanes.get('RW2')?.entries.length === 4, 'and the book is untouched');
+        wt.sb.close('RW2');
+    }
 
     // close always unfollows — even while the follow is still in flight
     const w3 = makeWorld();
