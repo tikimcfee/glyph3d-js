@@ -568,8 +568,19 @@ export class ViewerCameraController {
      */
     enterPlane(plane, { ms = 700, leaveMs = 600, switchMs = 0 } = {}) {
         const THREE = this.THREE, cam = this.ctx.camera;
-        for (const k of ['pxPerUnit', 'fovDeg', 'front', 'back']) {
+        for (const k of ['pxPerUnit', 'fovDeg']) {
+            if (!(Number.isFinite(plane?.[k]) && plane[k] > 0)) throw new Error(`enterPlane: ${k} must be a finite number > 0 (got ${plane?.[k]})`);
+        }
+        for (const k of ['front', 'back']) {
             if (!(Number.isFinite(plane?.[k]) && plane[k] >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${plane?.[k]})`);
+        }
+        for (const k of ['center', 'normal', 'up']) {
+            const v = plane[k];
+            if (!(Number.isFinite(v?.x) && Number.isFinite(v?.y) && Number.isFinite(v?.z))) throw new Error(`enterPlane: ${k} must be a finite {x, y, z} (got ${JSON.stringify(v)})`);
+        }
+        for (const k of ['aim', 'referent', 'origin']) {
+            const v = plane[k];
+            if (v != null && !(Number.isFinite(v.x) && Number.isFinite(v.y))) throw new Error(`enterPlane: ${k} must be finite plane coordinates {x, y} (got {x: ${v.x}, y: ${v.y}})`);
         }
         for (const [k, v] of Object.entries({ ms, leaveMs, switchMs })) {
             if (!(Number.isFinite(v) && v >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${v})`);
@@ -613,17 +624,24 @@ export class ViewerCameraController {
             const a = plane.aim ?? plane.referent ?? { x: 0, y: 0 };
             view.aim = { x: a.x, y: a.y };
         }
+        const before = this._plane;
         this._plane = view;
-        this._snapPlaneAim();
-        const to = this._planeLens();
+        let to;
+        try {
+            this._snapPlaneAim();
+            to = this._planeLens();
+            if (!(switching && switchMs <= 0)) {
+                this._startLens(to, { P0: held ?? from.aim, P1: held ?? to.aim, ms: switching ? switchMs : ms });
+            }
+        } catch (e) {
+            this._plane = before;   // a refused enter leaves the view as it was, never half-entered
+            throw e;
+        }
         if (switching && switchMs <= 0) {
             this._lens = null;
             this._setLens(to);   // the cut: the new plane's endpoint, this frame
             return;
         }
-        this._startLens(to, {
-            P0: held ?? from.aim, P1: held ?? to.aim, ms: switching ? switchMs : ms,
-        });
         if (!wasEntered) this._emitPlane(true);
     }
 

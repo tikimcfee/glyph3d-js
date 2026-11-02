@@ -482,6 +482,13 @@ for (const dpr of [1, 2]) {
     threw = false;
     try { cc.enterPlane({ ...PLANE, up: { ...PLANE.normal } }); } catch { threw = true; }
     ok(threw, 'an up parallel to the normal throws');
+    // A non-finite plane coordinate (an unlaid grid's cell origin was NaN) is refused by name, and a
+    // refused enter leaves the view as it was — never half-entered (a later leave would throw).
+    for (const [k, v] of [['origin', { x: NaN, y: 0 }], ['aim', { x: 0, y: Infinity }], ['referent', { x: NaN, y: NaN }], ['pxPerUnit', 0], ['center', { x: 0, y: NaN, z: 0 }]]) {
+        let msg = '';
+        try { cc.enterPlane({ ...PLANE, [k]: v }); } catch (e) { msg = e.message; }
+        ok(msg.includes(k) && cc.planeState() == null && cc.leavePlane() === false, `a bad ${k} is refused by name, the view not entered (${msg})`);
+    }
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} plane-camera: ${checks - fails}/${checks} checks`);

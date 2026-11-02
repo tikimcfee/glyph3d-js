@@ -813,6 +813,14 @@ export const SETTINGS = [
     type: 'number', default: 12, min: 0, max: 200, step: 1,
     apply: (ctx, v) => { ctx.loadBuildBudget = v; },
   },
+  // The view's render list — the flat render root (collections/FlatRenderRoot.js): three walks a
+  // list of the drawables the view camera sees, rebuilt only when visibility, membership or layers
+  // move, instead of every node of the scene each frame. Off = three's full walk (the A/B).
+  {
+    key: 'render.flatRoot', label: 'Flat render list (view walks only what draws)', group: 'Performance',
+    type: 'bool', default: true,
+    apply: (ctx, v) => { if (ctx.flatRoot) ctx.flatRoot.enabled = v; },
+  },
   // Hover picking — the cursor's ID pass (PickingSystem.pick). 0 = as fast as picks land:
   // one in flight, a new one as soon as it resolves and the cursor or camera has moved, so it
   // follows the display's own rate. A number caps it at that many picks per second.

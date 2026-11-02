@@ -376,7 +376,7 @@ export class PickingSystem {
                 if (mesh.userData?.panelClip) {
                     entry._savedMatrixWorld = mesh.matrixWorld.clone();
                     const cut = cutMatrix(mesh, mesh.matrixWorld);
-                    if (!cut) { entry._savedLayers = mesh.layers.mask; mesh.layers.disable(channel.layer); }
+                    if (!cut) { entry._offLayer = channel.layer; mesh.layers.disable(channel.layer); }
                 }
             }
         }
@@ -391,7 +391,8 @@ export class PickingSystem {
                 mesh.material = entry._savedMaterial;
                 entry._savedMaterial = null;
                 if (entry._savedMatrixWorld) { mesh.matrixWorld.copy(entry._savedMatrixWorld); entry._savedMatrixWorld = null; }
-                if (entry._savedLayers != null) { mesh.layers.mask = entry._savedLayers; entry._savedLayers = null; }
+                // (through the Layers methods: layer writes are watched — collections/FlatRenderRoot.js)
+                if (entry._offLayer != null) { mesh.layers.enable(entry._offLayer); entry._offLayer = null; }
             }
         }
     }

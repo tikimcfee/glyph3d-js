@@ -34,6 +34,7 @@ import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
 import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
 import GlyphBatch from '@glyph3d/core/collections/GlyphBatch.js';
 import SceneTransforms from '@glyph3d/core/collections/SceneTransforms.js';
+import FlatRenderRoot from '@glyph3d/core/collections/FlatRenderRoot.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -230,6 +231,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/PanelBatch.js').default|null} */ panelBatch: null,
     /** @type {import('@glyph3d/core/collections/GlyphBatch.js').default|null} */ glyphBatch: null,
     /** @type {import('@glyph3d/core/collections/SceneTransforms.js').default|null} */ sceneTransforms: null,
+    /** @type {import('@glyph3d/core/collections/FlatRenderRoot.js').default|null} the view renders its flat list of drawables (render.flatRoot) */ flatRoot: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
     /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
@@ -440,6 +442,16 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // World matrices: a pose write marks its node, and the per-frame walk enters only what was
     // marked — not every node of the tree, every frame (scene.transforms reports and verifies it).
     state.ctx.sceneTransforms = new SceneTransforms(scene);
+
+    // The view renders a flat list of the drawables it sees, not the scene tree: three's walk visits
+    // what draws, not every container (render.flatRoot toggles it). The seam is the renderer — every
+    // render of the scene goes through it (r3f's frame, the minimap's main pass, a screenshot); a
+    // camera off layer 0 (picking, overlays, cards) gets the scene itself.
+    const flatRoot = new FlatRenderRoot(scene);
+    flatRoot.enabled = getSetting('render.flatRoot');
+    state.ctx.flatRoot = flatRoot;
+    const baseRender = gl.render;
+    gl.render = function (s, c) { return baseRender.call(this, s === scene ? flatRoot.target(c) : s, c); };
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
     // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node
@@ -950,6 +962,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.panelBatch = null;
       state.ctx.glyphFarLod?.dispose();
       state.ctx.glyphFarLod = null;
+      gl.render = baseRender;
+      state.ctx.flatRoot = null;
       state.ctx.sceneTransforms?.dispose();   // hands scene.updateMatrixWorld back — a second boot takes it over again
       state.ctx.sceneTransforms = null;
       state.ctx.gomuxHub?.dispose();

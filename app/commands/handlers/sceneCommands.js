@@ -1,10 +1,11 @@
 /**
- * Scene commands: scene.info, scene.memory, scene.textures, scene.transforms, scene.clear_grids
+ * Scene commands: scene.info, scene.memory, scene.textures, scene.transforms, scene.render, scene.clear_grids
  * Uses registry as source of truth for scene object counts.
  */
 
 import { box, kvLines } from '../formatResponse.js';
 import { verifyTransforms } from '@glyph3d/core/collections/SceneTransforms.js';
+import { pathOf } from '@glyph3d/core/collections/FlatRenderRoot.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -172,6 +173,47 @@ export default function registerSceneCommands(router) {
             data: { last, checked, stale },
         };
     }, { description: "World-matrix walk stats, and a check of every world matrix against a fresh recompute; 'who [ms]' names the moving nodes that started the recomputes over the next ms (500)", usage: '[who [ms]]' });
+
+    // The view's render list (collections/FlatRenderRoot.js): whether it serves, how often it was
+    // rebuilt, what it holds — and a check of the list against a fresh walk of the scene now.
+    router.register('scene.render', (args, ctx) => {
+        const flat = ctx.flatRoot;
+        if (!flat) throw new Error('scene.render: no flat render root on this scene');
+        if (args[0] === 'time') {
+            // The frame rendered n times each way, interleaved (the same pixels — tools/flat-root-check.mjs):
+            // the render call's JS cost, flat list vs three's full walk. A one-off hitch of ~2n renders.
+            const n = Math.max(3, Math.min(200, Number(args[1]) || 30));
+            if (!flat.enabled) throw new Error('scene.render time: render.flatRoot is off');
+            const r = ctx.renderer, ms = { flat: [], full: [] };
+            for (let k = 0; k < n; k++) {
+                let t = performance.now(); r.render(ctx.scene, ctx.camera); ms.flat.push(performance.now() - t);
+                flat.enabled = false;
+                try { t = performance.now(); r.render(ctx.scene, ctx.camera); ms.full.push(performance.now() - t); } finally { flat.enabled = true; }
+            }
+            const med = (a) => a.sort((x, y) => x - y)[a.length >> 1];
+            const out = { n, flatMs: med(ms.flat), fullMs: med(ms.full), served: !flat.refused };
+            return { text: `OK: render JS (median of ${n}) — flat list ${out.flatMs.toFixed(2)} ms · full walk ${out.fullMs.toFixed(2)} ms${out.served ? '' : ' (REFUSED: both walk the scene)'}`, data: out };
+        }
+        const { missing, extra, refused } = flat.verify(ctx.camera);
+        const st = flat.stats;
+        const lines = kvLines({
+            'flat root': !flat.enabled ? 'off (render.flatRoot) — three walks the scene' : refused ? 'REFUSED — three walks the scene' : 'serving',
+            'list': `${st.drawables} drawables · ${st.carried} walked whole by three`,
+            'rebuilds': `${st.rebuilds} · refusals ${st.refusals}`,
+            'stale': refused ? '—' : `${missing.length} missing · ${extra.length} extra`,
+        });
+        const name = (o) => `  ${pathOf(o)}`;
+        const detail = [
+            refused ? `  refused: ${refused.reason}: ${refused.object}` : '',
+            ...missing.slice(0, 10).map((o) => name(o) + '  (missing)'),
+            ...extra.slice(0, 10).map((o) => name(o) + '  (extra)'),
+        ].filter(Boolean).join('\n');
+        const stale = missing.length + extra.length;
+        return {
+            text: box('RENDER LIST', lines, 60) + (detail ? '\n' + detail : '') + (stale ? `\nFAIL: the list is stale (${stale})` : '\nOK: the list matches a fresh walk'),
+            data: { enabled: flat.enabled, refused, stats: { ...st }, missing: missing.map(pathOf), extra: extra.map(pathOf) },
+        };
+    }, { description: "The view's flat render list: serving or refused (and why), rebuild counts, and a check against a fresh walk of the scene; 'time [n]' renders the frame n times each way and reports the render call's JS cost, flat vs full (30)", usage: '[time [n]]' });
 
     // Clear all CONTENT grids (the open code files). Leaves terminals alone — those
     // are live/owned and torn down explicitly (terminal.kill). Reuses ctx.removeGrid

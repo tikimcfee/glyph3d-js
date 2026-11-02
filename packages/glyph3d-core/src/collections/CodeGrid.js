@@ -563,7 +563,7 @@ class CodeGrid extends FramedGlyphField {
      * @returns {{x:number, y:number}}
      */
     pixelOrigin() {
-        return { x: 0, y: this._layoutOriginY + this.metrics.charHeight / 2 };
+        return { x: 0, y: (this._layoutOriginY ?? 0) + this.metrics.charHeight / 2 };
     }
 
     // getBounds(target) — world-space AABB, recomputed on demand — is inherited from

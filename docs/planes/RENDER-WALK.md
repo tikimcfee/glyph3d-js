@@ -2,8 +2,9 @@
 
 three's `WebGLRenderer.render(scene, camera)` walks the scene graph every call (`projectObject`) to
 build its render list. On the agents' display shape that walk is the largest single main-thread cost.
-This note measures where the visits go, weighs the ways to cut them, and measures a prototype of the
-recommended one. Nothing here is built into the tree.
+This note measures where the visits go, weighs the ways to cut them, and measures the recommended
+one — option 4, the flat render root, which is built: `collections/FlatRenderRoot.js` (see "Built"
+below).
 
 ## Method
 
@@ -15,7 +16,7 @@ recommended one. Nothing here is built into the tree.
 - The visit census is page-side (`tools/probes/render-walk-census.js`): it walks the scene exactly as
   `projectObject` does — a node with `visible === false` prunes its subtree; layers prune nothing —
   and classifies each visited node.
-- The prototype is installed page-side (`tools/probes/render-walk-flat-root.js`), never in the tree.
+- The prototype was installed page-side (`tools/probes/render-walk-flat-root.js`).
 
 ## Where the visits go (measured)
 
@@ -130,10 +131,47 @@ more than the change does — 2.2 to 4.7 ms across baselines — so the claim re
 - Pick-pass walk cost (no pointer in the headless runs).
 - The WebGPU renderer (this is WebGL2's `WebGLRenderer`).
 
-## Recommendation
+## Built: the flat render root
 
-Option 4: a flat render root for the view camera, its list rebuilt from a generation key (show
-generation × a new layer-0 generation × membership), with a check that refuses (fails loud) when a
-precondition breaks — a Group with a non-zero `renderOrder` over drawables, a light, a sprite, or a
-drawable with its own `onBeforeRender`. Then the same for the pick channels. Measured here: three's
-walk on this shape goes from 1.2–1.7 to 0.2–0.35 ms/frame, pixel-identical.
+`collections/FlatRenderRoot.js`, installed in `CommandProvider` at the renderer: every
+`renderer.render(scene, camera)` — r3f's frame, the minimap's main pass, a screenshot — renders the
+root instead when the camera sees layer 0 (`render.flatRoot`, Settings ▸ Performance, on by default).
+Cameras off layer 0 (pick channels, the plane overlay, carrel cards) render the scene as before.
+
+- **The key.** The list is rebuilt when SceneTransforms' show generation (visibility, membership), the
+  module's layer generation, or the camera's mask moves. The layer generation hooks `THREE.Layers`'
+  write methods and moves only when a bit the view camera sees changes — the batches' idempotent
+  per-frame `disable` and the pick passes' own layers move nothing. A direct `layers.mask =` write is
+  invisible to it; the picking system's cut path wrote one, and now goes through `enable`/`disable`
+  (`tools/flat-root.test.mjs` scans the source for any).
+- **Walked whole.** What three's walk does beyond pushing a drawable is kept by handing three that
+  node whole: a Group with a non-zero `renderOrder`, a light, an LOD, a light-probe grid. Draw order
+  doesn't depend on list order (three sorts by group order, renderOrder, program, depth, id).
+- **Refused, loudly.** A drawable whose own `onBeforeRender` could read the scene argument (three's
+  no-op and the fat lines' resolution hook can't — they pass) and a shadow-casting light: a
+  `console.error` naming the object, and the scene itself renders until the scene changes and the
+  check passes again. The agents' display first met one this way — the ownership traces are fat
+  lines (`LineSegments2`), whose prototype hook reads only the renderer.
+- **`scene.render`** reports serving/refused, list size, rebuilds, and checks the list against a
+  fresh walk; `scene.render time [n]` times the render call both ways on the live frame.
+
+Gates: `tools/flat-root.test.mjs` (three's walk replicated over the root and the scene: same render
+items × group order and lights after every kind of change; rebuild counts; refusals; mutation-tested:
+dropping the ordered-group carry, the layer bump or the show-generation key each fails it) and
+`tools/flat-root-check.mjs` (GPU: 0 bytes differ flat vs full at fit-all × 4 distances, five
+mid-flight samples of a fly, a plane view, the library layout and a plane view there — each with
+teeth, a half list that must differ; 0 rebuilds in a second at rest).
+
+Measured after building (hub shape, private relay, screens off, three A/B pairs of 240 frames):
+
+| | flat | full |
+|---|---|---|
+| `projectObject` self, ms/frame | 0.35 · 0.18 · 0.24 | 1.47 · 1.08 · 0.72 |
+| main render CPU p50, ms | 2.9 · 2.4 · 1.7 | 3.2 · 3.5 · 3.9 |
+| main-thread p50, ms/frame | 4.0 · 3.3 · 2.4 | 4.0 · 4.4 · 4.8 |
+
+The list holds 1,274 drawables there, rebuilt 63 times during the load and 0 times in 24 s at rest. On
+the agents' display (live agents, `scene.render time 40`): 0.7–1.0 ms flat vs 1.1–1.7 ms full per
+render; ~5 rebuilds per 10 s while books grow.
+
+Not done: the pick channels (a flat root per channel from the picking system's own entries).
