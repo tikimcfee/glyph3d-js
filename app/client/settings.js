@@ -688,6 +688,9 @@ export const SETTINGS = [
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },
   // Depth as time (slice 10a): a member's past as pages behind it (layer.show / pane.layer / pane.blink /
   // grid.history). A stack is born with these; layer.show again re-reads them.
+  // A team's channel (team.channel): every message between its agents and you, one scroll at its desk.
+  { key: 'channel.cols', label: 'Team channel: width in columns (messages wrap to it)', group: 'Planes', type: 'number', default: 100, min: 20, max: 1000, step: 1 },
+  { key: 'channel.rows', label: 'Team channel: rows in its frame', group: 'Planes', type: 'number', default: 30, min: 4, max: 1000, step: 1 },
   { key: 'layers.count', label: 'Depth layers: how many past pages a member shows (revisions, turns, screens)', group: 'Planes', type: 'number', default: 5, min: 1, max: 50, step: 1 },
   { key: 'layers.pitchRows', label: 'Depth layers: depth between pages, in text rows (the plane slab, plane.back, must hold them)', group: 'Planes', type: 'number', default: 1, min: 0.1, max: 100, step: 0.1 },
   { key: 'layers.riseRows', label: 'Depth layers: how far each page behind stands above the one in front, in rows (0 = registered)', group: 'Planes', type: 'number', default: 1, min: 0, max: 20, step: 1 },

@@ -126,6 +126,16 @@ const RECORDS = {
     },
     moveVerb: 'book.move',
   },
+  channel: {
+    // A team's channel (TeamChannels) is a document: the plain wheel scrolls its rows (wheel down = later).
+    wheelScroll(entry, dy) {
+      const team = entry.meta?.team ?? entry.team;
+      if (!team) return null;
+      let rows = Math.round(dy / 30);
+      if (rows === 0) rows = dy > 0 ? 1 : -1;
+      return ['team.channel', team, 'rows', String(rows)];
+    },
+  },
   search: {
     // The search book's cover — drag it to stand the results somewhere else (paging rides
     // its cards' records).

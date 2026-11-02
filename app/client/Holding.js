@@ -24,10 +24,10 @@
  * hands back the canonical id; the model and the holders only ever see that.
  */
 
-/** Holdable kinds (registry role || type): whole windows and whole books. A book's pages
+/** Holdable kinds (registry role || type): whole windows, whole books, and a team's channel. A book's pages
  *  (`card`, `delta-page`), the library's per-relayout `volume` covers, and carrels
  *  themselves (places, not cargo) are refused. */
-const HOLDABLE = new Set(['grid', 'terminal', 'frame', 'agent', 'delta', 'search']);
+const HOLDABLE = new Set(['grid', 'terminal', 'frame', 'agent', 'delta', 'search', 'channel']);
 
 /** What to say when an address names something that can't be held. */
 const REFUSAL = {

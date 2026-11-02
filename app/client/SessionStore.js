@@ -68,6 +68,7 @@ import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
 import { layerStacksOf } from './LayerStacks.js';
 import { agentSurfacesOf } from './AgentSurfaces.js';
+import { teamChannelsOf } from './TeamChannels.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
@@ -380,6 +381,8 @@ export default class SessionStore {
       // Agent-owned surfaces (AgentSurfaces): who owns each terminal / desktop an agent made — their
       // residences ride carrelMembers; the owners ride here.
       agentSurfaces: agentSurfacesOf(this.ctx).serialize(),
+      // Team channels shown (TeamChannels): which teams, and where each was held (by message).
+      teamChannels: this.ctx.teamChannels?.serialize?.() ?? [],
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -549,6 +552,7 @@ export default class SessionStore {
       ],
       [[['settle', () => this._projectSurfaces(), []],
         ['layers', () => { layerStacksOf(this.ctx).restore(snap.layerStacks); }, ['layerStacks']],
+        ['channels', () => { teamChannelsOf(this.ctx).restore(snap.teamChannels); }, ['teamChannels']],
         ['focus', () => this._restoreFocus(snap.focus), ['focus']]]],
     ];
 
