@@ -433,3 +433,159 @@ func TestSourceDisconnectNotifiesDisplay(t *testing.T) {
 		t.Errorf("relay still holds %d sources after disconnect", n)
 	}
 }
+
+// Binary source plane (0x03): a source sending BinaryMessage frames reaches the
+// display as BinaryMessage [0x03][idLen][id][w:u16 BE][h:u16 BE][payload] with
+// the relay's authoritative sourceId stamped (never a spoofed id from the wire),
+// and malformed/truncated binary frames are dropped without advancing Frames.
+func TestSourceBinaryPlaneRoundTripAndProvenance(t *testing.T) {
+	_, dial := newTestRelay(t)
+
+	display := dial(t)
+	display.WriteMessage(websocket.TextMessage, []byte("DISPLAY"))
+	readJSON(t, display) // initial ack
+
+	src := dial(t)
+	src.WriteMessage(websocket.TextMessage, []byte("SOURCE desktop"))
+	srcID := readJSON(t, src)["sourceId"].(string)
+	awaitEvent(t, display, "source_connected")
+
+	// 1. Truncated binary frame (< 5 bytes) — must be ignored, not forwarded.
+	if err := src.WriteMessage(websocket.BinaryMessage, []byte{0x01, 0x40, 0x00}); err != nil {
+		t.Fatalf("send truncated binary: %v", err)
+	}
+
+	// 2. Raw [w:u16 BE][h:u16 BE][payload] frame (320×200 JPEG header stub).
+	wantPayload1 := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x11, 0x22, 0xFF, 0xD9}
+	rawFrame := append([]byte{0x01, 0x40, 0x00, 0xC8}, wantPayload1...)
+	if err := src.WriteMessage(websocket.BinaryMessage, rawFrame); err != nil {
+		t.Fatalf("send raw binary frame: %v", err)
+	}
+
+	display.SetReadDeadline(time.Now().Add(2 * time.Second))
+	mt, msg1, err := display.ReadMessage()
+	if err != nil {
+		t.Fatalf("display read binary frame 1: %v", err)
+	}
+	if mt != websocket.BinaryMessage {
+		t.Fatalf("display message type = %d, want BinaryMessage (%d)", mt, websocket.BinaryMessage)
+	}
+	id1, w1, h1, gotPayload1, err := unpackSourceBinFrame(msg1)
+	if err != nil {
+		t.Fatalf("unpack 0x03 frame 1: %v", err)
+	}
+	if id1 != srcID || w1 != 320 || h1 != 200 || string(gotPayload1) != string(wantPayload1) {
+		t.Fatalf("frame 1 = (id=%q, %dx%d, payload=%x), want (id=%q, 320x200, payload=%x)",
+			id1, w1, h1, gotPayload1, srcID, wantPayload1)
+	}
+
+	// 3. Pre-framed 0x03 message claiming a spoofed id ("evil-id"): the relay must
+	// overwrite it with the connection's authoritative srcID.
+	wantPayload2 := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	spoofed, err := packSourceBinFrame("evil-id", 640, 480, wantPayload2)
+	if err != nil {
+		t.Fatalf("pack spoofed frame: %v", err)
+	}
+	if err := src.WriteMessage(websocket.BinaryMessage, spoofed); err != nil {
+		t.Fatalf("send spoofed binary frame: %v", err)
+	}
+
+	display.SetReadDeadline(time.Now().Add(2 * time.Second))
+	mt2, msg2, err := display.ReadMessage()
+	if err != nil {
+		t.Fatalf("display read binary frame 2: %v", err)
+	}
+	if mt2 != websocket.BinaryMessage {
+		t.Fatalf("display message 2 type = %d, want BinaryMessage", mt2)
+	}
+	id2, w2, h2, gotPayload2, err := unpackSourceBinFrame(msg2)
+	if err != nil {
+		t.Fatalf("unpack 0x03 frame 2: %v", err)
+	}
+	if id2 != srcID || w2 != 640 || h2 != 480 || string(gotPayload2) != string(wantPayload2) {
+		t.Fatalf("frame 2 = (id=%q, %dx%d, payload=%x), want (id=%q, 640x480, payload=%x)",
+			id2, w2, h2, gotPayload2, srcID, wantPayload2)
+	}
+
+	// 4. Only the 2 valid binary frames count in source.list (the truncated one was dropped).
+	for _, s := range summariesOf(t, srcID, dial) {
+		if s.ID == srcID && s.Frames != 2 {
+			t.Errorf("source.list Frames = %d, want 2 (truncated frame must not count)", s.Frames)
+		}
+	}
+}
+
+// Binary 0x03 source frames share the 4-deep drop-oldest displayFrames queue,
+// keeping the newest frames when the display lags behind.
+func TestSourceBinaryFramesDropOldest(t *testing.T) {
+	r := NewRelay()
+	const depth = 4
+	r.displayFrames = make(chan []byte, depth)
+
+	for i := 0; i < depth+20; i++ {
+		f, err := packSourceBinFrame("desk-1", 160, 120, []byte{0xFF, 0xD8, byte(i)})
+		if err != nil {
+			t.Fatalf("pack frame %d: %v", i, err)
+		}
+		got := r.sendFrameToDisplay(f)
+		if i < depth && got != frameQueued {
+			t.Fatalf("frame %d: got %d while queue had room, want frameQueued", i, got)
+		}
+		if i >= depth && got != frameEvicted {
+			t.Fatalf("frame %d: got %d on full queue, want frameEvicted", i, got)
+		}
+	}
+
+	var seqs []byte
+	for len(r.displayFrames) > 0 {
+		raw := <-r.displayFrames
+		id, w, h, payload, err := unpackSourceBinFrame(raw)
+		if err != nil {
+			t.Fatalf("unpack queued frame: %v", err)
+		}
+		if id != "desk-1" || w != 160 || h != 120 {
+			t.Fatalf("unexpected header (%s %dx%d)", id, w, h)
+		}
+		seqs = append(seqs, payload[2])
+	}
+	if len(seqs) != depth {
+		t.Fatalf("drained %d frames, want %d", len(seqs), depth)
+	}
+	if seqs[len(seqs)-1] != byte(depth+20-1) {
+		t.Errorf("newest frame in queue = %d, want %d", seqs[len(seqs)-1], depth+20-1)
+	}
+	if seqs[0] == 0 {
+		t.Error("oldest binary frame survived saturation — want drop-oldest")
+	}
+}
+
+// No Chromium → desktop.start fails loud naming what it looked for.
+func TestDesktopStartFailsLoudWithoutChromium(t *testing.T) {
+	r := NewRelay()
+
+	// 1. Explicit nonexistent --chromium path names that path.
+	_, err := r.startDesktop(desktopStartParams{
+		Name:     "test-desk",
+		Width:    320,
+		Height:   200,
+		Chromium: "/nonexistent/chromium-for-glyph3d-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "/nonexistent/chromium-for-glyph3d-test") {
+		t.Fatalf("explicit missing binary error = %v, want message naming '/nonexistent/chromium-for-glyph3d-test'", err)
+	}
+
+	// 2. Empty PATH + empty HOME cache names all standard candidates it looked for.
+	t.Setenv("PATH", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GLYPH3D_CHROMIUM", "")
+	t.Setenv("CHROME_BIN", "")
+	_, err2 := findChromiumBinary("")
+	if err2 == nil {
+		t.Fatal("findChromiumBinary succeeded with empty PATH and HOME, want error")
+	}
+	for _, want := range []string{"chromium", "google-chrome", "ms-playwright"} {
+		if !strings.Contains(err2.Error(), want) {
+			t.Errorf("error %q does not name candidate %q", err2.Error(), want)
+		}
+	}
+}

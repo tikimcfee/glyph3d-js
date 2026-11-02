@@ -79,11 +79,11 @@ export default function registerRepoCommands(router) {
             // 3. Render the whole repo as the field — the same provider-agnostic bulk-open +
             //    tree layout the relay path uses, now sourcing from GitHub. (It runs its own
             //    openDir trace — this stage is the envelope.)
-            const open = await router.execute(['file.openDir', '']);
+            const open = await ctx.execute(['file.openDir', '']);
             trace.mark('field', { opened: open?.data?.opened });
 
             // 4. Frame the field — unless the caller already owns the pose (restore).
-            if (!noFrame) await router.execute('camera.fitall');
+            if (!noFrame) await ctx.execute('camera.fitall');
             trace.mark('frame').end();
 
             // 5. Record the field source — the ONE decider the session persists. file.openDir (step 3)

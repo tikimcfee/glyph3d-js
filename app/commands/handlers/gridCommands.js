@@ -254,7 +254,7 @@ export default function registerGridCommands(router) {
         // (derender + drop the tab + clear attention) — delegate so tab and grid agree.
         const ws = ctx.workspace;
         const sheet = ws ? [...ws.sheets.values()].find((s) => s.panelId === id) : null;
-        if (sheet) return router.execute(['sheet.close', sheet.id]);
+        if (sheet) return ctx.execute(['sheet.close', sheet.id]);
 
         // A bare field grid (not a tab): clear attention if it points here so focus/key
         // don't dangle on a removed panel, then remove. No reflow — keep the field layout.

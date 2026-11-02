@@ -308,11 +308,12 @@ function makeWorld() {
 {
     const w = makeWorld();
     const handlers = {}, ran = [];
-    registerWindowCommands({ register: (n, fn) => { handlers[n] = fn; }, execute: (cmd) => { ran.push(cmd); } });
+    registerWindowCommands({ register: (n, fn) => { handlers[n] = fn; } });
     const g = w.file('/p/l.js');
     const A = w.desk('A');
     w.ctx.holding.seat(w.ctx.holding.resolve('/p/l.js'), A); w.tick();
-    const res = handlers['window.lift'](['/p/l.js'], w.ctx);
+    // A handler's nested verbs go through its call's ctx.execute (CommandRouter's per-call view).
+    const res = handlers['window.lift'](['/p/l.js'], { ...w.ctx, execute: (cmd) => { ran.push(cmd); } });
     ok(res.data?.from === 'carrel' && g.parent === w.tree, `window.lift: out of the desk (got "${res.text}")`);
     const mv = ran.find((c) => c[0] === 'grid.move');
     ok(!!mv && mv[1] === '/p/l.js' && Math.abs(Number(mv[2]) - g.position.x) < 1e-6,

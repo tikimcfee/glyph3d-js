@@ -125,7 +125,7 @@ export default function registerWorkspaceCommands(router) {
     // Focus = attention primary (single writer, drives the HUD's ●) + camera framing (reuse the
     // verb — array form keeps a space/slash path intact) + the field's remembered active sheet.
     ctx.attentionManager?.set('primary', panelId, { registry: ctx.registry });
-    await router.execute(['camera.focus', panelId]);
+    await ctx.execute(['camera.focus', panelId]);
     ws.setActiveSheet(sheet.id);
 
     return { text: `OK: focused "${sheet.title}" → panel ${panelId}`, data: { id: sheet.id, panelId, focused: true } };

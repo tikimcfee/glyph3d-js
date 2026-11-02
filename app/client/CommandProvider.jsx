@@ -51,6 +51,7 @@ import { createWheelDetent } from './wheelDetent.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 import PlaneOverlay from './PlaneOverlay.js';
+import Deixis from './Deixis.js';
 import MapLabels from './MapLabels.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -213,7 +214,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     // the canvas interaction components, loadTrace, and lazily by verbs. Declared here
     // so AppContext carries every field (LSP refs + hover reach them); each stays
     // null/false until its owner lights it up, which every reader already guards.
-    // sender/cid are written per dispatch by CommandRouter.
+    // sender/caller/cid/execute are PER CALL: a handler's ctx is the router's view of this bag
+    // that answers them for its own call (CommandRouter._viewFor); here they stay null.
     /** @type {import('@glyph3d/core/collections/WorldLayout.js').default|null} */ world: null,
     /** @type {import('@glyph3d/core/collections/ContentTree.js').default|null} */ contentTree: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeMarkers.js').default|null} */ contentTreeMarkers: null,
@@ -259,8 +261,11 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {Array<{ type: 'repo', ref: string }|{ type: 'local', dir: string }>|null} */ fieldSources: null,
     /** @type {ReturnType<typeof setTimeout>|null} */ _carrelSweepTimer: null,
     /** @type {Set<string>|null} */ _agentShelfSeen: null,
-    /** @type {string|null} */ sender: null,
+    /** @type {import('./Deixis.js').default|null} */ deixis: null,
+    /** @type {string|null} the controller to answer (a relay routing id, 'local', …) */ sender: null,
+    /** @type {string|null} the caller's name when identified (`glyph3d-cli --as`); null = anonymous */ caller: null,
     cid: 0,
+    /** @type {((input: string|string[], options?: {sender?: string|null, caller?: string|null}) => Promise<{text: string, data: any}>)|null} a nested call that inherits this call's sender and caller */ execute: null,
     /** @type {import('@glyph3d/core/annotations/ConnectionRenderer.js').default|null} */ connectionRenderer: null,
     /** @type {import('@glyph3d/core/services/tour/TourSequencer.js').default|null} */ _tourSequencer: null,
     /** @type {{sim: import('@glyph3d/core/hand/HandSim.js').default, timer: ReturnType<typeof setInterval>, mode?: string}|null} */ _handSim: null,
@@ -455,6 +460,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // dir it contains, parented into the node and rebuilt on relayout. File lines and dir
     // lines toggle independently (Tree settings); layout.arrows is the master on/off.
     state.ctx.contentTreeArrows = new ContentTreeArrows(contentTree);
+
+    // Deixis: the live points (one per agent) and the point.mark → CommandBar draft channel.
+    state.ctx.deixis = new Deixis(state.ctx);
 
     // Relayout motion: every re-lay becomes a glide — durable nodes ease from where
     // they were to where the scheme stamped them (<DockRunner/> ticks it; while it

@@ -40,6 +40,8 @@ const plog = createLogger('palette');
  *
  * `onHighlight(entry|null)` fires as the selection moves — a no-op socket today;
  * glance-preview (camera peeks at the highlighted candidate) plugs in there.
+ *
+ * `onWantOpen()` asks the shell to open the bar: a `point.mark` draft (`this = <ref>`) arrived.
  */
 
 const HISTORY_KEY = 'glyph3d.cmdHistory';
@@ -77,7 +79,7 @@ function HighlightedKey({ text, positions }) {
  * @param {object} props
  * @param {AppClient | null} props.client
  */
-export default function CommandBar({ client, open, onClose, onHighlight }) {
+export default function CommandBar({ client, open, onClose, onHighlight, onWantOpen }) {
   const [value, setValue] = useState('');
   const [result, setResult] = useState(null);   // { ok: boolean, text: string }
   const [history, setHistory] = useState(loadHistory);
@@ -98,6 +100,18 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
     inputRef.current?.focus();
     return () => { stale = true; };
   }, [open, client]);
+
+  // point.mark drafts (`this = <ref>`): appended to the line, and the bar opens to show it — the
+  // next line you send carries what you pointed at (Deixis.onDraft).
+  useEffect(() => {
+    const deixis = client?.ctx?.deixis;
+    if (!deixis) return undefined;
+    return deixis.onDraft((text) => {
+      setValue((v) => (v.trim() ? `${v.replace(/\s+$/, '')} ${text}` : text));
+      onWantOpen?.();
+      inputRef.current?.focus();
+    });
+  }, [client, onWantOpen]);
 
   const verbNames = useMemo(() => new Set(verbs.map((v) => v.key)), [verbs]);
   // ONE array identity per index refresh — rank() builds its fzf corpus per identity.

@@ -193,8 +193,8 @@ export default function registerAgentCommands(router) {
         const [id, lane] = hit;
         // What a click on the book does: it takes the primary slot (the HUD reads it), then
         // the camera flies to it.
-        await router.execute(['attention.set', 'primary', lane.groupId]);
-        await router.execute(['camera.focus', lane.groupId]);
+        await ctx.execute(['attention.set', 'primary', lane.groupId]);
+        await ctx.execute(['camera.focus', lane.groupId]);
         return { text: `OK: focused ${id}`, data: { id, groupId: lane.groupId } };
     }, { description: "Focus an agent's book: it takes the primary slot and the camera flies to it", usage: '<id>' });
 

@@ -205,6 +205,7 @@ function planeCommandFor(e) {
         case 'e': return 'pane.layout even';
         case 'm': return 'pane.layout main';
         case 's': return 'pane.layout stack';
+        case 'p': return 'point.mark here';   // `this = <what the cursor is on>` into the CommandBar
         case 'q': case 'Escape': return 'carrel.leave';
         default: return null;
     }

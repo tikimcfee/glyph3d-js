@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three';
 import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment, Minimap } from '@glyph3d/r3f';
@@ -99,6 +99,7 @@ function App() {
   // dock is a flex sibling that splits the row (canvas reflows to the rest).
   const [dockMode, setDockMode] = useState(() => stateController.get('chrome.dockMode', 'overlay'));
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
   const [showMinimap, setShowMinimap] = useState(() => getSetting('view.minimap'));
   const [, forceSettings] = useReducer((x) => x + 1, 0);   // re-read live settings on a change
   // Settings → number (color strings '#rrggbb' or numbers both → hex int that SceneEnvironment wants).
@@ -299,7 +300,7 @@ function App() {
       {/* the hover readout — an agent book's name + what it's doing, beside the cursor */}
       <HoverReadout client={client} />
       {/* command palette — summoned modal (⌘K) to drive bus verbs; stays open per command */}
-      <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <CommandBar client={client} open={paletteOpen} onClose={() => setPaletteOpen(false)} onWantOpen={openPalette} />
     </div>
   );
 }

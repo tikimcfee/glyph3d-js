@@ -43,6 +43,7 @@ var (
 	port     = flag.Int("port", 0, "Shorthand: ws://localhost:<port>")
 	jsonMode = flag.Bool("json", false, "Output raw JSON data (log.follow: one record per line)")
 	timeout  = flag.Duration("timeout", 5*time.Second, "Command response timeout")
+	asName   = flag.String("as", os.Getenv("AGENT_NAME"), "Run commands as this caller (attribution, an agent's points); default $AGENT_NAME, empty = anonymous")
 )
 
 func main() {
@@ -66,6 +67,12 @@ func main() {
 
 	flag.Usage = clientUsage
 	flag.Parse()
+	if *asName != "" {
+		if err := validCallerName(*asName); err != nil {
+			fmt.Fprintf(os.Stderr, "--as: %v\n", err)
+			os.Exit(2)
+		}
+	}
 
 	url := *host
 	if *port > 0 {

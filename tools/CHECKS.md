@@ -370,6 +370,41 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/map-labels.test.mjs
   ```
 
+- **`deixis-lite.test.mjs`** (headless) — pointing, lite (`app/client/Deixis.js`,
+  `deixisCommands.js`) on a real CodeGrid and TerminalGrid line model: a code glyph resolves to
+  `path:line «token»`, a terminal glyph to `<terminal> line N «text»` by its running line number;
+  one resolver for the text, a Ref's JSON and a log's `file:line:col`; an anonymous `point.show`
+  fails loud, an identified one fills its own line in its hue (one live point per agent); and the
+  doesn't-steal gate — camera pose and lens, attention and the dock are identical before and after
+  `point.show` (the same comparator catches a point that focuses or flies).
+  ```
+  bun tools/deixis-lite.test.mjs
+  ```
+
+- **`command-caller.test.mjs`** (headless) — the caller is PER CALL (`CommandRouter`): interleaved
+  async verbs from two senders each read their own sender / caller / cid; a nested call
+  (`ctx.execute`) inherits the outer one unless overridden; writes through ctx land in the shared
+  bag, the call's own fields are read-only. Teeth: the same checks against a shared-ctx dispatch
+  fail.
+  ```
+  bun tools/command-caller.test.mjs
+  ```
+
+- **`frame-grid.test.mjs`** (headless, no GPU) — FrameGrid: `deriveGrid` budget and aspect, the
+  frame-mode uniform wiring, picking's `uRenderMode`, stream liveness (`getStreamStatus` /
+  `noteFrame`), one grid per desktop id, and the `frame.status` verb.
+  ```
+  bun tools/frame-grid.test.mjs
+  ```
+
+- **`frame-capture-check.mjs`** (headless browser, client-only — never dials the relay) — FrameGrid
+  pixels: `frame.pattern`'s four-quadrant card read back for colour AND orientation plus advancing
+  checker pixels; a decoded PNG through `FrameGrid.textureFromImageBytes` at exact quadrant colours;
+  `frame.capture` through fake media, live and advancing.
+  ```
+  bun tools/frame-capture-check.mjs
+  ```
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —

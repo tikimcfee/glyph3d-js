@@ -85,6 +85,15 @@ export default class WebSocketBridge {
         // envelopes meaning.
         this._sourceListeners = new Set();
 
+        if (this.router && typeof this.router === 'object') {
+            this.router.bridge = this;
+            if (Array.isArray(this.router._bridgeListeners)) {
+                for (const fn of this.router._bridgeListeners) {
+                    try { fn(this); } catch (e) { console.error('[ws-bridge] router bridge listener threw:', e); }
+                }
+            }
+        }
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -295,10 +304,11 @@ export default class WebSocketBridge {
 
     /**
      * Register a handler for binary data-plane frames of a given type byte. Wire
-     * frame: [type:u8][idLen:u8][id:utf8][payload]; the handler receives
-     * (id, payload:Uint8Array). Used for the terminal OUTPUT byte stream.
+     * frame: [type:u8][idLen:u8][id:utf8][wOrCols:u16 BE][hOrRows:u16 BE][payload];
+     * the handler receives (id, payload:Uint8Array, wOrCols:number, hOrRows:number).
+     * Used for terminal OUTPUT (0x01) and binary source / desktop frames (0x03).
      * @param {number} type
-     * @param {(id: string, payload: Uint8Array) => void} fn
+     * @param {(id: string, payload: Uint8Array, wOrCols: number, hOrRows: number) => void} fn
      * @returns {() => void} unsubscribe
      */
     onBinaryFrame(type, fn) {
@@ -323,8 +333,8 @@ export default class WebSocketBridge {
             return;
         }
 
-        // OUTPUT frames carry the size the payload was drawn at, right after the id:
-        // [type][idLen][id][cols:u16 BE][rows:u16 BE][payload]. See attach_unix.go (frameOutput).
+        // OUTPUT (0x01) and binary SOURCE/DESKTOP (0x03) frames carry their dimensions
+        // right after the id: [type][idLen][id][wOrCols:u16 BE][hOrRows:u16 BE][payload].
         if (view.length < 2 + idLen + 4) return;
         const off = 2 + idLen;
         const cols = (view[off] << 8) | view[off + 1];
@@ -663,7 +673,7 @@ export default class WebSocketBridge {
         if (envelope.from && envelope.cmd) {
             this._commandsReceived++;
             this._addLog('in', envelope.from, envelope.cmd);
-            const result = await this.router.execute(envelope.cmd, { sender: envelope.from });
+            const result = await this.router.execute(envelope.cmd, { sender: envelope.from, caller: envelope.as ?? null });
 
             // Send response back to the originating controller
             const response = {

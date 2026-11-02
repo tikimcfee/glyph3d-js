@@ -44,6 +44,8 @@ type Relay struct {
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	gxMu          sync.Mutex
 	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
+	desktopsMu    sync.RWMutex
+	desktops      map[string]*desktopSession // relay-owned headless Chromium producers (desktop.go)
 	upgrader      websocket.Upgrader
 	fs            *FSHandler      // nil if --root not provided
 	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers
@@ -88,6 +90,7 @@ func NewRelay() *Relay {
 	return &Relay{
 		controllers: make(map[string]*websocket.Conn),
 		sources:     make(map[string]*sourceConn),
+		desktops:    make(map[string]*desktopSession),
 		logs:        logs,
 		logSubs:     make(map[string]bool),
 		upgrader: websocket.Upgrader{
@@ -269,7 +272,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 					return
 				}
 			case data := <-framesCh:
-				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+				mt := websocket.TextMessage
+				if len(data) > 0 && data[0] == binaryFrameSource {
+					mt = websocket.BinaryMessage
+				}
+				if err := ws.WriteMessage(mt, data); err != nil {
 					log.Printf("[relay] display frame-write error: %v", err)
 					return
 				}
@@ -299,6 +306,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 
 	var role string
 	var clientID string
+	var callerName string // a controller's name, from its `AS <name>` greeting (identity.go)
 	var displayGen uint64 // this connection's display id, once it says DISPLAY
 
 	for {
@@ -306,12 +314,15 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		if err != nil {
 			break
 		}
-		// Binary frames are the terminal OUTPUT data plane (adapter → display).
-		// Forward verbatim and losslessly; the frame self-describes its terminal id.
+		// Binary frames are the terminal OUTPUT data plane (adapter → display, 0x01)
+		// or the binary SOURCE plane (source → display, 0x03).
 		// Everything else is text/JSON control, handled below.
 		if msgType == websocket.BinaryMessage {
-			if role == "controller" {
+			switch role {
+			case "controller":
 				r.sendBytesToDisplay(msg)
+			case "source":
+				r.handleSourceBinaryFrame(clientID, msg)
 			}
 			continue
 		}
@@ -380,6 +391,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"sources":     srcs,
 				})
 				r.sendToDisplay(ack)
+				r.replayDesktopsToDisplay()
 				continue
 			} else if kind, isSource := parseSourceHandshake(raw); isSource {
 				// A sensor device: upstream-only, many allowed. Unlike DISPLAY there
@@ -403,15 +415,28 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.notifySourceChange("source_connected", src)
 				continue
 			} else {
+				name, greeting, nameErr := parseAsHandshake(raw)
+				if nameErr != nil {
+					ws.WriteMessage(websocket.TextMessage, []byte("ERR: "+nameErr.Error()))
+					return
+				}
 				id := r.nextID.Add(1) - 1
 				clientID = fmt.Sprintf("ctrl-%d", id)
+				callerName = name
 				r.mu.Lock()
 				r.controllers[clientID] = ws
 				r.mu.Unlock()
 				role = "controller"
-				log.Printf("[relay] controller '%s' connected from %s", clientID, ws.RemoteAddr())
-				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("OK: connected as %s", clientID)))
+				as := ""
+				if callerName != "" {
+					as = " (as " + callerName + ")"
+				}
+				log.Printf("[relay] controller '%s'%s connected from %s", clientID, as, ws.RemoteAddr())
+				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("OK: connected as %s%s", clientID, as)))
 				r.notifyDisplay("client_connected", clientID)
+				if greeting {
+					continue // the greeting names the caller; it is not a command
+				}
 				// Fall through to process first message as command
 			}
 		}
@@ -492,11 +517,18 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.mu.RUnlock()
 
 			if d == nil {
+				if r.tryRelayDesktopWhenNoDisplay(ws, raw) {
+					continue
+				}
 				ws.WriteMessage(websocket.TextMessage, []byte("ERR: no display connected. Open the viewer in a browser first."))
 				continue
 			}
 
-			envelope, _ := json.Marshal(map[string]string{"from": clientID, "cmd": raw})
+			fwd := map[string]string{"from": clientID, "cmd": raw}
+			if callerName != "" {
+				fwd["as"] = callerName // the display runs it as this caller (identity.go)
+			}
+			envelope, _ := json.Marshal(fwd)
 			r.sendToDisplay(envelope)
 
 		} else if role == "display" {
@@ -538,6 +570,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					continue
 				}
 				switch {
+				case strings.HasPrefix(rpc.Method, "desktop/"):
+					r.handleDesktopRPC(rpc.Method, rpc.ID, rpc.Params)
 				case strings.HasPrefix(rpc.Method, "lsp/"):
 					if r.lsp != nil {
 						r.lsp.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)

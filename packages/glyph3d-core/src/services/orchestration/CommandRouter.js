@@ -25,9 +25,22 @@ import { emitLogRecord } from './consoleForwarder.js';
  * @typedef {(args: string[], ctx: C) => any} CommandHandler
  */
 
-// Per-dispatch correlation id, attached to ctx.cid so anything a handler logs can be
+// Per-dispatch correlation id, answered by the call's ctx.cid so anything a handler logs can be
 // joined back to its dispatch record.
 let _cid = 0;
+
+// The call whose handler is running SYNCHRONOUSLY right now (null between calls): a raw
+// router.execute made inside it — a service the handler calls — inherits its caller. After an
+// await that span is over; a handler's own nested calls go through ctx.execute, which carries
+// the call wherever it runs.
+/** @type {CallFrame|null} */
+let _running = null;
+
+/**
+ * One call's identity: who sent it (the controller to answer — a relay routing id, 'local', …),
+ * who that is by NAME (an identified agent; null = anonymous), and its correlation id.
+ * @typedef {{sender: string|null, caller: string|null, cid: number, parentCid: number|null}} CallFrame
+ */
 
 /**
  * @template [C=Object] the context bag's shape — inferred from `new CommandRouter(ctx)`,
@@ -125,15 +138,16 @@ export default class CommandRouter {
     }
 
     /**
-     * Execute a command.
-     * @param {string|string[]} input - raw command string or pre-parsed [name, ...args]
-     * @returns {Promise<{text: string, data: any}>}
-     */
-    /**
-     * Execute a command.
+     * Execute a command. Each call runs its handler on its own VIEW of the context (see _viewFor):
+     * `ctx.sender` / `ctx.caller` / `ctx.cid` are THIS call's, whatever else runs in between, and
+     * `ctx.execute` makes a nested call that inherits them.
      * @param {string|string[]} input - raw command string or pre-parsed [name, ...args]
      * @param {Object} [options]
-     * @param {string} [options.sender] - identity of the caller (controller ID, 'local', etc.)
+     * @param {string|null} [options.sender] - the controller to answer (relay routing id, 'local', …);
+     *   absent → inherited from the calling call, if any
+     * @param {string|null} [options.caller] - the caller's NAME, when identified (`glyph3d-cli --as`);
+     *   absent → inherited
+     * @param {CallFrame} [options.parent] - the call this one is nested in (ctx.execute sets it)
      * @returns {Promise<{text: string, data: any}>}
      */
     async execute(input, options = {}) {
@@ -254,19 +268,21 @@ export default class CommandRouter {
     async _run(name, args, options = {}) {
         const cmd = this.commands.get(name);
 
+        // This call's identity: given, else the calling call's (nested), else anonymous.
+        const parent = options.parent ?? _running;
+        const cid = ++_cid;
+        /** @type {CallFrame} */
+        const frame = {
+            sender: options.sender !== undefined ? (options.sender || null) : (parent?.sender ?? null),
+            caller: options.caller !== undefined ? (options.caller || null) : (parent?.caller ?? null),
+            cid, parentCid: parent?.cid ?? null,
+        };
+        const ctx = this._viewFor(frame);
+
         // Run middleware
         for (const mw of this._middleware) {
-            try { mw(name, args, this.context); } catch (e) { /* ignore middleware errors */ }
+            try { mw(name, args, ctx); } catch (e) { /* ignore middleware errors */ }
         }
-
-        // Attach sender to the shared context for this call.
-        // We set it directly (not a shallow copy) so that command handlers
-        // that mutate ctx (e.g., lazy-initializing ctx.terminals) persist
-        // their changes across calls. Sender is overwritten on each call.
-        const ctx = this.context;
-        ctx.sender = options.sender || null;
-        const cid = ++_cid;
-        ctx.cid = cid;
 
         // Self-instrument: every verb is a timed, counted, logged event — so metric.list /
         // log.tail / error.list show live command telemetry, and the bus's own failures land
@@ -275,12 +291,17 @@ export default class CommandRouter {
         // records directly (scope 'command'), bypassing Logger level gates entirely.
         const t0 = performance.now();
         try {
-            const result = await cmd.handler(args, ctx);
+            // The handler's synchronous span runs as this call (a raw router.execute inside it inherits).
+            const before = _running;
+            _running = frame;
+            let pending;
+            try { pending = cmd.handler(args, ctx); } finally { _running = before; }
+            const result = await pending;
             const ms = performance.now() - t0;
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'ok' });
             emitLogRecord('trace', 'command', name, {
-                args, ms: Math.round(ms), status: 'ok', cid, sender: ctx.sender ?? null
+                args, ms: Math.round(ms), status: 'ok', cid, sender: frame.sender, caller: frame.caller, parentCid: frame.parentCid,
             });
             // Normalize: if handler returned a plain string, wrap it
             if (typeof result === 'string') {
@@ -292,7 +313,7 @@ export default class CommandRouter {
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'err' });
             emitLogRecord('trace', 'command', name, {
-                args, ms: Math.round(ms), status: 'err', cid, sender: ctx.sender ?? null,
+                args, ms: Math.round(ms), status: 'err', cid, sender: frame.sender, caller: frame.caller, parentCid: frame.parentCid,
                 error: err.message
             });
             // Expected failures RETURN {text:'ERR:…'} and never reach here — only genuine
@@ -300,5 +321,30 @@ export default class CommandRouter {
             errorTracker.captureException(err, { type: 'command_error', command: name, args });
             return { text: `ERR: ${err.message}`, data: null };
         }
+    }
+    /**
+     * The context as ONE call sees it: `sender`, `caller`, `cid` and `execute` are the call's own
+     * (writing them throws); everything else IS the shared bag — reads see it, writes land in it
+     * (handlers keep shared state there: the active desk, lazy caches), getters run on it. A
+     * Proxy rather than Object.create: a prototype view would keep a handler's writes on the view,
+     * lost when the call ends. `ctx.execute(input, options?)` runs a nested call that inherits
+     * this one's sender and caller (options override them).
+     * @param {CallFrame} frame
+     * @returns {C}
+     * @private
+     */
+    _viewFor(frame) {
+        const own = {
+            sender: frame.sender, caller: frame.caller, cid: frame.cid,
+            execute: (input, options = {}) => this.execute(input, { ...options, parent: frame }),
+        };
+        return /** @type {C} */ (new Proxy(/** @type {Object} */ (this.context), {
+            get: (target, key) => (Object.hasOwn(own, key) ? own[key] : Reflect.get(target, key)),
+            set: (target, key, value) => {
+                if (Object.hasOwn(own, key)) throw new Error(`ctx.${String(key)} belongs to the call (cid ${frame.cid}) — read-only`);
+                target[key] = value;
+                return true;
+            },
+        }));
     }
 }

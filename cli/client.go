@@ -28,12 +28,24 @@ import (
 
 // --- Connection ---
 
-// connect dials the relay and runs the controller handshake: send "ping", receive
-// "OK: connected as ctrl-N", receive "pong".
+// connect dials the relay and runs the controller handshake: name the caller (`AS <name>`,
+// when --as / $AGENT_NAME gives one — identity.go), send "ping", receive "OK: connected as
+// ctrl-N [(as <name>)]", receive "pong".
 func connect(url string) (*websocket.Conn, error) {
+	return connectAs(url, *asName)
+}
+
+// connectAs is connect with an explicit caller name ("" = anonymous).
+func connectAs(url, name string) (*websocket.Conn, error) {
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w (is a relay up? glyph3d-cli serve)", url, err)
+	}
+	if name != "" {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("AS "+name)); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("handshake AS: %w", err)
+		}
 	}
 	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
 		conn.Close()

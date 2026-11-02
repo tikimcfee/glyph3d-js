@@ -98,7 +98,7 @@ export default function registerPaneCommands(router) {
             if (!axis) return { text: 'ERR: usage: pane.split <h|v> <id|index>', data: null };
             const r = ctx.holding.resolve(args[1]);
             if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
-            if (!desk.has(r.id)) router.execute(['carrel.add', r.id, desk.carrelName]);   // seat it here first
+            if (!desk.has(r.id)) ctx.execute(['carrel.add', r.id, desk.carrelName]);   // seat it here first
             if (!desk.has(r.id)) return { text: `ERR: '${r.id}' could not be seated at '${desk.carrelName}'`, data: null };
             const pane = desk.paneSplit(axis, r.id);
             if (!pane) return { text: `ERR: could not split for '${r.id}'`, data: null };
@@ -114,7 +114,7 @@ export default function registerPaneCommands(router) {
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         if (dock.isFramed(r.id)) return { text: `ERR: '${r.id}' is already a pane`, data: null };
         // The new pane's window must be a live dock entry before it tiles into the frame.
-        if (!dock.has(r.id)) router.execute(['dock.lock', r.id]);
+        if (!dock.has(r.id)) ctx.execute(['dock.lock', r.id]);
         if (!dock.splitPane(axis, r.id)) return { text: `ERR: could not split '${r.id}' into the frame`, data: null };
         const type = ctx.registry?.get?.(r.id)?.type;
         ctx.attentionManager?.set?.('primary', r.id, { registry: ctx.registry });
@@ -232,7 +232,7 @@ export default function registerPaneCommands(router) {
         const target = deskPane(desk, ctx, args[1]);
         const where = String(args[2] ?? 'tab').toLowerCase();
         if (!target || !['tab', ...DIRS].includes(where)) return { text: 'ERR: usage: pane.place <id> <pane|member> <tab|left|right|up|down>', data: null };
-        if (!desk.has(r.id)) router.execute(['carrel.add', r.id, desk.carrelName]);
+        if (!desk.has(r.id)) ctx.execute(['carrel.add', r.id, desk.carrelName]);
         const pane = desk.has(r.id) ? desk.panePlace(r.id, target, where) : null;
         if (!pane) return { text: `ERR: could not place '${r.id}'`, data: null };
         focusPaneFront(ctx, desk);

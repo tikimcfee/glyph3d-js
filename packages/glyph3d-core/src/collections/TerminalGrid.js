@@ -144,6 +144,8 @@ export default class TerminalGrid extends FramedGlyphField {
         this._depthYFactor = options.depthYStep ?? 0;               // ×lineSpacing rise per PAGE
         this._depthZFactor = options.depthZStep ?? 6;               // ×lineSpacing recede per PAGE
         this._history  = [];      // captured rows, index 0 = newest scrolled-off
+        this._scrolled = 0;       // lines seen scroll off the top: the running line number's base (lineOfSlot)
+        this._rowMarks = new Map();   // key → { line, color, opacity }: fills re-applied on every buffer write
         this._prevRows = null;    // last live-screen snapshot, for scroll detection
         this._altActive = false;  // current frame is an alt-screen (TUI) repaint
         this._depthYStep = 0;     // world rise per page (set once metrics exist)
@@ -316,6 +318,7 @@ export default class TerminalGrid extends FramedGlyphField {
                 // index 0 (the forefront slot). Snapshot rows are immutable, so
                 // aliasing them into the ring is safe.
                 this._history.unshift(...captureScrolledRows(this._prevRows, k));
+                this._scrolled += k;
                 if (this._history.length > this._depthMax) this._history.length = this._depthMax;
             }
         }
@@ -1226,7 +1229,96 @@ export default class TerminalGrid extends FramedGlyphField {
         if (this._renderer._interleavedBuffer) {
             this._renderer._interleavedBuffer.needsUpdate = true;
         }
+        if (hl && this._rowMarks.size) this._paintRowMarks(hl);
         if (hl) this._renderer.markHighlightDirty();
+    }
+
+    // ============ Lines by number (deixis) ============
+    //
+    // A terminal line's RUNNING NUMBER: the lines this grid has seen scroll off the top are 0 … n−1
+    // (oldest first — the depth history holds the newest of them), and the live screen continues
+    // at n. A line keeps its number as it scrolls into the depth history, so a reference to it
+    // stays true while it is still drawn. Counted from what this grid saw scroll (depth history
+    // on — the default); with it off the live rows number from 0.
+
+    /** Lines seen scroll off the top since this grid started. @returns {number} */
+    get linesScrolled() { return this._scrolled; }
+
+    /**
+     * The line a glyph slot draws: its running number, its live row (null in the depth history),
+     * its column, and the line's text (trailing blanks trimmed). Null for a slot past what is drawn.
+     * @param {number} slot  live cells [0, rows·cols), then the depth-history block
+     * @returns {{line:number, row:number|null, col:number, text:string}|null}
+     */
+    lineOfSlot(slot) {
+        const cols = this.cols, live = cols * this.rows;
+        if (!(slot >= 0) || !Number.isInteger(slot)) return null;
+        if (slot < live) {
+            const row = Math.floor(slot / cols);
+            return { line: this._scrolled + row, row, col: slot % cols, text: this._rowText(this._codepoints, row * cols) };
+        }
+        const h = Math.floor((slot - live) / cols);
+        const entry = this._history[h];
+        if (!entry || h >= this._depthMax) return null;
+        return { line: this._scrolled - 1 - h, row: null, col: (slot - live) % cols, text: this._rowText(entry.cp, 0) };
+    }
+
+    /**
+     * The text of a line by its running number, if it is still drawn (live, or in the depth
+     * history). @param {number} line @returns {string|null}
+     */
+    lineText(line) {
+        const at = this._lineBase(line);
+        return at ? this._rowText(at.cp, at.offset) : null;
+    }
+
+    /**
+     * Fill one line (by running number) with a colour — a point — re-applied on every buffer
+     * write, since each screen rewrites the highlight lane from the cells' own backgrounds. A
+     * line that scrolls out of what is drawn keeps its mark but shows none.
+     * @param {string} key  the mark's owner (one mark per key)
+     * @param {{line:number, color:{r:number,g:number,b:number}, opacity:number}|null} mark  null clears
+     */
+    setRowMark(key, mark) {
+        if (mark) {
+            if (!Number.isInteger(mark.line) || !(mark.opacity > 0)) throw new Error(`setRowMark: bad mark ${JSON.stringify(mark)}`);
+            this._rowMarks.set(key, { line: mark.line, color: { ...mark.color }, opacity: mark.opacity });
+        } else if (!this._rowMarks.delete(key)) return;
+        this._writeToInstanceBuffer();
+    }
+
+    /** Where a line's cells live now: the codepoint array and the offset of its column 0. @private */
+    _lineBase(line) {
+        const row = line - this._scrolled;
+        if (row >= 0 && row < this.rows) return { cp: this._codepoints, offset: row * this.cols, slot: row * this.cols };
+        const h = this._scrolled - 1 - line;
+        if (h >= 0 && h < this._history.length && h < this._depthMax) {
+            return { cp: this._history[h].cp, offset: 0, slot: this.cols * this.rows + h * this.cols };
+        }
+        return null;
+    }
+
+    /** One row of codepoints as text, trailing blanks trimmed. @private */
+    _rowText(cp, offset) {
+        let end = this.cols;
+        while (end > 0 && (cp[offset + end - 1] ?? 32) === 32) end--;
+        let out = '';
+        for (let x = 0; x < end; x++) out += String.fromCodePoint(cp[offset + x] || 32);
+        return out;
+    }
+
+    /** Paint the row marks into the highlight lane (RGBA8 per slot; alpha = fill opacity). @private */
+    _paintRowMarks(hl) {
+        for (const m of this._rowMarks.values()) {
+            const at = this._lineBase(m.line);
+            if (!at) continue;
+            const r = (m.color.r * 255 + 0.5) | 0, g = (m.color.g * 255 + 0.5) | 0, b = (m.color.b * 255 + 0.5) | 0;
+            const a = InstancedField.encodeHighlightAlpha(m.opacity);
+            for (let x = 0; x < this.cols; x++) {
+                const i = (at.slot + x) * 4;
+                hl[i] = r; hl[i + 1] = g; hl[i + 2] = b; hl[i + 3] = a;
+            }
+        }
     }
 
     /**

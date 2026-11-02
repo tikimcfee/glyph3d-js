@@ -22,7 +22,7 @@ function writePanes(ctx, carrel) {
  * Wire a desk standing up: lay its saved panes over it, then keep the model in step with it.
  * A saved record the desk refuses (malformed) is reported with the record and dropped — the desk
  * lays out fresh rather than not standing up.
- * @param {AppContext} ctx @param {import('@glyph3d/core').Carrel} carrel
+ * @param {AppContext} ctx @param {import('@glyph3d/core/services/interaction/Carrel.js').default} carrel
  */
 export function wirePanes(ctx, carrel) {
   const saved = ctx.workspace?.getSurface?.(carrel.name)?.view?.panes;

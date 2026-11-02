@@ -2,12 +2,12 @@
  * FrameGrid — an external image/video frame rendered in 3D as an NxM grid of
  * instanced quads, each quad sampling one cell of the source texture.
  *
- * This is the "the frame buffer IS the atlas" path: instead of GlyphField
- * sampling glyph curves, the field runs in RENDER_MODE.FRAME (see GlyphField),
- * where every instance samples a cell of one shared texture. The cell index is
- * the per-instance glyphId (row-major: cell = row * cols + col), so the same
- * instanced draw call that renders thousands of glyphs reassembles a screen
- * capture / video / image in space.
+ * This is the "the frame buffer IS the atlas" path: instead of InstancedField
+ * sampling glyph curves, the field runs in frame mode (uRenderMode = 1 in
+ * glyphMaterial.js), where every instance samples a cell of one shared texture.
+ * The cell index is the per-instance aGlyphId (row-major: cell = row * cols + col),
+ * so the same instanced draw call that renders thousands of glyphs reassembles a
+ * screen capture / video / image in space.
  *
  * Because each cell is just an independently-positioned quad pointing at a cell
  * index, the addressable-grid tricks fall out for free: scatter the positions,
@@ -20,7 +20,7 @@
  * clear the OS "sharing" indicator) when the grid is removed.
  *
  * Part of the layered rendering architecture:
- * - GlyphAtlas -> FrameGrid -> GlyphField (RENDER_MODE.FRAME)
+ * - GlyphAtlas -> FrameGrid -> InstancedField (uRenderMode = 1)
  */
 
 import * as THREE from 'three';
@@ -66,7 +66,7 @@ class FrameGrid extends FramedGlyphField {
 
     /**
      * @param {THREE.Scene} scene - Three.js scene (renderer mesh is reparented under this Object3D)
-     * @param {GlyphAtlas} atlas - shared atlas (only used for GlyphField construction; no glyphs are shaped)
+     * @param {GlyphAtlas} atlas - shared atlas (only used for InstancedField construction; no glyphs are shaped)
      * @param {Object} [options]
      * @param {number} [options.cols=16] - cells across the source frame
      * @param {number} [options.rows=9]  - cells down the source frame
@@ -77,6 +77,7 @@ class FrameGrid extends FramedGlyphField {
     constructor(scene, atlas, options = {}) {
         super();
 
+        this.isFrameGrid = true;
         this.scene = scene;
         this.atlas = atlas;
         this.name  = options.name || 'FrameGrid';
@@ -94,7 +95,7 @@ class FrameGrid extends FramedGlyphField {
 
         // One renderer, sized to the cell count, kept in frame mode. defaultColor is
         // white so the frame shows its true color (the shader multiplies the sampled
-        // texel by the per-instance color — white = passthrough, see GlyphField).
+        // texel by the per-instance color — white = passthrough, see glyphMaterial.js).
         this._renderer = new InstancedField(scene, atlas, {
             maxInstances: this._cellCount,
             defaultColor: { r: 1, g: 1, b: 1 },
@@ -116,6 +117,7 @@ class FrameGrid extends FramedGlyphField {
         this._frameTimes = [];
         this._sourceSize = { width: 0, height: 0 };
         this._latencyMs  = { captureToPresent: null, processing: null };
+        this._oneToOne   = !!options.oneToOne;
 
         this._build();
 
@@ -159,30 +161,15 @@ class FrameGrid extends FramedGlyphField {
      * ── Frame cell mapping (the addressing contract) ──────────────────────────────
      * A cell is one instanced quad. Its identity is a single row-major index
      *   cell = row * cols + col        (0 = top-left, increasing left→right, top→bottom)
-     * carried in the instanceGlyphId attribute. The shader frame branch turns that
+     * carried in the aGlyphId slot attribute. The shader frame branch turns that
      * back into a sub-rectangle of the source texture:
-     *   col = cell % frameCols;  row = floor(cell / frameCols)
-     *   uv  = ((col + quadUV.x) / frameCols, (row + 1 - quadUV.y) / frameRows)
+     *   col = cell % frameCols;  row = cell / frameCols
+     *   uv  = ((col + vUv.x) / frameCols, fy)   // fy respects uFrameFlipY
      * Spatial position (this _build) and texture cell (the index) are independent —
      * that decoupling is the whole trick: move a quad anywhere while it keeps sampling
      * its cell, or repoint a quad at a different cell, and you get screen-in-place,
      * region slicing, or scatter, all from the same instanced draw.
      *
-     * ── Performance trajectory: push per-cell manipulation across the GPU fence ────
-     * Today this is CPU-side: we write the typed arrays here and hand them over once
-     * via applyPrebuiltBuffers (one upload). That's perfect for a static grid, and
-     * fine for occasional whole-rebuilds. Per-cell ANIMATION today would mean
-     * rewriting these arrays on the CPU each frame and re-uploading — exactly the
-     * CPU→GPU fence cost that glyph text alignment also pays (lay out on the CPU, copy
-     * over the boundary).
-     *
-     * The eventual win is to keep the per-cell state GPU-side: a small data texture
-     * (or a compute / GPGPU pass) holding per-cell offset / target-cell / tint,
-     * sampled in the vertex stage by instanceIndex — the same group-DataTexture
-     * pattern GlyphField already uses for group transforms, but at cell granularity.
-     * Then scatter/particle effects animate without ever crossing the fence per frame.
-     * See the Codrops GPGPU grid-displacement / particle recipes for the established
-     * approach. (Not needed for the first pass — basic CPU writes are fine for now.)
      * @private
      */
     _build() {
@@ -203,8 +190,8 @@ class FrameGrid extends FramedGlyphField {
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < cols; col++) {
                 const i = row * cols + col;
-                // Anchor is the cell's LEFT-center; GlyphField shifts the quad center
-                // right by iSize.x/2, landing the quad center at the cell center.
+                // Anchor is the cell's LEFT-center; applyPrebuiltBuffers shifts Y down by
+                // cellH/2 so the InstancedSlotBuffer bottom-left origin lands at the cell corner.
                 positions[i * 3]     = -halfW + col * cellW;
                 positions[i * 3 + 1] =  halfH - (row + 0.5) * cellH;
                 positions[i * 3 + 2] =  0;
@@ -233,13 +220,103 @@ class FrameGrid extends FramedGlyphField {
      */
     setFrameTexture(texture) {
         this._texture = texture || null;
+        this._applyTextureFilter();
         this._renderer.setFrameTexture(this._texture, this.cols, this.rows);
         const img = this._texture?.image;
-        if (img?.width > 0 && img?.height > 0) {
-            this._sourceSize = { width: img.width, height: img.height };
+        const w = img?.videoWidth || img?.width || 0;
+        const h = img?.videoHeight || img?.height || 0;
+        if (w > 0 && h > 0) {
+            const changed = this._sourceSize.width !== w || this._sourceSize.height !== h;
+            this._sourceSize = { width: w, height: h };
+            if (changed) this._emitResize(this.cols, this.rows);
         }
         if (this._texture && !this._video && !this._stream && this._frames === 0) {
-            this.noteFrame({ width: img?.width || 0, height: img?.height || 0 });
+            this.noteFrame({ width: w, height: h });
+        }
+    }
+
+    /** @returns {boolean} true when a frame texture is bound onto the field. */
+    get hasTexture() {
+        return Boolean(this._texture);
+    }
+
+    /**
+     * Source frame dimensions in texels (`{ w, h }`), or `null` when no source size is known yet.
+     * Used by plane-desk placement (`Carrel`) to seat frames at 1 texel = 1 device pixel (or
+     * whole-divisor contain-fit when the source exceeds the pane).
+     *
+     * Local-to-texel mapping:
+     *   - FrameGrid local width is `this.width`, local height is `this.width / this.aspect`,
+     *     centered at `(0, 0)` with top-left `pixelOrigin() = { x: -this.width / 2, y: (this.width / this.aspect) / 2 }`.
+     *   - 1 texel in local units is `texelSize() = { x: this.width / w, y: (this.width / this.aspect) / h }`.
+     *   - On a plane with `k = pxPerUnit` device px per world unit, 1:1 scale is
+     *     `m = (1 / k) / texelSize().x = (w / k) / this.width`.
+     *
+     * @returns {{ w: number, h: number } | null}
+     */
+    naturalPx() {
+        const settings = this._stream?.getVideoTracks?.()?.[0]?.getSettings?.() || {};
+        const img = this._texture?.image;
+        const w = this._video?.videoWidth || this._sourceSize.width || settings.width || img?.videoWidth || img?.width || 0;
+        const h = this._video?.videoHeight || this._sourceSize.height || settings.height || img?.videoHeight || img?.height || 0;
+        if (!(w > 0 && h > 0)) return null;
+        return { w: Math.round(w), h: Math.round(h) };
+    }
+
+    /**
+     * Size of 1 source texel in FrameGrid local units (`{ x, y }`), or `null` if `naturalPx()`
+     * is unknown. Parallels `grid.metrics.charWidth` for plane-desk scaling:
+     *   `m_1to1 = (1 / pxPerUnit) / frame.texelSize().x`
+     * @returns {{ x: number, y: number } | null}
+     */
+    texelSize() {
+        const nat = this.naturalPx();
+        if (!nat) return null;
+        const localH = this.width / this.aspect;
+        return { x: this.width / nat.w, y: localH / nat.h };
+    }
+
+    /**
+     * Top-left corner of the frame in local coordinates (`{ x, y }`). Matches the
+     * `CodeGrid.pixelOrigin()` contract consumed by `Carrel._layoutPlane` and `planeView`.
+     * @returns {{ x: number, y: number }}
+     */
+    pixelOrigin() {
+        return { x: -this.width / 2, y: (this.width / this.aspect) / 2 };
+    }
+
+    /**
+     * Whether 1:1 pixel-exact sampling (`THREE.NearestFilter`) is active on this frame's texture.
+     * @returns {boolean}
+     */
+    get oneToOne() {
+        return this._oneToOne;
+    }
+
+    /**
+     * Toggle 1:1 pixel-exact sampling (`THREE.NearestFilter` when true, `THREE.LinearFilter` when
+     * false). Persisted across subsequent `setFrameTexture` calls so live stream updates keep the
+     * filter mode.
+     * @param {boolean} enabled
+     */
+    setOneToOne(enabled) {
+        const next = !!enabled;
+        if (this._oneToOne === next && this._texture) {
+            const want = next ? THREE.NearestFilter : THREE.LinearFilter;
+            if (this._texture.magFilter === want && this._texture.minFilter === want) return;
+        }
+        this._oneToOne = next;
+        this._applyTextureFilter();
+    }
+
+    /** @private */
+    _applyTextureFilter() {
+        if (!this._texture) return;
+        const filter = this._oneToOne ? THREE.NearestFilter : THREE.LinearFilter;
+        if (this._texture.minFilter !== filter || this._texture.magFilter !== filter) {
+            this._texture.minFilter = filter;
+            this._texture.magFilter = filter;
+            this._texture.needsUpdate = true;
         }
     }
 
@@ -319,8 +396,10 @@ class FrameGrid extends FramedGlyphField {
         this._frames++;
         this._lastFrameAt = now;
         if (width > 0 && height > 0) {
+            const changed = this._sourceSize.width !== width || this._sourceSize.height !== height;
             this._sourceSize.width = width;
             this._sourceSize.height = height;
+            if (changed) this._emitResize(this.cols, this.rows);
         }
         if (processing != null) this._latencyMs.processing = processing;
         if (captureToPresent != null) this._latencyMs.captureToPresent = captureToPresent;

@@ -120,9 +120,9 @@ export default function registerTerminalCommands(router) {
             // modal "new terminal tab": centered, enlarged, keyboard-live; its verb
             // sets primary + key itself). terminal.focus is the no-dock fallback
             // (headless), an idempotent re-set of the same slots otherwise.
-            await router.execute(`dock.lock ${ack.id}`);
-            await router.execute(`dock.spotlight ${ack.id}`);
-            await router.execute(`terminal.focus ${ack.id}`);
+            await ctx.execute(`dock.lock ${ack.id}`);
+            await ctx.execute(`dock.spotlight ${ack.id}`);
+            await ctx.execute(`terminal.focus ${ack.id}`);
             return {
                 text: `OK: terminal '${ack.id}' spawned — pinned in the dock + focused`,
                 data: { id: ack.id, docked: true, pinned: true, focused: true },

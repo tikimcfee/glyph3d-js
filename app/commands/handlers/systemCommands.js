@@ -197,7 +197,7 @@ export default function registerSystemCommands(router) {
         // Coerce non-string args to strings: handlers read positional string tokens, and the
         // typed-CLI path always delivers strings — keep the hatch byte-identical to it.
         const argv = [invocation[0], ...invocation.slice(1).map(a => (typeof a === 'string' ? a : String(a)))];
-        return router.execute(argv, { sender: ctx.sender });
+        return ctx.execute(argv);   // the bundled call is this one: same sender and caller
     }, { description: 'Invoke any command from a base64-encoded JSON bundle ([name,...args] or {cmd,args})', usage: '<base64-json>' });
 
     router.register('reload', (args, ctx) => {

@@ -34,11 +34,10 @@ function utf16ToCp(lineText, col) {
  * Open (or focus) the grid for an LSP location, highlight its range, and fly to it.
  * loc = { uri, range: { start:{line,character}, end:{line,character} } } (LSP UTF-16).
  * Shared by lsp.definition (a query result) and lsp.goto (a known location).
- * @param {AppContext} ctx
- * @param {import('../../client/CommandProvider.jsx').AppRouter} router
+ * @param {AppContext} ctx  the calling verb's (its camera.focus runs as that call)
  * @param {object} loc
  */
-async function jumpToLocation(ctx, router, loc) {
+async function jumpToLocation(ctx, loc) {
     let destId;
     try {
         // LSP locations are RFC 8089 URIs (percent-encoded); ours are raw — decode at this seam.
@@ -55,7 +54,7 @@ async function jumpToLocation(ctx, router, loc) {
         destGrid.highlightRange?.(sL, sCp, eL, eCp, DEF_COLOR);
     }
     ctx.attentionManager?.set?.('primary', destId, { registry: ctx.registry });
-    try { await router.execute(['camera.focus', destId]); } catch { /* framing is best-effort */ }
+    try { await ctx.execute(['camera.focus', destId]); } catch { /* framing is best-effort */ }
     return { ok: true, gridId: destId };
 }
 
@@ -104,7 +103,7 @@ export default function registerLspCommands(router) {
         if (!locs.length) return { text: `OK: no definition at ${line}:${col}`, data: { locations: [] } };
         const loc = locs[0];
 
-        const r = await jumpToLocation(ctx, router, loc);
+        const r = await jumpToLocation(ctx, loc);
         return r.ok
             ? { text: `OK: definition → ${loc.uri}:${loc.range.start.line}:${loc.range.start.character}`,
                 data: { source: { uri: srcURI, line, col }, location: loc, gridId: r.gridId } }
@@ -124,7 +123,7 @@ export default function registerLspCommands(router) {
         const eL = args[3] != null ? Number(args[3]) : sL;
         const eC = args[4] != null ? Number(args[4]) : sC;
         const loc = { uri, range: { start: { line: sL, character: sC }, end: { line: eL, character: eC } } };
-        const r = await jumpToLocation(ctx, router, loc);
+        const r = await jumpToLocation(ctx, loc);
         return r.ok
             ? { text: `OK: jumped → ${uri}:${sL}:${sC}`, data: { gridId: r.gridId, location: loc } }
             : { text: `OK: ${r.text}`, data: { location: loc } };

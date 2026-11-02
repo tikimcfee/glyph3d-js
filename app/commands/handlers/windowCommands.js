@@ -147,14 +147,14 @@ export default function registerWindowCommands(router) {
             // Pin/unpin is a reversible toggle: if pin had to dock a LOOSE window, remember that so
             // unpin sends it back HOME — a window already in the bar stays in the bar on unpin.
             const wasDocked = dock.has(id);
-            if (!wasDocked) router.execute(['dock.lock', id]); // frame occupancy is a dock state
-            router.execute(['dock.spotlight', id]);            // raise into the frame (+ focus/keyboard)
+            if (!wasDocked) ctx.execute(['dock.lock', id]); // frame occupancy is a dock state
+            ctx.execute(['dock.spotlight', id]);            // raise into the frame (+ focus/keyboard)
             if (!wasDocked) ctx.workspace?.setSurfaceView?.(id, kind, { pinAutoDocked: true });
         } else {
-            router.execute(['dock.spotlight', id]);            // toggle off → vacate the frame
+            ctx.execute(['dock.spotlight', id]);            // toggle off → vacate the frame
             if (ctx.workspace?.getSurface?.(id)?.view?.pinAutoDocked) {
                 ctx.workspace?.setSurfaceView?.(id, kind, { pinAutoDocked: false });
-                router.execute(['dock.release', id]);          // pin docked it → unpin sends it home
+                ctx.execute(['dock.release', id]);          // pin docked it → unpin sends it home
             }
         }
         ctx.session?.scheduleSave?.();
@@ -226,7 +226,7 @@ export default function registerWindowCommands(router) {
         // book would snap into its cluster slot mid-drag.
         const verb = moveVerbFor(ctx.registry.get(r.id));
         const p = r.grid.position;
-        if (verb) router.execute([verb, r.id, String(p.x), String(p.y), String(p.z)]);
+        if (verb) ctx.execute([verb, r.id, String(p.x), String(p.y), String(p.z)]);
         ctx.session?.scheduleSave?.();
         return { text: `OK: lifted '${r.id}' out of the ${from.replace('+', ' and ')}`, data: { id: r.id, from } };
     }, {
