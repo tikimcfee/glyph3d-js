@@ -308,8 +308,11 @@ export default class GomuxHub {
             if (!book) continue;
             const id = this.screenId(name);
             const grid = this.ctx.registry?.get(id)?.grid;
-            if (!grid || book.aside === grid) continue;   // riding it (or docked from it — it comes home to the book)
-            if (deskOf(this.ctx, book)?.mode === 'plane' && deskOf(this.ctx, grid) === deskOf(this.ctx, book)) continue;   // its own pin already
+            if (!grid) continue;
+            const desk = deskOf(this.ctx, book);
+            if (desk?.mode === 'plane') {
+                if (book.aside !== grid && desk.has(id)) continue;   // its own pin already
+            } else if (book.aside === grid) continue;   // riding it (or docked from it — it comes home to the book)
             this.seatScreen(name, id);
         }
     }

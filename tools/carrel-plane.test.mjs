@@ -260,6 +260,12 @@ const pinMap = (desk) => new Map(desk.pinRects().map((p) => [p.id, JSON.stringif
     desk.settle();
     const packed = desk.pinRects();
     ok(!packed.some((p) => p.id === 'a') && packed[0].rect.x === 0 && packed[0].id === 'b', 'settle drops the ghost and repacks');
+    // a late member seated with an earlier ORDER (a screen beside its book) appends — then settle puts it in seat order
+    const s2 = screen('s2', 40, 10); scene.add(s2);
+    desk.lock('s2', s2, { immediate: true, order: desk.entries.get('b').order + 0.5 });
+    ok(desk.pinRects().at(-1).id === 's2', 'a joiner appends even with an earlier seat order (nothing moves)');
+    desk.settle();
+    ok(desk.pinRects().map((p) => p.id).join() === 'b,s2,n', `settle takes seat order (${desk.pinRects().map((p) => p.id).join()})`);
 }
 
 // 8. growth: only the pins after it on its shelf move; a pin never shrinks until settle

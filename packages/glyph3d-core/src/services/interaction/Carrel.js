@@ -944,8 +944,9 @@ export class Carrel extends THREE.Object3D {
     settle() {
         this._relearnSeats();
         if (this.mode === 'plane' && this.planeArrange === 'pins') {
-            // Repack: ghosts go, every pin re-measures from its member as it stands (it may shrink).
-            this.panes.pins = this.panes.pins.filter((p) => this.entries.has(p.id)).map((p) => ({ id: p.id, w: 0, h: 0 }));
+            // Repack: ghosts go, the pins take SEAT order (a screen right after its book), and every pin
+            // re-measures from its member as it stands (it may shrink).
+            this.panes.pins = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((e) => ({ id: e.id, w: 0, h: 0 }));
             this.onPanesChanged?.();
         }
         this._relayout();
@@ -1332,13 +1333,17 @@ export class Carrel extends THREE.Object3D {
     /**
      * A member's pin: its scale (its column → the plane's), its size in whole device px at k, and where
      * its cell origin sits inside the pin (dx, dy whole px; ox, oy the origin in member-local units).
-     * A member without cell metrics (a book) is scaled to `bookCols` plane columns wide. @private
+     * A member without cell metrics scales so its main reading row (planeRowHeight — an agent book's
+     * headline) is one plane row; one that states neither is `bookCols` plane columns wide. @private
      */
     _pinFit(e, cw, k) {
         const g = e.grid;
         const ext = this._extentOf(e);
         const colW = g.metrics?.charWidth;
-        const m = Number.isFinite(colW) && colW > 0 ? cw / colW : (Math.max(1, this.bookCols ?? 120) * cw) / Math.max(ext.w, 1e-6);
+        const rowH = g.planeRowHeight?.();
+        const m = Number.isFinite(colW) && colW > 0 ? cw / colW
+            : Number.isFinite(rowH) && rowH > 0 ? (cw * this.planeUnit.rowRatio) / rowH
+            : (Math.max(1, this.bookCols ?? 120) * cw) / Math.max(ext.w, 1e-6);
         const left = ext.cx - ext.w / 2, top = ext.cy + ext.h / 2;
         const po = g.pixelOrigin?.() ?? { x: left, y: top };
         const dx = Math.round((po.x - left) * m * k), dy = Math.round((top - po.y) * m * k);

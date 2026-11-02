@@ -346,6 +346,9 @@ export default class AgentBooks {
             // A layout LEAF for the cluster scheme: name = ordering key, isDir = false.
             book.userData = { ...book.userData, name: agentId, isDir: false };
             book.setDeckDefaults(this._deckDefaults());
+            // Its main reading row (the headline's row height, world units) — a plane desk scales the
+            // book so this row is one plane row (Carrel pins).
+            book.planeRowHeight = () => this._textOf(this.lanes.get(agentId)).versoTextSize;
             this.root.add(book);
             const hueIdx = this.lanes.size;
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));

@@ -1030,6 +1030,16 @@ export default class TerminalGrid extends FramedGlyphField {
         );
     }
 
+    /** Its cell metrics (world units, local — the renderer's: charWidth, lineSpacing, …). */
+    get metrics() { return this._metrics; }
+
+    /**
+     * The local point its cell grid starts from — row 0's top edge at column 0's pen (cells sit
+     * row-major from the origin, row 0's center on y = 0). A plane snaps THIS to a device-pixel corner.
+     * @returns {{x:number, y:number}}
+     */
+    pixelOrigin() { return { x: 0, y: this._metrics.charHeight / 2 }; }
+
     /**
      * Fill the sizes array with constant charWidth × charHeight for every cell.
      * Written once at construction / resize; never touched during content updates.

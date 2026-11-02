@@ -336,7 +336,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   239-column screen is 239 columns wide, never clipped) on shelves `shelfCols` columns wide in seat
   order, `paneGapPx` gutters, every pin and cell origin on whole device pixels; a newcomer APPENDS (no
   earlier pin moves), a pin only grows (a grower moves only the pins after it), a leaver's slot stays a
-  ghost until `carrel.settle` repacks; a book pins `bookCols` wide; a gomuxai agent's screen is its own
+  ghost until `carrel.settle` repacks (in seat order); a book pins with its headline one plane row (`planeRowHeight`;
+  else `bookCols` wide); a gomuxai agent's screen is its own
   pin right after its book (not the book's aside). TILES — a tiling window manager over a desk-sized
   frame (`tileCols × tileRows` cells): a PaneTree of panes, each a stack of members (tabs), a joiner
   lands in the INBOX pane, reflowable members take their pane's cols × rows and lend out their header.
