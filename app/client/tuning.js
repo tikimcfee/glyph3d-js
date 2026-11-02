@@ -47,9 +47,14 @@ import { pageableBookOf } from './bookFocus.js';
 const ring = (d) => d.mode === 'ring';
 const naturalRing = (d) => d.mode === 'ring' && d.seat === 'natural';
 const uniformRing = (d) => d.mode === 'ring' && d.seat !== 'natural';
+const planeDesk = (d) => d.form === 'plane';
 
 /** @type {Knob[]} one desk's knobs — Carrel's own params, in HUD order. */
 export const DESK_KNOBS = [
+  { key: 'form', type: 'enum', options: ['space', 'plane'], names: { space: 'space ◇', plane: 'plane ▭' },
+    short: 'form', label: 'Entered as — space (stays 3D) or a plane (panes read flat, pixel-exact: carrel.enter)' },
+  { key: 'paneGapPx', type: 'number', min: 0, max: 64, step: 1,
+    short: 'pane gap', label: 'Gap between a plane’s panes (device px)', shows: planeDesk },
   { key: 'mode', type: 'enum', options: ['ring', 'grid'], names: { ring: 'ring ◠', grid: 'wall ▦' },
     short: 'shape', label: 'Shape — a ring around you, or a flat wall' },
   { key: 'seat', type: 'enum', options: ['natural', 'uniform'], names: { natural: 'own size', uniform: 'same size' },
@@ -163,6 +168,7 @@ export function listTunings(ctx) {
 
 /** Set one knob on a desk, live. @returns {boolean} whether the desk changed */
 function setDeskKnob(desk, key, v) {
+  if (key === 'form') return desk.setForm(v);
   if (key === 'mode') return desk.mode !== v && desk.setMode(v);
   if (key === 'seat') return desk.setSeat(v);
   if (key === 'facing') return desk.facing !== v && desk.setFacing(v);

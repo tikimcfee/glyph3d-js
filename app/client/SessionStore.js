@@ -60,6 +60,7 @@ import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 import { openSession, sessionList } from '../commands/handlers/agentCommands.js';
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { listTunings, projectTune, tuneOf } from './tuning.js';
+import { listPanes, restorePanes } from './carrelPanes.js';
 import { getSetting } from './settings.js';
 import { laneForSession } from './SessionBooks.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
@@ -211,7 +212,8 @@ export default class SessionStore {
         // Frame state (Step 3c.2): a clipped/scrolled code grid restores its window.
         // Omit zeros so unframed grids stay terse and the dedup compare stays stable.
         if (typeof grid.getFrameRows === 'function') {
-          const frameRows = grid.getFrameRows() || 0;
+          // A grid dressed by a plane desk's pane saves its OWN frame, not the pane's (Carrel paneOwn).
+          const frameRows = (grid.userData?.paneOwn ? grid.userData.paneOwn.frameRows : grid.getFrameRows()) || 0;
           const scrollOffset = (grid.getScrollOffset?.() || 0);
           if (frameRows) entry.frameRows = frameRows;
           if (scrollOffset) entry.scrollOffset = scrollOffset;
@@ -331,6 +333,8 @@ export default class SessionStore {
     // now, so the gomuxai hub's derived desks (never saved themselves) and a team desk
     // that comes and goes keep theirs.
     const tunings = listTunings(ctx);
+    // Pane layouts: every plane desk's tree + stacks (the model's Panes component), keyed by desk.
+    const panes = listPanes(ctx);
 
     // Hidden agents (AgentVisibility): which agents get no book — the hub and the agents desk
     // consult it before opening anything on the next load.
@@ -352,6 +356,7 @@ export default class SessionStore {
       carrels,
       carrelMembers,
       tunings,
+      panes,
       agentVisibility,
     };
 
@@ -496,7 +501,7 @@ export default class SessionStore {
         // pre-shaped for its complement, and files a membership manifest — so
         // stage 2's windows (books, terminals, grids) seat IN PLACE the moment
         // they materialize instead of flying to a desk that arrived late.
-        ['carrels', () => { this._restoreTunings(snap); this._restoreCarrels(snap); }, ['tunings', 'carrels']],
+        ['carrels', () => { this._restoreTunings(snap); restorePanes(this.ctx, snap.panes); this._restoreCarrels(snap); }, ['tunings', 'panes', 'carrels']],
         // The hidden agents BEFORE any book: the hub and the agents desk wait on this to open.
         ['visibility', () => this.ctx.agentVisibility?.restore(snap.agentVisibility), ['agentVisibility']]]],
       [

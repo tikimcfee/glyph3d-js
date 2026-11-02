@@ -71,6 +71,7 @@ import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes, squareWrap } from '../../collections/layouts/flowBoxes.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
+import PaneTree from './PaneTree.js';
 
 const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
@@ -139,12 +140,19 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.glowStrength=0.35]  - chrome intensity (0 = chrome invisible)
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
+     * @param {'space'|'plane'} [opts.form='space'] - how the desk is ENTERED: 'space' stays 3D
+     *   (rings, walls); 'plane' is a pane layout read flat and pixel-exact — a tiling window
+     *   manager. A plane desk stands in the world exactly as it reads entered: a flat wall at
+     *   z=−R facing the doorway, its members tiled into panes (a PaneTree; each pane a stack of
+     *   members, one active), each member scaled so its text column is the plane's one column
+     *   (see setPlaneFrame), its cell grid on whole pixels.
+     * @param {number} [opts.paneGapPx=8]   - gap between panes (and around them), device px
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
                   growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringMaxRows = 2,
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
-                  animDur = 0.167, yawRate = 14 } = {}) {
+                  animDur = 0.167, yawRate = 14, form = 'space', paneGapPx = 8 } = {}) {
         super();
         this.name = `carrel:${name}`;
         this.carrelName = name;
@@ -166,6 +174,17 @@ export class Carrel extends THREE.Object3D {
         this.glowStrength = glowStrength;
         this.animDur = animDur;
         this.yawRate = yawRate;
+        this.form = form === 'plane' ? 'plane' : 'space';
+        this.paneGapPx = paneGapPx;
+        /** The frame a plane desk reads at: its size in device px and its scale (device px per
+         *  world unit) and text column (device px). Set by the app from the viewport (setPlaneFrame);
+         *  null until then — a plane desk with no frame lays out as a wall. */
+        this.planeFrame = null;
+        /** The pane layout of a plane desk: a PaneTree over pane ids, each pane a stack of member
+         *  ids with one active (tabs); `inbox` is where a member joining lands (nothing else moves). */
+        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0 };
+        /** Told whenever the pane layout changes (the app persists it as the desk's Panes). */
+        this.onPanesChanged = null;
         /** What this desk was BORN as — every knob's value at construction. A desk's own
          *  values (the app's per-desk tuning) are set over these; a knob returned to its
          *  default comes back here, and serialize() saves these, never the tuned ones. */
@@ -173,6 +192,7 @@ export class Carrel extends THREE.Object3D {
             radius, boxH, boxAspect, gapFrac, growCap, maxArcDeg,
             mode: this.mode, seat: this.seat, ringMaxRows, facing: this.facing,
             tableFrac, shadowSoft, glowColor, glowStrength, animDur, yawRate,
+            form: this.form, paneGapPx,
         });
 
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
@@ -310,6 +330,8 @@ export class Carrel extends THREE.Object3D {
         const e = this.entries.get(id);
         if (!e) return false;
 
+        this._unpane(e);
+        this._unstack(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -363,6 +385,8 @@ export class Carrel extends THREE.Object3D {
         const home = this.homeOf(id);
         const e = this.entries.get(id);
         if (!e) return null;
+        this._unpane(e);
+        this._unstack(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -383,6 +407,7 @@ export class Carrel extends THREE.Object3D {
         const e = this.entries.get(id);
         if (!e) return false;
 
+        this._unstack(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -450,7 +475,7 @@ export class Carrel extends THREE.Object3D {
      */
     setParam(key, value) {
         if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'tableFrac',
-              'shadowSoft', 'glowStrength', 'animDur', 'yawRate'].includes(key)) return false;
+              'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         if (key === 'glowStrength') this._tintChrome();
@@ -474,6 +499,141 @@ export class Carrel extends THREE.Object3D {
         this.mode = mode;
         this._relayout();
         return true;
+    }
+
+    /** How the desk is entered: 'space' (stays 3D) or 'plane' (a pane layout read flat). Leaving
+     *  plane form hands every member its own layout back. @param {'space'|'plane'} form */
+    setForm(form) {
+        if (form !== 'space' && form !== 'plane') return false;
+        if (form === this.form) return false;
+        this.form = form;
+        if (form === 'space') for (const e of this.entries.values()) this._unpane(e);
+        else if ((!this.panes.tree || this.panes.tree.isEmpty()) && this.entries.size) { this.layoutPanes('even'); return true; }
+        this._relayout();
+        return true;
+    }
+
+    /**
+     * Re-lay a plane desk's panes as a named layout over its members (in seat order), one member
+     * per pane: 'even' — rows of up to `perRow` side by side; 'main' — the first member a wide pane
+     * on the left, the rest stacked on the right; 'stack' — one pane, every member a tab. The
+     * last pane becomes the inbox.
+     * @param {'even'|'main'|'stack'} name @param {{perRow?:number, mainRatio?:number}} [opts]
+     * @returns {boolean}
+     */
+    layoutPanes(name, { perRow = 3, mainRatio = 0.6 } = {}) {
+        if (!['even', 'main', 'stack'].includes(name)) return false;
+        const ids = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((e) => e.id);
+        const P = this.panes;
+        P.stacks = new Map();
+        P.tree = null;
+        P.inbox = null;
+        if (!ids.length) { this._relayout(); this.onPanesChanged?.(); return true; }
+        const add = (memberIds) => { const id = this._newPaneId(); P.stacks.set(id, { ids: [...memberIds], active: memberIds[memberIds.length - 1] ?? null }); return id; };
+        // Split `from` into equal parts along `axis`, one new pane per extra member list.
+        const fan = (from, axis, lists) => {
+            const out = [from];
+            for (let i = 1; i < lists.length; i++) {
+                const id = add(lists[i]);
+                P.tree.split(out[out.length - 1], axis, id, { ratio: 1 / (lists.length - i + 1) });
+                out.push(id);
+            }
+            return out;
+        };
+        if (name === 'stack') {
+            P.tree = PaneTree.leaf(add(ids));
+        } else if (name === 'main' && ids.length > 1) {
+            const main = add([ids[0]]);
+            P.tree = PaneTree.leaf(main);
+            const side = add([ids[1]]);
+            P.tree.split(main, 'x', side, { ratio: mainRatio });
+            fan(side, 'y', ids.slice(1).map((id) => [id]));
+        } else {
+            const rows = [];
+            for (let i = 0; i < ids.length; i += Math.max(1, perRow)) rows.push(ids.slice(i, i + Math.max(1, perRow)));
+            const first = add([rows[0][0]]);
+            P.tree = PaneTree.leaf(first);
+            // Rows first (stacked, top to bottom), each row's first pane standing for it…
+            const rowHeads = [first];
+            for (let r = 1; r < rows.length; r++) {
+                const id = add([rows[r][0]]);
+                P.tree.split(rowHeads[rowHeads.length - 1], 'y', id, { ratio: 1 / (rows.length - r + 1) });
+                rowHeads.push(id);
+            }
+            // …then each row fans out side by side.
+            rows.forEach((row, r) => fan(rowHeads[r], 'x', row.map((id) => [id])));
+        }
+        const leaves = P.tree.leaves();
+        P.inbox = leaves[leaves.length - 1];
+        this._relayout();
+        this.onPanesChanged?.();
+        return true;
+    }
+
+    /**
+     * The frame a plane desk reads at — the entered viewport. The plane is widthPx × heightPx device
+     * px; one world unit is pxPerUnit device px; a text column is cellPx device px (every member is
+     * scaled so its column is cellPx / pxPerUnit world units). Re-lays the panes when it changes.
+     * @param {{widthPx:number, heightPx:number, pxPerUnit:number, cellPx:number}} f
+     * @returns {boolean} changed
+     */
+    setPlaneFrame(f) {
+        for (const k of ['widthPx', 'heightPx', 'pxPerUnit', 'cellPx']) {
+            if (!(Number.isFinite(f?.[k]) && f[k] > 0)) throw new Error(`Carrel.setPlaneFrame: ${k} must be a positive number (got ${f?.[k]})`);
+        }
+        const cur = this.planeFrame;
+        if (cur && cur.widthPx === f.widthPx && cur.heightPx === f.heightPx && cur.pxPerUnit === f.pxPerUnit && cur.cellPx === f.cellPx) return false;
+        this.planeFrame = { widthPx: f.widthPx, heightPx: f.heightPx, pxPerUnit: f.pxPerUnit, cellPx: f.cellPx };
+        if (this.form === 'plane') this._relayout();
+        return true;
+    }
+
+    /**
+     * The plane a plane desk reads on, in WORLD space: its center, the normal facing the viewer
+     * (the doorway), its up, its size in world units, and its top-left in plane coordinates (world
+     * units from the center, +y up) — the point a plane view snaps to a device-pixel corner.
+     * Null unless the desk is plane form with a frame.
+     * @returns {{center:Object, normal:Object, up:Object, width:number, height:number, origin:{x:number,y:number}}|null}
+     */
+    getPlaneRect() {
+        const f = this.planeFrame;
+        if (this.form !== 'plane' || !f) return null;
+        const W = f.widthPx / f.pxPerUnit, H = f.heightPx / f.pxPerUnit;
+        const R = Math.max(this.radius, 1e-3);
+        this.updateWorldMatrix(true, false);
+        const q = this.getWorldQuaternion(new THREE.Quaternion());
+        return {
+            center: this.localToWorld(new THREE.Vector3(0, H / 2, -R)),
+            normal: new THREE.Vector3(0, 0, 1).applyQuaternion(q).normalize(),
+            up: new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize(),
+            width: W, height: H,
+            origin: { x: -W / 2, y: H / 2 },
+        };
+    }
+
+    /**
+     * Every pane of a plane desk: its id, rect (device px from the plane's top-left, +y DOWN,
+     * whole pixels, gaps taken out), its stack and active member. The pane layout's one reading —
+     * placement, verbs and gates all use it.
+     * @returns {Array<{id:string, rect:{x:number,y:number,w:number,h:number}, stack:string[], active:string|null}>}
+     */
+    paneRects() {
+        const f = this.planeFrame, tree = this.panes.tree;
+        if (!f || !tree || tree.isEmpty()) return [];
+        const g = Math.max(0, Math.round(this.paneGapPx));
+        const half = g / 2;
+        const out = [];
+        for (const [id, r] of tree.rects({ x: 0, y: 0, w: f.widthPx, h: f.heightPx })) {
+            // y-up rect → top-down device px; cut on whole pixels, then take the gap out of every side
+            // (half a gap each, so neighbors meet a whole gap apart and the plane edge keeps half).
+            const left = Math.round(r.x), right = Math.round(r.x + r.w);
+            const top = Math.round(f.heightPx - (r.y + r.h)), bottom = Math.round(f.heightPx - r.y);
+            const x = left + Math.ceil(half), y = top + Math.ceil(half);
+            const w = Math.max(0, right - Math.floor(half) - x), h = Math.max(0, bottom - Math.floor(half) - y);
+            const st = this.panes.stacks.get(id) || { ids: [], active: null };
+            out.push({ id, rect: { x, y, w, h }, stack: [...st.ids], active: st.active });
+        }
+        return out;
     }
 
     /** The ring's seats: 'uniform' contain-fit boxes or 'natural' sizes (see the ctor). */
@@ -635,6 +795,15 @@ export class Carrel extends THREE.Object3D {
         members.forEach((e, i) => { e.slot = i; });
 
         const live = members.filter((e) => e.grid.parent === this && !e._borrowed);
+        if (this.form === 'plane') {
+            this._reconcilePanes(members);
+            if (this.planeFrame) {
+                this._layoutPlane(live);
+                this._refreshChrome();
+                this._notifyFootprint();
+                return;
+            }
+        }
         const boxW = this.boxH * this.boxAspect;
         const boxH = this.boxH;
         const gap = this._gap;
@@ -742,6 +911,205 @@ export class Carrel extends THREE.Object3D {
         this._ringR = grid ? Math.max(this.radius, 1e-3) : R;
         this._refreshChrome();
         this._notifyFootprint();
+    }
+
+    // ===================== plane form =====================
+
+    /**
+     * Seat new members in panes: a member not in any pane joins the INBOX pane as its active tab
+     * (a first member founds the tree). Members already placed keep their pane — a join never
+     * changes another pane's rect. A stack may name members not seated YET (a restored layout
+     * waiting for its windows): they hold their place. Members leave stacks only by leaving the
+     * desk (_unstack). @private
+     */
+    _reconcilePanes(members) {
+        const P = this.panes;
+        const placed = new Set([...P.stacks.values()].flatMap((st) => st.ids));
+        let changed = false;
+        for (const e of members) {
+            if (placed.has(e.id)) continue;
+            if (!P.tree || P.tree.isEmpty()) {
+                const id = this._newPaneId();
+                P.tree = PaneTree.leaf(id);
+                P.stacks.set(id, { ids: [], active: null });
+                P.inbox = id;
+            }
+            if (!P.inbox || !P.stacks.has(P.inbox)) P.inbox = P.tree.leaves()[P.tree.leaves().length - 1];
+            const st = P.stacks.get(P.inbox);
+            st.ids.push(e.id);
+            st.active = e.id;
+            changed = true;
+        }
+        if (changed) this.onPanesChanged?.();
+    }
+
+    /** A member leaving the desk leaves its pane's stack (the pane stays). @private */
+    _unstack(id) {
+        let changed = false;
+        for (const st of this.panes.stacks.values()) {
+            const i = st.ids.indexOf(id);
+            if (i < 0) continue;
+            st.ids.splice(i, 1);
+            if (st.active === id) st.active = st.ids[st.ids.length - 1] ?? null;
+            changed = true;
+        }
+        if (changed) this.onPanesChanged?.();
+    }
+
+    /**
+     * The pane layout as a plain record (the desk's Panes) — null when it has none.
+     * @returns {{tree:Object, stacks:Array<{id:string, ids:string[], active:string|null}>, inbox:string|null, seq:number}|null}
+     */
+    serializePanes() {
+        const P = this.panes;
+        if (!P.tree || P.tree.isEmpty()) return null;
+        return {
+            tree: P.tree.serialize(),
+            stacks: [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })),
+            inbox: P.inbox, seq: P.seq,
+        };
+    }
+
+    /**
+     * Stand a saved pane layout back up (restore): the tree, every stack — members not seated yet
+     * hold their place — and the inbox. A malformed record throws (a silent fallback would lay the
+     * desk out as something it never was).
+     * @param {ReturnType<Carrel['serializePanes']>} rec
+     */
+    applyPanes(rec) {
+        if (!rec || typeof rec !== 'object' || !rec.tree || !Array.isArray(rec.stacks)) {
+            throw new Error(`Carrel.applyPanes(${this.carrelName}): malformed record ${JSON.stringify(rec)?.slice(0, 200)}`);
+        }
+        const tree = PaneTree.deserialize(rec.tree);
+        const leaves = new Set(tree.leaves());
+        const stacks = new Map();
+        for (const st of rec.stacks) {
+            if (!leaves.has(st?.id) || !Array.isArray(st.ids)) throw new Error(`Carrel.applyPanes(${this.carrelName}): stack ${JSON.stringify(st)} names no pane of the tree`);
+            stacks.set(st.id, { ids: st.ids.map(String), active: st.active ?? null });
+        }
+        for (const id of leaves) if (!stacks.has(id)) stacks.set(id, { ids: [], active: null });
+        const P = this.panes;
+        P.tree = tree;
+        P.stacks = stacks;
+        P.inbox = leaves.has(rec.inbox) ? rec.inbox : [...leaves].pop();
+        const maxSeq = Math.max(0, ...[...leaves].map((id) => Number(String(id).split(':')[1]) || 0));
+        P.seq = Math.max(Number(rec.seq) || 0, maxSeq);
+        this._relayout();
+    }
+
+    /** @private */
+    _newPaneId() { return `pane:${++this.panes.seq}`; }
+
+    /**
+     * Lay the panes out on the plane and seat each pane's active member in it (the rest of its
+     * stack hidden, still members). The plane is a wall at z=−R facing the doorway, bottom on the
+     * table: world size = frame px / pxPerUnit. Each member is scaled so its text column is the
+     * plane's (cellPx / pxPerUnit world units) and placed so its cell-grid origin (pixelOrigin, else
+     * its top-left) sits at its pane's top-left — whole device pixels when the plane is read square.
+     * A member that can reflow (a CodeGrid: setLayout + setFrameRows) takes the pane's columns and
+     * rows; foreign content (a terminal) keeps its size. A member without cell metrics (a book) is
+     * contain-fit into its pane. @private
+     */
+    _layoutPlane(live) {
+        const f = this.planeFrame;
+        const k = f.pxPerUnit;
+        const W = f.widthPx / k, H = f.heightPx / k;
+        const R = Math.max(this.radius, 1e-3);
+        const cw = f.cellPx / k;                     // the plane's one column, world units
+        const byId = new Map(live.map((e) => [e.id, e]));
+        let deepest = 0;
+        for (const pane of this.paneRects()) {
+            // The active tab when it's seated, else the newest seated member of the stack.
+            const front = byId.has(pane.active) ? pane.active : [...pane.stack].reverse().find((id) => byId.has(id));
+            for (const id of pane.stack) {
+                const e = byId.get(id);
+                if (!e) continue;
+                const shown = id === front;
+                if (e.grid.visible !== shown) e.grid.visible = shown;
+                if (!shown) continue;
+                const r = pane.rect;
+                const colW = e.grid.metrics?.charWidth;
+                let m, ox, oy, headPx = 0;
+                if (Number.isFinite(colW) && colW > 0) {
+                    m = cw / colW;
+                    headPx = this._reflowToPane(e, r, f);
+                    const po = e.grid.pixelOrigin?.() ?? (() => { const lb = e.grid.getLocalBounds?.(); return lb && !lb.isEmpty() ? { x: lb.min.x, y: lb.max.y } : { x: 0, y: 0 }; })();
+                    ox = po.x; oy = po.y;
+                } else {
+                    const ext = this._extentOf(e);
+                    m = Math.min((r.w / k) / ext.w, (r.h / k) / ext.h);
+                    ox = ext.cx - ext.w / 2; oy = ext.cy + ext.h / 2;
+                }
+                // Pane top-left in desk-local coordinates (plane top-left = (−W/2, H)).
+                // A header (a grid's filename) sits in whole rows above row 0, so the row phase holds.
+                const tx = -W / 2 + r.x / k - ox * m;
+                const ty = H - (r.y + headPx) / k - oy * m;
+                this._placePaneMember(e, tx, ty, -R, m);
+                deepest = Math.max(deepest, (this._extentOf(e)?.d ?? 0) * m);
+            }
+        }
+        this._rows = 1;
+        this._layoutW = W;
+        this._layoutD = deepest;
+        this._stackH = H;
+        this._ringR = R;
+    }
+
+    /** Seat a pane's member exactly (facing the doorway), animating only real motion. @private */
+    _placePaneMember(e, tx, ty, tz, m) {
+        e.quatTarget.identity();
+        const s = e._seat;
+        const eps = 1e-6 * Math.max(1, Math.abs(tx), Math.abs(ty), Math.abs(tz));
+        if (s && Math.abs(s.x - tx) < eps && Math.abs(s.y - ty) < eps && Math.abs(s.z - tz) < eps && Math.abs(s.eff - m) < m * 1e-9) return;
+        e._seat = { x: tx, y: ty, z: tz, eff: m };
+        this.animator.animateTo(e.grid, 'position', { x: tx, y: ty, z: tz }, { duration: this.animDur });
+        this.animator.animateTo(e.grid, 'scale', m / this._userOf(e), { duration: this.animDur });
+    }
+
+    /**
+     * A reflowable member takes its pane's columns and rows (wrap at the pane width, a frame of the
+     * rows that fit). Its own header (a grid's filename) steps aside — a pane's title is the
+     * overlay's, and a header is a separate field no pane clips. Its own view is kept to hand back
+     * (_unpane).
+     * @returns {number} the header's height in device px (whole rows) — 0 without one @private
+     */
+    _reflowToPane(e, r, f) {
+        const g = e.grid;
+        const mt = g.metrics;
+        const rowPx = f.cellPx * (mt.lineSpacing / mt.charWidth);
+        if (typeof g.setLayout !== 'function' || typeof g.setFrameRows !== 'function') {
+            return (g.config?.showFilename && g.filename) ? 2 * rowPx : 0;
+        }
+        const cols = Math.max(8, Math.floor(r.w / f.cellPx));
+        const rows = Math.max(1, Math.floor(r.h / rowPx));
+        if (!e._paneSaved) {
+            e._paneSaved = { wrapWidth: g.getLayout?.()?.wrapWidth ?? 0, frameRows: g.getFrameRows?.() ?? 0, showFilename: g.config?.showFilename !== false };
+            if (e._paneSaved.showFilename && typeof g.showFilename === 'function') g.showFilename(false);
+            // The member's OWN view while the pane dresses it — what a save records for it (the pane's
+            // columns and rows are the desk's presentation, never the grid's).
+            g.userData.paneOwn = e._paneSaved;
+        }
+        const p = e._paneFit;
+        if (p && p.cols === cols && p.rows === rows) return 0;
+        e._paneFit = { cols, rows };
+        Promise.resolve(g.setLayout({ wrapWidth: cols })).then(() => g.setFrameRows(rows)).catch((err) => {
+            console.warn(`[carrel] ${this.carrelName}: reflowing '${e.id}' to its pane (${cols}×${rows}) failed: ${err?.message ?? err}`);
+        });
+        return 0;
+    }
+
+    /** Hand a member its own layout and visibility back as it leaves the plane. @private */
+    _unpane(e) {
+        if (e.grid && e.grid.visible === false) e.grid.visible = true;
+        const saved = e._paneSaved;
+        e._paneSaved = null;
+        e._paneFit = null;
+        if (e.grid?.userData) delete e.grid.userData.paneOwn;
+        if (!saved || !e.grid) return;
+        if (saved.showFilename && typeof e.grid.showFilename === 'function') e.grid.showFilename(true);
+        Promise.resolve(e.grid.setLayout?.({ wrapWidth: saved.wrapWidth })).then(() => e.grid.setFrameRows?.(saved.frameRows)).catch((err) => {
+            console.warn(`[carrel] ${this.carrelName}: giving '${e.id}' its layout back failed: ${err?.message ?? err}`);
+        });
     }
 
     /** Tell footprint listeners when getLocalBounds moved (an outer desk re-seats). */
@@ -890,6 +1258,15 @@ export class Carrel extends THREE.Object3D {
      * @returns {Object} THREE.Box3
      */
     getLocalBounds(target = new THREE.Box3()) {
+        const f = this.planeFrame;
+        if (this.form === 'plane' && f) {
+            // A plane desk's airspace is its plane: the wall, its depth, the table under it.
+            const W = f.widthPx / f.pxPerUnit, H = f.heightPx / f.pxPerUnit;
+            const R = Math.max(this.radius, 1e-3), d = Math.max(this._layoutD ?? 0, 1);
+            target.min.set(-W / 2, 0, -R - d);
+            target.max.set(W / 2, H, -R + d);
+            return target;
+        }
         const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;
         const cz = this._shadow.position.z;
         target.min.set(-hx, 0, cz - hz);

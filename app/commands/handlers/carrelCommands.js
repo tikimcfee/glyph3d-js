@@ -33,6 +33,8 @@
 import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { getSetting } from '../../client/settings.js';
+import { enterPlaneView, atlasColumnWorld } from './planeCommands.js';
+import { wirePanes } from '../../client/carrelPanes.js';
 import { DESK_KNOBS, tuneOf, applyDeskTune, tuneDesk, readDesk, forgetTune } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -117,6 +119,7 @@ export function buildCarrel(ctx, name, { radius, managed = false, nested = false
     if (Number.isFinite(radius)) born.radius = radius;
     const carrel = new Carrel({ name, ...born, ...(form || {}) });
     applyDeskTune(carrel, tuneOf(ctx, carrel.name));
+    wirePanes(ctx, carrel);
 
     if (nested) {
         // Seated at another desk by its owner (a gomuxai team inside the hub) — the
@@ -161,6 +164,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
     if (map.has(saved.name)) return map.get(saved.name);
     const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
     applyDeskTune(carrel, tuneOf(ctx, carrel.name));
+    wirePanes(ctx, carrel);
     // A world-MANAGED desk re-registers as its grouping — the layout owns its pose
     // (saved pose ignored).
     const managed = !!saved.managed && !!ctx.world;
@@ -251,6 +255,32 @@ function autoShelf(ctx, map) {
         seen.add(lane.groupId);
         ctx.holding.seat({ id: lane.groupId, grid: lane.book }, shelf);
     }
+}
+
+/**
+ * Enter a PLANE desk: its frame is the viewport (device px) at the plane's text column, its panes
+ * lay out for it, and the camera eases into the plane view squared to its wall, the plane's
+ * top-left on a device-pixel corner. The desk's members are already seated where they read.
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx @param {Object} carrel
+ */
+function enterPlaneDesk(ctx, carrel) {
+    const cc = ctx.cameraController;
+    const vp = cc.planeViewport();
+    const cellPx = Number(getSetting('plane.cellPx'));
+    const pxPerUnit = cellPx / atlasColumnWorld(ctx);
+    carrel.setPlaneFrame({ widthPx: vp.width, heightPx: vp.height, pxPerUnit, cellPx });
+    const rect = carrel.getPlaneRect();
+    ctx.activeCarrel = carrel.carrelName;
+    const s = enterPlaneView(ctx, `carrel:${carrel.carrelName}`, {
+        center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit, depth: 2 * Math.max(carrel._layoutD ?? 0, 1),
+        aim: { x: 0, y: 0 }, origin: rect.origin,
+    });
+    ctx.enteredCarrel = carrel.carrelName;
+    const panes = carrel.paneRects();
+    return {
+        text: `OK: entered '${carrel.carrelName}' — ${panes.length} pane(s) on ${vp.width}×${vp.height} px at ${cellPx} px/column`,
+        data: { name: carrel.carrelName, form: 'plane', panes, ...s },
+    };
 }
 
 /**
@@ -352,6 +382,7 @@ export default function registerCarrelCommands(router) {
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const cc = ctx.cameraController;
         if (!cc?.flyTo) return { text: 'ERR: no camera controller', data: null };
+        if (carrel.form === 'plane') return enterPlaneDesk(ctx, carrel);
         ctx.activeCarrel = carrel.carrelName;
         // Stand at the desk's center (its table origin), eyes at its members' mean height,
         // facing its back (local −z): a ring's arc centers ahead, a grid's wall stands ahead.
@@ -371,6 +402,36 @@ export default function registerCarrelCommands(router) {
         cc.flyTo({ position: { x: eye.x, y: eye.y, z: eye.z }, pitch: 0, yaw }, { ms: 600 });
         return { text: `OK: standing in carrel '${carrel.carrelName}'`, data: { name: carrel.carrelName, position: { x: eye.x, y: eye.y, z: eye.z }, yaw } };
     }, { description: "Stand the camera at a carrel's center, facing its back — a ring's members are a turn away", usage: '[name]', returns: '{ name, position, yaw }' });
+
+    router.register('carrel.leave', (_args, ctx) => {
+        const cc = ctx.cameraController;
+        const was = ctx.enteredCarrel ?? null;
+        if (!was) return { text: 'ERR: not in a carrel (carrel.enter <name> on a plane desk)', data: null };
+        if (!cc?.leavePlane?.({ ms: Number(getSetting('plane.leaveMs')) })) return { text: `ERR: '${was}' isn't entered as a plane`, data: null };
+        return { text: `OK: leaving carrel '${was}'`, data: { name: was } };
+    }, { description: 'Ease back out of the entered plane desk to exactly where you entered from', returns: '{ name }' });
+
+    router.register('carrel.layout', (args, ctx) => {
+        const name = String(args[0] ?? '');
+        const carrel = findCarrel(ctx, args[1] ?? ctx.enteredCarrel ?? ctx.activeCarrel);
+        if (!carrel) return { text: `ERR: no carrel '${args[1] ?? ''}'`, data: null };
+        if (carrel.form !== 'plane') return { text: `ERR: '${carrel.carrelName}' is a space desk (carrel.set ${carrel.carrelName} form plane)`, data: null };
+        if (!carrel.layoutPanes(name)) return { text: 'ERR: usage: carrel.layout <even|main|stack> [carrel]', data: null };
+        return { text: `OK: '${carrel.carrelName}' laid out ${name} — ${carrel.paneRects().length} pane(s)`, data: { name: carrel.carrelName, layout: name, panes: carrel.paneRects() } };
+    }, { description: "Re-lay a plane desk's panes: even (rows side by side), main (one wide + a stack), stack (one pane of tabs)", usage: '<even|main|stack> [carrel]', returns: '{ name, layout, panes }' });
+
+    router.register('carrel.panes', (args, ctx) => {
+        const carrel = findCarrel(ctx, args[0] ?? ctx.enteredCarrel ?? ctx.activeCarrel);
+        if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
+        if (carrel.form !== 'plane') return { text: `ERR: '${carrel.carrelName}' is a space desk (carrel.set ${carrel.carrelName} form plane)`, data: null };
+        const panes = carrel.paneRects();
+        const f = carrel.planeFrame;
+        const lines = panes.map((p) => `  ${p.id}  ${p.rect.w}×${p.rect.h}+${p.rect.x}+${p.rect.y}  ${p.stack.map((id) => (id === p.active ? `[${id}]` : id)).join(' ') || '(empty)'}${p.id === carrel.panes.inbox ? '  ← inbox' : ''}`);
+        return {
+            text: `OK: '${carrel.carrelName}' ${f ? `${f.widthPx}×${f.heightPx} px at ${f.cellPx} px/column` : '(no frame yet — carrel.enter sets it)'}\n${lines.join('\n') || '  (no panes)'}`,
+            data: { name: carrel.carrelName, frame: f, inbox: carrel.panes.inbox, panes },
+        };
+    }, { description: "A plane desk's panes: device-px rects, stacks (active in brackets), the inbox", usage: '[name]', returns: '{ name, frame, inbox, panes:[{id, rect, stack, active}] }' });
 
     router.register('carrel.dissolve', (args, ctx) => {
         const map = carrels(ctx);

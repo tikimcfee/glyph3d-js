@@ -55,6 +55,9 @@ export const COMPONENT_SCHEMA = {
   // An instance's OWN knob values (a desk, a shelf book) — they win over the defaults it was
   // born with; client/tuning.js reads and writes them, SessionStore saves them as `tunings`.
   Tuning:          { table: 'durable', keys: ['tune'] },
+  // A plane desk's pane layout (tree, stacks, inbox) on its `carrel:<name>` surface —
+  // client/carrelPanes.js reads and writes it, SessionStore saves it as `panes`.
+  Panes:           { table: 'durable', keys: ['panes'] },
   // Which agents get a book at all (the `agents:visibility` surface) — client/AgentVisibility.js
   // reads and writes it, SessionStore saves it as `agentVisibility`.
   Visibility:      { table: 'durable', keys: ['hidden'] },

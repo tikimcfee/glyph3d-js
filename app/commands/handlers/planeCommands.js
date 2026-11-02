@@ -37,9 +37,45 @@ function columnWorldWidth(ctx, obj) {
     const sx = Math.abs(obj.getWorldScale?.(new THREE.Vector3())?.x ?? 1);
     const own = obj.metrics?.charWidth;
     if (Number.isFinite(own) && own > 0) return own * sx;
+    return atlasColumnWorld(ctx) * sx;
+}
+
+/**
+ * The atlas's text column at the default glyph world scale, in world units — the one column a
+ * plane desk normalizes its members to.
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx @returns {number}
+ */
+export function atlasColumnWorld(ctx) {
     const cs = ctx.atlas?.getCharSize?.();
     if (!cs?.width) throw new Error('plane: no atlas char size to scale by');
-    return cs.width * Number(getSetting('plane.defaultWorldScale')) * sx;
+    return cs.width * Number(getSetting('plane.defaultWorldScale'));
+}
+
+/**
+ * Enter a plane view — the ONE path (plane.enter on any surface, carrel.enter on a plane desk).
+ * Space-layer chrome (the tree's ownership traces) steps aside for exactly the view's life — the
+ * camera says when it ends, however it ends (a leave, a fly, a restore) — and the view's target
+ * is recorded for the verbs that report it.
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
+ * @param {string} target  the registry id read (`carrel:<name>` for a desk)
+ * @param {{center:Object, normal:Object, up:Object, pxPerUnit:number, depth:number,
+ *          aim:{x:number,y:number}, origin:{x:number,y:number}}} p
+ * @returns {Object} the camera's planeState
+ */
+export function enterPlaneView(ctx, target, p) {
+    const cc = ctx.cameraController;
+    cc.onPlaneChange = (on) => {
+        ctx.contentTreeArrows?.setSuppressed?.(on);
+        if (!on) { ctx.planeTarget = null; ctx.enteredCarrel = null; }
+    };
+    cc.enterPlane({
+        center: p.center, normal: p.normal, up: p.up,
+        pxPerUnit: p.pxPerUnit, fovDeg: Number(getSetting('plane.fov')),
+        front: p.depth / 2 + Number(getSetting('plane.front')), back: p.depth / 2 + Number(getSetting('plane.back')),
+        aim: p.aim, origin: p.origin,
+    }, { ms: Number(getSetting('plane.enterMs')) });
+    ctx.planeTarget = target;
+    return cc.planeState();
 }
 
 /** The aim y that opens a surface of `height` world units at its top, or centered if it fits. */
@@ -76,23 +112,13 @@ export default function registerPlaneCommands(router) {
             const right = new THREE.Vector3().crossVectors(plane.up, plane.normal).normalize();
             origin = { x: d.dot(right), y: d.dot(plane.up) };
         }
-        // Space-layer chrome (the tree's ownership traces) steps aside for exactly the plane view's
-        // life — the camera says when it ends, however it ends (a leave, a fly, a restore).
-        cc.onPlaneChange = (on) => {
-            ctx.contentTreeArrows?.setSuppressed?.(on);
-            if (!on) ctx.planeTarget = null;
-        };
-        cc.enterPlane({
-            center: plane.center, normal: plane.normal, up: plane.up,
-            pxPerUnit, fovDeg: Number(getSetting('plane.fov')),
-            front: depth / 2 + Number(getSetting('plane.front')), back: depth / 2 + Number(getSetting('plane.back')),
+        const s = enterPlaneView(ctx, t.id, {
+            center: plane.center, normal: plane.normal, up: plane.up, pxPerUnit, depth,
             // A surface taller than the view opens at its top (a page is read from its head), the
             // top edge `plane.topMarginPx` below the view's; a shorter one centers.
             aim: { x: 0, y: openAimY(plane.height, pxPerUnit, vp) },
             origin,
-        }, { ms: Number(getSetting('plane.enterMs')) });
-        ctx.planeTarget = t.id;
-        const s = cc.planeState();
+        });
         return {
             text: `OK: reading '${t.id}' at ${cellPx} device px per column (${s.pxPerUnit.toFixed(4)} device px/unit, fov ${s.fovDeg}°)`,
             data: { target: t.id, cellPx, ...s },

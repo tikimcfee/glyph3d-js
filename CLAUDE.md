@@ -324,6 +324,22 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   starts at the same pixel phase (`tools/layout-cells.test.mjs`; `tools/pixel-check.mjs` measures
   pitch, stem crispness, stillness and advance on a screenshot or the live display). `tools/agent-display.mjs` is a self-healing headless display (real
   GPU) for agents to drive and screenshot while no person has the app open.
+- **Plane desks** (`Carrel` form `plane`, `carrel.set <name> form plane`): a carrel ENTERED as a
+  tiling window manager. It stands in the world exactly as it reads entered — a flat wall at z=−R
+  facing the doorway — and `carrel.enter <name>` sets its frame to the viewport (device px, the
+  plane's `plane.cellPx` column), lays its panes out and eases the camera into the plane view squared
+  to it; `carrel.leave` eases back (a space-form desk keeps today's stand-at-the-center enter). Panes
+  are a PaneTree over pane ids (`Carrel.paneRects()`: whole device-pixel rects, `paneGapPx` apart),
+  each a STACK of members with one active (the rest hidden): a member joining lands in the INBOX
+  pane as its active tab and no other pane moves; a member leaving leaves its stack (its pane stays).
+  Named layouts re-lay them: `carrel.layout even|main|stack`; `carrel.panes` reads them. Each member
+  is scaled so its text column is the plane's and its cell-grid origin (`pixelOrigin`) sits on its
+  pane's top-left; a reflowable one (a CodeGrid) takes the pane's cols × rows and lends its header
+  out (saves keep its OWN frame via `userData.paneOwn`), all handed back when it leaves; a member
+  without cell metrics (a book) is contain-fit. The layout is durable — the model's Panes component
+  on `carrel:<name>` (`app/client/carrelPanes.js`, the snapshot's `panes`, restored beside tunings
+  before desks stand up); a stack naming members not seated yet holds their place. Gate:
+  `tools/carrel-plane.test.mjs`.
 - **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book
   is BORN with — a Settings change never pushes onto a live one. A value set on ONE instance
   (`carrel.set <name> <knob> <v>`, `book.set [id] <knob> <v>`, `book.form`) is its own and wins:
