@@ -133,18 +133,24 @@ function bridgeFor(w, id) {
     desktop(w, 'desk-1');
     await quiet(() => agentSurfacesOf(w.ctx).claim(ME, 'desk-1', 'frame'));
     await w.as(ME)('terminal.create made-by-me 40 10');
-    // The saved model → a fresh page: surfaces' facts, and the desk (a plain carrel: SessionStore restores it).
-    const saved = w.ctx.workspace.listSurfaces().map((s) => ({ id: s.id, kind: s.kind, view: JSON.parse(JSON.stringify(s.view)) }));
+    // What a session SAVES → a fresh page: the residences (Holding's carrel membership — SessionStore's
+    // carrelMembers) and the owners (AgentSurfaces.serialize); nothing else of the surfaces' views.
+    const members = w.ctx.workspace.listSurfaces().filter((s) => s.view?.carrel).map((s) => ({ id: s.id, kind: s.kind, carrel: { ...s.view.carrel } }));
+    const owners = agentSurfacesOf(w.ctx).serialize();
+    ok(owners.length === 2 && owners.every((o) => o.owner === ME), 'serialize: both surfaces\' owners');
     const ws2 = new WorkspaceModel();
-    for (const s of saved) ws2.setSurfaceView(s.id, s.kind, s.view);
+    for (const m of members) ws2.setSurfaceView(m.id, m.kind, { carrel: m.carrel });
     const r = makeWorld(ws2);
-    agentSurfacesOf(r.ctx);   // made at boot (its registry listener seats what re-adopts)
+    agentSurfacesOf(r.ctx).restore(owners);   // the restore's first stage
+    ok(agentSurfacesOf(r.ctx).ownsAny(ME), 'restored: the agent owns its surfaces again before they re-adopt (its desk can stand)');
     await quiet(() => buildCarrel(r.ctx, ownerDesk(ME), { managed: true, form: { mode: 'plane' } }));
     desktop(r, 'desk-1');                                    // the desktop re-adopts
     await r.anon('terminal.create made-by-me 40 10');        // the terminal's adapter re-creates it (anonymous)
     r.ctx.holding.reconcile();
     ok(holderOf(r, 'desk-1') === ownerDesk(ME) && holderOf(r, 'made-by-me') === ownerDesk(ME), 'after a reload both surfaces are back at the agent\'s desk');
     ok([...r.ctx.carrels.keys()].filter((n) => n === ownerDesk(ME)).length === 1 && r.ctx.carrels.size === 1, 'one desk — no second one set down');
+    ok(r.ctx.registry.get('desk-1').meta.agent === ME && r.ctx.registry.get('made-by-me').meta.agent === ME
+        && (await r.anon(`agent.surfaces ${ME}`)).data.surfaces.length === 2, 'and they are still the agent\'s (meta, agent.surfaces)');
 }
 
 // ── 4. its owner ends ────────────────────────────────────────────────────────────────────────

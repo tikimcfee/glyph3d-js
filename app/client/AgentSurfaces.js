@@ -13,6 +13,8 @@ import { buildCarrel } from '../commands/handlers/carrelCommands.js';
  * adapter, a different fact). An anonymous caller's surfaces aren't claimed — they behave as they
  * always did.
  *
+ * A session saves `serialize()` (the owners) beside the residences; `restore` puts them back first.
+ *
  * WHERE IT LIVES: its owner's plane desk, `gomux/<owner>` — the gomuxai hub's team desk for that
  * agent (GomuxHub's ownsDesk counts owned surfaces, read from the model, so a reload rebuilds the
  * desk before the surfaces re-adopt), or, for a caller the hub doesn't know, a plane desk of that
@@ -126,10 +128,14 @@ export default class AgentSurfaces {
         try {
             for (const s of this.ctx.workspace?.listSurfaces?.() || []) {
                 const owner = s.view?.owner;
-                if (!owner || s.view?.carrel) continue;            // unowned, or it has a residence (Holding brings it there)
+                if (!owner) continue;
                 const entry = reg.get(s.id);
-                if (!entry || holding.holderOf(s.id)) continue;     // not live yet, or held (docked, seated)
-                if (entry.meta?.agent !== owner) reg.setMeta?.(s.id, { agent: owner, ownerEnded: !!s.view.ownerEnded });
+                if (!entry) continue;                               // not live yet (it re-adopts later)
+                // Every live owned surface wears its owner (a re-adopted one registers without it).
+                if (entry.meta?.agent !== owner || !!entry.meta?.ownerEnded !== !!s.view.ownerEnded) {
+                    reg.setMeta?.(s.id, { agent: owner, ownerEnded: !!s.view.ownerEnded });
+                }
+                if (s.view?.carrel || holding.holderOf(s.id)) continue;   // it has a residence (Holding brings it there), or it's held
                 const desk = this._deskFor(owner);
                 if (!desk) continue;
                 if (holding.seat({ id: entry.id, grid: entry.grid }, desk) === 'seated') {
@@ -154,6 +160,27 @@ export default class AgentSurfaces {
             return null;        // the hub seats the agent's book first; the next registry change seats these
         }
         return buildCarrel(this.ctx, name, { managed: true, form: { mode: 'plane' } });
+    }
+
+    /** What a session keeps: each owned surface's owner (and whether it ended). Saved apart from the
+     *  residence (Holding's carrel membership) — both come back before the surfaces re-adopt. */
+    serialize() {
+        const out = [];
+        for (const s of this.ctx.workspace?.listSurfaces?.() || []) {
+            if (s.view?.owner) out.push({ id: s.id, kind: s.kind, owner: s.view.owner, ownerEnded: !!s.view.ownerEnded });
+        }
+        return out;
+    }
+
+    /** Put saved owners back into the model (a restore's first stage: GomuxHub's ownsDesk reads them, so
+     *  an agent's desk stands again before its surfaces re-adopt). @param {Array<{id:string, kind?:string, owner:string, ownerEnded?:boolean}>} list */
+    restore(list) {
+        for (const x of Array.isArray(list) ? list : []) {
+            if (x && typeof x.id === 'string' && typeof x.owner === 'string' && x.owner) {
+                this.ctx.workspace?.setSurfaceView?.(x.id, x.kind, { owner: x.owner, ownerEnded: !!x.ownerEnded });
+            }
+        }
+        this.converge();
     }
 
     dispose() {

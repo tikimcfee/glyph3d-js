@@ -67,6 +67,7 @@ import { laneForSession } from './SessionBooks.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
 import { beginLoad } from '../commands/loadTrace.js';
 import { layerStacksOf } from './LayerStacks.js';
+import { agentSurfacesOf } from './AgentSurfaces.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
 
 const SESSION_URI = 'file:///.glyph3d-session.json';
@@ -376,6 +377,9 @@ export default class SessionStore {
       agentScrollViews,
       // Depth layers shown behind members (slice 10a): which members, how deep, the layer at z = 0.
       layerStacks: this.ctx.layerStacks?.serialize?.() ?? [],
+      // Agent-owned surfaces (AgentSurfaces): who owns each terminal / desktop an agent made — their
+      // residences ride carrelMembers; the owners ride here.
+      agentSurfaces: agentSurfacesOf(this.ctx).serialize(),
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -521,10 +525,13 @@ export default class SessionStore {
         // they materialize instead of flying to a desk that arrived late.
         ['carrels', () => {
           this._restoreTunings(snap);
+          // Owners before any surface or book: GomuxHub's ownsDesk reads them, so an agent's desk stands
+          // again before its surfaces re-adopt.
+          agentSurfacesOf(this.ctx).restore(snap.agentSurfaces);
           restorePanes(this.ctx, snap.panes);
           this._restoreCarrels(snap);
           restoreEntered(this.ctx, snap.entered, (cmd) => this.router.execute(cmd), Number(getSetting('plane.restoreWaitMs')));
-        }, ['tunings', 'panes', 'carrels', 'entered']],
+        }, ['tunings', 'panes', 'carrels', 'entered', 'agentSurfaces']],
         // The hidden agents BEFORE any book: the hub and the agents desk wait on this to open.
         ['visibility', () => {
           this.ctx.agentVisibility?.restore(snap.agentVisibility);
