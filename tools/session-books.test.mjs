@@ -744,5 +744,40 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     b.hub.dispose();
 }
 
+// ── 11. a book seated at a desk of your own STAYS — the trees never re-stamp a residence ──
+{
+    const { buildCarrel } = await import('../app/commands/handlers/carrelCommands.js');
+    const gid = 'agent:book:L1-aaaa';
+    // (a) live: the agents desk's re-pushes leave it where you put it; carrel.release hands it back.
+    const w = makeWorld();
+    w.ctx.sessionDesk = new SessionDesk(w.ctx, w.ctx.sessionProvider, w.sb);
+    const L1 = w.relay.add(session('L1-aaaa', { status: 'idle' }), [say(0, 'main')]);
+    w.relay.list([L1]);
+    await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
+    ok(holderName(w, 'L1-aaaa') === AGENTS_DESK, 'the agents desk seats its book');
+    const mine = buildCarrel(w.ctx, 'depth-probe');
+    ok(w.ctx.holding.seat({ id: gid, grid: w.books.lanes.get('L1-aaaa').book }, mine) === 'seated', 'seated at a desk of your own');
+    w.relay.list([session('L1-aaaa', { status: 'processing', title: 'renamed' })]);   // what the desk shows changed: it re-lays
+    ok(holderName(w, 'L1-aaaa') === 'depth-probe', 'a re-push of the agents desk leaves it at your desk');
+    eq(w.ctx.workspace.getSurface(gid)?.view?.carrel?.name, 'depth-probe', 'its residence stands');
+    w.ctx.holding.unseat(gid);   // carrel.release
+    await Promise.resolve();
+    ok(holderName(w, 'L1-aaaa') === AGENTS_DESK, 'carrel.release hands it back to the agents desk');
+    // (b) a reload: its residence names your desk before that desk stands; the book opens first.
+    const r = makeWorld();
+    r.ctx.workspace.setSurfaceView(gid, 'agent', { carrel: { name: 'depth-probe', order: 0 } });
+    r.ctx.sessionDesk = new SessionDesk(r.ctx, r.ctx.sessionProvider, r.sb);
+    const R1 = r.relay.add(session('L1-aaaa', { status: 'idle' }), [say(0, 'main')]);
+    r.relay.list([R1]);
+    await Promise.all([...r.sb.streams.values()].map((s) => s.opening));
+    ok(holderName(r, 'L1-aaaa') === null, 'opened before its own desk stands, the tree leaves it loose (not reclaimed)');
+    eq(r.ctx.workspace.getSurface(gid)?.view?.carrel?.name, 'depth-probe', 'and never re-stamps its residence');
+    buildCarrel(r.ctx, 'depth-probe');
+    r.ctx.holding.reconcile();
+    ok(holderName(r, 'L1-aaaa') === 'depth-probe', 'its desk stands back up: Holding seats it there');
+    r.relay.list([session('L1-aaaa', { status: 'processing', title: 'renamed' })]);
+    ok(holderName(r, 'L1-aaaa') === 'depth-probe', 'and it stays through the next re-push');
+}
+
 console.log(`session-books: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

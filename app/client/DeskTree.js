@@ -22,7 +22,12 @@ import { getSetting } from './settings.js';
  * Every desk the tree builds is `derived` — rebuilt from its owner's data every boot, never
  * saved (each keeps the values set on it by hand: those persist by desk name). A book the
  * tree seated stays the tree's to move when the tree changes; one taken elsewhere (docked,
- * dragged, seated at a desk of your own) is yours, and the tree leaves it alone.
+ * dragged, seated at a desk of your own) is yours, and the tree leaves it alone. That holds
+ * across a reload too: a book whose RESIDENCE (Holding's durable `view.carrel` fact) names a
+ * desk that isn't a tree's is never seated by the tree — not even while that desk is still
+ * standing back up (Holding seats it there when it does) — the rule per-instance knobs follow:
+ * what's set on one instance is its own. `carrel.release` clears the residence; the tree then
+ * seats the book again (watchCloses hears the release).
  *
  * @typedef {Object} DeskNode
  * @property {string} id        the node's identity (a gomuxai name, a session id)
@@ -72,6 +77,12 @@ export default class DeskTree {
      */
     layout(nodes) {
         if (!this.ctx.carrels || !this.ctx.holding) return;
+        this._laying = true;
+        try { this._layout(nodes); } finally { this._laying = false; }
+    }
+
+    /** layout's body (a seat inside it writes the model — watchCloses waits it out). @private */
+    _layout(nodes) {
         const ids = new Set(nodes.map((n) => n.id));
         const kids = new Map();
         for (const n of nodes) {
@@ -82,6 +93,7 @@ export default class DeskTree {
         const hasTeam = (id) => (kids.get(id) || []).some((k) => k.book || kids.has(k.id))
             || (!!nodes.find((n) => n.id === id)?.book && this._ownsDesk(id));
         const books = this.ctx.agentBooks?.lanes;
+        this._nodes = nodes;
         for (const id of [...this.seated.keys()]) if (!books?.has(id)) this.seated.delete(id);
         const teams = new Set(nodes.filter((n) => hasTeam(n.id)).map((n) => this.teamDesk(n.id)));
         for (const d of this.desks()) if (d.carrelName !== this.hub && !teams.has(d.carrelName)) this._retire(d);
@@ -147,6 +159,17 @@ export default class DeskTree {
         desk.setTitle(t);   // re-place + re-measure the footprint
     }
 
+    /** Whether a desk name is a tree's (this one's hub or team desks, or any derived desk standing). @private */
+    _treeDesk(name) {
+        return name === this.hub || name.startsWith(`${this.hub}/`) || !!this.ctx.carrels?.get(name)?.derived;
+    }
+
+    /** The residence a book claims at a desk that isn't a tree's (Holding's view.carrel), or null. @private */
+    _ownResidence(groupId) {
+        const claim = this.ctx.workspace?.getSurface?.(groupId)?.view?.carrel;
+        return claim?.name && !this._treeDesk(claim.name) ? claim : null;
+    }
+
     /** Seat a book at a desk — unless it isn't the tree's to move any more. @private */
     _seatBook(desk, laneId, order) {
         const lane = this.ctx.agentBooks?.lanes.get(laneId);
@@ -155,8 +178,9 @@ export default class DeskTree {
         const holder = holding.holderOf(lane.groupId);
         if (holder === desk) { this.seated.set(laneId, desk.carrelName); return; }
         // The tree's to move while it sits at a tree-built desk (or nowhere yet); docked,
-        // dragged, or seated at your own desk, it's yours.
-        if ((holder && !holder.derived) || lane.pinned) return;
+        // dragged, or seated at your own desk, it's yours — and so is one whose residence is
+        // your desk while that desk stands back up after a reload.
+        if ((holder && !holder.derived) || lane.pinned || this._ownResidence(lane.groupId)) return;
         if (holding.seat({ id: lane.groupId, grid: lane.book }, desk, { order }) === 'seated') this.seated.set(laneId, desk.carrelName);
     }
 
@@ -175,14 +199,32 @@ export default class DeskTree {
     }
 
     /**
-     * Re-seat when a book the tree seated closes (agent.clear, the panel's ✕) — the owners'
-     * own pushes don't announce that. @param {() => void} relayout @returns {() => void} unsubscribe
+     * Re-seat when a book the tree seated closes (agent.clear, the panel's ✕), or one is handed
+     * back to the tree (carrel.release) — the owners' own pushes don't announce either.
+     * @param {() => void} relayout @returns {() => void} unsubscribe
      */
     watchCloses(relayout) {
-        return this.ctx.agentBooks?.onChange?.(() => {
+        const offBooks = this.ctx.agentBooks?.onChange?.(() => {
             const lanes = this.ctx.agentBooks?.lanes;
             for (const id of this.seated.keys()) if (!lanes?.has(id)) { relayout(); return; }
         }) ?? (() => {});
+        // A book handed back (carrel.release clears its residence): loose, unpinned, claimed by
+        // no desk of yours — the tree's to seat again.
+        // Checked once the change settles (a release clears the residence before the desk lets go).
+        let queued = false;
+        const offModel = this.ctx.workspace?.on?.('change:surfaces', () => {
+            if (this._laying || queued) return;
+            queued = true;
+            queueMicrotask(() => {
+                queued = false;
+                const lanes = this.ctx.agentBooks?.lanes;
+                for (const n of this._nodes || []) {
+                    const lane = n.book && lanes?.get(n.book);
+                    if (lane && !lane.pinned && !this.ctx.holding?.holderOf(lane.groupId) && !this._ownResidence(lane.groupId)) { relayout(); return; }
+                }
+            });
+        }) ?? (() => {});
+        return () => { offBooks(); offModel(); };
     }
 
     /** Seat a team desk inside its parent desk (desks aren't cargo — the tree holds them). @private */
