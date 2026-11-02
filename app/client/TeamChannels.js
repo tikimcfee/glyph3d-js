@@ -12,7 +12,7 @@ import { getSetting } from './settings.js';
  * messages are the PROMPT records the members' books already parsed (AgentBooks: the window and its
  * older / newer buffers — no second read) whose origin says someone sent them: another agent
  * (`peer`, a held `delivered` message) or the person (`human`, `queued`). Each is a block: a header
- * row `from → to · HH:MM:SS` in the sender's hue (Deixis.callerHue — the hue its points draw in),
+ * row `from → to · HH:MM:SS` (the display's local time; the records keep their UTC ISO stamps) in the sender's hue (Deixis.callerHue — the hue its points draw in),
  * then the message's text, indented, wrapped by the layout's own cell rule (wrapCells) — shown as
  * written (nothing dropped: a `[from NAME@HOST]` prefix stays). The recipient is the book's agent;
  * the sender is the text's `[from NAME@HOST]` prefix when it carries one, else the person for a
@@ -33,6 +33,15 @@ export const PERSON = 'you';
 const PREAMBLE = String.raw`^(?:\s*(?:A message arrived while you were working:|<pasted_content[^>]*>))*\s*`;
 const SENDER = new RegExp(PREAMBLE + String.raw`\[from ([^\]@\s]+)(?:@[^\]\s]+)?\]`);
 const PERSON_PREFIX = new RegExp(PREAMBLE + String.raw`\[from a (?:person|Claude session) on [^\]]+\]`);
+
+/**
+ * A message's time as the display's wall clock, `HH:MM:SS` in the browser's own zone (a record's `ts`
+ * is UTC ISO; it stays so). @param {number} ms epoch ms @returns {string}
+ */
+export function localClock(ms) {
+    const d = new Date(ms), two = (n) => String(n).padStart(2, '0');
+    return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
 
 /** The registry id of a team's channel. @param {string} team */
 export const channelId = (team) => `channel:${team}`;
@@ -101,7 +110,7 @@ export default class TeamChannels {
     _block(doc, m) {
         const cols = doc.cfg.cols, ind = 2;
         const hue = this._hue(m.from), toHue = this._hue(m.to), dim = { r: 0.55, g: 0.59, b: 0.66 };
-        const time = m.ts ? new Date(m.ts).toISOString().slice(11, 19) : '--:--:--';
+        const time = m.ts ? localClock(m.ts) : '--:--:--';
         const rows = [{ segs: [{ text: m.from, color: hue }, { text: ' → ', color: dim }, { text: m.to, color: toHue }, { text: ` · ${time}`, color: dim }], indent: 0, src: { part: 'head', line: 0, cont: false } }];
         const lift = { r: hue.r + (1 - hue.r) * 0.6, g: hue.g + (1 - hue.g) * 0.6, b: hue.b + (1 - hue.b) * 0.6 };
         const text = m.text.replace(/\r\n/g, '\n').replace(/\n$/, '');

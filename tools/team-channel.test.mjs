@@ -5,12 +5,14 @@
 //   bun tools/team-channel.test.mjs        (GOMUXAI_DIR=<gomuxai checkout>, default ~/dev/gomuxai)
 //
 // Locks: one block per message prompt (peer / delivered / human / queued) across the members' books, the
-// header `from → to · HH:MM:SS` (from = the [from NAME@HOST] prefix, the person for a typed prompt, the
+// header `from → to · HH:MM:SS` in the display's LOCAL zone (the test runs in TZ=America/Denver; a UTC clock
+// fails it) (from = the [from NAME@HOST] prefix, the person for a typed prompt, the
 // parent for a subagent's task), the body == the record's text (rejoined from its wrapped rows; nothing
 // dropped), no row wider than the channel; merged chronologically; a live message later than the last
 // TAIL-APPENDS (only its rows laid out); one out of order re-lays with the view held; a held view survives a
 // rebuild (serialize → restore); registered channel:<team> and seated at gomux/<team>.
 
+process.env.TZ = 'America/Denver';   // the display's zone, not UTC — a header in UTC fails the clock check
 import * as THREE from 'three';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,7 +28,7 @@ const { default: SceneRegistry } = await import('../packages/glyph3d-core/src/se
 const { default: WorkspaceModel } = await import('../app/client/WorkspaceModel.js');
 const { default: Holding } = await import('../app/client/Holding.js');
 const { buildCarrel } = await import('../app/commands/handlers/carrelCommands.js');
-const { default: TeamChannels, senderOf, channelId, PERSON } = await import('../app/client/TeamChannels.js');
+const { default: TeamChannels, senderOf, channelId, localClock, PERSON } = await import('../app/client/TeamChannels.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error(`  ✗ ${m}`); } };
@@ -117,6 +119,11 @@ ok(ctx.registry.get(channelId('lead'))?.grid === doc && ctx.holding.holderOf(cha
     const line = (e) => J(e) + '\n';
     ctx.agentBooks.applyEvents('held', r.push(line(ev('live-1', '2030-01-01T00:00:00Z', '[from lead@hub] a live message, appended'))), { agentType: 'claude' });
     ok(doc.blocks.length === n + 1 && doc.blocks.at(-1).id === 'held:live-1', 'a live message joins at the end');
+    const liveHead = doc.blocks.at(-1).rows[0].segs.map((s) => s.text).join('');
+    ok(liveHead.endsWith(' · 17:00:00'), `its header shows the display's local time: 2030-01-01T00:00:00Z in America/Denver is 17:00:00 (${J(liveHead)}; UTC would read 00:00:00)`);
+    process.env.TZ = 'Asia/Kolkata';
+    eq(localClock(Date.parse('2030-01-01T00:00:00Z')), '05:30:00', 'the clock follows the zone, minutes too (Asia/Kolkata, +05:30)');
+    process.env.TZ = 'America/Denver';
     ok(doc.stats.fullPasses === before.fullPasses && doc.stats.laidRows - before.laidRows === doc.blocks.at(-1).rows.length,
         `TAIL-APPENDED: only its ${doc.blocks.at(-1).rows.length} rows laid out (laid ${doc.stats.laidRows - before.laidRows}, full passes ${doc.stats.fullPasses - before.fullPasses})`);
     ok(doc.bodyField.slotBuffer.count > lastSlot, 'its glyphs added after the rest');
