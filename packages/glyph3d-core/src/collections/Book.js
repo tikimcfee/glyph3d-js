@@ -418,6 +418,8 @@ export default class Book extends BoundedObject3D {
      * Return to natural form: identity mounts, contents re-seated at the origin, page
      * faces dropped, sheets resting at the book origin. The book's POSITION is
      * untouched — the next layout pass places it. Head/following survive a release.
+     * A side whose content a holder has taken (parented outside its mount) is left as it is —
+     * its mount and fit wait for the content's return; the holder poses the content.
      */
     release() {
         for (const sheet of this.sheets) {
@@ -425,13 +427,21 @@ export default class Book extends BoundedObject3D {
             sheet.node.position.set(0, 0, 0);
             sheet.node.rotation.set(0, 0, 0);
             sheet._at = null;
-            for (const [mount, content] of [[sheet.versoMount, sheet.verso], [sheet.rectoMount, sheet.recto]]) {
+            const kept = {};
+            for (const [side, mount, content] of [['verso', sheet.versoMount, sheet.verso], ['recto', sheet.rectoMount, sheet.recto]]) {
+                // Content a holder has taken (a desk seat, the dock) is the holder's to pose, and its
+                // side keeps its mount and fit for the content's return — a tree relayout must not
+                // yank a seated file to its holder's origin, nor send it home to an unfit page.
+                if (content && content.parent !== mount) {
+                    if (sheet.fit?.[side]) kept[side] = sheet.fit[side];
+                    continue;
+                }
                 mount.position.set(0, 0, 0);
                 mount.rotation.set(0, 0, 0);
                 mount.scale.setScalar(1);
                 if (content) { content.position.set(0, 0, 0); content.rotation.set(0, 0, 0); }
             }
-            sheet.fit = {};
+            sheet.fit = kept;
         }
         this.fitInfo = null;
         this._fitOpts = null;
@@ -1296,11 +1306,20 @@ export default class Book extends BoundedObject3D {
         if (sheet.verso) sides.push(['verso', sheet.versoMount, sheet.verso]);
         if (sheet.recto) sides.push(['recto', sheet.rectoMount, sheet.recto]);
         this._dropFaces(sheet);
+        const before = sheet.fit ?? {};
         sheet.fit = {};
         if (!sides.length) return;
         const spread = sides.length === 2;
         const dx = spread ? (o.gutter ?? 0) / 2 + o.pageW / 2 : 0;
         for (const [side, mount, content] of sides) {
+            const slotX = side === 'verso' ? -dx : (spread ? dx : 0);
+            // Content a holder has taken (a desk, the dock) is posed THERE: the book neither re-seats
+            // nor re-measures it — the page keeps the fit it had (its mount is untouched), or stands
+            // empty until the content comes home.
+            if (content.parent !== mount) {
+                if (before[side]) { sheet.fit[side] = before[side]; this._addFace(sheet, slotX, o); }
+                continue;
+            }
             // Re-seat so the fit reads the content's own form, not a stale offset.
             content.position.set(0, 0, 0);
             content.rotation.set(0, 0, 0);
@@ -1314,7 +1333,6 @@ export default class Book extends BoundedObject3D {
             const w = Math.max(b.max.x - b.min.x, 1e-6);
             const h = Math.max(b.max.y - b.min.y, 1e-6);
             const s = empty ? 1 : Math.min(o.pageW / w, o.pageH / h, o.maxUpscale ?? Infinity);
-            const slotX = side === 'verso' ? -dx : (spread ? dx : 0);
             mount.scale.setScalar(s);
             if (empty) mount.position.set(slotX, 0, 0);
             else mount.position.set(

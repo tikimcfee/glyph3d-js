@@ -72,8 +72,14 @@ const cellPx = Number((await req('settings.get plane.cellPx')).data?.value ?? 8)
 const rowPx = cellPx * 15 / 8;
 
 // ── enter ──
+// Out of any plane first (the display may be reading one): the pose to come back to is the open
+// world's, read once the camera is there.
+if ((await req('plane.state')).data) {
+    await req('carrel.leave');
+    if (await until((s) => !s) == null) { console.error('could not leave the plane the display was in'); process.exit(1); }
+    await sleep(800);   // the leave's ease
+}
 const pre = (await req('camera.info')).data;
-if ((await req('plane.state')).data) { await req('carrel.leave'); await until((s) => !s); }
 const t0 = now();
 const e = await req(`carrel.enter ${desk}`);
 if (!/^OK/.test(e.text ?? '')) { console.error(`carrel.enter ${desk}: ${e.text}`); process.exit(1); }

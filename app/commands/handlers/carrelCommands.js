@@ -430,6 +430,42 @@ export default function registerCarrelCommands(router) {
         return { text: `OK: ${summary}`, data: { carrels: desks } };
     }, { description: 'List every carrel and its seated members (* = active)', returns: '{ carrels:[{name,active,members}] }' });
 
+    // A desk's members as the desk HOLDS them, against the registry: the object it carries is the
+    // window's live one, under the desk, still in the scene. A member object swapped behind the desk's
+    // back (a row materialized into its actor, a window re-made on restore) draws nothing in its seat.
+    router.register('carrel.check', (args, ctx) => {
+        const map = carrels(ctx);
+        if (!map) return { text: 'ERR: carrels not ready', data: null };
+        const desks = args[0] ? [findCarrel(ctx, args[0])].filter(Boolean) : [...map.values()];
+        if (!desks.length) return { text: `ERR: no carrel '${args[0]}'`, data: null };
+        const where = (o) => { const p = []; for (let n = o; n && p.length < 5; n = n.parent) p.push(String(n.name || n.type).split('/').pop()); return p.join(' ← ') || '(detached)'; };
+        const rows = [];
+        for (const desk of desks) {
+            for (const e of desk.entries.values()) {
+                const live = ctx.registry.get(e.id)?.grid ?? null;
+                let under = false;
+                for (let n = e.grid; n; n = n.parent) if (n === desk) under = true;
+                let inScene = false;
+                for (let n = e.grid; n; n = n.parent) if (n === ctx.scene) inScene = true;
+                const g = e.grid, f = (v) => +Number(v).toFixed(2);
+                const seat = e._seat ? { x: f(e._seat.x), y: f(e._seat.y), z: f(e._seat.z), eff: f(e._seat.eff) } : null;
+                const pos = g ? { x: f(g.position.x), y: f(g.position.y), z: f(g.position.z), s: f(g.scale.x) } : null;
+                const seated = !!seat && !!pos && Math.hypot(pos.x - seat.x, pos.y - seat.y, pos.z - seat.z) < 1e-2;
+                const moving = !!desk.animator?.isAnimating;
+                // In its seat (once the desk has given it one, and isn't sliding it there now).
+                const ok = !!live && g === live && under && inScene && (!seat || seated || moving);
+                rows.push({ desk: desk.carrelName, id: e.id, ok, held: g === live, heldKind: g?.constructor?.name ?? null, liveKind: live?.constructor?.name ?? null, under, inScene, heldAt: where(g), liveAt: live && live !== g ? where(live) : null, pos, seat, seated, borrowed: !!e._borrowed, moving, planeUnit: !!desk.planeUnit, mode: desk.mode });
+            }
+        }
+        const bad = rows.filter((r) => !r.ok);
+        const line = (r) => `  ${r.ok ? '✓' : '✗'} ${r.desk} · ${r.id}: holds ${r.heldKind}${r.held ? ' (the live one)' : ` — the registry's is a ${r.liveKind ?? 'nothing'} at ${r.liveAt ?? '—'}`} · ${r.under ? 'under the desk' : 'NOT under the desk'}${r.inScene ? '' : ' · NOT in the scene'} · at ${r.heldAt}`
+            + `\n      pos ${JSON.stringify(r.pos)} · seat ${JSON.stringify(r.seat)}${r.seated ? ' (in it)' : r.seat ? ' (NOT in it)' : ''}${r.borrowed ? ' · borrowed' : ''}${r.moving ? ' · desk animating' : ''} · ${r.mode}${r.mode === 'plane' && !r.planeUnit ? ' (NO plane unit)' : ''}`;
+        return {
+            text: rows.map(line).join('\n') + (bad.length ? `\nFAIL: ${bad.length} member(s) not held live in their seats` : `\nOK: ${rows.length} member(s), each held live in its seat`),
+            data: { members: rows },
+        };
+    }, { description: "Check each desk member: the desk holds the window's live object, under the desk, in the scene, standing in its seat (else where the live one is)", usage: '[name]', returns: '{ members:[{desk,id,ok,held,heldKind,liveKind,under,inScene,heldAt,liveAt}] }' });
+
     router.register('carrel.focus', (args, ctx) => {
         const carrel = findCarrel(ctx, args[0]);
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
