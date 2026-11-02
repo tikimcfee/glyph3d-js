@@ -1170,9 +1170,26 @@ export class CarrelCards {
     }
 
     /**
+     * The desk the plane view is reading: the entered one (`carrel.enter`), else the one holding the
+     * member it reads (`plane.enter <member>`). It draws live, never as its card — a card is a flat
+     * picture, and a member read in the plane may stand its layer pages behind it, which the fan moves.
+     * @returns {string|null} its carrel name
+     */
+    readingCarrel() {
+        const entered = this.ctx?.enteredCarrel;
+        if (entered) return entered;
+        const target = this.ctx?.planeTarget;
+        const carrels = this.ctx?.carrels;
+        if (!target || !(carrels instanceof Map)) return null;
+        for (const [name, carrel] of carrels) if (carrel.entries?.has?.(target)) return name;
+        return null;
+    }
+
+    /**
      * Per-frame update (gated on `cfg.enabled`, default `false`):
      * 1. Sweeps dissolved carrels.
-     * 2. Ranks standing carrels (top `cfg.live` are near-live; rest are static postcards marked stale when changed).
+     * 2. Ranks standing carrels (top `cfg.live` are near-live; rest are static postcards marked stale when
+     *    changed); the desk being read (`readingCarrel`) is live.
      * 3. Swaps `'live'` ↔ `'card'` at `texel >= pixel` with hysteresis (`swapInRatio` / `swapOutRatio`).
      * 4. Refreshes dirty near-live cards round-robin within `cfg.budgetMs` and `cfg.nearLiveHz`.
      *
@@ -1184,8 +1201,9 @@ export class CarrelCards {
         const carrels = this.ctx?.carrels;
         if (!(carrels instanceof Map) || !camera) return;
 
-        if (this.ctx?.enteredCarrel) {
-            this._lastEnteredCarrel = this.ctx.enteredCarrel;
+        const entered = this.readingCarrel();
+        if (entered) {
+            this._lastEnteredCarrel = entered;
         }
 
         // Sweep removed/dissolved carrels (or container carrels that gained child Carrels).
@@ -1206,7 +1224,6 @@ export class CarrelCards {
             return;
         }
 
-        const entered = this.ctx?.enteredCarrel ?? null;
         const ranked = [];
         const now = this._now();
         const curFrame = this.ctx?.renderPasses?.frames ?? -1;

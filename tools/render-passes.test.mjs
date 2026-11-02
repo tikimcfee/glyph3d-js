@@ -9,6 +9,7 @@
 //     frame, and r3f draws nothing itself (the owner took the loop)
 //   - main renders the flat root's target when one serves, else the scene
 //   - a pass that throws is logged once, by name, and the passes after it still draw
+//   - renderFrame's `only` draws just the named passes; an unknown name throws, naming the declared
 //   - names are unique; every frame pass is timed; off-frame work (cards, picks) reports with record
 //   - the minimap pass follows the `minimap` prop (declared on, removed off)
 //   - a SECOND positive-priority useFrame (another loop owner) is a fault: recorded, console.error
@@ -111,6 +112,16 @@ try {
     const st = Object.fromEntries(passes.stats().map((s) => [s.name, s]));
     ok(st.main.frame && st.main.count === passes.frames && st.overlay.count === passes.frames, `every frame pass timed every frame (${st.main.count}/${passes.frames})`);
     ok(!st.pick.frame && st.pick.last === 0.7 && !st.cards.frame && st.cards.count === 1, 'off-frame work reported with record');
+
+    // `only` (the screenshot verb's --passes): just the named passes; an unknown name throws, naming the declared.
+    seen.length = 0; gl.calls.length = 0;
+    passes.renderFrame(new THREE.PerspectiveCamera(), ['main']);
+    ok(gl.calls.join() === 'render:main-scene' && seen.length === 0, `only main: the scene and nothing over it (${gl.calls} / ${seen})`);
+    passes.renderFrame(new THREE.PerspectiveCamera(), ['cloud']);
+    ok(seen.join() === 'cloud' && gl.calls.length === 1, `only cloud: just it (${seen})`);
+    let named = '';
+    try { passes.renderFrame(new THREE.PerspectiveCamera(), ['main', 'minmap']); } catch (e) { named = e.message; }
+    ok(/'minmap'/.test(named) && /declared: main, overlay, cloud/.test(named), `an unknown pass throws, naming the declared ones (${named})`);
 
     // ── A second loop owner: loud, recorded, the frame still drawn.
     errors.length = 0;

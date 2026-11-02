@@ -186,7 +186,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (`app/client/FramePasses.js` — the ONE render owner, `<RenderPasses/>`: one `useFrame(…, 1)`, passes
   main → overlay → cloud → minimap declared with `ctx.renderPasses.add`, never a second
   positive-priority useFrame nor a scene onAfterRender hook; a second loop owner is logged loudly and
-  shown FAIL in `scene.render`; screenshots draw through it); cameras off layer 0 (overlay, cards) take
+  shown FAIL in `scene.render`; screenshots draw through it, `screenshot --passes main[,…]` just the named
+  passes); cameras off layer 0 (overlay, cards) take
   the scene, picks their own lists (`pick.flatRoot`). What three must walk itself (a Group with renderOrder, lights, LODs) goes in whole; a
   drawable whose own onBeforeRender may read the scene, or a shadow-casting light, switches it off
   loudly (named) until the scene changes. `render.flatRoot` (on) is the A/B; `scene.render [time n]`
@@ -416,8 +417,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   never pokes through), raised `layers.riseRows` per rank so each page's top row peeks over the one in front; suggest
   strips in front, exactly over the lines they'd replace. Every page and the member itself get an opaque backing, so
   a translucent member never shows what's behind. `pane.layer <id> <n>` fronts a page at EXACTLY z = 0 (the member's
-  glyph meshes hide meanwhile); `now` restores the member. The fan is the plane lens: holding the pane prefix
-  (Ctrl+Space) past key-repeat sets `plane.fov layers.fanFov`, release flattens. Stacks are saved
+  glyph meshes hide meanwhile); `now` restores the member. The fan is the plane's (`plane.fan`): holding the pane prefix
+  (Ctrl+Space) past key-repeat sends `plane.fan on`, release `plane.fan off`. A desk the plane view reads
+  (entered, or holding the member read) draws live, never as its card, so its members' pages stand in
+  the scene. `layer.where` says where the pages stand, in the world and on screen. Stacks are saved
   (`LayerStacks.serialize` → the snapshot's `layerStacks`) and re-shown once each member stands up again. Gates:
   `tools/layer-stack.test.mjs`, `tools/layer-fan.test.mjs`, `cli/gitlog_test.go`.
 - **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book

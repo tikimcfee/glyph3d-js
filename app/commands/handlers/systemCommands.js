@@ -213,16 +213,25 @@ export default function registerSystemCommands(router) {
         if (!canvas) {
             return { text: 'ERR: no renderer available', data: null };
         }
+        // --passes main[,overlay,…]: draw only those passes (a check measuring the scene leaves out
+        // the overlay and the minimap, which move on their own timing). The next frame draws them all.
+        const pi = args.indexOf('--passes');
+        if (pi >= 0 && !args[pi + 1]) return { text: `ERR: --passes needs a list (declared: ${ctx.renderPasses.order().join(', ')})`, data: null };
+        const only = pi >= 0 ? args[pi + 1].split(',').filter(Boolean) : null;
         // Draw the frame now, as the frame owner does (every pass — what you see), and read it back.
-        ctx.renderPasses.renderFrame(ctx.camera);
+        try {
+            ctx.renderPasses.renderFrame(ctx.camera, only);
+        } catch (e) {
+            return { text: `ERR: ${e?.message || e}`, data: null };
+        }
         const dataUrl = canvas.toDataURL('image/png');
         // Strip the data:image/png;base64, prefix — caller gets raw base64
         const base64 = dataUrl.split(',')[1];
         return {
-            text: `OK: screenshot ${canvas.width}x${canvas.height}`,
-            data: { width: canvas.width, height: canvas.height, image: base64 },
+            text: `OK: screenshot ${canvas.width}x${canvas.height}${only ? ` (passes: ${only.join(', ')})` : ''}`,
+            data: { width: canvas.width, height: canvas.height, image: base64, passes: only ?? ctx.renderPasses.order() },
         };
-    }, { description: 'Capture the 3D canvas as a PNG screenshot' });
+    }, { description: 'Capture the 3D canvas as a PNG screenshot (--passes draws only the named frame passes, e.g. main)', usage: '[--passes main[,overlay,cloud,minimap]]' });
 
     router.register('console.log', (args, ctx) => {
         // Capture and return recent console output — useful for remote debugging.

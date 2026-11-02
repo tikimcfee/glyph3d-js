@@ -476,8 +476,9 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   column 0 lands right of it, `carrel.neighbor <h|l|j|k|parent|child>`) and carrel impostor cards
   (`CarrelCards`: an FBO capture on `CARD_LAYER = 29` that dirties neither GlyphBatch nor PanelBatch,
   an LRU pool cap, world-scaled nested-desk native px, render-target sizes validated at the seam; the
-  GPU half compares a native card with the live terminal pixel for pixel). Cards are off by default
-  (`carrel.card.enabled`).
+  GPU half compares a native card with the live terminal pixel for pixel; the desk the plane view reads,
+  entered or holding the member read, is live however far, and teeth: dropping the member branch fails
+  it). Cards are on by default (`carrel.card.enabled`).
   ```
   bun tools/strip.test.mjs
   bun tools/carrel-cards.test.mjs
@@ -535,14 +536,17 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 - **`planes-e2e.mjs`** — one command that runs all 9 plane feature live checks in sequence against a
   relay and prints one verdict table: `plane-live-check` (`--desk`/`--back`/`--reload`), `carrel.check`
   on every desk, `frame-capture-check --live`, `desk-reload-check` (`seated` → `layout.scheme` relayout
-  → `save+reload` → `leave+re-enter`), layer fan identity (`plane.fov 1` vs `plane.fov default`
-  pixel-identical on a layer stack; fan at `30°` spreads), strip band (column 0 lands right of the
+  → `save+reload` → `leave+re-enter`), layer fan identity (measured on the layers: the scene alone, `screenshot --passes main`, cropped by
+  `layer.where`'s screen boxes to the member and the band above it where its history pages peek. The
+  pages show there, `plane.fan off` twice is byte-identical, `plane.fan on` moves the band but not the
+  member's own text, and with the layers hidden the same fan moves nothing there. Teeth: a fan that
+  doesn't move the layers, `layers.fanFov 1` or `layers.fanPx 0`, fails it), strip band (column 0 lands right of the
   left-edge strip cards), `team.channel rows` (`show` → `rows -N` held → `rows +N` live),
   `point.show → point.list` (doesn't-steal gate + shown point), and `file-follow` (a scratch file under
   the user cache dir: `open → write → landed`). Default target starts a private relay (scratch git root
-  seeded with 4 files and 2 commits, scratch `--tmux-socket`, `gomux.autoScreens` seeded off,
+  seeded with 4 files, alpha.js with four past revisions, scratch `--tmux-socket`, `gomux.autoScreens` seeded off,
   `--no-gomuxai` unless `--hub`) and a private headless GPU display so it never disturbs the shared
-  display; `--port 8080` targets the shared relay explicitly. Exits non-zero on any failure.
+  display; `--port 8080` targets the shared relay explicitly; `--ortho` seeds `plane.ortho` on in the private display (every check on the orthographic endpoint; refused with `--port`). Exits non-zero on any failure.
   ```
   bun tools/planes-e2e.mjs [--out-dir /tmp/planes-e2e]
   bun tools/planes-e2e.mjs --port 8080 [--out-dir /tmp/planes-e2e-shared]

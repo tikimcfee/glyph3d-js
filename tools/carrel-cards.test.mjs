@@ -11,7 +11,8 @@
 //   4. Postcard capture on `carrel.leave`, budgeted refresh under `budgetMs` (1.5 ms),
 //      near-live top `live = 6` vs staleness stamp, and byte-capped LRU pool eviction
 //      (falls back to 'live')
-//   5. Live <-> card swap at texel >= pixel with hysteresis (1.0 / 0.85)
+//   5. Live <-> card swap at texel >= pixel with hysteresis (1.0 / 0.85); the desk the plane view
+//      reads (entered, or holding the member read) is live however far
 //   6. `carrel.card <name>` and `card.list` verbs
 //   7. Real WebGL2 GPU pixel gate: a card of a terminal vs the live member has
 //      maxChannelDelta <= 1, a 0.5 px offset FAILS (teeth), and capture < 2 ms.
@@ -449,6 +450,25 @@ console.log('=== carrel-cards.test.mjs ===');
     cam.updateMatrixWorld(true);
     cards.update(cam, 1000);
     ok(cards.get('desk-0').showing === 'live', 'inside hysteresis band from live (0.92 px/texel), stays live');
+
+    // 4c'. The desk the plane view reads is live, however far: entered (carrel.enter), or holding the
+    // member read (plane.enter <member>) — a card is flat, and that member's layer pages need the scene.
+    cam.position.set(0, 0, 800);
+    cam.updateMatrixWorld(true);
+    cards.update(cam, 1000);
+    ok(cards.get('desk-0').showing === 'card', 'far again: desk-0 is its card');
+    ctx.planeTarget = 'term:0';
+    cards.update(cam, 1000);
+    ok(cards.readingCarrel() === 'desk-0' && cards.get('desk-0').showing === 'live'
+        && carrels.get('desk-0').entries.get('term:0').grid.visible === true,
+        `the plane view reading desk-0's member (plane.enter term:0): desk-0 live, its member shown (${cards.get('desk-0').showing})`);
+    ctx.planeTarget = 'nobody';
+    cards.update(cam, 1000);
+    ok(cards.readingCarrel() === null && cards.get('desk-0').showing === 'card', 'reading something no desk holds: desk-0 back to its card');
+    ctx.planeTarget = null;
+    cam.position.set(0, 0, rect0.center.z + wantDepthClose);
+    cam.updateMatrixWorld(true);
+    cards.update(cam, 1000);
 
     // 4d. Byte-capped LRU pool eviction falls back to 'live'
     // Cap pool at 1.5 MB and capture two 512x512 (~1 MB each) cards: first must be evicted.

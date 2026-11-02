@@ -453,7 +453,9 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
   `carrel.leave` from the last pixel-exact frame (the postcard: the page Ivan last read), refreshed on
   content change under `carrel.card.budgetMs` (1.5 ms per frame), near-live for the top
   `carrel.card.live` (6), with a staleness stamp. A byte-capped LRU pool falls back to the far-LOD box.
-  Swap live ↔ card at texel ≥ pixel with hysteresis.
+  Swap live ↔ card at texel ≥ pixel with hysteresis. The desk the plane view reads is live however
+  far: the entered one, or the one holding the member read (`plane.enter <member>`) — a card is flat,
+  and that member's layer pages (§3.15) need the scene for the fan to move them.
 - **Layers, stated.** Batched panels and labels are off layer 0 and draw from arenas that are on layer
   0, so a card-layer camera sees neither unless the card pass enables the arenas (with only the
   carrel's ranges live) or the originals; and GlyphFarLod's per-view layer state decides what the

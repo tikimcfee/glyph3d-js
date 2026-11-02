@@ -7,15 +7,15 @@
  *                                    again re-reads them
  *   layer.hide <id>                  take them away
  *   layer.list [id]                  a member's layers front to back (every member with a stack, bare)
- *   layer.where <id>                 where its pages stand in the world (in the scene, shown, camera layers)
+ *   layer.where <id>                 where its pages stand: the world (in the scene, shown, camera layers), the screen (device px)
  *   pane.layer <id> <n|now|label>    bring a layer to z = 0 (1 = the newest history page; a label or
  *                                    id prefix; `now` = the member itself) — shows the stack first
  *   pane.blink <id> <a> <b>|off      alternate two layers at z = 0 every layers.blinkMs
  *   grid.history <id> [--at n]       a file grid's revisions (newest first); --at n brings revision n
  *                                    to z = 0
  *
- * The fan is the plane's lens (plane.fov — wider spreads the layers by depth); these verbs never
- * move the camera.
+ * The fan is the plane's (plane.fan — the perspective endpoint's wider lens, the orthographic one's
+ * shear); these verbs never move the camera.
  */
 
 import * as THREE from 'three';
@@ -35,6 +35,29 @@ function entryOf(ctx, id) {
         if (lane) e = reg?.get?.(lane.groupId) ?? null;
     }
     return e ?? null;
+}
+
+/**
+ * A mesh's box on screen through the view camera, in device px of the drawing buffer (x right, y down
+ * from the top-left) — the extent of its geometry's bounding box's 8 corners, projected. Null when a
+ * corner is behind the eye.
+ * @param {THREE.Mesh} obj @param {THREE.Camera} camera @param {{width:number, height:number}} canvas
+ * @returns {{x:number, y:number, w:number, h:number}|null}
+ */
+function screenRectOf(obj, camera, canvas) {
+    const g = obj?.geometry;
+    if (!g) return null;
+    if (!g.boundingBox) g.computeBoundingBox();
+    const b = g.boundingBox, v = new THREE.Vector3();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < 8; i++) {
+        v.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z).applyMatrix4(obj.matrixWorld).project(camera);
+        if (!(v.z > -1 && v.z < 1)) return null;
+        const px = (v.x + 1) / 2 * canvas.width, py = (1 - v.y) / 2 * canvas.height;
+        x0 = Math.min(x0, px); x1 = Math.max(x1, px); y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+    }
+    const r2 = (n) => Math.round(n * 100) / 100;
+    return { x: r2(x0), y: r2(y0), w: r2(x1 - x0), h: r2(y1 - y0) };
 }
 
 const fmtOrder = (stack) => stack.order().map((l) => `${l.front ? '▶' : ' '} ${l.kind === 'now' ? 'now' : l.kind === 'suggest' ? `+${-l.rank}` : `-${l.rank}`}  ${l.label}`);
@@ -80,13 +103,16 @@ export default function registerLayerCommands(router) {
         let root = stack; while (root.parent) root = root.parent;
         const at = (o) => { const p = new THREE.Vector3().setFromMatrixPosition(o.matrixWorld); return [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]; };
         const rows = [{ id: 'stack', world: at(stack), visible: stack.visible, parent: stack.parent?.name ?? null, inScene: root === ctx.scene }];
-        const panel = (m) => ({ at: at(m), inScene: rootOf(m) === ctx.scene, shown: isShown(m), mask: m.layers.mask, opacity: m.material?.opacity });
+        const canvas = ctx.renderer?.domElement;
+        const panel = (m) => ({ at: at(m), inScene: rootOf(m) === ctx.scene, shown: isShown(m), mask: m.layers.mask, opacity: m.material?.opacity, screen: canvas ? screenRectOf(m, ctx.camera, canvas) : null });
         const field = (f) => f && ({ glyphs: f.getGlyphCount(), mask: f.instanceMesh.layers.mask, sphere: f.geometry.boundingSphere ? +f.geometry.boundingSphere.radius.toFixed(1) : null, rowHeight: +f.rowHeight.toFixed(3), culled: f.instanceMesh.frustumCulled });
         if (stack._now) rows.push({ id: 'now-back', ...panel(stack._now.back) });
         if (e.grid._background) rows.push({ id: 'member-back', ...panel(e.grid._background) });
+        // The member's own text (the glyph meshes a fronted page replaces): its stated extent on screen.
+        (stack.frame?.text ?? []).forEach((m, i) => rows.push({ id: `member-text${i ? `-${i}` : ''}`, ...panel(m) }));
         for (const l of stack.pages) rows.push({ id: l.id, world: at(l.group), back: panel(l.back), field: field(l.field) });
         return { text: `OK: ${e?.id ?? args[0]} — member at ${J(at(e.grid))}\n${rows.map((r) => J(r)).join('\n')}`, data: { rows } };
-    }, { description: "Where a member's layer pages stand in the world (in the scene? visible? on which camera layers?) — a diagnostic", usage: '<id>' });
+    }, { description: "Where a member's layer pages stand in the world (in the scene? visible? on which camera layers?) and on screen (each backing's box through the view camera, device px) — a diagnostic", usage: '<id>' });
 
     router.register('pane.layer', async (args, ctx) => {
         const e = entryOf(ctx, args[0]);

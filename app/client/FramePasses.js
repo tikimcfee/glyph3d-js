@@ -93,12 +93,21 @@ export default class FramePasses {
 
     /**
      * Draw the frame: every pass, in order, each timed. A pass that throws is logged (once) and the
-     * rest still draw.
+     * rest still draw. `only` draws just the named passes (the screenshot verb's `--passes`: a check
+     * that measures the scene leaves out the overlay and the minimap, which move on their own
+     * timing); a name that isn't a declared pass throws, naming the declared ones.
      * @param {THREE.Camera} camera the view camera
+     * @param {Iterable<string>|null} [only] the passes to draw (default: all)
      */
-    renderFrame(camera) {
+    renderFrame(camera, only = null) {
         const r = this.renderer;
+        const want = only ? new Set(only) : null;
+        if (want) {
+            const unknown = [...want].filter((n) => !this.passes.some((p) => p.name === n));
+            if (unknown.length) throw new Error(`FramePasses.renderFrame: no pass named ${unknown.map((n) => `'${n}'`).join(', ')} (declared: ${this.order().join(', ')})`);
+        }
         for (const p of this.passes) {
+            if (want && !want.has(p.name)) continue;
             const t0 = this.now();
             try {
                 p.fn(r, camera);

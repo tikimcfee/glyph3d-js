@@ -7,8 +7,11 @@
  *   2. carrel.check           (every desk member held live in its seat)
  *   3. frame-capture-check    (--live desktop stream + non-blank frame texture)
  *   4. desk-reload-check      (seated → layout.scheme relayout → save+reload → leave+re-enter)
- *   5. layer fan identity     (plane.fan off twice pixel-identical on a layer stack; plane.fan on spreads —
- *                              the wider lens on the perspective endpoint, the whole-px shear on the orthographic)
+ *   5. layer fan identity     (on the layers themselves — the scene alone, cropped to the member and the band
+ *                              where its history pages peek: visible, plane.fan off twice byte-identical,
+ *                              plane.fan on moves the band but not the member; with the layers hidden it moves
+ *                              nothing there — the wider lens on the perspective endpoint, the shear on the
+ *                              orthographic)
  *   6. strip band             (column 0 lands to the right of the left-edge strip cards)
  *   7. team.channel rows      (show → rows -N holds view → rows +N resumes live tail)
  *   8. point.show → list      (deictic point.show does not steal camera/attention; listed in point.list)
@@ -129,8 +132,12 @@ function seedScratchRepo(dir) {
     git(['config', 'user.name', 'e2e']);
     git(['add', '.']);
     git(['commit', '-qm', 'seed rev 1']);
-    fs.writeFileSync(path.join(src, 'alpha.js'), makeScratchCode('alpha', 2));
-    git(['commit', '-am', 'alpha rev 2']);
+    // alpha gets four past revisions, so step 5's history pages rise past its title row (ranks 3 and 4
+    // peek over it: a page rises layers.riseRows per rank, and the title stands about two rows high).
+    for (let rev = 2; rev <= 5; rev++) {
+        fs.writeFileSync(path.join(src, 'alpha.js'), makeScratchCode('alpha', rev));
+        git(['commit', '-am', `alpha rev ${rev}`]);
+    }
 }
 
 async function assertNotHeldByOtherDesk(reqFn, id, targetDesk) {
@@ -421,9 +428,20 @@ try {
         recordVerdict('4. desk-reload-check', r.ok, performance.now() - t0, `${stepsOk}/4 steps (${summary})`);
     }
 
-    // ── 5. layer fan identity (fan off twice identical, fan on spreads, on a layer stack) ──
+    // ── 5. layer fan identity — measured on the LAYERS: the scene alone (screenshot --passes main: no
+    //    overlay, no minimap — they move on their own timing), cropped by layer.where's screen boxes.
+    //    The BAND is the strip above the member where its history pages peek (ranks rise
+    //    layers.riseRows each, past the member's title); nothing but the pages draws there.
+    //      visible   the band with the layers vs without (layer.hide) differs — the pages show
+    //      identity  fan off, on, off: the member + layer crop byte-identical (maxDelta 0)
+    //      moves     fan on moves the band (perspective: the wider lens' parallax; orthographic: the shear)
+    //      member    the member's own text (its glyphs' box) stays put with the fan on: resampling
+    //                noise only (≤ MEMBER_NOISE), never a move
+    //      control   the same fan with the layers hidden moves nothing in the band — the member's own
+    //                resampling (what a whole-frame diff counts) can't pass the measure
     {
         const t0 = performance.now();
+        const MEMBER_NOISE = 16;   // max channel delta: f32 resampling of the member's text reads ≤ 3 here; a 1 px move reads ~100+
         if ((await req('plane.state')).data) {
             await req('plane.leave');
             await untilPlane((s) => !s, 10000);
@@ -436,56 +454,96 @@ try {
             await req(`terminal.create ${fanTarget} 60 12`);
             await req(`terminal.move ${fanTarget} -50000 50000 0`);
             await reqAs('', ['terminal.write', fanTarget, 'live terminal front row 1\r\nlive terminal front row 2\r\n']);
-            const seedLines = Array.from({ length: 30 }, (_, i) => `scrollback line ${i + 1}: layer fan probe`).join('\n');
+            const seedLines = Array.from({ length: 60 }, (_, i) => `scrollback line ${i + 1}: layer fan probe`).join('\n');
             await reqAs('', ['terminal.depth.seed', fanTarget, seedLines]);
         }
         try {
             await req(`plane.enter ${fanTarget}`);
             await untilPlane((s) => s && !s.tweening, 15000);
-            const showRes = await req(`layer.show ${fanTarget} 2`, 15000);
+            const showRes = await req(`layer.show ${fanTarget} 4`, 15000);
             const layers = showRes.data?.layers ?? [];
             const hasHistory = /^OK:/.test(showRes.text ?? '') && layers.length >= 2;
 
             // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one unsheared.
             const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.camera.shear === 0 : s.fovDeg === 1);
-            await req('plane.fan off');
-            await untilPlane(folded, 10000);
-            await sleep(400);
-            const shot1 = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-            if (outDir) writePng(path.join(outDir, 'layer-fan-off.png'), shot1);
+            const fanned = (s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1);
+            const shotAt = async (pred, name) => {
+                await untilPlane(pred, 10000);
+                await sleep(400);
+                const img = decodePng(Buffer.from((await req('screenshot --passes main', 15000)).data.image, 'base64'));
+                if (outDir) writePng(path.join(outDir, `layer-fan-${name}.png`), img);
+                return img;
+            };
+            const where = async () => {
+                const rows = (await req(`layer.where ${fanTarget}`)).data?.rows ?? [];
+                return {
+                    member: rows.find((r) => r.id === 'member-back')?.screen ?? null,
+                    text: rows.find((r) => r.id === 'member-text')?.screen ?? null,
+                    pages: rows.filter((r) => r.back).map((r) => r.back.screen).filter(Boolean),
+                };
+            };
 
+            await req('plane.fan off');
+            const off1 = await shotAt(folded, 'off');
+            const wOff = await where();
             const fanOn = await req('plane.fan on');
-            await untilPlane((s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1), 10000);
-            await sleep(400);
-            const shotFan = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-            if (outDir) writePng(path.join(outDir, 'layer-fan-on.png'), shotFan);
-
+            const on = await shotAt(fanned, 'on');
+            const wOn = await where();
+            await req('plane.fan off');
+            const off2 = await shotAt(folded, 'off-again');
+            const stateDef = (await req('plane.state')).data;
+            await req(`layer.hide ${fanTarget}`);
+            const bareOff = await shotAt(folded, 'bare-off');
+            await req('plane.fan on');
+            const bareOn = await shotAt(fanned, 'bare-on');
             await req('plane.fan off');
             await untilPlane(folded, 10000);
-            await sleep(400);
-            const stateDef = (await req('plane.state')).data;
-            const shotDef = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-            if (outDir) writePng(path.join(outDir, 'layer-fan-off-again.png'), shotDef);
-
-            const ov = (await req('overlay.list --all')).data;
-            const stripCards = (ov?.items ?? []).filter((i) => i.kind === 'strip' && String(i.id).startsWith('strip:card:'));
-            const stripRightPx = stripCards.length
-                ? Math.min(shot1.width - 1, Math.max(0, Math.ceil(Math.max(...stripCards.map((c) => c.rect.x + c.rect.w)) + 4)))
-                : 0;
-            const planeRect = { x: stripRightPx, y: 0, w: shot1.width - stripRightPx, h: shot1.height };
-            const diffIdentity = diffImages(cropImage(shot1, planeRect), cropImage(shotDef, planeRect), 0);
-            const diffFan = diffImages(cropImage(shot1, planeRect), cropImage(shotFan, planeRect), 5);
-            await req(`layer.hide ${fanTarget}`);
             await req('plane.leave');
             await untilPlane((s) => !s, 10000);
 
-            const ok = hasHistory && folded(stateDef) && diffIdentity.maxDelta === 0 && diffFan.diffPixels > 0;
-            recordVerdict(
-                '5. layer fan identity',
-                ok,
-                performance.now() - t0,
-                `${stateDef?.ortho ? 'orthographic' : 'perspective'}, layers=${layers.length - 1}, off==off maxDelta=${diffIdentity.maxDelta} (diffPx=${diffIdentity.diffPixels}), ${String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0]} diffPx=${diffFan.diffPixels}`,
-            );
+            const M = wOff.member;
+            const pages = [...wOff.pages, ...wOn.pages];
+            let ok = false;
+            let detail;
+            if (!hasHistory || !M || !wOff.text || pages.length < 2) {
+                detail = `no layer stack to measure (${showRes.text?.split('\n')[0]}; member box ${JSON.stringify(M)}, text box ${JSON.stringify(wOff.text)}, ${pages.length} page box(es))`;
+            } else {
+                const W = off1.width, H = off1.height;
+                const union = (rs) => {
+                    const x0 = Math.min(...rs.map((r) => r.x)), y0 = Math.min(...rs.map((r) => r.y));
+                    return { x: x0, y: y0, w: Math.max(...rs.map((r) => r.x + r.w)) - x0, h: Math.max(...rs.map((r) => r.y + r.h)) - y0 };
+                };
+                const pxBox = (r) => {   // whole px inside the image
+                    const x0 = Math.max(0, Math.floor(r.x)), y0 = Math.max(0, Math.floor(r.y));
+                    return { x: x0, y: y0, w: Math.min(W, Math.ceil(r.x + r.w)) - x0, h: Math.min(H, Math.ceil(r.y + r.h)) - y0 };
+                };
+                const L = union(pages);
+                const crop = pxBox(union([M, L]));
+                const band = pxBox({ x: L.x, y: L.y, w: L.w, h: Math.floor(M.y) - 1 - L.y });   // above the member's edge row
+                // The member's own text: its glyphs' stated extent (layer.where's member-text, which carries
+                // a row of right-side overdraw), inside the member's box less MEMBER_EDGE px — not its
+                // backdrop or focus border, which stand off the plane and so slide with the fan (the
+                // orthographic shear moves the backdrop, 0.5 units behind, n/3 px at a 1.5-unit pitch).
+                const MEMBER_EDGE = 10;
+                const tx0 = Math.max(Math.ceil(wOff.text.x), Math.ceil(M.x + MEMBER_EDGE)), ty0 = Math.max(Math.ceil(wOff.text.y), Math.ceil(M.y + MEMBER_EDGE));
+                const tx1 = Math.min(Math.floor(wOff.text.x + wOff.text.w), Math.floor(M.x + M.w - MEMBER_EDGE)), ty1 = Math.min(Math.floor(wOff.text.y + wOff.text.h), Math.floor(M.y + M.h - MEMBER_EDGE));
+                const inner = { x: tx0, y: ty0, w: tx1 - tx0, h: ty1 - ty0 };
+                const d = (a, b, r, tol = 0) => (r.w > 0 && r.h > 0 ? diffImages(cropImage(a, r), cropImage(b, r), tol) : { maxDelta: 0, diffPixels: 0 });
+                const visible = d(off1, bareOff, band);
+                const identity = d(off1, off2, crop);
+                const moves = d(off1, on, band, 5);
+                const member = d(off1, on, inner);
+                const control = d(bareOff, bareOn, band, 5);
+                const controlMember = d(bareOff, bareOn, inner);
+                ok = folded(stateDef) && band.h > 0 && visible.diffPixels > 0 && identity.maxDelta === 0
+                    && moves.diffPixels > 0 && member.maxDelta <= MEMBER_NOISE && control.diffPixels === 0;
+                const fanText = String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0];
+                detail = `${stateDef?.ortho ? 'orthographic' : 'perspective'}, ${layers.length - 1} layers, band ${band.w}×${band.h} px: `
+                    + `visible ${visible.diffPixels} px, off==off maxDelta=${identity.maxDelta} (${identity.diffPixels} px of ${crop.w}×${crop.h}), `
+                    + `${fanText}: band moved ${moves.diffPixels} px, member maxDelta=${member.maxDelta} (≤${MEMBER_NOISE}); `
+                    + `control (layers hidden): band ${control.diffPixels} px, member ${controlMember.diffPixels} px`;
+            }
+            recordVerdict('5. layer fan identity', ok, performance.now() - t0, detail);
         } finally {
             if (createdFanTerm) {
                 await req(`terminal.close ${fanTarget}`).catch(() => {});
