@@ -9,7 +9,7 @@
  *                                    the default — the GPU pick's glyph slot), a CSS-px point on
  *                                    the canvas (at), or a focused surface's caret / cursor line
  *   point.mark [here|<ref>]          put `this = <ref>` into the CommandBar (the plane prefix's p)
- *   point.show <ref> [--kind look|suggest] [--say <line>]
+ *   point.show <ref> [--kind look|suggest] [--say <line>] [--with <proposed text>]
  *                                    an IDENTIFIED caller's point (glyph3d-cli --as): its line fills
  *                                    in the caller's hue. Moves NOTHING of the person's — no camera,
  *                                    focus, keyboard or projection. One live point per agent.
@@ -87,13 +87,14 @@ async function here(ctx, args) {
 /** point.show's args: the ref text, then --kind / --say. */
 function parseShow(args) {
     const ref = [];
-    let kind = 'look', say = null;
+    let kind = 'look', say = null, replace = null;
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--kind') { kind = String(args[++i] ?? ''); continue; }
         if (args[i] === '--say') { say = args[++i] ?? null; continue; }
+        if (args[i] === '--with') { replace = args[++i] ?? null; continue; }
         ref.push(args[i]);
     }
-    return { refText: ref.join(' '), kind, say };
+    return { refText: ref.join(' '), kind, say, replace };
 }
 
 /** @param {import('../../client/CommandProvider.jsx').AppRouter} router */
@@ -124,22 +125,24 @@ export default function registerDeixisCommands(router) {
         const who = ctx.caller;
         if (!who) return fail('point.show needs an identified caller: glyph3d-cli --as <name> (or $AGENT_NAME) — an anonymous point has no owner or hue');
         if (!ctx.deixis) return fail('no deixis on this display');
-        const { refText, kind, say } = parseShow(args);
+        const { refText, kind, say, replace } = parseShow(args);
         if (kind !== 'look' && kind !== 'suggest') return fail(`--kind is look or suggest (got '${kind}')`);
-        if (!refText) return fail('usage: point.show <ref> [--kind look|suggest] [--say <line>]');
+        if (replace != null && kind !== 'suggest') return fail('--with is a suggest point\'s proposed text (--kind suggest)');
+        if (!refText) return fail('usage: point.show <ref> [--kind look|suggest] [--say <line>] [--with <proposed text>]');
         const r = resolveRef(ctx, refText, who);
         if ('error' in r) return fail(r.error);
         const fill = Number(getSetting(kind === 'suggest' ? 'point.suggestFill' : 'point.lookFill'));
-        const p = ctx.deixis.show(who, r, { kind, say, fill });
-        record('point.show', ctx, { text: r.text, kind, say, ref: r });
-        return { text: `OK: ${who} points at ${r.text}${say ? ` — ${say}` : ''}`, data: p };
-    }, { description: "Point at a line from an identified caller: it fills in the caller's hue (no camera, focus or keyboard change); one point per agent", usage: '<ref> [--kind look|suggest] [--say <line>]', returns: 'Point { id, who, kind, say, ref, hue, ts }' });
+        const p = ctx.deixis.show(who, r, { kind, say, fill, replace });
+        record('point.show', ctx, { text: r.text, kind, say, replace, status: p.status, ref: r });
+        const held = p.status === 'held' ? ' (held — the person is typing; drawn when they pause)' : '';
+        return { text: `OK: ${who} points at ${r.text}${say ? ` — ${say}` : ''}${held}`, data: p };
+    }, { description: "Point at a line from an identified caller: it fills in the caller's hue (no camera, focus or keyboard change); one point per agent; it follows its words through edits; a suggest point --with its proposed text resolves when an edit makes it", usage: '<ref> [--kind look|suggest] [--say <line>] [--with <proposed text>]', returns: 'Point { id, who, kind, say, ref, hue, ts, status, moved }' });
 
     router.register('point.list', (_args, ctx) => {
         const pts = ctx.deixis?.list() ?? [];
         if (!pts.length) return { text: 'OK: no points', data: [] };
-        return { text: `OK: ${pts.length} point(s)\n${pts.map((p) => `  ${p.id} [${p.kind}] ${p.ref.text}${p.say ? ` — ${p.say}` : ''}`).join('\n')}`, data: pts };
-    }, { description: 'The live points (one per agent), newest first', returns: 'Point[]' });
+        return { text: `OK: ${pts.length} point(s)\n${pts.map((p) => `  ${p.id} [${p.kind}${p.status !== 'shown' ? ` · ${p.status}` : ''}] ${p.ref.text}${p.say ? ` — ${p.say}` : ''}`).join('\n')}`, data: pts };
+    }, { description: 'The live points (one per agent), newest first — each with its status (shown | held | orphan | resolved)', returns: 'Point[]' });
 
     router.register('point.go', async (args, ctx) => {
         if (ctx.caller) return fail(`point.go is the person's verb — it moves attention and the camera; '${ctx.caller}' points (point.show) instead`);

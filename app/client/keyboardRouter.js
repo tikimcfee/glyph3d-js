@@ -265,6 +265,7 @@ function domInputFocused(doc) {
  * @param {() => boolean} [env.planeEntered]  a plane desk is entered (the plane tiers' gate)
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.planePrefix]
  *   the pane prefix chord (default PLANE_PREFIX = Ctrl+Space) @param {number} [env.planePrefixMs]
+ * @param {() => void} [env.noteKey]  told of every keydown, claimed or not (Deixis' typing gate)
  * @param {Document} [env.document] injectable for tests; defaults to the global
  * @returns {() => void} uninstall
  */
@@ -272,6 +273,7 @@ export function installKeyboardRouter(env) {
     const doc = env.document ?? document;
 
     const onKeyDown = (e) => {
+        env.noteKey?.();                    // the person is typing (agents' points wait — Deixis)
         if (domInputFocused(doc)) return;   // a focused <input> keeps its keys
 
         for (const handler of HANDLERS) {

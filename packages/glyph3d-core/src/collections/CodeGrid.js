@@ -345,7 +345,26 @@ class CodeGrid extends FramedGlyphField {
         this.loadPromise = this._relayout();
         await this.loadPromise;
         this._seedExtent = null;
+        this._textChanged();
         return this;
+    }
+
+    /**
+     * Listen for this grid's TEXT changing — a load or an edit — once it is laid out (`lines` is
+     * the new text). What anchors to lines (a point, a highlight that should follow its words)
+     * re-reads them here. @param {(grid: CodeGrid) => void} fn @returns {() => void} unlisten
+     */
+    addTextListener(fn) {
+        (this._textListeners ??= new Set()).add(fn);
+        return () => { this._textListeners?.delete(fn); };
+    }
+
+    /** @private */
+    _textChanged() {
+        if (!this._textListeners?.size) return;
+        for (const fn of [...this._textListeners]) {
+            try { fn(this); } catch (e) { console.error('[CodeGrid] a text listener threw —', e); }
+        }
     }
 
     // ============ Windowing (scrollable viewport) ============
@@ -1705,7 +1724,9 @@ class CodeGrid extends FramedGlyphField {
     async _relayoutPreservingCursor() {
         this._linesDirty = true;
         this._modified = true;   // a content edit (insert/delete/split) happened → unsaved until file.save
-        return this._relayout();
+        const r = await this._relayout();
+        this._textChanged();
+        return r;
     }
 
     /**

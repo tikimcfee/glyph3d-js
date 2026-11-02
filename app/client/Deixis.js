@@ -20,6 +20,13 @@
  * camera, focus, keyboard or projection. One live point per agent. Every point.* is a `[deixis]`
  * record in the relay log store.
  *
+ * A point FOLLOWS its words (the FULL part): when its file's text changes (CodeGrid's text
+ * listener — an agent's edit landing, the person typing) it finds its line again — the same line
+ * text, else its quote near, else anywhere; gone, it is an orphan, listed but unfilled — and a
+ * `suggest` point with proposed text (`--with`) is RESOLVED when an edit puts that text where it
+ * pointed. While the person types, agents' points are HELD and drawn once they stop for
+ * `point.breakpointIdleMs` (keyboardRouter tells noteKey of every key).
+ *
  * ONE resolver turns any spelling back into a Ref (resolveRef): a Ref's JSON, its one-line text,
  * or any `file:line[:col]` a log or a stack trace prints (parseFileRef → the registry → the tour
  * resolver's suffix/basename match).
@@ -28,6 +35,7 @@
 import TourResolver from '@glyph3d/core/services/tour/TourResolver.js';
 import { parseFileRef } from '@glyph3d/core/parsing/parseFileRef.js';
 import { canonicalPath } from '../commands/handlers/pathResolve.js';
+import { getSetting } from './settings.js';
 
 /** @typedef {{path:string, line:number, col:number}} CodeSpot */
 /** @typedef {{terminal:string, line:number, col:number}} TerminalSpot */
@@ -246,7 +254,34 @@ function hsl(h, s, l) {
  * @property {{r:number,g:number,b:number}} hue
  * @property {number} ts
  * @property {number} seq       shown order (newest highest — ts ties within a millisecond)
+ * @property {'shown'|'held'|'orphan'|'resolved'} status  held: waiting for the person to stop typing;
+ *   orphan: its words are gone from the file; resolved: an edit made what it suggested
+ * @property {string|null} anchor  a code point's line text as last seen (what re-anchoring looks for)
+ * @property {string|null} replace a suggest point's proposed text (`--with`): seen in the file → resolved
+ * @property {string|null} moved   how the last edit moved it ('kept'|'line'|'near'|'far'), null before
  */
+
+/** How a point's line is found again after its file changes, nearest first. @private */
+function relocate(lines, line0, anchor, quote, window) {
+    if (anchor != null && lines[line0] === anchor) return { line0, how: 'kept' };
+    const nearest = (pred, limit) => {
+        for (let d = 0; d <= limit; d++) {
+            if (line0 - d >= 0 && pred(lines[line0 - d])) return line0 - d;
+            if (d && line0 + d < lines.length && pred(lines[line0 + d])) return line0 + d;
+        }
+        return -1;
+    };
+    const span = Math.max(lines.length, line0 + 1);
+    let i = anchor != null ? nearest((s) => s === anchor, span) : -1;
+    if (i >= 0) return { line0: i, how: 'line' };
+    if (quote) {
+        i = nearest((s) => s != null && s.includes(quote), window);
+        if (i >= 0) return { line0: i, how: 'near' };
+        i = nearest((s) => s != null && s.includes(quote), span);
+        if (i >= 0) return { line0: i, how: 'far' };
+    }
+    return null;
+}
 
 /** The live points (one per agent) and the CommandBar draft channel. */
 export default class Deixis {
@@ -258,6 +293,46 @@ export default class Deixis {
         /** @type {Set<(text:string) => void>} */
         this._draft = new Set();
         this._seq = 0;
+        /** @type {Map<string, () => void>} code entity → its text listener's unlisten */
+        this._watch = new Map();
+        /** when the person last pressed a key (performance.now()), -Infinity before any */
+        this._lastKey = -Infinity;
+        this._flushTimer = null;
+    }
+
+    /** The idle the person's typing must leave before a point draws (ms). */
+    get idleMs() { return Math.max(0, Number(getSetting('point.breakpointIdleMs')) || 0); }
+
+    /**
+     * The person pressed a key (keyboardRouter tells us, every keydown). Points arriving while they
+     * type are HELD and drawn once they stop for idleMs — agents never flicker lines under a typist.
+     * @param {number} [now] performance.now()
+     */
+    noteKey(now = performance.now()) {
+        this._lastKey = now;
+        if ([...this.points.values()].some((p) => p.status === 'held')) this._scheduleFlush();
+    }
+
+    /** @private */
+    _scheduleFlush() {
+        clearTimeout(this._flushTimer);
+        const wait = Math.max(0, this._lastKey + this.idleMs - performance.now());
+        this._flushTimer = setTimeout(() => this.flush(), wait);
+    }
+
+    /** Draw the held points if the person has stopped typing (else wait again). @returns {number} drawn */
+    flush(now = performance.now()) {
+        this._flushTimer = null;
+        if (now - this._lastKey < this.idleMs) { this._scheduleFlush(); return 0; }
+        let n = 0;
+        for (const p of this.points.values()) {
+            if (p.status !== 'held') continue;
+            p.status = 'shown';
+            this._draw(p.ref, p.hue, p.fill, p.who);
+            n++;
+        }
+        if (n) console.info(`[deixis] ${n} held point(s) drawn — the person stopped typing`);
+        return n;
     }
 
     /**
@@ -267,23 +342,99 @@ export default class Deixis {
      * @param {{kind?: 'look'|'suggest', say?: string|null, fill: number}} opts  fill: the opacity
      * @returns {Point}
      */
-    show(who, ref, { kind = 'look', say = null, fill }) {
+    show(who, ref, { kind = 'look', say = null, fill, replace = null, now = performance.now() }) {
         if (!who) throw new Error('Deixis.show: an anonymous caller has no point');
         if (!(fill > 0 && fill <= 1)) throw new Error(`Deixis.show: fill opacity must be in (0, 1] (got ${fill})`);
+        if (replace != null && kind !== 'suggest') throw new Error('Deixis.show: --with is a suggest point\'s proposed text');
         this.clear(who);
         const hue = callerHue(this.ctx, who);
-        this._draw(ref, hue, fill, who);
-        const p = { id: who, who, kind, say, ref, hue, ts: Date.now(), seq: ++this._seq, fill };
+        const grid = this.ctx.registry?.get?.(ref.entity)?.grid;
+        const anchor = ref.kind === 'code' ? (grid?.lines?.[ref.durable.line - 1] ?? null) : null;
+        const typing = now - this._lastKey < this.idleMs;
+        const p = { id: who, who, kind, say, ref, hue, ts: Date.now(), seq: ++this._seq, fill,
+                    status: typing ? 'held' : 'shown', anchor, replace: replace != null ? String(replace) : null, moved: null };
         this.points.set(who, p);
+        if (typing) this._scheduleFlush();
+        else this._draw(ref, hue, fill, who);
+        if (ref.kind === 'code') this._watchText(ref.entity, grid);
         return p;
+    }
+
+    /** One text listener per code surface a point is on. @private */
+    _watchText(entity, grid) {
+        if (this._watch.has(entity) || typeof grid?.addTextListener !== 'function') return;
+        this._watch.set(entity, grid.addTextListener((g) => this.reanchor(entity, g)));
+    }
+
+    /** @private */
+    _unwatchIfIdle(entity) {
+        if ([...this.points.values()].some((p) => p.ref.entity === entity)) return;
+        this._watch.get(entity)?.();
+        this._watch.delete(entity);
+    }
+
+    /**
+     * A code surface's text changed: every live point on it finds its line again — the same line
+     * text where it was, else that line text nearest, else its quote within point.reanchorWindow
+     * lines, else its quote anywhere; found nowhere, it is an ORPHAN (its fill goes; it stays
+     * listed). A suggest point whose proposed text (`--with`) now stands where it pointed is
+     * RESOLVED by the edit. @param {string} entity @param {Object} grid @returns {Point[]} the moved
+     */
+    reanchor(entity, grid) {
+        const lines = grid?.lines;
+        if (!Array.isArray(lines)) return [];
+        const window = Math.max(0, Number(getSetting('point.reanchorWindow')) || 0);
+        const out = [];
+        for (const p of this.points.values()) {
+            if (p.ref.entity !== entity || p.ref.kind !== 'code' || p.status === 'orphan' || p.status === 'resolved') continue;
+            const old0 = p.ref.durable.line - 1;
+            const drawn = p.status === 'shown';
+            if (drawn) this._draw(p.ref, null, 0, p.who);   // unfill where it was (the line may have moved)
+            const want = p.replace?.trim();
+            const at = relocate(lines, old0, p.anchor, p.ref.quote, window);
+            // Resolved only when the pointed line itself changed (its text is no longer found as it
+            // was) and the proposed text now stands there or nearest it — an unrelated edit that
+            // merely shifts the line never resolves it.
+            const lineChanged = !at || (at.how !== 'kept' && at.how !== 'line');
+            const landed = want && lineChanged
+                ? (at && lines[at.line0]?.includes(want) ? at.line0 : relocate(lines, old0, null, want, window)?.line0 ?? null)
+                : null;
+            if (landed != null) {
+                p.status = 'resolved';
+                p.moved = at?.how ?? null;
+                p.ref = this._moved(p.ref, landed);
+                console.info(`[deixis] ${p.who}'s suggestion at ${p.ref.text} was made by an edit — resolved`);
+                out.push(p);
+                continue;
+            }
+            if (!at) {
+                p.status = 'orphan';
+                p.moved = null;
+                console.info(`[deixis] ${p.who}'s point ${p.ref.text}: its words are gone from the file — orphaned`);
+                out.push(p);
+                continue;
+            }
+            p.moved = at.how;
+            p.anchor = lines[at.line0];
+            if (at.line0 !== old0) { p.ref = this._moved(p.ref, at.line0); out.push(p); }
+            if (drawn) this._draw(p.ref, p.hue, p.fill, p.who);
+        }
+        return out;
+    }
+
+    /** A code ref moved to another line (0-based); its column and quote as said. @private */
+    _moved(ref, line0) {
+        const out = { ...ref, durable: { ...ref.durable, line: line0 + 1 } };
+        return { ...out, text: refText(out) };
     }
 
     /** Clear `who`'s point (its fill goes). @param {string} who @returns {boolean} whether it had one */
     clear(who) {
         const p = this.points.get(who);
         if (!p) return false;
-        this._draw(p.ref, null, 0, who);
+        if (p.status === 'shown') this._draw(p.ref, null, 0, who);
         this.points.delete(who);
+        this._unwatchIfIdle(p.ref.entity);
         return true;
     }
 

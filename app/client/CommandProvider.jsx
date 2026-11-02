@@ -771,6 +771,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       am: state.ctx.attentionManager,
       exec: (cmd) => state.router.execute(cmd),
       planeEntered: () => !!state.ctx.enteredCarrel,
+      noteKey: () => state.ctx.deixis?.noteKey(),
       get planePrefixMs() { return Number(getSetting('plane.prefixMs')); },
       gestureEnv: {
         exec: (cmd) => state.router.execute(cmd),

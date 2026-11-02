@@ -404,6 +404,17 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/deixis-lite.test.mjs
   ```
 
+- **`deixis-ref.test.mjs`** (headless, a real CodeGrid) — pointing, full: a point follows its words
+  through edits (lines inserted above → moves with its line; its line edited around the quote →
+  stays; far → found anywhere; deleted → an orphan, unfilled, still listed), the grid's edit funnel
+  included; a suggest point `--with` its proposed text resolves when an edit makes it, never on an
+  unrelated shift; the noise gate (three agents pointing while keys land every 100 ms → nothing
+  drawn until the keys pause `point.breakpointIdleMs`). Teeth: with the text listener off the point
+  names the wrong words.
+  ```
+  bun tools/deixis-ref.test.mjs
+  ```
+
 - **`command-caller.test.mjs`** (headless) — the caller is PER CALL (`CommandRouter`): interleaved
   async verbs from two senders each read their own sender / caller / cid; a nested call
   (`ctx.execute`) inherits the outer one unless overridden; writes through ctx land in the shared

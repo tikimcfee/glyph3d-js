@@ -681,6 +681,8 @@ export const SETTINGS = [
   // focus or keyboard moves. See app/client/Deixis.js.
   { key: 'point.lookFill', label: "A 'look here' point: the line's fill opacity", group: 'Pointing', type: 'number', default: 0.28, min: 0.02, max: 1, step: 0.02 },
   { key: 'point.suggestFill', label: "A 'suggest' point: the line's fill opacity", group: 'Pointing', type: 'number', default: 0.45, min: 0.02, max: 1, step: 0.02 },
+  { key: 'point.breakpointIdleMs', label: "While you type, agents' points wait: drawn once your keys pause this long (ms; 0 = at once)", group: 'Pointing', type: 'number', default: 1500, min: 0, max: 20000, step: 100 },
+  { key: 'point.reanchorWindow', label: 'After an edit, a point looks this many lines either way for its quote before searching the whole file', group: 'Pointing', type: 'number', default: 40, min: 0, max: 100000, step: 1 },
   { key: 'plane.restoreWaitMs', label: 'After a reload, how long to wait for the plane you were reading to stand up before giving up (ms)', group: 'Planes', type: 'number', default: 60000, min: 1000, max: 600000, step: 1000 },
   { key: 'plane.prefixMs', label: 'Pane prefix (Ctrl+Space): how long it waits for its command key (ms)', group: 'Planes', type: 'number', default: 1500, min: 200, max: 10000, step: 100 },
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },
