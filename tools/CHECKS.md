@@ -195,6 +195,15 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/glyph-batch-check.mjs --url 'http://localhost:5174/?relay=8099' --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
+- **`scroll-form.test.mjs`** (headless, gomuxai's corpus + the real font chain) — the agent scroll
+  form: every event's headline, call, info rows and body rejoin from the document's rows to the
+  record's text (CRLF → LF, one trailing newline dropped); long outputs are one summary row until
+  expanded; no row wider than the document (cells by the layout's rule and the laid pens), every pen
+  on the cell grid; a held document stays still while 30 events append (`+30 newer`) and while an
+  event above it grows; a reload stands on the same top row by (session, at), sliding it back in
+  from the older buffer; one registry id / attention / tuning id across form changes; at the
+  200-event cap a live batch lays out and uploads only its tail (p95 budget `SCROLL_BUDGET_MS`,
+  default 4 ms) while the full re-lay fails it (teeth), and scrolling lays out nothing.
 - **`agent-book-history.test.mjs`** (headless) — an agent book's sliding window over a synthetic
   100-turn event stream and a mock `agentEvents/read {until, tail}`: records carry their line's
   byte offset; paging near

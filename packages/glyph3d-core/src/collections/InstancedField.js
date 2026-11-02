@@ -278,6 +278,42 @@ export default class InstancedField {
     }
 
     /**
+     * Upload the slots from `from` up to `count` — a TAIL written in place (an appended row, a
+     * re-laid end of a document): only that range goes to the GPU. The geometry's view spans the
+     * buffer's whole CAPACITY, so a tail inside it is an update range; a buffer that moved (it
+     * grew) or a view too short is rebound over its capacity, one full upload. Slots before
+     * `from` must be what the GPU already holds.
+     * @param {InstancedSlotBuffer} slotBuffer
+     * @param {number} from first slot written
+     * @param {number} count the active count after the write
+     * @returns {number} slots uploaded
+     */
+    writeTail(slotBuffer, from, count) {
+        if (!(from >= 0 && from <= count)) throw new Error(`InstancedField.writeTail: tail [${from}, ${count}) is not a range`);
+        const ib = this._interleavedBuffer;
+        let uploaded;
+        if (!ib || ib.array.buffer !== slotBuffer.buffer || ib.count < Math.max(count, 1) || this.slotBuffer !== slotBuffer) {
+            const hadOld = !!ib;
+            this.slotBuffer = slotBuffer;
+            this._interleavedBuffer = slotBuffer.createInterleavedBuffer(THREE.DynamicDrawUsage, slotBuffer.capacity);
+            InstancedSlotBuffer.bindGeometryAttributes(this.geometry, this._interleavedBuffer);
+            if (hadOld && this.geometry) this.geometry.dispose();
+            this._interleavedBuffer.needsUpdate = true;
+            uploaded = slotBuffer.capacity;
+        } else {
+            if (count > from) {
+                ib.addUpdateRange(from * SLOT_FLOATS, (count - from) * SLOT_FLOATS);
+                ib.needsUpdate = true;
+            }
+            uploaded = count - from;
+        }
+        this.slotBuffer.count = count;
+        this._cachedGlyphCount = count;
+        this.geometry.instanceCount = count;
+        return uploaded;
+    }
+
+    /**
      * Load text directly through LayoutGenerator and upload to GPU.
      * @param {string|string[]} text
      * @param {Object} [options]
@@ -327,13 +363,15 @@ export default class InstancedField {
      * extends further than that past the last pen. Call after the slots are written (the widest
      * quad is read off them).
      * @param {{ min: {x:number, y:number, z:number}, max: {x:number, y:number, z:number} }} bounds
+     * @param {number} [from] the slots before this are unchanged since the last call — only the
+     *        tail is read for its widest quad (an appended row), the rest keeps its measure
      */
-    setLayoutExtent(bounds) {
+    setLayoutExtent(bounds, from = 0) {
         if (!bounds) return;
         this._layoutBounds = { min: { ...bounds.min }, max: { ...bounds.max } };
         const f32 = this.slotBuffer.f32, n = this.slotBuffer.count;
-        let widest = 0, tallest = 0;
-        for (let s = 0; s < n; s++) {
+        let widest = from > 0 ? this._maxQuad : 0, tallest = from > 0 ? this._rowHeight : 0;
+        for (let s = Math.max(0, from); s < n; s++) {
             const b = s * SLOT_FLOATS;
             const h = f32[b + LANE_HEIGHT];
             const w = Math.max(f32[b + LANE_ADVANCE], h);

@@ -307,6 +307,9 @@ export default class SessionStore {
       const entry = { session };
       entry.head = a.head;
       entry.following = !!a.following;
+      // A scroll book held away from the end: where its frame stands, by the RUN's coordinates.
+      const sv = ctx.agentBooks.scrollView?.(a.id);
+      if (sv && !sv.following) entry.scroll = { at: sv.at, id: sv.id, row: sv.row };
       if (lane?.maxSheets != null) entry.limit = lane.maxSheets;
       if (lane?.pinned && lane.pinnedPos) {
         entry.pinned = [round(lane.pinnedPos.x), round(lane.pinnedPos.y), round(lane.pinnedPos.z)];
@@ -646,6 +649,9 @@ export default class SessionStore {
         if (!lane) return;
         if (Array.isArray(a.pinned) && a.pinned.length === 3) books.moveGroup(r.lane, ...a.pinned);
         if (!a.following && Number.isInteger(a.head)) lane.book.pageTo(a.head);
+        // Taken now, applied once the book is a scroll and the event is in its window (it slides
+        // back in from the older buffer or is read again); a view of another session is ignored.
+        if (a.scroll && Number.isFinite(a.scroll.at)) books.applyScrollView(r.lane, { session: a.session, following: false, ...a.scroll });
       } catch (e) {
         failed++;
         console.warn('[session] agent restore failed:', a?.session, e?.message || e);

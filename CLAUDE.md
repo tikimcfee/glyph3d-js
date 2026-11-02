@@ -425,6 +425,28 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `+N newer`) — the book never grows or shifts under the reader.
   Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`,
   `tools/agent-events.test.mjs` (gomuxai's corpus).
+  The third form, **scroll** (`book.form <id> scroll`; an agent book seated at a plane desk is born
+  one — `book.planeForm`, told by Carrel's `onDeskMode` — until given its own form), reads the run as ONE document at one size
+  (`collections/ScrollDocument.js`): a title row (name, a status lamp, `turn · step · live|held`,
+  `+N newer`) over a headline row per event (`[verb] head` in the action hue) and its body indented
+  under it — the call's other lines and info rows dimmed, prose lifted toward white, an output or a
+  file's text plainer; hue, never size, carries the hierarchy. Rows wrap to `book.scrollCols` by the
+  layout's own cell rule (`wrapCells`; nothing dropped — a break keeps its space). An output or a
+  file longer than `book.scrollCollapseRows` lines is one summary row (`▸ output · 214 lines`) until
+  `book.expand` opens it (`AgentBooks.scrollHit` names the event under a pointer ray). The sheets
+  stay as light placeholders (no cards), so the deck's window machinery is the scroll's
+  (`book.scrollMaxRecords` events; older/newer buffers; slides; in-place updates), each window
+  change mirrored as a block op; the document lays out once a frame from its first changed block
+  (a live batch: just its tail — `InstancedField.writeTail` uploads that range), an evicted head
+  goes dead (clipped) until a memmove compaction, and scrolling is the body group's offset + clip
+  (no layout). Following, it rides the end; scrolled up it is held, anchored to the event it
+  shows (live events wait as `+N newer`; reaching the end brings them in). The plain wheel scrolls
+  rows (`book.rows`), Shift+wheel / `book.scroll` / `book.page` move by events (past the top,
+  older history slides in). `book.view` / `AgentBooks.scrollView` give (session, at, row) and
+  `applyScrollView` stands on it again (sliding or reading it back in). On a plane desk it pins
+  like a terminal: `Book.metrics` / `pixelOrigin()` are the document's cell grid; its seat is its
+  frame (`claimsSeat`). Gate: `tools/scroll-form.test.mjs` (corpus text == shown text, row
+  widths, held stillness, reload, one id, the per-batch cost at the cap with teeth).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across

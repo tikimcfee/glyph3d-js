@@ -368,6 +368,7 @@ export class Carrel extends THREE.Object3D {
         this._unpane(e);
         this._unstack(id);
         this._ghostSeat(id);
+        e.grid.onDeskMode?.(null, null);   // no desk now: a member dressed for one undresses
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -424,6 +425,7 @@ export class Carrel extends THREE.Object3D {
         this._unpane(e);
         this._unstack(id);
         this._ghostSeat(id);
+        e.grid.onDeskMode?.(null, null);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns

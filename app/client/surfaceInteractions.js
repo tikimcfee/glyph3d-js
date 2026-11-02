@@ -5,7 +5,8 @@
  * CommandProvider / CanvasInteraction / VCC.
  *
  * TWO wheel gestures, one grammar each:
- *   plain wheel  (wheelScroll) — MOVEMENT: terminal scrollback, a framed grid's conveyor;
+ *   plain wheel  (wheelScroll) — MOVEMENT: terminal scrollback, a framed grid's conveyor, an
+ *     agent book's scroll document;
  *     everything else falls through to the camera dolly.
  *   shift+wheel  (wheelPage)   — PAGING: turns the BOOK under the cursor — an agent book
  *     (cover or card) or a library volume (cover or any page) — wheel-down dives deeper
@@ -95,9 +96,18 @@ const RECORDS = {
     },
   },
   agent: {
+    // An agent book in its SCROLL form is a document: the plain wheel scrolls its rows (wheel
+    // down = later), ~30px a row as a framed grid's conveyor. Any other form leaves the plain
+    // wheel to the camera.
+    wheelScroll(entry, dy) {
+      if (entry.grid?.form !== 'scroll') return null;
+      let rows = Math.round(dy / 30);
+      if (rows === 0) rows = dy > 0 ? 1 : -1;
+      return ['book.rows', entry.id, String(rows)];
+    },
     // An agent book. SHIFT+wheel over the cover TURNS THE PAGES — down = older
     // (deeper into the run), up = newer; landing on the newest resumes live-follow.
-    // One notch = one sheet: a page turn is a discrete act, not a glide.
+    // One notch = one sheet (a scroll: one event's headline): a page turn is a discrete act.
     wheelPage(entry, notches) {
       return ['book.scroll', entry.id, String(-notches)];
     },

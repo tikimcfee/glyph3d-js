@@ -74,6 +74,7 @@ import Book, { PAGE_FACE_DEFAULTS, DECK_DEFAULTS } from './Book.js';
 import CodeGrid from './CodeGrid.js';
 import FrameGrid from './FrameGrid.js';
 import ActionPage, { fitTextStack, wrapText } from './ActionPage.js';
+import ScrollDocument, { wrapCells } from './ScrollDocument.js';
 import AgentNameplate from './AgentNameplate.js';
 import { LAYOUT_SCHEMES } from './layouts/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
@@ -161,6 +162,20 @@ export const AGENT_BOOKS_DEFAULTS = {
     palette: [                  // per-agent identity hues, indexed by lane creation order
         0x3a6ea5, 0xa56a3a, 0x4a9a6a, 0x8a5aa5, 0xa54a5a, 0x5a8aa5,
     ],
+    // -- the scroll form (book.form scroll — the run read as ONE document at one size) ----------
+    scrollCols: 100,            // the document's width in cells — every row wraps to it
+    scrollRows: 40,             // the document's frame height in rows (its title row rides above)
+    scrollTitleGap: 1,          // blank rows between the title row and the run
+    scrollTextSize: 12,         // its row height in the world (a plane desk scales it to the plane's row)
+    scrollMaxRecords: 200,      // events the document holds — its window (older/newer wait as parsed records)
+    scrollCollapseRows: 12,     // an output or a file longer than this many lines shows as ONE summary row (book.expand opens it)
+    scrollBlockGap: 1,          // blank rows between one event and the next
+    scrollIndent: 2,            // an event's body, indented under its headline (cells)
+    scrollProseLift: 0.7,       // prose (prompt / say / think / harness): its hue lifted toward white
+    scrollOutputLift: 0.35,     // an output or a file's text: its hue lifted toward white
+    scrollInfoDim: 0.7,         // the call's own lines and info rows: its hue darkened to this share
+    scrollPage: 10,             // events one push past the document's top brings in from older history
+    planeForm: 'scroll',        // the form an agent book takes at a PLANE desk until it's given its own (deck elsewhere)
     debug: false,               // ON → log the decoration decision per snapshot
     hues: { ...ACTION_HUES },   // live per-kind text hues, seeded from the tool registry's one table
 };
@@ -349,6 +364,13 @@ export default class AgentBooks {
             // Its main reading row (the headline's row height, world units) — a plane desk scales the
             // book so this row is one plane row (Carrel pins).
             book.planeRowHeight = () => this._textOf(this.lanes.get(agentId)).versoTextSize;
+            // The scroll form: the book asks, this shelf answers (its document, its paging).
+            book.onForm = (form, prev) => this._formChanged(this.lanes.get(agentId), form, prev);
+            book.onScroll = (op) => this._scrollOp(this.lanes.get(agentId), op);
+            book.makeScrollDoc = () => this._ensureDoc(this.lanes.get(agentId));
+            // A desk seating this book says its mode (Carrel, as it joins and on a mode change — before it
+            // measures): a plane desk's book is born a scroll; null = it left the desk.
+            book.onDeskMode = (mode) => this._deskMode(this.lanes.get(agentId), mode);
             this.root.add(book);
             const hueIdx = this.lanes.size;
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
@@ -370,6 +392,10 @@ export default class AgentBooks {
                 maxSheets: null,       // per-book retention override: n>0 caps, 0 unbounded, null → cfg.maxSheets
                 textOwn: {},           // page-text values given to THIS book (tuneText) — they win over cfg
                 pinned: false, pinnedPos: null,
+                doc: null,             // the scroll form's ScrollDocument (built when the book takes the form)
+                expanded: new Set(),   // seqs whose collapsed output the reader opened (book.expand)
+                expandAll: false,      // every collapsed output open
+                pendingView: null,     // a saved scroll view waiting for its event to page in (applyScrollView)
             };
             book.fit(this._pageOpts(lane));   // page form from birth — appended sheets inherit it
             this._reserveRoom(lane);           // the frame it claims at its cap — the cover and furniture hold still
@@ -424,6 +450,7 @@ export default class AgentBooks {
         const { sides, entry } = this._buildSheet(lane, record, seq);
         lane.book.addSheet(sides);
         lane.entries.push(entry);
+        if (this._scrolling(lane)) lane.doc.pushBlocks([this._block(lane, entry, seq)]);
         this._trimLane(lane);   // past the cap, the oldest sheet leaves as the newest lands
         if (!this._batch) { this._refreshNameplate(lane); this._relayout(); this._emitChange(); }
         return lane;
@@ -441,6 +468,20 @@ export default class AgentBooks {
         const agentId = lane.agentId;
         const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
         const sheetId = rev ? `agent:${agentId}:${seq}~${rev}` : `agent:${agentId}:${seq}`;
+        if (lane.book.form === 'scroll') {
+            // The scroll form reads the RECORD (its document's block) — the sheet is a light
+            // placeholder: no cards, no GPU objects, the window machinery unchanged.
+            const meta = { agentId, seq, sheetId, record };
+            return {
+                sides: { verso: null, recto: null, meta: { seq, kind: kindForAction(record.action) } },
+                entry: {
+                    sheetId, verso: null, action: null, body: null, info: null, snapshot: null,
+                    rectoRole: null, rectoText: null, call: actionCall(record), infoText: infoOf(record), window: null,
+                    pickMeta: meta, actionId: null, bodyId: null, infoId: null, snapId: null,
+                    record, rev, ts: this._now(),
+                },
+            };
+        }
         const actionId = `${sheetId}:action`;
         const bodyId = `${sheetId}:body`;
         const infoId = `${sheetId}:info`;
@@ -679,6 +720,7 @@ export default class AgentBooks {
             const { sides, entry } = this._buildSheet(lane, next, seq, (old.rev || 0) + 1);
             lane.book.replaceSheet(i, sides);
             lane.entries[i] = entry;
+            if (this._scrolling(lane)) lane.doc.replaceBlock(String(seq), this._block(lane, entry, seq));
             return true;
         }
         for (const buf of [lane.newer, lane.older]) {
@@ -1061,6 +1103,7 @@ export default class AgentBooks {
                 changed = true;
                 this._refreshNameplate(lane);
             } else if (tick) this._refreshNameplate(lane);
+            if (this._scrolling(lane)) this._flushScroll(lane, tick);
             lane.book.update(dt);
         }
         if (changed) this._emitChange();
@@ -1127,6 +1170,7 @@ export default class AgentBooks {
             lane.book.setNameplate(lane.label, { gap: this.cfg.labelGap });
             this._refreshNameplate(lane);
             lane.book.resetNameplateBand();   // the plate's sizing may have moved — its band re-learns
+            if (this._scrolling(lane)) this._restageScroll(lane);
         }
         this._relayout();
     }
@@ -1179,6 +1223,437 @@ export default class AgentBooks {
     dispose() {
         this.clear('all');
         this.scene.remove(this.root);
+    }
+
+    // -- the scroll form: the run as ONE document ------------------------------------------------
+    //    A book in form 'scroll' shows its window's records as a ScrollDocument: a headline row per
+    //    event (`[verb] target` in the action hue), its body indented under it, hue — never size —
+    //    carrying the hierarchy. Its sheets are light placeholders (_buildSheet), so the window
+    //    machinery (cap, older/newer, slide, in-place updates) is the deck's own; every change to
+    //    the window is mirrored into the document as a block op and laid out once per frame from
+    //    the first changed block on (_flushScroll — a live batch lays out only its tail).
+
+    /** True while a lane shows its scroll document. @private */
+    _scrolling(lane) { return !!lane?.doc && lane.book.form === 'scroll'; }
+
+    /** The lane's document, built on first use: its frame from cfg, its scale so a row is
+     *  cfg.scrollTextSize in the world, its backdrop the book's pick handle. @private */
+    _ensureDoc(lane) {
+        if (lane.doc) return lane.doc;
+        const c = this.cfg;
+        const doc = new ScrollDocument(this.atlas, {
+            cols: c.scrollCols, rows: c.scrollRows, titleGap: c.scrollTitleGap, worldScale: CARD_WORLD_SCALE,
+            background: c.faceColor, backgroundOpacity: c.faceOpacity,
+        });
+        doc.name = `agent-scroll:${lane.agentId}`;
+        doc.scale.setScalar(c.scrollTextSize / doc.metrics.lineSpacing);
+        lane.doc = doc;
+        lane.book.setScrollDoc(doc);
+        try { this.ctx.pickingSystem?.register?.('group', doc._background, lane.book); }
+        catch (e) { console.warn('[AgentBooks] scroll pick register failed', e); }
+        return doc;
+    }
+
+    /** Free a lane's document (it left the scroll form, or the lane died). @private */
+    _dropDoc(lane) {
+        const doc = lane.doc;
+        if (!doc) return;
+        try { this.ctx.pickingSystem?.unregister?.('group', doc._background); } catch (_e) { /* best effort */ }
+        lane.doc = null;
+        if (lane.book.scrollDoc === doc) lane.book.setScrollDoc(null);
+        doc.dispose();
+    }
+
+    /**
+     * Book.onForm: the book changed form. Into or out of scroll, every resident sheet is rebuilt
+     * for the new form in place (cards ↔ light), the window takes the new form's size (the scroll
+     * form's is cfg.scrollMaxRecords — it fills from the older buffer; the deck's sheds), and the
+     * document is set whole. Deck ↔ splay is the deck's own. @private
+     */
+    _formChanged(lane, form, prev) {
+        if (!lane || (form !== 'scroll' && prev !== 'scroll')) return;
+        const book = lane.book;   // the scroll form's document is built before this runs (Book.makeScrollDoc)
+        const outer = this._batch;
+        this._batch = true;
+        try {
+            for (let i = 0; i < lane.entries.length; i++) {
+                const e = lane.entries[i];
+                const seq = book.sheets[i].meta.seq;
+                this._disposeEntry(e);
+                const { sides, entry } = this._buildSheet(lane, e.record, seq, (e.rev || 0) + 1);
+                book.replaceSheet(i, sides);
+                lane.entries[i] = entry;
+            }
+            if (form === 'scroll') {
+                const cap = this._capFor(lane);
+                while (lane.entries.length < cap && lane.older?.length) this._materialize(lane, 0, lane.older.pop());
+            } else this._trimLane(lane);
+        } finally { this._batch = outer; }
+        if (form === 'scroll') {
+            const doc = lane.doc;
+            doc.setBlocks(lane.entries.map((e, i) => this._block(lane, e, book.sheets[i].meta.seq)));
+            if (book.following) doc.follow();
+            this._flushScroll(lane, true);
+        } else {
+            this._dropDoc(lane);
+            this._reserveRoom(lane);
+            book.seatAll();
+        }
+        this._refreshNameplate(lane);
+        if (!outer) { this._relayout(); this._emitChange(); }
+    }
+
+    /** The form an agent book takes at a desk of `mode` when it has none of its own (cfg.planeForm
+     *  at a plane desk, else the deck): Book.setFormDefault — its own form wins. @private */
+    _deskMode(lane, mode) {
+        if (!lane) return;
+        lane.book.setFormDefault(mode === 'plane' && Book.FORMS.includes(this.cfg.planeForm) ? this.cfg.planeForm : 'deck');
+    }
+
+    /** The scroll document re-read from cfg: its frame, its world row, its window (filled from the
+     *  older buffer when it grew), every block re-composed (new width, new collapse, new hues);
+     *  the frame keeps standing on what it showed. @private */
+    _restageScroll(lane) {
+        const c = this.cfg, doc = lane.doc;
+        const view = doc.view();
+        doc.cfg.titleGap = c.scrollTitleGap;
+        doc.setFrame({ cols: c.scrollCols, rows: c.scrollRows });
+        doc.scale.setScalar(c.scrollTextSize / doc.metrics.lineSpacing);
+        const cap = this._capFor(lane);
+        const outer = this._batch;
+        this._batch = true;
+        try { while (lane.entries.length < cap && lane.older?.length) this._materialize(lane, 0, lane.older.pop()); }
+        finally { this._batch = outer; }
+        doc.setBlocks(lane.entries.map((e, i) => this._block(lane, e, lane.book.sheets[i].meta.seq)));
+        doc._layFrame();
+        this._flushScroll(lane, true);
+        if (!doc.setView(view)) doc.follow();
+        lane.book._emitResize();
+    }
+
+    /** Lay out what changed and restage the title row. @private */
+    _flushScroll(lane, title = true) {
+        const doc = lane.doc;
+        if (title || doc.dirty || lane.titleStale) { lane.titleStale = false; doc.setTitle(this._scrollTitle(lane)); }
+        if (doc.dirty) doc.flush();
+        if (lane.pendingView) this._tryView(lane);
+    }
+
+    /** The colours one record's block is set in. @private */
+    _scrollHues(record) {
+        const c = this.cfg;
+        const hue = c.hues[kindForAction(record.action)] || c.hues.other;
+        const noise = record.action === 'noise';
+        const dim = (h, t) => ({ r: h.r * t, g: h.g * t, b: h.b * t });
+        return {
+            tag: hue,
+            head: liftHue(hue, noise ? c.noiseTextLift : c.callTextLift),
+            call: noise ? hue : dim(hue, c.scrollInfoDim),
+            prose: liftHue(hue, record.action === 'prompt' ? c.promptTextLift : noise ? c.noiseTextLift : c.scrollProseLift),
+            output: liftHue(hue, noise ? c.noiseTextLift : c.scrollOutputLift),
+            summary: dim(hue, c.scrollInfoDim),
+        };
+    }
+
+    /**
+     * One event as the document's block — every row wrapped to the document's width by the
+     * layout's own cell rule, nothing dropped (each row says where its text came from: `src`
+     * {part, line, cont}). The headline: `[verb] head`; under it, indented: the call's other
+     * lines, its info rows, then its content — prose, an output, or the file text the event
+     * carries. An output or a file longer than cfg.scrollCollapseRows lines is ONE summary row
+     * (`▸ output · 214 lines`) until it's expanded (then `▾ …` over every line). Text is
+     * normalized for display: CRLF → LF, one trailing newline (the line's terminator) dropped.
+     * @private
+     */
+    _block(lane, entry, seq) {
+        const c = this.cfg, doc = lane.doc, rec = entry.record;
+        const cols = doc.cfg.cols, ind = Math.max(0, Math.floor(c.scrollIndent));
+        const hue = this._scrollHues(rec);
+        const rows = [];
+        const norm = (t) => String(t ?? '').replace(/\r\n/g, '\n').replace(/\n$/, '');
+        const add = (part, text, color, indent) => {
+            const lines = norm(text).split('\n');
+            lines.forEach((line, li) => {
+                wrapCells(line, Math.max(1, cols - indent), doc.cellsOf, doc.cfg.tabWidth).forEach((r, k) =>
+                    rows.push({ segs: r ? [{ text: r, color }] : [], indent, src: { part, line: li, cont: k > 0 } }));
+            });
+        };
+        // The headline: the tag in the action hue, the call's first line lifted toward white.
+        const call = entry.call, tag = `[${call.verb}]`;
+        const headText = call.head ? `${tag} ${call.head}` : tag;
+        const tagLen = Array.from(tag).length;
+        let before = 0;   // headline codepoints set on the rows above
+        wrapCells(headText, cols, doc.cellsOf, doc.cfg.tabWidth).forEach((r, k) => {
+            const cps = Array.from(r);
+            const cut = Math.max(0, Math.min(cps.length, tagLen - before));
+            before += cps.length;
+            const segs = [];
+            if (cut > 0) segs.push({ text: cps.slice(0, cut).join(''), color: hue.tag });
+            if (cut < cps.length) segs.push({ text: cps.slice(cut).join(''), color: hue.head });
+            rows.push({ segs, indent: 0, src: { part: 'head', line: 0, cont: k > 0 } });
+        });
+        if (call.rest) add('call', call.rest, hue.call, ind);
+        if (entry.infoText) add('info', entry.infoText, hue.call, ind);
+        const content = this._scrollContent(rec);
+        if (content) {
+            const n = norm(content.text).split('\n').length;
+            const collapsible = content.role !== 'prose' && n > Math.max(0, c.scrollCollapseRows);
+            const open = !collapsible || lane.expandAll || lane.expanded.has(seq);
+            if (collapsible) {
+                rows.push({ segs: [{ text: `${open ? '▾' : '▸'} ${content.name} · ${n} lines`, color: hue.summary }], indent: ind,
+                    src: { part: 'summary', line: 0, cont: false } });
+            }
+            if (open) add('body', content.text, content.role === 'prose' ? hue.prose : hue.output, ind);
+        }
+        for (let g = 0; g < Math.max(0, c.scrollBlockGap); g++) rows.push({ segs: [], indent: 0, src: { part: 'gap', line: g, cont: false } });
+        return { id: String(seq), rows, seq, collapsible: !!content && content.role !== 'prose' };
+    }
+
+    /** What a record's body shows in the scroll form: prose, an output, or the file text its
+     *  event carries (a file action without one shows its headline and info only). @private
+     *  @returns {{role:'prose'|'output'|'file', name:string, text:string}|null} */
+    _scrollContent(rec) {
+        if (rec.result) {
+            const prose = PROSE_ACTIONS.has(rec.action);
+            const name = rec.action === 'prompt' ? (rec.tag || 'prompt') : rec.action === 'say' ? 'said'
+                : rec.action === 'think' ? 'thinking' : rec.action === 'system' ? 'harness' : 'output';
+            return { role: prose ? 'prose' : 'output', name, text: String(rec.result) };
+        }
+        if (rec.target && typeof rec.file?.text === 'string') return { role: 'file', name: 'file', text: rec.file.text };
+        return null;
+    }
+
+    /**
+     * The document's title row: the session's name, a status lamp in its state's hue, then
+     * `turn N · step M · live|held` for the event at the frame's top (the newest while
+     * following) and, held, `+N newer`. Facts that don't fit the width are left off right to
+     * left (the name never is). @private
+     */
+    _scrollTitle(lane) {
+        const r = this.readout(lane);
+        const doc = lane.doc, pal = this.cfg.palette;
+        const hex = pal[lane.hueIdx % pal.length];
+        const own = { r: ((hex >> 16) & 255) / 255, g: ((hex >> 8) & 255) / 255, b: (hex & 255) / 255 };
+        const name = liftHue(own, 0.55);
+        const st = String(r.status || lane.state);
+        const lampHue = { active: 0x6ee7a0, working: 0x6ee7a0, running: 0x6ee7a0, idle: 0x8a93a6, stalled: 0xe0b050,
+            waiting: 0xe070c0, done: 0x6a8ab0, ended: 0x6a8ab0 }[st.split(/\s/)[0]] ?? 0x8a93a6;
+        const lamp = { r: ((lampHue >> 16) & 255) / 255, g: ((lampHue >> 8) & 255) / 255, b: (lampHue & 255) / 255 };
+        const dim = { r: 0.62, g: 0.66, b: 0.74 };
+        const top = doc.following ? lane.entries.length - 1 : lane.entries.findIndex((e, i) => String(lane.book.sheets[i].meta.seq) === doc.rowAt(0)?.id);
+        const e = lane.entries[top], seq = e ? lane.book.sheets[top].meta.seq : null;
+        const facts = [st];
+        if (e?.record?.turn) facts.push(`turn ${e.record.turn.index}`);
+        if (seq != null) facts.push(`step ${seq + (lane.sheetBase || 0) + 1}`);
+        facts.push(doc.following ? 'live' : 'held');
+        if (lane.newer?.length) facts.push(`+${lane.newer.length} newer`);
+        const cols = doc.cfg.cols, cells = (t) => Array.from(t).reduce((n, ch) => n + doc.cellsOf(ch.codePointAt(0)), 0);
+        while (facts.length > 1 && cells(`${r.name} ● ${facts.join(' · ')}`) > cols) facts.pop();
+        return [{ text: r.name, color: name }, { text: ' ● ', color: lamp }, { text: facts.join(' · '), color: dim }];
+    }
+
+    /**
+     * Book.onScroll — the scroll form's paging, by EVENTS: `by` moves the frame's top to the
+     * headline `by` events away (past the first, older history slides in; past the last, the
+     * newer buffer does, then the frame follows the end); `to` stands on event `to` (0-based in
+     * the window; Infinity = the live end). @private
+     */
+    _scrollOp(lane, op) {
+        const doc = lane?.doc;
+        if (!doc) return false;
+        if (doc.dirty) doc.flush();
+        if (op.to === Infinity || op.to === 'last') return this._toEnd(lane);
+        const cur = Math.max(0, lane.entries.findIndex((_, i) => String(lane.book.sheets[i].meta.seq) === doc.rowAt(0)?.id));
+        let target = Number.isFinite(op.to) ? Math.round(op.to) : cur + Math.round(op.by || 0);
+        if (target < 0) {
+            if (lane.history) this.slide(lane.agentId, target);
+            doc.flush();
+            target = 0;
+        }
+        if (target >= lane.entries.length) return this._toEnd(lane);
+        const seq = lane.book.sheets[target]?.meta?.seq;
+        if (seq == null) return false;
+        doc.setView({ following: false, id: String(seq), row: 0 });
+        this._afterScroll(lane);
+        return true;
+    }
+
+    /** Ride the live end: the newer buffer slides in, the frame follows. @private */
+    _toEnd(lane) {
+        // The newer events join the document — appended while it has room (nothing above the
+        // reader leaves), the window sliding on only past its cap.
+        const cap = this._capFor(lane), outer = this._batch;
+        this._batch = true;
+        try { while (lane.newer?.length && lane.entries.length < cap) this._materialize(lane, lane.entries.length, lane.newer.shift()); }
+        finally { this._batch = outer; }
+        if (lane.newer?.length) this.slide(lane.agentId, lane.newer.length);
+        lane.doc.flush();
+        lane.doc.follow();
+        this._afterScroll(lane);
+        return true;
+    }
+
+    /** After the frame moved: the book's follow state is the document's (a held document keeps
+     *  live events in the newer buffer), the title restages, older history prefetches near the top. @private */
+    _afterScroll(lane) {
+        const doc = lane.doc;
+        lane.book.following = doc.following;
+        if (!doc.following && lane.history) {
+            const top = lane.entries.findIndex((_, i) => String(lane.book.sheets[i].meta.seq) === doc.rowAt(0)?.id);
+            if (top >= 0 && top <= this.cfg.historyLead && lane.older.length < this.cfg.historyTurns) this.loadOlder(lane.agentId);
+        }
+        doc.setTitle(this._scrollTitle(lane));
+        this._emitChange();
+    }
+
+    /**
+     * Scroll a book's document by `delta` ROWS (− up, + down) — the plain wheel's grammar. Past
+     * its first row, cfg.scrollPage older events slide in (the frame stays on what it showed);
+     * reaching the end brings the newer buffer in and follows.
+     * @param {string} agentId any address resolveLane answers to @param {number} delta
+     * @returns {{top:number, following:boolean}|null} null: no such book, or it isn't a scroll
+     */
+    scrollRows(agentId, delta) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!this._scrolling(lane)) return null;
+        const doc = lane.doc;
+        if (doc.dirty) doc.flush();
+        const r = doc.scrollBy(delta);
+        if (r.atStart && delta < 0 && lane.history && (lane.older.length || !lane.history.done)) {
+            this.slide(lane.agentId, -Math.max(1, Math.floor(this.cfg.scrollPage)));
+            doc.flush();
+            doc.scrollBy(delta);
+        }
+        if (doc.following && lane.newer?.length) { this._toEnd(lane); return { top: r.top, following: true }; }
+        this._afterScroll(lane);
+        return { top: r.top, following: doc.following };
+    }
+
+    /**
+     * Open or close collapsed outputs: `which` is a run step number (the title's `step`), 'all',
+     * 'none', or 'top' (every collapsible event in the frame). Each changed event's block is
+     * rebuilt in place; the frame stays on what it shows.
+     * @param {string} agentId @param {number|'all'|'none'|'top'} which @param {boolean|null} [open] null toggles
+     * @returns {number|null} events changed (null: no scroll book)
+     */
+    expand(agentId, which, open = null) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!this._scrolling(lane)) return null;
+        const doc = lane.doc;
+        if (doc.dirty) doc.flush();
+        const base = lane.sheetBase || 0;
+        const seqs = lane.entries.map((_, i) => lane.book.sheets[i].meta.seq);
+        let pick;
+        if (which === 'all' || which === 'none') {
+            lane.expandAll = which === 'all';
+            if (which === 'none') lane.expanded.clear();
+            pick = seqs;
+        } else if (which === 'top') {
+            const ids = new Set();
+            for (let k = 0; k < doc.cfg.rows; k++) { const h = doc.rowAt(k); if (h) ids.add(h.id); }
+            pick = seqs.filter((q) => ids.has(String(q)));
+        } else {
+            const q = Math.round(Number(which)) - base - 1;
+            if (!seqs.includes(q)) return 0;
+            pick = [q];
+        }
+        let n = 0;
+        for (const q of pick) {
+            const i = seqs.indexOf(q);
+            const blk = doc.blocks.find((b) => b.id === String(q));
+            if (!blk?.collapsible) continue;
+            if (which !== 'all' && which !== 'none') {
+                const isOpen = lane.expandAll || lane.expanded.has(q);
+                const want = open ?? !isOpen;
+                if (want) lane.expanded.add(q); else { lane.expanded.delete(q); if (lane.expandAll) { lane.expandAll = false; for (const s of seqs) if (s !== q) lane.expanded.add(s); } }
+            }
+            doc.replaceBlock(String(q), this._block(lane, lane.entries[i], q));
+            n++;
+        }
+        if (n) doc.flush();
+        return n;
+    }
+
+    /**
+     * What a pointer RAY hits on a book's scroll document: the event (its run step) and the row
+     * part under it — a click on a `summary` row is the expand gesture (`book.expand <step>`).
+     * @param {string} agentId @param {THREE.Ray} ray world space
+     * @returns {{step:number, part:string, collapsible:boolean, frameRow:number}|null}
+     */
+    scrollHit(agentId, ray) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!this._scrolling(lane)) return null;
+        const doc = lane.doc;
+        doc.updateWorldMatrix(true, false);
+        const inv = new THREE.Matrix4().copy(doc.matrixWorld).invert();
+        const local = ray.clone().applyMatrix4(inv);
+        const p = local.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3());
+        if (!p) return null;
+        const hit = doc.rowAtLocal(p.x, p.y);
+        if (!hit?.block) return null;
+        const r = hit.block.rows[hit.row];
+        return { step: hit.block.seq + (lane.sheetBase || 0) + 1, part: r.src?.part ?? 'body', collapsible: !!hit.block.collapsible, frameRow: hit.frameRow };
+    }
+
+    /**
+     * The scroll view to save for a book — where its frame stands, by the RUN's coordinates:
+     * the session and the byte offset (`at`) of the event at the top, and the row inside it.
+     * Following, just that. null: no scroll book.
+     * @param {string} agentId
+     * @returns {{session:string|null, following:boolean, at?:number, id?:string, row?:number}|null}
+     */
+    scrollView(agentId) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!this._scrolling(lane)) return null;
+        const doc = lane.doc;
+        if (doc.dirty) doc.flush();
+        const v = doc.view();
+        if (v.following) return { session: lane.sessionId ?? null, following: true };
+        const i = lane.entries.findIndex((_, k) => String(lane.book.sheets[k].meta.seq) === v.id);
+        const rec = lane.entries[i]?.record;
+        if (!rec || !Number.isFinite(rec.at)) return { session: lane.sessionId ?? null, following: true };
+        return { session: lane.sessionId ?? null, following: false, at: rec.at, id: rec.id ?? null, row: v.row };
+    }
+
+    /**
+     * Stand a book's frame on a saved scroll view — once its event is in the window (now, or
+     * when history pages it in: an event in the older buffer slides in; one older still is read).
+     * A view of another session is ignored.
+     * @param {string} agentId @param {{session?:string|null, following:boolean, at?:number, id?:string|null, row?:number}} view
+     * @returns {boolean} whether the lane took it (applied now, or pending)
+     */
+    applyScrollView(agentId, view) {
+        const lane = this.resolveLane(agentId)?.[1];
+        if (!lane || !view) return false;
+        if (view.session && lane.sessionId && view.session !== lane.sessionId) return false;
+        lane.pendingView = { ...view, tries: 0 };
+        if (this._scrolling(lane)) this._tryView(lane);
+        return true;
+    }
+
+    /** Apply a pending view if its event is here (sliding it in from the older buffer, or reading
+     *  older history, as needed). @private */
+    _tryView(lane) {
+        const v = lane.pendingView, doc = lane.doc;
+        if (!v || !doc) return;
+        if (v.following) { lane.pendingView = null; this._toEnd(lane); return; }
+        const match = (r) => r && r.at === v.at && (v.id == null || r.id === v.id);
+        const i = lane.entries.findIndex((e) => match(e.record));
+        if (i >= 0) {
+            if (doc.dirty) doc.flush();
+            doc.setView({ following: false, id: String(lane.book.sheets[i].meta.seq), row: v.row || 0 });
+            lane.pendingView = null;
+            this._afterScroll(lane);
+            return;
+        }
+        if (!lane.history || v.tries > 8) return;
+        const k = lane.older.findIndex((x) => match(x.record));
+        if (k >= 0) { v.tries++; this.slide(lane.agentId, -(lane.older.length - k)); doc.flush(); this._tryView(lane); return; }
+        const first = lane.older[0]?.record ?? lane.entries[0]?.record;
+        if (first && Number.isFinite(first.at) && v.at < first.at && !lane.history.done && !lane.history.loading) {
+            v.tries++;
+            this.loadOlder(lane.agentId).then(() => this._tryView(lane));
+        }
     }
 
     // -- private: cards --------------------------------------------------------------
@@ -1328,6 +1803,7 @@ export default class AgentBooks {
      * to the same width. Identical text is a no-op downstream (FieldLabel). @private
      */
     _refreshNameplate(lane) {
+        lane.titleStale = true;   // the scroll form's title row reads the same readout
         if (!lane.label) return;
         const c = this.cfg;
         const { name, status } = this.nameplateText(lane);
@@ -1413,7 +1889,7 @@ export default class AgentBooks {
     }
 
     _capFor(lane) {
-        const n = lane.maxSheets ?? this.cfg.maxSheets;
+        const n = lane.book.form === 'scroll' ? this.cfg.scrollMaxRecords : (lane.maxSheets ?? this.cfg.maxSheets);
         return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
     }
 
@@ -1451,6 +1927,7 @@ export default class AgentBooks {
         const seq = lane.book.sheets[i]?.meta?.seq ?? e.pickMeta.seq;
         lane.book.removeSheet(i);
         this._disposeEntry(e);
+        if (this._scrolling(lane)) lane.doc.removeBlock(String(seq));
         return { record: e.record, seq };
     }
 
@@ -1459,6 +1936,7 @@ export default class AgentBooks {
         const { sides, entry } = this._buildSheet(lane, item.record, item.seq);
         lane.book.insertSheet(i, sides);
         lane.entries.splice(i, 0, entry);
+        if (this._scrolling(lane)) lane.doc.insertBlock(i, this._block(lane, entry, item.seq));
     }
 
     /** Append records to the older buffer's NEWEST end, dropping its oldest past the
@@ -1572,6 +2050,7 @@ export default class AgentBooks {
             moved = k;
         }
         if (moved) {
+            if (this._scrolling(lane) && book.following) lane.doc.follow();
             book.seatAll();   // a slide is a cut — the window re-seats at once, nothing flies
             this._refreshNameplate(lane);
             this._relayout();
@@ -1922,6 +2401,7 @@ export default class AgentBooks {
     /** Unregister + dispose everything a lane owns (cards, cover, nameplate, book). @private */
     _kill(lane) {
         for (const e of lane.entries) this._disposeEntry(e);
+        this._dropDoc(lane);
         try { this.ctx.registry?.unregister?.(lane.groupId); } catch (_e) { /* best effort */ }
         try { if (lane.book.cover) this.ctx.pickingSystem?.unregister?.('group', lane.book.cover.mesh); } catch (_e) { /* best effort */ }
         try { lane.book.dispose(); } catch (_e) { /* best effort */ }   // drops the cover + nameplate with the sheets

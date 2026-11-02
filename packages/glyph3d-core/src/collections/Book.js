@@ -47,6 +47,14 @@
  *     (cols from an aspect target unless fixed), the head floating `lift` forward as
  *     the visible bookmark. The overview form: "a lot of files here — show me all
  *     of them."
+ *   'scroll' — the book READ AS ONE DOCUMENT: its owner's ScrollDocument (setScrollDoc)
+ *     stands in for the sheets — one size, a headline row per sheet, read through a
+ *     fixed frame like a terminal. The sheets stay (their records are the document's;
+ *     the owner builds them light) but draw nothing; the cover, tabs and nameplate are
+ *     quiet (the document's title row is the book's one ornament). Its frame is the
+ *     document's, and it states its cell grid (metrics, pixelOrigin), so a plane desk
+ *     pins it at the plane's column like a terminal. Paging moves the document by
+ *     sheets (onScroll — the owner scrolls); a form change taps onForm.
  *
  * Paging only moves the head in both forms; in splay that means the lift glides
  * across the grid. The book live-follows its newest sheet (`following`) until paged
@@ -144,6 +152,9 @@ const _asideBox = new THREE.Box3();
 const _asideAt = new THREE.Vector3();
 
 export default class Book extends BoundedObject3D {
+    /** The presentation forms. */
+    static FORMS = Object.freeze(['deck', 'splay', 'scroll']);
+
     /**
      * @param {THREE.Object3D} [leaf] initial bound content (a CodeGrid, or any
      *        leafBox-measurable object) — becomes the first sheet's recto. Omit for an
@@ -167,8 +178,24 @@ export default class Book extends BoundedObject3D {
         this.deckOwn = {};
         /** @type {Object<string, number>} the owner's latest deck defaults (setDeckDefaults) — what an untuned knob returns to */
         this._deckBase = {};
-        /** @type {'deck'|'splay'} the presentation form — the slot law sheets ease to */
+        /** @type {'deck'|'splay'|'scroll'} the presentation form — the slot law sheets ease to,
+         *  or the scroll document standing in for them */
         this.form = 'deck';
+        /** @type {Object|null} the document the scroll form shows (a ScrollDocument — setScrollDoc) */
+        this.scrollDoc = null;
+        /** @type {(() => void)|null} the owner builds the scroll document when the form is asked for */
+        this.makeScrollDoc = null;
+        /** @type {'deck'|'splay'|'scroll'|null} the form given to THIS book (setForm) — it wins over the default */
+        this.formOwn = null;
+        /** @type {'deck'|'splay'|'scroll'} the owner's default form for where the book sits (setFormDefault) */
+        this._formBase = 'deck';
+        /** @type {((form:string, prev:string) => void)|null} the owner's form tap — runs after every change */
+        this.onForm = null;
+        /** @type {((op:{by?:number, to?:number}) => boolean)|null} the scroll form's paging — the owner
+         *  moves its document by sheets (`by`) or to one (`to`: an index, Infinity = the live end) */
+        this.onScroll = null;
+        /** @type {Set<Function>} resize subscribers (a desk re-seats the book when its frame changes) */
+        this._resizeFns = new Set();
         /** @type {{cols:number,gapX:number,gapY:number,aspect:number,lift:number}} splay knobs */
         this.splay = { ...SPLAY_DEFAULTS };
         /** @type {{pageW:number,pageH:number,scale:number,contentW:number,contentH:number}|null}
@@ -262,6 +289,7 @@ export default class Book extends BoundedObject3D {
             rectoMount: mountFor(recto, 'recto'),
             faces: [], fit: {}, meta, _at: null,
         };
+        node.visible = this.form !== 'scroll';
         this.add(node);
         const held = this.sheets.length > 0 && !this.following;
         this.sheets.splice(i, 0, sheet);
@@ -430,13 +458,81 @@ export default class Book extends BoundedObject3D {
         return { cols: c, rows, w: Math.max(c * stepX - gapX, 0), h: Math.max(rows * stepY - gapY, 0) };
     }
 
-    /** Take a presentation form ('deck' | 'splay'), optionally tuning the splay knobs.
-     *  Sheets EASE to the new form's slots in update(dt) — pages fly between forms. */
+    /** Take a presentation form ('deck' | 'splay' | 'scroll'), optionally tuning the splay knobs.
+     *  Sheets EASE to the new form's slots in update(dt) — pages fly between forms. 'scroll'
+     *  needs the owner's document (setScrollDoc); the owner hears every change (onForm). */
     setForm(form, opts = {}) {
-        this.form = form === 'splay' ? 'splay' : 'deck';
-        Object.assign(this.splay, opts);
+        if (form == null) { this.formOwn = null; return this._takeForm(this._formBase, opts); }
+        if (!Book.FORMS.includes(form)) throw new Error(`Book.setForm: form is ${Book.FORMS.join('|')} (got ${JSON.stringify(form)})`);
+        this.formOwn = form;
+        return this._takeForm(form, opts);
+    }
+
+    /** The form this book takes where it is when it has none of its own (its owner's default —
+     *  an agent book at a plane desk is born a scroll). A book given its own (setForm) keeps it. */
+    setFormDefault(form) {
+        if (!Book.FORMS.includes(form)) throw new Error(`Book.setFormDefault: form is ${Book.FORMS.join('|')} (got ${JSON.stringify(form)})`);
+        this._formBase = form;
+        if (!this.formOwn) this._takeForm(form);
         return this;
     }
+
+    /** Become `form` (the owner's tap hears it). @private */
+    _takeForm(form, opts = {}) {
+        if (form === 'scroll' && !this.scrollDoc) this.makeScrollDoc?.();
+        if (form === 'scroll' && !this.scrollDoc) throw new Error('Book.setForm: the scroll form needs its owner\'s document (makeScrollDoc / setScrollDoc) — this book has none');
+        const prev = this.form;
+        this.form = form;
+        Object.assign(this.splay, opts);
+        if (prev !== form) {
+            this._showForm();
+            this.onForm?.(form, prev);
+            this._emitResize();
+        }
+        return this;
+    }
+
+    /** Hand the book its scroll document (null drops it — a book showing it falls back to the deck). */
+    setScrollDoc(doc) {
+        if (this.scrollDoc && this.scrollDoc !== doc && this.scrollDoc.parent === this) this.remove(this.scrollDoc);
+        this.scrollDoc = doc || null;
+        if (doc && doc.parent !== this) this.add(doc);
+        if (!doc && this.form === 'scroll') this._takeForm('deck');
+        else this._showForm();
+        return this;
+    }
+
+    /** What draws in the current form: the document in scroll, the sheets otherwise. @private */
+    _showForm() {
+        const scroll = this.form === 'scroll';
+        if (this.scrollDoc) this.scrollDoc.visible = scroll;
+        for (const s of this.sheets) s.node.visible = !scroll;
+        if (this.tabs) for (const t of this.tabs) t.tab.visible = !scroll;
+    }
+
+    /** True in the scroll form with its document. @private */
+    get _scroll() { return this.form === 'scroll' && !!this.scrollDoc; }
+
+    /** The scroll document's cell metrics in the book's frame (a plane desk scales by its column);
+     *  undefined in the other forms (their text sits on pages at many sizes). */
+    get metrics() {
+        if (!this._scroll) return undefined;
+        const d = this.scrollDoc, m = d.metrics, s = d.scale.x;
+        return s === 1 ? m : { ...m, charWidth: m.charWidth * s, charHeight: m.charHeight * s, lineSpacing: m.lineSpacing * s };
+    }
+
+    /** The scroll document's cell-grid origin in the book's frame (null in the other forms). */
+    pixelOrigin() {
+        if (!this._scroll) return null;
+        const d = this.scrollDoc, o = d.pixelOrigin();
+        return { x: d.position.x + o.x * d.scale.x, y: d.position.y + o.y * d.scale.y };
+    }
+
+    /** Subscribe to frame changes (a form change, the document's frame). @returns {() => void} */
+    onResize(fn) { this._resizeFns.add(fn); return () => this._resizeFns.delete(fn); }
+
+    /** Tell subscribers the frame moved. */
+    _emitResize() { for (const fn of this._resizeFns) { try { fn(); } catch (e) { console.error('[Book] resize subscriber failed', e); } } }
 
     /** The OWNER's deck defaults (its shelf cfg — at birth and on every re-apply): stamped
      *  onto each knob this book hasn't been given its own value for.
@@ -503,6 +599,7 @@ export default class Book extends BoundedObject3D {
      *  _turnDeck (side-changers cut, the reading deck slides ≤ deck.slide pitches); the
      *  sheets then ease the remainder in update(dt). */
     pageTo(index) {
+        if (this._scroll) return !!this.onScroll?.({ to: index });
         const n = this.sheets.length;
         if (!n) return false;
         const from = Math.min(Math.max(0, this.head), n - 1);
@@ -517,7 +614,10 @@ export default class Book extends BoundedObject3D {
     }
 
     /** Move the head by `delta` sheets (− older / back in time, + newer). */
-    scroll(delta) { return this.pageTo(this.head + (Number(delta) || 0)); }
+    scroll(delta) {
+        if (this._scroll) return !!this.onScroll?.({ by: Number(delta) || 0 });
+        return this.pageTo(this.head + (Number(delta) || 0));
+    }
 
     /** Seat every sheet directly at its slot (no easing) — a builder lays a deck down
      *  settled, so a freshly-assembled book appears in place instead of converging. */
@@ -594,7 +694,7 @@ export default class Book extends BoundedObject3D {
 
     /** A framed book CLAIMS its seat: getSeatBounds is its stated room, so a desk seats it
      *  as given (an unframed book's seat is grown-only at the desk — Carrel CALM SEATS). */
-    get claimsSeat() { return this._framed; }
+    get claimsSeat() { return this._framed || this._scroll; }
 
     /**
      * The book's FRAME (local): what it claims, not what it draws this frame. Reserved
@@ -605,6 +705,7 @@ export default class Book extends BoundedObject3D {
      * @returns {THREE.Box3}
      */
     frameBounds() {
+        if (this._scroll) return this._docBox();
         if (!this._framed) return this.layoutBounds();
         const o = this._fitOpts;
         const n = Math.max(this.reserve.sheets, this.sheets.length, 1);
@@ -630,6 +731,13 @@ export default class Book extends BoundedObject3D {
         const c = this.cover;
         if (!c) return this;
         const b = this.frameBounds();
+        if (this._scroll) {
+            // Quiet: the document's title row is the book's ornament — no cover box, no plate.
+            c.mesh.visible = false;
+            if (this.nameplate) this.nameplate.visible = false;
+            this._placeAside(b, 0);
+            return this;
+        }
         if (b.isEmpty()) {
             c.mesh.visible = false;
             if (this.nameplate) this.nameplate.visible = false;
@@ -847,6 +955,7 @@ export default class Book extends BoundedObject3D {
      *  color. @see bindTabs for the placement shapes. */
     syncTabs() {
         if (!this.tabs) return;
+        if (this._scroll) { for (const t of this.tabs) t.tab.visible = false; return; }
         const o = this._tabOpts;
         const { steps, placement, protrusion, raise: raiseRows } = TAB_CONFIG;   // live `tab.*` dials (re-read each frame)
         const b = this.frameBounds();   // a reserved book's ruler holds still on its frame
@@ -914,6 +1023,7 @@ export default class Book extends BoundedObject3D {
     update(dt) {
         if (this.cover) this.syncCover();
         this.syncTabs();
+        if (this._scroll) return;
         const n = this.sheets.length;
         if (n < 2 && this.form === 'deck') return;
         const rate = this.deck.lerp;
@@ -977,6 +1087,7 @@ export default class Book extends BoundedObject3D {
      * @returns {THREE.Box3}
      */
     layoutBounds() {
+        if (this._scroll) return this._docBox();
         const cb = this.contentBox();
         if (!this.fitted) return cb;
         const db = this.deckBounds();
@@ -987,6 +1098,13 @@ export default class Book extends BoundedObject3D {
 
     /** BoundedObject3D's Measurable contract — getBounds() derives the world AABB from this. */
     getLocalBounds() { return this.layoutBounds(); }
+
+    /** The scroll document's frame in the book's frame (a fresh box). @private */
+    _docBox() {
+        const d = this.scrollDoc;
+        d.updateMatrix();
+        return d.getLocalBounds().clone().applyMatrix4(d.matrix);
+    }
 
     /**
      * The room a SEAT must hold for this book (local frame): the book as it draws — the
@@ -1000,6 +1118,16 @@ export default class Book extends BoundedObject3D {
      */
     getSeatBounds() {
         const b = this.frameBounds();
+        if (this._scroll) {
+            const ap = this._asidePose(b, 0);
+            if (ap) {
+                _asideBox.copy(ap.lb);
+                _asideBox.min.multiplyScalar(ap.s); _asideBox.max.multiplyScalar(ap.s);
+                _asideBox.translate(_asideAt.set(ap.x, ap.y, ap.z));
+                b.union(_asideBox);
+            }
+            return b;
+        }
         if (b.isEmpty() || !this.fitted) return b;
         const lb = b.clone();
         const c = this.cover;
@@ -1046,6 +1174,9 @@ export default class Book extends BoundedObject3D {
         const single = this.leaf;
         if (this.aside?.parent === this) this.parent?.attach(this.aside);   // not ours to dispose
         this.aside = null;
+        if (this.scrollDoc?.parent === this) this.remove(this.scrollDoc);   // the owner's to dispose
+        this.scrollDoc = null;
+        this._resizeFns.clear();
         this.dropCover();
         this.dropTabs();
         for (const sheet of this.sheets) {

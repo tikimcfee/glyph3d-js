@@ -7,14 +7,24 @@
  *   book.list <path|id>  → one book's full record (form, page, sheets, head, world position)
  *   book.page   [id] <next|prev|first|last|N>   turn a book's head (1-based index; N of M)
  *   book.scroll [id] <delta>                    turn by ±N sheets (− older / + newer)
- *   book.form   [id] <deck|splay|toggle|default> the presentation form: rolodex deck, or the
- *                                               book laid OPEN as an m×n page grid (the
- *                                               many-file overview). A library volume's form
- *                                               persists on its dir node and re-lays the tree
- *                                               (the footprint honestly changes); an agent or
- *                                               delta book's is its own (tuning, persisted;
- *                                               'default' drops it — a deck again); the head
- *                                               stays the bookmark in both forms.
+ *   book.form   [id] <deck|splay|scroll|toggle|default> the presentation form: rolodex deck,
+ *                                               the book laid OPEN as an m×n page grid (the
+ *                                               many-file overview), or — an agent book — its
+ *                                               run read as ONE document (scroll). A library
+ *                                               volume's form persists on its dir node and
+ *                                               re-lays the tree (the footprint honestly
+ *                                               changes); an agent or delta book's is its own
+ *                                               (tuning, persisted; 'default' drops it — the
+ *                                               form where it sits: a scroll at a plane desk,
+ *                                               else a deck); the head stays the bookmark.
+ *   book.rows   [id] <±n>                       scroll an agent book's scroll document by rows
+ *                                               (− up / + down; past the top older history
+ *                                               slides in, the end follows live)
+ *   book.expand [id] <step|top|all|none> [open|close]  open (or close) a scroll document's
+ *                                               collapsed outputs: one event by its run step,
+ *                                               those in the frame, every one, or none
+ *   book.view   [id]                            where a scroll document's frame stands — the
+ *                                               (session, at, row) a reload restores
  *   book.set    [id] <knob> <value|default>     give ONE agent/delta book its own deck value,
  *                                               or an agent book its own page text (each
  *                                               page's text size + line break) (client/
@@ -195,10 +205,11 @@ export default function registerBookCommands(router) {
         const bk = hit.book;
         const a = String(arg ?? '').toLowerCase();
         const shelf = hit.kind === 'agent' || hit.kind === 'delta';
-        if (!['deck', 'splay', 'toggle', ...(shelf ? ['default'] : [])].includes(a)) {
-            return { text: `ERR: usage: book.form [id] <deck|splay|toggle${shelf ? '|default' : ''}> (current: ${bk.form})`, data: { form: bk.form } };
+        const forms = ['deck', 'splay', ...(hit.kind === 'agent' ? ['scroll'] : []), 'toggle', ...(shelf ? ['default'] : [])];
+        if (!forms.includes(a)) {
+            return { text: `ERR: usage: book.form [id] <${forms.join('|')}> (current: ${bk.form})`, data: { form: bk.form } };
         }
-        const form = a === 'toggle' ? (bk.form === 'splay' ? 'deck' : 'splay') : a === 'default' ? 'deck' : a;
+        const form = a === 'toggle' ? (bk.form === 'splay' ? 'deck' : 'splay') : a;
         if (hit.kind === 'volume') {
             // A volume is a per-pass husk — the form lives on the DIR NODE (beside
             // volumeHead) and the re-lay rebuilds the volume wearing it. The footprint
@@ -211,12 +222,51 @@ export default function registerBookCommands(router) {
             // A shelf book (agent/delta) owns its own frame — its form is its own value
             // (tuning: set now, persisted; 'default' drops it); its update() eases the pages
             // and the cover re-wraps live. No relayout to run.
-            tuneBook(ctx, hit, 'form', a === 'default' ? 'default' : form);
+            const r = tuneBook(ctx, hit, 'form', form);
+            if (!r.ok) return { text: `ERR: ${r.error}`, data: null };
         } else {
             bk.setForm(form);
         }
-        return { text: `OK: ${hit.kind === 'volume' ? bk.userData.path : id ?? 'book'} → ${form}`, data: { form } };
-    }, { description: 'Set a book\'s presentation form — rolodex deck or the laid-open m×n page grid', usage: '[id] <deck|splay|toggle>' });
+        return { text: `OK: ${hit.kind === 'volume' ? bk.userData.path : id ?? 'book'} → ${bk.form}`, data: { form: bk.form } };
+    }, { description: 'Set a book\'s presentation form — rolodex deck, the laid-open m×n page grid, or (an agent book) one scroll document', usage: '[id] <deck|splay|scroll|toggle|default>' });
+
+    /** The agent book a scroll verb names (or the focused one) — an error line when it isn't a scroll. */
+    const scrollHit = (ctx, id, verb) => {
+        const hit = resolveBook(ctx, id);
+        if (!hit) return { err: id ? `ERR: no book '${id}'` : `ERR: no book to ${verb}` };
+        if (hit.kind !== 'agent' || hit.book.form !== 'scroll') return { err: `ERR: ${verb} reads an agent book in its scroll form (book.form ${hit.agentId ?? id ?? ''} scroll) — this one is a ${hit.book.form}` };
+        return { hit };
+    };
+
+    router.register('book.rows', (args, ctx) => {
+        const [id, delta] = splitTarget(args);
+        const n = Number(delta);
+        if (!Number.isFinite(n)) return { text: 'ERR: usage: book.rows [id] <±n>', data: null };
+        const { hit, err } = scrollHit(ctx, id, 'book.rows');
+        if (err) return { text: err, data: null };
+        const r = hit.books.scrollRows(hit.agentId, n);
+        const s = headOf(hit);
+        return { text: `OK: ${hit.agentId} ${r.following ? 'live' : 'held'} · row ${r.top}${s.newer ? ` · +${s.newer} newer` : ''}`, data: { agentId: hit.agentId, ...r, newer: s.newer } };
+    }, { description: "Scroll an agent book's scroll document by rows (− up / + down)", usage: '[id] <±n>' });
+
+    router.register('book.expand', (args, ctx) => {
+        const [id, which, how] = args.length >= 2 && !/^(\d+|top|all|none)$/.test(args[0]) ? args : [undefined, ...args];
+        const w = String(which ?? 'top');
+        if (!/^(\d+|top|all|none)$/.test(w) || (how != null && how !== 'open' && how !== 'close')) {
+            return { text: 'ERR: usage: book.expand [id] <step|top|all|none> [open|close]', data: null };
+        }
+        const { hit, err } = scrollHit(ctx, id, 'book.expand');
+        if (err) return { text: err, data: null };
+        const n = hit.books.expand(hit.agentId, /^\d+$/.test(w) ? Number(w) : w, how == null ? null : how === 'open');
+        return { text: `OK: ${hit.agentId} — ${n} output${n === 1 ? '' : 's'} ${w === 'none' || how === 'close' ? 'closed' : 'changed'}`, data: { agentId: hit.agentId, changed: n } };
+    }, { description: "Open or close a scroll document's collapsed outputs — one event by step, those in the frame, all, or none", usage: '[id] <step|top|all|none> [open|close]' });
+
+    router.register('book.view', (args, ctx) => {
+        const { hit, err } = scrollHit(ctx, args[0], 'book.view');
+        if (err) return { text: err, data: null };
+        const v = hit.books.scrollView(hit.agentId);
+        return { text: `OK: ${hit.agentId} ${v.following ? 'following the end' : `held at ${v.session ?? '(no session)'} @${v.at} row ${v.row}`}`, data: v };
+    }, { description: "Where an agent book's scroll document stands — the (session, at, row) a reload restores", usage: '[id]', returns: '{ session, following, at?, id?, row? }' });
 
     router.register('book.set', (args, ctx) => {
         // `book.set <knob> <value>` is the focused book; `book.set <id> <knob> <value>` names one.

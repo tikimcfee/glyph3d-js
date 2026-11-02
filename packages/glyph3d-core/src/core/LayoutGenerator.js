@@ -21,6 +21,37 @@ import { InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_POS_X, LANE_POS_Y, LA
 import { pageFold, pageShift } from './foldGeometry.js';
 import { DEFAULT_LAYOUT } from '../workers/builders/index.js';
 
+/** The shaper's units per em (2048 when it doesn't say). */
+export function shaperUpem(shaper) {
+    return shaper?.upem || shaper?._shaper?.upem || 2048;
+}
+
+/**
+ * ONE glyph's cell, the rule every row is laid out by: its glyph id, its ink box (`advance` —
+ * the quad the curves span, ax/upem × emWorld) and its pen STEP — whole cells of `charWidth`
+ * (a wide glyph two, a combining mark none), so every glyph starts on the cell grid. Without a
+ * shaper (or an unshaped codepoint) the glyph is its codepoint, one cell. Tabs are the caller's
+ * (their step depends on the column). Writes `out` and returns it.
+ * @param {Object|null} shaper @param {number} cp @param {number} upem @param {number} emWorld
+ * @param {number} charWidth @param {{g:number, advance:number, step:number}} out
+ */
+export function resolveGlyph(shaper, cp, upem, emWorld, charWidth, out) {
+    out.g = cp; out.advance = charWidth; out.step = charWidth;
+    if (!shaper) return out;
+    let shape = null;
+    if (typeof shaper.lookup === 'function') shape = shaper.lookup(cp);
+    else if (typeof shaper.shape === 'function') shape = shaper.shape(String.fromCodePoint(cp))?.[0] ?? null;
+    if (shape) {
+        out.g = shape.g;
+        out.advance = (shape.ax / upem) * emWorld;
+        out.step = Math.max(0, Math.round(out.advance / charWidth)) * charWidth;
+    }
+    return out;
+}
+
+/** Scratch for resolveGlyph inside generateLayout (main-thread / one worker at a time). */
+const _glyph = { g: 0, advance: 0, step: 0 };
+
 /**
  * Generate a 32-byte InstancedSlotBuffer from text.
  *
@@ -61,11 +92,7 @@ export function generateLayout(text, options = {}) {
     if (shaper && !(emWorld > 0)) {
         throw new Error(`LayoutGenerator: metrics.emWorld is required to lay out shaped text (got ${emWorld}) — build metrics with computeCellMetrics from atlas.getCharSize()`);
     }
-    const upem = (shaper && shaper.upem)
-        ? shaper.upem
-        : (shaper && shaper._shaper && shaper._shaper.upem)
-            ? shaper._shaper.upem
-            : 2048;
+    const upem = shaperUpem(shaper);
 
     const origin = options.origin || { x: 0, y: 0, z: 0 };
     const wrapWidth = options.wrapWidth !== undefined ? Math.max(0, Math.trunc(options.wrapWidth)) : 200;
@@ -167,34 +194,16 @@ export function generateLayout(text, options = {}) {
             // combining mark none), so every glyph starts on the cell grid tabs, cursors and
             // highlights count by — and at a whole-pixel cell (plane view) every column lands at
             // the same pixel phase. The ink keeps its true width (ax/upem × em), never stretched.
-            let glyphId = 0;
-            let advance = charWidth;
-            let step = charWidth;
+            let glyphId, advance, step;
             if (cp === 9) {
                 // A tab: the space glyph, advancing to the next stop.
                 const k = tabWidth - (lineCells % tabWidth);
                 glyphId = spaceGlyphId();
                 advance = step = k * charWidth;
                 lineCells += k;
-            } else if (shaper) {
-                let shape = null;
-                if (typeof shaper.lookup === 'function') {
-                    shape = shaper.lookup(cp);
-                } else if (typeof shaper.shape === 'function') {
-                    const shaped = shaper.shape(String.fromCodePoint(cp));
-                    if (shaped && shaped.length > 0) {
-                        shape = shaped[0];
-                    }
-                }
-                if (shape) {
-                    glyphId = shape.g;
-                    advance = (shape.ax / upem) * emWorld;
-                    step = Math.max(0, Math.round(advance / charWidth)) * charWidth;
-                } else {
-                    glyphId = cp;
-                }
             } else {
-                glyphId = cp;
+                resolveGlyph(shaper, cp, upem, emWorld, charWidth, _glyph);
+                glyphId = _glyph.g; advance = _glyph.advance; step = _glyph.step;
             }
             if (cp !== 9) lineCells += Math.round(step / charWidth);
 

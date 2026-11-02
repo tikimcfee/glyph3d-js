@@ -274,8 +274,10 @@ export function applyBookTune(hit, tune) {
   let changed = false;
   for (const [key, raw] of Object.entries(tune || {})) {
     if (key === 'form') {
-      const f = raw === 'splay' ? 'splay' : 'deck';
-      if (book.form !== f) { book.setForm(f); changed = true; }
+      // A shelf book's own form; an agent book may be a scroll (its run as one document).
+      const forms = hit.kind === 'agent' ? ['deck', 'splay', 'scroll'] : ['deck', 'splay'];
+      const f = forms.includes(String(raw)) ? String(raw) : 'deck';
+      if (book.formOwn !== f) { book.setForm(f); changed = true; }
       continue;
     }
     const knob = BOOK_BY_KEY.get(key);
@@ -299,7 +301,8 @@ function bookValue(hit, knob) {
 }
 
 /**
- * Give one shelf book its own value for a knob — BOOK_KNOBS, or `form` (deck|splay) — live
+ * Give one shelf book its own value for a knob — BOOK_KNOBS, or `form` (deck|splay; an agent book
+ * also scroll) — live
  * and into its record. `'default'` hands it back to its shelf's default.
  * @param {AppContext} ctx @param {Object} hit a shelf BookHit @param {string} key @param {string|number} raw
  * @returns {{ok:true, key:string, value:any, own:boolean}|{ok:false, error:string}}
@@ -309,11 +312,12 @@ export function tuneBook(ctx, hit, key, raw) {
   if (!id) return { ok: false, error: 'a library volume takes its deck from Settings ▸ Layout (its form is book.form)' };
   const book = hit.book;
   if (key === 'form') {
-    const f = raw === 'default' ? 'deck' : String(raw);
-    if (f !== 'deck' && f !== 'splay') return { ok: false, error: 'form is deck|splay' };
-    book.setForm(f);
-    writeTune(ctx, id, 'form', raw === 'default' ? null : f);
-    return { ok: true, key, value: f, own: raw !== 'default' };
+    const forms = hit.kind === 'agent' ? ['deck', 'splay', 'scroll'] : ['deck', 'splay'];
+    const f = raw === 'default' ? null : String(raw);
+    if (f !== null && !forms.includes(f)) return { ok: false, error: `form is ${forms.join('|')}` };
+    book.setForm(f);   // null: its own form dropped — the form where it sits (a plane desk: book.planeForm)
+    writeTune(ctx, id, 'form', f);
+    return { ok: true, key, value: book.form, own: f !== null };
   }
   const knob = BOOK_BY_KEY.get(key);
   if (!knob) return { ok: false, error: `no book knob '${key}' (knobs: ${BOOK_KNOBS.map((k) => k.key).join('|')})` };

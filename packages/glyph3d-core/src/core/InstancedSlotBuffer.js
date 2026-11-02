@@ -250,10 +250,14 @@ export class InstancedSlotBuffer {
      * Create a Three.js InstancedInterleavedBuffer over this buffer.
      * Stride is 8 floats (32 bytes).
      * @param {number} [usage=THREE.DynamicDrawUsage]
+     * @param {number} [slots] slots the view spans (default: the active count) — a field that
+     *        appends spans its capacity, so a write past the count is a range, not a rebind
      * @returns {THREE.InstancedInterleavedBuffer}
      */
-    createInterleavedBuffer(usage = THREE.DynamicDrawUsage) {
-        const slots = Math.max(this._count, 1);
+    createInterleavedBuffer(usage = THREE.DynamicDrawUsage, slots = Math.max(this._count, 1)) {
+        if (!(slots >= 1 && slots <= this._capacity)) {
+            throw new Error(`InstancedSlotBuffer.createInterleavedBuffer: ${slots} slots asked of a ${this._capacity}-slot buffer`);
+        }
         const view = new Float32Array(this.buffer, 0, slots * SLOT_FLOATS);
         const ib = new THREE.InstancedInterleavedBuffer(view, SLOT_FLOATS, 1);
         ib.setUsage(usage);
