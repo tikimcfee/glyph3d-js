@@ -204,3 +204,49 @@ meshes the sweep hit dropped from the lists must change hits; 0 rebuilds over ea
 Measured: a 4-channel pick's passes, 1.6–1.8 → 0.3–0.4 ms on the hub shape (private relay, screens
 off); 1.5–1.6 → 0.2–0.3 ms live on the agents' display. The hover pick runs as fast as picks land, so
 while the pointer moves that is up to ~1.3 ms a frame.
+
+## Where it stands
+
+The optimization pass closed with everything landed: lazy group tables, GlyphBatch and PanelBatch
+uploading only what changed, the flat render root, the pick channels' lists, the one render-pass
+owner (`app/client/FramePasses.js`), and PanelBatch walking only its shown panels (below). Measured on
+the hub shape: a private relay with gomuxai on, agent screens off (`--setting
+gomux.autoScreens=false`), `tools/frame-profile.mjs`, 4 s windows, steady state, no pointer.
+
+| | the pass's first profile | closing (3 runs) |
+|---|---|---|
+| main-thread work per frame, p50 | 5.7 · 5.1 ms | 3.3 · 3.5 · 2.9 ms |
+| main-thread work per frame, p95 | — | 4.2 · 4.4 · 4.3 ms |
+| frame gap, p50 | — | 16.6 · 16.7 · 16.6 ms (vsync) |
+| three's `projectObject`, self | 1.22 · 1.66 · 1.28 ms/frame | 0.26 · 0.31 · 0.35 ms/frame |
+
+Main-thread p50 on this shape swings by more than a millisecond between runs (live agents keep
+writing books), so the per-function self times are the steadier reading.
+
+**The top main-thread costs now** (self time, closing runs):
+
+1. `PanelBatch.update` — 0.39–0.44 ms/frame (10.6–11.3%). It walks the 1,598 shown panels every
+   frame: 336 drawn, 1,262 outside the frustum, each paying its lookups and a 16-element matrix
+   compare even at rest.
+2. three's `projectObject` — 0.26–0.35 ms/frame (7.5–8.7%), the flat lists' walk.
+3. `GlyphBatch` gather — 0.23–0.36 ms/frame (6.1–10.2%): every batched label's verdict and matrix
+   compare.
+
+Next: `GlyphFarLod.update` at 0.19–0.23 ms/frame (5.4–5.7%), which does each live field's box math
+every frame, hidden or not.
+
+**PanelBatch walks only its shown panels.** Whether an enrolled object is under the batch's scene and
+shown changes only when SceneTransforms' show generation moves (a `visible` flip, a node gaining or
+losing a child) or the enrolled set does (an enrol, an add, a remove — the module's own counter, since
+enrolling an already-parented object moves no generation). The batch keeps that list, rebuilt only
+then, and at rest never touches the hidden ones (on the hub 3,212 enrolled, 1,598 shown, the list not
+rebuilt once in 221 frames). A/B on the same scene, interleaved, self time: 0.84 · 0.61 → 0.29 · 0.13
+ms/frame. Gate: `tools/panel-batch-shown.test.mjs` (the walk visits the shown only; it follows a
+visibility flip, an add, a remove, a late enrolment, a move to another root, each time equal to a
+fresh batch; a panel hidden while drawn decides afresh when shown; mutation-checked — the enrolled-set
+key and the outcome reset each fail it; teeth: a list pinned to an old key misses a shown group).
+
+What would cut the remaining PanelBatch walk: a whole-batch still-skip (nothing moved since the last
+frame), which needs a signal that no world matrix changed — SceneTransforms recomputes only marked
+nodes, but the nodes it hands to three every walk (cameras, hand-written matrices, pivots) can move
+unmarked, so that signal doesn't exist yet.

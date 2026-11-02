@@ -33,7 +33,7 @@
  */
 
 import * as THREE from 'three';
-import { rootOf, isShown, isTracked } from './SceneTransforms.js';
+import { rootOf, isShown, isTracked, showGeneration } from './SceneTransforms.js';
 import { cutRect, cutMatrix } from '../core/panelCut.js';
 
 /** The view camera renders layer 0; an enrolled object leaves it while a batch draws it. */
@@ -45,14 +45,16 @@ const _cut = new THREE.Matrix4();
 
 /** @type {Set<THREE.Object3D>} enrolled objects currently attached to a parent */
 const _panels = new Set();
+/** Moves whenever `_panels` gains or loses an object (a batch's shown list keys on it). */
+let _panelsVersion = 0;
 /** @type {WeakMap<THREE.Object3D, Kind>} */
 const _kindOf = new WeakMap();
 
-function onAdded(e) { _panels.add(e.target); }
+function onAdded(e) { if (!_panels.has(e.target)) { _panels.add(e.target); _panelsVersion++; } }
 function onRemoved(e) { release(e.target); }
 function onMaterialDispose(e) { for (const m of _panels) if (m.material === e.target) release(m); }
 function release(obj) {
-    _panels.delete(obj);
+    if (_panels.delete(obj)) _panelsVersion++;
     if (!obj.layers.isEnabled(VIEW_LAYER)) obj.layers.enable(VIEW_LAYER);
 }
 
@@ -279,7 +281,7 @@ export function enrollPanel(obj) {
         obj.material.userData.panelBatchDispose = true;
         obj.material.addEventListener('dispose', onMaterialDispose);
     }
-    if (obj.parent) _panels.add(obj);
+    if (obj.parent && !_panels.has(obj)) { _panels.add(obj); _panelsVersion++; }
     return obj;
 }
 
@@ -499,9 +501,15 @@ export default class PanelBatch {
         /** the last refresh's projection·view and eye (a still camera skips still panels' math) */
         this._view = new Float64Array(16).fill(NaN);
         this._lastEye = new THREE.Vector3(NaN, NaN, NaN);
-        /** Last refresh: objects drawn as instances, hidden, outside the view frustum, drawing
-         *  themselves (material no longer batchable, or fog), under another root, and the buckets. */
-        this.stats = { enrolled: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, buckets: 0, uploaded: 0 };
+        /** The enrolled objects under this scene and shown, as of `_shownKey` (the show generation and
+         *  the enrolled set's version): the per-frame walk visits these only; the hidden and the
+         *  elsewhere are counted when the list is rebuilt. @type {THREE.Object3D[]} */
+        this._shown = [];
+        this._shownKey = { show: -1, panels: -1, hidden: 0, elsewhere: 0 };
+        /** Last refresh: objects walked (the shown list), drawn as instances, hidden, outside the view
+         *  frustum, drawing themselves (material no longer batchable, or fog), under another root, and
+         *  the buckets. */
+        this.stats = { enrolled: 0, walked: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, buckets: 0, uploaded: 0 };
         const prev = scene.onBeforeRender;
         this._prevHook = prev;
         scene.onBeforeRender = (renderer, sc, camera, target) => {
@@ -533,8 +541,26 @@ export default class PanelBatch {
             console.warn('PanelBatch: the scene has fog, which the box fill/edge shader does not draw — those objects draw themselves (one draw each) while it is set');
         }
         const camMoved = take16(this._view, _proj.elements);
-        for (const p of _panels) {
-            if (rootOf(p) !== this.scene) { elsewhere++; continue; }
+        // Which enrolled objects are under this scene and shown changes only when the show generation
+        // (a visible flip, a node gaining or losing a child) or the enrolled set moves: the list is
+        // rebuilt then, and at rest the walk never touches the hidden ones.
+        const k = this._shownKey, show = showGeneration();
+        if (k.show !== show || k.panels !== _panelsVersion) {
+            k.show = show; k.panels = _panelsVersion; k.hidden = 0; k.elsewhere = 0;
+            this._shown.length = 0;
+            for (const p of _panels) {
+                if (rootOf(p) !== this.scene) { k.elsewhere++; continue; }
+                if (!isShown(p)) {
+                    k.hidden++;
+                    const rec = this._recs.get(p);
+                    if (rec) rec.out = null;   // shown again, its outcome is decided afresh
+                    continue;
+                }
+                this._shown.push(p);
+            }
+        }
+        hidden = k.hidden; elsewhere = k.elsewhere;
+        for (const p of this._shown) {
             const kind = _kindOf.get(p), m = p.material;
             let rec = this._recs.get(p);
             if (!rec) { rec = { material: null, accepts: false, mw: new Float64Array(16).fill(NaN), clip: null, out: null, moved: true }; this._recs.set(p, rec); }
@@ -548,7 +574,7 @@ export default class PanelBatch {
                 continue;
             }
             if (p.layers.isEnabled(VIEW_LAYER)) p.layers.disable(VIEW_LAYER);
-            if (!isShown(p) || !m.visible) { rec.out = null; hidden++; continue; }
+            if (!m.visible) { rec.out = null; hidden++; continue; }
             // Its cut and cull outcome stand while its world matrix, the camera and its clip held.
             const clip = p.userData.panelClip ?? null;
             rec.moved = take16(rec.mw, p.matrixWorld.elements) || rec.clip !== clip;
@@ -582,7 +608,7 @@ export default class PanelBatch {
         this._lastEye.copy(eye);
         let uploaded = 0;
         for (const b of this._buckets.values()) { b.write(eye, _proj, eyeMoved, this._recs); uploaded += b.uploaded; }
-        this.stats = { enrolled: _panels.size, drawn, hidden, culled, own, elsewhere, buckets: this._buckets.size, uploaded };
+        this.stats = { enrolled: _panels.size, walked: this._shown.length, drawn, hidden, culled, own, elsewhere, buckets: this._buckets.size, uploaded };
         return this.stats;
     }
 
