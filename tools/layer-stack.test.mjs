@@ -13,10 +13,12 @@
 //      its backing in front of the member's glyphs) and front(null) puts it back; the `now` backing sits
 //      between the member's own backdrop and the first history page;
 //   3. OPAQUE BACKS: every page (and the member's `now` backing) is opaque and covers the member's frame;
-//   4. SOURCES: a file's revisions (newest first, leading copies of what's shown skipped, text exact);
+//   4. SOURCES: a file's revisions (newest first, leading copies of what's shown skipped, text exact; the
+//      label's day in the display's LOCAL zone — the test runs in TZ=America/Denver, a UTC day fails it);
 //      an agent book's scroll by turn (newest turn first, the document's own rows; registered on the
 //      document's frame rows); a terminal's scrollback by screen (oldest line of a page on top).
 
+process.env.TZ = 'America/Denver';   // the display's zone, not UTC — a revision day in UTC fails the label check
 import * as THREE from 'three';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -31,7 +33,7 @@ const { default: AgentBooks } = await import('../packages/glyph3d-core/src/colle
 const { AgentEventReader } = await import('../packages/glyph3d-core/src/collections/agentEvents.js');
 const { SLOT_FLOATS, LANE_POS_X, LANE_POS_Y, LANE_GLYPH_ID } = await import('../packages/glyph3d-core/src/core/InstancedSlotBuffer.js');
 const { getBandDistance, LAYER_BAND } = await import('../packages/glyph3d-core/src/core/layerBands.js');
-const { revisionLayers } = await import('../app/client/layerSources.js');
+const { revisionLayers, localDay } = await import('../app/client/layerSources.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error(`  ✗ ${m}`); } };
@@ -216,7 +218,11 @@ const lineSlots = (ln) => {
     eq(r.layers.map((l) => l.sha[0]), ['b', 'd'], 'revisions newest first, the copy of what\'s shown skipped, a textless one skipped');
     eq(r.omitted, 1, 'the textless revision is counted');
     ok(r.layers.every((l) => rowsText(l.rows) === l.text), 'each revision page holds its text exactly');
-    ok(r.layers[0].label.startsWith('bbbbbbb 2026-10-30 older'), `a revision's label (${r.layers[0].label})`);
+    // the day is the display's: midnight UTC on the 30th is the evening of the 29th in America/Denver (TZ forced above)
+    ok(r.layers[0].label.startsWith('bbbbbbb 2026-10-29 older'), `a revision's label carries its LOCAL day (${r.layers[0].label}; UTC would read 2026-10-30)`);
+    process.env.TZ = 'Asia/Tokyo';
+    eq(localDay(Date.UTC(2026, 9, 30, 20)), '2026-10-31', 'the day follows the zone (20:00Z on the 30th is the 31st in Asia/Tokyo)');
+    process.env.TZ = 'America/Denver';
     eq(revisionLayers(commits, 'something else', { n: 1 }).layers.map((l) => l.sha[0]), ['a'], 'n caps; a differing HEAD is layer 1');
     const wrapped = textRows('abcdefghij\nxy', { wrapWidth: 4 });
     eq([wrapped.rows.map((x) => x.segs[0]?.text ?? ''), wrapped.lineStartRow], [['abcd', 'efgh', 'ij', 'xy'], [0, 3]], 'rows wrap as the grid wraps (every wrapWidth codepoints)');

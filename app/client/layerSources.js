@@ -18,9 +18,19 @@ import { textRows, terminalPageLayers } from '@glyph3d/core/collections';
 export const REVISION_COLOR = Object.freeze({ r: 0.74, g: 0.77, b: 0.84 });
 
 /**
+ * A commit's day as the display's calendar, `YYYY-MM-DD` in the browser's own zone (fs/gitLog's `time` is
+ * unix ms, UTC; it stays so). @param {number} ms @returns {string}
+ */
+export function localDay(ms) {
+    const d = new Date(ms), two = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+}
+
+/**
  * A file's revisions as layers — pure: `commits` as fs/gitLog answers (newest first, with text),
  * `current` the text the grid shows now. Leading revisions equal to `current` are skipped; a
- * revision the relay left textless (its budget) is skipped and counted.
+ * revision the relay left textless (its budget) is skipped and counted. A label is `sha7 day subject`, the day
+ * the display's local one (localDay).
  * @param {Array<{sha:string, time:number, subject:string, path:string, text?:string, textOmitted?:boolean}>} commits
  * @param {string} current @param {{wrapWidth?:number, n?:number, color?:{r:number,g:number,b:number}}} [o]
  * @returns {{layers: Array<{id:string, label:string, kind:'history', rows:Object[], sha:string, text:string}>, omitted:number}}
@@ -33,7 +43,7 @@ export function revisionLayers(commits, current, { wrapWidth = 0, n = 5, color =
         if (leading && c.text === current) continue;
         leading = false;
         if (layers.length >= n) break;
-        const day = Number.isFinite(c.time) ? new Date(c.time).toISOString().slice(0, 10) : '';
+        const day = Number.isFinite(c.time) ? localDay(c.time) : '';
         layers.push({
             id: c.sha.slice(0, 12), label: `${c.sha.slice(0, 7)} ${day} ${c.subject}`.trim(), kind: 'history',
             rows: textRows(c.text, { wrapWidth, color }).rows, sha: c.sha, text: c.text,
