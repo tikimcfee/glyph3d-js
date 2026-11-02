@@ -398,9 +398,10 @@ export default function registerTerminalCommands(router) {
         const lines = typeof grid.readText === 'function' ? grid.readText() : [];
         return {
             text: lines.join('\n') + `\nOK: terminal '${id}' screen ${grid.cols}x${grid.rows}`,
-            data: { id, cols: grid.cols, rows: grid.rows, lines },
+            // The cursor's cell (a drawn block — a stillness check leaves its row out) and the screen drawn last.
+            data: { id, cols: grid.cols, rows: grid.rows, lines, cursor: grid.cursorCell, frame: grid.frameSeq },
         };
-    }, { description: "Read a terminal's visible screen as plain text", usage: '<id>' });
+    }, { description: "Read a terminal's visible screen as plain text (data: lines, cursor cell, frame)", usage: '<id>' });
 
     // ------------------------------------------------------------------
     // terminal.scroll <id> <lines>   (+ = back into history, − = forward to live)

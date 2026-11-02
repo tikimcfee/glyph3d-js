@@ -402,6 +402,25 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/pixel-check.mjs /tmp/shot-a.png --second /tmp/shot-b.png --crop 312,384,135,42
   ```
 
+- **`screen-stillness-check.mjs`** (live display; MOVES THE CAMERA) — a streaming agent screen read in a
+  plane: enters the desk, focuses the screen's pin, places its cell rows on screen (the pin's board rect
+  through `plane.state`, the row phase from where blank rows carry no ink), then takes pairs of captures,
+  each bracketed by `terminal.read`. Every row whose text didn't change across a pair (the cursor's row
+  left out) must be PIXEL-IDENTICAL; vertical stems must ramp ≤ 1.25 px; an idle screen fails unless
+  `--allow-idle`. Teeth on every run: the capture drifted ½ px fails crisp, re-laid by 1 px fails still.
+  ```
+  bun tools/screen-stillness-check.mjs --desk gomux/<agent> --screen gx-<agent> --gate [--pairs 4] [--out-dir <dir>]
+  ```
+
+- **`scroll-cost-check.mjs`** (live display) — what a running agent's live batches cost its scroll book:
+  `book.cost` (AgentBooks.scrollCost — applyEvents + the frame's flush that lays each batch) over
+  `--seconds`, p50/p95/max against `--budget-ms` (scroll-form's 4 ms); `--held` holds the document a few
+  rows up first (the `+N newer` path) and rides the end after; `--headless` prints scroll-form §6's
+  tail-append numbers beside it. Too few batches (an idle agent) is no verdict and fails `--gate`.
+  ```
+  bun tools/scroll-cost-check.mjs --book <agent> --seconds 60 --gate [--held] [--headless]
+  ```
+
 - **`overlay.test.mjs`** — the SCREEN OVERLAY gate (`app/client/PlaneOverlay.js` and
   `overlay.text` / `overlay.clear` / `overlay.list` in `app/commands/handlers/labelCommands.js`).
   Verifies `OrthographicCamera` frustum sync (`left: 0, right: Wdev, top: 0, bottom: -Hdev`

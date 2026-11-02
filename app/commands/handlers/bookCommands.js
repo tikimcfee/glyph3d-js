@@ -268,6 +268,15 @@ export default function registerBookCommands(router) {
         return { text: `OK: ${hit.agentId} ${v.following ? 'following the end' : `held at ${v.session ?? '(no session)'} @${v.at} row ${v.row}`}`, data: v };
     }, { description: "Where an agent book's scroll document stands — the (session, at, row) a reload restores", usage: '[id]', returns: '{ session, following, at?, id?, row? }' });
 
+    router.register('book.cost', (args, ctx) => {
+        const reset = args.at(-1) === 'reset';
+        const { hit, err } = scrollHit(ctx, reset ? args.slice(0, -1)[0] : args[0], 'book.cost');
+        if (err) return { text: err, data: null };
+        const c = hit.books.scrollCost(hit.agentId, { reset });
+        const f = (v) => (v == null ? '—' : `${v.toFixed(3)} ms`);
+        return { text: `OK: ${hit.agentId} — ${c.batches} live batch${c.batches === 1 ? '' : 'es'} (${c.following} following) · p50 ${f(c.p50)} · p95 ${f(c.p95)} · max ${f(c.max)} · at ${c.records} events, ${c.rows} rows, ${c.slots} slots`, data: { agentId: hit.agentId, ...c } };
+    }, { description: "What live batches cost an agent book's scroll document: applyEvents + the flush that laid each, p50/p95/max (reset empties it)", usage: '[id] [reset]', returns: '{ batches, following, p50, p95, max, apply95, flush95, laid95, uploaded95, records, rows, slots }' });
+
     router.register('book.set', (args, ctx) => {
         // `book.set <knob> <value>` is the focused book; `book.set <id> <knob> <value>` names one.
         const [id, key, raw] = args.length >= 3 ? args : [undefined, args[0], args[1]];

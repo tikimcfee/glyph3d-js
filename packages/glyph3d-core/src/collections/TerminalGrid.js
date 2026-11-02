@@ -1268,6 +1268,9 @@ export default class TerminalGrid extends FramedGlyphField {
     /** The number of the screen drawn last (0 before the first) — a point records it. @returns {number} */
     get frameSeq() { return this._frameSeq; }
 
+    /** The live cursor's cell (viewport-relative col x, row y) — a copy. @returns {{x:number, y:number}} */
+    get cursorCell() { return { x: this._cursor.x, y: this._cursor.y }; }
+
     /**
      * A line as it was DRAWN in frame `frame` (its running number then; live or in that frame's depth
      * history), trailing blanks trimmed — or null once that frame has left the ring (or the line wasn't

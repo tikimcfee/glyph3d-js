@@ -176,6 +176,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     scrollOutputLift: 0.35,     // an output or a file's text: its hue lifted toward white
     scrollInfoDim: 0.7,         // the call's own lines and info rows: its hue darkened to this share
     scrollPage: 10,             // events one push past the document's top brings in from older history
+    scrollCostSamples: 512,     // live batches a scroll book keeps the cost of (book.cost reads them: applyEvents + the flush that lays it)
     planeForm: 'scroll',        // the form an agent book takes at a PLANE desk until it's given its own (deck elsewhere)
     debug: false,               // ON → log the decoration decision per snapshot
     hues: { ...ACTION_HUES },   // live per-kind text hues, seeded from the tool registry's one table
@@ -662,6 +663,7 @@ export default class AgentBooks {
      * @returns {{added:number, updated:number}}
      */
     applyEvents(streamLane, changes, { agentType = 'claude' } = {}) {
+        const t0 = performance.now();
         let added = 0, updated = 0;
         const touched = new Set();
         const outer = this._batch;
@@ -700,6 +702,8 @@ export default class AgentBooks {
         for (const lane of touched) this._refreshNameplate(lane);
         this._relayout();
         this._emitChange();
+        const ms = performance.now() - t0;
+        for (const lane of touched) if (this._scrolling(lane)) lane.costPending = (lane.costPending ?? 0) + ms;
         return { added, updated };
     }
 
@@ -1336,10 +1340,41 @@ export default class AgentBooks {
 
     /** Lay out what changed and restage the title row. @private */
     _flushScroll(lane, title = true) {
-        const doc = lane.doc;
+        const doc = lane.doc, t0 = performance.now();
         if (title || doc.dirty || lane.titleStale) { lane.titleStale = false; doc.setTitle(this._scrollTitle(lane)); }
-        if (doc.dirty) doc.flush();
+        const r = doc.dirty ? doc.flush() : null;
         if (lane.pendingView) this._tryView(lane);
+        if (lane.costPending != null) this._noteCost(lane, lane.costPending, performance.now() - t0, r);
+    }
+
+    /** One live batch's cost on a scroll book: its applyEvents + the flush that laid it. @private */
+    _noteCost(lane, applyMs, flushMs, r) {
+        lane.costPending = null;
+        const c = lane.cost ??= { samples: [] };
+        c.samples.push({ applyMs, flushMs, ms: applyMs + flushMs, laidSlots: r?.laidSlots ?? 0, uploaded: r?.uploaded ?? 0, following: !!lane.doc.following });
+        if (c.samples.length > this.cfg.scrollCostSamples) c.samples.splice(0, c.samples.length - this.cfg.scrollCostSamples);
+    }
+
+    /**
+     * What live batches have cost a scroll book (book.cost): per batch, applyEvents + the flush that
+     * laid it, ms p50/p95/max, and the slots laid/uploaded — the live twin of scroll-form's headless
+     * cost. `reset` empties it first.
+     * @param {string} agentId
+     * @param {{reset?:boolean}} [opts]
+     * @returns {{batches:number, following:number, p50:number|null, p95:number|null, max:number|null, apply95:number|null, flush95:number|null, laid95:number|null, uploaded95:number|null, records:number, rows:number, slots:number}|null}
+     */
+    scrollCost(agentId, { reset = false } = {}) {
+        const lane = this.lanes.get(agentId);
+        if (!this._scrolling(lane)) return null;
+        if (reset) { lane.cost = { samples: [] }; lane.costPending = null; }
+        const s = lane.cost?.samples ?? [];
+        const q = (key, f) => { if (!s.length) return null; const a = s.map((x) => x[key]).sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(a.length * f))]; };
+        return {
+            batches: s.length, following: s.filter((x) => x.following).length,
+            p50: q('ms', 0.5), p95: q('ms', 0.95), max: s.length ? Math.max(...s.map((x) => x.ms)) : null,
+            apply95: q('applyMs', 0.95), flush95: q('flushMs', 0.95), laid95: q('laidSlots', 0.95), uploaded95: q('uploaded', 0.95),
+            records: lane.entries.length, rows: lane.doc.totalRows, slots: lane.doc.bodyField.slotBuffer.count,
+        };
     }
 
     /** The colours one record's block is set in. @private */

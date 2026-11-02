@@ -412,6 +412,20 @@ const SCROLL_BUDGET_MS = 0.5;
     console.log(`    scroll step  ${per.toFixed(4)} ms, 0 slots laid, 0 uploaded`);
 }
 
+// ── 6b. book.cost: a live batch's cost is recorded where the frame lays it ─────────────────────
+{
+    const books = newBooks();
+    books.ensure('c', 'claude').book.setForm('scroll');
+    books.applyEvents('c', run(20), { agentType: 'claude' });
+    flushAll(books);
+    books.scrollCost('c', { reset: true });
+    for (let b = 0; b < 5; b++) { books.applyEvents('c', run(2, 20 + 2 * b), { agentType: 'claude' }); books.update(16); }
+    books.update(16);   // a frame with no batch records nothing
+    const c = books.scrollCost('c');
+    ok(c.batches === 5 && c.following === 5 && c.p95 > 0 && c.laid95 > 0, `book.cost: each live batch + the frame's flush is one sample (${JSON.stringify({ batches: c.batches, p95: c.p95, laid95: c.laid95 })})`);
+    ok(books.scrollCost('c', { reset: true }).batches === 0 && books.scrollCost('nope') === null, 'reset empties it; a lane that is no scroll has none');
+}
+
 // BEFORE (informational): the deck at its own cap — a sheet of CodeGrid cards per event, every
 // card laid out whole as it loads (the cost the scroll form replaces for a plane desk's books).
 {
