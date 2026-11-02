@@ -527,6 +527,9 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				if r.tryRelayDesktopWhenNoDisplay(ws, raw, callerName) {
 					continue
 				}
+				if r.tryRelayPointWhenNoDisplay(ws, raw, callerName) {
+					continue
+				}
 				ws.WriteMessage(websocket.TextMessage, []byte("ERR: no display connected. Open the viewer in a browser first."))
 				continue
 			}
@@ -579,6 +582,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				switch {
 				case strings.HasPrefix(rpc.Method, "desktop/"):
 					r.handleDesktopRPC(rpc.Method, rpc.ID, rpc.Params)
+				case strings.HasPrefix(rpc.Method, "points/"):
+					r.handlePointsRPC(rpc.Method, rpc.ID, rpc.Params)
 				case strings.HasPrefix(rpc.Method, "lsp/"):
 					if r.lsp != nil {
 						r.lsp.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)

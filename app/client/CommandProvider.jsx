@@ -903,6 +903,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         state.ctx.fileWatch?.reconnect();
         state.ctx.sessionDesk?.refresh();
         state.ctx.gomuxHub?.refresh();
+        // Agents' points the relay kept (made with no display, or before this page reloaded) — shown as their owners.
+        state.ctx.deixis?.reconnect((argv, who) => state.router.execute(argv, { caller: who }));
       }
       if (connected && repo) state.ctx.agentVisibility?.settle();   // no session store under ?repo: nothing hidden to read
       if (!connected || repo) return;

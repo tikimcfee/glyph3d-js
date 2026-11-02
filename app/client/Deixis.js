@@ -390,6 +390,7 @@ export default class Deixis {
         else this._draw(ref, hue, fill, who, p.status === 'overdrawn');
         if (ref.kind === 'code') this._watchText(ref.entity, grid);
         if (ref.kind === 'terminal') this._watchFrames(ref.entity, grid);
+        this._changed();
         return p;
     }
 
@@ -415,6 +416,7 @@ export default class Deixis {
             this._draw(p.ref, p.hue, p.fill, p.who, od);
             n++;
         }
+        if (n) this._changed();
         return n;
     }
 
@@ -477,6 +479,7 @@ export default class Deixis {
             if (at.line0 !== old0) { p.ref = this._moved(p.ref, at.line0); out.push(p); }
             if (drawn) this._draw(p.ref, p.hue, p.fill, p.who);
         }
+        this._changed();
         return out;
     }
 
@@ -489,11 +492,88 @@ export default class Deixis {
     /** Clear `who`'s point (its fill goes). @param {string} who @returns {boolean} whether it had one */
     clear(who) {
         const p = this.points.get(who);
-        if (!p) return false;
+        if (!p) {
+            // A kept point still waiting for its surface (reconnect) clears too — the relay forgets it.
+            if (!this._pending?.delete(who)) return false;
+            this._changed();
+            return true;
+        }
         if (p.status === 'shown' || p.status === 'overdrawn') this._draw(p.ref, null, 0, who);
         this.points.delete(who);
+        this._changed();
         this._unwatchIfIdle(p.ref.entity);
         return true;
+    }
+
+    // ── kept by the relay (cli/points.go): a point made with no display, and every live point across a reload ──
+
+    /** Each live point as the `point.show` arguments that recreate it (its ref's JSON, kind, say, with) —
+     *  and each kept one still waiting to be shown (its surface not open yet), as the relay gave it. */
+    serialize() {
+        const live = this.list().map((p) => ({
+            who: p.who, ts: p.ts,
+            args: [JSON.stringify({ kind: p.ref.kind, entity: p.ref.entity, durable: p.ref.durable, quote: p.ref.quote }),
+                '--kind', p.kind, ...(p.say ? ['--say', p.say] : []), ...(p.replace != null ? ['--with', p.replace] : [])],
+        }));
+        const waiting = [...(this._pending?.values() ?? [])].filter((k) => !this.points.has(k.who));
+        return [...live, ...waiting];
+    }
+
+    /** Tell the relay what's live (debounced) — once this page has loaded what the relay kept, so a fresh
+     *  page never syncs over points it hasn't shown yet. @private */
+    _changed() {
+        if (!this._relayLoaded) return;
+        clearTimeout(this._syncTimer);
+        this._syncTimer = setTimeout(() => this.sync(), 150);
+    }
+
+    /** Send the live points (and the kept ones still waiting) to the relay now (points/sync). @returns {Promise<boolean>} */
+    async sync() {
+        const bridge = this.ctx.wsbridge;
+        if (!bridge?.connected || typeof bridge.rpcRequest !== 'function') return false;
+        try { await bridge.rpcRequest('points/sync', { points: this.serialize() }); return true; }
+        catch (e) { console.warn('[deixis] syncing points to the relay failed:', e?.message || e); return false; }
+    }
+
+    /**
+     * The relay connected: show what it kept (points made while no display was connected, or this page's
+     * before a reload) — each replayed as `point.show` run AS its owner (`exec(argv, who)`), the typing gate
+     * and every check as usual. Each is tried once, then the live set is synced back; one whose surface isn't
+     * open yet (a file still loading after a reload) stays waiting — kept in the relay's set — and is retried
+     * every `everyMs` for up to `waitMs`.
+     * @param {(argv: string[], who: string) => any} exec @param {{waitMs?:number, everyMs?:number}} [o]
+     * @returns {Promise<{shown:number, waiting:number, done:Promise<number>}>} done: when every retry ended (shown in all)
+     */
+    async reconnect(exec, { waitMs = 60000, everyMs = 2000 } = {}) {
+        const bridge = this.ctx.wsbridge;
+        if (!bridge?.connected || typeof bridge.rpcRequest !== 'function') return { shown: 0, waiting: 0, done: Promise.resolve(0) };
+        let kept = [];
+        try { kept = (await bridge.rpcRequest('points/list', {}))?.points ?? []; }
+        catch (e) { console.warn('[deixis] the relay kept no points (points/list):', e?.message || e); }
+        this._pending = new Map((Array.isArray(kept) ? kept : []).filter((k) => k?.who && Array.isArray(k.args)).map((k) => [k.who, k]));
+        const tryOne = async (k) => {
+            if (this.points.has(k.who)) { this._pending.delete(k.who); return 0; }   // shown meanwhile — the newer one stands
+            const r = await exec(['point.show', ...k.args], k.who);
+            if (String(r?.text ?? '').startsWith('ERR')) return -1;
+            this._pending.delete(k.who);
+            return 1;
+        };
+        let shown = 0;
+        for (const k of [...this._pending.values()]) if ((await tryOne(k)) === 1) shown++;
+        this._relayLoaded = true;
+        await this.sync();
+        const waiting = this._pending.size;
+        const done = (async () => {
+            const until = Date.now() + waitMs;
+            let more = 0;
+            while (this._pending.size && Date.now() < until) {
+                await new Promise((res) => setTimeout(res, everyMs));
+                for (const k of [...this._pending.values()]) if ((await tryOne(k)) === 1) more++;
+            }
+            for (const k of this._pending.values()) console.warn(`[deixis] ${k.who}'s kept point could not be shown: ${String(k.args[0]).slice(0, 120)}`);
+            return shown + more;
+        })();
+        return { shown, waiting, done };
     }
 
     /** @returns {Point[]} newest first */

@@ -210,12 +210,13 @@ func serveCmd() {
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
 	flagSet.DurationVar(&watchDebounce, "watch-debounce", watchDebounce, "How long fs/changed waits to coalesce writes per path")
 	flagSet.IntVar(&maxWatchedPaths, "watch-max", maxWatchedPaths, "Most directories fs/watch may hold inotify watches on at once")
+	flagSet.IntVar(&maxPoints, "max-points", maxPoints, "Most agents' points the relay keeps for a display (one per agent; the oldest leaves first)")
 	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])
-	if *sessionsInterval <= 0 || *maxFollowers <= 0 || watchDebounce <= 0 || maxWatchedPaths <= 0 {
-		log.Fatalf("[serve] --sessions-interval, --max-followers, --watch-debounce, and --watch-max must be positive (got %s, %d, %s, %d)", *sessionsInterval, *maxFollowers, watchDebounce, maxWatchedPaths)
+	if *sessionsInterval <= 0 || *maxFollowers <= 0 || watchDebounce <= 0 || maxWatchedPaths <= 0 || maxPoints <= 0 {
+		log.Fatalf("[serve] --sessions-interval, --max-followers, --watch-debounce, --watch-max and --max-points must be positive (got %s, %d, %s, %d, %d)", *sessionsInterval, *maxFollowers, watchDebounce, maxWatchedPaths, maxPoints)
 	}
 	// The `agent` children (gomuxai export, sessions, transcripts) go when the relay goes.
 	watchShutdown()

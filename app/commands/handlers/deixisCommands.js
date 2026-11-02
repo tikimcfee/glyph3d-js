@@ -166,8 +166,8 @@ export default function registerDeixisCommands(router) {
             record('point.clear', ctx, { id: who, had });
             return { text: had ? `OK: cleared ${who}'s point` : `OK: ${who} had no point`, data: { cleared: had ? [who] : [] } };
         }
-        const ids = !arg || arg === 'all' ? [...d.points.keys()] : [arg];
-        if (arg && arg !== 'all' && !d.points.has(arg)) return fail(`no point '${arg}' (point.list)`);
+        const ids = !arg || arg === 'all' ? [...new Set([...d.points.keys(), ...(d._pending?.keys() ?? [])])] : [arg];
+        if (arg && arg !== 'all' && !d.points.has(arg) && !d._pending?.has(arg)) return fail(`no point '${arg}' (point.list)`);
         for (const id of ids) d.clear(id);
         record('point.clear', ctx, { ids });
         return { text: `OK: cleared ${ids.length} point(s)`, data: { cleared: ids } };
