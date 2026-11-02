@@ -19,7 +19,7 @@
 //   - the agents desk: live + recent local sessions get books (lane = session id), old ones
 //     and workgroup ones don't; a subagent sits on its parent's team desk; a re-pushed list
 //     that changes nothing shown rebuilds nothing; agent.clear stops following and the desk
-//     doesn't reopen it; agent.open opens an older session (by prefix; a workgroup agent by
+//     doesn't reopen it (it's hidden — and keeps its place in agents.maxBooks' window); agent.open opens an older session (by prefix; a workgroup agent by
 //     its name) and the desk seats it;
 //   - restore reopens saved books through the same path (limit, head), parents before their
 //     subagents; an ended session past the history window stays closed unless pinned or
@@ -49,6 +49,7 @@ const { default: AgentSessionProvider } = await import('../packages/glyph3d-core
 const { default: WorkspaceModel } = await import('../app/client/WorkspaceModel.js');
 const { default: Holding } = await import('../app/client/Holding.js');
 const { default: SessionBooks, laneForSession, resolveSession } = await import('../app/client/SessionBooks.js');
+const { default: AgentVisibility } = await import('../app/client/AgentVisibility.js');
 const { default: SessionDesk, AGENTS_DESK } = await import('../app/client/SessionDesk.js');
 const { default: GomuxHub, GOMUX_HUB } = await import('../app/client/GomuxHub.js');
 const { default: SessionStore } = await import('../app/client/SessionStore.js');
@@ -148,6 +149,8 @@ function makeWorld() {
     ctx.agentBooks.cfg.tailReadBytes = 3 * LINE;
     const { relay, bridge } = makeRelay();
     ctx.sessionProvider = new AgentSessionProvider(bridge);
+    ctx.agentVisibility = new AgentVisibility(ctx);
+    ctx.agentVisibility.settle();   // nothing saved to wait for (tools/agent-visibility.test.mjs locks the gate)
     ctx.sessionBooks = new SessionBooks(ctx, ctx.sessionProvider);
     const verbs = new Map();
     registerAgentCommands({ register: (n, fn) => verbs.set(n, fn) });
@@ -304,7 +307,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     w.relay.list([{ ...L1, status: 'waiting' }, SUB, OLD, WG, RECENT]);
     ok(layouts === 1 && w.books.lanes.get('L1-aaaa').beacon === 'waiting', 'a shown session\'s status change does (and waiting raises its hand)');
 
-    // agent.clear stops following; the desk leaves it closed
+    // agent.clear stops following; the desk leaves it closed (clearing a desk's book hides it)
     w.run('agent.clear', 'R1');
     ok(!w.sb.streams.has('R1') && w.relay.calls.some((c) => c.method === 'agentEvents/unfollow' && c.params.session === 'R1'), 'agent.clear: its stream unfollowed');
     w.relay.list([L1, SUB, OLD, WG, { ...RECENT, size: 5 }]);
@@ -460,6 +463,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     const w = makeWorld();
     setSetting(w.ctx, 'agents.maxBooks', 2);
     const desk = new SessionDesk(w.ctx, w.ctx.sessionProvider, w.sb);
+    w.ctx.sessionDesk = desk;
     const ss = ['A', 'B', 'C', 'D'].map((id) => w.relay.add(session(id, { status: id === 'D' ? 'ended' : 'idle' }), [say(0, id)]));
     w.relay.list(ss);
     await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
@@ -467,7 +471,8 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     w.run('agent.clear', 'A');
     w.relay.list([...ss.slice(0, 3), { ...ss[3], title: 'changed' }]);
     await Promise.all([...w.sb.streams.values()].map((s) => s.opening));
-    eq([...w.books.lanes.keys()].sort(), ['B', 'C'], 'a cleared book frees its slot for the next newest');
+    eq([...w.books.lanes.keys()].sort(), ['B'], 'a cleared book is hidden: it keeps its slot, no older book opens in its place');
+    eq(desk.hiddenSessions().map((x) => x.session_id), ['A'], 'and the desk lists it as hidden');
     resetSetting(w.ctx, 'agents.maxBooks');
     desk.dispose();
 }

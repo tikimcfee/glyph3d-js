@@ -13,12 +13,18 @@ import { bookInSlot } from './client/bookFocus.js';
  *   history   every session on the host with no open book (the relay's session list),
  *             folded until opened or filtered
  *
+ * HIDDEN agents (AgentVisibility) stay in their group, dimmed, with no book behind them —
+ * nothing is read, followed or drawn for one, across reloads too. Each group header sets
+ * the group's rule: all · running (ended ones hidden) · none.
+ *
  * A row is a status lamp, the name, the status word and its age; a working agent's
  * current action, the reason a waiting one needs you, or a failure sits under it.
  *
  *   click a row          → agent.focus <id>   (primary slot → the HUD; the camera flies there)
- *   ✕ on a row           → agent.clear <id>   (the book closes; history still lists it)
- *   close done           → agent.clear done
+ *   hide on a row        → agent.hide <id>    (a desk's book: it stays listed, dimmed)
+ *   ✕ on a row           → agent.clear <id>   (a book opened from history: it goes back there)
+ *   click a hidden row   → agent.show <id>    (its book opens again)
+ *   all · running · none → agent.group <gomux|local> <shown|ended|hidden>
  *   click a history row  → agent.open <session>, then agent.focus
  *   filter               → narrows every group by name, id, project or workgroup
  *
@@ -59,7 +65,6 @@ const S = {
     },
     title: { flex: '0 0 auto', color: '#aeb6c4', letterSpacing: '0.04em' },
     summary: { flex: '1 1 auto', minWidth: 0, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-    btn: { flex: '0 0 auto', cursor: 'pointer', padding: '0 5px', borderRadius: 3, color: '#7c8596', fontSize: 11, whiteSpace: 'nowrap' },
     filterWrap: { padding: '0 8px 6px', flex: '0 0 auto', borderBottom: '1px solid #1b1f29' },
     filter: {
         width: '100%', boxSizing: 'border-box', font: 'inherit', fontSize: 11, color: '#c8ccd6',
@@ -74,6 +79,11 @@ const S = {
         cursor: 'pointer', userSelect: 'none',
     },
     groupCount: { color: '#444b56' },
+    groupRule: { marginLeft: 'auto', display: 'flex', gap: 2, textTransform: 'none', letterSpacing: 0 },
+    rule: (on) => ({
+        cursor: 'pointer', padding: '0 4px', borderRadius: 3, fontSize: 10,
+        color: on ? '#c8ccd6' : '#4f5661', background: on ? 'rgba(120,150,200,0.16)' : 'transparent',
+    }),
 
     row: (selected, waiting, depth) => ({
         padding: `3px 8px 3px ${8 + depth * 14}px`, cursor: 'pointer', userSelect: 'none',
@@ -92,6 +102,7 @@ const S = {
     word: (color) => ({ flex: '0 0 auto', color, fontSize: 10 }),
     age: { flex: '0 0 auto', color: '#5a616c', fontSize: 10, minWidth: 24, textAlign: 'right' },
     x: (show) => ({ flex: '0 0 auto', cursor: 'pointer', color: show ? '#7c8596' : 'transparent', padding: '0 2px', fontSize: 11 }),
+    hiddenName: { flex: '1 1 auto', minWidth: 0, color: '#4f5661', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     sub: (color) => ({
         paddingLeft: 14, color, fontSize: 11,
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -140,13 +151,30 @@ function asTree(list, parentOf) {
     return out;
 }
 
-/** @param {AppContext} ctx @param {Object[]} agents */
+/**
+ * The hidden agents, as rows: the hub's (by name) and the agents desk's (by session id).
+ * @param {AppContext} ctx @returns {Object[]}
+ */
+function hiddenRows(ctx) {
+    const rows = [];
+    for (const a of ctx?.gomuxHub?.hiddenAgents() || []) {
+        rows.push({ id: a.name, name: a.name, hidden: true, group: 'gomux', status: a.live ? (a.status || 'unknown') : 'ended',
+                    endReason: a.endReason || '', wallTs: Date.parse(a.statusAt || a.createdAt) });
+    }
+    for (const s of ctx?.sessionDesk?.hiddenSessions() || []) {
+        rows.push({ id: s.session_id, name: sessionName(s), hidden: true, group: 'local', status: s.status,
+                    endReason: s.end_reason || '', wallTs: Date.parse(s.mtime) });
+    }
+    return rows;
+}
+
+/** @param {AppContext} ctx @param {Object[]} agents open books and hidden rows */
 function groupBooks(ctx, agents) {
     const hub = ctx?.gomuxHub;
     const desk = ctx?.sessionDesk;
-    const inHub = (a) => !!hub?.lanes.has(a.id);
+    const inHub = (a) => (a.hidden ? a.group === 'gomux' : !!hub?.lanes.has(a.id));
     const parentOf = (a) => (inHub(a)
-        ? hub.nodes.get(a.id)?.parent || null
+        ? hub?.nodes.get(a.id)?.parent || null
         : desk?.sessions.get(a.id)?.parent_session?.session_id ?? a.meta?.parentSession?.session_id ?? null);
     return {
         gomux: asTree(agents.filter(inHub), parentOf),
@@ -168,8 +196,29 @@ function endReasonOf(ctx, a) {
     return ctx?.gomuxHub?.nodes.get(a.id)?.endReason || ctx?.sessionDesk?.sessions.get(a.id)?.end_reason || '';
 }
 
-/** @param {{ a: Object, depth: number, selected: boolean, endReason: string, onSelect: Function, onClose: Function }} props */
-function BookRow({ a, depth, selected, endReason, onSelect, onClose }) {
+/** A hidden agent: listed, dimmed, no book behind it — a click shows it.
+ *  @param {{ a: Object, depth: number, onShow: Function }} props */
+function HiddenRow({ a, depth, onShow }) {
+    const [hover, setHover] = useState(false);
+    const phase = phaseOf(a.status);
+    const word = phase === 'done' && a.endReason ? `ended · ${a.endReason}` : LAMP[phase].word;
+    return (
+        <div style={S.row(false, false, depth)} onClick={() => onShow(a.id)}
+            onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+            title={`${a.name}\n${a.id}\nhidden — no book is opened for it (agent.show ${a.id})`}>
+            <div style={S.line}>
+                <span style={S.lamp('#3a404a', true)} />
+                <span style={S.hiddenName}>{a.name}</span>
+                <span style={S.word('#3f4550')}>{word}</span>
+                <span style={S.age}>{wallAgo(a.wallTs)}</span>
+                <span style={{ ...S.x(true), color: hover ? '#8fa0b8' : '#3f4550' }}>show</span>
+            </div>
+        </div>
+    );
+}
+
+/** @param {{ a: Object, depth: number, selected: boolean, endReason: string, owned: boolean, onSelect: Function, onClose: Function, onHide: Function }} props */
+function BookRow({ a, depth, selected, endReason, owned, onSelect, onClose, onHide }) {
     const [hover, setHover] = useState(false);
     const phase = phaseOf(a.status, a.beacon);
     const lamp = LAMP[phase];
@@ -190,8 +239,11 @@ function BookRow({ a, depth, selected, endReason, onSelect, onClose }) {
                 {a.type && a.type !== 'claude' && <span style={S.tag}>{a.type}</span>}
                 <span style={S.word(lamp.color)}>{word}</span>
                 <span style={S.age}>{wallAgo(a.wallTs)}</span>
-                <span style={S.x(hover || selected)} title={`Close this book (agent.clear ${a.id})`}
-                    onClick={(e) => { e.stopPropagation(); onClose(a.id); }}>✕</span>
+                {owned
+                    ? <span style={S.x(hover || selected)} title={`Hide this agent — its book closes and stays closed across reloads (agent.hide ${a.id})`}
+                        onClick={(e) => { e.stopPropagation(); onHide(a.id); }}>hide</span>
+                    : <span style={S.x(hover || selected)} title={`Close this book — it goes back to history (agent.clear ${a.id})`}
+                        onClick={(e) => { e.stopPropagation(); onClose(a.id); }}>✕</span>}
             </div>
             {sub && <div style={S.sub(sub.color)} title={sub.text}>{sub.text}</div>}
         </div>
@@ -221,6 +273,7 @@ function SessionRow({ s, opening, onOpen }) {
 export default function AgentsPanel({ client }) {
     const ctx = client?.ctx || null;
     const [agents, setAgents] = useState([]);
+    const [hidden, setHidden] = useState([]);
     const [sessions, setSessions] = useState(null);   // null = no session provider
     const [selected, setSelected] = useState(null);
     const [filter, setFilter] = useState('');
@@ -232,12 +285,13 @@ export default function AgentsPanel({ client }) {
     // The roster: AgentBooks' change event, plus a 1 s tick for ages and hub status.
     useEffect(() => {
         const books = ctx?.agentBooks;
-        if (!books) { setAgents([]); return undefined; }
-        const read = () => setAgents(books.agents());
+        if (!books) { setAgents([]); setHidden([]); return undefined; }
+        const read = () => { setAgents(books.agents()); setHidden(hiddenRows(ctx)); };
         read();
         const off = books.onChange?.(read);
+        const offVis = ctx.agentVisibility?.onChange(read);
         const t = setInterval(read, 1000);
-        return () => { off?.(); clearInterval(t); };
+        return () => { off?.(); offVis?.(); clearInterval(t); };
     }, [ctx]);
 
     // Selection = the book in the primary slot.
@@ -269,6 +323,10 @@ export default function AgentsPanel({ client }) {
     }, [exec]);
 
     const close = useCallback((id) => exec(['agent.clear', id]), [exec]);
+    const hide = useCallback((id) => exec(['agent.hide', id]), [exec]);
+    const show = useCallback((id) => exec(['agent.show', id]), [exec]);
+    const setRule = useCallback((group, state) => exec(['agent.group', group, state]), [exec]);
+    const owned = (id) => !!(ctx?.gomuxHub?.lanes.has(id) || ctx?.sessionDesk?.owns(id));
 
     const open = useCallback(async (s) => {
         setOpening((o) => new Set(o).add(s.session_id));
@@ -282,15 +340,16 @@ export default function AgentsPanel({ client }) {
 
     const q = filter.trim().toLowerCase();
     const shown = useMemo(() => (q ? agents.filter((a) => bookText(a).includes(q)) : agents), [agents, q]);
-    const groups = useMemo(() => groupBooks(ctx, shown), [ctx, shown]);
+    const shownHidden = useMemo(() => (q ? hidden.filter((a) => bookText(a).includes(q)) : hidden), [hidden, q]);
+    const groups = useMemo(() => groupBooks(ctx, [...shown, ...shownHidden]), [ctx, shown, shownHidden]);
     const history = useMemo(() => {
         if (!sessions) return null;
-        const open = new Set(agents.map((a) => a.id));
-        const rest = sessions.filter((s) => !open.has(laneForSession(s)));
+        const listed = new Set([...agents, ...hidden].map((a) => a.id));
+        const rest = sessions.filter((s) => !listed.has(laneForSession(s)));
         return q ? rest.filter((s) => sessionText(s).includes(q)) : rest;
-    }, [sessions, agents, q]);
+    }, [sessions, agents, hidden, q]);
 
-    const counts = { working: 0, waiting: 0, done: 0 };
+    const counts = { working: 0, waiting: 0 };
     for (const a of agents) {
         const ph = phaseOf(a.status, a.beacon);
         if (ph in counts) counts[ph]++;
@@ -304,16 +363,35 @@ export default function AgentsPanel({ client }) {
     const toggle = (key) => setFolded((f) => ({ ...f, [key]: !f[key] }));
     const isFolded = (key) => (key === 'history' && q ? false : !!folded[key]);
 
-    const groupHeader = (key, label, n) => (
-        <div style={S.group} onClick={() => toggle(key)}>
-            <span>{isFolded(key) ? '▸' : '▾'}</span>
-            <span>{label}</span>
-            <span style={S.groupCount}>{n}</span>
-        </div>
-    );
-    const bookRows = (rows) => rows.map(({ a, depth }) => (
-        <BookRow key={a.id} a={a} depth={depth} selected={a.id === selected} endReason={endReasonOf(ctx, a)} onSelect={select} onClose={close} />
+    /** A group's header: fold, its count (and how many are hidden), and its rule —
+     *  all · running · none (agent.group). `rule` is the group's key in AgentVisibility. */
+    const groupHeader = (key, label, n, rule = null, nHidden = 0) => {
+        const state = rule ? ctx?.agentVisibility?.groupState(rule) : null;
+        const ruleBtn = (st, text, title) => (
+            <span style={S.rule(state === st)} title={`${title} (agent.group ${rule} ${st})`}
+                onClick={(e) => { e.stopPropagation(); if (state !== st) setRule(rule, st); }}>{text}</span>
+        );
+        return (
+            <div style={S.group} onClick={() => toggle(key)}>
+                <span>{isFolded(key) ? '▸' : '▾'}</span>
+                <span>{label}</span>
+                <span style={S.groupCount}>{nHidden ? `${n - nHidden} · ${nHidden} hidden` : n}</span>
+                {state && (
+                    <span style={S.groupRule}>
+                        {ruleBtn('shown', 'all', 'Every agent here gets its book')}
+                        {ruleBtn('ended', 'running', 'Only running agents get books — ended ones are hidden')}
+                        {ruleBtn('hidden', 'none', 'No agent here gets a book — they stay listed, dimmed')}
+                    </span>
+                )}
+            </div>
+        );
+    };
+    const bookRows = (rows) => rows.map(({ a, depth }) => (a.hidden
+        ? <HiddenRow key={a.id} a={a} depth={depth} onShow={show} />
+        : <BookRow key={a.id} a={a} depth={depth} selected={a.id === selected} endReason={endReasonOf(ctx, a)}
+            owned={owned(a.id)} onSelect={select} onClose={close} onHide={hide} />
     ));
+    const hiddenIn = (rows) => rows.filter(({ a }) => a.hidden).length;
 
     return (
         <div style={S.content}>
@@ -324,10 +402,6 @@ export default function AgentsPanel({ client }) {
                     {counts.working ? <span style={{ color: LAMP.working.color }}>{counts.working} working · </span> : null}
                     {agents.length} open
                 </span>
-                {counts.done > 0 && (
-                    <span style={S.btn} onClick={() => exec(['agent.clear', 'done'])}
-                        title="Close every finished book (agent.clear done)">close done ({counts.done})</span>
-                )}
             </div>
             <div style={S.filterWrap}>
                 <input style={S.filter} placeholder="filter" value={filter}
@@ -336,16 +410,16 @@ export default function AgentsPanel({ client }) {
             </div>
 
             <div style={S.body}>
-                {groups.gomux.length > 0 && (<>
-                    {groupHeader('gomux', 'gomuxai', groups.gomux.length)}
+                {(groups.gomux.length > 0 || ctx?.gomuxHub?.snapshot) && (<>
+                    {groupHeader('gomux', 'gomuxai', groups.gomux.length, 'gomux', hiddenIn(groups.gomux))}
                     {!isFolded('gomux') && bookRows(groups.gomux)}
                 </>)}
                 {groups.local.length > 0 && (<>
-                    {groupHeader('local', 'local', groups.local.length)}
+                    {groupHeader('local', 'local', groups.local.length, 'local', hiddenIn(groups.local))}
                     {!isFolded('local') && bookRows(groups.local)}
                 </>)}
-                {!agents.length && <div style={S.msg}>No agent books open.</div>}
-                {agents.length > 0 && !shown.length && <div style={S.msg}>No open book matches.</div>}
+                {!agents.length && !hidden.length && <div style={S.msg}>No agent books open.</div>}
+                {(agents.length > 0 || hidden.length > 0) && !shown.length && !shownHidden.length && <div style={S.msg}>No agent matches.</div>}
 
                 {history && (<>
                     {groupHeader('history', 'history', history.length)}

@@ -233,7 +233,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   old unfollowed, history sealed), a live edit taps the delta books with its patch; the agents
   desk opens live + recent local sessions (not old, not workgroup) up to `agents.maxBooks`,
   seats a subagent on its parent's team desk, rebuilds nothing on a re-push that changes nothing
-  shown, leaves a cleared book closed; agent.open by prefix / workgroup name (its main session,
+  shown, leaves a cleared book closed (hidden — it keeps its maxBooks slot); agent.open by prefix / workgroup name (its main session,
   never a subagent; a workgroup subagent opens into its own book); a failed open keeps its book,
   says so and retries; a refused follow says so; close always unfollows; a reconnect re-opens a
   stuck open; restore reopens saved books (limit, head), a vanished one stays closed, no list
@@ -248,6 +248,20 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   `go test -run 'AgentEvents|TailFrom|Children'` (the event wire, tail math, child cleanup).
   ```
   bun tools/session-books.test.mjs
+  ```
+- **`agent-visibility.test.mjs`** (headless) — hidden agents (client/AgentVisibility.js) over the
+  same fake relay with the real hub, desk, verbs and SessionStore: before the saved set is known
+  the hub and the desk open nothing (no read, no book); the restore's first stage opens the gate
+  and only shown agents open — a hidden one is never read, a stale roster entry included;
+  agent.hide closes the book, its stream and a hub agent's screen, and tree pushes keep it
+  closed; agent.show reopens (a session outside the desks' windows too); agent.open shows;
+  agent.clear hides a desk's/hub's book but only closes one opened from history; capture saves
+  the set and a fresh page restoring it opens none of it; agent.group hidden keeps a new agent
+  closed, ended closes ended ones (and one that ends later), shown drops overrides; a hidden
+  session keeps its maxBooks slot. Mutation-checked (gate open from birth, restore not skipping
+  hidden).
+  ```
+  bun tools/agent-visibility.test.mjs
   ```
 - **`desk-tuning.test.mjs`** (headless) — per-instance knobs (client/tuning.js): a Settings ▸
   Carrel default reaches only desks born after it; `carrel.set` tunes one desk, `carrel.get`

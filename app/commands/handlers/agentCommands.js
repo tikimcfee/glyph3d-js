@@ -13,8 +13,13 @@
  *   agent.spawn    <id> [type]                      summon an empty book (request an instance)
  *   agent.state    <id> <active|idle|stalled|done>  set lifecycle state
  *   agent.stop     <id>                             mark finished ('done' — PERSISTS)
- *   agent.clear    <id|all|done>                    remove agent book(s) from the field (stops following)
+ *   agent.clear    <id|all|done>                    remove agent book(s) from the field (stops following);
+ *                                                    a book the hub or the agents desk opened is HIDDEN
  *   agent.request  <id> [message...]                raise a hand ("needs you")
+ *   agent.hide     <name|session|prefix>            no book for this agent (durable — a reload won't open it)
+ *   agent.show     <name|session|prefix>            its book again (opened now)
+ *   agent.group    <gomux|local> <shown|hidden|ended>   a group's rule (its members' own overrides drop)
+ *   agent.hidden                                     the rule: groups, overrides, the agents it hides now
  *
  * Paging/tuning the books themselves is the book.* family (bookCommands) — paging is a
  * BOOK capability, not an agent one. Framing a book is the ordinary camera verb on its
@@ -28,6 +33,7 @@
 import { canonicalPath } from './pathResolve.js';
 import { laneForSession, resolveSession } from '../../client/SessionBooks.js';
 import { followable } from '../../client/SessionDesk.js';
+import { AGENT_GROUPS, GROUP_STATES } from '../../client/AgentVisibility.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 /** @import { AgentSession } from '@glyph3d/core/services/data/AgentSessionProvider.js' */
 
@@ -44,6 +50,11 @@ const noSessions = { text: 'ERR: no agent sessions (the session list is a relay 
  */
 export function openSession(ctx, session, { limit } = {}) {
     if (!ctx.sessionBooks) return Promise.reject(new Error('no session books (relay offline — sessions are a relay feature)'));
+    // Opening an agent by hand shows it: a hidden one's own override (or its group's rule)
+    // would otherwise close the book its desk converges on.
+    const vis = ctx.agentVisibility;
+    const who = vis?.who(laneForSession(session));
+    if (who && vis.isHidden(who)) vis.setHidden(who, false);
     // A session that ended needs no follower (the relay caps them): its book is its record.
     return ctx.sessionBooks.open(session.session_id, {
         lane: laneForSession(session), agentType: session.harness, limit, follow: followable(session.status),
@@ -58,6 +69,28 @@ export async function sessionList(ctx) {
     const p = ctx.sessionProvider;
     if (!p) throw new Error('no session provider');
     return p.latest ? p.sessions : (await p.list()).sessions;
+}
+
+const noVisibility = { text: 'ERR: no agent visibility (needs the relay)', data: null };
+
+/**
+ * An agent by reference, for hide/show: a gomuxai agent's name, an open book's lane, or a
+ * session (its id, a workgroup agent's name, or a unique id prefix — resolveSession).
+ * @param {AppContext} ctx @param {string} ref
+ * @returns {Promise<{lane: string, group: string, ended: boolean, session: string|null, row: AgentSession|null}>}
+ */
+async function resolveAgent(ctx, ref) {
+    const vis = ctx.agentVisibility;
+    if (ctx.gomuxHub?.nodes.has(ref) || ctx.agentBooks?.lanes.has(ref)) return { ...vis.who(ref), row: null };
+    const hit = ctx.agentBooks?.resolveLane(ref);
+    if (hit) return { ...vis.who(hit[0]), row: null };
+    const row = resolveSession(await sessionList(ctx), ref);
+    return { ...vis.who(laneForSession(row)), row };
+}
+
+/** Whether the hub or the agents desk opened this book by itself (clearing it hides it). */
+function ownedBook(ctx, lane) {
+    return !!(ctx.gomuxHub?.lanes.has(lane) || ctx.sessionDesk?.owns(lane));
 }
 
 const fmtAge = (ms) => {
@@ -199,15 +232,100 @@ export default function registerAgentCommands(router) {
         if (!books) return noBooks;
         const [target] = args;
         if (!target) return { text: 'ERR: usage: agent.clear <id|all|done>', data: null };
+        // A book the hub or the agents desk opened by itself is theirs to reopen: clearing it
+        // HIDES it (AgentVisibility — durable, so a reload doesn't bring it back either).
+        const vis = ctx.agentVisibility;
+        const hide = (id) => { vis.setHidden(vis.who(id), true); vis.closeHidden(); };
         if (target === 'all' || target === 'done') {
-            const n = books.clear(target);
-            return { text: `OK: cleared ${n} agent book${n === 1 ? '' : 's'}`, data: { cleared: n } };
+            let hidden = 0;
+            if (vis) {
+                for (const [id, lane] of [...books.lanes]) {
+                    if ((target === 'all' || lane.state === 'done') && ownedBook(ctx, id)) { hide(id); hidden++; }
+                }
+            }
+            const n = hidden + books.clear(target);
+            return { text: `OK: cleared ${n} agent book${n === 1 ? '' : 's'}${hidden ? ` (${hidden} hidden — agent.show brings one back)` : ''}`, data: { cleared: n, hidden } };
+        }
+        if (vis && books.lanes.has(target) && ownedBook(ctx, target)) {
+            hide(target);
+            return { text: `OK: cleared ${target} (hidden — agent.show ${target} brings it back)`, data: { id: target, hidden: true } };
         }
         const ok = books.remove(target);
         return ok
             ? { text: `OK: cleared ${target}`, data: { id: target } }
             : { text: `ERR: no agent '${target}'`, data: null };
-    }, { description: "Remove an agent's book, or all/done ('done' books persist until cleared) — its stream stops following", usage: '<id|all|done>' });
+    }, { description: "Remove an agent's book, or all/done ('done' books persist until cleared) — its stream stops following; a book the hub or the agents desk opened is hidden (agent.show brings it back)", usage: '<id|all|done>' });
+
+    router.register('agent.hide', async (args, ctx) => {
+        const vis = ctx.agentVisibility;
+        if (!vis) return noVisibility;
+        const [ref] = args;
+        if (!ref) return { text: 'ERR: usage: agent.hide <name|session|prefix>', data: null };
+        let who;
+        try { who = await resolveAgent(ctx, ref); } catch (e) { return { text: `ERR: ${e?.message || e}`, data: null }; }
+        const { lane, group } = who;
+        const was = vis.isHidden(who);
+        vis.setHidden(who, true);
+        const closed = vis.closeHidden();
+        return {
+            text: was ? `OK: ${lane} was already hidden` : `OK: hid ${lane}${closed.includes(lane) ? ' — its book closed' : ''}`,
+            data: { lane, group, hidden: true, closed },
+        };
+    }, { description: 'Hide an agent: its book closes and stays closed — across reloads too (no read, no follower, no screen)', usage: '<name|session|prefix>' });
+
+    router.register('agent.show', async (args, ctx) => {
+        const vis = ctx.agentVisibility;
+        if (!vis) return noVisibility;
+        const [ref] = args;
+        if (!ref) return { text: 'ERR: usage: agent.show <name|session|prefix>', data: null };
+        let who;
+        try { who = await resolveAgent(ctx, ref); } catch (e) { return { text: `ERR: ${e?.message || e}`, data: null }; }
+        const { lane, group } = who;
+        vis.setHidden(who, false);   // the hub / the agents desk open their own as the rule moves
+        if (!ctx.agentBooks?.lanes.has(lane) && ctx.sessionBooks && ctx.sessionProvider) {
+            // Nobody converges this one (a session outside the desks' windows): open it here.
+            try {
+                const row = who.row ?? (who.session ? (await sessionList(ctx)).find((s) => s.session_id === who.session) : null);
+                if (row) await openSession(ctx, row);
+            } catch (e) {
+                return { text: `ERR: ${lane} is shown, but opening its book failed — ${e?.message || e}`, data: { lane, group, hidden: false } };
+            }
+        }
+        const open = !!ctx.agentBooks?.lanes.has(lane);
+        return {
+            text: `OK: showed ${lane}${open ? ' — its book is open' : ' (no session to open yet)'}`,
+            data: { lane, group, hidden: false, open },
+        };
+    }, { description: 'Show a hidden agent: its book opens again', usage: '<name|session|prefix>' });
+
+    router.register('agent.group', (args, ctx) => {
+        const vis = ctx.agentVisibility;
+        if (!vis) return noVisibility;
+        const [group, state] = args;
+        if (!group || !state) return { text: `ERR: usage: agent.group <${AGENT_GROUPS.join('|')}> <${GROUP_STATES.join('|')}>`, data: null };
+        try { vis.setGroup(group, state); } catch (e) { return { text: `ERR: ${e?.message || e}`, data: null }; }
+        const closed = vis.closeHidden();
+        const words = { shown: 'every agent shown', hidden: 'every agent hidden', ended: 'ended agents hidden' };
+        return { text: `OK: ${group} — ${words[state]}${closed.length ? ` (${closed.length} book${closed.length === 1 ? '' : 's'} closed)` : ''}`,
+                 data: { group, state, closed } };
+    }, { description: "A group's rule — gomux (the gomuxai hub) or local (the agents desk): shown, hidden, or ended (only the running ones get books). Its members' own overrides drop; a new agent follows the rule", usage: '<gomux|local> <shown|hidden|ended>' });
+
+    router.register('agent.hidden', (_args, ctx) => {
+        const vis = ctx.agentVisibility;
+        if (!vis) return noVisibility;
+        const st = vis.state();
+        const groups = Object.fromEntries(AGENT_GROUPS.map((g) => [g, vis.groupState(g)]));
+        const hub = (ctx.gomuxHub?.hiddenAgents() || []).map((a) => a.name);
+        const desk = (ctx.sessionDesk?.hiddenSessions() || []).map((s) => s.session_id);
+        const lines = [
+            `groups   ${AGENT_GROUPS.map((g) => `${g}: ${groups[g]}`).join(' · ')}`,
+            `own      ${Object.entries(st.agents).map(([l, h]) => `${l} ${h ? 'hidden' : 'shown'}`).join(' · ') || '(none)'}`,
+            `hidden   gomux ${hub.length}${hub.length ? ': ' + hub.join(' ') : ''}`,
+            `         local ${desk.length}${desk.length ? ': ' + desk.join(' ') : ''}`,
+            vis.ready ? null : '(waiting for the saved set — no agent desk has opened yet)',
+        ].filter(Boolean);
+        return { text: lines.join('\n'), data: { ready: vis.ready, groups, agents: st.agents, hidden: { gomux: hub, local: desk } } };
+    }, { description: 'Which agents get no book: each group\'s rule, the agents\' own overrides, and who is hidden now', returns: '{ ready, groups, agents, hidden:{gomux,local} }' });
 
     router.register('agent.request', (args, ctx) => {
         const books = ctx.agentBooks;

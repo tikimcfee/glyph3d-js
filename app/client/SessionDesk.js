@@ -21,9 +21,14 @@ import { getSetting } from './settings.js';
  * demand (agent.open, the Agents panel's archive, a saved book's restore) and are seated here
  * too, outside the cap — a workgroup's session (a hub agent's subagent) excepted: it sits at
  * the hub under its agent. A session's subagents sit on its own team desk (`agents/<session id>`,
- * titled `<name> · N helpers`) — the DeskTree rule the hub's teams follow. A book you cleared
- * stays closed while its session lives on. A failed open retries (SessionBooks), its book
- * saying why.
+ * titled `<name> · N helpers`) — the DeskTree rule the hub's teams follow. A failed open
+ * retries (SessionBooks), its book saying why.
+ *
+ * HIDDEN sessions (AgentVisibility — agent.hide, the `local` group hidden or ended, or a book
+ * you cleared) get no book: the desk converges on the rule on every list push and every
+ * change of it, and waits for the rule to be known (restored) before it opens anything. A
+ * hidden session still holds its place in the `agents.maxBooks` window — hiding a book never
+ * opens an older one in its place.
  *
  * Status rides the lane: the session's status (its list row, or its stream's newest session
  * line) maps onto the book's lifecycle as the hub's does, and `waiting` raises its hand.
@@ -58,15 +63,16 @@ export default class SessionDesk {
         this.tree = new DeskTree(ctx, { hub: AGENTS_DESK, hubForm: () => cylinderForm() });
         /** @type {Map<string, AgentSession>} session id → its latest list row */
         this.sessions = new Map();
-        /** Session ids this desk opened or seats (an on-demand open joins) — a cleared one stays here, closed. */
+        /** Session ids this desk opened or seats (an on-demand open joins). */
         this.known = new Set();
-        /** Session ids the desk opened by itself — what agents.maxBooks counts. */
+        /** Session ids the desk took into its window by itself, shown or hidden — what agents.maxBooks counts. */
         this._autoOpened = new Set();
         /** Session id → the newest status word on it (list row or session line). */
         this._statusOf = new Map();
         this._offList = provider.onSessions((list) => this.apply(list));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
         this._offCloses = this.tree.watchCloses(() => this._layout());
+        this._offVisibility = ctx.agentVisibility?.onChange(() => { if (this._list) this.apply(this._list); }) ?? null;
         this._disposed = false;
     }
 
@@ -95,18 +101,38 @@ export default class SessionDesk {
      */
     apply(list) {
         if (this._disposed || !this.ctx.agentBooks || !Array.isArray(list?.sessions)) return;
+        this._list = list;
         this.sessions = new Map(list.sessions.map((s) => [s.session_id, s]));
+        // Nothing opens before the hidden set is known (the restore's first stage puts it back).
+        const vis = this.ctx.agentVisibility;
+        if (vis && !vis.ready) {
+            if (!this._parked) { this._parked = true; vis.whenReady(() => { this._parked = false; if (this._list) this.apply(this._list); }); }
+            return;
+        }
+        const books = this.ctx.agentBooks;
         const max = Math.max(0, Math.floor(Number(getSetting('agents.maxBooks'))) || 0);
-        let open = [...this._autoOpened].filter((id) => this.ctx.agentBooks.lanes.has(id)).length;
+        // The window: every session the desk took by itself, shown or hidden (a book of the
+        // desk's closes only by being hidden — it keeps its slot).
+        let open = this._autoOpened.size;
         let opened = false;
         for (const s of this._auto(list.sessions)) {
             if (open >= max) break;
-            if (this.known.has(s.session_id)) continue;
-            this.known.add(s.session_id);
+            if (this.known.has(s.session_id) || this._autoOpened.has(s.session_id)) continue;
             this._autoOpened.add(s.session_id);
             open++;
+        }
+        // Converge the window on the rule: a shown session's book opens, a hidden one's closes.
+        for (const id of this._autoOpened) {
+            const s = this.sessions.get(id);
+            if (this._hiddenId(id)) {
+                if (books.lanes.has(id)) books.remove(id);   // its stream closes with it (SessionBooks' sweep)
+                this.known.delete(id);
+                continue;
+            }
+            if (books.lanes.has(id) || this.sessionBooks.streams.has(id) || !s) continue;
+            this.known.add(id);
             opened = true;
-            this.sessionBooks.open(s.session_id, { agentType: s.harness, follow: followable(s.status) })
+            this.sessionBooks.open(id, { agentType: s.harness, follow: followable(s.status) })
                 .catch(() => { /* SessionBooks said it (and retries) */ });
         }
         // The list arrives whole (every session on the host, re-pushed whenever any of it
@@ -119,6 +145,29 @@ export default class SessionDesk {
         this._sig = sig;
         this._layout();
         for (const id of this.known) this._status(id, this.sessions.get(id)?.status);
+    }
+
+    /** Whether a session's book stays closed (AgentVisibility; its group is `local`). */
+    hidden(s) {
+        return !!this.ctx.agentVisibility?.isHidden({ lane: s.session_id, group: 'local', ended: s.status === 'ended' });
+    }
+
+    /** @private */
+    _hiddenId(id) {
+        const s = this.sessions.get(id);
+        return s ? this.hidden(s) : !!this.ctx.agentVisibility?.isHidden({ lane: id, group: 'local' });
+    }
+
+    /** The sessions in the desk's window whose books are hidden — the Agents panel lists them,
+     *  dimmed. @returns {AgentSession[]} */
+    hiddenSessions() {
+        return [...this._autoOpened].map((id) => this.sessions.get(id)).filter((s) => s && this.hidden(s));
+    }
+
+    /** Whether the desk took this session into its window by itself (its book is the desk's
+     *  to open and close — agent.clear on it hides it). @param {string} id */
+    owns(id) {
+        return this._autoOpened.has(id);
     }
 
     /** SessionBooks' events: an on-demand open of a local session joins the desk. @private */
@@ -185,5 +234,6 @@ export default class SessionDesk {
         this._offList?.();
         this._offStream?.();
         this._offCloses?.();
+        this._offVisibility?.();
     }
 }

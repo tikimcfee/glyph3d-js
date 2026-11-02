@@ -12,7 +12,8 @@
  * stays individually awaited + guarded + timed:
  *   1  substrate    layout scheme + world-grouping order (direct state, empty scene)
  *      ∥ carrels    every instance's own values into the model (tunings), then the
- *                   saved desks stand back up wearing them
+ *                   saved desks stand back up wearing them; the hidden agents
+ *                   (agentVisibility) — the gate the hub and the agents desk wait on
  *   2  panels       2D dockview layout FIRST — the chrome rises while content loads
  *                   behind it (prunes by component type, never by entity)
  *      ∥ field→tabs replay fieldSources (bulk fetch, one batch-window settle), then
@@ -331,6 +332,10 @@ export default class SessionStore {
     // that comes and goes keep theirs.
     const tunings = listTunings(ctx);
 
+    // Hidden agents (AgentVisibility): which agents get no book — the hub and the agents desk
+    // consult it before opening anything on the next load.
+    const agentVisibility = ctx.agentVisibility?.capture() ?? null;
+
     const snap = {
       version: SCHEMA_VERSION,
       savedAt: Date.now(),
@@ -347,6 +352,7 @@ export default class SessionStore {
       carrels,
       carrelMembers,
       tunings,
+      agentVisibility,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -490,7 +496,9 @@ export default class SessionStore {
         // pre-shaped for its complement, and files a membership manifest — so
         // stage 2's windows (books, terminals, grids) seat IN PLACE the moment
         // they materialize instead of flying to a desk that arrived late.
-        ['carrels', () => { this._restoreTunings(snap); this._restoreCarrels(snap); }, ['tunings', 'carrels']]]],
+        ['carrels', () => { this._restoreTunings(snap); this._restoreCarrels(snap); }, ['tunings', 'carrels']],
+        // The hidden agents BEFORE any book: the hub and the agents desk wait on this to open.
+        ['visibility', () => this.ctx.agentVisibility?.restore(snap.agentVisibility), ['agentVisibility']]]],
       [
         [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],
@@ -646,7 +654,17 @@ export default class SessionStore {
     // Parents before their subagents: a session's book opens before the books of the sessions
     // it spawned, so the desks seat a team around a book that's already there.
     const isChild = (a) => !!sessions.get(a?.session)?.parent_session;
-    const restoring = list.filter(kept);
+    // HIDDEN: a book whose agent is hidden now (AgentVisibility — its own, or its group's
+    // rule) stays closed: hiding is what keeps a reload from opening it.
+    const vis = this.ctx.agentVisibility;
+    const shown = (a) => {
+      const s = typeof a?.session === 'string' ? sessions.get(a.session) : null;
+      if (!s || !vis) return true;
+      const hidden = vis.isHidden({ lane: laneForSession(s), group: s.workgroup ? 'gomux' : 'local', ended: s.status === 'ended' });
+      if (hidden) console.info('[session] agent book left closed — hidden:', a.session);
+      return !hidden;
+    };
+    const restoring = list.filter((a) => kept(a) && shown(a));
     const POUR_WIDTH = 6;
     const pour = async (entries) => {
       const queue = [...entries];
@@ -955,13 +973,17 @@ export default class SessionStore {
     // (relay reconnect, vite hot swap) — an ephemeral page stays ephemeral.
     if (isEphemeralSession()) {
       console.info('[session] ephemeral (?session=off) — no restore, no autosave');
+      this.ctx.agentVisibility?.settle();   // nothing hidden to read: the agent desks may open
       return;
     }
-    if (this.ctx._sessionRestored) { this._armAutosave(); return; }
+    if (this.ctx._sessionRestored) { this.ctx.agentVisibility?.settle(); this._armAutosave(); return; }
     this.ctx._sessionRestored = true;
     const snap = await this.load();
     if (snap) await this.restore(snap);   // phased; each phase is guarded, this never throws
     else console.info('[session] no saved session — fresh start');
+    // No snapshot (or one restore wiped as incompatible, or a failed visibility phase): the
+    // hidden set is what the model holds now — the agent desks stop waiting either way.
+    this.ctx.agentVisibility?.settle();
     this._armAutosave();
   }
 

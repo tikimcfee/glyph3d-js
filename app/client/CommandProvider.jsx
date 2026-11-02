@@ -19,6 +19,7 @@ import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
 import RemoteFileSystemProvider from '@glyph3d/core/services/data/RemoteFileSystemProvider.js';
 import AgentSessionProvider from '@glyph3d/core/services/data/AgentSessionProvider.js';
 import GomuxProvider from '@glyph3d/core/services/data/GomuxProvider.js';
+import AgentVisibility from './AgentVisibility.js';
 import GomuxHub from './GomuxHub.js';
 import SessionBooks from './SessionBooks.js';
 import SessionDesk from './SessionDesk.js';
@@ -227,6 +228,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/services/data/RemoteLspProvider.js').default|null} */ lsp: null,
     /** @type {import('@glyph3d/core/services/interaction/LspNavigator.js').default|null} */ lspNavigator: null,
     /** @type {import('@glyph3d/core/services/data/AgentSessionProvider.js').default|null} */ sessionProvider: null,
+    /** @type {import('./AgentVisibility.js').default|null} */ agentVisibility: null,
     /** @type {import('./SessionBooks.js').default|null} */ sessionBooks: null,
     /** @type {import('./SessionDesk.js').default|null} */ sessionDesk: null,
     /** @type {import('./GomuxHub.js').default|null} */ gomuxHub: null,
@@ -689,6 +691,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // agent book opens through: the agents desk (local sessions, SessionDesk), the gomuxai
     // hub, agent.open, the Agents panel's archive, and restore.
     state.ctx.sessionProvider = new AgentSessionProvider(bridge);
+    // Which agents get a book at all — the hub and the agents desk wait on it (the restore
+    // puts the saved set back) before they open anything.
+    state.ctx.agentVisibility = new AgentVisibility(state.ctx);
     state.ctx.sessionBooks = new SessionBooks(state.ctx, state.ctx.sessionProvider);
     state.ctx.sessionDesk = new SessionDesk(state.ctx, state.ctx.sessionProvider, state.ctx.sessionBooks);
     // The gomuxai tree (the relay watches the orchestrator's stores): every agent it runs
@@ -824,6 +829,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         state.ctx.sessionDesk?.refresh();
         state.ctx.gomuxHub?.refresh();
       }
+      if (connected && repo) state.ctx.agentVisibility?.settle();   // no session store under ?repo: nothing hidden to read
       if (!connected || repo) return;
       state.ctx.fileProvider = remoteProvider;
       // Learn what the binary serves BEFORE restore: session restore normalizes
@@ -880,6 +886,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.sessionDesk = null;
       state.ctx.sessionBooks?.dispose();
       state.ctx.sessionBooks = null;
+      state.ctx.agentVisibility?.dispose();
+      state.ctx.agentVisibility = null;
       state.ctx.sessionProvider?.dispose();
       state.ctx.sessionProvider = null;
       state.ctx.agentBooks?.dispose();

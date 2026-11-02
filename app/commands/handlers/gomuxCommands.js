@@ -43,18 +43,19 @@ export default function registerGomuxCommands(router) {
         if (!hub) return noHub;
         if (!hub.snapshot) return { text: 'gomuxai: no tree yet (relay offline, or no stores found)', data: { agents: [] } };
         const rows = hub.rows();
-        const lines = rows.map(({ depth, agent: a, shown, book }) => {
+        const lines = rows.map(({ depth, agent: a, shown, hidden, book }) => {
             const status = statusWords(a);
             const bits = [status.padEnd(16), (a.detail || '').slice(0, 72)];
-            const tags = [!shown && 'hidden', book && `book:${book}`, a.attached && 'tmux'].filter(Boolean).join(' ');
+            // past: outside the history window (the hub doesn't show it); hidden: agent.hide / its group's rule
+            const tags = [!shown && 'past', hidden && 'hidden', book && `book:${book}`, a.attached && 'tmux'].filter(Boolean).join(' ');
             return `${'  '.repeat(depth)}${a.name.padEnd(Math.max(1, 22 - depth * 2))} ${bits.join(' ')}${tags ? `  [${tags}]` : ''}  ${ago(a.statusAt || a.createdAt)}`;
         });
         return {
             text: `gomuxai (${rows.length} agent${rows.length === 1 ? '' : 's'}, ${hub.snapshot.dirs.length} store${hub.snapshot.dirs.length === 1 ? '' : 's'})\n` + (lines.join('\n') || '(none)'),
             data: { gen: hub.snapshot.gen, dirs: hub.snapshot.dirs,
-                    agents: rows.map(({ depth, agent, shown, book }) => ({ ...agent, depth, shown, book })) },
+                    agents: rows.map(({ depth, agent, shown, hidden, book }) => ({ ...agent, depth, shown, hidden, book })) },
         };
-    }, { description: 'The gomuxai agent tree: status, detail, and whether each agent has a book', returns: '{ gen, dirs, agents:[{name,parent,status,detail,live,attached,depth,shown,book}] }' });
+    }, { description: 'The gomuxai agent tree: status, detail, and whether each agent has a book', returns: '{ gen, dirs, agents:[{name,parent,status,detail,live,attached,depth,shown,hidden,book}] }' });
 
     router.register('gomux.status', (args, ctx) => {
         const hub = ctx.gomuxHub;

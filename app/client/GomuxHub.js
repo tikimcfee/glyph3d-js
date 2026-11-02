@@ -38,7 +38,13 @@ import { getSetting } from './settings.js';
  *
  * An agent's book follows its CURRENT session (the tree's `sessionId`, else its
  * transcript's path): a new session (the agent restarted) is opened into the same book and
- * the old stream closed. A book you cleared stays closed.
+ * the old stream closed.
+ *
+ * HIDDEN agents (AgentVisibility — agent.hide, its group `gomux` hidden or ended, or a book
+ * you cleared) get no book at all: no read, no follower, no seat, no screen. The hub
+ * converges on the rule — every tree push and every change of it opens what's shown and
+ * closes what's hidden (its screen too) — and waits for the rule to be known (restored)
+ * before it opens anything, so a reload never opens a hidden agent.
  *
  * Status rides the lane: `lane.meta.gomux` is the agent's node (status/detail/tool/…),
  * its lifecycle maps onto the book's (processing → active, idle → idle, error → stalled,
@@ -100,6 +106,7 @@ export default class GomuxHub {
         this._offCloses = this.tree.watchCloses(() => this._layout());
         this._onRegistry = () => this._seatScreens();   // a screen (re-)adopted: seat it
         ctx.registry?.addChangeListener?.(this._onRegistry);
+        this._offVisibility = ctx.agentVisibility?.onChange(() => { if (this.snapshot) this.apply(this.snapshot); }) ?? null;
         this._disposed = false;
     }
 
@@ -121,8 +128,21 @@ export default class GomuxHub {
     }
 
     /**
-     * Where an agent's book is: 'opening' | 'open' | 'failed' | 'closed' (cleared, or its
-     * stream stopped), or null when the hub never opened one.
+     * Whether an agent's book stays closed (AgentVisibility; its group is `gomux`, and it has
+     * ended when it doesn't run). @param {GomuxAgent} a
+     */
+    hidden(a) {
+        return !!this.ctx.agentVisibility?.isHidden({ lane: a.name, group: 'gomux', ended: !this.runs(a) });
+    }
+
+    /** The shown agents whose books are hidden — the Agents panel lists them, dimmed. @returns {GomuxAgent[]} */
+    hiddenAgents() {
+        return [...this.nodes.values()].filter((a) => this.hidden(a));
+    }
+
+    /**
+     * Where an agent's book is: 'opening' | 'open' | 'failed' | 'closed' (its stream
+     * stopped), or null when it has none (hidden, or no session yet).
      * @param {string} name @returns {string|null}
      */
     phase(name) {
@@ -141,14 +161,22 @@ export default class GomuxHub {
         if (this._disposed || !snap || !Array.isArray(snap.agents) || !this.ctx.agentBooks) return;
         if (getSetting('gomux.enabled') === false) return;
         this.snapshot = snap;
+        // Nothing opens before the hidden set is known (the restore's first stage puts it back).
+        const vis = this.ctx.agentVisibility;
+        if (vis && !vis.ready) {
+            if (!this._parked) { this._parked = true; vis.whenReady(() => { this._parked = false; if (this.snapshot) this.apply(this.snapshot); }); }
+            return;
+        }
         const shown = this._shown(snap);
         this.nodes = new Map(shown.map((a) => [a.name, a]));
+        const books = this.ctx.agentBooks;
         for (const a of shown) {
+            if (this.hidden(a)) { this._hide(a.name); continue; }
             const session = a.sessionId || a.transcript;   // gomuxai reads a session by its id, or its transcript's path
             if (!session) continue;                         // no record yet (or a backend that keeps none)
             const hl = this.lanes.get(a.name);
-            if (!hl) this._open(a, session);
-            else if (hl.session !== session && this.ctx.agentBooks.lanes.has(a.name)) {
+            if (!hl || !books.lanes.has(a.name)) this._open(a, session);   // shown: its book (again, once shown again)
+            else if (hl.session !== session) {
                 this.sessionBooks.close(hl.session);        // the agent moved on to a new session: same book
                 this._open(a, session);
             }
@@ -160,18 +188,31 @@ export default class GomuxHub {
         this._centerWhenSettled();
     }
 
+    /** A hidden agent: its book closes (its stream with it — SessionBooks' sweep) and so does
+     *  its screen; shown again, both come back. @private */
+    _hide(name) {
+        this.lanes.delete(name);
+        this._screens.delete(name);
+        if (this.ctx.agentBooks.lanes.has(name)) this.ctx.agentBooks.remove(name);
+        const id = this.screenId(name);
+        if (this.ctx.registry?.get(id) && this._exec) {
+            Promise.resolve(this._exec(['terminal.kill', id]))
+                .catch((e) => console.warn(`[gomux] ${name}: closing a hidden agent's screen failed —`, e?.message || e));
+        }
+    }
+
     /** Open an agent's book from its session (SessionBooks: tail read → hydrate → follow). @private */
     _open(a, session) {
         this.lanes.set(a.name, { name: a.name, session });
         // A follower only for an agent that runs (the relay caps followers); a departed one's
         // book is its record. A failed open retries in SessionBooks, its book saying why.
-        const opening = this.sessionBooks.open(session, { lane: a.name, agentType: a.harness || a.backend, follow: this._runs(a) });
+        const opening = this.sessionBooks.open(session, { lane: a.name, agentType: a.harness || a.backend, follow: this.runs(a) });
         this._layout();   // the book was born just now: seat it before the auto-shelf sweep looks
         opening.catch(() => { /* SessionBooks said it, and retries */ });
     }
 
-    /** Whether an agent runs now — its book follows only then. @private */
-    _runs(a) {
+    /** Whether an agent runs now — its book follows only then (and an agent that doesn't has ended). */
+    runs(a) {
         return !!a.live && a.status !== 'ended';
     }
 
@@ -283,7 +324,7 @@ export default class GomuxHub {
             detail: a.detail || '', tool: a.tool || '',
             live: a.live, attached: a.attached, statusAt: a.statusAt || null,
         };
-        this.sessionBooks.setLive(this.lanes.get(a.name)?.session, this._runs(a));
+        this.sessionBooks.setLive(this.lanes.get(a.name)?.session, this.runs(a));
         const prev = lane.meta?.gomux;
         if (!prev || Object.keys(g).some((k) => prev[k] !== g[k])) books.setLaneMeta(a.name, { gomux: g });
         const life = LIFECYCLE[g.status] ?? 'idle';
@@ -386,7 +427,8 @@ export default class GomuxHub {
         const out = [];
         const walk = (p, depth) => {
             for (const a of byParent.get(p) || []) {
-                out.push({ depth, agent: a, shown: this.nodes.has(a.name), book: this.phase(a.name) });
+                const shown = this.nodes.has(a.name);
+                out.push({ depth, agent: a, shown, hidden: shown && this.hidden(a), book: this.phase(a.name) });
                 walk(a.name, depth + 1);
             }
         };
@@ -400,6 +442,7 @@ export default class GomuxHub {
         this._off?.();
         this._offStream?.();
         this._offCloses?.();
+        this._offVisibility?.();
         this.ctx.registry?.removeChangeListener?.(this._onRegistry);
     }
 }

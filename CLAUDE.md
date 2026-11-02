@@ -242,10 +242,21 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   desk (DeskTree, the hub's rule), older sessions open on demand (`agent.open
   <session|prefix|name>`, the Agents panel's history — the whole session list) and are seated
   there too — a workgroup's subagent (a hub agent's, opened from history) sits on its agent's
-  team desk at the hub instead; a book you clear stays closed, and a team desk whose helpers'
-  books have all closed folds. Restore reopens saved books (by session) through the same path,
-  parents before subagents; a session that ended before the `gomux.historyHours` window stays
-  closed unless its book was pinned or tuned (the Agents panel's history opens it). Gates: `tools/session-books.test.mjs`, `tools/agent-events.test.mjs`.
+  team desk at the hub instead; a team desk whose helpers' books have all closed folds. Restore
+  reopens saved books (by session) through the same path, parents before subagents; a session
+  that ended before the `gomux.historyHours` window stays closed unless its book was pinned or
+  tuned (the Agents panel's history opens it). **Hidden agents** (`app/client/AgentVisibility.js`,
+  `ctx.agentVisibility`) get no book at all — no read, no follower, no seat, no screen — yet stay
+  listed (dimmed) in the Agents panel: an agent's own override (`agent.hide` / `agent.show`;
+  `agent.open` shows) else its group's rule (`agent.group <gomux|local> <shown|hidden|ended>` —
+  `ended`: only running agents get books; a new agent follows its group). It is the ONE "stays
+  closed" memory: `agent.clear` on a book the hub or the agents desk opened hides it (one opened
+  from history just closes), and a hidden session keeps its `agents.maxBooks` slot. The hub and
+  the desk converge on the rule (every push, every change) and wait on `agentVisibility.ready`
+  before opening anything; the set is the durable `agents:visibility` surface (Visibility
+  component), saved as the snapshot's `agentVisibility` and restored in stage 1, so a reload
+  never opens a hidden agent. `agent.hidden` reports it. Gates: `tools/session-books.test.mjs`,
+  `tools/agent-events.test.mjs`, `tools/agent-visibility.test.mjs`.
 - **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
   `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
   find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
