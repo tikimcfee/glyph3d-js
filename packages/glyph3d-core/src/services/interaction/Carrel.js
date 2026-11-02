@@ -93,6 +93,17 @@ function reachesScene(obj) {
  *  Width is the plain box span — anchor-agnostic, unlike the dock's 2·|cx| form,
  *  which assumes top-left-anchored content. Read LIVE each time it's needed,
  *  never cached and delta-updated (the dock's lesson). */
+/**
+ * Turn a quaternion toward its target by `rate` — and LAND: within a hair (1e-5 rad) it takes the
+ * target exactly. An endless asymptotic slerp is a real (tiny) change every frame, which marks the
+ * member's whole subtree for a world-matrix recompute forever (SceneTransforms); landed, an equal
+ * value writes nothing.
+ */
+function turnToward(q, target, rate) {
+    if (q.angleTo(target) < 1e-5) { if (!q.equals(target)) q.copy(target); return; }
+    q.slerp(target, rate);
+}
+
 function extentFromBox(lb) {
     if (!lb || lb.isEmpty?.()) return null;
     return {
@@ -1643,11 +1654,11 @@ export class Carrel extends THREE.Object3D {
                 continue;
             }
             if (e._borrowed) { e._borrowed = false; returned = true; }
-            e.grid.quaternion.slerp(e.quatTarget, rate);
+            turnToward(e.grid.quaternion, e.quatTarget, rate);
         }
         if (returned) this._relayout();
 
-        for (const e of this._releasing.values()) e.grid.quaternion.slerp(e.quatTarget, rate);
+        for (const e of this._releasing.values()) turnToward(e.grid.quaternion, e.quatTarget, rate);
 
         if (this._dissolving && !this.entries.size && !this._releasing.size) {
             this.parent?.remove(this);

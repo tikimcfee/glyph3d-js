@@ -215,7 +215,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   when the show generation moves (a `visible` flip, a tracked node gaining or losing a child) —
   PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
-  recompute. Gate: `tools/scene-transforms.test.mjs`.
+  recompute; `scene.transforms who [ms]` names the moving nodes that started the recomputes over a
+  window (the "who never rests" probe — an ease must LAND on its target, never approach it forever:
+  `Carrel.update`'s member turns do). Gate: `tools/scene-transforms.test.mjs`.
 - **Agent sessions** (`app/client/SessionBooks.js`, `services/data/AgentSessionProvider.js`):
   gomuxai is the ONE reader of agent transcripts (its docs/EVENTS.md); the relay runs
   `agent sessions --json` (pushed whole as `agentSessions/changed`; `agentSessions/list`) and

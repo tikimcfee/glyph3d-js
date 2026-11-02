@@ -497,5 +497,22 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     ok(moved(at(b), wide) > 1, 'a claimed seat is taken as stated (no grow-only hold)');
 }
 
+// A member's turn LANDS: after the ease its quaternion IS its target (an endless asymptotic slerp is a
+// real change every frame — its whole subtree recomputed forever), and a further update writes nothing.
+{
+    const scene = new THREE.Scene();
+    const c = new Carrel({ name: 'turn', mode: 'ring', radius: 50 });
+    scene.add(c);
+    const a = makeGrid(10, 6), b = makeGrid(10, 6);
+    scene.add(a, b);
+    c.lock('a', a); c.lock('b', b);
+    for (let i = 0; i < 400; i++) c.update(1 / 60);
+    const e = c.entries.get('b');
+    ok(a.quaternion.equals(c.entries.get('a').quatTarget) && b.quaternion.equals(e.quatTarget), 'a member\'s turn lands exactly on its target');
+    const before = b.quaternion.toArray().join();
+    c.update(1 / 60);
+    ok(b.quaternion.toArray().join() === before, 'and a resting update leaves it bit-identical');
+}
+
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
