@@ -301,6 +301,29 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/panel-batch-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
   ```
 
+- **`pixel-metrics.test.mjs`** (headless) and **`pixel-check.mjs`** (`tools/lib/pixel-metrics.mjs`) —
+  pixel-exactness analysis over PNG captures (`glyph3d-cli screenshot -o x.png` or cropped
+  sub-regions) for orthographic plane carrels (1 world unit = 1 device pixel):
+  (a) **text row pitch** in device px from horizontal ink projection profiles (segmented
+  row-band center regression + parabolic-interpolated autocorrelation peak + integer snap
+  error), (b) **edge crispness** — monotonic ink transition ramp width across vertical and
+  horizontal glyph stems (1.0 px single-step transitions on integer-snapped stems vs ≥2-px
+  ramps from half-pixel offsets or perspective filtering), (c) **stillness** — exact
+  frame-to-frame diff between two captures N ms apart, guarded by a non-empty ink check so
+  blank-vs-blank fails as vacuous, and (d) **scale** — ratio of measured horizontal glyph
+  advance in device px to the runtime atlas advance derived from `bootHeadlessFontChain()` +
+  `deriveCharSize` / `computeCellMetrics`. Teeth verified on synthetic PNG fixtures: crisp
+  13 px integer-snapped text passes all gates; half-pixel shifted (+0.5 px X/Y) fails
+  crispness (median ramp 2.00 px, 97.4% ≥2-px ramps); 1.03× scaled text fails rowPitch
+  (13.39 px, 0.39 px snap error) and scale (1.0301×, +3.01%); drifted frame pairs fail
+  stillness; blank-vs-blank fails all four gates as vacuous.
+  ```
+  bun tools/pixel-metrics.test.mjs
+  bun tools/pixel-check.mjs --self-test
+  bun tools/pixel-check.mjs --live --crop 155,200,1050,520 --expected-pitch 13 --gate
+  bun tools/pixel-check.mjs /tmp/shot-a.png --second /tmp/shot-b.png --crop 312,384,135,42
+  ```
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —
