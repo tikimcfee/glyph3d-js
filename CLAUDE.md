@@ -485,7 +485,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `applyScrollView` stands on it again (sliding or reading it back in). On a plane desk it pins
   like a terminal: `Book.metrics` / `pixelOrigin()` are the document's cell grid; its seat is its
   frame (`claimsSeat`). A view handed over before its book opens is held for the lane (a reload
-  restoring the hub's books). `book.cost` reads what live batches cost it (applyEvents + the flush that lays each;
+  restoring the hub's books). Its body is reserved for the window up front (`book.scrollReserveSlotsPerEvent` × the cap, plus the dead head a
+  compaction waits for), so a following book never grows — growth re-sends the whole body. `book.cost` reads what live batches cost it (applyEvents + the flush that lays each;
   `tools/scroll-cost-check.mjs` live, against the headless number). Gate: `tools/scroll-form.test.mjs` (corpus text == shown text, row
   widths, held stillness, reload, one id, click-to-expand, the per-batch cost at the cap with teeth).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second

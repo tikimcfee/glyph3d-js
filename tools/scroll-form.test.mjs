@@ -426,6 +426,29 @@ const SCROLL_BUDGET_MS = 0.5;
     ok(books.scrollCost('c', { reset: true }).batches === 0 && books.scrollCost('nope') === null, 'reset empties it; a lane that is no scroll has none');
 }
 
+// ── 6c. a following book filling its window never grows (the body is reserved for the cap) ──────
+{
+    const follow = (per) => {
+        const books = newBooks();
+        books.cfg.scrollReserveSlotsPerEvent = per;
+        books.ensure('g', 'claude').book.setForm('scroll');
+        books.applyEvents('g', run(10), { agentType: 'claude' });
+        flushAll(books);
+        const doc = books.lanes.get('g').doc, cap0 = doc.bodyField.slotBuffer.capacity;
+        books.scrollCost('g', { reset: true });
+        for (let k = 10, b = 0; k < books.cfg.scrollMaxRecords; b++) { const n = 1 + (b % 3); books.applyEvents('g', run(n, k), { agentType: 'claude' }); k += n; books.update(16); }
+        const s = books.lanes.get('g').cost.samples;
+        return { s, cap0, cap: doc.bodyField.slotBuffer.capacity, slots: doc.bodyField.slotBuffer.count, grows: doc.stats.grows || 0 };
+    };
+    const kept = follow(newBooks().cfg.scrollReserveSlotsPerEvent), grown = follow(0);
+    ok(kept.slots > grown.cap0 && kept.s.length > 50, `the follow fills past the unreserved body's capacity (${kept.slots} slots > ${grown.cap0}; ${kept.s.length} batches)`);
+    ok(kept.grows === 0 && kept.cap === kept.cap0 && kept.s.every((x) => !x.grew && x.uploaded <= x.laidSlots),
+        `reserved for the cap: no batch grows the body — each uploads only its tail (${kept.grows} grows; max upload ${Math.max(...kept.s.map((x) => x.uploaded))} slots, capacity ${kept.cap0})`);
+    const g = grown.s.filter((x) => x.grew);
+    console.log(`  follow 10 → ${kept.s.length} batches → the ${newBooks().cfg.scrollMaxRecords}-event cap: reserved ${kept.cap0} slots, ${kept.grows} grows, max upload ${Math.max(...kept.s.map((x) => x.uploaded))}; unreserved ${grown.cap0} → ${grown.cap} slots, ${g.length} grows uploading ${g.map((x) => x.uploaded).join(' / ')}`);
+    ok(g.length >= 1 && g.every((x) => x.uploaded > x.laidSlots), `teeth: unreserved, the follow grows the body ${g.length}× and each growth sends the whole body (${g.map((x) => x.uploaded).join(', ')} slots)`);
+}
+
 // BEFORE (informational): the deck at its own cap — a sheet of CodeGrid cards per event, every
 // card laid out whole as it loads (the cost the scroll form replaces for a plane desk's books).
 {

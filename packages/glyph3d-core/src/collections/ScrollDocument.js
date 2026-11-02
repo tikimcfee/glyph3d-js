@@ -58,6 +58,7 @@ export const SCROLL_DOCUMENT_DEFAULTS = Object.freeze({
     background: 0x0a0a1e,  // backdrop fill
     backgroundOpacity: 0.92,
     compactRatio: 1,       // dead slots above the first live row past this × the live ones → one full re-lay
+    reserveSlots: 0,       // live slots the body holds without growing (× (1 + compactRatio), the dead head beside them) — reserve()
     tabWidth: DEFAULT_LAYOUT.tabWidth,
 });
 
@@ -167,11 +168,12 @@ export default class ScrollDocument extends BoundedObject3D {
 
         const field = (n) => new InstancedField(null, atlas, { worldScale: this.cfg.worldScale, defaultColor: { r: 1, g: 1, b: 1 }, maxInstances: n });
         this.titleField = field(256);
-        this.bodyField = field(4096);
+        this.bodyField = field(Math.max(4096, this._reserveTarget(this.cfg.reserveSlots)));
         this.add(this.titleField.instanceMesh);
         this.add(this.bodyField.instanceMesh);
         this._slots = this.bodyField.slotBuffer;
         this._sizes = new Float32Array(8192);
+        this._sentBuffer = null;       // the body's slot buffer as last uploaded (another one = it grew)
 
         const bg = createBackgroundMesh({ backgroundColor: this.cfg.background, backgroundOpacity: this.cfg.backgroundOpacity, showBackground: true },
             getBandDistance(LAYER_BAND.GRID_BACKGROUND));
@@ -370,6 +372,23 @@ export default class ScrollDocument extends BoundedObject3D {
         this._index = new Map(this.blocks.map((b) => [b.id, b]));
     }
 
+    /** The body capacity `live` live slots need: they and the dead head a compaction waits for. @private */
+    _reserveTarget(live) { return Number.isFinite(live) && live > 0 ? Math.ceil(live * (1 + this.cfg.compactRatio)) : 0; }
+
+    /**
+     * Hold room for `live` live slots up front, so a document filling toward its window never GROWS
+     * while it's read (growth re-sends the whole body to the GPU). Grows now, once, if it's short —
+     * that one full upload rides the next flush. Never shrinks.
+     * @param {number} live
+     * @returns {number} the body's slot capacity
+     */
+    reserve(live) {
+        this.cfg.reserveSlots = live;
+        const need = this._reserveTarget(live);
+        if (need > this._slots.capacity) this._slots.ensureCapacity(need);
+        return this._slots.capacity;
+    }
+
     /** True while a change waits for flush(). */
     get dirty() { return this._full || this._dirtyFrom < this.blocks.length || !!this._truncate; }
 
@@ -377,10 +396,11 @@ export default class ScrollDocument extends BoundedObject3D {
      * Lay out what changed: from the first dirty block to the end (a full pass from row 0 after a
      * prepend, a replace-all, or once the dead slots outnumber the live), and upload just those
      * slots. Then re-apply the view. Idempotent.
-     * @returns {{laidRows:number, laidSlots:number, uploaded:number, full:boolean}}
+     * @returns {{laidRows:number, laidSlots:number, uploaded:number, full:boolean, compacted:boolean, grew:boolean}}
+     *   grew: the body outgrew its capacity this flush (the whole body went up, not just its tail)
      */
     flush() {
-        if (!this.dirty) { this._applyView(); return { laidRows: 0, laidSlots: 0, uploaded: 0, full: false }; }
+        if (!this.dirty) { this._applyView(); return { laidRows: 0, laidSlots: 0, uploaded: 0, full: false, compacted: false, grew: false }; }
         const live = this._slots.count - this._deadSlots;
         const full = this._full;
         let from = full ? 0 : Math.min(this._dirtyFrom, this.blocks.length);
@@ -402,16 +422,18 @@ export default class ScrollDocument extends BoundedObject3D {
         }
         this._rowEnd = row;
         const sent = compacted ? 0 : slot;   // a compaction moved every live slot: the whole tail goes up
+        const grew = this._sentBuffer != null && slots.buffer !== this._sentBuffer;   // a new body: it all goes up
         const uploaded = this.bodyField.writeTail(slots, sent, slots.count);
+        this._sentBuffer = slots.buffer;
         this.bodyField.setLayoutExtent(this._bodyExtent, full || compacted ? 0 : slot);
         this._full = false;
         this._truncate = false;
         this._dirtyFrom = this.blocks.length;
         const st = this.stats;
-        st.flushes++; if (full) st.fullPasses++; if (compacted) st.compactions = (st.compactions || 0) + 1;
+        st.flushes++; if (full) st.fullPasses++; if (compacted) st.compactions = (st.compactions || 0) + 1; if (grew) st.grows = (st.grows || 0) + 1;
         st.laidRows += laidRows; st.laidSlots += slots.count - slot; st.uploadedSlots += uploaded;
         this._applyView();
-        return { laidRows, laidSlots: slots.count - slot, uploaded, full };
+        return { laidRows, laidSlots: slots.count - slot, uploaded, full, compacted, grew };
     }
 
     /**
