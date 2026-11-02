@@ -142,9 +142,15 @@ export async function openApp(browser, {
   url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
   session = null,
   viewport = { width: 1280, height: 800 },
+  settings = null,
 } = {}) {
   const errors = [], gpuErrors = [], failedResources = [], warnings = [];
   const page = await browser.newPage({ viewport });
+  // Settings the page must have from its first line of script (a fresh browser starts at the
+  // defaults): written into its store (localStorage `g3d.<key>`, StateController) before load.
+  if (settings && Object.keys(settings).length) {
+    await page.addInitScript((s) => { for (const [k, v] of Object.entries(s)) localStorage.setItem(`g3d.${k}`, JSON.stringify(v)); }, settings);
+  }
 
   page.on('pageerror', (err) => {
     const rec = { kind: 'uncaught', text: err.message };

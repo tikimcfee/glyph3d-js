@@ -17,6 +17,8 @@
  *                               [--cmd 'verb args']…   (after the load + fit, before measuring)
  *                               [--eval 'js']          (page setup after --cmd, e.g. an A/B toggle)
  *                               [--hitch MS]           (frames longer than MS: what ran in them; default 25)
+ *                               [--setting key=value]… (a setting the page starts with, seeded before load —
+ *                                                       a hub profile wants --setting gomux.autoScreens=false)
  *
  * Needs Vite (:5173) and a PRIVATE relay serving a root you don't mind (session=off keeps
  * the page from autosaving, but the relay's root is where a save would land):
@@ -44,13 +46,22 @@ const CALLERS = (arg('--callers') ?? '').split(',').filter(Boolean);
 const CMDS = process.argv.flatMap((a, i) => (a === '--cmd' ? [process.argv[i + 1]] : []));
 const EVAL = arg('--eval');
 const HITCH = Number(arg('--hitch', 25));
+// --setting key=value (repeatable): the page starts with it (seeded before load). Values parse as
+// JSON when they can (false, 3, "x"), else stay strings. E.g. --setting gomux.autoScreens=false.
+const SETTINGS = Object.fromEntries(process.argv.flatMap((a, i) => (a === '--setting' ? [process.argv[i + 1]] : [])).map((kv) => {
+    const at = kv.indexOf('=');
+    if (at < 1) throw new Error(`--setting wants key=value (got ${kv})`);
+    const raw = kv.slice(at + 1);
+    let v; try { v = JSON.parse(raw); } catch { v = raw; }
+    return [kv.slice(0, at), v];
+}));
 
 const browser = await launchGpuBrowser({
     extraArgs: has('--uncapped') ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [],
 });
 const result = {};
 try {
-    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 6000, session: 'off', viewport: { width: W, height: H } });
+    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 6000, session: 'off', viewport: { width: W, height: H }, settings: SETTINGS });
     if (!app.booted) throw new Error('app did not boot');
 
     const gpu = await app.evalPage(() => {
