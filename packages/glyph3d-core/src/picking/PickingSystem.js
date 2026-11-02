@@ -23,6 +23,7 @@
  */
 
 import * as THREE from 'three';
+import { GROUP_CLIP_GLSL } from '../core/glyphMaterial.js';
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -82,7 +83,7 @@ uniform int uBasePickingId;
 uniform int uRenderMode;
 
 flat out int vPickingId;
-
+${GROUP_CLIP_GLSL}
 void main() {
     int gid = int(aGlyphId + 0.5);
     int vMode = 0;
@@ -113,13 +114,16 @@ void main() {
     vec4 gColor = texelFetch(groupTexture, ivec2(2, grow), 0);
     vec4 gScale = texelFetch(groupTexture, ivec2(3, grow), 0);
     vec4 gClip  = texelFetch(groupTexture, ivec2(4, grow), 0);
+    vec4 gClipX = texelFetch(groupTexture, ivec2(6, grow), 0);
 
     if (gColor.a < 0.01) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
 
-    if (gClip.z > 0.5 && (aPos.y > gClip.x || aPos.y < gClip.y)) {
+    // The render shader's clip rule (glyphMaterial GROUP_CLIP_GLSL): what is cut there can't be
+    // picked here. (A frame's partial cells stay pickable to their whole cell.)
+    if (vMode != 3 && groupClipped(gClip, gClipX, aPos, quadW, aExtent.y)) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }

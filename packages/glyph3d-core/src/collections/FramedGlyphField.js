@@ -111,6 +111,33 @@ export default class FramedGlyphField extends BoundedObject3D {
     }
 
     /**
+     * Clip this window to a rect in its OWN local space (a tile's edges): its glyphs are cut whole
+     * past it (the group clip lanes — rows by their centers, glyphs by their quads), and its panels
+     * (the background, the cursor) are cut to it by the PanelBatch. Null draws it whole again. A
+     * window without its own glyph group (a CodeGrid reflows to its tile instead) refuses.
+     * @param {{left:number, right:number, top:number, bottom:number}|null} rect
+     */
+    setClipRect(rect) {
+        const r = this._renderer, g = this._groupId;
+        if (!r || !Number.isInteger(g)) throw new Error(`${this.constructor.name}.setClipRect: no glyph group of its own to clip`);
+        if (rect && !(rect.right >= rect.left && rect.top >= rect.bottom)) throw new Error(`setClipRect: bad rect ${JSON.stringify(rect)}`);
+        const same = (a, b) => (!a && !b) || (a && b && a.left === b.left && a.right === b.right && a.top === b.top && a.bottom === b.bottom);
+        if (same(this._clipRect, rect)) return;
+        this._clipRect = rect ? { ...rect } : null;
+        r.setGroupClip(g, rect?.top ?? 0, rect?.bottom ?? 0, !!rect);
+        r.setGroupClipX(g, rect?.left ?? 0, rect?.right ?? 0, !!rect);
+        // Its own flat panels, cut by the PanelBatch (FramedGlyphField's background; a terminal's cursor).
+        for (const c of [this._background, this._cursorBlock?.mesh]) {
+            if (!c) continue;
+            if (rect) c.userData.panelClip = this._clipRect; else delete c.userData.panelClip;
+        }
+        this._updateCursorMesh?.();   // the cursor re-judges itself against the cut
+    }
+
+    /** The clip rect set by setClipRect (own local space), or null. */
+    get clipRect() { return this._clipRect ?? null; }
+
+    /**
      * Wire a PickingSystem and register this field's two stable channels:
      *   - 'glyph' (token = renderer) — per-character / per-cell picks. A subclass whose
      *     instanceCount changes re-registers it after a rebuild (flush / resize / re-dice).

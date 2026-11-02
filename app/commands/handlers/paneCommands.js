@@ -3,8 +3,10 @@
  * plane desk's panes while one is entered (carrel.enter on a plane-form carrel — Carrel's pane
  * operations: stacks of tabs, an inbox, zoom), else the CameraDock's view-frame below.
  *
- * The frame's occupancy is a binary-BSP PaneTree (packages/.../PaneTree.js); a single leaf is the
- * old single-occupant pin (window.pin / dock.spotlight). These verbs GROW and navigate that tree —
+ * Both arrangements are one PaneLayout (packages/.../PaneLayout.js: a binary-BSP PaneTree of tab
+ * stacks); the dock's single pane is the old single-occupant pin (window.pin / dock.spotlight). A
+ * tile showing content wider or taller than itself clips it and scrolls it (pane.scroll). These
+ * verbs GROW and navigate the layout —
  * the i3/tmux/vim intersection an old-school user expects: split, directional focus, proportional
  * resize, swap, un-frame. UI keybindings and the CLI/RPC hit the same verbs (one source of truth).
  *
@@ -212,6 +214,18 @@ export default function registerPaneCommands(router) {
         focusPaneFront(ctx, desk);
         return { text: z ? `OK: zoomed ${z} to the whole plane` : 'OK: unzoomed', data: { zoomed: z } };
     }, { description: 'Zoom the focused pane to the whole plane, or back (tmux -Z)', usage: '[on|off]', returns: '{ zoomed }' });
+
+    router.register('pane.scroll', (args, ctx) => {
+        const desk = enteredDesk(ctx);
+        if (!desk) return enteredPlane(ctx) ? tilesOnly(enteredPlane(ctx), 'pane.scroll') : { text: 'ERR: pane.scroll works inside a plane desk (carrel.enter <name>)', data: null };
+        const dc = Number(args[0] ?? 0), dr = Number(args[1] ?? 0);
+        if (!Number.isFinite(dc) || !Number.isFinite(dr)) return { text: 'ERR: usage: pane.scroll <cols> [rows] [pane|member]', data: null };
+        const at = deskPane(desk, ctx, args[2]);
+        if (!at) return { text: `ERR: no pane '${args[2]}'`, data: null };
+        const s = desk.paneScroll(at, dc, dr);
+        if (!s) return { text: `ERR: pane '${at}' shows nothing to scroll (only content that keeps its own size — a terminal, a frame — scrolls in its tile)`, data: null };
+        return { text: `OK: '${s.member}' at column ${s.cols}/${s.overflow.cols}, row ${s.rows}/${s.overflow.rows} past the tile`, data: { pane: at, ...s } };
+    }, { description: "Scroll what a tile shows by whole columns / rows (content wider or taller than its tile), clamped to what's past the tile", usage: '<cols> [rows] [pane|member]', returns: '{ pane, member, cols, rows, overflow:{cols, rows} }' });
 
     router.register('pane.tab', (args, ctx) => {
         const desk = enteredDesk(ctx);

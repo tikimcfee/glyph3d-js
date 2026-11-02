@@ -72,7 +72,7 @@ export default class InstancedField {
         // col 1: rotation quaternion xyzw (identity 0,0,0,1)
         // col 2: color.rgb + alpha (default 1,1,1,1)
         // col 3: scale.xyz + colorBlend (default 1,1,1,0)
-        // col 4: clipTop, clipBottom, clipEnabled (default 0,0,0)
+        // col 4: clipTop, clipBottom, yOn, xOn (default 0,0,0,0); col 6: clipLeft, clipRight
         // col 5: bg_color.rgba (default 0,0,0,0)
         this._groupData = new Float32Array(this.maxGroups * GROUP_STRIDE * 4);
         this._initGroupDefaults();
@@ -585,7 +585,7 @@ export default class InstancedField {
         this._touchGroup(g);
     }
 
-    /** Set group vertical clip window */
+    /** Set group vertical clip window (pen space: a row whose center leaves [bottom, top] is cut) */
     setGroupClip(groupId, clipTop, clipBottom, clipEnabled = true) {
         const g = groupId | 0;
         if (g < 0 || g >= this.maxGroups) return;
@@ -593,6 +593,21 @@ export default class InstancedField {
         this._groupData[b + 0] = clipTop ?? 0;
         this._groupData[b + 1] = clipBottom ?? 0;
         this._groupData[b + 2] = clipEnabled ? 1.0 : 0.0;
+        this._touchGroup(g);
+    }
+
+    /**
+     * Set group horizontal clip window (pen space: a glyph whose quad leaves [left, right] is cut —
+     * glyphMaterial's GROUP_CLIP_GLSL). col 4.w turns it on, col 6 holds the edges.
+     */
+    setGroupClipX(groupId, clipLeft, clipRight, clipEnabled = true) {
+        const g = groupId | 0;
+        if (g < 0 || g >= this.maxGroups) return;
+        if (clipEnabled && !(clipRight >= clipLeft)) throw new Error(`setGroupClipX: right (${clipRight}) < left (${clipLeft})`);
+        const b = g * GROUP_STRIDE * 4;
+        this._groupData[b + 4 * 4 + 3] = clipEnabled ? 1.0 : 0.0;
+        this._groupData[b + 6 * 4 + 0] = clipLeft ?? 0;
+        this._groupData[b + 6 * 4 + 1] = clipRight ?? 0;
         this._touchGroup(g);
     }
 

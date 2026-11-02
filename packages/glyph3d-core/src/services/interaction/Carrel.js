@@ -174,6 +174,7 @@ export class Carrel extends THREE.Object3D {
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14, planeArrange = 'pins', paneGapPx = 8, shelfCols = 480,
+                  edgeMarkPx = 2, edgeMarkColor = 0xe8c07a,
                   tileCols = 200, tileRows = 60, bookCols = 120 } = {}) {
         super();
         this.name = `carrel:${name}`;
@@ -198,6 +199,11 @@ export class Carrel extends THREE.Object3D {
         this.yawRate = yawRate;
         this.planeArrange = planeArrange === 'tiles' ? 'tiles' : 'pins';
         this.paneGapPx = paneGapPx;
+        /** A tile whose member runs past an edge shows a mark there: this many device px wide, this colour. */
+        this.edgeMarkPx = edgeMarkPx;
+        this.edgeMarkColor = edgeMarkColor;
+        /** @type {Map<string, THREE.Mesh>} `<pane>:<side>` → its edge mark (TILES) */
+        this._edgeMarks = new Map();
         this.shelfCols = shelfCols;
         this.tileCols = tileCols;
         this.tileRows = tileRows;
@@ -1400,23 +1406,41 @@ export class Carrel extends THREE.Object3D {
                 if (!shown) continue;
                 const r = pane.rect;
                 const colW = e.grid.metrics?.charWidth;
-                let m, ox, oy, headPx = 0;
+                let m, ox, oy, headPx = 0, sx = 0, sy = 0;
+                const clips = this._clipsToTile(e);
                 if (Number.isFinite(colW) && colW > 0) {
                     m = cw / colW;
                     headPx = this._reflowToPane(e, r, u);
                     const po = e.grid.pixelOrigin?.() ?? (() => { const lb = e.grid.getLocalBounds?.(); return lb && !lb.isEmpty() ? { x: lb.min.x, y: lb.max.y } : { x: 0, y: 0 }; })();
                     ox = po.x; oy = po.y;
+                    // FOREIGN content (it keeps its own size — a terminal, a frame) is clipped to the
+                    // tile and scrolled in whole cells; reflowed content fits by construction.
+                    if (clips) ({ sx, sy } = this._scrollFor(e, r, u));
                 } else {
                     const ext = this._extentOf(e);
                     m = Math.min((r.w / k) / ext.w, (r.h / k) / ext.h);
                     ox = ext.cx - ext.w / 2; oy = ext.cy + ext.h / 2;
                 }
                 // A header (a grid's filename) sits in whole rows above row 0, so the row phase holds.
-                const tx = tl.x + r.x / k - ox * m;
-                const ty = tl.y - (r.y + headPx) / k - oy * m;
+                // A scrolled member moves left / up by whole cells: its columns and rows stay on the grid.
+                const ls = e.grid.metrics?.lineSpacing ?? 0;
+                const left = ox + sx * (colW || 0), top = oy - sy * ls;
+                const tx = tl.x + r.x / k - left * m;
+                const ty = tl.y - (r.y + headPx) / k - top * m;
                 this._placePaneMember(e, tx, ty, tl.z, m);
+                if (clips && Number.isFinite(colW) && colW > 0) {
+                    // The tile in the member's own space (its top-left at the tile's): cut there.
+                    const tTop = top + headPx / k / m;
+                    e.grid.setClipRect({ left, right: left + (r.w / k) / m, top: tTop, bottom: tTop - (r.h / k) / m });
+                    this._markEdges(pane.id, r, this._overflow(e, r, u, sx, sy), tl);
+                }
                 deepest = Math.max(deepest, (this._extentOf(e)?.d ?? 0) * m);
             }
+        }
+        // Edge marks of tiles that no longer show content past them go.
+        for (const [key, mark] of this._edgeMarks) {
+            if (!mark.userData.live) { this.remove(mark); mark.geometry.dispose(); mark.material.dispose(); this._edgeMarks.delete(key); }
+            else mark.userData.live = false;
         }
         const box = this._boardPx();
         this._rows = 1;
@@ -1424,6 +1448,89 @@ export class Carrel extends THREE.Object3D {
         this._layoutD = deepest;
         this._stackH = box.h / k;
         this._ringR = Math.max(this.radius, 1e-3);
+    }
+
+    /** Foreign content: a cell-metric member that can't reflow and can be clipped. @private */
+    _clipsToTile(e) {
+        const g = e.grid;
+        return typeof g?.setClipRect === 'function' && Number.isInteger(g.cols) && Number.isInteger(g.rows)
+            && !(typeof g.setLayout === 'function' && typeof g.setFrameRows === 'function');
+    }
+
+    /** A member's columns × rows past its tile (what scrolling can reach). @private */
+    _overflowCells(e, r, u) {
+        const rowPx = u.cellPx * (e.grid.metrics.lineSpacing / e.grid.metrics.charWidth);
+        return {
+            cols: Math.max(0, e.grid.cols - Math.floor(r.w / u.cellPx)),
+            rows: Math.max(0, e.grid.rows - Math.floor(r.h / rowPx)),
+        };
+    }
+
+    /** The member's scroll in whole cells, clamped to its overflow. @private */
+    _scrollFor(e, r, u) {
+        const o = this._overflowCells(e, r, u);
+        const s = e._paneScroll ?? { cols: 0, rows: 0 };
+        const sx = Math.min(Math.max(0, Math.round(s.cols)), o.cols), sy = Math.min(Math.max(0, Math.round(s.rows)), o.rows);
+        e._paneScroll = { cols: sx, rows: sy };
+        return { sx, sy };
+    }
+
+    /** Which sides of the tile have content past them. @private */
+    _overflow(e, r, u, sx, sy) {
+        const o = this._overflowCells(e, r, u);
+        return { left: sx > 0, right: sx < o.cols, top: sy > 0, bottom: sy < o.rows };
+    }
+
+    /**
+     * Show a thin mark on each side of a tile with content past it (the member is scrolled, or wider
+     * / taller than its tile) — `edgeMarkPx` device px, `edgeMarkColor`, a hair in front. @private
+     */
+    _markEdges(paneId, r, sides, tl) {
+        const k = this.planeK, w = Math.max(1, this.edgeMarkPx) / k;
+        const x0 = tl.x + r.x / k, x1 = tl.x + (r.x + r.w) / k, y0 = tl.y - r.y / k, y1 = tl.y - (r.y + r.h) / k;
+        for (const side of ['left', 'right', 'top', 'bottom']) {
+            if (!sides[side]) continue;
+            const key = `${paneId}:${side}`;
+            let mark = this._edgeMarks.get(key);
+            if (!mark) {
+                // Tile chrome: in the transparent pass above the member's own panel (whose border
+                // sits on the same edge), like a window's grips.
+                mark = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: this.edgeMarkColor, transparent: true, depthWrite: false }));
+                mark.renderOrder = RENDER_ORDER.GRID_CHROME;
+                mark.name = `edge-mark:${key}`;
+                this.add(mark);
+                this._edgeMarks.set(key, mark);
+            }
+            mark.userData.live = true;
+            const vertical = side === 'left' || side === 'right';
+            mark.scale.set(vertical ? w : x1 - x0, vertical ? y0 - y1 : w, 1);
+            mark.position.set(
+                side === 'left' ? x0 + w / 2 : side === 'right' ? x1 - w / 2 : (x0 + x1) / 2,
+                side === 'top' ? y0 - w / 2 : side === 'bottom' ? y1 + w / 2 : (y0 + y1) / 2,
+                tl.z + 0.01 / k,
+            );
+        }
+    }
+
+    /**
+     * Scroll the member a tile shows by whole columns / rows (foreign content wider or taller than
+     * its tile: a 239-column screen in a narrower tile) — clamped to what is past the tile.
+     * @param {string} paneOrMember  a pane id, or a member (its pane)
+     * @param {number} dCols @param {number} [dRows=0]
+     * @returns {{member:string, cols:number, rows:number, overflow:{cols:number, rows:number}}|null}
+     */
+    paneScroll(paneOrMember, dCols, dRows = 0) {
+        const T = this.panes.tiles;
+        const pane = T.has(paneOrMember) ? paneOrMember : T.paneOf(paneOrMember);
+        const id = pane ? this.paneFront(pane) : null;
+        const e = id ? this.entries.get(id) : null;
+        const rect = pane ? this.paneRects().find((p) => p.id === pane)?.rect : null;
+        if (!e || !rect || !this._clipsToTile(e) || !this.planeUnit) return null;
+        const s = e._paneScroll ?? { cols: 0, rows: 0 };
+        e._paneScroll = { cols: s.cols + Math.round(dCols), rows: s.rows + Math.round(dRows) };
+        const { sx, sy } = this._scrollFor(e, rect, this.planeUnit);
+        this._relayout();
+        return { member: id, cols: sx, rows: sy, overflow: this._overflowCells(e, rect, this.planeUnit) };
     }
 
     /** Seat a pane's member exactly (facing the doorway), animating only real motion. @private */
@@ -1472,6 +1579,8 @@ export class Carrel extends THREE.Object3D {
     /** Hand a member its own layout and visibility back as it leaves the plane. @private */
     _unpane(e) {
         if (e.grid && e.grid.visible === false) e.grid.visible = true;
+        if (e.grid?.clipRect) e.grid.setClipRect(null);
+        e._paneScroll = null;
         const saved = e._paneSaved;
         e._paneSaved = null;
         e._paneFit = null;

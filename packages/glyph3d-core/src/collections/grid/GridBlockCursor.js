@@ -107,8 +107,12 @@ export class GridBlockCursor {
         const strideX = m.charWidth + m.letterSpacing;
         const strideY = m.lineSpacing;
         this.mesh.scale.set(strideX, strideY, 1);
-        this.mesh.position.set(col * strideX + strideX / 2, -row * strideY, 0.05);
-        this.mesh.visible = true;
+        const x = col * strideX + strideX / 2, y = -row * strideY;
+        this.mesh.position.set(x, y, 0.05);
+        // A window clipped to a tile (FramedGlyphField.setClipRect) hides its cursor past the cut —
+        // the glyph rule: a cell is drawn whole or not at all.
+        const c = this.mesh.userData.panelClip, eps = 1e-3 * strideY;
+        this.mesh.visible = !(c && (x - strideX / 2 < c.left - eps || x + strideX / 2 > c.right + eps || y > c.top || y < c.bottom));
     }
 
     dispose() {

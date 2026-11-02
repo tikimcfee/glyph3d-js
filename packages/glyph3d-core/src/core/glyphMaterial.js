@@ -14,7 +14,37 @@
 import * as THREE from 'three';
 import { TEXTURE_WIDTH } from '../shaping/slug-constants.js';
 
-export const GROUP_STRIDE = 6; // vec4s per group row: [offset, quat, color, scale, clip, bg_color]
+export const GROUP_STRIDE = 7; // vec4s per group row: [offset, quat, color, scale, clip, bg_color, clipX]
+
+/**
+ * THE group clip rule, in a field's own pen space (aPos: a glyph's pen origin — left edge, cell
+ * vertical center — before the group pose): col 4 = (clipTop, clipBottom, yOn, xOn), col 6 =
+ * (clipLeft, clipRight). y: a row whose center lies outside [bottom, top] is cut; x: a glyph whose
+ * quad [pen x, pen x + quad width] leaves [left, right] is cut — whole quads, so a tile's edge is a
+ * cell edge and nothing draws past it. Frames (render mode 3) are cut per fragment instead
+ * (glyphFragClip). The render shader and the pick shader both splice this in; groupClipped is its
+ * JS twin for gates.
+ */
+export const GROUP_CLIP_GLSL = `
+bool groupClipped(vec4 gClip, vec4 gClipX, vec3 pen, float quadW, float rowH) {
+    if (gClip.z > 0.5 && (pen.y > gClip.x || pen.y < gClip.y)) return true;
+    float eps = 1e-3 * rowH;
+    if (gClip.w > 0.5 && (pen.x < gClipX.x - eps || pen.x + quadW > gClipX.y + eps)) return true;
+    return false;
+}
+`;
+
+/**
+ * JS twin of GROUP_CLIP_GLSL — the same rule on plain numbers.
+ * @param {{top:number, bottom:number, yOn:boolean, left:number, right:number, xOn:boolean}} c
+ * @param {{x:number, y:number}} pen @param {number} quadW @param {number} rowH
+ * @returns {boolean} the glyph is cut
+ */
+export function groupClipped(c, pen, quadW, rowH) {
+    if (c.yOn && (pen.y > c.top || pen.y < c.bottom)) return true;
+    const eps = 1e-3 * rowH;
+    return !!c.xOn && (pen.x < c.left - eps || pen.x + quadW > c.right + eps);
+}
 
 const VERTEX_SHADER = `
 precision highp float;
@@ -37,13 +67,14 @@ uniform mat4 projectionMatrix;
 uniform highp usampler2D glyphMapTexture;
 uniform int glyphMapWidth;
 
-// Group transform table: 6 columns x maxGroups rows (Float DataTexture)
+// Group transform table: 7 columns x maxGroups rows (Float DataTexture)
 // col 0: offset.xyz (w free)
 // col 1: rotation quaternion xyzw
 // col 2: color.rgb + alpha
 // col 3: scale.xyz + colorBlend (w)
-// col 4: clipTop, clipBottom, clipEnabled
+// col 4: clipTop, clipBottom, yOn, xOn
 // col 5: bg_color.rgba
+// col 6: clipLeft, clipRight
 uniform sampler2D groupTexture;
 uniform int maxGroups;
 
@@ -63,7 +94,10 @@ out vec3 vAddedColor;
 out float vFillAmount;
 out vec4 vBgColor;
 out vec3 vGroupRgb;
-
+out vec2 vPen;               // the fragment's point in pen space (frames cut per fragment)
+flat out vec4 vClipRect;     // left, right, top, bottom
+flat out ivec2 vClipOn;      // y, x
+${GROUP_CLIP_GLSL}
 void main() {
     int gid = int(aGlyphId + 0.5);
     if (uRenderMode == 1) {
@@ -94,8 +128,9 @@ void main() {
     vec4 gQuat  = texelFetch(groupTexture, ivec2(1, grow), 0); // col 1: quaternion xyzw
     vec4 gColor = texelFetch(groupTexture, ivec2(2, grow), 0); // col 2: color.rgb + alpha
     vec4 gScale = texelFetch(groupTexture, ivec2(3, grow), 0); // col 3: scale.xyz + colorBlend
-    vec4 gClip  = texelFetch(groupTexture, ivec2(4, grow), 0); // col 4: clipTop, clipBottom, clipEnabled
+    vec4 gClip  = texelFetch(groupTexture, ivec2(4, grow), 0); // col 4: clipTop, clipBottom, yOn, xOn
     vec4 gBg    = texelFetch(groupTexture, ivec2(5, grow), 0); // col 5: bg_color
+    vec4 gClipX = texelFetch(groupTexture, ivec2(6, grow), 0); // col 6: clipLeft, clipRight
 
     // World transform: rotate(quat, aligned * groupScale) + groupOffset
     vec3 local = aligned * gScale.xyz;
@@ -110,7 +145,11 @@ void main() {
     if (int(aGroupId + 0.5) >= maxGroups || gColor.a <= 0.01) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     }
-    if (gClip.z > 0.5 && (aPos.y > gClip.x || aPos.y < gClip.y)) {
+    // The group clip: whole quads for glyphs; a frame's cells are cut per fragment (glyphFragClip).
+    vPen = aligned.xy;
+    vClipRect = vec4(gClipX.x, gClipX.y, gClip.x, gClip.y);
+    vClipOn = ivec2(gClip.z > 0.5 ? 1 : 0, gClip.w > 0.5 ? 1 : 0);
+    if (vMode != 3 && groupClipped(gClip, gClipX, aPos, quadW, aExtent.y)) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     }
 
@@ -177,6 +216,9 @@ in vec3 vAddedColor;
 in float vFillAmount;
 in vec4 vBgColor;
 in vec3 vGroupRgb;
+in vec2 vPen;
+flat in vec4 vClipRect;
+flat in ivec2 vClipOn;
 
 out vec4 fragColor;
 
@@ -250,6 +292,10 @@ void main() {
 
     // ── Frame branch (vMode == 3): external NxM video/image grid ────
     if (vMode == 3) {
+        // A frame is cut per fragment by its group's clip rect (left, right, top, bottom in pen
+        // space) — a tile's edge needn't fall on one of its cells.
+        if ((vClipOn.x == 1 && (vPen.y > vClipRect.z || vPen.y < vClipRect.w))
+            || (vClipOn.y == 1 && (vPen.x < vClipRect.x || vPen.x > vClipRect.y))) discard;
         float cols = float(frameCols > 0 ? frameCols : 1);
         float rows = float(frameRows > 0 ? frameRows : 1);
         float fcell = float(vEmojiCell);
