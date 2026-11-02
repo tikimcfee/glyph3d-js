@@ -477,6 +477,11 @@ function KnobRow({ knob, value, own, resetHint, onSet, onReset }) {
             <Mode key={o} on={value === o} onClick={() => onSet(o)}>{knob.names?.[o] ?? o}</Mode>
           ))}
         </div>
+      ) : knob.type === 'color' ? (
+        <div style={S.row}>
+          <input type="color" value={typeof value === 'string' ? value : '#000000'} onChange={(e) => onSet(e.target.value)} />
+          <span style={{ ...S.knobVal, ...(own ? S.knobOwn : null) }}>{value ?? '—'}</span>
+        </div>
       ) : knob.type === 'count' ? (
         <div style={S.row}>
           <input key={String(value)} type="number" style={S.count} min={knob.min} step={knob.step}

@@ -68,6 +68,10 @@ export const DESK_KNOBS = [
     short: 'tile rows', label: 'A tiled plane’s height, in text rows', shows: tiledPlane },
   { key: 'paneGapPx', type: 'number', min: 0, max: 64, step: 1,
     short: 'gutter', label: 'Gutter between a plane’s pins or panes (device px)', shows: planeDesk },
+  { key: 'edgeMarkPx', type: 'number', min: 1, max: 16, step: 1,
+    short: 'edge mark', label: 'A tile showing content past an edge marks that edge — this many device px wide', shows: tiledPlane },
+  { key: 'edgeMarkColor', type: 'color',
+    short: 'mark colour', label: 'The tile edge mark’s colour', shows: tiledPlane },
   { key: 'seat', type: 'enum', options: ['natural', 'uniform'], names: { natural: 'own size', uniform: 'same size' },
     short: 'seats', label: 'Members — each at its own size, or fitted into same-size seats', shows: ring },
   { key: 'facing', type: 'enum', options: ['in', 'out'], names: { in: 'center', out: 'outward' },
@@ -133,6 +137,7 @@ const BOOK_BY_KEY = new Map(BOOK_KNOBS.map((k) => [k.key, k]));
 /** Coerce a raw (typed / stored) value for a knob — null when it isn't one. */
 function coerce(knob, raw) {
   if (knob.type === 'enum') return knob.options.includes(String(raw)) ? String(raw) : null;
+  if (knob.type === 'color') { const s = String(raw).trim(); return /^#[0-9a-f]{6}$/i.test(s) ? s.toLowerCase() : null; }
   const n = typeof raw === 'number' ? raw : parseFloat(raw);
   return Number.isFinite(n) ? n : null;
 }
@@ -212,7 +217,7 @@ export function tuneDesk(ctx, desk, key, raw) {
     return { ok: true, key, value: desk[key], own: false };
   }
   const v = coerce(knob, raw);
-  if (v == null) return { ok: false, error: knob.type === 'enum' ? `${key} is one of ${knob.options.join('|')}` : `${key} wants a number` };
+  if (v == null) return { ok: false, error: knob.type === 'enum' ? `${key} is one of ${knob.options.join('|')}` : knob.type === 'color' ? `${key} wants a #rrggbb colour` : `${key} wants a number` };
   setDeskKnob(desk, key, v);
   writeTune(ctx, desk.name, key, v);
   return { ok: true, key, value: desk[key], own: true };

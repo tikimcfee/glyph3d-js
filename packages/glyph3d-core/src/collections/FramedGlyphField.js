@@ -134,6 +134,15 @@ export default class FramedGlyphField extends BoundedObject3D {
         this._updateCursorMesh?.();   // the cursor re-judges itself against the cut
     }
 
+    /**
+     * Hide (or show again) this window's own chrome — its control buttons — while it sits in a tile:
+     * the tile is its frame, and a pane's title belongs to the tile. A window without chrome ignores it.
+     * @param {boolean} on
+     */
+    setChromeSuppressed(on) {
+        this._chrome?.setSuppressed(on);
+    }
+
     /** The clip rect set by setClipRect (own local space), or null. */
     get clipRect() { return this._clipRect ?? null; }
 

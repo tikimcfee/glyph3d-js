@@ -13,6 +13,12 @@
 //   - stepping pane.scroll reaches every column and row, clamped at both ends
 //   - an edge mark shows on exactly the sides with content past them
 //   - the background panel is CPU-cut to the tile (PanelBatch cutRect), the cursor hides past it
+//   - a tiled member's own chrome (its control buttons) hides; leaving the tiles brings each back as
+//     it wants (a popup stays hidden)
+//   - PICKING respects the cut: the pick pass draws the background through the same cut matrix, a
+//     fully cut panel isn't picked, and both are restored after the pass — teeth: an uncut pass
+//     reaches past the tile
+//   - a plane desk's title stands above its board, one gutter clear — no row under it
 //   - leaving the tiles hands the window back unclipped
 
 import './headless-canvas.mjs';
@@ -20,9 +26,12 @@ import * as THREE from 'three';
 import FramedGlyphField from '../packages/glyph3d-core/src/collections/FramedGlyphField.js';
 import InstancedField from '../packages/glyph3d-core/src/collections/InstancedField.js';
 import { GridBlockCursor } from '../packages/glyph3d-core/src/collections/grid/GridBlockCursor.js';
-import { cutRect } from '../packages/glyph3d-core/src/collections/PanelBatch.js';
+import { cutRect } from '../packages/glyph3d-core/src/core/panelCut.js';
 import { GROUP_STRIDE, GROUP_CLIP_GLSL, groupClipped } from '../packages/glyph3d-core/src/core/glyphMaterial.js';
 import { Carrel } from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
+import { GridChrome } from '../packages/glyph3d-core/src/collections/grid/GridChrome.js';
+import { PickingSystem } from '../packages/glyph3d-core/src/picking/PickingSystem.js';
+import { cutMatrix } from '../packages/glyph3d-core/src/core/panelCut.js';
 import fs from 'node:fs';
 
 let fails = 0, checks = 0;
@@ -46,6 +55,7 @@ class Term extends FramedGlyphField {
         this._background.position.set(cols * CW / 2, -rows * LS / 2 + LS / 2, -0.01);
         this.add(this._background);
         this._cursorBlock = new GridBlockCursor({ parent: this, metrics: this.metrics });
+        this._chrome = new GridChrome(this, this.metrics);
         this._cursor = { x: 0, y: 0 };
         this._initScale(1);
     }
@@ -170,11 +180,61 @@ const marks = () => [...desk._edgeMarks.keys()].filter((key) => key.startsWith(p
     ok(big._cursorBlock.mesh.visible === true, 'a cursor inside the tile shows');
 }
 
+// ── 4b. Chrome hides in a tile.
+{
+    const shown = (t) => t._chrome.controls.filter((c) => c.button.visible).map((c) => c.spec.role);
+    ok(shown(big).length === 0 && shown(small).length === 0, `tiled members show none of their own buttons (big: ${shown(big)}, small: ${shown(small)})`);
+    big._chrome.setVisible('close-confirm', true);
+    ok(shown(big).length === 0, 'a button asked for while suppressed stays hidden');
+    big._chrome.setVisible('close-confirm', false);
+}
+
+// ── 4c. Picking respects the cut: the background's pick quad is the drawn one.
+{
+    let seen = null;
+    const renderer = {
+        setRenderTarget() {}, clear() {},
+        render(sc, cam) { seen = { m: big._background.matrixWorld.clone(), on: big._background.layers.isEnabled(ch.layer) }; },
+    };
+    const ps = new PickingSystem(renderer);
+    ps._target = new THREE.WebGLRenderTarget(4, 1);   // the pass's 1-px column target, as pick() makes it
+    ps.register('grid', big._background, big);
+    const ch = ps._channel('grid');
+    const camera = new THREE.PerspectiveCamera();
+    const before = big._background.matrixWorld.clone();
+    ps._renderChannelPass(ch, camera, scene, 0);
+    const want = cutMatrix(big._background, new THREE.Matrix4());
+    ok(seen && seen.on && seen.m.equals(want), 'the pick pass draws the background through its cut matrix');
+    ok(!seen.m.equals(before), 'teeth: the cut quad is not the uncut one (a click past the tile would hit it)');
+    ok(big._background.matrixWorld.equals(before), 'and the matrix is restored after the pass');
+    // Fully cut: not picked at all.
+    const saved = big._background.userData.panelClip;
+    big._background.userData.panelClip = { left: 1e6, right: 1e6 + 1, top: 0, bottom: -1 };
+    ps._renderChannelPass(ch, camera, scene, 0);
+    ok(seen.on === false && big._background.layers.isEnabled(ch.layer), 'a fully cut panel is off the pick layer for the pass, back on after');
+    big._background.userData.panelClip = saved;
+}
+
+// ── 4d. The plane desk's title stands above its board.
+{
+    const title = new THREE.Object3D();
+    title.height = 2; title.width = 10;
+    desk.setTitle(title);
+    desk._refreshChrome();
+    const tl = desk._boardTopLeft();
+    const bottom = title.position.y - title.height / 2;
+    ok(bottom >= tl.y + desk.paneGapPx / desk.planeK - 1e-9, `the title's band is above the board's top edge (bottom ${bottom.toFixed(3)} ≥ ${(tl.y + desk.paneGapPx / desk.planeK).toFixed(3)})`);
+    ok(Math.abs(title.position.x - (tl.x + desk._layoutW / 2)) < 1e-9 && title.position.z === tl.z, 'centered over the board, on its plane');
+    desk.setTitle(null);
+}
+
 // ── 5. Leaving the tiles hands the window back whole.
 {
     desk.setPlaneArrange('pins');
     ok(big.clipRect === null && !clipOf(big).xOn && !clipOf(big).yOn, 'pins: the clip is gone');
     ok(big._background.userData.panelClip == null, 'and the panel cut');
+    const shown = big._chrome.controls.filter((c) => c.button.visible).map((c) => c.spec.role);
+    ok(shown.length === 6 && !shown.includes('close-confirm'), `its buttons come back as each wants (${shown})`);
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} pane-clip: ${checks - fails}/${checks} checks`);

@@ -84,7 +84,12 @@ const deskPane = (desk, ctx, arg) => {
 /** The pane list as text + data (desk or frame). */
 const deskPaneList = (desk) => {
     const focus = desk.focusedPane();
-    const panes = desk.paneRects().map((p) => ({ ...p, front: desk.paneFront(p.id), focused: p.id === focus }));
+    const panes = desk.paneRects().map((p) => {
+        const front = desk.paneFront(p.id);
+        const e = front ? desk.entries.get(front) : null;
+        // What the tile does to its front member: the clip (its own space) and scroll, when clipped.
+        return { ...p, front, focused: p.id === focus, clip: e?.grid?.clipRect ?? null, scroll: e?._paneScroll ?? null };
+    });
     const text = panes.map((p) => `${p.focused ? '*' : ' '}${p.id} ${p.rect.w}×${p.rect.h}+${p.rect.x}+${p.rect.y} ${p.stack.map((id) => (id === p.front ? `[${id}]` : id)).join(' ')}`).join('\n');
     return { panes, text };
 };

@@ -28,6 +28,8 @@ export class GridChrome {
         this.metrics = metrics;
         this.specs = specs;
         this.controls = [];
+        /** All controls hidden while set (the window sits in a tile: the tile is its frame). */
+        this._suppressed = false;
         this._initControls();
     }
 
@@ -45,7 +47,7 @@ export class GridChrome {
             });
             if (spec.popupOf) button.visible = false;
             if (this.parent) this.parent.add(button);
-            return { spec, button };
+            return { spec, button, wanted: button.visible };
         });
     }
 
@@ -132,7 +134,19 @@ export class GridChrome {
      */
     setVisible(role, on) {
         const c = this.controls.find((x) => x.spec.role === role);
-        if (c) c.button.visible = !!on;
+        if (!c) return;
+        c.wanted = !!on;
+        c.button.visible = c.wanted && !this._suppressed;
+    }
+
+    /**
+     * Hide every control (and keep each one's own visibility to come back to) — the window sits in
+     * a tile, whose frame it is; or show them again as each wants.
+     * @param {boolean} on
+     */
+    setSuppressed(on) {
+        this._suppressed = !!on;
+        for (const c of this.controls) c.button.visible = c.wanted && !this._suppressed;
     }
 
     /**

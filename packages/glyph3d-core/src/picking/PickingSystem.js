@@ -24,6 +24,7 @@
 
 import * as THREE from 'three';
 import { GROUP_CLIP_GLSL } from '../core/glyphMaterial.js';
+import { cutMatrix } from '../core/panelCut.js';
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -369,6 +370,14 @@ export class PickingSystem {
                 if (entry.material?.uniforms?.uBasePickingId) {
                     entry.material.uniforms.uBasePickingId.value = entry.startId;
                 }
+                // A panel cut to a tile is picked as it is drawn (core/panelCut.js): its quad shrinks
+                // to the cut for the pass, and a fully cut one isn't picked — a click past the tile
+                // goes to what is there.
+                if (mesh.userData?.panelClip) {
+                    entry._savedMatrixWorld = mesh.matrixWorld.clone();
+                    const cut = cutMatrix(mesh, mesh.matrixWorld);
+                    if (!cut) { entry._savedLayers = mesh.layers.mask; mesh.layers.disable(channel.layer); }
+                }
             }
         }
 
@@ -381,6 +390,8 @@ export class PickingSystem {
                 if (!mesh || !entry._savedMaterial) continue;
                 mesh.material = entry._savedMaterial;
                 entry._savedMaterial = null;
+                if (entry._savedMatrixWorld) { mesh.matrixWorld.copy(entry._savedMatrixWorld); entry._savedMatrixWorld = null; }
+                if (entry._savedLayers != null) { mesh.layers.mask = entry._savedLayers; entry._savedLayers = null; }
             }
         }
     }

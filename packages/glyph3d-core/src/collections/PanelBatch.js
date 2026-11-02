@@ -34,39 +34,14 @@
 
 import * as THREE from 'three';
 import { rootOf, isShown, isTracked } from './SceneTransforms.js';
+import { cutRect, cutMatrix } from '../core/panelCut.js';
 
 /** The view camera renders layer 0; an enrolled object leaves it while a batch draws it. */
 const VIEW_LAYER = 0;
 
-// ── the CPU cut ───────────────────────────────────────────────────────────────────────────
-// A panel may carry `userData.panelClip` — a rect {left, right, top, bottom} in its PARENT's space
-// (a window clipped to a tile: FramedGlyphField.setClipRect). Its instance is the part of the unit
-// quad inside it: the instance matrix shrinks to the cut, so one draw per kind holds (no scissor).
-// The quad must sit unrotated in its parent (a window's own panels do); otherwise it fails loud.
-
+// The CPU cut (core/panelCut.js): a panel carrying `userData.panelClip` draws only the part of its
+// quad inside it — the instance matrix shrinks to the cut, the same matrix the pick pass uses.
 const _cut = new THREE.Matrix4();
-const _cutLocal = new THREE.Matrix4();
-
-/**
- * The cut part of a panel's unit quad, in its own unit coords, or null when nothing is left
- * (exported for gates). @param {THREE.Object3D} p @returns {{x0:number,x1:number,y0:number,y1:number}|null}
- */
-export function cutRect(p) {
-    const c = p.userData.panelClip;
-    const q = p.quaternion;
-    if (q.x !== 0 || q.y !== 0 || q.z !== 0) throw new Error(`PanelBatch: panelClip on a rotated panel (${p.name || p.type}) — the cut is stated in its parent's axes`);
-    const sx = p.scale.x, sy = p.scale.y, px = p.position.x, py = p.position.y;
-    const x0 = Math.max(-0.5, (c.left - px) / sx), x1 = Math.min(0.5, (c.right - px) / sx);
-    const y0 = Math.max(-0.5, (c.bottom - py) / sy), y1 = Math.min(0.5, (c.top - py) / sy);
-    return x1 > x0 && y1 > y0 ? { x0, x1, y0, y1 } : null;
-}
-
-/** A clipped panel's instance matrix: its world matrix times the cut. */
-function cutMatrix(p) {
-    const r = cutRect(p);
-    _cutLocal.makeScale(r.x1 - r.x0, r.y1 - r.y0, 1).setPosition((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2, 0);
-    return _cut.multiplyMatrices(p.matrixWorld, _cutLocal);
-}
 
 /** @type {Set<THREE.Object3D>} enrolled objects currently attached to a parent */
 const _panels = new Set();
@@ -399,7 +374,7 @@ class Bucket {
         const im = attrs.aInstance.array;
         for (let i = 0; i < n; i++) {
             const p = this.members[i];
-            const e = (p.userData.panelClip ? cutMatrix(p) : p.matrixWorld).elements, o = i * 16;
+            const e = (p.userData.panelClip ? cutMatrix(p, _cut) : p.matrixWorld).elements, o = i * 16;
             for (let k = 0; k < 12; k++) im[o + k] = e[k];
             im[o + 12] = e[12] - eye.x; im[o + 13] = e[13] - eye.y; im[o + 14] = e[14] - eye.z; im[o + 15] = e[15];
             this.kind.read(arrays, i, p);

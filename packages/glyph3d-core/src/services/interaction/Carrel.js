@@ -174,7 +174,7 @@ export class Carrel extends THREE.Object3D {
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14, planeArrange = 'pins', paneGapPx = 8, shelfCols = 480,
-                  edgeMarkPx = 2, edgeMarkColor = 0xe8c07a,
+                  edgeMarkPx = 2, edgeMarkColor = '#e8c07a',
                   tileCols = 200, tileRows = 60, bookCols = 120 } = {}) {
         super();
         this.name = `carrel:${name}`;
@@ -199,7 +199,8 @@ export class Carrel extends THREE.Object3D {
         this.yawRate = yawRate;
         this.planeArrange = planeArrange === 'tiles' ? 'tiles' : 'pins';
         this.paneGapPx = paneGapPx;
-        /** A tile whose member runs past an edge shows a mark there: this many device px wide, this colour. */
+        /** A tile whose member runs past an edge shows a mark there: this many device px wide, this
+         *  colour (CSS hex). */
         this.edgeMarkPx = edgeMarkPx;
         this.edgeMarkColor = edgeMarkColor;
         /** @type {Map<string, THREE.Mesh>} `<pane>:<side>` → its edge mark (TILES) */
@@ -233,6 +234,7 @@ export class Carrel extends THREE.Object3D {
             mode: this.mode, seat: this.seat, ringMaxRows, facing: this.facing,
             tableFrac, shadowSoft, glowColor, glowStrength, animDur, yawRate,
             planeArrange: this.planeArrange, paneGapPx, shelfCols, tileCols, tileRows, bookCols,
+            edgeMarkPx, edgeMarkColor,
         });
 
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
@@ -517,12 +519,20 @@ export class Carrel extends THREE.Object3D {
 
     /**
      * Tune a layout/chrome parameter live and re-seat. Keys: radius, boxH, boxAspect,
-     * gapFrac, growCap, maxArcDeg, ringMaxRows, tableFrac, shadowSoft, glowStrength, animDur, yawRate.
-     * @param {string} key @param {number} value @returns {boolean}
+     * gapFrac, growCap, maxArcDeg, ringMaxRows, tableFrac, shadowSoft, glowStrength, animDur, yawRate,
+     * paneGapPx, shelfCols, tileCols, tileRows, bookCols, edgeMarkPx; edgeMarkColor takes a CSS hex.
+     * @param {string} key @param {number|string} value @returns {boolean}
      */
     setParam(key, value) {
+        if (key === 'edgeMarkColor') {
+            if (!/^#[0-9a-f]{6}$/i.test(String(value))) return false;
+            this.edgeMarkColor = String(value);
+            for (const m of this._edgeMarks.values()) m.material.color.set(this.edgeMarkColor);
+            return true;
+        }
         if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'tableFrac',
-              'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx', 'shelfCols', 'tileCols', 'tileRows', 'bookCols'].includes(key)) return false;
+              'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx', 'shelfCols', 'tileCols', 'tileRows', 'bookCols',
+              'edgeMarkPx'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         if (key === 'glowStrength') this._tintChrome();
@@ -1329,14 +1339,16 @@ export class Carrel extends THREE.Object3D {
      * The plane-view aim (plane coordinates: world units from the board center, +y up) that shows a
      * pin in a viewport: centered when it fits, else its top-left `marginPx` in from the view's
      * top-left (read from the head). Null for no such pin.
-     * @param {string} id @param {{width:number, height:number}} vp device px @param {number} marginPx device px
+     * @param {string} id @param {{width:number, height:number}} vp device px @param {number} marginPx device px @param {number} [leftInsetPx] device px a left-edge overlay covers
      */
-    pinAim(id, vp, marginPx = 0) {
+    pinAim(id, vp, marginPx = 0, leftInsetPx = 0) {
         const pin = this.pinRects().find((p) => p.id === id);
         const box = this._boardPx();
         if (!pin || !box) return null;
         const r = pin.rect, k = this.planeK / this._planeScale();   // px per WORLD unit
-        const ax = r.w <= vp.width - 2 * marginPx ? r.x + r.w / 2 : r.x - marginPx + vp.width / 2;
+        const ax0 = r.w <= vp.width - 2 * marginPx ? r.x + r.w / 2 : r.x - marginPx + vp.width / 2;
+        // A left-edge overlay (the strip) `leftInsetPx` wide never covers the pin's left edge.
+        const ax = leftInsetPx > 0 ? Math.min(ax0, r.x - leftInsetPx + vp.width / 2) : ax0;
         const ay = r.h <= vp.height - 2 * marginPx ? r.y + r.h / 2 : r.y - marginPx + vp.height / 2;
         return { x: -box.w / (2 * k) + ax / k, y: box.h / (2 * k) - ay / k };
     }
@@ -1403,6 +1415,7 @@ export class Carrel extends THREE.Object3D {
                 if (!e) continue;
                 const shown = id === front;
                 if (e.grid.visible !== shown) e.grid.visible = shown;
+                e.grid.setChromeSuppressed?.(true);   // the tile is its frame: its own buttons step aside
                 if (!shown) continue;
                 const r = pane.rect;
                 const colW = e.grid.metrics?.charWidth;
@@ -1580,6 +1593,7 @@ export class Carrel extends THREE.Object3D {
     _unpane(e) {
         if (e.grid && e.grid.visible === false) e.grid.visible = true;
         if (e.grid?.clipRect) e.grid.setClipRect(null);
+        e.grid?.setChromeSuppressed?.(false);
         e._paneScroll = null;
         const saved = e._paneSaved;
         e._paneSaved = null;
@@ -1721,10 +1735,18 @@ export class Carrel extends THREE.Object3D {
             this._shadow.scale.set(r * 2, 1, r * 2);
             this._shadow.position.set(0, 0, 0);
         }
-        // The title stands over the stack's top, at the wall (grid) / the ring's back.
+        // The title stands over the stack's top, at the wall (grid) / the ring's back — on a plane,
+        // above the board's top edge (the board hangs from it), one gutter clear, so no row of the
+        // board sits under it.
         if (this.title) {
-            const top = (this._stackH ?? this.boxH) + this._gap * 0.5;
-            this.title.position.set(0, top + this.title.height / 2, -R);
+            if (this.mode === 'plane' && this.planeUnit) {
+                const tl = this._boardTopLeft(), W = this._layoutW || 0;
+                const gap = Math.max(1, this.paneGapPx) / this.planeK;
+                this.title.position.set(tl.x + W / 2, tl.y + gap + this.title.height / 2, tl.z);
+            } else {
+                const top = (this._stackH ?? this.boxH) + this._gap * 0.5;
+                this.title.position.set(0, top + this.title.height / 2, -R);
+            }
         }
     }
 
