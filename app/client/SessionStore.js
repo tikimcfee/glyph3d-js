@@ -316,6 +316,13 @@ export default class SessionStore {
       }
       agents.push(entry);
     }
+    // The gomuxai hub's books reopen from its tree, not from `agents` — their scroll frames ride
+    // here by lane id (the hub's book is its gomuxai name), handed back before the hub opens them.
+    const agentScrollViews = [];
+    for (const id of (ctx.gomuxHub?.lanes?.keys?.() ?? [])) {
+      const sv = ctx.agentBooks?.scrollView?.(id);
+      if (sv && !sv.following) agentScrollViews.push({ lane: id, session: sv.session, at: sv.at, id: sv.id, row: sv.row });
+    }
 
     // Carrels: world furniture — each desk's serialize() carries pose and what it was born
     // as (NO members — residence is the MODEL's authority via view.carrel; NO own values —
@@ -365,6 +372,7 @@ export default class SessionStore {
       panes,
       entered,
       agentVisibility,
+      agentScrollViews,
     };
 
     // Quarantine: a section whose restore phase FAILED keeps its loaded blob verbatim — never
@@ -515,7 +523,13 @@ export default class SessionStore {
           restoreEntered(this.ctx, snap.entered, (cmd) => this.router.execute(cmd), Number(getSetting('plane.restoreWaitMs')));
         }, ['tunings', 'panes', 'carrels', 'entered']],
         // The hidden agents BEFORE any book: the hub and the agents desk wait on this to open.
-        ['visibility', () => this.ctx.agentVisibility?.restore(snap.agentVisibility), ['agentVisibility']]]],
+        ['visibility', () => {
+          this.ctx.agentVisibility?.restore(snap.agentVisibility);
+          // Scroll frames of the hub's books — held by AgentBooks until each book opens (and is a scroll).
+          for (const v of (Array.isArray(snap.agentScrollViews) ? snap.agentScrollViews : [])) {
+            if (v && typeof v.lane === 'string' && Number.isFinite(v.at)) this.ctx.agentBooks?.applyScrollView(v.lane, { following: false, session: v.session ?? null, at: v.at, id: v.id ?? null, row: v.row ?? 0 });
+          }
+        }, ['agentVisibility', 'agentScrollViews']]]],
       [
         [['panels', () => this._restorePanels(snap), ['dock']]],
         [['field', () => this._restoreField(snap), ['fieldSources']],

@@ -24,8 +24,10 @@
  *   typically claims only gestures targeting ITS entity and declines the rest —
  *   the decline IS "retarget as fresh focus", formalized (root handles it).
  *
- * env = { exec, attention, placeCaretFromPointer }
+ * env = { exec, attention, placeCaretFromPointer, scrollHitAt }
  *   exec: (cmd) => router.execute(cmd) — verbs only, never direct mutation.
+ *   scrollHitAt: (entry) => what the pointer is over on an agent book's scroll document
+ *     ({step, part} — AgentBooks.scrollHit), or null.
  *
  * NOT in the chain (the always tier lives in its own components, on purpose):
  * camera orbit/pan drag, wheel-scroll-by-hover, Ctrl-drag move, grip resize.
@@ -122,7 +124,7 @@ const ROOT = {
 /**
  * Walk the chain: innermost node → outward → root tier.
  * @param {{type: string, target: object|null}} gesture
- * @param {{exec: Function, attention: object, context: object, cameraDock: object, placeCaretFromPointer: Function}} env
+ * @param {{exec: Function, attention: object, context: object, cameraDock: object, placeCaretFromPointer: Function, scrollHitAt?: Function}} env
  * @returns {boolean} whether anything claimed the gesture
  */
 export function resolveGesture(gesture, env) {
@@ -148,6 +150,17 @@ export function resolveGesture(gesture, env) {
     if (gesture.type === 'click' && gesture.target && env.ctx?.holding.isDocked(gesture.target.id)) {
         env.exec(['dock.spotlight', gesture.target.id]);
         return true;
+    }
+
+    // A plain click on an agent book's scroll-document SUMMARY row (`▸ output · 214 lines`) opens
+    // or closes that output — the row is the control. Pre-empts the chain (a focus change would
+    // fly the camera off the page being read); a click anywhere else on the book bubbles as usual.
+    if (gesture.type === 'click' && gesture.target?.grid?.form === 'scroll') {
+        const hit = env.scrollHitAt?.(gesture.target);
+        if (hit?.part === 'summary') {
+            env.exec(['book.expand', gesture.target.id, String(hit.step)]);
+            return true;
+        }
     }
 
     const nodes = env.context?.nodes() ?? [];

@@ -412,6 +412,8 @@ export default class AgentBooks {
             lane.label.name = `agent-label:${agentId}`;
             book.setNameplate(lane.label, { gap: this.cfg.labelGap });
             this._refreshNameplate(lane);
+            const ahead = this._viewsAhead?.get(agentId);
+            if (ahead) { this._viewsAhead.delete(agentId); lane.pendingView = { ...ahead, tries: 0 }; }
             this.lanes.set(agentId, lane);
             this._registerGroup(agentId, lane);
             this._emitChange();
@@ -1618,13 +1620,19 @@ export default class AgentBooks {
     /**
      * Stand a book's frame on a saved scroll view — once its event is in the window (now, or
      * when history pages it in: an event in the older buffer slides in; one older still is read).
-     * A view of another session is ignored.
+     * A view of another session is ignored. A lane not open yet takes the view when it's born.
      * @param {string} agentId @param {{session?:string|null, following:boolean, at?:number, id?:string|null, row?:number}} view
      * @returns {boolean} whether the lane took it (applied now, or pending)
      */
     applyScrollView(agentId, view) {
+        if (!view || agentId == null || agentId === '') return false;
         const lane = this.resolveLane(agentId)?.[1];
-        if (!lane || !view) return false;
+        if (!lane) {
+            // Its book isn't open yet (a reload restores views before the hub reopens its books):
+            // the lane born under this id takes it.
+            (this._viewsAhead ??= new Map()).set(String(agentId), { ...view });
+            return true;
+        }
         if (view.session && lane.sessionId && view.session !== lane.sessionId) return false;
         lane.pendingView = { ...view, tries: 0 };
         if (this._scrolling(lane)) this._tryView(lane);
@@ -1636,6 +1644,7 @@ export default class AgentBooks {
     _tryView(lane) {
         const v = lane.pendingView, doc = lane.doc;
         if (!v || !doc) return;
+        if (v.session && lane.sessionId && v.session !== lane.sessionId) { lane.pendingView = null; return; }   // the lane moved to another session
         if (v.following) { lane.pendingView = null; this._toEnd(lane); return; }
         const match = (r) => r && r.at === v.at && (v.id == null || r.id === v.id);
         const i = lane.entries.findIndex((e) => match(e.record));

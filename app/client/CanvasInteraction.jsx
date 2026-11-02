@@ -176,6 +176,7 @@ export function CanvasPicker() {
     // false when the pointer is over the panel but not a glyph. Async: the GPU
     // readback lands a frame later; the click guards already passed, so the
     // pointer is parked.
+    const scrollRay = new THREE.Raycaster();
     const placeCaretFromPointer = (entry) => {
       const ps = client.ctx.pickingSystem;
       if (!ps || entry?.type !== 'grid') return Promise.resolve(false);
@@ -208,6 +209,16 @@ export function CanvasPicker() {
       get context() { return client.ctx.interactionContext; },
       get cameraDock() { return client.ctx.cameraDock; },
       placeCaretFromPointer,
+      // What the pointer is over on an agent book's scroll document (its event + row part) —
+      // a ray from the view camera through the cursor onto the document's plane.
+      scrollHitAt: (entry) => {
+        const books = client.ctx.agentBooks;
+        if (!books) return null;
+        const rect = dom.getBoundingClientRect();
+        const ndc = new THREE.Vector2(((s.x - rect.left) / rect.width) * 2 - 1, -((s.y - rect.top) / rect.height) * 2 + 1);
+        scrollRay.setFromCamera(ndc, camera);
+        return books.scrollHit(entry.id, scrollRay.ray);
+      },
     };
 
     const onUp = (e) => {

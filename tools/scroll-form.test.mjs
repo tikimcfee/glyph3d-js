@@ -261,6 +261,16 @@ const sealed = { read: async () => ({ lines: [] }), sealed: true };
     flushAll(c);
     eq(ln.doc.visibleText().slice(0, 3), want.slice(0, 3), 'a saved top in the older buffer slides back in and stands');
     ok(c.applyScrollView('r', { ...view, session: 'other' }) === false, 'a view of another session is ignored');
+    // A view handed over before its book opens (a reload restoring the hub's books): the lane takes it when born.
+    const d = newBooks();
+    ok(d.applyScrollView('r', view), 'a view for a lane not open yet is held');
+    const dl = d.ensure('r', 'claude');
+    dl.sessionId = 'sess-1';
+    dl.book.setForm('scroll');
+    d.setHistory('r', sealed);
+    await d.hydrate('r', run(260).map((x) => eventRecord(x.event, x.pos)), { sessionId: 'sess-1' });
+    flushAll(d);
+    eq(dl.doc.visibleText(), want, 'the lane born later stands on it');
 }
 
 // ── 5. one book id across registry, attention and tuning ───────────────────────────────
@@ -303,6 +313,57 @@ const sealed = { read: async () => ({ lines: [] }), sealed: true };
     const m = lane.book.metrics, d = lane.doc;
     ok(Math.abs(m.charWidth - d.metrics.charWidth * d.scale.x) < 1e-9 && lane.book.pixelOrigin() && lane.book.claimsSeat,
         'a scroll book states its column, cell origin and room');
+}
+
+// ── 5b. click-to-expand: a click on a summary row is the expand gesture ──────────────
+{
+    const { resolveGesture } = await import('../app/client/gestureResolver.js');
+    const { default: registerBookCommands } = await import('../app/commands/handlers/bookCommands.js');
+    const verbs = new Map();
+    registerBookCommands({ register: (name, fn) => verbs.set(name, fn) });
+    const books = newBooks();
+    books.cfg.scrollCollapseRows = 4;
+    const lane = books.ensure('click', 'claude');
+    lane.book.setForm('scroll');
+    books.applyEvents('click', run(30), { agentType: 'claude' });
+    books.activity('click', 'claude', { action: 'bash', detail: 'ls -la', result: Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n'), id: 'long-output', at: 1e7 });
+    books.applyEvents('click', run(30, 30), { agentType: 'claude' });
+    flushAll(books);
+    const doc = lane.doc, gid = lane.groupId;
+    const blk = doc.blocks.find((b) => b.rows.some((r) => r.src.part === 'summary'));
+    ok(!!blk, 'the run has a collapsed output');
+    doc.setView({ following: false, id: blk.id, row: 0 });
+    const rayAt = (k) => {
+        doc.updateWorldMatrix(true, false);
+        const m = doc.metrics, y = doc.pixelOrigin().y - (1 + doc.cfg.titleGap + k + 0.5) * m.lineSpacing;
+        const p = new THREE.Vector3(4 * m.charWidth, y, 0).applyMatrix4(doc.matrixWorld);
+        return new THREE.Ray(p.clone().add(new THREE.Vector3(0, 0, 50)), new THREE.Vector3(0, 0, -1));
+    };
+    const ctx = { agentBooks: books, holding: { isDocked: () => false } };
+    const click = (k) => {
+        const ray = rayAt(k), sent = [];
+        const env = {
+            exec: (cmd) => { sent.push(cmd); if (Array.isArray(cmd) && verbs.has(cmd[0])) verbs.get(cmd[0])(cmd.slice(1), ctx); },
+            ctx, context: null, attention: { get: () => null }, placeCaretFromPointer: async () => false,
+            scrollHitAt: (entry) => books.scrollHit(entry.id, ray),
+        };
+        const claimed = resolveGesture({ type: 'click', target: { id: gid, type: 'book', role: 'agent', grid: lane.book }, mods: {} }, env);
+        return { claimed, sent };
+    };
+    const sumRow = blk.rows.findIndex((r) => r.src.part === 'summary');
+    const before = doc.blocks.find((b) => b.id === blk.id).rows.length;
+    const c1 = click(sumRow);
+    ok(c1.claimed && c1.sent.length === 1 && c1.sent[0][0] === 'book.expand' && c1.sent[0][1] === gid,
+        `a click on a summary row sends book.expand for that book (${J(c1.sent)})`);
+    flushAll(books);
+    const open = doc.blocks.find((b) => b.id === blk.id);
+    ok(open.rows.length > before && open.rows[sumRow].segs[0].text.startsWith('▾'), 'it opens that output (▾, every line)');
+    const c2 = click(sumRow);
+    flushAll(books);
+    ok(c2.sent[0]?.[0] === 'book.expand' && doc.blocks.find((b) => b.id === blk.id).rows.length === before, 'a second click closes it');
+    const c3 = click(0);   // the headline: not a control — the click bubbles to focus
+    ok(!c3.sent.some((cmd) => Array.isArray(cmd) && cmd[0] === 'book.expand') && c3.sent.some((cmd) => String(cmd).startsWith('attention.set')),
+        `a click elsewhere on the book focuses it as before (${J(c3.sent)})`);
 }
 
 // ── 6. the cost at the window cap ───────────────────────────────────────────────────────

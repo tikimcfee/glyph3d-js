@@ -438,7 +438,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   file's text plainer; hue, never size, carries the hierarchy. Rows wrap to `book.scrollCols` by the
   layout's own cell rule (`wrapCells`; nothing dropped — a break keeps its space). An output or a
   file longer than `book.scrollCollapseRows` lines is one summary row (`▸ output · 214 lines`) until
-  `book.expand` opens it (`AgentBooks.scrollHit` names the event under a pointer ray). The sheets
+  a click on that row (or `book.expand`) opens it — the gesture resolver's pre-empt asks
+  `AgentBooks.scrollHit` what the pointer ray meets, so the click never flies the camera off the page. The sheets
   stay as light placeholders (no cards), so the deck's window machinery is the scroll's
   (`book.scrollMaxRecords` events; older/newer buffers; slides; in-place updates), each window
   change mirrored as a block op; the document lays out once a frame from its first changed block
@@ -450,8 +451,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   older history slides in). `book.view` / `AgentBooks.scrollView` give (session, at, row) and
   `applyScrollView` stands on it again (sliding or reading it back in). On a plane desk it pins
   like a terminal: `Book.metrics` / `pixelOrigin()` are the document's cell grid; its seat is its
-  frame (`claimsSeat`). Gate: `tools/scroll-form.test.mjs` (corpus text == shown text, row
-  widths, held stillness, reload, one id, the per-batch cost at the cap with teeth).
+  frame (`claimsSeat`). A view handed over before its book opens is held for the lane (a reload
+  restoring the hub's books). Gate: `tools/scroll-form.test.mjs` (corpus text == shown text, row
+  widths, held stillness, reload, one id, click-to-expand, the per-batch cost at the cap with teeth).
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
