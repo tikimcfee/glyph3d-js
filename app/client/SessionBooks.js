@@ -2,6 +2,7 @@
 /** @import { AgentSessionProvider, AgentSession } from '@glyph3d/core/services/data/AgentSessionProvider.js' */
 
 import { AgentEventReader, eventRecord, parseEventSlice, sessionMeta } from '@glyph3d/core/collections/agentEvents.js';
+import { landAgentEdit } from './AgentEdits.js';
 
 /**
  * SessionBooks — every agent book's content, from its session's event stream. gomuxai is
@@ -337,15 +338,17 @@ export default class SessionBooks {
         this._emit('applied', st);
     }
 
-    /** A live call that landed ok → the delta books' watch lane (unwatched lanes fall through). @private */
+    /** A live call that landed ok → the delta books' watch lane (unwatched lanes fall through), and
+     *  an edit lands in the file if it's open (AgentEdits — your reading row held still). @private */
     _tapDeltas(st, changes) {
         const deltas = this.ctx.deltaBooks;
-        if (!deltas?.ingestTool) return;
         const cwd = this.ctx.agentBooks?.lanes.get(st.lane)?.cwd || st.info?.cwd || '';
         for (const c of changes) {
             if (c.event?.kind !== 'tool' || c.event.tool?.result?.status !== 'ok') continue;
             const rec = eventRecord(c.event, c.pos);
-            if (rec) deltas.ingestTool(st.lane, rec, cwd);
+            if (!rec) continue;
+            deltas?.ingestTool?.(st.lane, rec, cwd);
+            landAgentEdit(this.ctx, rec, cwd).catch((e) => console.warn(`[edits] landing ${rec.target} failed —`, e?.message || e));
         }
     }
 

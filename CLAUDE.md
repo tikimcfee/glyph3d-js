@@ -234,7 +234,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   orphan and the call adopts it when it pages in. A failed open keeps its book and retries; a
   refused follow or a failed open says so on the book (its notice, also in the Agents panel). A
   live call that lands ok taps the delta books' watch lane with its event record (meta carries
-  an edit's patch). Lane ids: a workgroup agent's gomuxai name (its main session — its
+  an edit's patch), and an Edit / Write LANDS in the file if it's open (`app/client/AgentEdits.js`:
+  the file as the call left it, swapped in place; the row you're reading — a framed grid's top row,
+  else the plane view's center line — keeps its screen row; a grid you're editing is left alone;
+  never from a history read). Lane ids: a workgroup agent's gomuxai name (its main session — its
   subagents carry its workgroup too), else the session id (`laneForSession`). The **agents
   desk** (`app/client/SessionDesk.js`) is the `agents` cylinder: the local sessions (no
   workgroup) live or written within `gomux.historyHours` — the newest `agents.maxBooks`
