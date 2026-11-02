@@ -13,6 +13,7 @@ import (
 const fakeInputAgent = `#!/bin/sh
 D="$(dirname "$0")"
 printf '%s\0' "$@" >> "$D/calls"; echo >> "$D/calls"
+echo "AGENT_NAME=${AGENT_NAME:-} AI_AGENT=${AI_AGENT:-} CLAUDECODE=${CLAUDECODE:-}" > "$D/env"
 case "$1" in
 send) echo "sent to $3 (typed in at its prompt)"; exit 0 ;;
 approve) [ "$3" = Bash ] && { echo "approved Bash for $5"; exit 0; }; echo "pending prompt is not $3" >&2; exit 5 ;;
@@ -93,5 +94,22 @@ func TestAgentInput_DenyAndBadNames(t *testing.T) {
 	}
 	if _, err := a.Input(context.Background(), "agent/kill", agentInputParams{Name: "helper-1"}); err == nil {
 		t.Fatal("an unknown method accepted")
+	}
+}
+
+func TestAgentInput_SentAsThePersonNeverTheRelaysAgent(t *testing.T) {
+	a, dir := newInputFixture(t)
+	t.Setenv("AGENT_NAME", "some-agent")
+	t.Setenv("AI_AGENT", "1")
+	t.Setenv("CLAUDECODE", "1")
+	if _, err := a.Input(context.Background(), "agent/say", agentInputParams{Name: "helper-1", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(b)); got != "AGENT_NAME= AI_AGENT= CLAUDECODE=" {
+		t.Fatalf("the agent child inherited a sender identity: %q (gomuxai would sign the person's reply as it)", got)
 	}
 }

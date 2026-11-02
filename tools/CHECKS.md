@@ -132,6 +132,17 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   pkill -USR2 -f '^bun tools/agent-display.mjs'; tail -1 /tmp/glyph3d/agent-display.log
   ```
 
+- **`agent-answer-check.mjs`** (live, private) — answering an agent end to end without touching the
+  person's display or agents: it spawns a scratch shell agent (`agent spawn … --backend shell`), a
+  private relay (gomuxai on, scratch root and tmux socket) and a private display whose own store has
+  `gomux.input` on and `gomux.autoScreens` off; then `agent.say` types the text at the agent's prompt,
+  signed `[from a person on <host>]` (never as the agent whose shell started the relay); an identified
+  caller is refused and nothing reaches the pane; `agent.approve` with nothing pending is refused; an
+  unknown agent is refused. Cleans up everything (`--keep` leaves the agent for a look).
+  ```
+  bun tools/agent-answer-check.mjs
+  ```
+
 - **`render-passes.test.mjs`** (headless, real r3f) and **`render-passes-check.mjs`** (GPU) — the ONE
   render owner (`app/client/FramePasses.js`, mounted as `<RenderPasses/>`): passes main → overlay →
   cloud → minimap in a declared order, each once a frame, timed; a throwing pass contained and named

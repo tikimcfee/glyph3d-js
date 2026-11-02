@@ -12,14 +12,16 @@ package main
 //	agent/deny    {name}          → agent deny -- <name>
 //
 // Each answers {ok, code, output}: what gomuxai said (stdout + stderr) and its exit code, so the
-// display's OK/ERR line reports what was actually done. The child dies with the relay (startChild)
-// and is bounded by agentInputTimeout.
+// display's OK/ERR line reports what was actually done. The child dies with the relay (startChild),
+// is bounded by agentInputTimeout, and runs WITHOUT the relay's agent identity (personEnv): gomuxai
+// signs the message "[from a person on <host>]", never as whichever agent started the relay.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -84,6 +86,10 @@ func (a *AgentEvents) Input(ctx context.Context, method string, p agentInputPara
 	ctx, cancel := context.WithTimeout(ctx, agentInputTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// The answer is the PERSON's (the display's verbs refuse an identified caller): gomuxai stamps a
+	// sent message by the sender's identity, so the child must not inherit the relay's — a relay
+	// started from an agent's shell would otherwise sign the person's reply as that agent.
+	cmd.Env = personEnv(os.Environ())
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := startChild(cmd); err != nil {
@@ -103,6 +109,21 @@ func (a *AgentEvents) Input(ctx context.Context, method string, p agentInputPara
 		return agentInputResult{}, werr
 	}
 	return res, nil
+}
+
+// personEnv is env without the variables gomuxai reads as the sender's identity (AGENT_NAME — an
+// agent; AI_AGENT / CLAUDECODE — an AI CLI a person started), so `agent send` signs the message
+// "[from a person on <host>]".
+func personEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if k == "AGENT_NAME" || k == "AI_AGENT" || k == "CLAUDECODE" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func (h *FSHandler) handleAgentInput(write writeFn, id json.RawMessage, method string, raw json.RawMessage) {

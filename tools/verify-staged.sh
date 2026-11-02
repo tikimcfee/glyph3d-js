@@ -24,7 +24,13 @@ mkdir -p "$I/node_modules/@glyph3d"
 ln -s ../../packages/glyph3d-core "$I/node_modules/@glyph3d/core"
 ln -s ../../packages/glyph3d-r3f "$I/node_modules/@glyph3d/r3f"
 [ -d "$WT/app/public" ] && ln -s "$WT/app/public" "$I/app/public"
-[ -d "$WT/app/node_modules/.vite" ] && mkdir -p "$I/app/node_modules" && cp -r "$WT/app/node_modules/.vite" "$I/app/node_modules/.vite"
+# A warm start only: the live Vite may be rewriting its dep cache this moment (files vanish mid-copy),
+# and the scratch Vite re-optimizes whatever is missing — so an incomplete copy is said, never fatal.
+if [ -d "$WT/app/node_modules/.vite" ]; then
+  mkdir -p "$I/app/node_modules"
+  cp -r "$WT/app/node_modules/.vite" "$I/app/node_modules/.vite" 2>/dev/null \
+    || echo "note: the Vite dep cache changed while copying it; the scratch Vite re-optimizes what's missing"
+fi
 mkdir -p "$I/cli/web" && : > "$I/cli/web/index.html"
 cd "$I"
 if [ $# -gt 0 ]; then list=$(for t in "$@"; do echo "tools/$t.test.mjs"; done); else list=$(ls tools/*.test.mjs); fi
