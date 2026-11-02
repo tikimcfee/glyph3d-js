@@ -508,12 +508,31 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/frame-grid.test.mjs
   ```
 
-- **`frame-capture-check.mjs`** (headless browser, client-only — never dials the relay) — FrameGrid
+- **`frame-capture-check.mjs`** (headless browser, client-only — never dials the relay; or `--live` against a relay) — FrameGrid
   pixels: `frame.pattern`'s four-quadrant card read back for colour AND orientation plus advancing
   checker pixels; a decoded PNG through `FrameGrid.textureFromImageBytes` at exact quadrant colours;
-  `frame.capture` through fake media, live and advancing.
+  `frame.capture` through fake media, live and advancing. With `--live [--port 8080]`, drives
+  `desktop.start` → `plane.enter` → `carrel.check` → `screenshot` → `desktop.stop` against a live relay
+  and verifies the captured desktop frame texture is non-blank.
   ```
   bun tools/frame-capture-check.mjs
+  bun tools/frame-capture-check.mjs --live [--port 8080]
+  ```
+
+- **`planes-e2e.mjs`** — one command that runs all 9 plane feature live checks in sequence against a
+  relay and prints one verdict table: `plane-live-check` (`--desk`/`--back`/`--reload`), `carrel.check`
+  on every desk, `frame-capture-check --live`, `desk-reload-check` (`seated` → `layout.scheme` relayout
+  → `save+reload` → `leave+re-enter`), layer fan identity (`plane.fov 1` vs `plane.fov default`
+  pixel-identical on a layer stack; fan at `30°` spreads), strip band (column 0 lands right of the
+  left-edge strip cards), `team.channel rows` (`show` → `rows -N` held → `rows +N` live),
+  `point.show → point.list` (doesn't-steal gate + shown point), and `file-follow` (a scratch file under
+  the user cache dir: `open → write → landed`). Default target starts a private relay (scratch git root
+  seeded with 4 files and 2 commits, scratch `--tmux-socket`, `gomux.autoScreens` seeded off,
+  `--no-gomuxai` unless `--hub`) and a private headless GPU display so it never disturbs the shared
+  display; `--port 8080` targets the shared relay explicitly. Exits non-zero on any failure.
+  ```
+  bun tools/planes-e2e.mjs [--out-dir /tmp/planes-e2e]
+  bun tools/planes-e2e.mjs --port 8080 [--out-dir /tmp/planes-e2e-shared]
   ```
 
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of

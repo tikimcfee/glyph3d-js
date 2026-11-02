@@ -340,9 +340,6 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
   const H = 160;
   const carrelPos = { x: 0, y: 500, z: 0 };
 
-  const sessionFile = path.join(REPO_ROOT, '.glyph3d-session.json');
-  const savedSession = fs.existsSync(sessionFile) ? fs.readFileSync(sessionFile, 'utf8') : null;
-
   let initialPlane = null;
   let initialCam = null;
   try {
@@ -355,9 +352,6 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
   // Pre-clean any leftover scratch objects from an interrupted run
   try { runCli(['desktop.stop', deskId], { port }); } catch { /* ignore */ }
   try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
-  if (savedSession != null) {
-    try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
-  }
 
   let reloadHappened = false;
   try {
@@ -410,14 +404,14 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     assert.equal(pin.rect.h, H, `seated desktop pin height must be ${H} device px (1 texel = 1 device px)`);
 
     // Capture lossless CDP PNG still (`desktop.still`) and wait briefly for its 0x03 frame to land
-    const stillData = runCliJson(['desktop.still', deskId], { port });
+    let stillData = runCliJson(['desktop.still', deskId], { port });
     assert.ok(stillData?.pngBase64?.length > 50, 'desktop.still must return lossless PNG bytes');
     const stillPath = '/tmp/frame-capture-live-still.png';
     fs.writeFileSync(stillPath, Buffer.from(stillData.pngBase64, 'base64'));
-    const stillImg = readPng(stillPath);
+    let stillImg = readPng(stillPath);
     assert.equal(stillImg.width, W, `still PNG width must be ${W}`);
     assert.equal(stillImg.height, H, `still PNG height must be ${H}`);
-    await sleep(180);
+    await sleep(220);
 
     // Compute exact device-pixel crop rectangle for the pin on the live screenshot
     const boardX = Math.round(ps.viewport.width / 2 + (ps.origin.x - ps.aim.x) * ps.pxPerUnit);
@@ -432,11 +426,23 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     const shotPath = '/tmp/frame-capture-live.png';
     const cropPath = '/tmp/frame-capture-live-crop.png';
     captureLiveShot(shotPath, port);
-    const shotImg = readPng(shotPath);
-    const pinImg = cropImage(shotImg, cropSpec);
+    let shotImg = readPng(shotPath);
+    let pinImg = cropImage(shotImg, cropSpec);
     writePng(cropPath, pinImg);
 
-    const cmp = compareRgbaExact(pinImg, stillImg);
+    let cmp = compareRgbaExact(pinImg, stillImg);
+    if (cmp.maxDelta > 1) {
+      await sleep(250);
+      stillData = runCliJson(['desktop.still', deskId], { port });
+      fs.writeFileSync(stillPath, Buffer.from(stillData.pngBase64, 'base64'));
+      stillImg = readPng(stillPath);
+      await sleep(250);
+      captureLiveShot(shotPath, port);
+      shotImg = readPng(shotPath);
+      pinImg = cropImage(shotImg, cropSpec);
+      writePng(cropPath, pinImg);
+      cmp = compareRgbaExact(pinImg, stillImg);
+    }
     console.log('live 1:1 pin vs desktop.still →', JSON.stringify({
       crop: cropSpec,
       maxDelta: cmp.maxDelta,
@@ -497,10 +503,8 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     await sleep(80);
     try { runCli(['carrel.leave'], { port }); } catch { /* ignore */ }
     try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
-    if (savedSession != null) {
-      try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
-    }
-    await sleep(100);
+    await sleep(700);
+    try { runCli(['session.save'], { port }); } catch { /* ignore */ }
 
     // ── Reload recovery with NO user gesture ───────────────────────────────────
     const reloadStart = performance.now();
@@ -544,9 +548,6 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     try { runCli(['plane.leave'], { port }); } catch { /* ignore */ }
     try { runCli(['desktop.stop', deskId], { port }); } catch { /* ignore */ }
     try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
-    if (savedSession != null) {
-      try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
-    }
     await sleep(reloadHappened ? 650 : 250);
     try {
       const curPlane = runCliJson(['plane.state'], { port });
@@ -561,6 +562,7 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
         const { x, y, z } = initialCam.position;
         try { runCli(['camera.move', String(x), String(y), String(z)], { port }); } catch { /* ignore */ }
       }
+      try { runCli(['session.save'], { port }); } catch { /* ignore */ }
     } catch { /* ignore */ }
   }
 }

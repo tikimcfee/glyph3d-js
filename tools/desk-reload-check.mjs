@@ -13,18 +13,135 @@
  * fail at the relayout step.
  *
  *   bun tools/desk-reload-check.mjs --relay 8099 --dir /abs/dir [--url URL]
+ *   bun tools/desk-reload-check.mjs --live [--port 8080] [--desk <name>] [--out-dir <dir>]
  *
  * Needs Vite and a PRIVATE relay (--no-gomuxai, its own --tmux-socket) on a SCRATCH root that
  * holds --dir: the page runs with its session ON (it saves and restores — into that root's file).
+ * With --live, drives an already-connected display over the relay bus without session.clear.
  */
 
 import { launchGpuBrowser } from './itest/driver.mjs';
+import { dialRelay } from './lib/relay.mjs';
+import { decodePng, cropImage, writePng } from './lib/pixel-metrics.mjs';
 
 const arg = (k, d = null) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
+const flag = (k) => process.argv.includes(k);
+
+if (flag('--live')) {
+    const port = Number(arg('--port', arg('--relay', '8080')));
+    const outDir = arg('--out-dir');
+    let desk = arg('--desk');
+    let relay = await dialRelay(port);
+    const req = (line, ms = 30000) => relay.request(line, ms);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const until = async (pred, timeoutMs = 60000, everyMs = 50) => {
+        const t0 = performance.now();
+        while (performance.now() - t0 < timeoutMs) {
+            try {
+                const s = (await req('plane.state', 2500)).data;
+                if (pred(s)) return true;
+            } catch { /* reloading */ }
+            await sleep(everyMs);
+        }
+        return false;
+    };
+    const landed = (d) => (s) => s && !s.tweening && s.target === `carrel:${d}`;
+    const measureStep = async (tag, label, failures) => {
+        const chk = await req(`carrel.check ${desk}`);
+        const okCheck = /^OK:/m.test(chk.text ?? '') && (chk.data?.members?.length ?? 0) > 0 && chk.data.members.every((m) => m.ok);
+        const shot = await req('screenshot', 15000);
+        const img = decodePng(Buffer.from(shot.data.image, 'base64'));
+        if (outDir) writePng(`${outDir}/desk-reload-${tag}.png`, img);
+        const crop = cropImage(img, {
+            x: Math.round(img.width * 0.15),
+            y: Math.round(img.height * 0.15),
+            w: Math.round(img.width * 0.7),
+            h: Math.round(img.height * 0.7),
+        });
+        let ink = 0;
+        for (let i = 0; i < crop.data.length; i += 4) {
+            if (Math.max(crop.data[i], crop.data[i + 1], crop.data[i + 2]) > 60) ink++;
+        }
+        const ok = okCheck && ink > 500;
+        if (!ok) failures.push(label);
+        console.log(`${ok ? '✓' : '✗'} ${label}: carrel.check ${okCheck ? 'OK' : 'FAIL'} · center ink ${ink} px`);
+        return ok;
+    };
+
+    const failures = [];
+    let createdTemp = false;
+    const savedPos = [];
+    try {
+        if ((await req('plane.state')).data) {
+            await req('carrel.leave');
+            await until((s) => !s, 10000);
+        }
+        if (!desk) {
+            desk = 'reloadcheck-live';
+            createdTemp = true;
+            const grids = ((await req('grid.list')).data?.grids ?? []).filter((g) => g.id?.startsWith('/')).slice(0, 2);
+            await req(`carrel.create ${desk}`);
+            for (const g of grids) {
+                const info = (await req(`grid.info ${g.id}`)).data;
+                if (info?.position) savedPos.push({ id: g.id, ...info.position });
+                await req(`carrel.add ${g.id} ${desk}`);
+            }
+            await sleep(600);
+        }
+        await req(`carrel.enter ${desk}`);
+        await until(landed(desk), 15000);
+        await measureStep('seated', 'seated + entered', failures);
+
+        const scheme = (await req('layout.scheme')).data?.scheme || 'hierarchical';
+        await req(`layout.scheme ${scheme}`);
+        await sleep(600);
+        await measureStep('relayout', `after a full tree relayout (layout.scheme ${scheme})`, failures);
+
+        await req('session.save');
+        await sleep(300);
+        const prevAt = (await req('session.status')).data?.restore?.at ?? 0;
+        await req('reload');
+        await sleep(1000);
+        relay.close();
+        relay = await dialRelay(port);
+        const t0 = performance.now();
+        while (performance.now() - t0 < 60000) {
+            try {
+                const st = await req('session.status', 2500);
+                if (/^restore: complete/m.test(st.text ?? '') && st.data?.restore?.at !== prevAt) break;
+            } catch { /* reloading */ }
+            await sleep(150);
+        }
+        const reEntered = await until(landed(desk), 60000, 100);
+        if (!reEntered) failures.push('reload re-enters the desk');
+        await measureStep('reload', 'after a save + reload (restore re-seats, re-enters)', failures);
+
+        await req('carrel.leave');
+        await until((s) => !s, 10000);
+        await req(`carrel.enter ${desk}`);
+        await until(landed(desk), 15000);
+        await measureStep('reenter', 'after leave + re-enter', failures);
+        await req('carrel.leave');
+        await until((s) => !s, 10000);
+    } finally {
+        if (createdTemp) {
+            try {
+                await req(`carrel.dissolve ${desk}`);
+                await sleep(800);
+                for (const p of savedPos) await req(`grid.move ${p.id} ${p.x} ${p.y} ${p.z}`);
+                await req('session.save');
+            } catch { /* best effort */ }
+        }
+        relay.close();
+    }
+    console.log(failures.length ? `FAIL desk-reload-check: ${failures.length} failing` : 'ok desk-reload-check');
+    process.exit(failures.length ? 1 : 0);
+}
+
 const URL = arg('--url', 'http://localhost:5173/');
 const RELAY = Number(arg('--relay', 8099));
 const DIR = arg('--dir');
-if (!DIR) { console.error('usage: --dir /abs/dir (inside the private relay\'s scratch root)'); process.exit(2); }
+if (!DIR) { console.error('usage: --dir /abs/dir (inside the private relay\'s scratch root), or --live [--port 8080] [--desk <name>]'); process.exit(2); }
 const DESK = 'reloadcheck';
 
 /** Page-side: ink in each member's on-screen pin box. */
