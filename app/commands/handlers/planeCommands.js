@@ -67,6 +67,16 @@ export default function registerPlaneCommands(router) {
         // Columns land on whole DEVICE pixels: cellPx device px per column = cellPx/dpr CSS px.
         const pxPerUnit = (cellPx / dpr) / columnWorldWidth(ctx, t.obj);
         const depth = plane.depth ?? 0;
+        // The point to pixel-snap: the surface's cell-grid origin when it states one (text), else
+        // its top-left corner — in plane coordinates (world units from the plane center, +y up).
+        const po = t.obj.pixelOrigin?.();
+        let origin = { x: -plane.width / 2, y: plane.height / 2 };
+        if (po) {
+            t.obj.updateWorldMatrix(true, false);
+            const d = t.obj.localToWorld(new THREE.Vector3(po.x, po.y, 0)).sub(plane.center);
+            const right = new THREE.Vector3().crossVectors(plane.up, plane.normal).normalize();
+            origin = { x: d.dot(right), y: d.dot(plane.up) };
+        }
         // Space-layer chrome (the tree's ownership traces) steps aside for exactly the plane view's
         // life — the camera says when it ends, however it ends (a leave, a fly, a restore).
         cc.onPlaneChange = (on) => {
@@ -80,7 +90,7 @@ export default function registerPlaneCommands(router) {
             // A surface taller than the view opens at its top (a page is read from its head), the
             // top edge `plane.topMarginPx` below the view's; a shorter one centers.
             aim: { x: 0, y: openAimY(plane.height, pxPerUnit, vp.height) },
-            origin: { x: -plane.width / 2, y: plane.height / 2 },
+            origin,
         }, { ms: Number(getSetting('plane.enterMs')) });
         ctx.planeTarget = t.id;
         const s = cc.planeState();

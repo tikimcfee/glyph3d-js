@@ -17,7 +17,8 @@ export const LETTER_SPACING = 0.0;
 
 /**
  * Monospace cell size FROM THE SHAPER — the single metrics source. width = the 'M'
- * advance (the forced monospace column the builder lays out to); height = the PRIMARY
+ * advance rounded UP to whole atlas px (the monospace column the builder steps by); em = the
+ * font size (a glyph's true advance is ax/upem × em); height = the PRIMARY
  * font's REAL vertical em (ascender − descender from fontExtents), the SAME range
  * encodeGlyph normalizes each glyph's Y into. Anchoring the cell on the real metric —
  * not the old fontSize × 1.15 guess — makes a glyph fill its cell, so full-height
@@ -26,7 +27,7 @@ export const LETTER_SPACING = 0.0;
  * expression, so baked advances are bit-identical to the runtime's.
  * @param {{upem?:number, shape?:Function, fontExtents?:Function}} shaper
  * @param {number} fontSize - atlas glyph cell font size in px
- * @returns {{width:number, height:number}}
+ * @returns {{width:number, height:number, em:number}}
  */
 export function deriveCharSize(shaper, fontSize) {
     const upem = shaper.upem || 2048;
@@ -34,15 +35,17 @@ export function deriveCharSize(shaper, fontSize) {
     const ax = (shaped && shaped[0]) ? shaped[0].ax : upem * 0.6;
     const ext = shaper.fontExtents ? shaper.fontExtents() : null;        // primary font's hExtents
     const emHeight = ext ? (ext.ascender - ext.descender) / upem : 1.15; // real em, fallback to the old guess
-    return { width: Math.ceil(ax / upem * fontSize), height: emHeight * fontSize };
+    return { width: Math.ceil(ax / upem * fontSize), height: emHeight * fontSize, em: fontSize };
 }
 
 /**
- * World-space cell metrics from the atlas char size + world scale.
- * @param {{width:number, height:number}} charSize - atlas.getCharSize()
+ * World-space cell metrics from the atlas char size + world scale. emWorld is the font size in
+ * world units — a shaped glyph's true advance is ax/upem × emWorld (its ink box), while the pen
+ * steps whole cells of charWidth (LayoutGenerator).
+ * @param {{width:number, height:number, em:number}} charSize - atlas.getCharSize()
  * @param {number} worldScale
  * @returns {{ charWidth:number, charHeight:number, lineSpacing:number, letterSpacing:number,
- *             pixelWidth:number, pixelHeight:number }}
+ *             pixelWidth:number, pixelHeight:number, emWorld:number }}
  */
 export function computeCellMetrics(charSize, worldScale) {
     const charWidth  = charSize.width  * worldScale;
@@ -54,5 +57,6 @@ export function computeCellMetrics(charSize, worldScale) {
         letterSpacing: charWidth  * LETTER_SPACING,
         pixelWidth:    charSize.width,
         pixelHeight:   charSize.height,
+        emWorld:       charSize.em * worldScale,
     };
 }

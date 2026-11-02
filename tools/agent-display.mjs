@@ -16,7 +16,9 @@
 //
 // It heals itself: a Vite restart (HMR "Failed to reload", "server connection lost") or a page
 // that stops answering (no window.__glyphClient) gets one reload a few seconds later, and
-// SIGUSR1 reloads on demand (`pkill -USR1 -f agent-display.mjs`).
+// SIGUSR1 reloads on demand (`pkill -USR1 -f '^bun tools/agent-display.mjs'` — anchored, so it never
+// signals the shell that launched it). Launch it with `exec` so no wrapper shell sits in between:
+//   tmux new-session -d -s planes-display 'exec bun tools/agent-display.mjs'
 
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';

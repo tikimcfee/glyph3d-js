@@ -68,7 +68,7 @@ console.log('Testing Emoji WebGL2 Pipeline...');
     const atlas = {
         _emojiAtlas: fakeEmojiAtlas,
         _live: fakeLive,
-        getCharSize: () => ({ width: 10, height: 20 }),
+        getCharSize: () => ({ width: 10, height: 20, em: 17 }),
     };
 
     const scene = new THREE.Scene();
@@ -171,7 +171,7 @@ console.log('Testing Emoji WebGL2 Pipeline...');
                 return { grew: true, added: cps.length, total: cps.length };
             },
         },
-        getCharSize: () => ({ width: 10, height: 20 }),
+        getCharSize: () => ({ width: 10, height: 20, em: 17 }),
     };
 
     const grid = new CodeGrid(scene, atlas, {

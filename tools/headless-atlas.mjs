@@ -7,7 +7,7 @@
 //   import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 
 export const HEADLESS_ATLAS = {
-    getCharSize: () => ({ width: 8, height: 16 }),
+    getCharSize: () => ({ width: 8, height: 16, em: 14 }),
     _shaper: null,
     _slugData: null,
     _live: null,

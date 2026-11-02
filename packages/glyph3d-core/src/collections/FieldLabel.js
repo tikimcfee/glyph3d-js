@@ -146,7 +146,7 @@ export default class FieldLabel extends THREE.Object3D {
 
     _measure() {
         const ws = 0.025;
-        const cm = computeCellMetrics(this.atlas?.getCharSize?.() || { width: 9.6, height: 18 }, ws);
+        const cm = computeCellMetrics(this.atlas?.getCharSize?.() || { width: 9.6, height: 18, em: 16 }, ws);
         this._mLine = cm.lineSpacing;
         const rows = Math.max(this._text.split('\n').length, 1);
         let wu = 0;

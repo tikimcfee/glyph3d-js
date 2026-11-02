@@ -14,7 +14,7 @@ const eq = (a, b, m) => ok(a === b, `${m} (got ${a}, want ${b})`);
 console.log('Testing Camera Focus & Jump-To-Grid fixes...');
 
 const mockAtlas = {
-    getCharSize: () => ({ width: 10, height: 20 }),
+    getCharSize: () => ({ width: 10, height: 20, em: 17 }),
     _slugData: null,
     _shaper: null,
 };

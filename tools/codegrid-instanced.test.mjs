@@ -10,7 +10,7 @@ const eq = (a, b, m) => ok(a === b, `${m} (got ${a}, want ${b})`);
 
 // Mock GlyphAtlas
 const mockAtlas = {
-    getCharSize: () => ({ width: 28, height: 55 }),
+    getCharSize: () => ({ width: 28, height: 55, em: 48 }),
     _slugData: null,
     _shaper: null,
 };

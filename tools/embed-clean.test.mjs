@@ -55,7 +55,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
 // 2. CodeGrid Line-Ending Normalization (\r\n and \r -> \n)
 {
     const dummyAtlas = {
-        getCharSize: () => ({ width: 10, height: 20 }),
+        getCharSize: () => ({ width: 10, height: 20, em: 17 }),
         _slugData: null,
         _shaper: null,
         _live: null,
@@ -144,7 +144,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
 // 5. InstancedField Scene / Parent Group Disposal
 {
     const dummyAtlas = {
-        getCharSize: () => ({ width: 10, height: 20 }),
+        getCharSize: () => ({ width: 10, height: 20, em: 17 }),
         _slugData: null,
         _shaper: null,
         _live: null,

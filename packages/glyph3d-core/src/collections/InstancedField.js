@@ -808,7 +808,7 @@ export default class InstancedField {
     /** Cell metrics computed from atlas char size and worldScale */
     get metrics() {
         if (!this._cachedMetrics) {
-            const charSize = this.atlas?.getCharSize?.() || { width: 9.6, height: 18 };
+            const charSize = this.atlas?.getCharSize?.() || { width: 9.6, height: 18, em: 16 };
             this._cachedMetrics = computeCellMetrics(charSize, this.worldScale);
         }
         return this._cachedMetrics;

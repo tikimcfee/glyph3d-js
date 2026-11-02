@@ -39,13 +39,13 @@ class GlyphAtlas {
     }
 
     /**
-     * Monospace cell size { width, height }. Set from the shaper at boot; falls
+     * Monospace cell size { width, height, em }. Set from the shaper at boot; falls
      * back to a fontSize-derived guess (0.6em advance, 1.15em line) pre-boot.
-     * @returns {{width:number, height:number}}
+     * @returns {{width:number, height:number, em:number}}
      */
     getCharSize() {
         if (this._charSize) return this._charSize;
-        return { width: Math.ceil(this.fontSize * 0.6), height: this.fontSize * 1.15 };
+        return { width: Math.ceil(this.fontSize * 0.6), height: this.fontSize * 1.15, em: this.fontSize };
     }
 }
 

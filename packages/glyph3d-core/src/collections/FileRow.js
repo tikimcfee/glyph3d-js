@@ -49,7 +49,7 @@ export default class FileRow extends BoundedObject3D {
         this.sourcePath = null;
         this.content = '';
 
-        this.metrics = computeCellMetrics(atlas?.getCharSize?.() || { width: 9.6, height: 18 }, this.config.worldScale);
+        this.metrics = computeCellMetrics(atlas?.getCharSize?.() || { width: 9.6, height: 18, em: 16 }, this.config.worldScale);
 
         this._analyzeGen = 0;
         this._highlights = null;

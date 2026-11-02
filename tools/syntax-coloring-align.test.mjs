@@ -40,7 +40,7 @@ const lut = paletteLUT();
 
 // 2. Load text into CodeGrid
 const dummyAtlas = {
-    getCharSize: () => ({ width: 10, height: 20 }),
+    getCharSize: () => ({ width: 10, height: 20, em: 17 }),
     _slugData: null,
     _shaper: null,
     _live: null,

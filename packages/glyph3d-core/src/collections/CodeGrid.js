@@ -537,6 +537,16 @@ class CodeGrid extends FramedGlyphField {
         return box;
     }
 
+    /**
+     * The local point the text's cell grid starts from — row 0's top edge at the pen origin. A plane
+     * view snaps THIS to a device-pixel corner (not the padded bounds corner), so at a whole-pixel
+     * cell every column and row edge lands on a pixel boundary.
+     * @returns {{x:number, y:number}}
+     */
+    pixelOrigin() {
+        return { x: 0, y: this._layoutOriginY + this.metrics.charHeight / 2 };
+    }
+
     // getBounds(target) — world-space AABB, recomputed on demand — is inherited from
     // BoundedObject3D (getLocalBounds() applied by the current matrixWorld).
 
@@ -1061,7 +1071,7 @@ class CodeGrid extends FramedGlyphField {
     _computeMetrics() {
         const atlasCharSize = (this.atlas && typeof this.atlas.getCharSize === 'function')
             ? this.atlas.getCharSize()
-            : { width: 48 * 0.6, height: 48 * 1.15 };
+            : { width: 48 * 0.6, height: 48 * 1.15, em: 48 };
         const scale = this.config.worldScale;
         return computeCellMetrics(atlasCharSize, scale);
     }

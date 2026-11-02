@@ -54,6 +54,13 @@ export function generateLayout(text, options = {}) {
     const charWidth = metrics.charWidth || (48 * 0.6 * worldScale);
     const charHeight = metrics.charHeight || (48 * 1.15 * worldScale);
     const lineSpacing = metrics.lineSpacing || (charHeight * 1.2);
+    // The font size in world units: a shaped glyph's true advance is ax/upem × emWorld. With no
+    // metrics at all it joins the defaults above (a 48 px atlas); metrics without it are a caller
+    // that built them by hand, which would lay out every glyph at the wrong width — refuse.
+    const emWorld = options.metrics ? metrics.emWorld : 48 * worldScale;
+    if (shaper && !(emWorld > 0)) {
+        throw new Error(`LayoutGenerator: metrics.emWorld is required to lay out shaped text (got ${emWorld}) — build metrics with computeCellMetrics from atlas.getCharSize()`);
+    }
     const upem = (shaper && shaper.upem)
         ? shaper.upem
         : (shaper && shaper._shaper && shaper._shaper.upem)
@@ -155,14 +162,19 @@ export function generateLayout(text, options = {}) {
                 i++;
             }
 
-            // Resolve glyph and advance
+            // Resolve glyph, its ink box (advance — the quad the glyph's curves span) and the pen
+            // step. MONOSPACE: the pen steps whole cells (charWidth each; a wide glyph two, a
+            // combining mark none), so every glyph starts on the cell grid tabs, cursors and
+            // highlights count by — and at a whole-pixel cell (plane view) every column lands at
+            // the same pixel phase. The ink keeps its true width (ax/upem × em), never stretched.
             let glyphId = 0;
             let advance = charWidth;
+            let step = charWidth;
             if (cp === 9) {
                 // A tab: the space glyph, advancing to the next stop.
                 const k = tabWidth - (lineCells % tabWidth);
                 glyphId = spaceGlyphId();
-                advance = k * charWidth;
+                advance = step = k * charWidth;
                 lineCells += k;
             } else if (shaper) {
                 let shape = null;
@@ -176,14 +188,15 @@ export function generateLayout(text, options = {}) {
                 }
                 if (shape) {
                     glyphId = shape.g;
-                    advance = (shape.ax / upem) * (charHeight / 1.15); // preserve font em proportion
+                    advance = (shape.ax / upem) * emWorld;
+                    step = Math.max(0, Math.round(advance / charWidth)) * charWidth;
                 } else {
                     glyphId = cp;
                 }
             } else {
                 glyphId = cp;
             }
-            if (cp !== 9) lineCells += Math.max(0, Math.round(advance / charWidth));
+            if (cp !== 9) lineCells += Math.round(step / charWidth);
 
             // Intra-line wrapping, by slot count: a new segment starts its advance at 0.
             const wrapSeg = wrapWidth > 0 ? Math.floor(col / wrapWidth) : 0;
@@ -229,8 +242,8 @@ export function generateLayout(text, options = {}) {
             );
 
             col++;
-            lineAdv += advance;
-            segAdv += advance;
+            lineAdv += step;
+            segAdv += step;
             // The widest VISUAL row — a wrapped line contributes its segments, not its length.
             const rowExtent = wrapWidth > 0 ? segAdv : lineAdv;
             if (rowExtent > maxRowExtent) maxRowExtent = rowExtent;

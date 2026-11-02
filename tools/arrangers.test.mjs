@@ -29,7 +29,7 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
 const near = (a, b, eps = 1e-3) => Math.abs(a - b) < eps;
 
-const atlas = { getCharSize: () => ({ width: 28, height: 55 }), _slugData: null, _shaper: null };
+const atlas = { getCharSize: () => ({ width: 28, height: 55, em: 48 }), _slugData: null, _shaper: null };
 const scene = new THREE.Scene();
 
 const lines = [
