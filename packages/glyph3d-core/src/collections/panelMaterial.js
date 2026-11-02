@@ -176,6 +176,11 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
     });
 
     let flags = 0;
+    // Every restyle goes through this handle and bumps the material's panelVersion: the
+    // PanelBatch re-reads a panel's colours, border and flags only when it moved (writing these
+    // uniforms by hand would go unseen by a batched panel — use the handle).
+    material.userData.panelVersion = 0;
+    const bump = () => { material.userData.panelVersion++; };
     return {
         material,
 
@@ -183,6 +188,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
         setFill(c, o) {
             if (c != null) uFill.value.set(c);
             if (o != null) { uOpacity.value = o; material.transparent = o < 1; }
+            bump();
         },
 
         /** Set the identity color / width(px) / master intensity. State is via setBorderFlag. */
@@ -190,6 +196,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
             if (color != null) uBorderColor.value.set(color);
             if (width != null) uBorderWidth.value = width;
             if (intensity != null) uBorderIntensity.value = intensity;
+            bump();
         },
 
         /** Restyle the focus/hover/input/capture state colors live (the shared interaction vocabulary). */
@@ -198,6 +205,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
             if (focus != null) uFocusColor.value.set(focus);
             if (input != null) uInputColor.value.set(input);
             if (capture != null) uCaptureColor.value.set(capture);
+            bump();
         },
 
         /** This panel's current state colors as hex ints (inspection — symmetric with getBorderFlags). */
@@ -212,6 +220,7 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
         setBorderFlag(mask, present) {
             flags = present ? (flags | mask) : (flags & ~mask);
             uFlags.value = flags >>> 0;
+            bump();
         },
 
         getBorderFlags() { return flags; },
