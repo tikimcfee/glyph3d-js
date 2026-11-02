@@ -662,6 +662,7 @@ export const SETTINGS = [
   { key: 'carrel.glowStrength', label: 'Floor shadow brightness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05 },
   // A CYLINDER desk — the gomuxai hub and the agents desk are born one (cylinderForm): every
   // member at its own size around you, rows stacking before the ring widens past its radius.
+  { key: 'carrel.createGap', label: 'A desk you set down keeps this far from other desks (world units; it slides along its own right to the nearest clear spot)', group: 'Carrel', type: 'number', default: 24, min: 0, max: 5000, step: 4 },
   { key: 'carrel.createMode', label: 'A desk you set down (carrel.create) is born a — plane (read flat when entered), wall, or ring', group: 'Carrel', type: 'enum', options: ['plane', 'grid', 'ring'], default: 'plane' },
   { key: 'carrel.cylinderRadius', label: "A new cylinder desk's least radius (the gomuxai hub, the agents desk — it widens to fit)", group: 'Carrel', type: 'number', default: 900, min: 50, max: 50000, step: 50 },
   // Planes (plane.* verbs, carrel.enter on a plane desk): the camera squares to a surface and eases

@@ -31,7 +31,7 @@
  */
 
 import * as THREE from 'three';
-import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
+import Carrel, { clearSpot } from '@glyph3d/core/services/interaction/Carrel.js';
 import { getSetting } from '../../client/settings.js';
 import { enterPlaneView, planeUnitOf } from './planeCommands.js';
 import { wirePanes } from '../../client/carrelPanes.js';
@@ -131,19 +131,48 @@ export function buildCarrel(ctx, name, { radius, managed = false, nested = false
         carrel.worldManaged = true;
         ctx.world.register(carrel.name, carrel, () => carrel.getLocalBounds());
     } else {
-        const cam = ctx.camera;
-        if (cam) {
-            const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-            const dist = carrel.radius * 1.6;
-            const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, dist);
-            carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
-            carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
-        }
+        carrel.userData.setDown = setDown(ctx, carrel);
         ctx.scene.add(carrel);
     }
     ctx.registry?.register?.(`carrel:${name}`, carrel, { type: 'carrel' });
     carrels(ctx)?.set(name, carrel);
     return carrel;
+}
+
+/**
+ * Set a new desk down where you are looking — ahead of the camera, facing it; inside a plane, beside
+ * the desk you are reading, facing as it does — and never over another desk: when that spot meets a
+ * standing desk's airspace (Carrel.airspace, grown by `carrel.createGap`), the desk slides along its
+ * own right to the nearest clear spot (Carrel's clearSpot).
+ * @param {AppContext} ctx @param {Carrel} carrel
+ * @returns {{at:{x:number,y:number,z:number}, slid:number, blockedBy:string[]}} where it stands, how
+ *   far it slid from the wanted spot (world units, + = its right), and which desks were there
+ */
+function setDown(ctx, carrel) {
+    const cam = ctx.camera;
+    const entered = ctx.enteredCarrel ? carrels(ctx)?.get(ctx.enteredCarrel) : null;
+    if (entered) {
+        entered.updateWorldMatrix(true, false);
+        entered.getWorldPosition(carrel.position);
+        carrel.rotation.y = entered.rotation.y;
+    } else if (cam) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        const p = new THREE.Vector3().copy(cam.position).addScaledVector(fwd, carrel.radius * 1.6);
+        carrel.position.set(p.x, Math.max(p.y - carrel.boxH * 0.5, 0), p.z);
+        carrel.rotation.y = Math.atan2(cam.position.x - p.x, cam.position.z - p.z);
+    }
+    // Every standing desk at the top level (a desk seated in another stands inside its airspace).
+    const others = [...(carrels(ctx)?.values() ?? [])].filter((d) => d !== carrel && !d._dissolving && (d.parent === ctx.scene || d.worldManaged));
+    carrel.updateMatrixWorld(true);
+    const right = new THREE.Vector3(Math.cos(carrel.rotation.y), 0, -Math.sin(carrel.rotation.y));
+    const { offset, blockedBy } = clearSpot(carrel.airspace(), right, others.map((d) => d.airspace()), { gap: Number(getSetting('carrel.createGap')) });
+    carrel.position.addScaledVector(right, offset);
+    carrel.updateMatrixWorld(true);
+    return {
+        at: { x: carrel.position.x, y: carrel.position.y, z: carrel.position.z },
+        slid: offset,
+        blockedBy: blockedBy.map((i) => others[i].carrelName),
+    };
 }
 
 /** The desk agent books call home by default. */
@@ -326,8 +355,11 @@ export default function registerCarrelCommands(router) {
         if (map.has(name)) return { text: `ERR: carrel '${name}' already exists`, data: null };
         const carrel = buildCarrel(ctx, name, { radius: parseFloat(args[1]), form: { mode: String(getSetting('carrel.createMode')) } });
         ctx.activeCarrel = name;
-        return { text: `OK: carrel '${name}' set down (${carrel.mode}, r=${carrel.radius})`, data: { name, mode: carrel.mode, radius: carrel.radius } };
-    }, { description: 'Set down a new carrel (world-anchored desk) ahead of the camera', usage: '[name] [radius]', returns: '{ name, radius }' });
+        const d = carrel.userData.setDown;
+        const at = d ? ` at (${d.at.x.toFixed(1)}, ${d.at.y.toFixed(1)}, ${d.at.z.toFixed(1)})` : '';
+        const moved = d?.blockedBy.length ? ` — slid ${Math.abs(d.slid).toFixed(1)} to its ${d.slid > 0 ? 'right' : 'left'}: ${d.blockedBy.map((n) => `'${n}'`).join(', ')} stood where you were looking` : '';
+        return { text: `OK: carrel '${name}' set down${at} (${carrel.mode}, r=${carrel.radius})${moved}`, data: { name, mode: carrel.mode, radius: carrel.radius, setDown: d ?? null } };
+    }, { description: 'Set down a new carrel (world-anchored desk) ahead of the camera — inside a plane, beside the desk you read — sliding to the nearest spot clear of other desks (carrel.createGap)', usage: '[name] [radius]', returns: '{ name, mode, radius, setDown:{at, slid, blockedBy} }' });
 
     router.register('carrel.add', (args, ctx) => {
         // Forgiving arg order: `<book> [carrel]` is canon, but container-first

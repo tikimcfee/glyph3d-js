@@ -116,6 +116,39 @@ function extentFromBox(lb) {
     };
 }
 
+const _air = new THREE.Vector3();
+
+/**
+ * The nearest spot clear of other desks for a desk standing at `box` (its world airspace there):
+ * slide it along `right` (a horizontal unit vector — its own right, so it keeps facing) by the
+ * smallest |t| for which the slid box, grown by `gap`, meets none of `others`. Steps of `step`
+ * outward, right before left at each distance.
+ * @param {THREE.Box3} box  the airspace at the wanted spot
+ * @param {THREE.Vector3} right
+ * @param {THREE.Box3[]} others  the other desks' airspaces
+ * @param {{gap?:number, step?:number, maxSteps?:number}} [opts]
+ * @returns {{offset:number, blockedBy:number[]}} the slide along `right` (0 = the wanted spot is
+ *   free) and which of `others` the wanted spot met
+ */
+export function clearSpot(box, right, others, { gap = 0, step, maxSteps = 2000 } = {}) {
+    if (!(gap >= 0)) throw new Error(`clearSpot: gap must be ≥ 0 (got ${gap})`);
+    const size = box.getSize(new THREE.Vector3());
+    const stride = step ?? Math.max(1e-3, Math.max(size.x, size.z) / 16);
+    const probe = new THREE.Box3(), shift = new THREE.Vector3();
+    const hits = (t) => {
+        probe.copy(box).translate(shift.copy(right).multiplyScalar(t)).expandByScalar(gap);
+        const out = [];
+        others.forEach((o, i) => { if (!o.isEmpty() && probe.intersectsBox(o)) out.push(i); });
+        return out;
+    };
+    const blockedBy = hits(0);
+    if (!blockedBy.length) return { offset: 0, blockedBy };
+    for (let n = 1; n <= maxSteps; n++) {
+        for (const t of [n * stride, -n * stride]) if (!hits(t).length) return { offset: t, blockedBy };
+    }
+    throw new Error(`clearSpot: no clear spot within ${maxSteps} steps of ${stride.toFixed(2)} either side`);
+}
+
 export class Carrel extends THREE.Object3D {
     /**
      * @param {Object} [opts]
@@ -1783,6 +1816,26 @@ export class Carrel extends THREE.Object3D {
             target.max.z = Math.max(target.max.z, -R);
         }
         return target;
+    }
+
+    /**
+     * The room this desk claims in the world, for setting another desk down beside it (clearSpot):
+     * its airspace (getBounds) — and a plane desk, whose board grows from its fixed top-left as pins
+     * arrive, claims at least its desk-sized frame there (the shelf's width × the tile frame's
+     * height), so an empty board is never set down where a neighbour's board will grow.
+     * @param {THREE.Box3} [target] @returns {THREE.Box3} world AABB
+     */
+    airspace(target = new THREE.Box3()) {
+        this.getLocalBounds(target);
+        const f = this.mode === 'plane' ? this.tileFrame() : null;
+        if (f) {
+            const k = this.planeK, tl = this._boardTopLeft();
+            const shelfW = Math.max(1, this.shelfCols) * this.planeUnit.column;
+            target.expandByPoint(_air.set(tl.x + Math.max(shelfW, f.widthPx / k), tl.y - f.heightPx / k, tl.z));
+            target.expandByPoint(_air.set(tl.x, tl.y, tl.z));
+        }
+        this.updateWorldMatrix(true, false);
+        return target.applyMatrix4(this.matrixWorld);
     }
 
     /**
