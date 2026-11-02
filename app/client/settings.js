@@ -320,6 +320,7 @@ export const GROUPS = [
   { name: 'Hands',              subtitle: 'sensor-plane skeletons — canvas coverage · depth · size · yaw', columns: 2 },
   { name: 'Performance',        subtitle: 'load build budget · hover pick rate · draw-call readout', columns: 2 },
   { name: 'Files',              subtitle: 'all-files browsing · hex dump depth', columns: 2 },
+  { name: 'Labels',             subtitle: 'screen-space map labels — declutter grid · discrete px steps · placement rate · hysteresis', columns: 2 },
   { name: 'Connection',         subtitle: 'auto-connect to relay on load' },
 ];
 
@@ -1036,6 +1037,29 @@ export const SETTINGS = [
   { key: 'strata.clipLeadingWhitespace', label: 'Clip leading whitespace', group: 'Strata', type: 'bool', default: STRATA_DEFAULTS.clipLeadingWhitespace, apply: strataParam('clipLeadingWhitespace') },
   { key: 'strata.minSlots', label: 'Min glyphs per box', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.minSlots, min: 1, max: 40, step: 1, apply: strataParam('minSlots') },
   { key: 'strata.maxDepth', label: 'Max nesting depth', group: 'Strata', type: 'number', default: STRATA_DEFAULTS.maxDepth, min: 1, max: 64, step: 1, apply: strataParam('maxDepth') },
+  // Labels — screen-space map labels (MapLabels): decluttered on a device-px grid with
+  // discrete px steps (16 / 14 / 13 / 12 / 11, floor 11), variable anchors, hysteresis,
+  // cluster labels, and self-naming handoff.
+  { key: 'labels.mapEnabled', label: 'Map labels', group: 'Labels', type: 'bool', default: true, apply: (ctx, v) => ctx.mapLabels?.configure?.({ enabled: v }) },
+  { key: 'labels.px', label: 'Base label size (px)', group: 'Labels', type: 'number', default: 13, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ px: v }) },
+  { key: 'labels.minPx', label: 'Minimum label size floor (px)', group: 'Labels', type: 'number', default: 11, min: 11, max: 16, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ minPx: v }) },
+  { key: 'labels.placeHz', label: 'Placement rate (Hz)', group: 'Labels', type: 'number', default: 8, min: 1, max: 60, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ placeHz: v }) },
+  { key: 'labels.fadeMs', label: 'Opacity fade (ms, 0 = hard switch)', group: 'Labels', type: 'number', default: 200, min: 0, max: 1000, step: 25, apply: (ctx, v) => ctx.mapLabels?.configure?.({ fadeMs: v }) },
+  { key: 'labels.gridPx', label: 'Collision grid cell (px)', group: 'Labels', type: 'number', default: 32, min: 8, max: 128, step: 4, apply: (ctx, v) => ctx.mapLabels?.configure?.({ gridPx: v }) },
+  { key: 'labels.hysteresisPx', label: 'Placement hysteresis (px)', group: 'Labels', type: 'number', default: 4, min: 0, max: 32, step: 0.5, apply: (ctx, v) => ctx.mapLabels?.configure?.({ hysteresisPx: v }) },
+  { key: 'labels.selfNameHysteresisPx', label: 'Self-naming hysteresis (px)', group: 'Labels', type: 'number', default: 1.5, min: 0, max: 8, step: 0.25, apply: (ctx, v) => ctx.mapLabels?.configure?.({ selfNameHysteresisPx: v }) },
+  { key: 'labels.anchorGapPx', label: 'Anchor offset gap (px)', group: 'Labels', type: 'number', default: 6, min: 0, max: 32, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ anchorGapPx: v }) },
+  { key: 'labels.edgeMarginPx', label: 'Off-screen edge margin (px)', group: 'Labels', type: 'number', default: 24, min: 8, max: 96, step: 2, apply: (ctx, v) => ctx.mapLabels?.configure?.({ edgeMarginPx: v }) },
+  { key: 'labels.dotPx', label: 'Collided dot size (px)', group: 'Labels', type: 'number', default: 5, min: 2, max: 12, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ dotPx: v }) },
+  { key: 'labels.pxP0', label: 'P0 deixis size (px)', group: 'Labels', type: 'number', default: 16, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP0: v }) },
+  { key: 'labels.pxP1', label: 'P1 waiting on Ivan size (px)', group: 'Labels', type: 'number', default: 16, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP1: v }) },
+  { key: 'labels.pxP2', label: 'P2 attention chain size (px)', group: 'Labels', type: 'number', default: 14, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP2: v }) },
+  { key: 'labels.pxP3', label: 'P3 carrel size (px)', group: 'Labels', type: 'number', default: 14, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP3: v }) },
+  { key: 'labels.pxP4', label: 'P4 live agent size (px)', group: 'Labels', type: 'number', default: 13, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP4: v }) },
+  { key: 'labels.pxP5', label: 'P5 terminal size (px)', group: 'Labels', type: 'number', default: 13, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP5: v }) },
+  { key: 'labels.pxP6', label: 'P6 file size (px)', group: 'Labels', type: 'number', default: 12, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP6: v }) },
+  { key: 'labels.pxP7', label: 'P7 directory size (px)', group: 'Labels', type: 'number', default: 12, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP7: v }) },
+  { key: 'labels.pxP8', label: 'P8 ended agent size (px)', group: 'Labels', type: 'number', default: 11, min: 11, max: 24, step: 1, apply: (ctx, v) => ctx.mapLabels?.configure?.({ pxP8: v }) },
 ];
 
 /**

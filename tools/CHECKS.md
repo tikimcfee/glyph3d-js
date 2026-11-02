@@ -324,6 +324,32 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/pixel-check.mjs /tmp/shot-a.png --second /tmp/shot-b.png --crop 312,384,135,42
   ```
 
+- **`overlay.test.mjs`** — the SCREEN OVERLAY gate (`app/client/PlaneOverlay.js` and
+  `overlay.text` / `overlay.clear` / `overlay.list` in `app/commands/handlers/labelCommands.js`).
+  Verifies `OrthographicCamera` frustum sync (`left: 0, right: Wdev, top: 0, bottom: -Hdev`
+  at `1 unit = 1 device px`), integer device-pixel origin snapping (`snapOverlayOrigin`),
+  atlas-derived scale (`overlayScaleForPx` → `rowPx / rowWorld`), layer isolation on
+  `OVERLAY_LAYER = 30` (skipped by main-scene `GlyphBatch`, `PanelBatch`, and `GlyphFarLod`),
+  `mainScene.onAfterRender` pass with depth clear and draw-call telemetry preservation, CPU
+  rect hit-testing (`hitTest`), and `overlay.*` command-bus verbs.
+  ```
+  bun tools/overlay.test.mjs
+  ```
+
+- **`map-labels.test.mjs`** — the MAP LABELS declutter gate (`app/client/MapLabels.js` and
+  `label.list` / `label.explain` / `label.freeze`). Verifies: no two placed
+  labels overlap in a dense 36-candidate field; priority ladder `P0 > P1 > … > P8` (`P1`
+  waiting on Ivan always beats `P6` file for the same 32 px cell); variable anchors (`above`,
+  `right`, `below`, `left`) with `triedAnchors` blocker trace in `label.explain`; sub-cell
+  camera jitter hysteresis (`0` flip-flops across 20 jitter frames); self-naming handoff with
+  hysteresis (`worldTitlePx >= labelPx` → `whyHidden: 'self-named'`, and world title + map
+  label are never both shown); cluster labels (`gomux · 7 agents · 2 waiting` — a waiting
+  count never aggregates away); off-screen `P0/P1` edge markers; and never-truncated /
+  never-shrunk (`px ∈ {16, 14, 13, 12, 11}`, floor 11) invariants.
+  ```
+  bun tools/map-labels.test.mjs
+  ```
+
 - **`loadstorm-check.mjs`** — the LOAD STORM invariant gate: a launch-shaped burst of
   sequential `file.openDir`s must hold the batching laws (one relayout per bulk load,
   coalesced registry notification). `STORM_RELAY=<port>` to point it elsewhere —

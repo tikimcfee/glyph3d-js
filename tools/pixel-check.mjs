@@ -52,7 +52,7 @@ function parseArgs(argv) {
         crops: /** @type {string[]} */ ([]),
         expectedPitch: /** @type {number | null} */ (13),
         expectedAdvance: /** @type {number | undefined} */ (undefined),
-        advanceMode: /** @type {'shaper' | 'cell'} */ ('shaper'),
+        advanceMode: /** @type {'shaper' | 'cell'} */ ('cell'),
         outDir: /** @type {string | null} */ (null),
         gate: false,
         json: false,
@@ -334,7 +334,11 @@ if (args.crops.length > 0) {
         })
     );
     if (imgA.width >= 600 && imgA.height >= 400) {
-        const detected = findTextRegions(imgA).slice(0, 3);
+        const allDetected = findTextRegions(imgA);
+        const topInk = allDetected[0]?.inkPixels ?? 0;
+        const detected = allDetected
+            .filter((reg) => reg.rowCount >= 4 && reg.inkPixels >= topInk * 0.25)
+            .slice(0, 3);
         for (const reg of detected) {
             if (reg.w === imgA.width && reg.h === imgA.height) continue;
             const subA = cropImage(imgA, reg);

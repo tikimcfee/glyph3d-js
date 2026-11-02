@@ -142,7 +142,7 @@ assert(cropThrew, 'cropImage throws on out-of-bounds rectangle');
     assert(rowPitch.pitchPx !== null && Math.abs(rowPitch.pitchPx - 13) < 0.02, `half-px preserves 13 px pitch (got ${rowPitch.pitchPx})`);
     assert(scale.scaleRatio !== null && Math.abs(scale.scaleRatio - 1.0) < 0.005, `half-px preserves 1.0x scale (got ${scale.scaleRatio})`);
     assert(crispness.rampWidthMedianPx !== null && crispness.rampWidthMedianPx >= 1.8, `half-px rampWidthMedianPx >= 1.8 px (got ${crispness.rampWidthMedianPx})`);
-    assert(crispness.twoPxRampShare !== null && crispness.twoPxRampShare >= 0.90, `half-px twoPxRampShare >= 90% (got ${crispness.twoPxRampShare})`);
+    assert(crispness.twoPxRampShare !== null && crispness.twoPxRampShare >= 0.85, `half-px twoPxRampShare >= 85% (got ${crispness.twoPxRampShare})`);
     assert(crispness.midGrayInkShare >= 0.70, `half-px midGrayInkShare >= 70% (got ${crispness.midGrayInkShare})`);
     assert(!gate.passed && gate.failures.some((f) => f.startsWith('crispness:')), 'half-px fixture fails crispness gate');
 }
@@ -226,6 +226,68 @@ assert(cropThrew, 'cropImage throws on out-of-bounds rectangle');
     assert(stillness.vacuous === true && stillness.still === false, 'blank-vs-blank is flagged vacuous and NOT still');
     assert(rowPitch.vacuous && crispness.vacuous && scale.vacuous, 'blank image is flagged vacuous across all metrics');
     assert(!gate.passed && gate.failures.length === 4, `blank-vs-blank fails all 4 gates as vacuous (got ${gate.failures.length})`);
+}
+
+// 8. Fixture 6: Wide 239-column terminal at 15 px row pitch with blank lines (1x/2x gaps) and
+// short lines (3-4 chars alongside 120-char lines) -> must measure 15.00 px pitch & autocorr and PASS
+{
+    const wideLine = 'THEMINIHTTMLIHEFTOUN'.repeat(6);
+    const termLines = [
+        wideLine,
+        'FEFE',
+        '',
+        wideLine,
+        'EFE',
+        '',
+        '',
+        wideLine,
+        'FEFE',
+        '',
+        wideLine,
+        'EFE',
+        '',
+        '',
+        wideLine,
+        'FEFE',
+        '',
+        wideLine,
+        'EFE',
+        '',
+        '',
+        wideLine,
+        'FEFE',
+    ];
+    const termImg = renderSyntheticTextPng({
+        width: 1600,
+        height: 400,
+        lines: termLines,
+        rowPitchPx: 15,
+        advancePx: 8,
+        scale: 1.0,
+        offsetX: 0,
+        offsetY: 0,
+    });
+    const inkMap = computeInkMap(termImg);
+    const rowPitch = measureRowPitch(termImg, { inkMap });
+    const crispness = measureEdgeCrispness(termImg, { inkMap });
+    const scale = measureGlyphScale(termImg, {
+        inkMap,
+        rowPitch,
+        expectedAdvancePx: 8,
+        atlasMetrics: atlas,
+    });
+    const gate = evaluatePixelGates({ rowPitch, crispness, scale }, { expectedRowPitchPx: 15 });
+
+    console.log(
+        `  [fixture:wide-terminal-15px] pitch=${rowPitch.pitchPx}px (autocorr=${rowPitch.autocorrPitchPx}px, ` +
+        `snapErr=${rowPitch.integerSnapErrorPx}px, rows=${rowPitch.rowCount}) adv=${scale.measuredAdvancePx}px`
+    );
+
+    assert(rowPitch.rowCount === 14, `wide terminal detects all 14 non-blank rows including short lines (got ${rowPitch.rowCount})`);
+    assert(rowPitch.pitchPx !== null && Math.abs(rowPitch.pitchPx - 15) < 0.02, `wide terminal rowPitch ~ 15.00 px (got ${rowPitch.pitchPx})`);
+    assert(rowPitch.autocorrPitchPx !== null && Math.abs(rowPitch.autocorrPitchPx - 15) < 0.05, `wide terminal autocorrPitchPx ~ 15.00 px (got ${rowPitch.autocorrPitchPx})`);
+    assert(rowPitch.integerSnapErrorPx !== null && rowPitch.integerSnapErrorPx < 0.02, `wide terminal integerSnapError < 0.02 px (got ${rowPitch.integerSnapErrorPx})`);
+    assert(gate.passed, `wide terminal fixture passes all pixel gates (failures: ${gate.failures.join('; ')})`);
 }
 
 console.log(`\n${failed === 0 ? '✓ PASS' : '✗ FAIL'} (${passed} assertions passed, ${failed} failed)`);

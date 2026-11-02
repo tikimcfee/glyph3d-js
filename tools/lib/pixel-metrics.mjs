@@ -562,16 +562,33 @@ function fundamentalAutocorr(signal, minLag, maxLag) {
     for (let lag = startLag; lag <= hi; lag++) {
         const prev = corr[lag - 1];
         const next = lag < hi ? corr[lag + 1] : corr[lag] - 1e-6;
-        if (corr[lag] >= prev && corr[lag] >= next && corr[lag] > 0.05) {
+        const prom = corr[lag] - 0.5 * (prev + next);
+        if (corr[lag] >= prev && corr[lag] >= next && (corr[lag] > 0.025 || prom > 0.025)) {
             peaks.push({ lag, val: corr[lag] });
         }
     }
     if (!peaks.length) return { lagPx: null, strength: 0, corr };
 
     const maxPeakVal = Math.max(...peaks.map((p) => p.val));
-    // Fundamental period is the first local peak in [startLag, hi] that reaches at least 50% of maxPeakVal
-    const chosen = peaks.find((p) => p.val >= 0.50 * maxPeakVal) || peaks[0];
-    const refined = parabolicPeak(corr, chosen.lag);
+    // First candidate is the earliest strong local peak (>= 50% of maxPeakVal)
+    let chosen = peaks.find((p) => p.val >= 0.50 * maxPeakVal) || peaks[0];
+    let refined = parabolicPeak(corr, chosen.lag);
+
+    // Sub-harmonic check: when blank lines repeat periodically (e.g. 3-line blocks in a terminal
+    // where blank lines separate dense headers), the k-th harmonic (k = 2, 3, 4) can have a
+    // higher correlation than the 1x fundamental. If refined/k (>= startLag) itself sits at a
+    // genuine positive local peak in `peaks`, lock onto the fundamental period refined/k.
+    for (const k of [4, 3, 2]) {
+        const subTarget = refined / k;
+        if (subTarget < startLag) continue;
+        const subPeak = peaks.find((p) => Math.abs(p.lag - subTarget) <= 1.15 && p.val >= Math.max(0.03, 0.15 * maxPeakVal));
+        if (subPeak) {
+            refined = refined / k;
+            chosen = subPeak;
+            break;
+        }
+    }
+
     return { lagPx: +refined.toFixed(4), strength: +chosen.val.toFixed(4), corr };
 }
 
@@ -616,67 +633,121 @@ export function measureRowPitch(img, opts = {}) {
         };
     }
 
-    // Horizontal projection profile: mean active ink per row
+    // Horizontal projection profile: mean active ink per row, peak ink, and active pixel count
     const rowProfile = new Float64Array(height);
     const rowPeak = new Float64Array(height);
+    const rowActiveCount = new Int32Array(height);
     for (let y = 0; y < height; y++) {
         let sum = 0;
         let pk = 0;
+        let cnt = 0;
         const rowOff = y * width;
         for (let x = 0; x < width; x++) {
             const v = ink[rowOff + x];
-            if (v >= inkThreshold) sum += v;
+            if (v >= inkThreshold) {
+                sum += v;
+                cnt++;
+            }
             if (v > pk) pk = v;
         }
         rowProfile[y] = sum / width;
         rowPeak[y] = pk;
+        rowActiveCount[y] = cnt;
     }
 
     const sortedRow = Float64Array.from(rowProfile).sort();
-    const p95Row = quantileSorted(sortedRow, 0.95);
-    const bandThresh = Math.max(inkThreshold / Math.max(width, 1), p95Row * 0.12);
-    const ac = fundamentalAutocorr(rowProfile, minPitchPx, maxPitchPx);
+    const p20Row = quantileSorted(sortedRow, 0.20);
+    // Avoid thresholding against p95Row * 0.12 on wide terminals (e.g. 239 cols), where dense
+    // lines or 1-px full-width rules inflate p95Row and cause short lines (2-10 chars) to lose
+    // their vertical-stem scanlines and shatter into multiple 1-px crossbar fragments.
+    // Instead, require at least minRowPixels active ink pixels above the inter-row gap floor
+    // (skipping 2-px vertical box borders in empty gaps while preserving short text lines).
+    const minRowPixels = Math.max(3, Math.min(6, Math.floor(width * 0.004)));
+    const bandThresh = Math.max((minRowPixels * inkThreshold) / Math.max(width, 1), p20Row * 1.35);
+    const isScanlineActive = (y) =>
+        rowActiveCount[y] >= minRowPixels &&
+        rowProfile[y] >= bandThresh &&
+        rowPeak[y] >= inkThreshold * 1.25;
+
+    // Estimate typical single-row glyph band height from contiguous active runs so that
+    // autocorrelation never mistakes intra-glyph crossbar spacing (< glyph height) for row pitch.
+    /** @type {number[]} */
+    const prelimHeights = [];
+    for (let y = 0; y < height; ) {
+        while (y < height && !isScanlineActive(y)) y++;
+        if (y >= height) break;
+        const s0 = y;
+        while (y < height && isScanlineActive(y)) y++;
+        const h = y - s0;
+        if (h >= 4 && h <= maxPitchPx) prelimHeights.push(h);
+    }
+    prelimHeights.sort((a, b) => a - b);
+    const typicalGlyphHeight = prelimHeights.length >= 2
+        ? quantileSorted(prelimHeights, 0.25)
+        : 0;
+    const effectiveMinPitchPx = Math.max(minPitchPx, Math.round(typicalGlyphHeight * 1.05));
+
+    // Normalize each active scanline by its local (±4 px) vertical row peak before autocorrelation
+    // so short lines (2-8 chars) and full-width lines (200+ chars) both have unit row amplitude
+    // instead of short lines falling below the global mean and correlating negatively.
+    const autocorrProfile = new Float64Array(height);
+    for (let y = 0; y < height; y++) {
+        if (!isScanlineActive(y)) continue;
+        let localMax = 0;
+        const y0 = Math.max(0, y - 4);
+        const y1 = Math.min(height - 1, y + 4);
+        for (let yy = y0; yy <= y1; yy++) {
+            if (rowProfile[yy] > localMax) localMax = rowProfile[yy];
+        }
+        autocorrProfile[y] = localMax > 0 ? rowProfile[y] / localMax : 0;
+    }
+
+    const ac = fundamentalAutocorr(autocorrProfile, effectiveMinPitchPx, maxPitchPx);
 
     // If perspective tilt or a box border merged multiple rows into a giant band
-    // (height > 2.2x the expected/autocorr pitch), split that band at internal valleys.
-    const splitRefPitch = Math.max(minPitchPx, ac.lagPx ?? 8);
+    // (height > 1.60x the expected/autocorr pitch), split that band at internal valleys.
+    const splitRefPitch = Math.max(effectiveMinPitchPx, ac.lagPx ?? 13);
     /** @type {InkRowBand[]} */
     const rawBands = [];
+    const buildBand = (s0, s1) => {
+        const h = s1 - s0 + 1;
+        let wSum = 0, ySum = 0, pk = 0;
+        for (let yy = s0; yy <= s1; yy++) {
+            const w = rowProfile[yy];
+            wSum += w;
+            ySum += yy * w;
+            if (rowPeak[yy] > pk) pk = rowPeak[yy];
+        }
+        return {
+            yStart: s0,
+            yEnd: s1,
+            yCenter: +(ySum / Math.max(wSum, 1e-12)).toFixed(4),
+            height: h,
+            meanInk: +(wSum / h).toFixed(4),
+            peakInk: +pk.toFixed(4),
+        };
+    };
+
     for (let y = 0; y <= height; ) {
-        while (y < height && !(rowProfile[y] >= bandThresh && rowPeak[y] >= inkThreshold * 1.25)) y++;
+        while (y < height && !isScanlineActive(y)) y++;
         if (y >= height) break;
         const bStart = y;
-        while (y < height && (rowProfile[y] >= bandThresh && rowPeak[y] >= inkThreshold * 1.25)) y++;
+        while (y < height && isScanlineActive(y)) y++;
         const bEnd = y - 1;
         const bHeight = bEnd - bStart + 1;
 
         const pushSubBand = (s0, s1) => {
             const h = s1 - s0 + 1;
             if (h < 1 || h > maxPitchPx * 1.5) return;
-            let wSum = 0, ySum = 0, pk = 0;
-            for (let yy = s0; yy <= s1; yy++) {
-                const w = rowProfile[yy];
-                wSum += w;
-                ySum += yy * w;
-                if (rowPeak[yy] > pk) pk = rowPeak[yy];
-            }
-            if (wSum > 0) {
-                rawBands.push({
-                    yStart: s0,
-                    yEnd: s1,
-                    yCenter: +(ySum / wSum).toFixed(4),
-                    height: h,
-                    meanInk: +(wSum / h).toFixed(4),
-                    peakInk: +pk.toFixed(4),
-                });
-            }
+            const band = buildBand(s0, s1);
+            if (band.meanInk > 0) rawBands.push(band);
         };
 
-        if (bHeight <= splitRefPitch * 2.2) {
+        if (bHeight <= splitRefPitch * 1.60) {
             pushSubBand(bStart, bEnd);
         } else {
-            // Find local minima inside [bStart..bEnd] spaced at least minPitchPx*0.75 apart
-            const minStep = Math.max(3, Math.round(splitRefPitch * 0.7));
+            // Find local minima inside [bStart..bEnd] spaced at least splitRefPitch*0.65 apart
+            const minStep = Math.max(3, Math.round(splitRefPitch * 0.65));
             let segStart = bStart;
             let lastPeakVal = rowProfile[bStart];
             for (let yy = bStart + 1; yy < bEnd; yy++) {
@@ -692,32 +763,35 @@ export function measureRowPitch(img, opts = {}) {
         }
     }
 
-    // Merge 1-2 px descender/ascender fragments separated from their parent row by <= 1 px
-    for (let i = rawBands.length - 1; i > 0; i--) {
-        const prev = rawBands[i - 1];
-        const cur = rawBands[i];
-        const gap = cur.yStart - prev.yEnd - 1;
-        if (gap <= 1 && (cur.height <= 2 || prev.height <= 2) && (cur.yEnd - prev.yStart + 1) <= splitRefPitch * 1.15) {
-            const s0 = prev.yStart, s1 = cur.yEnd, h = s1 - s0 + 1;
-            let wSum = 0, ySum = 0, pk = Math.max(prev.peakInk, cur.peakInk);
-            for (let yy = s0; yy <= s1; yy++) {
-                const w = rowProfile[yy];
-                wSum += w;
-                ySum += yy * w;
+    // Merge intra-row fragments (descender loops, underscores, or short-line vertical stems)
+    // that lie within a single glyph cell (gap <= 2 px and combined outer span <= 0.92 * splitRefPitch).
+    const maxIntraGap = Math.max(2, Math.floor(splitRefPitch * 0.20));
+    let mergedAny = true;
+    while (mergedAny) {
+        mergedAny = false;
+        for (let i = rawBands.length - 1; i > 0; i--) {
+            const prev = rawBands[i - 1];
+            const cur = rawBands[i];
+            const gap = cur.yStart - prev.yEnd - 1;
+            const span = cur.yEnd - prev.yStart + 1;
+            if (gap <= maxIntraGap && (cur.height <= 3 || prev.height <= 3) && span <= splitRefPitch * 0.92) {
+                rawBands[i - 1] = buildBand(prev.yStart, cur.yEnd);
+                rawBands.splice(i, 1);
+                mergedAny = true;
             }
-            rawBands[i - 1] = {
-                yStart: s0,
-                yEnd: s1,
-                yCenter: +(ySum / Math.max(wSum, 1e-12)).toFixed(4),
-                height: h,
-                meanInk: +(wSum / h).toFixed(4),
-                peakInk: +pk.toFixed(4),
-            };
-            rawBands.splice(i, 1);
         }
     }
 
-    if (rawBands.length < 2) {
+    // When real multi-scanline glyph rows are present (max height >= 6 px), exclude 1-2 px
+    // horizontal rules / box borders (or bare hyphen/underscore lines) whose vertical center
+    // sits at the rule/crossbar rather than the full glyph cell center. Also exclude unsplit
+    // multi-row solid blocks taller than 1.40x pitch.
+    const maxBandHeight = rawBands.reduce((m, b) => Math.max(m, b.height), 0);
+    const pitchBands = maxBandHeight >= 6
+        ? rawBands.filter((b) => b.height >= 3 && b.height <= splitRefPitch * 1.40)
+        : rawBands;
+
+    if (pitchBands.length < 2) {
         const pitch = ac.lagPx;
         const nearest = pitch !== null ? Math.round(pitch) : null;
         return {
@@ -729,27 +803,43 @@ export function measureRowPitch(img, opts = {}) {
             autocorrStrength: ac.strength,
             integerSnapErrorPx: pitch !== null && nearest !== null ? +Math.abs(pitch - nearest).toFixed(4) : null,
             nearestIntegerPx: nearest,
-            rowCount: rawBands.length,
-            medianBandHeightPx: rawBands.length ? rawBands[0].height : null,
-            rows: rawBands,
-            vacuous: pitch === null,
+            rowCount: pitchBands.length,
+            medianBandHeightPx: pitchBands.length ? pitchBands[0].height : null,
+            rows: pitchBands,
+            vacuous: pitch === null || pitchBands.length < 2,
         };
     }
 
+    const heights = pitchBands.map((b) => b.height).sort((a, b) => a - b);
+    const medianHeight = quantileSorted(heights, 0.5);
+    const minValidDiff = Math.max(minPitchPx * 0.75, medianHeight * 0.95);
+
     const rawDiffs = [];
-    for (let i = 0; i < rawBands.length - 1; i++) {
-        const d = rawBands[i + 1].yCenter - rawBands[i].yCenter;
-        if (d >= minPitchPx * 0.7 && d <= maxPitchPx * 2.2) rawDiffs.push(d);
+    for (let i = 0; i < pitchBands.length - 1; i++) {
+        const d = pitchBands[i + 1].yCenter - pitchBands[i].yCenter;
+        if (d >= minValidDiff && d <= maxPitchPx * 4.5) rawDiffs.push(d);
     }
     rawDiffs.sort((a, b) => a - b);
 
-    // Base single-row pitch estimate from lower-half median or autocorrelation
-    const baseEst = rawDiffs.length
-        ? quantileSorted(rawDiffs, 0.35)
-        : (ac.lagPx ?? 13);
+    // Locate the first (1x single-row) step cluster in rawDiffs and take its unbiased median
+    // (avoiding the 35th-percentile low bias on dense grids and 2x/3x jump on blank-line grids).
+    let baseEst = ac.lagPx ?? 13;
+    if (rawDiffs.length > 0) {
+        const dLo = quantileSorted(rawDiffs, rawDiffs.length >= 6 ? 0.10 : 0.0);
+        const firstCluster = rawDiffs.filter((d) => d >= dLo * 0.85 && d <= dLo * 1.25);
+        baseEst = firstCluster.length ? quantileSorted(firstCluster, 0.50) : quantileSorted(rawDiffs, 0.50);
+        // If every consecutive row pair in the sample was separated by blank lines (2x/3x) while
+        // autocorrelation locked onto the 1x fundamental, de-multiply baseEst to the fundamental.
+        if (ac.lagPx !== null && ac.lagPx >= minPitchPx) {
+            const mult = Math.round(baseEst / ac.lagPx);
+            if (mult >= 2 && mult <= 4 && Math.abs(baseEst - mult * ac.lagPx) <= 0.12 * baseEst) {
+                baseEst = baseEst / mult;
+            }
+        }
+    }
 
-    // Filter to single-row steps (allowing empty-line gaps of 2x pitch to advance line index by 2)
-    const singleDiffs = rawDiffs.filter((d) => d >= baseEst * 0.68 && d <= baseEst * 1.38);
+    // Filter to single-row steps around baseEst
+    const singleDiffs = rawDiffs.filter((d) => d >= baseEst * 0.72 && d <= baseEst * 1.32);
     const stepDiffs = singleDiffs.length ? singleDiffs : rawDiffs;
     stepDiffs.sort((a, b) => a - b);
 
@@ -761,11 +851,12 @@ export function measureRowPitch(img, opts = {}) {
         ? Math.sqrt(stepDiffs.reduce((s, d) => s + (d - meanDiff) ** 2, 0) / stepDiffs.length)
         : 0;
 
-    // Fit line center vs cumulative integer row index across contiguous chains for sub-pixel accuracy
+    // Fit line center vs cumulative integer row index across lattice chains (allowing up to 5
+    // consecutive blank lines, k = 1..6) so blank lines do not break telescope cancellation.
     const refStep = medianDiff ?? ac.lagPx ?? baseEst;
     let sumW = 0, sumSlope = 0;
     let chainIndices = [0];
-    let chainCenters = [rawBands[0].yCenter];
+    let chainCenters = [pitchBands[0].yCenter];
 
     const flushChain = () => {
         if (chainCenters.length < 2) return;
@@ -786,16 +877,17 @@ export function measureRowPitch(img, opts = {}) {
         }
     };
 
-    for (let i = 1; i < rawBands.length; i++) {
-        const dy = rawBands[i].yCenter - rawBands[i - 1].yCenter;
+    for (let i = 1; i < pitchBands.length; i++) {
+        const dy = pitchBands[i].yCenter - pitchBands[i - 1].yCenter;
         const k = Math.round(dy / refStep);
-        if (k >= 1 && k <= 2 && Math.abs(dy - k * refStep) <= 0.32 * refStep) {
+        const tol = k <= 2 ? 0.30 * refStep : Math.min(0.25 * refStep, 2.2);
+        if (k >= 1 && k <= 6 && Math.abs(dy - k * refStep) <= tol) {
             chainIndices.push(chainIndices[chainIndices.length - 1] + k);
-            chainCenters.push(rawBands[i].yCenter);
+            chainCenters.push(pitchBands[i].yCenter);
         } else {
             flushChain();
             chainIndices = [0];
-            chainCenters = [rawBands[i].yCenter];
+            chainCenters = [pitchBands[i].yCenter];
         }
     }
     flushChain();
@@ -803,7 +895,6 @@ export function measureRowPitch(img, opts = {}) {
     const regressedPitch = sumW > 0 ? sumSlope / sumW : (meanDiff ?? ac.lagPx);
     const pitchPx = regressedPitch !== null ? +regressedPitch.toFixed(4) : null;
     const nearestInt = pitchPx !== null ? Math.round(pitchPx) : null;
-    const heights = rawBands.map((b) => b.height).sort((a, b) => a - b);
 
     return {
         pitchPx,
@@ -814,10 +905,10 @@ export function measureRowPitch(img, opts = {}) {
         autocorrStrength: ac.strength,
         integerSnapErrorPx: pitchPx !== null && nearestInt !== null ? +Math.abs(pitchPx - nearestInt).toFixed(4) : null,
         nearestIntegerPx: nearestInt,
-        rowCount: rawBands.length,
-        medianBandHeightPx: heights.length ? +quantileSorted(heights, 0.5).toFixed(2) : null,
-        rows: rawBands,
-        vacuous: pitchPx === null || rawBands.length < 2,
+        rowCount: pitchBands.length,
+        medianBandHeightPx: heights.length ? +medianHeight.toFixed(2) : null,
+        rows: pitchBands,
+        vacuous: pitchPx === null || pitchBands.length < 2,
     };
 }
 
@@ -914,17 +1005,28 @@ function scanLineTransitions(ink, width, height, horizontalScan, minEdgeAmp, ref
                 const gradParticipation = sumG2 > 1e-12 ? (sumG * sumG) / sumG2 : 1;
 
                 // If a 1-px stem [0, 1, 0] was half-pixel shifted to [0, 0.5, 0.5, 0],
-                // its peak is followed/preceded by a flat plateau at half of localRef.
+                // its peak or valley is a 2-pixel plateau at half of localRef (unlike a >=3-px crossbar).
                 const topIdx = sign > 0 ? i1 : i0;
-                const neighborIdx = sign > 0 ? Math.min(innerLen - 1, i1 + 1) : Math.max(0, i0 - 1);
-                const isHalfPeakPlateau =
-                    Math.abs(line[topIdx] - line[neighborIdx]) <= 0.08 * localRef &&
+                const botIdx = sign > 0 ? i0 : i1;
+                const topDir = sign > 0 ? 1 : -1;
+                const botDir = sign > 0 ? -1 : 1;
+                const nbTop1 = Math.max(0, Math.min(innerLen - 1, topIdx + topDir));
+                const nbTop2 = Math.max(0, Math.min(innerLen - 1, topIdx + 2 * topDir));
+                const nbBot1 = Math.max(0, Math.min(innerLen - 1, botIdx + botDir));
+                const nbBot2 = Math.max(0, Math.min(innerLen - 1, botIdx + 2 * botDir));
+                const is2PxPeak =
+                    Math.abs(line[topIdx] - line[nbTop1]) <= 0.08 * localRef &&
+                    Math.abs(line[topIdx] - line[nbTop2]) > 0.12 * localRef &&
                     line[topIdx] < 0.75 * localRef;
-                const peakRefWidth = isHalfPeakPlateau && maxStep > 1e-9
-                    ? Math.min(3.0, (localRef - lo) / maxStep)
+                const is2PxValley =
+                    line[botIdx] > 0.12 * localRef &&
+                    Math.abs(line[botIdx] - line[nbBot1]) <= 0.08 * localRef &&
+                    Math.abs(line[botIdx] - line[nbBot2]) > 0.12 * localRef;
+                const peakRefWidth = (is2PxPeak || is2PxValley) && maxStep > 1e-9
+                    ? Math.min(3.0, localRef / maxStep)
                     : 1.0;
 
-                const effWidth = Math.max(normStep10_90, gradParticipation, peakRefWidth);
+                const effWidth = Math.max(gradParticipation, peakRefWidth);
                 raw10_90.push(span10_90);
                 widths.push(effWidth);
             }
@@ -1015,7 +1117,7 @@ export function measureEdgeCrispness(img, opts = {}) {
     const vMed = vSorted.length ? quantileSorted(vSorted, 0.5) : null;
     const hMed = hSorted.length ? quantileSorted(hSorted, 0.5) : null;
 
-    const twoPxCount = allWidths.filter((w) => w >= 1.35).length;
+    const twoPxCount = allWidths.filter((w) => w >= 1.75).length;
     const sharpCount = allWidths.filter((w) => w <= 1.15).length;
 
     return {
@@ -1148,8 +1250,8 @@ export async function loadAtlasReferenceMetrics(opts = {}) {
                 cellMetrics,
                 cellAdvanceToPitch,
                 shaperAdvanceToPitch,
-                advanceAtRowPitch(rowPitchPx, mode = 'shaper') {
-                    return rowPitchPx * (mode === 'cell' ? cellAdvanceToPitch : shaperAdvanceToPitch);
+                advanceAtRowPitch(rowPitchPx, mode = 'cell') {
+                    return rowPitchPx * (mode === 'shaper' ? shaperAdvanceToPitch : cellAdvanceToPitch);
                 },
             };
         })();
@@ -1409,7 +1511,7 @@ export function measureGlyphScale(img, opts = {}) {
 
     // Resolve expected atlas advance
     const atlas = opts.atlasMetrics || null;
-    const mode = opts.advanceMode ?? 'shaper';
+    const mode = opts.advanceMode ?? 'cell';
     const targetPitch = opts.targetRowPitchPx ?? rowPitch.pitchPx ?? 13;
     const expectedAdvancePx = opts.expectedAdvancePx !== undefined
         ? opts.expectedAdvancePx

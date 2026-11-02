@@ -50,6 +50,8 @@ import { wheelScrollCommand, wheelPageCommand } from './surfaceInteractions.js';
 import { createWheelDetent } from './wheelDetent.js';
 import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
+import PlaneOverlay from './PlaneOverlay.js';
+import MapLabels from './MapLabels.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
 import { registerAllCommands } from '../commands/handlers/index.js';
@@ -263,6 +265,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/services/tour/TourSequencer.js').default|null} */ _tourSequencer: null,
     /** @type {{sim: import('@glyph3d/core/hand/HandSim.js').default, timer: ReturnType<typeof setInterval>, mode?: string}|null} */ _handSim: null,
     /** @type {Map<string, import('@glyph3d/core/collections/TerminalGrid.js').default>|null} */ terminals: null,
+    /** @type {import('./PlaneOverlay.js').default|null} */ planeOverlay: null,
+    /** @type {import('./MapLabels.js').default|null} */ mapLabels: null,
   };
 }
 
@@ -323,6 +327,7 @@ function DockRunner({ stateRef }) {
     c?.handCalib?.update(state.camera);
     // Far-LOD last: every system above has moved what it moves this frame.
     c?.glyphFarLod?.update(state.camera, state.size.height);
+    c?.mapLabels?.update(state.camera, dt);
   });
   return null;
 }
@@ -465,7 +470,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     state.ctx.panelBatch = new PanelBatch(scene);
     // Labels (book tabs, nameplates, dock titles) draw as ranges of one glyph field, one draw for all.
     state.ctx.glyphBatch = new GlyphBatch(scene, atlas);
+    state.ctx.planeOverlay = new PlaneOverlay(state.ctx);
+    state.ctx.mapLabels = new MapLabels(state.ctx);
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
+    applyGroupSettings(state.ctx, 'Labels');             // fold persisted map-label declutter dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns
     applyGroupSettings(state.ctx, 'Display & glyph LOD'); // fold the persisted greek size into the global glyph uniforms at boot
@@ -899,6 +907,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
+      state.ctx.mapLabels?.dispose?.();
+      state.ctx.mapLabels = null;
+      state.ctx.planeOverlay?.dispose?.();
+      state.ctx.planeOverlay = null;
       state.ctx.glyphBatch?.dispose();      // chained after the panel batch's hook: unhook it first
       state.ctx.glyphBatch = null;
       state.ctx.panelBatch?.dispose();     // unhooks scene.onBeforeRender — a second boot must not chain a second batch
