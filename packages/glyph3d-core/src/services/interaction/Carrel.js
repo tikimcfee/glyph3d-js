@@ -317,6 +317,8 @@ export class Carrel extends THREE.Object3D {
         entry.unsubscribeResize = grid.onResize?.(() => this.reflow(id)) ?? null;
 
         this.entries.set(id, entry);
+        // A member may dress for the desk it joins (a book takes its scroll form on a plane).
+        grid.onDeskMode?.(this.mode, this);
         this._relearnSeats();   // a member joining is a structural moment — every seat re-learns
         this._relayout();
         // Immediate seating: place the member AT its seat and drop the slide tweens
@@ -527,6 +529,7 @@ export class Carrel extends THREE.Object3D {
         this.mode = mode;
         this._remeasureSeats();
         if (was === 'plane') for (const e of this.entries.values()) this._unpane(e);
+        for (const e of this.entries.values()) e.grid.onDeskMode?.(mode, this);
         if (mode === 'plane') this._seedTiles();
         this._relayout();
         return true;
