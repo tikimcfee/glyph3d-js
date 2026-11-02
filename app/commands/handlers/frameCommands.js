@@ -478,6 +478,24 @@ export default function registerFrameCommands(router) {
         };
     }, { description: 'Re-dice a FrameGrid into a new cell grid (live)', usage: '<id> <COLSxROWS>' });
 
+    router.register('frame.filter', (args, ctx) => {
+        const id = args[0];
+        const mode = String(args[1] ?? '').toLowerCase();
+        if (!id || (mode !== 'nearest' && mode !== 'linear')) {
+            return { text: 'ERR: usage: frame.filter <id> <nearest|linear>', data: null };
+        }
+        const grid = ctx.registry?.get(id)?.grid;
+        if (!grid || typeof grid.setOneToOne !== 'function') {
+            return { text: `ERR: no FrameGrid "${id}"`, data: null };
+        }
+        const oneToOne = mode === 'nearest';
+        grid.setOneToOne(oneToOne);
+        return {
+            text: `OK: "${id}" filter → ${mode} (oneToOne=${oneToOne})`,
+            data: { id, filter: mode, oneToOne: grid.oneToOne },
+        };
+    }, { description: 'Set texture sampling filter on a FrameGrid (nearest = 1:1 crisp, linear = bilinear)', usage: '<id> <nearest|linear>' });
+
     // ── Observability + lifecycle: CLI/bus control of capture state, mirroring the
     //    terminal.* roster verbs. These ride only the registry (no interaction/scale
     //    layer), so they're independent of the chrome/dock work. The richer per-capture

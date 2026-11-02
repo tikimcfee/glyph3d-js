@@ -21,13 +21,16 @@
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { openApp, webgpuArgs, makeAssert } from './itest/driver.mjs';
+import { readPng, writePng, cropImage } from './lib/pixel-metrics.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
+const CLI_BIN = path.join(REPO_ROOT, 'glyph3d-cli');
 
 function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -151,6 +154,423 @@ async function readFrameQuadrants(app, frameId) {
       status: g.getStreamStatus?.() || null,
     };
   }, frameId);
+}
+
+/**
+ * Sleep helper for live display polling.
+ * @param {number} ms
+ */
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Run a one-shot `./glyph3d-cli` command against the live display.
+ * @param {string[]} args
+ * @param {{ port?: number, json?: boolean, timeout?: number }} [opts]
+ */
+function runCli(args, { port = 8080, json = false, timeout = 25000 } = {}) {
+  const cliArgs = ['--port', String(port), '--as', '', ...(json ? ['--json'] : []), ...args];
+  return execFileSync(CLI_BIN, cliArgs, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * Run a `./glyph3d-cli --json` command and parse its JSON reply.
+ * @param {string[]} args
+ * @param {{ port?: number, timeout?: number }} [opts]
+ */
+function runCliJson(args, opts = {}) {
+  const out = runCli(args, { ...opts, json: true }).trim();
+  if (!out || out.startsWith('OK:')) return null;
+  return JSON.parse(out);
+}
+
+/**
+ * Capture a screenshot PNG from the live display via `./glyph3d-cli screenshot -o <outPath>`.
+ * @param {string} outPath
+ * @param {number} port
+ */
+function captureLiveShot(outPath, port) {
+  execFileSync(CLI_BIN, ['--port', String(port), '--as', '', 'screenshot', '-o', outPath], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: 25000,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * Compare two RGBA images of identical dimensions pixel-by-pixel across RGB channels.
+ * @param {{ width: number, height: number, data: Uint8Array }} got
+ * @param {{ width: number, height: number, data: Uint8Array }} want
+ */
+function compareRgbaExact(got, want) {
+  assert.equal(got.width, want.width, `image width mismatch (${got.width} vs ${want.width})`);
+  assert.equal(got.height, want.height, `image height mismatch (${got.height} vs ${want.height})`);
+  let maxDelta = 0;
+  let sumDelta = 0;
+  let mismatchOver1 = 0;
+  let greyCheckerPixels = 0;
+  let worst = null;
+  const totalPixels = got.width * got.height;
+
+  for (let y = 0; y < got.height; y++) {
+    for (let x = 0; x < got.width; x++) {
+      const idx = (y * got.width + x) * 4;
+      const gr = got.data[idx], gg = got.data[idx + 1], gb = got.data[idx + 2];
+      const wr = want.data[idx], wg = want.data[idx + 1], wb = want.data[idx + 2];
+      const dr = Math.abs(gr - wr);
+      const dg = Math.abs(gg - wg);
+      const db = Math.abs(gb - wb);
+      const d = Math.max(dr, dg, db);
+      sumDelta += d;
+      if (d > 1) mismatchOver1++;
+      if ((wr === 0 || wr === 255) && gr >= 60 && gr <= 195) {
+        greyCheckerPixels++;
+      }
+      if (d > maxDelta) {
+        maxDelta = d;
+        worst = { x, y, got: [gr, gg, gb], want: [wr, wg, wb], delta: d };
+      }
+    }
+  }
+  return {
+    width: got.width,
+    height: got.height,
+    totalPixels,
+    maxDelta,
+    meanDelta: +(sumDelta / Math.max(1, totalPixels)).toFixed(4),
+    mismatchOver1,
+    greyCheckerPixels,
+    worst,
+  };
+}
+
+/**
+ * Build a deterministic 240×160 HTML data URL with crisp pixel-aligned text,
+ * a 1-px black/white checkerboard, and 4-quadrant reference blocks.
+ */
+function buildSharpDesktopDataUrl(w = 240, h = 160) {
+  const html = [
+    '<!doctype html><html><head><meta charset="utf-8">',
+    `<style>html,body{margin:0;padding:0;width:${w}px;height:${h}px;overflow:hidden;background:#000;}canvas{display:block;}</style>`,
+    `</head><body><canvas id="c" width="${w}" height="${h}"></canvas><script>`,
+    'const cv = document.getElementById("c");',
+    'const g = cv.getContext("2d");',
+    'const W = cv.width, H = cv.height, halfW = W >> 1, halfH = H >> 1;',
+    'const img = g.createImageData(W, H);',
+    'const d = img.data;',
+    'const putPx = (x, y, r, gr, b) => {',
+    '  if (x < 0 || x >= W || y < 0 || y >= H) return;',
+    '  const o = (y * W + x) * 4;',
+    '  d[o] = r; d[o + 1] = gr; d[o + 2] = b; d[o + 3] = 255;',
+    '};',
+    // Top-left (0..halfW-1, 0..halfH-1): dark slate plate for crisp 1-px pixel-font text
+    // Top-right (halfW..W-1, 0..halfH-1): 4-quadrant color reference (TL red, TR green, BL blue, BR white)
+    // Bottom half (0..W-1, halfH..H-1): 1-px black/white checkerboard
+    'const qW = (W - halfW) >> 1, qH = halfH >> 1;',
+    'for (let y = 0; y < H; y++) {',
+    '  for (let x = 0; x < W; x++) {',
+    '    if (y >= halfH) {',
+    '      const v = ((x + y) & 1) ? 255 : 0;',
+    '      putPx(x, y, v, v, v);',
+    '    } else if (x < halfW) {',
+    '      putPx(x, y, 16, 24, 32);',
+    '    } else {',
+    '      const rx = x - halfW;',
+    '      if (y < qH && rx < qW) putPx(x, y, 255, 0, 0);',
+    '      else if (y < qH) putPx(x, y, 0, 255, 0);',
+    '      else if (rx < qW) putPx(x, y, 0, 0, 255);',
+    '      else putPx(x, y, 255, 255, 255);',
+    '    }',
+    '  }',
+    '}',
+    // Crisp 5×7 bitmap glyph strokes in top-left text panel (exact 1-px stems & bars)
+    'const GLYPHS = {',
+    '  G:[14,17,16,23,17,17,14], L:[16,16,16,16,16,16,31], Y:[17,17,10,4,4,4,4],',
+    '  P:[30,17,17,30,16,16,16], H:[17,17,17,31,17,17,17], D:[30,17,17,17,17,17,30],',
+    '  I:[14,4,4,4,4,4,14], X:[17,17,10,4,10,17,17], E:[31,16,16,30,16,16,31],',
+    '  A:[14,17,17,31,17,17,17], C:[14,17,16,16,16,17,14], T:[31,4,4,4,4,4,4],',
+    '  N:[17,25,21,19,17,17,17], R:[30,17,17,30,20,18,17], O:[14,17,17,17,17,17,14],',
+    '  W:[17,17,17,21,21,21,10], "1":[4,12,4,4,4,4,14], "0":[14,17,19,21,25,17,14],',
+    '  ":":[0,4,4,0,4,4,0], "-":[0,0,0,31,0,0,0], " ":[0,0,0,0,0,0,0]',
+    '};',
+    'const drawLine = (str, x0, y0, r, gr, b) => {',
+    '  for (let i = 0; i < str.length; i++) {',
+    '    const rows = GLYPHS[str[i]] || GLYPHS[" "];',
+    '    for (let ry = 0; ry < 7; ry++) {',
+    '      const bits = rows[ry];',
+    '      for (let rx = 0; rx < 5; rx++) {',
+    '        if ((bits >> (4 - rx)) & 1) putPx(x0 + i * 6 + rx, y0 + ry, r, gr, b);',
+    '      }',
+    '    }',
+    '  }',
+    '};',
+    'drawLine("GLYPH3D 1:1 PIN", 8, 10, 255, 255, 255);',
+    'drawLine("PIXEL EXACT 1:1", 8, 24, 80, 240, 180);',
+    'drawLine("ROW 01: TEXT+CHK", 8, 38, 255, 210, 80);',
+    'drawLine("ROW 02: 1-PX GRID", 8, 52, 180, 220, 255);',
+    'g.putImageData(img, 0, 0);',
+    '</script></body></html>',
+  ].join('');
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+/**
+ * Live Slice 5 felt gate (`bun tools/frame-capture-check.mjs --live [--port 8080]`):
+ *   1. Starts `gate-live-desk` (240×160, sharp pixel text + 1-px checker + 4 quadrants) on `:8080`.
+ *   2. Seats it at a scratch plane desk (`gate-live-carrel`), enters it (`carrel.enter`),
+ *      takes a screenshot, crops the desktop's pin, and compares against `desktop.still`
+ *      (lossless CDP PNG of the same frame): asserts max channel delta <= 1 at 1 texel = 1 device px.
+ *   3. Teeth: proves BOTH a half-pixel offset AND a linear filter (`frame.filter ... linear`)
+ *      fail the maxDelta <= 1 gate on the live display, then restores 1:1 snap.
+ *   4. Reloads the page (`reload`) and asserts the desktop is back and streaming with NO user
+ *      gesture, recording `reloadToStreamingMs`.
+ *   5. Leaves the camera as found, stops the test desktop, and dissolves the scratch desk.
+ */
+async function runLiveDesktopGate({ port = 8080 } = {}) {
+  const deskId = 'gate-live-desk';
+  const carrelName = 'gate-live-carrel';
+  const W = 240;
+  const H = 160;
+  const carrelPos = { x: 0, y: 500, z: 0 };
+
+  const sessionFile = path.join(REPO_ROOT, '.glyph3d-session.json');
+  const savedSession = fs.existsSync(sessionFile) ? fs.readFileSync(sessionFile, 'utf8') : null;
+
+  let initialPlane = null;
+  let initialCam = null;
+  try {
+    initialPlane = runCliJson(['plane.state'], { port });
+  } catch { /* open world */ }
+  try {
+    initialCam = runCliJson(['camera.info'], { port });
+  } catch { /* ignore */ }
+
+  // Pre-clean any leftover scratch objects from an interrupted run
+  try { runCli(['desktop.stop', deskId], { port }); } catch { /* ignore */ }
+  try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
+  if (savedSession != null) {
+    try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
+  }
+
+  let reloadHappened = false;
+  try {
+    // Ensure the live display has the latest frameCommands (`frame.filter`) loaded before starting
+    const dataUrl = buildSharpDesktopDataUrl(W, H);
+    const startData = runCliJson(['desktop.start', deskId, `${W}x${H}`, '--browser', dataUrl], { port });
+    console.log('live desktop.start →', JSON.stringify(startData));
+    assert.ok(startData && startData.name === deskId, 'desktop.start must return summary');
+    assert.equal(startData.naturalPx?.w, W, `naturalPx.w must be ${W}`);
+    assert.equal(startData.naturalPx?.h, H, `naturalPx.h must be ${H}`);
+    assert.equal(startData.oneToOne, true, 'desktop FrameGrid must default to oneToOne');
+
+    // Create scratch plane carrel at a known world position, seat the desktop, and enter it
+    runCli(['carrel.create', carrelName], { port });
+    runCli(['carrel.move', carrelName, String(carrelPos.x), String(carrelPos.y), String(carrelPos.z)], { port });
+    runCli(['carrel.set', carrelName, 'mode', 'plane'], { port });
+    const addOut = runCli(['carrel.add', deskId, carrelName], { port }).trim();
+    console.log('live carrel.add →', addOut);
+    assert.ok(addOut.startsWith('OK:'), `carrel.add failed: ${addOut}`);
+
+    // Wait for Carrel's 167ms member seating tween (`animDur = 0.167`) to finish
+    await sleep(320);
+
+    const enterData = runCliJson(['carrel.enter', carrelName], { port });
+    console.log('live carrel.enter →', JSON.stringify({
+      name: enterData?.name,
+      mode: enterData?.mode,
+      arrange: enterData?.arrange,
+      focus: enterData?.focus,
+      pxPerUnit: enterData?.pxPerUnit,
+    }));
+
+    // Wait for plane enter lens tween to settle (`tweening: false`)
+    let ps = null;
+    const settleDeadline = Date.now() + 5000;
+    while (Date.now() < settleDeadline) {
+      ps = runCliJson(['plane.state'], { port });
+      if (ps && !ps.tweening) break;
+      await sleep(60);
+    }
+    await sleep(150);
+    ps = runCliJson(['plane.state'], { port });
+    assert.ok(ps && !ps.tweening, 'plane view tween must finish settling');
+    assert.equal(ps.viewport?.exact, true, `live display viewport must be pixel-exact (got ${JSON.stringify(ps.viewport)})`);
+
+    const pl = runCliJson(['pane.list'], { port });
+    const pin = pl?.pins?.find((p) => p.id === deskId);
+    assert.ok(pin, `pane.list must include pin for ${deskId} (got ${JSON.stringify(pl)})`);
+    assert.equal(pin.rect.w, W, `seated desktop pin width must be ${W} device px (1 texel = 1 device px)`);
+    assert.equal(pin.rect.h, H, `seated desktop pin height must be ${H} device px (1 texel = 1 device px)`);
+
+    // Capture lossless CDP PNG still (`desktop.still`) and wait briefly for its 0x03 frame to land
+    const stillData = runCliJson(['desktop.still', deskId], { port });
+    assert.ok(stillData?.pngBase64?.length > 50, 'desktop.still must return lossless PNG bytes');
+    const stillPath = '/tmp/frame-capture-live-still.png';
+    fs.writeFileSync(stillPath, Buffer.from(stillData.pngBase64, 'base64'));
+    const stillImg = readPng(stillPath);
+    assert.equal(stillImg.width, W, `still PNG width must be ${W}`);
+    assert.equal(stillImg.height, H, `still PNG height must be ${H}`);
+    await sleep(180);
+
+    // Compute exact device-pixel crop rectangle for the pin on the live screenshot
+    const boardX = Math.round(ps.viewport.width / 2 + (ps.origin.x - ps.aim.x) * ps.pxPerUnit);
+    const boardY = Math.round(ps.viewport.height / 2 - (ps.origin.y - ps.aim.y) * ps.pxPerUnit);
+    const cropSpec = {
+      x: boardX + pin.rect.x,
+      y: boardY + pin.rect.y,
+      w: pin.rect.w,
+      h: pin.rect.h,
+    };
+
+    const shotPath = '/tmp/frame-capture-live.png';
+    const cropPath = '/tmp/frame-capture-live-crop.png';
+    captureLiveShot(shotPath, port);
+    const shotImg = readPng(shotPath);
+    const pinImg = cropImage(shotImg, cropSpec);
+    writePng(cropPath, pinImg);
+
+    const cmp = compareRgbaExact(pinImg, stillImg);
+    console.log('live 1:1 pin vs desktop.still →', JSON.stringify({
+      crop: cropSpec,
+      maxDelta: cmp.maxDelta,
+      meanDelta: cmp.meanDelta,
+      mismatchOver1: cmp.mismatchOver1,
+      worst: cmp.worst,
+    }));
+    assert.ok(
+      cmp.maxDelta <= 1,
+      `live 1:1 desktop pin must match desktop.still with maxDelta <= 1 (got maxDelta=${cmp.maxDelta} at ${JSON.stringify(cmp.worst)})`,
+    );
+
+    // ── Teeth A: Half-pixel offset fails maxDelta <= 1 ─────────────────────────
+    // Shift the carrel along world +Y (its board up vector) by 0.55 device pixels
+    const dyHalfPx = 0.55 / ps.pxPerUnit;
+    runCli(['carrel.move', carrelName, String(carrelPos.x), String(carrelPos.y + dyHalfPx), String(carrelPos.z)], { port });
+    await sleep(80);
+    const halfPxShotPath = '/tmp/frame-capture-live-tooth-halfpx.png';
+    captureLiveShot(halfPxShotPath, port);
+    const halfPxPin = cropImage(readPng(halfPxShotPath), cropSpec);
+    const toothHalfPx = compareRgbaExact(halfPxPin, stillImg);
+    console.log('live tooth (half-pixel offset) →', JSON.stringify({
+      offsetDevicePx: 0.55,
+      maxDelta: toothHalfPx.maxDelta,
+      meanDelta: toothHalfPx.meanDelta,
+      mismatchOver1: toothHalfPx.mismatchOver1,
+    }));
+    assert.ok(
+      toothHalfPx.maxDelta > 50 && toothHalfPx.mismatchOver1 > 1000,
+      `teeth: half-pixel offset must fail maxDelta <= 1 check (got maxDelta=${toothHalfPx.maxDelta}, mismatchOver1=${toothHalfPx.mismatchOver1})`,
+    );
+
+    // ── Teeth B: LinearFilter (non-1:1 sampling) at half-pixel offset blurs 1-px checker ─
+    const dyExactHalf = 0.5 / ps.pxPerUnit;
+    runCli(['frame.filter', deskId, 'linear'], { port });
+    runCli(['carrel.move', carrelName, String(carrelPos.x), String(carrelPos.y + dyExactHalf), String(carrelPos.z)], { port });
+    await sleep(80);
+    const linearShotPath = '/tmp/frame-capture-live-tooth-linear.png';
+    captureLiveShot(linearShotPath, port);
+    const linearPin = cropImage(readPng(linearShotPath), cropSpec);
+    const toothLinear = compareRgbaExact(linearPin, stillImg);
+    console.log('live tooth (LinearFilter + 0.5px phase) →', JSON.stringify({
+      filter: 'linear',
+      offsetDevicePx: 0.5,
+      maxDelta: toothLinear.maxDelta,
+      meanDelta: toothLinear.meanDelta,
+      mismatchOver1: toothLinear.mismatchOver1,
+      greyCheckerPixels: toothLinear.greyCheckerPixels,
+    }));
+    assert.ok(
+      toothLinear.maxDelta > 50 && toothLinear.greyCheckerPixels > 5000,
+      `teeth: LinearFilter must blur 1-px checker into mid-grey and fail maxDelta <= 1 (got maxDelta=${toothLinear.maxDelta}, greyCheckerPixels=${toothLinear.greyCheckerPixels})`,
+    );
+
+    // Restore nearest filter & carrel position, leave & dissolve scratch carrel before reload
+    runCli(['frame.filter', deskId, 'nearest'], { port });
+    runCli(['carrel.move', carrelName, String(carrelPos.x), String(carrelPos.y), String(carrelPos.z)], { port });
+    await sleep(80);
+    try { runCli(['carrel.leave'], { port }); } catch { /* ignore */ }
+    try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
+    if (savedSession != null) {
+      try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
+    }
+    await sleep(100);
+
+    // ── Reload recovery with NO user gesture ───────────────────────────────────
+    const reloadStart = performance.now();
+    runCli(['reload'], { port });
+    reloadHappened = true;
+    // `reload` schedules `location.reload()` after 200ms; wait 350ms before polling
+    await sleep(350);
+
+    let recoveredStatus = null;
+    const reloadDeadline = Date.now() + 20000;
+    while (Date.now() < reloadDeadline) {
+      try {
+        const st = runCliJson(['frame.status', deskId], { port, timeout: 4000 });
+        if (st && st.live === true && (st.frames ?? 0) >= 1 && st.size?.width === W && st.size?.height === H) {
+          recoveredStatus = st;
+          break;
+        }
+      } catch {
+        // Transient while the browser page reloads and reconnects to the relay
+      }
+      await sleep(100);
+    }
+    const reloadToStreamingMs = Math.round(performance.now() - reloadStart);
+    console.log('live reload recovery (no user gesture) →', JSON.stringify({
+      reloadToStreamingMs,
+      status: recoveredStatus,
+    }));
+    assert.ok(
+      recoveredStatus && recoveredStatus.live === true && (recoveredStatus.frames ?? 0) >= 1,
+      `desktop "${deskId}" must recover and stream after reload with no user gesture (got ${JSON.stringify(recoveredStatus)})`,
+    );
+
+    console.log(
+      `PASS: frame-capture-check --live (1:1 pin maxDelta=${cmp.maxDelta} <= 1, ` +
+      `teeth halfPx maxDelta=${toothHalfPx.maxDelta} FAIL, linear maxDelta=${toothLinear.maxDelta} [greyPx=${toothLinear.greyCheckerPixels}] FAIL, ` +
+      `reload-to-streaming=${reloadToStreamingMs}ms)`,
+    );
+  } finally {
+    // Leave plane view, stop test desktop, dissolve scratch carrel, and restore camera as found
+    try { runCli(['carrel.leave'], { port }); } catch { /* ignore */ }
+    try { runCli(['plane.leave'], { port }); } catch { /* ignore */ }
+    try { runCli(['desktop.stop', deskId], { port }); } catch { /* ignore */ }
+    try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
+    if (savedSession != null) {
+      try { fs.writeFileSync(sessionFile, savedSession); } catch { /* ignore */ }
+    }
+    await sleep(reloadHappened ? 650 : 250);
+    try {
+      const curPlane = runCliJson(['plane.state'], { port });
+      if (!initialPlane && curPlane) {
+        try { runCli(['plane.leave'], { port }); } catch { /* ignore */ }
+        await sleep(500);
+      }
+      if (initialPlane?.target?.startsWith('carrel:')) {
+        const prevCarrel = initialPlane.target.slice('carrel:'.length);
+        try { runCli(['carrel.enter', prevCarrel], { port }); } catch { /* ignore */ }
+      } else if (initialCam?.position) {
+        const { x, y, z } = initialCam.position;
+        try { runCli(['camera.move', String(x), String(y), String(z)], { port }); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+  }
+}
+
+const cliArgv = process.argv.slice(2);
+if (cliArgv.includes('--live')) {
+  const portIdx = cliArgv.indexOf('--port');
+  const livePort = portIdx >= 0 ? Number(cliArgv[portIdx + 1]) : 8080;
+  await runLiveDesktopGate({ port: livePort });
+  process.exit(0);
 }
 
 const browser = await chromium.launch({
@@ -321,6 +741,7 @@ try {
     stdio: 'inherit',
   });
   const relayPort = await getFreePort();
+  const relayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'glyphd-gate-root-'));
   const relayProc = spawn(
     relayBin,
     [
@@ -330,8 +751,9 @@ try {
       '--tmux-socket', `glyphd-gate-${process.pid}`,
       '--port', String(relayPort),
       '--listen', '127.0.0.1',
+      relayRoot,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: relayRoot, stdio: ['ignore', 'pipe', 'pipe'] },
   );
 
   try {
@@ -607,6 +1029,7 @@ try {
   } finally {
     relayProc.kill('SIGTERM');
     fs.rmSync(relayBin, { force: true });
+    fs.rmSync(relayRoot, { recursive: true, force: true });
   }
 
   assert.noErrors(app);
