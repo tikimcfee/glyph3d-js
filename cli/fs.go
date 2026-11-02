@@ -619,6 +619,8 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleAgentEventsRead(write, rawID, params)
 			case "gomux/list":
 				h.handleGomuxList(write, rawID, params)
+			case "agent/say", "agent/approve", "agent/deny":
+				h.handleAgentInput(write, rawID, method, params)
 			default:
 				h.sendRPCError(write, rawID, -32601, "method not found: "+method, nil)
 			}

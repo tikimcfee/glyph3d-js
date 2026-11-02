@@ -317,7 +317,14 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   when the tree, the books and the desks have stopped moving — polled to the same answer three
   times, since the load is part events, part state.
   Verbs: `gomux.list`, `gomux.status`, `gomux.refresh`, `gomux.attach`, `gomux.detach`.
-  Read-only: nothing here types into, starts, or stops an agent.
+  Nothing here starts or stops an agent. Answering is opt-in (Settings ▸ gomuxai `gomux.input`,
+  off by default — read-only): `agent.say <name> <text>` / `agent.approve [name] [--expect <tool>]` /
+  `agent.deny [name]` run gomuxai's own `send` / `approve --expect` / `deny` through the relay
+  (`agent/*` RPCs, `cli/agentinput.go`; never a tmux client), approve only for the tool gomuxai
+  reports pending (unknown → refused); the person's verbs (an identified caller is refused). A
+  printable key on a focused agent screen opens the CommandBar as `agent.say <name> …` (the reply
+  line); the plane prefix's `y` / `n` answer the agent in focus. Gates: `tools/agent-input.test.mjs`,
+  `cli/agentinput_test.go`.
 - **Plane view** (`services/camera/planeView.js`, `ViewerCameraController.enterPlane|leavePlane|
   setPlaneFov`, verbs `plane.enter <target> [cellPx]` / `plane.leave` / `plane.fov` / `plane.aim` /
   `plane.state`): READING a surface pixel-exact. A perspective camera squared to a plane shows it at

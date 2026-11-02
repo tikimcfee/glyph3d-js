@@ -152,6 +152,18 @@ function gridPasteHandler(text, grid) {
 }
 
 /** Tier 1 — deliver the key to whichever entity holds the 'key' slot (greedily when captured). */
+/** Tier 0.5 — the reply line: a printable key on a focused agent SCREEN (its keys go nowhere —
+ *  the screen is a view) opens the CommandBar as `agent.say <name> <that key>`, so the first key
+ *  lands where you looked. Only when answering is on (env.replyAgentFor answers null otherwise). */
+function agentReply(e, env) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return false;
+    const id = env.am?.get?.('key')?.id;
+    const name = id ? env.replyAgentFor?.(id) : null;
+    if (!name) return false;
+    env.exec(['agent.reply', name, e.key]);
+    return true;
+}
+
 function entityTyping(e, env) {
     const slot = env.am?.get?.('key');
     const entity = slot?.entity;
@@ -206,6 +218,8 @@ function planeCommandFor(e) {
         case 'm': return 'pane.layout main';
         case 's': return 'pane.layout stack';
         case 'p': return 'point.mark here';   // `this = <what the cursor is on>` into the CommandBar
+        case 'y': return 'agent.approve';     // the focused agent's permission prompt (gomux.input)
+        case 'n': return 'agent.deny';
         case 'q': case 'Escape': return 'carrel.leave';
         default: return null;
     }
@@ -240,7 +254,7 @@ function planeEscLeave(e, env) {
  *  implicit final tier — it sees only keys NO tier here claimed. captureToggle sits ABOVE typing
  *  so the reserved chord releases capture even while the terminal is greedily eating keys; the
  *  plane prefix sits above typing for the same reason. */
-const HANDLERS = [captureToggle, planePrefix, entityTyping, contextEsc, planeEscLeave, navKeymap];
+const HANDLERS = [captureToggle, planePrefix, agentReply, entityTyping, contextEsc, planeEscLeave, navKeymap];
 
 /** True while a real DOM input owns focus — the whole chain yields so it keeps its own keys. */
 function domInputFocused(doc) {
@@ -266,6 +280,8 @@ function domInputFocused(doc) {
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.planePrefix]
  *   the pane prefix chord (default PLANE_PREFIX = Ctrl+Space) @param {number} [env.planePrefixMs]
  * @param {() => void} [env.noteKey]  told of every keydown, claimed or not (Deixis' typing gate)
+ * @param {(id: string) => string|null} [env.replyAgentFor]  the agent a focused screen answers to,
+ *   when answering agents is on (the reply-line tier), else null
  * @param {Document} [env.document] injectable for tests; defaults to the global
  * @returns {() => void} uninstall
  */

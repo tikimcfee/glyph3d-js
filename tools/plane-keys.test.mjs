@@ -70,7 +70,7 @@ function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
     const table = [
         [['h'], 'pane.focus left'], [['ArrowRight'], 'pane.focus right'], [['k'], 'pane.focus up'], [['j'], 'pane.focus down'],
         [['z'], 'pane.zoom'], [['Tab'], 'carrel.back'], [[']'], 'pane.tab next'], [['['], 'pane.tab prev'], [['x'], 'pane.close'],
-        [['e'], 'pane.layout even'], [['m'], 'pane.layout main'], [['s'], 'pane.layout stack'], [['p'], 'point.mark here'], [['q'], 'carrel.leave'], [['Escape'], 'carrel.leave'],
+        [['e'], 'pane.layout even'], [['m'], 'pane.layout main'], [['s'], 'pane.layout stack'], [['p'], 'point.mark here'], [['y'], 'agent.approve'], [['n'], 'agent.deny'], [['q'], 'carrel.leave'], [['Escape'], 'carrel.leave'],
     ];
     for (const [[key, mods], verb] of table) {
         const h = harness();

@@ -911,6 +911,7 @@ export const SETTINGS = [
   // desks are BORN with (a desk already standing keeps its own — the HUD's Desk section);
   // its ring's radius and rows are Settings ▸ Carrel's cylinder defaults.
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
+  { key: 'gomux.input', label: "Answer agents from here: agent.say / approve / deny run gomuxai's own send / approve / deny through the relay (never a tmux client). Off = read-only", group: 'gomuxai', type: 'bool', default: false },
   { key: 'gomux.autoScreens', label: "Open each live agent's screen beside its book", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.screenGap', label: "Gap between a book and its agent's screen", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 2000, step: 2 },
   { key: 'gomux.teamMode', label: 'An agent’s own desk (its book + live screen, its helpers) is born a — plane (read flat when entered), wall, or ring', group: 'gomuxai', type: 'enum', options: ['plane', 'grid', 'ring'], default: 'plane' },

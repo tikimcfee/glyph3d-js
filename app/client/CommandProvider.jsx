@@ -772,6 +772,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       exec: (cmd) => state.router.execute(cmd),
       planeEntered: () => !!state.ctx.enteredCarrel,
       noteKey: () => state.ctx.deixis?.noteKey(),
+      replyAgentFor: (id) => (getSetting('gomux.input') === true ? state.ctx.gomuxHub?.screenAgent(id) ?? null : null),
       get planePrefixMs() { return Number(getSetting('plane.prefixMs')); },
       gestureEnv: {
         exec: (cmd) => state.router.execute(cmd),

@@ -8,15 +8,29 @@
  *   gomux.attach <name>      the agent's live tmux screen as a terminal, seated beside its book
  *   gomux.detach <name>      close that terminal (the agent's session is untouched)
  *
- * Read-only: these verbs never type into, start, or stop an agent. The screen is a
- * read-only tmux client on the agent's session (cli/gomux.go attachGomuxAgent): keys typed
- * at it go nowhere, and it never resizes the agent's window. Dock it like any terminal
+ *   agent.waiting            the agents gomuxai reports waiting on you, oldest first
+ *   agent.say <name> <text>  answer an agent: gomuxai's `agent send` (typed in at its prompt,
+ *                            held while it's busy, refused at a dialog) — through the relay
+ *   agent.approve <name> [--expect <tool>]   yes to its permission prompt, for the tool the
+ *                            display shows pending (--expect overrides); unknown → refused
+ *   agent.deny <name>        no to its permission prompt (approve / deny: the agent in focus when
+ *                            no name is given — the plane prefix's y / n)
+ *   agent.reply <name> [text] the CommandBar opened as `agent.say <name> …` (a printable key on a
+ *                            focused agent screen runs it: the reply line)
+ *
+ * The answer verbs run gomuxai's own commands through the relay (cli/agentinput.go) — never a
+ * tmux client, never keys of ours — and only when Settings ▸ gomuxai `gomux.input` is on (off by
+ * default: it reverses the hub's read-only rule, docs/planes/DESIGN.md §8 question 1). They are the
+ * PERSON's verbs: an identified caller (an agent) is refused — it has gomuxai's `agent` itself.
+ * Nothing here starts or stops an agent. The screen is a client-less view of the agent's pane
+ * (cli/gomux.go attachGomuxAgent): keys typed at it go nowhere. Dock it like any terminal
  * (`dock.lock gx-<name>`); releasing it returns it to its seat by the book. Framing an agent's book
  * is the ordinary camera verb on its lane: `camera.focus agent:book:<name>`.
  */
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
 import { waitForTerminal } from './terminalCommands.js';
+import { getSetting } from '../../client/settings.js';
 
 const noHub = { text: 'ERR: no gomuxai hub (needs the relay)', data: null };
 
@@ -101,6 +115,66 @@ export default function registerGomuxCommands(router) {
         const lines = waiting.map((w) => `  ${w.name}  ${w.since != null ? `${w.since}s  ` : ''}${w.detail || 'needs you'}${w.toolInput ? `  — ${w.toolInput}` : ''}`);
         return { text: `OK: ${waiting.length} waiting on you\n${lines.join('\n')}`, data: { waiting } };
     }, { description: 'The agents gomuxai reports waiting on you — what for, since when', returns: '{ waiting:[{name, detail, tool, toolInput, since}] }' });
+
+    // ── answering (slice 1b): gomuxai's own send / approve / deny, through the relay ──
+    /** Run one answer through the relay, or say why not. @returns {Promise<{text:string, data:any}>} */
+    const answer = async (ctx, method, params, what) => {
+        if (getSetting('gomux.input') !== true) {
+            return { text: "ERR: answering agents is off — Settings ▸ gomuxai 'gomux.input' (it lets the display send to agents through gomuxai)", data: null };
+        }
+        if (ctx.caller) return { text: `ERR: ${what} is the person's verb — '${ctx.caller}' answers with gomuxai's agent CLI itself`, data: null };
+        const bridge = ctx.wsbridge;
+        if (!bridge?.connected) return { text: 'ERR: not connected to the relay', data: null };
+        let r;
+        try { r = await bridge.rpcRequest(method, params); }
+        catch (e) { return { text: `ERR: ${what}: ${e?.message || e}`, data: null }; }
+        console.info(`[gomux] ${what} ${params.name}: ${r.ok ? 'ok' : `exit ${r.code}`} — ${r.output}`);
+        return r.ok
+            ? { text: `OK: ${r.output || `${what} ${params.name}`}`, data: { ...params, ...r } }
+            : { text: `ERR: gomuxai refused (exit ${r.code}): ${r.output}`, data: { ...params, ...r } };
+    };
+    const known = (ctx, name) => ctx.gomuxHub?.snapshot?.agents.find((x) => x.name === name) ?? null;
+    /** The agent in focus: its screen (gx-<name>) or its book (agent:book:<name>) holds primary. */
+    const focusedAgent = (ctx) => {
+        const id = ctx.attentionManager?.get?.('primary')?.id;
+        if (!id) return null;
+        const screen = ctx.gomuxHub?.screenAgent?.(id);
+        if (screen) return screen;
+        const m = /^agent:book:(.+)$/.exec(id);
+        return m && known(ctx, m[1]) ? m[1] : null;
+    };
+
+    router.register('agent.say', async (args, ctx) => {
+        const [name, ...rest] = args;
+        const text = rest.join(' ');
+        if (!name || !text.trim()) return { text: 'ERR: usage: agent.say <name> <text>', data: null };
+        if (ctx.gomuxHub && !known(ctx, name) && !name.includes('@')) return { text: `ERR: no gomuxai agent '${name}'`, data: null };
+        return answer(ctx, 'agent/say', { name, text }, 'agent.say');
+    }, { description: "Answer an agent: gomuxai's `agent send` — typed in at its prompt, held while it's busy, refused at a dialog (needs gomux.input on)", usage: '<name> <text>', returns: '{ name, text, ok, code, output }' });
+
+    router.register('agent.reply', (args, ctx) => {
+        const [name, ...rest] = args;
+        if (!name) return { text: 'ERR: usage: agent.reply <name> [text]', data: null };
+        if (!ctx.deixis) return { text: 'ERR: no CommandBar on this display', data: null };
+        const told = ctx.deixis.draft(`agent.say ${name} ${rest.join(' ')}`);
+        return { text: `OK: replying to ${name}${told ? '' : ' (no CommandBar to receive it)'}`, data: { name, told } };
+    }, { description: 'Open the CommandBar as `agent.say <name> …` — the reply line (a key on a focused agent screen runs it)', usage: '<name> [text]', returns: '{ name, told }' });
+
+    router.register('agent.approve', async (args, ctx) => {
+        const name = args[0] && args[0] !== '--expect' ? args[0] : focusedAgent(ctx);
+        if (!name) return { text: 'ERR: usage: agent.approve [name] [--expect <tool>] — no name, and no agent in focus', data: null };
+        const i = args.indexOf('--expect');
+        const pending = waitingAgents(ctx.gomuxHub).find((w) => w.name === name);
+        const expect = i >= 0 ? String(args[i + 1] ?? '') : (pending?.tool || '');
+        if (!expect) return { text: `ERR: refused — no pending tool known for '${name}' (gomuxai doesn't report it waiting on a permission prompt); look (gomux.status ${name}) and pass --expect <tool>`, data: null };
+        return answer(ctx, 'agent/approve', { name, expect }, 'agent.approve');
+    }, { description: "Yes to an agent's permission prompt — for the tool the display shows pending (--expect overrides); never blind (needs gomux.input on)", usage: '[name] [--expect <tool>]', returns: '{ name, expect, ok, code, output }' });
+
+    router.register('agent.deny', async (args, ctx) => {
+        const name = args[0] || focusedAgent(ctx);
+        if (!name) return { text: 'ERR: usage: agent.deny [name] — no name, and no agent in focus', data: null };
+        return answer(ctx, 'agent/deny', { name }, 'agent.deny');
+    }, { description: "No to an agent's permission prompt — the agent in focus when none is named (needs gomux.input on)", usage: '[name]', returns: '{ name, ok, code, output }' });
 
     router.register('gomux.attach', async (args, ctx) => {
         const hub = ctx.gomuxHub;
