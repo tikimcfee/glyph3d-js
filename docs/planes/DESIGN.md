@@ -446,7 +446,9 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
   parent, then the rest — rows never reshuffle as the camera moves), or by bearing (`strip.order
   bearing`: the ring unrolled). The wheel over the list scrolls it, never the view; its header (or
   `strip.collapse on|off|toggle`, durable as `strip.collapsed`) folds it to a thin bar, and the plane's
-  reserved column gives the room back. The focused pin is cleared of the band when the reserve changes
+  reserved column gives the room back. Each row's name sits on its own line under its card, inside the
+  band (the hub prefix dropped, the tree depth a small guide mark; a long name shrinks or wraps, never
+  cut), every card one width (`strip.widthPx`). The focused pin is cleared of the band when the reserve changes
   (a desk entered, the band's width, collapse or expand) and when a pin hop lands on it, never per frame:
   a pan that slides it under the band is the person's. It reads Holding membership; it is not a second roster.
 - **Locus hints, since lines, visit marks**: later dials, born when a pixel asks.

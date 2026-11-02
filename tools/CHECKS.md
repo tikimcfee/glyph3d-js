@@ -541,7 +541,9 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   left-edge collapsible, scrollable list of every desk's card, open world and plane alike: desk-tree
   order (`strip.order tree`, team desks indented; camera moves never reshuffle it) or bearing, the
   entered desk highlighted in place, `strip.collapse` + the header (durable `strip.collapsed`; the plane
-  reserve shrinks to 0 collapsed), scroll offset clamped and kept, waiting badges, off-screen deixis and waiting edge marks, the band reserved so a surface's
+  reserve shrinks to 0 collapsed), scroll offset clamped and kept, row labels (each on its own line
+  under its card, inside the band at every scroll, overlapping no card or label, never truncated: a long
+  name shrinks or wraps at a delimiter; cards one width at every depth, `strip.widthPx`), waiting badges, off-screen deixis and waiting edge marks, the band reserved so a surface's
   column 0 lands right of it, `carrel.neighbor <h|l|j|k|parent|child>`) and carrel impostor cards
   (`CarrelCards`: an FBO capture on `CARD_LAYER = 29` that dirties neither GlyphBatch nor PanelBatch,
   an LRU pool cap, world-scaled nested-desk native px, render-target sizes validated at the seam; the

@@ -303,15 +303,34 @@ try {
             };
             await exec('carrel.create gomux');
             await exec(`carrel.add ${await openNextFile()} gomux`);
-            for (const tName of ['gomux/team-ui', 'gomux/team-core', 'gomux/team-net']) {
+            const depth1 = [
+                'gomux/glyph3d-root-delegate',
+                'gomux/agy-makepad-integration',
+                'gomux/glyph3d-js-root',
+                'gomux/gomuxai-host-a',
+                'gomux/claude-makepad-integration',
+            ];
+            for (const tName of depth1) {
                 await exec(`carrel.create ${tName}`);
                 await exec(`carrel.add ${await openNextFile()} ${tName}`);
                 const hub = ctx.carrels.get('gomux');
                 const child = ctx.carrels.get(tName);
                 if (hub && child) hub.lock(child.name, child, { immediate: true });
             }
-            for (let i = 1; i <= 8; i++) {
-                const dName = `desk-extra-${i}`;
+            const depth2 = [
+                'gomux/glyph3d-js-root-desktop',
+                'gomux/glyph3d-js-root-pixels',
+                'gomux/glyph3d-js-root-camera',
+                'gomux/glyph3d-js-root-scroll',
+            ];
+            for (const tName of depth2) {
+                await exec(`carrel.create ${tName}`);
+                await exec(`carrel.add ${await openNextFile()} ${tName}`);
+                const parent = ctx.carrels.get('gomux/glyph3d-js-root');
+                const child = ctx.carrels.get(tName);
+                if (parent && child) parent.lock(child.name, child, { immediate: true });
+            }
+            for (const dName of ['glyph3d-root-delegate-idx-makepad-fit', 'desk-extra-1']) {
                 await exec(`carrel.create ${dName}`);
                 await exec(`carrel.add ${await openNextFile()} ${dName}`);
             }
@@ -329,6 +348,18 @@ try {
         check(
             scrollSetup.maxScrollPx > 0 && scrollSetup.cards.length >= 12,
             `Populated ${scrollSetup.cards.length} desks in tree order with maxScrollPx=${scrollSetup.maxScrollPx} > 0`
+        );
+        const allLabelsInBand = scrollSetup.cards
+            .filter((c) => c.shown)
+            .every((c) => (
+                c.labelRect &&
+                c.labelRect.x >= 0 &&
+                c.labelRect.x + c.labelRect.w <= scrollSetup.stripRightPx &&
+                c.labelRect.y >= c.rect.y + c.rect.h
+            ));
+        check(
+            allLabelsInBand,
+            `Every visible strip label in real browser sits below its card and inside stripRightPx=${scrollSetup.stripRightPx}`
         );
 
         const shotDir = process.env.STRIP_SCREENSHOT_DIR || '';
@@ -396,6 +427,11 @@ try {
         );
 
         if (shotDir) {
+            await app.evalPage(() => {
+                const strip = window.__glyphClient.ctx.strip;
+                strip.setScroll(strip.maxScrollPx());
+            });
+            await app.waitFor(200);
             await app.page.screenshot({ path: path.join(shotDir, 'strip-scrolled.png') });
         }
 
@@ -473,6 +509,17 @@ try {
                     && afterHeaderExpand.cardCountInOverlay > 0,
                 `Clicking strip:header again expands strip (collapsed=${afterHeaderExpand.collapsed}, stripRightPx=${afterHeaderExpand.stripRightPx}, overlayCards=${afterHeaderExpand.cardCountInOverlay})`
             );
+
+            if (shotDir) {
+                await app.evalPage(async () => {
+                    const ctx = window.__glyphClient.ctx;
+                    await window.__glyphClient.router.execute('carrel.enter "gomux/glyph3d-js-root"');
+                    ctx.strip.setScroll(0);
+                    ctx.strip.update();
+                });
+                await app.waitFor(800);
+                await app.page.screenshot({ path: path.join(shotDir, 'strip-labels-plane.png') });
+            }
         }
     }
 

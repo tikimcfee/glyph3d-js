@@ -28,7 +28,7 @@
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
 import CarrelCards from '../packages/glyph3d-core/src/collections/CarrelCards.js';
-import PlaneOverlay from '../app/client/PlaneOverlay.js';
+import PlaneOverlay, { measureOverlayText } from '../app/client/PlaneOverlay.js';
 import Deixis from '../app/client/Deixis.js';
 import { getSetting, setSetting } from '../app/client/settings.js';
 import registerPlaneCommands from '../app/commands/handlers/planeCommands.js';
@@ -39,6 +39,7 @@ import {
     rollSeat,
     carrelBearingFrom,
     orderCarrelsForStrip,
+    layoutStripLabel,
     resolveCarrelNeighbor,
     registerStripCommands,
 } from '../app/client/Strip.js';
@@ -438,8 +439,13 @@ console.log('=== strip.test.mjs ===');
     const gomuxCard = st.cards[0];
     const alphaCard = st.cards[1];
     check(
-        alphaCard.depth === 1 && alphaCard.parent === 'gomux' && alphaCard.rect.x > gomuxCard.rect.x && (alphaCard.rect.x + alphaCard.rect.w) === (gomuxCard.rect.x + gomuxCard.rect.w),
-        `nested team desk 'gomux/alpha' has depth=1, parent='gomux', and indented left edge (${alphaCard.rect.x} > ${gomuxCard.rect.x})`
+        alphaCard.depth === 1 &&
+        alphaCard.parent === 'gomux' &&
+        alphaCard.rect.x === gomuxCard.rect.x &&
+        alphaCard.rect.w === gomuxCard.rect.w &&
+        alphaCard.labelText.startsWith('└ ') &&
+        alphaCard.labelRect.x > gomuxCard.labelRect.x,
+        `nested team desk 'gomux/alpha' has depth=1, parent='gomux', uniform card width (${alphaCard.rect.w} === ${gomuxCard.rect.w}), and guide-indented label (${alphaCard.labelRect.x} > ${gomuxCard.labelRect.x})`
     );
 
     // Move and rotate camera + switch entered desk: tree order must NOT reshuffle!
@@ -879,6 +885,215 @@ console.log('=== strip.test.mjs ===');
     check(lastScrolled.inView === true && overlay.items.has(`strip:card:${lastScrolled.name}`), `at maxScrollPx, last desk '${lastScrolled.name}' is inView and in overlay.items`);
     overlay.clickAt(lastScrolled.rect.x + lastScrolled.rect.w / 2, lastScrolled.rect.y + lastScrolled.rect.h / 2);
     check(ctx.enteredCarrel === lastScrolled.name, `clicking scrolled-into-view last desk enters '${lastScrolled.name}' (got '${ctx.enteredCarrel}')`);
+}
+
+// ----------------------------------------------------------------------------
+// 9. Strip row labels: own line below card (no label/card overlap), every label
+//    rect inside the band [0, stripRightPx], uniform card widths across tree
+//    depths, zero glyph truncation ('…' banned), and longest real names fit.
+//    Teeth: legacy unshrunk 11px inside-card labels with depth-shrunk card width.
+// ----------------------------------------------------------------------------
+{
+    const vpW = 1912, vpH = 942;
+    const { ctx, router, scene, carrels } = makeTestContext(vpW, vpH);
+    const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
+    ctx.planeOverlay = overlay;
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
+    ctx.strip = strip;
+
+    const unit = makePlaneUnit();
+    const hub = new Carrel({ name: 'gomux', mode: 'ring', seat: 'natural', radius: 40 });
+    scene.add(hub);
+    carrels.set('gomux', hub);
+
+    // A real desk tree (depth 1 under gomux, depth 2 under gomux/glyph3d-js-root, plus standalone long desk)
+    const depth1Desks = [
+        'gomux/glyph3d-root-delegate',
+        'gomux/agy-makepad-integration',
+        'gomux/glyph3d-js-root',
+        'gomux/gomuxai-host-a',
+        'gomux/claude-makepad-integration',
+    ];
+    for (const [idx, dName] of depth1Desks.entries()) {
+        const d = new Carrel({ name: dName, mode: 'plane', radius: 10 });
+        d.setPlaneUnit(unit);
+        d.lock(`${dName}:m`, makeBoundedMember(`${dName}:m`, 24, 15), { order: 0 });
+        hub.lock(d.name, d, { order: idx });
+        carrels.set(dName, d);
+    }
+
+    const rootTeamDesk = carrels.get('gomux/glyph3d-js-root');
+    const depth2Desks = [
+        'gomux/glyph3d-js-root-desktop',
+        'gomux/glyph3d-js-root-pixels',
+        'gomux/glyph3d-js-root-camera',
+        'gomux/glyph3d-js-root-scroll',
+    ];
+    for (const [idx, dName] of depth2Desks.entries()) {
+        const d = new Carrel({ name: dName, mode: 'plane', radius: 10 });
+        d.setPlaneUnit(unit);
+        d.lock(`${dName}:m`, makeBoundedMember(`${dName}:m`, 24, 15), { order: 0 });
+        rootTeamDesk.lock(d.name, d, { order: idx + 1 });
+        carrels.set(dName, d);
+    }
+    hub.updateWorldMatrix(true, true);
+
+    const longStandaloneName = 'glyph3d-root-delegate-idx-makepad-fit';
+    const longStandalone = new Carrel({ name: longStandaloneName, mode: 'plane', radius: 10 });
+    longStandalone.setPlaneUnit(unit);
+    longStandalone.lock(`${longStandaloneName}:m`, makeBoundedMember(`${longStandaloneName}:m`, 24, 15), { order: 0 });
+    longStandalone.updateWorldMatrix(true, true);
+    scene.add(longStandalone);
+    carrels.set(longStandaloneName, longStandalone);
+
+    await router.execute('carrel.enter "gomux/glyph3d-js-root"');
+    strip.update();
+
+    const rectsOverlap = (a, b) => (
+        a.x < b.x + b.w - 0.5 &&
+        a.x + a.w > b.x + 0.5 &&
+        a.y < b.y + b.h - 0.5 &&
+        a.y + a.h > b.y + 0.5
+    );
+
+    // ---- Teeth: prove legacy 11px single-line inside-card labels + depth-indented cards fail ----
+    {
+        const legacyBandRight = 12 + 148 + 12; // 172 px
+        const legacyDepth2Label = measureOverlayText(
+            null,
+            '└ gomux/glyph3d-js-root-desktop',
+            12 + 2 * 14 + 6,
+            0,
+            11,
+            { color: 0x070d18, opacity: 1.0, hairline: false }
+        );
+        const legacyOverflowPx = (legacyDepth2Label.rect.x + legacyDepth2Label.rect.w) - legacyBandRight;
+        check(
+            legacyOverflowPx > 55,
+            `teeth: legacy unshrunk 11px label for 'gomux/glyph3d-js-root-desktop' overflows the 172px band by ${legacyOverflowPx.toFixed(1)} px into the plane`
+        );
+
+        const legacyLongestLabel = measureOverlayText(
+            null,
+            `└ ${longStandaloneName}`,
+            12 + 14 + 6,
+            0,
+            11,
+            { color: 0x070d18, opacity: 1.0, hairline: false }
+        );
+        check(
+            legacyLongestLabel.rect.x + legacyLongestLabel.rect.w > strip.stripRightPx() + 60,
+            `teeth: legacy unshrunk 11px label for '${longStandaloneName}' overflows even widened band (${(legacyLongestLabel.rect.x + legacyLongestLabel.rect.w).toFixed(1)} > ${strip.stripRightPx()})`
+        );
+
+        const sampleCardRect = { x: 12, y: 100, w: 168, h: 68 };
+        const legacyInsideLabelRect = { x: 18, y: 100 + 68 - 16, w: 140, h: 11 };
+        check(
+            rectsOverlap(sampleCardRect, legacyInsideLabelRect) === true,
+            'teeth: legacy inside-card label rect at y = cardBottom - 16 overlaps the card preview rect'
+        );
+
+        const legacyDepth0W = 148;
+        const legacyDepth1W = 148 - 14;
+        const legacyDepth2W = 148 - 28;
+        check(
+            legacyDepth2W < legacyDepth1W && legacyDepth1W < legacyDepth0W,
+            `teeth: legacy tree indentation shrank card widths unevenly (${legacyDepth0W}px -> ${legacyDepth1W}px -> ${legacyDepth2W}px)`
+        );
+    }
+
+    // ---- Gate: verify every row at scrollPx=0 and scrollPx=maxScrollPx ----
+    for (const scrollPos of [0, strip.maxScrollPx()]) {
+        strip.setScroll(scrollPos);
+        const st = strip.getState();
+        const stripRight = st.stripRightPx;
+        const gomuxW = st.cards[0].rect.w;
+        const gomuxX = st.cards[0].rect.x;
+
+        // (d) Uniform card width & X across all tree depths
+        const allUniformWidth = st.cards.every((c) => c.rect.x === gomuxX && c.rect.w === gomuxW);
+        check(allUniformWidth, `[scroll=${scrollPos}] every desk card has uniform x=${gomuxX} and width=${gomuxW} across all depths`);
+
+        const visibleCards = st.cards.filter((c) => c.shown);
+        check(visibleCards.length > 0, `[scroll=${scrollPos}] has visible cards (${visibleCards.length})`);
+
+        for (let i = 0; i < visibleCards.length; i++) {
+            const c = visibleCards[i];
+            const lr = c.labelRect;
+            const ovItem = overlay.items.get(`strip:card:${c.name}`);
+            check(Boolean(lr && ovItem?.labelRect), `[scroll=${scrollPos}] '${c.name}' has a measured labelRect`);
+
+            // (a) & (b): Label rect lies 100% inside the strip band [0, stripRightPx] × [0, vpH]
+            const insideBand = (
+                lr.x >= 0 &&
+                lr.x + lr.w <= stripRight &&
+                lr.y >= 0 &&
+                lr.y + lr.h <= vpH &&
+                ovItem.labelRect.x >= 0 &&
+                ovItem.labelRect.x + ovItem.labelRect.w <= stripRight
+            );
+            check(
+                insideBand,
+                `[scroll=${scrollPos}] '${c.name}' labelRect [${lr.x}, ${lr.y}, right=${(lr.x + lr.w).toFixed(1)}, bottom=${(lr.y + lr.h).toFixed(1)}] lies inside band [0, ${stripRight}] × [0, ${vpH}]`
+            );
+
+            // (c): Label sits in its own row below its card — zero overlap with its own card or any other visible card/label
+            check(
+                !rectsOverlap(c.rect, lr) && lr.y >= c.rect.y + c.rect.h,
+                `[scroll=${scrollPos}] '${c.name}' label sits in its own line below its card (card bottom=${c.rect.y + c.rect.h}, label top=${lr.y})`
+            );
+            for (let j = 0; j < visibleCards.length; j++) {
+                if (i === j) continue;
+                const other = visibleCards[j];
+                check(
+                    !rectsOverlap(lr, other.rect),
+                    `[scroll=${scrollPos}] '${c.name}' label does not overlap '${other.name}' card`
+                );
+                check(
+                    !rectsOverlap(lr, other.labelRect),
+                    `[scroll=${scrollPos}] '${c.name}' label does not overlap '${other.name}' label`
+                );
+            }
+
+            // Never truncate glyphs ('…' and character caps are banned)
+            check(
+                !c.labelText.includes('…'),
+                `[scroll=${scrollPos}] '${c.name}' label ('${c.labelText.replace(/\n/g, ' / ')}') has no ellipsis truncation`
+            );
+            const expectedShort = c.name.startsWith('gomux/') ? c.name.slice('gomux/'.length) : c.name;
+            const compactLabel = c.labelText.replace(/\s+/g, '');
+            check(
+                compactLabel.includes(expectedShort),
+                `[scroll=${scrollPos}] '${c.name}' label preserves every character of '${expectedShort}' (got '${c.labelText.replace(/\n/g, '⏎')}')`
+            );
+        }
+    }
+
+    // Specifically verify the longest real names fit inside baseCardW and click-hit on the label row enters the desk
+    strip.setScroll(strip.maxScrollPx());
+    const endState = strip.getState();
+    const longestCard = endState.cards.find((c) => c.name === longStandaloneName);
+    check(
+        Boolean(longestCard && longestCard.shown && longestCard.labelRows === 2 && longestCard.labelRect.x + longestCard.labelRect.w <= endState.stripRightPx),
+        `longest real name '${longStandaloneName}' wraps cleanly onto ${longestCard?.labelRows} lines and fits inside stripRightPx=${endState.stripRightPx} (right=${longestCard ? (longestCard.labelRect.x + longestCard.labelRect.w).toFixed(1) : 'n/a'})`
+    );
+    const labelClickHit = overlay.clickAt(
+        longestCard.labelRect.x + longestCard.labelRect.w * 0.5,
+        longestCard.labelRect.y + longestCard.labelRect.h * 0.5
+    );
+    check(
+        Boolean(labelClickHit) && ctx.enteredCarrel === longStandaloneName,
+        `clicking a desk's label row enters '${longStandaloneName}' (enteredCarrel='${ctx.enteredCarrel}')`
+    );
+
+    // Born-configurable `strip.widthPx` widens the band live when updated
+    const prevRight = strip.stripRightPx();
+    setSetting(ctx, 'strip.widthPx', 196);
+    check(
+        strip.stripRightPx() > prevRight,
+        `born-configurable strip.widthPx widens stripRightPx live (${prevRight} -> ${strip.stripRightPx()})`
+    );
+    setSetting(ctx, 'strip.widthPx', 168);
 }
 
 console.log(`ok strip: ${passed}/${passed + failed} checks passed`);

@@ -505,6 +505,11 @@ export default class PlaneOverlay {
      * @param {boolean} [opts.interactive=true] - whether `hitTest` / `clickAt` can hit this item
      * @param {Function|null} [opts.onClick=null] - click handler `(rec) => void`
      * @param {Object|null} [opts.data=null] - arbitrary metadata (e.g. `{ carrel, waiting, stale }`)
+     * @param {'inside'|'below'|'above'} [opts.titlePosition] - where the title sits relative to the card
+     * @param {number} [opts.titlePx] - title row height in device pixels
+     * @param {number} [opts.titleColor] - title glyph hex color
+     * @param {number} [opts.titleOffsetX] - title left X offset from card left edge in device pixels
+     * @param {number} [opts.titleGapY] - vertical gap between card and below/above title in device pixels
      */
     setCard(id, {
         x = 0,
@@ -524,6 +529,11 @@ export default class PlaneOverlay {
         interactive = true,
         onClick = null,
         data = null,
+        titlePosition,
+        titlePx,
+        titleColor,
+        titleOffsetX,
+        titleGapY,
     } = {}) {
         if (!id) throw new Error('PlaneOverlay.setCard: id is required');
         const atlas = this.atlas ?? this.ctx?.atlas;
@@ -536,6 +546,12 @@ export default class PlaneOverlay {
             this.remove(id);
             rec = null;
         }
+
+        const resolvedTitlePos = titlePosition ?? rec?.titlePosition ?? 'inside';
+        const resolvedTitlePx = Number(titlePx ?? rec?.titlePx ?? 11) || 11;
+        const resolvedTitleColor = titleColor ?? rec?.titleColor ?? 0xe2e8f0;
+        const resolvedTitleOffsetX = Math.round(Number(titleOffsetX ?? rec?.titleOffsetX ?? (resolvedTitlePos === 'inside' ? 6 : 2)));
+        const resolvedTitleGapY = Math.round(Number(titleGapY ?? rec?.titleGapY ?? 3));
 
         if (!this._dotGeo) this._dotGeo = new THREE.PlaneGeometry(1, 1);
 
@@ -587,8 +603,15 @@ export default class PlaneOverlay {
                 interactive: interactive !== false,
                 cols: 0,
                 rows: 0,
+                titlePosition: resolvedTitlePos,
+                titlePx: resolvedTitlePx,
+                titleColor: resolvedTitleColor,
+                titleOffsetX: resolvedTitleOffsetX,
+                titleGapY: resolvedTitleGapY,
+                labelRect: null,
                 textRect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
                 rect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
+                hitRect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
                 object: group,
                 texture: texture || null,
                 onClick,
@@ -626,13 +649,58 @@ export default class PlaneOverlay {
         rec._thumbMesh.visible = !!texture && opacity > 0;
 
         const titleStr = String(title ?? '');
+        const titlePlateCfg = resolvedTitlePos === 'inside'
+            ? { color: 0x070d18, opacity: 1.0, hairline: false }
+            : null;
+        let localY;
+        let labelScreenY;
+        if (resolvedTitlePos === 'below') {
+            localY = -(snapH + resolvedTitleGapY);
+            labelScreenY = snapped.y + snapH + resolvedTitleGapY;
+        } else if (resolvedTitlePos === 'above') {
+            const m0 = measureOverlayText(atlas, titleStr, 0, 0, resolvedTitlePx, titlePlateCfg);
+            const th = m0 ? m0.textRect.h : resolvedTitlePx;
+            localY = resolvedTitleGapY + th;
+            labelScreenY = snapped.y - resolvedTitleGapY - th;
+        } else {
+            const insideY = Math.max(4, Math.round((snapH - resolvedTitlePx) * 0.5));
+            localY = -(snapH - insideY - resolvedTitlePx);
+            labelScreenY = snapped.y + snapH - insideY - resolvedTitlePx;
+        }
+        let labelRect = null;
+        if (titleStr) {
+            const measured = measureOverlayText(
+                atlas,
+                titleStr,
+                snapped.x + resolvedTitleOffsetX,
+                labelScreenY,
+                resolvedTitlePx,
+                titlePlateCfg
+            );
+            rec.cols = measured.cols;
+            rec.rows = measured.rows;
+            labelRect = {
+                x: measured.textRect.x,
+                y: measured.textRect.y,
+                w: measured.textRect.w,
+                h: measured.textRect.h,
+            };
+        } else {
+            rec.cols = 0;
+            rec.rows = 0;
+        }
+
+        if (rec._titleLabel && Boolean(rec._titleLabel._plateCfg) !== Boolean(titlePlateCfg)) {
+            rec._titleLabel.dispose();
+            rec._titleLabel = null;
+        }
         if (!rec._titleLabel && atlas && titleStr) {
             const titleLabel = new FieldLabel({
                 atlas,
                 text: titleStr,
-                lineHeight: 11,
-                textColor: 0xe2e8f0,
-                plate: { color: 0x070d18, opacity: 1.0, hairline: false },
+                lineHeight: resolvedTitlePx,
+                textColor: resolvedTitleColor,
+                plate: titlePlateCfg,
             });
             titleLabel.name = `overlay-card-title:${id}`;
             group.add(titleLabel);
@@ -640,9 +708,11 @@ export default class PlaneOverlay {
         }
         if (rec._titleLabel) {
             if (titleStr && rec._titleLabel.text !== titleStr) rec._titleLabel.setText(titleStr);
+            if (rec._titleLabel.lineHeight !== resolvedTitlePx) rec._titleLabel.setLineHeight(resolvedTitlePx);
+            if (resolvedTitleColor !== rec.titleColor) rec._titleLabel.setTextColor(resolvedTitleColor);
             rec._titleLabel._anchor.position.set(0, 0, 0);
-            rec._titleLabel.position.set(6, -(snapH - 16), 0.6);
-            this._applyLabelOpacity(rec._titleLabel, titleStr ? opacity : 0, { opacity: 1.0 });
+            rec._titleLabel.position.set(resolvedTitleOffsetX, localY, 0.6);
+            this._applyLabelOpacity(rec._titleLabel, titleStr ? opacity : 0, titlePlateCfg);
         }
 
         const badgeStr = String(badge ?? '');
@@ -669,6 +739,17 @@ export default class PlaneOverlay {
 
         setOverlayLayers(group);
 
+        const cardRect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };
+        let hitRect = cardRect;
+        if (labelRect && resolvedTitlePos === 'below') {
+            const bottom = Math.max(cardRect.y + cardRect.h, labelRect.y + labelRect.h);
+            hitRect = { x: cardRect.x, y: cardRect.y, w: cardRect.w, h: bottom - cardRect.y };
+        } else if (labelRect && resolvedTitlePos === 'above') {
+            const top = Math.min(cardRect.y, labelRect.y);
+            const bottom = Math.max(cardRect.y + cardRect.h, labelRect.y + labelRect.h);
+            hitRect = { x: cardRect.x, y: top, w: cardRect.w, h: bottom - top };
+        }
+
         rec.kind = kind;
         rec.x = snapped.x;
         rec.y = snapped.y;
@@ -686,8 +767,15 @@ export default class PlaneOverlay {
         rec.placeholder = Boolean(data?.placeholder ?? !texture);
         rec.onClick = onClick;
         rec.data = data;
-        rec.textRect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };
-        rec.rect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };
+        rec.titlePosition = resolvedTitlePos;
+        rec.titlePx = resolvedTitlePx;
+        rec.titleColor = resolvedTitleColor;
+        rec.titleOffsetX = resolvedTitleOffsetX;
+        rec.titleGapY = resolvedTitleGapY;
+        rec.labelRect = labelRect;
+        rec.textRect = labelRect ? { ...labelRect } : { x: snapped.x, y: snapped.y, w: 0, h: 0 };
+        rec.rect = cardRect;
+        rec.hitRect = hitRect;
 
         return rec;
     }
@@ -845,6 +933,7 @@ export default class PlaneOverlay {
                 opacity: rec.opacity,
                 cols: rec.cols,
                 rows: rec.rows,
+                labelRect: rec.labelRect ? { ...rec.labelRect } : null,
                 textRect: { ...rec.textRect },
                 rect: { ...rec.rect },
                 screenRect: {
@@ -869,7 +958,7 @@ export default class PlaneOverlay {
         let best = null;
         for (const rec of this.items.values()) {
             if (rec.interactive === false || rec.opacity <= 0 || !rec.object?.visible) continue;
-            const r = rec.rect;
+            const r = rec.hitRect || rec.rect;
             if (devX >= r.x && devX <= r.x + r.w && devY >= r.y && devY <= r.y + r.h) {
                 if (!best || rec.z >= best.z) best = rec;
             }

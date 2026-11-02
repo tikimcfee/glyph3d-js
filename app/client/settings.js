@@ -1126,6 +1126,7 @@ export const SETTINGS = [
   { key: 'strip.enabled', label: 'Desk strip', group: 'Labels', type: 'bool', default: true, apply: (ctx, v) => ctx.strip?.configure?.({ enabled: v }) },
   { key: 'strip.collapsed', label: 'Collapse desk strip', group: 'Labels', type: 'bool', default: false, apply: (ctx, v) => ctx.strip?.setCollapsed?.(v, { persist: false }) },
   { key: 'strip.order', label: 'Desk strip order', group: 'Labels', type: 'enum', options: ['tree', 'bearing'], default: 'tree', apply: (ctx, v) => ctx.strip?.configure?.({ order: v }) },
+  { key: 'strip.widthPx', label: 'Desk strip card width (CSS px)', group: 'Labels', type: 'number', default: 168, min: 120, max: 360, step: 4, apply: (ctx, v) => ctx.strip?.configure?.({ cardWidthPx: v }) },
   { key: 'carrel.card.enabled', label: 'Carrel impostor cards', group: 'Labels', type: 'bool', default: true, apply: (ctx, v) => ctx.carrelCards?.configure?.({ enabled: v }) },
   { key: 'carrel.card.budgetMs', label: 'Card capture budget (ms/frame)', group: 'Labels', type: 'number', default: 1.5, min: 0.2, max: 16, step: 0.1, apply: (ctx, v) => ctx.carrelCards?.configure?.({ budgetMs: v }) },
   { key: 'carrel.card.maxBytes', label: 'Card FBO pool cap (bytes)', group: 'Labels', type: 'number', default: 67108864, min: 4194304, max: 268435456, step: 1048576, apply: (ctx, v) => ctx.carrelCards?.configure?.({ maxBytes: v }) },

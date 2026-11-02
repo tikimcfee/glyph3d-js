@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { flowBoxes, squareWrap } from '@glyph3d/core/collections/layouts/flowBoxes.js';
 import { getSetting, setSetting } from './settings.js';
 import { waitingAgents } from '../commands/handlers/gomuxCommands.js';
+import { measureOverlayText, overlayScaleForPx } from './PlaneOverlay.js';
 /** @import Carrel from '@glyph3d/core/services/interaction/Carrel.js' */
 
 const DEG2RAD = Math.PI / 180;
@@ -38,7 +39,7 @@ export const DEFAULT_STRIP_CONFIG = Object.freeze({
     enabled: true,
     collapsed: false,
     order: 'tree',
-    cardWidthPx: 148,
+    cardWidthPx: 168,
     cardMaxHeightPx: 96,
     cardMinHeightPx: 54,
     headerHeightPx: 26,
@@ -757,6 +758,109 @@ export function waitingOnCarrel(ctx, carrel, waitingMap = null) {
     return { count: names.length, names };
 }
 
+/**
+ * Lay out a desk card's label text and size so that:
+ * 1. It NEVER truncates glyphs ('…' and character caps are strictly banned).
+ * 2. Tree depth is shown via a compact prefix guide mark (`└ `, `·└ `) and a small
+ *    label X offset (`offsetX`) rather than shrinking the card preview width.
+ * 3. A long name either shrinks its text size (`px`) to fit on 1 line, or wraps onto
+ *    2 lines at a natural delimiter (`'/'`, `'-'`, `'_'`, `'.'`) or midpoint so its
+ *    measured `textRect` lies 100% inside `baseCardW`.
+ *
+ * @param {Object|null} atlas
+ * @param {string} rawName
+ * @param {number} depth
+ * @param {string|null} parent
+ * @param {'tree'|'bearing'} orderMode
+ * @param {number} baseCardW - device-pixel width of the strip card
+ * @param {number} dpr
+ * @returns {{ displayName: string, text: string, px: number, rows: number, cols: number, width: number, height: number, offsetX: number, gapY: number }}
+ */
+export function layoutStripLabel(atlas, rawName, depth, parent, orderMode, baseCardW, dpr = 1) {
+    const targetName = String(rawName ?? '');
+    const treeDepth = orderMode === 'tree' ? Math.max(0, Number(depth) || 0) : 0;
+
+    let displayName = targetName;
+    if (treeDepth > 0) {
+        if (parent && targetName.startsWith(`${parent}/`)) {
+            displayName = targetName.slice(parent.length + 1);
+        } else {
+            const rootHub = parent ? String(parent).split('/')[0] : '';
+            if (rootHub && targetName.startsWith(`${rootHub}/`)) {
+                displayName = targetName.slice(rootHub.length + 1);
+            }
+        }
+    }
+
+    const prefix = treeDepth <= 0
+        ? ''
+        : (treeDepth === 1 ? '└ ' : `${'·'.repeat(Math.min(treeDepth - 1, 2))}└ `);
+    const offsetX = Math.round((2 + Math.min(treeDepth, 3) * 4) * dpr);
+    const gapY = Math.max(2, Math.round(3 * dpr));
+    const rightPad = Math.max(2, Math.round(2 * dpr));
+    const maxLabelW = Math.max(Math.round(48 * dpr), baseCardW - offsetX - rightPad);
+
+    const basePx = 11 * dpr;
+    const minSinglePx = 9.2 * dpr;
+    const { colPx: colAt1 } = overlayScaleForPx(atlas, 1);
+
+    const singleLine = `${prefix}${displayName}`;
+    const singleCols = [...singleLine].length;
+    const singleFitPx = singleCols > 0 ? (maxLabelW - 1) / (singleCols * colAt1) : basePx;
+
+    let chosenText = singleLine;
+    let chosenPx = Math.min(basePx, singleFitPx);
+
+    if (singleFitPx < minSinglePx && [...displayName].length > 10) {
+        const chars = [...displayName];
+        const len = chars.length;
+        const target = len * 0.5;
+        let bestBreak = -1;
+        let bestDist = Infinity;
+        for (let i = 3; i < len - 3; i++) {
+            const ch = chars[i];
+            if (ch === '-' || ch === '_' || ch === '/' || ch === '.') {
+                const breakAfter = i + 1;
+                const dist = Math.abs(breakAfter - target);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestBreak = breakAfter;
+                }
+            }
+        }
+        if (bestBreak < 0) {
+            bestBreak = Math.ceil(len / 2);
+        }
+        const indentCont = ' '.repeat([...prefix].length);
+        const line1 = `${prefix}${chars.slice(0, bestBreak).join('')}`;
+        const line2 = `${indentCont}${chars.slice(bestBreak).join('')}`;
+        const twoLine = `${line1}\n${line2}`;
+        const twoCols = Math.max([...line1].length, [...line2].length);
+        const twoFitPx = twoCols > 0 ? (maxLabelW - 1) / (twoCols * colAt1) : basePx;
+        chosenText = twoLine;
+        chosenPx = Math.min(10.5 * dpr, twoFitPx);
+    }
+
+    chosenPx = Math.max(5 * dpr, Math.floor(chosenPx * 20) / 20);
+    let measured = measureOverlayText(atlas, chosenText, 0, 0, chosenPx, null);
+    while (measured.textRect.w > maxLabelW && chosenPx > 4 * dpr) {
+        chosenPx = Math.max(4 * dpr, Math.floor((chosenPx - 0.1 * dpr) * 20) / 20);
+        measured = measureOverlayText(atlas, chosenText, 0, 0, chosenPx, null);
+    }
+
+    return {
+        displayName,
+        text: chosenText,
+        px: chosenPx,
+        rows: measured.rows,
+        cols: measured.cols,
+        width: Math.ceil(measured.textRect.w),
+        height: Math.ceil(measured.textRect.h),
+        offsetX,
+        gapY,
+    };
+}
+
 // ============================================================================
 // Strip Controller
 // ============================================================================
@@ -785,6 +889,10 @@ export class Strip {
             const o = getSetting('strip.order');
             if (o === 'tree' || o === 'bearing') this.config.order = o;
         }
+        if (cfgOpts?.cardWidthPx === undefined) {
+            const w = Number(getSetting('strip.widthPx'));
+            if (w > 0) this.config.cardWidthPx = w;
+        }
         this._collapsed = cfgOpts?.collapsed !== undefined
             ? Boolean(cfgOpts.collapsed)
             : Boolean(getSetting('strip.collapsed') ?? DEFAULT_STRIP_CONFIG.collapsed);
@@ -796,7 +904,7 @@ export class Strip {
         this._listViewportHeightPx = 0;
         this._listTopY = 0;
         this._lastHeader = null;
-        /** @type {Array<{name:string, bearing:number, depth:number, parent:string|null, entered:boolean, waitingCount:number, waitingNames:string[], shown:boolean, inView:boolean, rect:{x:number,y:number,w:number,h:number}|null}>} */
+        /** @type {Array<{name:string, bearing:number, depth:number, parent:string|null, entered:boolean, waitingCount:number, waitingNames:string[], shown:boolean, inView:boolean, rect:{x:number,y:number,w:number,h:number}|null, labelRect:{x:number,y:number,w:number,h:number}|null, labelText:string, labelPx:number, labelRows:number}>} */
         this._lastCards = [];
         /** @type {Array<{id:string, kind:'deixis'|'waiting', edge:'left'|'right'|'top'|'bottom', x:number, y:number, text:string}>} */
         this._lastEdgeMarks = [];
@@ -812,10 +920,16 @@ export class Strip {
      */
     configure(opts = {}) {
         if (!opts || typeof opts !== 'object') return;
+        const prevWidth = this.config.cardWidthPx;
         const { collapsed, ...rest } = opts;
         Object.assign(this.config, rest);
         if (collapsed !== undefined) {
             this.setCollapsed(collapsed, { persist: false });
+            return;
+        }
+        if (rest.cardWidthPx !== undefined && this.config.cardWidthPx !== prevWidth) {
+            this.update();
+            this._reaimPlaneForReserveChange();
         }
     }
 
@@ -997,7 +1111,11 @@ export class Strip {
             contentHeightPx: this._contentHeightPx,
             viewportHeightPx: this._listViewportHeightPx,
             header: this._lastHeader ? { ...this._lastHeader, rect: { ...this._lastHeader.rect } } : null,
-            cards: this._lastCards.map((c) => ({ ...c, rect: c.rect ? { ...c.rect } : null })),
+            cards: this._lastCards.map((c) => ({
+                ...c,
+                rect: c.rect ? { ...c.rect } : null,
+                labelRect: c.labelRect ? { ...c.labelRect } : null,
+            })),
             cluster: this._lastCluster ? { ...this._lastCluster } : null,
             edgeMarks: this._lastEdgeMarks.map((m) => ({ ...m })),
         };
@@ -1068,6 +1186,7 @@ export class Strip {
         }
 
         const waitingMap = collectWaitingAgents(ctx);
+        const atlas = overlay.atlas ?? ctx.atlas ?? null;
         const baseCardW = Math.round(this.config.cardWidthPx * dpr);
         const leftX = Math.round(this.config.edgeLeftPx * dpr);
         const topY = Math.round(this.config.edgeTopPx * dpr);
@@ -1075,7 +1194,6 @@ export class Strip {
         const headerGap = Math.round(this.config.headerGapPx * dpr);
         const gapY = Math.round(this.config.cardGapPx * dpr);
         const bottomMargin = Math.round(this.config.edgeBottomPx * dpr);
-        const indentUnitPx = Math.round(this.config.treeIndentPx * dpr);
 
         const listTopY = topY + headerH + headerGap;
         const listBottomY = Math.max(listTopY + Math.round(this.config.cardMinHeightPx * dpr), vpH - bottomMargin);
@@ -1089,9 +1207,9 @@ export class Strip {
         for (const d of orderedDesks) {
             const waitInfo = waitingOnCarrel(ctx, d.carrel, waitingMap);
             for (const wn of waitInfo.names) waitingIdsOnStrip.add(wn);
-            const indentPx = orderMode === 'tree' ? Math.min(d.depth, 3) * indentUnitPx : 0;
-            const cardX = leftX + indentPx;
-            const cardW = Math.max(Math.round(64 * dpr), baseCardW - indentPx);
+            // Cards keep uniform width & left alignment; tree depth shows as a small guide mark on the label row
+            const cardX = leftX;
+            const cardW = baseCardW;
             const pr = d.carrel.getPlaneRect?.();
             const aspect = pr && pr.height > 0 ? pr.width / pr.height : 16 / 10;
             const rawH = Math.round(baseCardW / Math.max(0.5, Math.min(3.0, aspect)));
@@ -1099,6 +1217,8 @@ export class Strip {
                 Math.round(this.config.cardMinHeightPx * dpr),
                 Math.min(Math.round(this.config.cardMaxHeightPx * dpr), rawH)
             );
+            const label = layoutStripLabel(atlas, d.name, d.depth, d.parent, orderMode, baseCardW, dpr);
+            const rowH = cardH + label.gapY + label.height;
             candidates.push({
                 ...d,
                 waitingCount: waitInfo.count,
@@ -1106,9 +1226,11 @@ export class Strip {
                 cardX,
                 cardW,
                 cardH,
+                rowH,
+                label,
                 offsetY: curOffset,
             });
-            curOffset += cardH + gapY;
+            curOffset += rowH + gapY;
         }
 
         const contentHeightPx = candidates.length > 0 ? curOffset - gapY : 0;
@@ -1122,9 +1244,7 @@ export class Strip {
         const totalWaiting = waitingIdsOnStrip.size;
         const chevron = collapsed ? '▶' : '▼';
         const headerTitle = `${chevron} Desks (${candidates.length})`;
-        const headerBadge = totalWaiting > 0
-            ? `${totalWaiting} waiting`
-            : (collapsed && entered ? entered.carrelName : '');
+        const headerBadge = totalWaiting > 0 ? `${totalWaiting} waiting` : '';
         const headerRect = { x: leftX, y: topY, w: baseCardW, h: headerH };
         this._lastHeader = {
             id: 'strip:header',
@@ -1143,6 +1263,8 @@ export class Strip {
             h: headerRect.h,
             title: headerTitle,
             badge: headerBadge,
+            titlePosition: 'inside',
+            titlePx: Math.round(11 * dpr),
             color: 0x0f172a,
             borderColor: totalWaiting > 0 ? 0xf59e0b : 0x475569,
             borderWidth: 1.5,
@@ -1180,6 +1302,10 @@ export class Strip {
                     hasTexture: !!tex,
                     placeholder: !tex,
                     rect: null,
+                    labelRect: null,
+                    labelText: item.label.text,
+                    labelPx: item.label.px,
+                    labelRows: item.label.rows,
                 });
             }
             if (inPlane) {
@@ -1209,14 +1335,16 @@ export class Strip {
         });
 
         const minVisibleCardH = Math.round(24 * dpr);
+        const maxBottomY = vpH - Math.round(4 * dpr);
         for (const item of candidates) {
             const isEntered = Boolean(entered && item.name === entered.carrelName);
+            const labelReserveH = item.label.gapY + item.label.height;
             const rawY = listTopY + item.offsetY - this._scrollPx;
             const rawBottom = rawY + item.cardH;
             const drawY = Math.max(listTopY, rawY);
-            const drawBottom = Math.min(vpH - Math.round(4 * dpr), rawBottom);
+            const drawBottom = Math.min(maxBottomY - labelReserveH, rawBottom);
             const drawH = drawBottom - drawY;
-            const inView = drawH >= minVisibleCardH && rawBottom > listTopY && rawY < vpH - Math.round(4 * dpr);
+            const inView = drawH >= minVisibleCardH && rawBottom > listTopY && rawY < maxBottomY - labelReserveH;
 
             const cardEntry = inView
                 ? (ctx.carrelCards?.ensureCard?.(item.carrel, this.config.cardWidthPx) ?? null)
@@ -1225,10 +1353,13 @@ export class Strip {
             const placeholder = !tex;
 
             const rect = { x: item.cardX, y: inView ? drawY : rawY, w: item.cardW, h: inView ? drawH : item.cardH };
+            const labelRect = {
+                x: rect.x + item.label.offsetX,
+                y: rect.y + rect.h + item.label.gapY,
+                w: item.label.width,
+                h: item.label.height,
+            };
             const targetName = item.name;
-            const shortName = item.depth > 0 && item.parent && targetName.startsWith(`${item.parent}/`)
-                ? `└ ${targetName.slice(item.parent.length + 1)}`
-                : (item.depth > 0 ? `└ ${targetName}` : targetName);
 
             if (inView) {
                 const badge = item.waitingCount > 0
@@ -1248,6 +1379,9 @@ export class Strip {
                     : (placeholder
                         ? 0x475569
                         : (isEntered ? 0x6ee7a0 : 0x3b82f6));
+                const titleColor = item.waitingCount > 0
+                    ? 0xfcd34d
+                    : (isEntered ? 0x6ee7a0 : 0xe2e8f0);
 
                 const cardId = `strip:card:${targetName}`;
                 activeIds.add(cardId);
@@ -1256,7 +1390,12 @@ export class Strip {
                     y: rect.y,
                     w: rect.w,
                     h: rect.h,
-                    title: shortName,
+                    title: item.label.text,
+                    titlePosition: 'below',
+                    titlePx: item.label.px,
+                    titleColor,
+                    titleOffsetX: item.label.offsetX,
+                    titleGapY: item.label.gapY,
                     badge,
                     borderColor,
                     borderWidth: isEntered ? 2.5 : 1.5,
@@ -1277,6 +1416,7 @@ export class Strip {
                         waitingNames: item.waitingNames,
                         placeholder,
                         stale: cardEntry ? cardEntry.stale : true,
+                        labelRect,
                     },
                     onClick: () => this._exec(`carrel.enter ${JSON.stringify(targetName)}`),
                 });
@@ -1295,6 +1435,10 @@ export class Strip {
                 hasTexture: !!tex,
                 placeholder,
                 rect,
+                labelRect,
+                labelText: item.label.text,
+                labelPx: item.label.px,
+                labelRows: item.label.rows,
             });
         }
 
