@@ -197,11 +197,14 @@ export class Carrel extends THREE.Object3D {
          *  a row's height over a column's width. Null until set: a plane desk without it lays out as
          *  a wall. */
         this.planeUnit = null;
-        /** The plane's layout state — PINS: `pins`, the slots in seat order ({id, w, h} device px at
+        /** The desk's layout record. SEATS (ring and wall desks): the seats in order, {id, w, h, ghost}
+         *  world units — a seat is remembered: a leaver's stays a GHOST (its room kept) that a newcomer
+         *  may take, a member not seated yet holds its own, only settle repacks.
+         *  The plane's layout state — PINS: `pins`, the slots in seat order ({id, w, h} device px at
          *  k, grow-only; a leaver's slot stays a ghost until settle) and `focus` (a member); TILES: a
          *  PaneTree over pane ids, each pane a stack of member ids with one active, the `inbox` a
          *  joiner lands in, `focus` (a pane) and `zoomed`. Durable as the desk's Panes. */
-        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null, pins: [] };
+        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null, pins: [], seats: [] };
         /** Told whenever the plane's layout changes (the app persists it as the desk's Panes). */
         this.onPanesChanged = null;
         /** What this desk was BORN as — every knob's value at construction. A desk's own
@@ -351,6 +354,7 @@ export class Carrel extends THREE.Object3D {
 
         this._unpane(e);
         this._unstack(id);
+        this._ghostSeat(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -406,6 +410,7 @@ export class Carrel extends THREE.Object3D {
         if (!e) return null;
         this._unpane(e);
         this._unstack(id);
+        this._ghostSeat(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -427,6 +432,7 @@ export class Carrel extends THREE.Object3D {
         if (!e) return false;
 
         this._unstack(id);
+        this._ghostSeat(id);
         e.unsubscribeResize?.();
         this.entries.delete(id);
         this._relearnSeats();   // a member leaving is a structural moment — every seat re-learns
@@ -519,6 +525,7 @@ export class Carrel extends THREE.Object3D {
         if (mode === this.mode) return false;
         const was = this.mode;
         this.mode = mode;
+        this._remeasureSeats();
         if (was === 'plane') for (const e of this.entries.values()) this._unpane(e);
         if (mode === 'plane') this._seedTiles();
         this._relayout();
@@ -892,6 +899,7 @@ export class Carrel extends THREE.Object3D {
         const next = seat === 'natural' ? 'natural' : 'uniform';
         if (next === this.seat) return false;
         this.seat = next;
+        this._remeasureSeats();
         this._relayout();
         return true;
     }
@@ -943,6 +951,12 @@ export class Carrel extends THREE.Object3D {
      *  its room back) and re-seat — the explicit settle (`carrel.settle`). */
     settle() {
         this._relearnSeats();
+        // Repack the remembered seats: ghosts and never-arrived seats go, the rest take seat order.
+        if (this.panes.seats.length) {
+            this.panes.seats = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+                .map((e) => ({ id: e.id, w: 1e-3, h: 1e-3, ghost: false }));
+            this.onPanesChanged?.();
+        }
         if (this.mode === 'plane' && this.planeArrange === 'pins') {
             // Repack: ghosts go, the pins take SEAT order (a screen right after its book), and every pin
             // re-measures from its member as it stands (it may shrink).
@@ -1075,12 +1089,16 @@ export class Carrel extends THREE.Object3D {
             // seats on the ring. eff is decided here once per member — natural scale
             // (the user zoom passes through) vs contain-fit into the seat box.
             const effs = live.map((e) => (natural ? this._userOf(e) : this._containScale(e, boxW, boxH)));
-            const boxes = natural
+            const liveBoxes = natural
                 ? live.map((e, i) => {
                     const ext = this._extentOf(e);
                     return { w: Math.max(ext.w * effs[i], 1e-3), h: Math.max(ext.h * effs[i], 1e-3) };
                 })
                 : live.map(() => ({ w: boxW, h: boxH }));
+            // STICKY SEATS: lay out over the remembered seats, not the members — a ghost (a leaver)
+            // and a seat whose member isn't seated yet keep their room, so nobody else moves.
+            const seatOf = this._seatMembers(members, live, liveBoxes);
+            const boxes = this.panes.seats.map((st) => ({ w: st.w, h: st.h }));
 
             // A natural ring keeps its radius while its members wrap into up to ringMaxRows
             // rows; past that it widens. The greedy wrap packs unevenly, so the radius is
@@ -1099,9 +1117,9 @@ export class Carrel extends THREE.Object3D {
                     R = hi;
                 }
             }
-            const wrapN = Math.max(live.length, this._expected);
+            const wrapN = Math.max(boxes.length, this._expected);
             let wrapWidth, W;
-            if (wrapN > live.length) {
+            if (wrapN > boxes.length) {
                 // Fill in progress: synthesize the absentees at the FROZEN average box
                 // and wrap for the whole complement — stable slots while the pour runs.
                 this._expectShape ??= (() => {
@@ -1128,13 +1146,14 @@ export class Carrel extends THREE.Object3D {
             if (!W) W = liveW;
             this._layoutW = W;
             let rows = 1, deepest = 0;
+            for (const s of slots) rows = Math.max(rows, s.row + 1);
             live.forEach((e, i) => {
-                const s = slots[i];
-                rows = Math.max(rows, s.row + 1);
+                const k = seatOf.get(e.id);
+                const s = slots[k];
                 const eff = effs[i];
                 const ext = this._extentOf(e);
                 deepest = Math.max(deepest, ext.d * eff);
-                const cx = (s.x + boxes[i].w / 2) - W / 2;      // slot center, shelf centered on the back
+                const cx = (s.x + boxes[k].w / 2) - W / 2;      // slot center, shelf centered on the back
                 const bottomY = -s.y;                           // rows climb; each rests on its shelf line
                 let sx, sz;
                 if (grid) {
@@ -1166,6 +1185,54 @@ export class Carrel extends THREE.Object3D {
         this._ringR = grid ? Math.max(this.radius, 1e-3) : R;
         this._refreshChrome();
         this._notifyFootprint();
+    }
+
+    /**
+     * Keep the seat list true for a ring / wall layout: every live member's seat takes its measured
+     * box; a member without a seat takes the first GHOST seat (a leaver's), else a new seat at the
+     * end. Seats of members not seated yet (a restore) hold their room untouched. Says so when the
+     * list changes (the desk's record).
+     * @returns {Map<string, number>} member id → its seat's index @private
+     */
+    _seatMembers(members, live, liveBoxes) {
+        const seats = this.panes.seats;
+        let changed = false;
+        const index = () => new Map(seats.map((st, i) => [st.id, i]));
+        let at = index();
+        for (const e of members) {
+            if (at.has(e.id)) {
+                const st = seats[at.get(e.id)];
+                if (st.ghost) { st.ghost = false; changed = true; }   // a leaver came back to its own seat
+                continue;
+            }
+            const g = seats.findIndex((st) => st.ghost);
+            if (g >= 0) seats[g] = { id: e.id, w: seats[g].w, h: seats[g].h, ghost: false };
+            else seats.push({ id: e.id, w: 1e-3, h: 1e-3, ghost: false });
+            changed = true;
+            at = index();
+        }
+        live.forEach((e, i) => {
+            // A member that states its room (claimsSeat — a framed book, a desk) is seated as stated.
+            // Any other's seat only grows (until settle): shrinking keeps its room, so its neighbors
+            // never move; outgrowing it moves only the seats after it.
+            const st = seats[at.get(e.id)];
+            if (e.grid.claimsSeat) { st.w = liveBoxes[i].w; st.h = liveBoxes[i].h; return; }
+            if (liveBoxes[i].w > st.w) st.w = liveBoxes[i].w;
+            if (liveBoxes[i].h > st.h) st.h = liveBoxes[i].h;
+        });
+        if (changed) this.onPanesChanged?.();
+        return at;
+    }
+
+    /** A shape change re-measures every seat (their boxes meant something else); order is kept. @private */
+    _remeasureSeats() {
+        for (const st of this.panes.seats) { st.w = 1e-3; st.h = 1e-3; }
+    }
+
+    /** A member leaving a ring / wall desk leaves its seat as a ghost (its room kept). @private */
+    _ghostSeat(id) {
+        const st = this.panes.seats.find((x) => x.id === id);
+        if (st && !st.ghost) { st.ghost = true; this.onPanesChanged?.(); }
     }
 
     // ===================== plane form =====================
@@ -1220,12 +1287,13 @@ export class Carrel extends THREE.Object3D {
     serializePanes() {
         const P = this.panes;
         const hasTree = !!(P.tree && !P.tree.isEmpty());
-        if (!hasTree && !P.pins.length) return null;
+        if (!hasTree && !P.pins.length && !P.seats.length) return null;
         return {
             tree: hasTree ? P.tree.serialize() : null,
             stacks: hasTree ? [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })) : [],
             inbox: P.inbox, seq: P.seq, focus: P.focus, zoomed: P.zoomed,
             pins: P.pins.map((p) => ({ id: p.id, w: p.w, h: p.h })),
+            seats: P.seats.map((st) => ({ id: st.id, w: st.w, h: st.h, ghost: !!st.ghost })),
         };
     }
 
@@ -1239,6 +1307,12 @@ export class Carrel extends THREE.Object3D {
         if (!rec || typeof rec !== 'object' || !Array.isArray(rec.stacks) || (rec.pins != null && !Array.isArray(rec.pins))) {
             throw new Error(`Carrel.applyPanes(${this.carrelName}): malformed record ${JSON.stringify(rec)?.slice(0, 200)}`);
         }
+        if (rec.seats != null && !Array.isArray(rec.seats)) throw new Error(`Carrel.applyPanes(${this.carrelName}): seats must be a list`);
+        const seats = (rec.seats || []).map((st) => {
+            if (typeof st?.id !== 'string' || !(st.w > 0) || !(st.h > 0)) throw new Error(`Carrel.applyPanes(${this.carrelName}): seat ${JSON.stringify(st)} is malformed`);
+            return { id: st.id, w: st.w, h: st.h, ghost: !!st.ghost };
+        });
+        this.panes.seats = seats;
         const pins = (rec.pins || []).map((p) => {
             if (typeof p?.id !== 'string' || !(p.w >= 0) || !(p.h >= 0)) throw new Error(`Carrel.applyPanes(${this.carrelName}): pin ${JSON.stringify(p)} is malformed`);
             return { id: p.id, w: p.w, h: p.h };

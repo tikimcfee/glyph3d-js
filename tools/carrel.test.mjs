@@ -470,7 +470,25 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     const g = makeGrid(10, 6); scene.add(g);
     c.lock('g', g, { immediate: true }); settle(c);
     c.release('g'); settle(c);
-    ok(moved(held, b2) > 1 && moved(at(b), b2) < 1e-6, `a member joining/leaving re-learns every seat (held off by ${moved(held, b2)}, after ${moved(at(b), b2)})`);
+    // STICKY SEATS (only settle repacks): a member leaving leaves its seat a ghost — nobody moves;
+    // settle gives the room back.
+    // A newcomer with no ghost seat to take APPENDS; the centered ring then re-centers rigidly (everyone
+    // by the same arc) — the arrangement holds. Its LEAVE moves nobody.
+    const g2 = makeGrid(10, 6); scene.add(g2);
+    const aj = at(a), bj = at(b);
+    c.lock('g2', g2, { immediate: true }); settle(c);
+    const da = at(a).sub(aj).length(), db = at(b).sub(bj).length();
+    ok(Math.abs(da - db) < 1e-6, `an append re-centers rigidly (a moved ${da.toFixed(4)}, b ${db.toFixed(4)})`);
+    const bl = at(b);
+    c.release('g2'); settle(c);
+    ok(moved(at(b), bl) < 1e-6, `a leave moves nobody — its seat stays a ghost (b moved ${moved(at(b), bl)})`);
+    // the ghost is taken by the next newcomer: nobody moves
+    const g3 = makeGrid(10, 6); scene.add(g3);
+    c.lock('g3', g3, { immediate: true }); settle(c);
+    ok(moved(at(b), bl) < 1e-6, `a newcomer takes the ghost seat — nobody moves (b moved ${moved(at(b), bl)})`);
+    c.release('g3'); c.release('g2'); settle(c);
+    c.settle(); settle(c);
+    ok(moved(at(b), b2) < 1e-6, `settle repacks: the room comes back (off by ${moved(at(b), b2)})`);
     // a member that CLAIMS its room is seated by it as given — its shrink is honored at once
     a.claimsSeat = true;
     a._dims.w = 16; c.refit(); settle(c);
