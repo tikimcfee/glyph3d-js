@@ -802,6 +802,8 @@ export class Strip {
         this._lastEdgeMarks = [];
         this._lastStripRightPx = 0;
         this._lastCluster = null;
+        /** The desk and reserve the focused pin was last cleared for (`<desk>|<stripRightPx>`; see update's step 7). @type {string|null} */
+        this._pinClearKey = null;
     }
 
     /**
@@ -1301,8 +1303,11 @@ export class Strip {
             this._renderOffscreenEdgeMarks(entered, waitingMap, vpW, vpH, dpr, activeIds);
         }
 
-        // 7. Focused-pin non-overlap: ensure the expanded strip never covers the entered plane's focused pin
-        this._ensureFocusedPinClear(entered, vpW);
+        // 7. Focused-pin non-overlap: when the reserve changes under a desk (entered, the band's width), the
+        // focused pin is cleared ONCE — never per frame: a pan that slides the pin under the band is the
+        // person's, and pulling it back each frame would wall the board off at the focused pin.
+        const clearKey = `${entered?.carrelName ?? ''}|${this._lastStripRightPx}`;
+        if (clearKey !== this._pinClearKey && this._ensureFocusedPinClear(entered, vpW)) this._pinClearKey = clearKey;
 
         this._pruneStripOverlay(activeIds);
     }
@@ -1560,29 +1565,30 @@ export class Strip {
     }
 
     /**
-     * Ensure the left-edge strip never covers the focused pin on a pin-arranged plane desk.
-     * If the focused pin's screen left edge is `< stripRightPx`, insets the plane's aim so
-     * the focused pin's left edge sits at `stripRightPx`.
+     * Clear the focused pin of the left-edge strip on a pin-arranged plane desk, once: if its screen
+     * left edge is `< stripRightPx`, inset the plane's aim so it sits at `stripRightPx`. The render
+     * calls it when the reserve changes (see step 7), never every frame.
      * @param {Carrel|null} entered
      * @param {number} vpW
+     * @returns {boolean} whether it could judge (no desk, or a plane view not up yet: false — ask again)
      * @private
      */
     _ensureFocusedPinClear(entered, vpW) {
-        if (!entered) return;
-        if (this.ctx?.planeTarget && this.ctx.planeTarget !== `carrel:${entered.carrelName}`) return;
+        if (!entered) return true;
+        if (this.ctx?.planeTarget && this.ctx.planeTarget !== `carrel:${entered.carrelName}`) return true;
         const stripRight = this._lastStripRightPx;
-        if (!(stripRight > 0)) return;
-        if (entered.mode !== 'plane' || entered.planeArrange !== 'pins' || !entered.planeUnit) return;
+        if (!(stripRight > 0)) return true;
+        if (entered.mode !== 'plane' || entered.planeArrange !== 'pins' || !entered.planeUnit) return true;
 
         const cc = this.ctx?.cameraController;
         const st = cc?.planeState?.();
-        if (!st || st.leaving) return;
+        if (!st || st.leaving) return false;
 
         const focusId = entered.focusedPin?.();
-        if (!focusId) return;
+        if (!focusId) return true;
         const pin = entered.pinRects?.().find((p) => p.id === focusId);
         const box = entered._boardPx?.();
-        if (!pin || !box) return;
+        if (!pin || !box) return true;
 
         const scale = typeof entered._planeScale === 'function' ? entered._planeScale() : 1;
         const k = entered.planeK / scale; // device px per world unit
@@ -1591,11 +1597,12 @@ export class Strip {
         // Screen X of `pinLeftWorld` when plane aim is `st.aim.x`:
         // screenLeft = vpW / 2 + (pinLeftWorld - st.aim.x) * k
         const screenLeft = vpW / 2 + (pinLeftWorld - st.aim.x) * k;
-        if (screenLeft >= stripRight - 0.5) return;
+        if (screenLeft >= stripRight - 0.5) return true;
 
         // Inset aim.x so `screenLeft === stripRight`
         const newAimX = pinLeftWorld - (stripRight - vpW / 2) / k;
         cc.setPlaneAim?.(newAimX, st.aim.y);
+        return true;
     }
 }
 

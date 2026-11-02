@@ -21,7 +21,8 @@
  *      - An off-screen Deixis point (`Deixis.show`) emits a clamped edge mark on the strip overlay.
  *   5. Focused-pin non-overlap:
  *      - The strip never covers the focused pin; if the focused pin's screen rect would overlap
- *        `[0, stripRightPx]`, the plane's aim is inset so `pinScreenLeft >= stripRightPx`.
+ *        `[0, stripRightPx]` when the desk is entered or the band changes, the plane's aim is inset so
+ *        `pinScreenLeft >= stripRightPx` — once, never per frame (a pan under the band stays).
  */
 
 import * as THREE from 'three';
@@ -607,15 +608,14 @@ console.log('=== strip.test.mjs ===');
         `focused pin screen left (${pinScreenLeft.toFixed(1)} px) >= stripRightPx (${stripRight} px) — strip never covers focused pin`
     );
 
-    // Also test dynamic overlap: if the user/test aims at (0, 0) where pinScreenLeft = 50 < stripRight,
-    // `strip.update()` insets the plane aim so `pinScreenLeft >= stripRight`!
+    // A PAN that slides the focused pin under the band (aim (0, 0): pinScreenLeft = 50 < stripRight) is the
+    // person's: `strip.update()` frame after frame leaves it (a per-frame pull would wall the board off).
     ctx.cameraController.setPlaneAim(0, 0);
-    strip.update();
+    for (let i = 0; i < 3; i++) strip.update();
     const aimAfter = ctx.cameraController.planeState().aim;
-    const pinScreenLeftAfter = vpW / 2 + (pinLeftWorld - aimAfter.x) * k;
     check(
-        pinScreenLeftAfter >= stripRight - 1e-3,
-        `dynamic strip.update() insets plane aim so focused pin left (${pinScreenLeftAfter.toFixed(1)} px) >= stripRightPx (${stripRight} px)`
+        aimAfter.x === 0 && aimAfter.y === 0,
+        `a pan under the band stays: strip.update() leaves the plane aim (${JSON.stringify(aimAfter)})`
     );
 
     // Collapse / Expand gate (`strip.collapse on|off|toggle` + header click + reserve shrinks when collapsed):

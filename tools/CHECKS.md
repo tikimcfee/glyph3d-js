@@ -154,6 +154,19 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/plane-follow.test.mjs
   ```
+- **`plane-pan-reach.test.mjs`** (headless, the real controller, `carrel.enter` and `pane.focus`, a real
+  Strip and PlaneOverlay updated every frame) — inside a plane desk, drag-pan reaches the whole board.
+  A 13-book board in 4 columns on a team desk nested in a hub (world scale < 0.5), a 1912 × 927
+  canvas, the band shown and collapsed: entered, the focused pin is clear of the band; a drag moves
+  the board 1:1; panning right brings the rightmost pin's right edge on screen, down the bottom row,
+  back left and up the first column clear of the band; let go, the view stays put; a pan that slides
+  the focused pin 800 px left goes 800 px and stays; collapse then expand clears it again; a hop
+  (`pane.focus left`) onto a 236-column pin under the band lands its left edge on the band's. Teeth:
+  the per-frame pull fails 3 (the right edge stuck at 3396 of 1912); the hop without the band fails
+  the hop. `STRIP=<path>` / `PANE_COMMANDS=<path>` run it against others.
+  ```
+  bun tools/plane-pan-reach.test.mjs
+  ```
 - **`key-notice.test.mjs`** (headless, the real installKeyboardRouter, statusChannel and StatusBar) — a
   verb run from a key says what went wrong on the display: prefix + Tab running `carrel.back` and its
   ERR reaches notify once, as an error; so do a bare nav key, Esc's plane leave, Esc popping the context

@@ -50,7 +50,8 @@ function focusPin(ctx, desk, idOrDir, keepView = false) {
     const cc = ctx.cameraController;
     if (!keepView && cc?.setPlaneAim) {
         const vp = cc.planeViewport();
-        const a = desk.pinAim(id, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1));
+        const leftInset = ctx.strip?.leftInsetForCarrel?.(desk) ?? 0;   // the strip's band stays clear of the pin
+        const a = desk.pinAim(id, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1), leftInset);
         if (a) cc.setPlaneAim(a.x, a.y);
     }
     const type = ctx.registry?.get?.(id)?.type;

@@ -446,7 +446,9 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
   parent, then the rest — rows never reshuffle as the camera moves), or by bearing (`strip.order
   bearing`: the ring unrolled). The wheel over the list scrolls it, never the view; its header (or
   `strip.collapse on|off|toggle`, durable as `strip.collapsed`) folds it to a thin bar, and the plane's
-  reserved column gives the room back. It reads Holding membership; it is not a second roster.
+  reserved column gives the room back. The focused pin is cleared of the band when the reserve changes
+  (a desk entered, the band's width, collapse or expand) and when a pin hop lands on it, never per frame:
+  a pan that slides it under the band is the person's. It reads Holding membership; it is not a second roster.
 - **Locus hints, since lines, visit marks**: later dials, born when a pixel asks.
 - **Verbs** (NEW). `maplabel.list` (every candidate: class, rect, px, state, why hidden),
   `maplabel.explain <id>`, `maplabel.freeze on|off`, `carrel.neighbor <h|l|j|k|parent|child>` (by
@@ -609,7 +611,7 @@ Three substrate conditions make the snap mean anything:
 | GlyphBatch / PanelBatch | refresh only for cameras that see layer 0; camera-relative writes stay precise at D ≈ 7000 (f32 ulp ≈ 0.0005 units ≈ 0.006 px) | overlay and card cameras use other layers (§3.13, §3.16) |
 | SceneTransforms | matrices only | none |
 | CameraDock, ReaderCompass | parked 10 / 5 units ahead of the eye: inside the slab's near clip | hidden while entered (a plane-life listener) |
-| VCC input | inside: drag pans 1:1, wheel scrolls the member under the cursor, flight/look/dolly off | aim clamped to the plane rect; key slot set at t = 0; a fly leaves first (§3.2) |
+| VCC input | inside: drag pans 1:1, wheel scrolls the member under the cursor, flight/look/dolly off | the aim is never walled: the whole board is reachable in every direction (`tools/plane-pan-reach.test.mjs`); key slot set at t = 0; a fly leaves first (§3.2) |
 | autosave | `onMoved` schedules saves; `_applyPlane` never calls `_notifyMoved` | the saved camera is `home`; members save their own view (§3.2) |
 | world relayout | a world-managed or nested desk can move while entered | the parent's relayout is frozen while entered; the camera re-squares from `matrixWorld` if a pose changes anyway |
 | SessionStore | captures live grid state | `holding.ownViewOf(id)` (§3.2) |
