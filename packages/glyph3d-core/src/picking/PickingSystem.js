@@ -19,12 +19,19 @@
  *     resize grips), ID = base, resolves to { token } → e.g. { grid, edge }.
  *   - 'group' (layer 10, kind 'flat') — container volumes (agent-trail corridor boxes)
  *
+ * A pass renders its channel's FLAT LIST when `flatLists` is on (the app's pick.flatRoot): a
+ * FlatRenderRoot per channel (collections/FlatRenderRoot.js) holding the shown meshes on the
+ * channel's layer, rebuilt only when visibility, membership or that layer moves — not three's walk
+ * of the whole scene once per channel per pick. The pass draws exactly what the walk would
+ * (tools/pick-flat-root-check.mjs).
+ *
  * WebGL2 (GLSL 3.00 ES) THREE.ShaderMaterial implementation.
  */
 
 import * as THREE from 'three';
 import { GROUP_CLIP_GLSL } from '../core/glyphMaterial.js';
 import { cutMatrix } from '../core/panelCut.js';
+import FlatRenderRoot, { unwatchLayers } from '../collections/FlatRenderRoot.js';
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -166,7 +173,9 @@ export class PickingSystem {
         }
         this._renderer = threeRenderer;
 
-        // Channels: name -> { layer, kind, entries: [{ mesh, material, startId, endId, token }] }
+        /** @type {Map<string, FlatRenderRoot>} a channel's flat list, for the scene it was built on */
+        this._roots = new Map();
+        // Channels: name -> { name, layer, kind, entries: [{ mesh, material, startId, endId, token }] }
         this._channels = new Map();
         for (const [name, def] of Object.entries(DEFAULT_CHANNELS)) {
             this.defineChannel(name, def);
@@ -180,6 +189,12 @@ export class PickingSystem {
 
         this._lastRenderMs = 0;
         this._lastReadMs = 0;
+
+        /**
+         * Whether a pass renders its channel's flat list instead of the scene (pick.flatRoot). Needs
+         * the picked scene to carry a SceneTransforms (FlatRenderRoot throws otherwise).
+         */
+        this.flatLists = false;
     }
 
     // -------------------------------------------------------------------------
@@ -188,7 +203,8 @@ export class PickingSystem {
 
     defineChannel(name, { layer, kind }) {
         const existing = this._channels.get(name);
-        this._channels.set(name, { layer, kind, entries: existing?.entries ?? [] });
+        this._channels.set(name, { name, layer, kind, entries: existing?.entries ?? [] });
+        this._roots.delete(name);   // a new layer: a new list
     }
 
     /** @private */
@@ -231,6 +247,7 @@ export class PickingSystem {
         if (!this._pickCamera || this._pickCamera.constructor !== camera.constructor) {
             this._pickCamera = new camera.constructor();
             this._pickCamera.matrixWorldAutoUpdate = false; // the view camera's world matrix, as drawn
+            unwatchLayers(this._pickCamera.layers);         // set per pass; no list depends on it
         }
         const pc = this._pickCamera;
         pc.copy(camera, false);
@@ -373,17 +390,19 @@ export class PickingSystem {
                 // A panel cut to a tile is picked as it is drawn (core/panelCut.js): its quad shrinks
                 // to the cut for the pass, and a fully cut one isn't picked — a click past the tile
                 // goes to what is there.
+                // (A fully cut one hides its pick material for the pass rather than leaving the layer:
+                // a layer write would rebuild the channel's flat list every pick.)
                 if (mesh.userData?.panelClip) {
                     entry._savedMatrixWorld = mesh.matrixWorld.clone();
                     const cut = cutMatrix(mesh, mesh.matrixWorld);
-                    if (!cut) { entry._offLayer = channel.layer; mesh.layers.disable(channel.layer); }
+                    if (!cut) { entry._hidPick = true; entry.material.visible = false; }
                 }
             }
         }
 
         try {
             camera.layers.set(channel.layer);
-            this._renderer.render(scene, camera);
+            this._renderer.render(this.flatLists ? this._rootFor(channel, scene).target(camera) : scene, camera);
         } finally {
             for (const entry of channel.entries) {
                 const mesh = entry.mesh;
@@ -391,11 +410,23 @@ export class PickingSystem {
                 mesh.material = entry._savedMaterial;
                 entry._savedMaterial = null;
                 if (entry._savedMatrixWorld) { mesh.matrixWorld.copy(entry._savedMatrixWorld); entry._savedMatrixWorld = null; }
-                // (through the Layers methods: layer writes are watched — collections/FlatRenderRoot.js)
-                if (entry._offLayer != null) { mesh.layers.enable(entry._offLayer); entry._offLayer = null; }
+                if (entry._hidPick) { entry.material.visible = true; entry._hidPick = false; }
             }
         }
     }
+
+    /** @private — the channel's flat list over `scene` (made on first use, remade for a new scene). */
+    _rootFor(channel, scene) {
+        let root = this._roots.get(channel.name);
+        if (!root || root.scene !== scene) {
+            root = new FlatRenderRoot(scene, { layer: channel.layer, name: `pick:${channel.name}` });
+            this._roots.set(channel.name, root);
+        }
+        return root;
+    }
+
+    /** The channels' flat lists (scene.render reports and verifies them). */
+    get flatRoots() { return this._roots; }
 
     /**
      * What is under one canvas point, across channels — in ONE readback.
@@ -512,6 +543,8 @@ export class PickingSystem {
             targetWidth: this._target?.width ?? 0,
             lastRenderMs: this._lastRenderMs,
             lastReadMs: this._lastReadMs,
+            flatLists: this.flatLists,
+            roots: Object.fromEntries([...this._roots].map(([n, r]) => [n, { refused: r.refused, ...r.stats }])),
         };
     }
 
@@ -529,5 +562,6 @@ export class PickingSystem {
             this._target.dispose();
             this._target = null;
         }
+        this._roots.clear();
     }
 }

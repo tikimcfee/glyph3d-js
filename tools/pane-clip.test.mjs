@@ -194,7 +194,7 @@ const marks = () => [...desk._edgeMarks.keys()].filter((key) => key.startsWith(p
     let seen = null;
     const renderer = {
         setRenderTarget() {}, clear() {},
-        render(sc, cam) { seen = { m: big._background.matrixWorld.clone(), on: big._background.layers.isEnabled(ch.layer) }; },
+        render(sc, cam) { seen = { m: big._background.matrixWorld.clone(), on: big._background.layers.isEnabled(ch.layer), drawn: big._background.material.visible }; },
     };
     const ps = new PickingSystem(renderer);
     ps._target = new THREE.WebGLRenderTarget(4, 1);   // the pass's 1-px column target, as pick() makes it
@@ -211,7 +211,8 @@ const marks = () => [...desk._edgeMarks.keys()].filter((key) => key.startsWith(p
     const saved = big._background.userData.panelClip;
     big._background.userData.panelClip = { left: 1e6, right: 1e6 + 1, top: 0, bottom: -1 };
     ps._renderChannelPass(ch, camera, scene, 0);
-    ok(seen.on === false && big._background.layers.isEnabled(ch.layer), 'a fully cut panel is off the pick layer for the pass, back on after');
+    ok(seen.drawn === false && seen.on && big._background.material.visible && big._background.layers.isEnabled(ch.layer),
+        'a fully cut panel\'s pick material is hidden for the pass (three draws no invisible material), shown after — its layer untouched');
     big._background.userData.panelClip = saved;
 }
 

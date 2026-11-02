@@ -821,6 +821,14 @@ export const SETTINGS = [
     type: 'bool', default: true,
     apply: (ctx, v) => { if (ctx.flatRoot) ctx.flatRoot.enabled = v; },
   },
+  // The pick passes' render lists: each pick channel renders a flat list of its shown meshes
+  // (PickingSystem.flatLists), rebuilt only when visibility, membership or its layer move, instead
+  // of three's walk of the whole scene once per channel per pick. Off = the full walk (the A/B).
+  {
+    key: 'pick.flatRoot', label: 'Flat pick lists (a pick walks only its channel)', group: 'Performance',
+    type: 'bool', default: true,
+    apply: (ctx, v) => { if (ctx.pickingSystem) ctx.pickingSystem.flatLists = v; },
+  },
   // Hover picking — the cursor's ID pass (PickingSystem.pick). 0 = as fast as picks land:
   // one in flight, a new one as soon as it resolves and the cursor or camera has moved, so it
   // follows the display's own rate. A number caps it at that many picks per second.

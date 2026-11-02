@@ -176,7 +176,7 @@ export default function registerSceneCommands(router) {
 
     // The view's render list (collections/FlatRenderRoot.js): whether it serves, how often it was
     // rebuilt, what it holds — and a check of the list against a fresh walk of the scene now.
-    router.register('scene.render', (args, ctx) => {
+    router.register('scene.render', async (args, ctx) => {
         const flat = ctx.flatRoot;
         if (!flat) throw new Error('scene.render: no flat render root on this scene');
         if (args[0] === 'time') {
@@ -192,7 +192,21 @@ export default function registerSceneCommands(router) {
             }
             const med = (a) => a.sort((x, y) => x - y)[a.length >> 1];
             const out = { n, flatMs: med(ms.flat), fullMs: med(ms.full), served: !flat.refused };
-            return { text: `OK: render JS (median of ${n}) — flat list ${out.flatMs.toFixed(2)} ms · full walk ${out.fullMs.toFixed(2)} ms${out.served ? '' : ' (REFUSED: both walk the scene)'}`, data: out };
+            // A pick at the canvas center, every channel, each way (PickingSystem.flatLists): its passes' CPU.
+            const ps = ctx.pickingSystem;
+            if (ps) {
+                const was = ps.flatLists, size = r.getSize(ctx.camera.position.clone());
+                const pk = { flat: [], full: [] }, CH = ['grid', 'handle', 'group', 'glyph'];
+                try {
+                    for (let k = 0; k < n; k++) {
+                        ps.flatLists = true; await ps.pick(CH, ctx.camera, ctx.scene, size.x / 2, size.y / 2); pk.flat.push(ps._lastRenderMs);
+                        ps.flatLists = false; await ps.pick(CH, ctx.camera, ctx.scene, size.x / 2, size.y / 2); pk.full.push(ps._lastRenderMs);
+                    }
+                } finally { ps.flatLists = was; }
+                out.pickFlatMs = med(pk.flat); out.pickFullMs = med(pk.full);
+            }
+            const pickText = out.pickFlatMs != null ? ` · a pick (4 channels) ${out.pickFlatMs.toFixed(2)} ms flat · ${out.pickFullMs.toFixed(2)} ms full` : '';
+            return { text: `OK: render JS (median of ${n}) — flat list ${out.flatMs.toFixed(2)} ms · full walk ${out.fullMs.toFixed(2)} ms${out.served ? '' : ' (REFUSED: both walk the scene)'}${pickText}`, data: out };
         }
         const { missing, extra, refused } = flat.verify(ctx.camera);
         const st = flat.stats;
@@ -202,18 +216,30 @@ export default function registerSceneCommands(router) {
             'rebuilds': `${st.rebuilds} · refusals ${st.refusals}`,
             'stale': refused ? '—' : `${missing.length} missing · ${extra.length} extra`,
         });
+        // The pick channels' lists (PickingSystem.flatLists), each checked the same way.
+        const ps = ctx.pickingSystem, picks = [];
+        for (const [ch, root] of ps?.flatRoots ?? []) {
+            const v = root.verify();
+            picks.push({ ch, root, v });
+        }
+        const pickLines = picks.map(({ ch, root, v }) => `  pick ${ch}: ${!ps.flatLists ? 'off (pick.flatRoot)' : v.refused ? `REFUSED — ${v.refused.reason}: ${v.refused.object}` : 'serving'} · ${root.stats.drawables} meshes · ${root.stats.rebuilds} rebuilds · ${v.missing.length} missing · ${v.extra.length} extra`);
+        const pickStale = picks.reduce((n, { v }) => n + v.missing.length + v.extra.length, 0);
         const name = (o) => `  ${pathOf(o)}`;
         const detail = [
             refused ? `  refused: ${refused.reason}: ${refused.object}` : '',
             ...missing.slice(0, 10).map((o) => name(o) + '  (missing)'),
             ...extra.slice(0, 10).map((o) => name(o) + '  (extra)'),
         ].filter(Boolean).join('\n');
-        const stale = missing.length + extra.length;
+        const stale = missing.length + extra.length + pickStale;
         return {
-            text: box('RENDER LIST', lines, 60) + (detail ? '\n' + detail : '') + (stale ? `\nFAIL: the list is stale (${stale})` : '\nOK: the list matches a fresh walk'),
-            data: { enabled: flat.enabled, refused, stats: { ...st }, missing: missing.map(pathOf), extra: extra.map(pathOf) },
+            text: box('RENDER LIST', lines, 60) + (detail ? '\n' + detail : '') + (pickLines.length ? '\n' + pickLines.join('\n') : '')
+                + (stale ? `\nFAIL: a list is stale (${stale})` : '\nOK: every list matches a fresh walk'),
+            data: {
+                enabled: flat.enabled, refused, stats: { ...st }, missing: missing.map(pathOf), extra: extra.map(pathOf),
+                picks: Object.fromEntries(picks.map(({ ch, root, v }) => [ch, { enabled: ps.flatLists, refused: v.refused, stats: { ...root.stats }, missing: v.missing.map(pathOf), extra: v.extra.map(pathOf) }])),
+            },
         };
-    }, { description: "The view's flat render list: serving or refused (and why), rebuild counts, and a check against a fresh walk of the scene; 'time [n]' renders the frame n times each way and reports the render call's JS cost, flat vs full (30)", usage: '[time [n]]' });
+    }, { description: "The view's flat render list and each pick channel's: serving or refused (and why), rebuild counts, and a check against a fresh walk of the scene; 'time [n]' renders the frame n times each way and reports the render call's JS cost, flat vs full, and a center pick's passes each way (30)", usage: '[time [n]]' });
 
     // Clear all CONTENT grids (the open code files). Leaves terminals alone — those
     // are live/owned and torn down explicitly (terminal.kill). Reuses ctx.removeGrid

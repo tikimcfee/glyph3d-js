@@ -113,10 +113,8 @@ more than the change does — 2.2 to 4.7 ms across baselines — so the claim re
   `disable`, `set`, `toggle`, `enableAll`, `disableAll`, and `mask` as an accessor — the picking
   system's panel-cut path assigns `layers.mask` directly). Bumping only when bit 0 changes keeps the
   batches' idempotent per-frame `disable` free.
-- **Picking.** Unchanged by default: pick cameras don't see layer 0, so their renders take the full
-  walk as today. The same idea extends to them: the picking system already holds each channel's
-  registered meshes and could render a flat root of the shown ones — the pick walk becomes the
-  channel's entries. Not measured.
+- **Picking.** Pick cameras don't see layer 0, so the view's root never serves them; each channel
+  has its own list (below, "Built: the pick channels' lists").
 - **SceneTransforms.** Unchanged — it still owns the logical tree's matrices and the show generation.
 - **GlyphFarLod.** Unchanged; its layer flips are exactly what the layer-0 signal must report.
 - **PanelBatch / GlyphBatch.** Unchanged: their `scene.onBeforeRender` hook is forwarded before the
@@ -174,4 +172,33 @@ The list holds 1,274 drawables there, rebuilt 63 times during the load and 0 tim
 the agents' display (live agents, `scene.render time 40`): 0.7–1.0 ms flat vs 1.1–1.7 ms full per
 render; ~5 rebuilds per 10 s while books grow.
 
-Not done: the pick channels (a flat root per channel from the picking system's own entries).
+## Built: the pick channels' lists
+
+A pick renders each asked channel through a camera that sees only that channel's layer, and three
+walked the whole scene for every one of those passes. `PickingSystem.flatLists` (`pick.flatRoot`,
+Settings ▸ Performance, on by default) gives each channel its own FlatRenderRoot on its layer, built
+the first time it is picked and rebuilt only when a pick finds its key moved.
+
+- **Per-bit layer generations.** The module counts layer changes per bit, and a list reads only
+  the bits its camera sees: registering a field on the glyph channel rebuilds the glyph list and
+  nothing else, a batch taking a panel off layer 0 rebuilds the view's list and no pick list.
+- **The pick camera is unwatched** (`unwatchLayers`): it sets its layer per pass, and no list depends
+  on a camera's layers (each list keys on its camera's mask directly). Watched, every pass would
+  rebuild every list.
+- **The panel cut hides, never moves layers.** A panel cut fully out of its tile hides its pick
+  material for the pass (three draws no invisible material) instead of leaving the channel's layer —
+  a layer write per pick would rebuild the grid list on every pick.
+- **`scene.render`** lists and verifies each pick channel's list too; `scene.render time [n]` times a
+  center pick each way.
+
+Gates: `tools/pick-flat-root.test.mjs` (each channel's pass draws the same items flat as full, after
+registrations, unregistrations, view-only layer flips, visibility flips, a fully cut panel; 0
+rebuilds over many picks at rest; mutation-tested — a watched pick camera, the layer-toggling cut,
+one global generation, no ordered-group carry each fail it) and `tools/pick-flat-root-check.mjs`
+(GPU: a pointer sweep plus every registered mesh's center, every channel picked both ways, 0 hits
+differing — glyphs, batched panels, handles, volumes, a plane view, the library, the hub — teeth: the
+meshes the sweep hit dropped from the lists must change hits; 0 rebuilds over each sweep).
+
+Measured: a 4-channel pick's passes, 1.6–1.8 → 0.3–0.4 ms on the hub shape (private relay, screens
+off); 1.5–1.6 → 0.2–0.3 ms live on the agents' display. The hover pick runs as fast as picks land, so
+while the pointer moves that is up to ~1.3 ms a frame.

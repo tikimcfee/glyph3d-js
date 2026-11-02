@@ -157,7 +157,7 @@ try {
     await app.waitFor(2000);
 
     const v = await app.cmd('scene.render');
-    const stale = !/OK: the list matches a fresh walk/.test(v.text ?? '');
+    const stale = !/OK: every list matches a fresh walk/.test(v.text ?? '');
     if (stale) failed++;
     console.log(`${stale ? '✗' : '✓'} scene.render: ${(v.text ?? '').split('\n').filter((l) => /rebuilds|list:|OK|FAIL/.test(l)).map((l) => l.replace(/[║]/g, '').trim()).join(' · ')}`);
 
