@@ -91,7 +91,10 @@ export default class GomuxHub {
         this._exec = exec;
         this.tree = new DeskTree(ctx, {
             hub: GOMUX_HUB, hubTitle: 'gomuxai',
-            hubForm: () => (getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
+            hubForm: () => ({
+                ...(getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
+                bookForm: getSetting('gomux.hubBookForm') === 'deck' ? 'deck' : 'scroll',
+            }),
             // An agent's own desk (its book and live screen pinned together; its helpers too) is
             // born a plane — entered, it reads like its terminal.
             teamForm: () => ({ mode: String(getSetting('gomux.teamMode')) }),
@@ -383,6 +386,16 @@ export default class GomuxHub {
     /** Re-seat the tree now (an agent's surfaces just made it own a desk). */
     relayout() { if (!this._disposed && this.snapshot) this._layout(); }
 
+    /** Flip the form of agent books seated at the hub ('deck' | 'scroll') and re-seat the ring. */
+    setBookForm(form) {
+        const want = form === 'deck' ? 'deck' : 'scroll';
+        const hub = this.ctx.carrels?.get(GOMUX_HUB);
+        if (!hub) return;
+        hub.bookForm = want;
+        for (const e of hub.entries.values()) e.grid?.onDeskMode?.(hub.mode, hub);
+        hub.settle();
+    }
+
     /** Seat every book and team at its desk — spawn order is seat order (DeskTree). @private */
     _layout() {
         const books = this.ctx.agentBooks;
@@ -404,6 +417,11 @@ export default class GomuxHub {
             nodes.push({ id, parent, label: meta.title || meta.agentName || id, book: id });
         }
         this.tree.layout(nodes);
+        const hub = this.ctx.carrels?.get(GOMUX_HUB);
+        if (hub) {
+            const want = getSetting('gomux.hubBookForm') === 'deck' ? 'deck' : 'scroll';
+            if (hub.bookForm !== want) this.setBookForm(want);
+        }
     }
 
     /**

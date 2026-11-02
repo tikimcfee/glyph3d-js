@@ -164,6 +164,10 @@ const reads = (w, sid) => w.relay.calls.filter((c) => c.method === 'agentEvents/
 const follows = (w, sid) => w.relay.calls.filter((c) => c.method === 'agentEvents/follow' && c.params.session === sid).map((c) => c.params);
 const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).groupId)?.carrelName ?? null;
 
+// The hub's books are born scrolls (gomux.hubBookForm, default scroll — tools/scroll-form.test.mjs
+// locks that form); these sections lock the DECK window (its cap, its paging), so they ask for it.
+setSetting({}, 'gomux.hubBookForm', 'deck');
+
 // ── 1. the hub: open = tail read + follow; live lines; updates in place; status; ended ──
 {
     const w = makeWorld();

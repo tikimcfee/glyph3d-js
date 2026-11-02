@@ -373,7 +373,7 @@ export default class AgentBooks {
             book.makeScrollDoc = () => this._ensureDoc(this.lanes.get(agentId));
             // A desk seating this book says its mode (Carrel, as it joins and on a mode change — before it
             // measures): a plane desk's book is born a scroll; null = it left the desk.
-            book.onDeskMode = (mode) => this._deskMode(this.lanes.get(agentId), mode);
+            book.onDeskMode = (mode, desk) => this._deskMode(this.lanes.get(agentId), mode, desk);
             this.root.add(book);
             const hueIdx = hueIndexOf(agentId, this.cfg.palette.length);   // its id's hue — the same on every load (core/identityHue)
             book.bindCover(this._coverOpts(this.cfg.palette[hueIdx % this.cfg.palette.length]));
@@ -1319,10 +1319,14 @@ export default class AgentBooks {
     }
 
     /** The form an agent book takes at a desk of `mode` when it has none of its own (cfg.planeForm
-     *  at a plane desk, else the deck): Book.setFormDefault — its own form wins. @private */
-    _deskMode(lane, mode) {
+     *  at a plane desk, desk.bookForm when given, else the deck): Book.setFormDefault — its own form wins. @private */
+    _deskMode(lane, mode, desk = null) {
         if (!lane) return;
-        lane.book.setFormDefault(mode === 'plane' && Book.FORMS.includes(this.cfg.planeForm) ? this.cfg.planeForm : 'deck');
+        const want = mode === 'plane' && Book.FORMS.includes(this.cfg.planeForm)
+            ? this.cfg.planeForm
+            : (desk?.bookForm && Book.FORMS.includes(desk.bookForm) ? desk.bookForm : 'deck');
+        lane.book.setFormDefault(want);
+        lane.book.syncCover();
     }
 
     /** The scroll document re-read from cfg: its frame, its world row, its window (filled from the
@@ -1899,6 +1903,7 @@ export default class AgentBooks {
             wrapText(name, cols(nameLh)),
             status ? wrapText(status, cols(statusLh)) : '',
             { nameLh, statusLh });
+        lane.book.syncCover();
     }
 
     /** The timeline tabs' Book.bindTabs opts: a tab per sheet labelled with its NUMBER in

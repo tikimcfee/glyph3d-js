@@ -851,7 +851,9 @@ export class Strip {
             }
 
             // Ensure CarrelCards has a card entry / aspect ratio for this carrel
-            const cardEntry = ctx.carrelCards?.ensureCard?.(item.carrel, cardW) ?? null;
+            const cardEntry = ctx.carrelCards?.ensureCard?.(item.carrel, this.config.cardWidthPx) ?? null;
+            const tex = cardEntry?.target?.texture ?? null;
+            const placeholder = !tex;
             const pr = item.carrel.getPlaneRect?.();
             const aspect = pr && pr.height > 0 ? pr.width / pr.height : 16 / 10;
             const rawH = Math.round(cardW / Math.max(0.5, Math.min(3.0, aspect)));
@@ -863,7 +865,7 @@ export class Strip {
             const rect = { x: leftX, y: curY, w: cardW, h: cardH };
             const badge = item.waitingCount > 0
                 ? `${item.waitingCount} waiting`
-                : (item.carrel.carrelName === ctx.carrelBack ? 'back' : '');
+                : (item.carrel.carrelName === ctx.carrelBack ? 'back' : (placeholder ? '…' : ''));
             const borderColor = item.waitingCount > 0
                 ? 0xf59e0b
                 : (item.carrel.carrelName === ctx.carrelBack ? 0x60a5fa : 0x334155);
@@ -880,16 +882,18 @@ export class Strip {
                 badge,
                 borderColor,
                 color: 0x0b1220,
-                badgeColor: item.waitingCount > 0 ? 0xf59e0b : 0x3b82f6,
+                badgeColor: item.waitingCount > 0 ? 0xf59e0b : (placeholder ? 0x475569 : 0x3b82f6),
                 opacity: 1.0,
                 z: 5,
-                texture: cardEntry?.target?.texture ?? null,
+                texture: tex,
+                placeholder,
                 kind: 'strip',
                 data: {
                     carrel: targetName,
                     bearing: item.bearing,
                     waiting: item.waitingCount,
                     waitingNames: item.waitingNames,
+                    placeholder,
                     stale: cardEntry ? cardEntry.stale : true,
                 },
                 onClick: () => {
@@ -909,6 +913,8 @@ export class Strip {
                 waitingCount: item.waitingCount,
                 waitingNames: item.waitingNames,
                 shown: true,
+                hasTexture: !!tex,
+                placeholder,
                 rect,
             });
             curY += cardH + gapY;

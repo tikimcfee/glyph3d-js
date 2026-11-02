@@ -80,6 +80,8 @@ export const DESK_KNOBS = [
     short: 'radius', label: 'How far the ring (or wall) stands from the desk’s center — a ring of own-size members widens past it to fit' },
   { key: 'ringMaxRows', type: 'number', min: 1, max: 20, step: 1,
     short: 'rows', label: 'Rows the ring stacks before it widens around you', shows: naturalRing },
+  { key: 'heightFactor', type: 'number', min: 0, max: 5, step: 0.05, hud: false,
+    short: 'height fit', label: 'Ring radius floor from stack height so the whole stack fits vertically from the center (×)', shows: naturalRing },
   { key: 'maxArcDeg', type: 'number', min: 60, max: 360, step: 5,
     short: 'arc°', label: 'How far around you the ring wraps (°) — the rest is the doorway', shows: ring },
   { key: 'gapFrac', type: 'number', min: 0, max: 5, step: 0.05,

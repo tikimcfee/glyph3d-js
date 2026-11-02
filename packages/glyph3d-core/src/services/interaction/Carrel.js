@@ -113,10 +113,17 @@ function extentFromBox(lb) {
         cx: (lb.min.x + lb.max.x) * 0.5,
         cy: (lb.min.y + lb.max.y) * 0.5,
         cz: (lb.min.z + lb.max.z) * 0.5,
+        frontZ: lb.max.z,
+        backZ: lb.min.z,
     };
 }
 
 const _air = new THREE.Vector3();
+const _mBox = new THREE.Box3();
+const _fpBox = new THREE.Box3();
+const _mPos = new THREE.Vector3();
+const _mScale = new THREE.Vector3();
+const _mMat = new THREE.Matrix4();
 
 /**
  * The nearest spot clear of other desks for a desk standing at `box` (its world airspace there):
@@ -204,6 +211,7 @@ export class Carrel extends THREE.Object3D {
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
                   growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringMaxRows = 2,
+                  heightFactor = 1.1, vFov = 70, bookForm = null,
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
                   animDur = 0.167, yawRate = 14, planeArrange = 'pins', paneGapPx = 8, shelfCols = 480,
@@ -221,6 +229,9 @@ export class Carrel extends THREE.Object3D {
         this.mode = mode === 'grid' || mode === 'plane' ? mode : 'ring';
         this.seat = seat === 'natural' ? 'natural' : 'uniform';
         this.ringMaxRows = ringMaxRows;
+        this.heightFactor = heightFactor;
+        this.vFov = vFov;
+        this.bookForm = bookForm;
         /** the radius the last layout used — a natural ring grows past `radius` to fit */
         this._ringR = radius;
         this.facing = facing === 'out' ? 'out' : 'in';
@@ -264,7 +275,7 @@ export class Carrel extends THREE.Object3D {
          *  default comes back here, and serialize() saves these, never the tuned ones. */
         this.born = Object.freeze({
             radius, boxH, boxAspect, gapFrac, growCap, maxArcDeg,
-            mode: this.mode, seat: this.seat, ringMaxRows, facing: this.facing,
+            mode: this.mode, seat: this.seat, ringMaxRows, heightFactor, vFov, facing: this.facing,
             tableFrac, shadowSoft, glowColor, glowStrength, animDur, yawRate,
             planeArrange: this.planeArrange, paneGapPx, shelfCols, tileCols, tileRows, bookCols,
             edgeMarkPx, edgeMarkColor,
@@ -354,7 +365,7 @@ export class Carrel extends THREE.Object3D {
                 w: hasBounds ? Math.max((b.max.x - b.min.x) / resolvedScale, 1e-3) : 10,
                 h: hasBounds ? Math.max((b.max.y - b.min.y) / resolvedScale, 1e-3) : 10,
                 d: hasBounds ? Math.max((b.max.z - b.min.z) / resolvedScale, 1e-3) : 10,
-                cx: 0, cy: 0, cz: 0,
+                cx: 0, cy: 0, cz: 0, frontZ: 0, backZ: 0,
             },
             unsubscribeResize: null,
             order,
@@ -563,7 +574,7 @@ export class Carrel extends THREE.Object3D {
             for (const m of this._edgeMarks.values()) m.material.color.set(this.edgeMarkColor);
             return true;
         }
-        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'tableFrac',
+        if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'heightFactor', 'vFov', 'tableFrac',
               'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx', 'shelfCols', 'tileCols', 'tileRows', 'bookCols',
               'edgeMarkPx'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
@@ -996,7 +1007,13 @@ export class Carrel extends THREE.Object3D {
     _animateMember(e, sx, sy, sz, eff, faceDir) {
         e.quatTarget.setFromUnitVectors(_z, faceDir);
         const ext = this._extentOf(e);
-        _off.set(ext.cx * eff, ext.cy * eff, ext.cz * eff).applyQuaternion(e.quatTarget);
+        // A deep member (a 20-sheet deck book) seats its FRONT face on its ring/wall seat (or its back
+        // face when facing outward), never its Z midpoint — so its deck depth extends behind the wall
+        // instead of protruding half-way into the room toward the viewer.
+        const zAnchor = this.facing === 'out'
+            ? (ext.backZ ?? ext.cz)
+            : (ext.frontZ ?? ext.cz);
+        _off.set(ext.cx * eff, ext.cy * eff, zAnchor * eff).applyQuaternion(e.quatTarget);
         const tx = sx - _off.x, ty = sy - _off.y, tz = sz - _off.z;
         const s = e._seat;
         const eps = this.boxH * 0.01;
@@ -1096,7 +1113,7 @@ export class Carrel extends THREE.Object3D {
                     };
                 })();
                 const shape = this._expectShape;
-                wrapWidth = shape.wrapWidth;
+                wrapWidth = grid ? shape.wrapWidth : Math.max(this.maxArcDeg * DEG2RAD * R, shape.wrapWidth);
                 const synth = boxes.concat(Array.from({ length: wrapN - boxes.length }, () => ({ w: shape.avgW, h: shape.avgH })));
                 W = flowBoxes(synth, { margin: gap, wrapWidth }).width;
             } else {
@@ -1109,6 +1126,16 @@ export class Carrel extends THREE.Object3D {
             const { slots, width: liveW, height: liveH } = flowBoxes(boxes, { margin: gap, wrapWidth });
             if (!W) W = liveW;
             this._layoutW = W;
+            // Real-size rows: the stack height reads straight off the flow (uniform
+            // rows reduce to the old rows·(boxH+gap)−gap).
+            this._stackH = Math.max(liveH, 1e-3);
+            // A natural ring also floors its radius from the stack height so the whole stack fits
+            // vertically from the center (`_stackH * 0.5 / tan(vFov / 2) * heightFactor`).
+            if (!grid && natural && this.heightFactor > 0) {
+                const vFovRad = Math.max(10, Number(this.vFov) || 70) * DEG2RAD;
+                const rFloor = (this._stackH * 0.5) / Math.tan(vFovRad * 0.5) * this.heightFactor;
+                if (rFloor > R) R = rFloor;
+            }
             let rows = 1, deepest = 0;
             for (const s of slots) rows = Math.max(rows, s.row + 1);
             live.forEach((e, i) => {
@@ -1136,9 +1163,6 @@ export class Carrel extends THREE.Object3D {
             });
             this._rows = rows;
             this._layoutD = deepest;
-            // Real-size rows: the stack height reads straight off the flow (uniform
-            // rows reduce to the old rows·(boxH+gap)−gap).
-            this._stackH = Math.max(liveH, 1e-3);
         } else {
             this._rows = 1;
             this._layoutW = 0;
@@ -1641,8 +1665,9 @@ export class Carrel extends THREE.Object3D {
 
     /** Tell footprint listeners when getLocalBounds moved (an outer desk re-seats). */
     _notifyFootprint() {
+        const b = this.getLocalBounds(_fpBox);
         const t = this.title;
-        const fp = `${this._shadow.scale.x}|${this._shadow.scale.z}|${this._shadow.position.z}|${this._stackH}|${t ? `${t.width}x${t.height}` : ''}`;
+        const fp = `${this._shadow.scale.x}|${this._shadow.scale.z}|${this._shadow.position.z}|${this._stackH}|${t ? `${t.width}x${t.height}` : ''}|${b.min.x.toFixed(2)},${b.min.z.toFixed(2)},${b.max.x.toFixed(2)},${b.max.z.toFixed(2)}`;
         if (fp !== this._footprint) {
             this._footprint = fp;
             for (const cb of this._resizeListeners) cb();
@@ -1814,6 +1839,20 @@ export class Carrel extends THREE.Object3D {
             target.max.x = Math.max(target.max.x, tw);
             target.min.z = Math.min(target.min.z, -R);
             target.max.z = Math.max(target.max.z, -R);
+        }
+        // Every seated member's box (seat bounds and local content bounds) lies inside the desk's
+        // stated airspace so free-spot placement (clearSpot) can trust getBounds() / airspace().
+        for (const e of this.entries.values()) {
+            if (e.grid.parent !== this || e._borrowed || !e._seat) continue;
+            const st = e._seat;
+            const ext = this._extentOf(e);
+            _mBox.min.set(ext.cx - ext.w * 0.5, ext.cy - ext.h * 0.5, ext.cz - ext.d * 0.5);
+            _mBox.max.set(ext.cx + ext.w * 0.5, ext.cy + ext.h * 0.5, ext.cz + ext.d * 0.5);
+            const lb = e.grid.getLocalBounds?.();
+            if (lb && !lb.isEmpty?.()) _mBox.union(lb);
+            _mScale.setScalar(st.eff);
+            _mMat.compose(_mPos.set(st.x, st.y, st.z), e.quatTarget, _mScale);
+            target.union(_mBox.applyMatrix4(_mMat));
         }
         return target;
     }

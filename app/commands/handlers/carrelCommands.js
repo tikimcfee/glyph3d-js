@@ -42,7 +42,7 @@ import { DESK_KNOBS, tuneOf, applyDeskTune, tuneDesk, readDesk, forgetTune } fro
 
 /** The knobs Settings ▸ Carrel stores — the values a NEW desk is born with. */
 const CARREL_KNOBS = ['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg',
-                      'tableFrac', 'shadowSoft', 'glowStrength'];
+                      'tableFrac', 'shadowSoft', 'glowStrength', 'heightFactor'];
 
 /**
  * The CYLINDER form an owner gives a desk at birth — the gomuxai hub, the agents desk: a

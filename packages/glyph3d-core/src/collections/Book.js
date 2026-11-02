@@ -497,6 +497,7 @@ export default class Book extends BoundedObject3D {
         if (prev !== form) {
             this._showForm();
             this.onForm?.(form, prev);
+            if (this.cover) this.syncCover();
             this._emitResize();
         }
         return this;
@@ -742,9 +743,21 @@ export default class Book extends BoundedObject3D {
         if (!c) return this;
         const b = this.frameBounds();
         if (this._scroll) {
-            // Quiet: the document's title row is the book's ornament — no cover box, no plate.
+            // Quiet: the document's title row is the book's ornament on a plane — no cover box;
+            // on a ring or shelf desk (mode !== 'plane'), the nameplate stays above the scroll frame.
             c.mesh.visible = false;
-            if (this.nameplate) this.nameplate.visible = false;
+            const np = this.nameplate;
+            if (np) {
+                if (!b.isEmpty() && this.parent?.mode !== 'plane') {
+                    np.visible = true;
+                    const cx = (b.min.x + b.max.x) / 2;
+                    np.position.set(cx, b.max.y + this._nameplateGap() + np.height / 2, b.max.z);
+                    if (np.height > this._npBand.h) this._npBand.h = np.height;
+                    if (np.width > this._npBand.w) this._npBand.w = np.width;
+                } else {
+                    np.visible = false;
+                }
+            }
             this._placeAside(b, 0);
             return this;
         }
@@ -1129,6 +1142,16 @@ export default class Book extends BoundedObject3D {
     getSeatBounds() {
         const b = this.frameBounds();
         if (this._scroll) {
+            const np = this.nameplate;
+            if (np && np.visible !== false && !b.isEmpty() && this.parent?.mode !== 'plane') {
+                const w = Math.max(np.width, this._npBand.w);
+                const h = Math.max(np.height, this._npBand.h);
+                const y0 = b.max.y + this._nameplateGap();
+                const cx = (b.min.x + b.max.x) / 2, cz = b.max.z;
+                _furn.min.set(cx - w / 2, y0, cz);
+                _furn.max.set(cx + w / 2, y0 + h, cz);
+                b.union(_furn);
+            }
             const ap = this._asidePose(b, 0);
             if (ap) {
                 _asideBox.copy(ap.lb);

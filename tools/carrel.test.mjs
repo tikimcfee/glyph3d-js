@@ -188,7 +188,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     scene.add(a);
     carrel.lock('a', a, { order: 0, immediate: true });
     ok(carrel.animator._active.size === 0, 'immediate lock issues no tweens');
-    near(a.position.z, -20, 1e-6, 'immediate member stands on the wall this tick');
+    near(a.getBounds().max.z, -20, 1e-6, 'immediate member stands with its front face on the wall this tick');
     const firstSeat = a.position.clone();
 
     const rest = [];
@@ -422,7 +422,7 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     const arc = 300 * Math.PI / 180;
     const R0 = (4 * 30 + 3 * 4.5) / arc;   // the least radius seats exactly four 30-wide members a row
     const seatN = (n, widths = () => 30) => {
-        const ring = new Carrel({ name: `cap${n}`, radius: R0 + 1e-6, boxH: 9, mode: 'ring', seat: 'natural', ringMaxRows: 3, gapFrac: 0.5 });
+        const ring = new Carrel({ name: `cap${n}`, radius: R0 + 1e-6, boxH: 9, mode: 'ring', seat: 'natural', ringMaxRows: 3, heightFactor: 0, gapFrac: 0.5 });
         new THREE.Scene().add(ring);
         const ms = Array.from({ length: n }, (_, i) => { const g = makeGrid(widths(i), 20); ring.lock(`m${i}`, g); return g; });
         settle(ring, 20);
@@ -512,6 +512,110 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     const before = b.quaternion.toArray().join();
     c.update(1 / 60);
     ok(b.quaternion.toArray().join() === before, 'and a resting update leaves it bit-identical');
+}
+
+// ---- (a) front-face z-anchor + airspace gate: deep deck books keep r >= R - eps at front face,
+//          and every member's world box lies inside the desk's stated airspace ----
+{
+    const makeDeepDeck = (w = 600, h = 760, frontZ = 10, backZ = -1750) => {
+        const g = new THREE.Object3D();
+        g.getLocalBounds = (t = new THREE.Box3()) => t.set(
+            new THREE.Vector3(-w / 2, -h / 2, backZ),
+            new THREE.Vector3(w / 2, h / 2, frontZ),
+        );
+        g.getSeatBounds = (t = new THREE.Box3()) => g.getLocalBounds(t);
+        g.getBounds = (t = new THREE.Box3()) => {
+            g.updateWorldMatrix(true, false);
+            return g.getLocalBounds(t).applyMatrix4(g.matrixWorld);
+        };
+        return g;
+    };
+
+    const scene = new THREE.Scene();
+    const hub = new Carrel({ name: 'hub-deep', mode: 'ring', seat: 'natural', radius: 900, ringMaxRows: 2, gapFrac: 1.6, boxH: 110, animDur: 0 });
+    hub.position.set(120, 0, -340);
+    hub.rotation.y = 0.35;
+    scene.add(hub);
+
+    const books = [];
+    for (let i = 0; i < 6; i++) {
+        const b = makeDeepDeck();
+        scene.add(b);
+        hub.lock(`b${i}`, b, { immediate: true });
+        books.push(b);
+    }
+    settle(hub, 20);
+    scene.updateMatrixWorld(true);
+
+    const R = hub._ringR;
+    // Check front-face radial distance in carrel-local XZ plane for every deep deck book:
+    for (let i = 0; i < books.length; i++) {
+        const b = books[i];
+        const lb = b.getLocalBounds();
+        // Front-face center in member-local is (0, 0, lb.max.z = +10)
+        const frontCenterLocal = new THREE.Vector3(0, 0, lb.max.z).applyMatrix4(b.matrix);
+        const rFront = Math.hypot(frontCenterLocal.x, frontCenterLocal.z);
+        near(rFront, R, 1e-3, `deep book b${i} front face sits on the ring radius R=${R.toFixed(1)}`);
+        ok(rFront >= R - 1e-4, `gate (a): deep book b${i} front face keeps r >= R - eps (r=${rFront.toFixed(2)}, R=${R.toFixed(2)})`);
+
+        // Teeth: midpoint anchor (`cz = (lb.min.z + lb.max.z)/2 = -870`) would put the front face at `R - (frontZ - cz) = R - 880`!
+        const cz = (lb.min.z + lb.max.z) * 0.5;
+        const rMidpointFront = R - (lb.max.z - cz);
+        ok(rMidpointFront < R - 800, `teeth (a): midpoint anchor pushes front face ${Math.round(R - rMidpointFront)} units inside the ring (r=${rMidpointFront.toFixed(1)} << R=${R.toFixed(1)})`);
+    }
+
+    // Gate (a2): every hub member's world AABB lies inside the hub's stated airspace() and getBounds()
+    const hubAir = hub.airspace();
+    const hubBounds = hub.getBounds();
+    const epsVec = new THREE.Vector3(1e-3, 1e-3, 1e-3);
+    const paddedAir = hubAir.clone().expandByVector(epsVec);
+    const paddedBounds = hubBounds.clone().expandByVector(epsVec);
+    for (let i = 0; i < books.length; i++) {
+        const mb = books[i].getBounds();
+        ok(paddedAir.containsBox(mb), `gate (airspace): member b${i} world box lies inside hub.airspace()`);
+        ok(paddedBounds.containsBox(mb), `gate (bounds): member b${i} world box lies inside hub.getBounds()`);
+    }
+
+    // Teeth (a2): shadow-only bounds (`±R * tableFrac`) fail to contain the deep deck books!
+    const shadowHalf = R * hub.tableFrac;
+    const shadowLocal = new THREE.Box3(
+        new THREE.Vector3(-shadowHalf, 0, -shadowHalf),
+        new THREE.Vector3(shadowHalf, hub._stackH + hub.boxH * 0.25, shadowHalf),
+    );
+    const shadowWorld = shadowLocal.applyMatrix4(hub.matrixWorld).expandByVector(epsVec);
+    const protrudesShadow = books.some((b) => !shadowWorld.containsBox(b.getBounds()));
+    ok(protrudesShadow, 'teeth (airspace): shadow-only bounds fail to contain protruding deep deck books on the ring');
+}
+
+// ---- (c) ring radius floor from stack height: _stackH * 0.5 / tan(vFov/2) * heightFactor ----
+{
+    const scene = new THREE.Scene();
+    const ring = new Carrel({ name: 'tall-hub', mode: 'ring', seat: 'natural', radius: 900, ringMaxRows: 2, boxH: 110, gapFrac: 1.6, animDur: 0 });
+    scene.add(ring);
+    // 6 tall members (w=800, h=780) wrap into 2 rows at R=900 -> _stackH = 780*2 + 176 = 1736
+    for (let i = 0; i < 6; i++) {
+        const g = makeGrid(800, 780, 2);
+        scene.add(g);
+        ring.lock(`s${i}`, g, { immediate: true });
+    }
+    settle(ring, 10);
+    const wantFloor = (ring._stackH * 0.5) / Math.tan((70 * Math.PI / 180) * 0.5) * 1.1;
+    near(ring._ringR, wantFloor, 1e-3, `gate (c): ring radius widens to stack-height floor (${ring._ringR.toFixed(1)} vs ${wantFloor.toFixed(1)})`);
+    ok(ring._rows === 2, `gate (c): keeps 2-row packing while widening R to fit stack height (rows=${ring._rows})`);
+    // Vertical half-angle from center to top/bottom of stack fits inside vFov/2 = 35 deg
+    const halfAngleDeg = Math.atan2(ring._stackH * 0.5, ring._ringR) * 180 / Math.PI;
+    ok(halfAngleDeg < 35, `gate (c): whole stack fits vertically inside 70° vFov from center (half-angle ${halfAngleDeg.toFixed(1)}° < 35°)`);
+
+    // Born-configurable + live setParam('heightFactor')
+    ok(ring.born.heightFactor === 1.1, `heightFactor is in born (${ring.born.heightFactor})`);
+    ok(ring.setParam('heightFactor', 1.3), 'setParam heightFactor accepted');
+    near(ring._ringR, (ring._stackH * 0.5) / Math.tan((70 * Math.PI / 180) * 0.5) * 1.3, 1e-3, 'setParam heightFactor updates _ringR live');
+
+    // Teeth (c): with heightFactor=0 (no stack-height floor), R stays at 900 and the stack overflows 70° vFov!
+    ring.setParam('heightFactor', 0);
+    near(ring._ringR, 900, 1e-3, 'teeth (c): heightFactor=0 leaves R at 900');
+    const overflowHalfDeg = Math.atan2(ring._stackH * 0.5, ring._ringR) * 180 / Math.PI;
+    ok(overflowHalfDeg > 35, `teeth (c): without stack-height floor, stack overflows 70° vFov (${overflowHalfDeg.toFixed(1)}° > 35°)`);
 }
 
 console.log(`\ncarrel.test: ${pass} passed, ${fail} failed`);

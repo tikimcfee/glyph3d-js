@@ -313,6 +313,31 @@ const sealed = { read: async () => ({ lines: [] }), sealed: true };
     const m = lane.book.metrics, d = lane.doc;
     ok(Math.abs(m.charWidth - d.metrics.charWidth * d.scale.x) < 1e-9 && lane.book.pixelOrigin() && lane.book.claimsSeat,
         'a scroll book states its column, cell origin and room');
+    // Ring desk with bookForm='scroll' (hub default): scroll form + nameplate kept visible above the scroll frame.
+    const origParent = lane.book.parent;
+    lane.book.setForm(null);
+    const ringScroll = Object.assign(new THREE.Object3D(), { mode: 'ring', bookForm: 'scroll' });
+    lane.book.parent = ringScroll;
+    lane.book.onDeskMode('ring', ringScroll);
+    ok(lane.book.form === 'scroll', 'at a ring desk with bookForm=scroll, a book with no form of its own is a scroll');
+    ok(lane.book.nameplate?.visible === true, 'a scroll book on a ring desk keeps its nameplate visible');
+    const fb = lane.book.frameBounds();
+    const sb = lane.book.getSeatBounds();
+    ok(lane.book.nameplate.position.y > fb.max.y, 'scroll book nameplate is anchored above the scroll frame');
+    ok(sb.max.y > fb.max.y, 'scroll book getSeatBounds on a ring desk includes the nameplate');
+    // On a plane desk, the nameplate is hidden and excluded from getSeatBounds.
+    const planeDesk = Object.assign(new THREE.Object3D(), { mode: 'plane' });
+    lane.book.parent = planeDesk;
+    lane.book.onDeskMode('plane', planeDesk);
+    ok(lane.book.nameplate?.visible === false, 'a scroll book on a plane desk hides its nameplate');
+    const sbPlane = lane.book.getSeatBounds();
+    ok(Math.abs(sbPlane.max.y - fb.max.y) < 1e-6, 'scroll book getSeatBounds on a plane desk excludes the hidden nameplate');
+    // Flipping ring desk bookForm back to 'deck' returns the book to deck form.
+    const ringDeck = Object.assign(new THREE.Object3D(), { mode: 'ring', bookForm: 'deck' });
+    lane.book.parent = ringDeck;
+    lane.book.onDeskMode('ring', ringDeck);
+    ok(lane.book.form === 'deck' && lane.book.nameplate?.visible === true, 'at a ring desk with bookForm=deck, the book returns to deck form');
+    lane.book.parent = origParent;
 }
 
 // ── 5b. click-to-expand: a click on a summary row is the expand gesture ──────────────

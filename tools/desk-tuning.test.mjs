@@ -111,6 +111,10 @@ function makeWorld() {
     const agentBook = (id) => {
         const book = new Book(makeGrid(8, 5));
         book.getSeatBounds = book.getLocalBounds.bind(book);
+        book.makeScrollDoc = () => book.setScrollDoc(makeGrid(6, 8));
+        book.onDeskMode = (mode, desk) => {
+            book.setFormDefault((mode === 'plane' || desk?.bookForm === 'scroll') ? 'scroll' : 'deck');
+        };
         scene.add(book);
         const lane = { agentId: id, groupId: `agent:book:${id}`, book, pinned: false };
         lanes.set(id, lane);
@@ -172,6 +176,7 @@ const run = makeRouter();
 function hubWorld() {
     const w = makeWorld();
     const hub = new GomuxHub(w.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, { onStream: () => () => {}, streams: new Map() });
+    w.ctx.gomuxHub = hub;
     const agents = [
         { name: 'lead', parent: '' }, { name: 'h1', parent: 'lead' }, { name: 'h2', parent: 'lead' }, { name: 'solo', parent: '' },
     ];
@@ -190,6 +195,14 @@ function hubWorld() {
     ok(hubDesk && team, 'the hub builds its desk and the team desk');
     ok(hubDesk.mode === 'ring' && hubDesk.seat === 'natural' && hubDesk.radius === getSetting('carrel.cylinderRadius')
         && hubDesk.ringMaxRows === getSetting('carrel.cylinderMaxRows'), 'the hub desk is born a cylinder (Settings ▸ Carrel cylinder defaults)');
+    ok(getSetting('gomux.hubBookForm') === 'scroll' && hubDesk.bookForm === 'scroll' && w.lanes.get('solo').book.form === 'scroll',
+        'gomux.hubBookForm defaults to scroll and seats hub books as scrolls');
+    setSetting(w.ctx, 'gomux.hubBookForm', 'deck');
+    ok(hubDesk.bookForm === 'deck' && w.lanes.get('solo').book.form === 'deck',
+        'setting gomux.hubBookForm=deck live flips hub books to deck form');
+    resetSetting(w.ctx, 'gomux.hubBookForm');
+    ok(hubDesk.bookForm === 'scroll' && w.lanes.get('solo').book.form === 'scroll',
+        'resetting gomux.hubBookForm returns hub books to scroll form');
     ok(team.mode === getSetting('gomux.teamMode') && team.mode === 'plane' && team.derived && hubDesk.derived, 'a team desk is born in gomux.teamMode (a plane by default); hub desks are derived');
     ok(Math.abs(hubDesk.gapFrac * hubDesk.boxH - getSetting('gomux.gap')) < 1e-6, 'hub desks are born gomux.gap apart');
     ok(deskOf(w.ctx, w.lanes.get('h1').book.sheets[0].recto) === team, "deskOf: a seated book's card sits at its team desk");

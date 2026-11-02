@@ -26,6 +26,7 @@
 
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
+import CarrelCards from '../packages/glyph3d-core/src/collections/CarrelCards.js';
 import PlaneOverlay from '../app/client/PlaneOverlay.js';
 import Deixis from '../app/client/Deixis.js';
 import registerPlaneCommands from '../app/commands/handlers/planeCommands.js';
@@ -577,6 +578,121 @@ console.log('=== strip.test.mjs ===');
         col0ScreenX >= stripRight - 1e-3 && Math.abs(col0ScreenX - stripRight) < 1.5,
         `plane.enter'd wide surface column 0 screen X (${col0ScreenX.toFixed(2)} px) lands right of the strip band (${stripRight} px)`
     );
+}
+
+// ----------------------------------------------------------------------------
+// 7. Strip card capture requests: entering a plane with N other desks requests
+//    a capture for every shown strip card (at 256 tier, within budgetMs), shows
+//    a placeholder until the first capture lands, and populates all N cards
+//    within ~N capture intervals. Teeth: without strip requests, the 1°-FOV
+//    plane camera and nearLive cap leave strip cards blank.
+// ----------------------------------------------------------------------------
+{
+    const vpW = 1600, vpH = 1000;
+    const { ctx, router, scene, camera, carrels } = makeTestContext(vpW, vpH);
+    let currentTarget = null;
+    const mockRenderer = {
+        domElement: { width: vpW, height: vpH, clientWidth: vpW, clientHeight: vpH },
+        autoClear: true,
+        getRenderTarget: () => currentTarget,
+        setRenderTarget: (t) => { currentTarget = t; },
+        getClearAlpha: () => 1,
+        getClearColor: (c) => c.set(0x060a12),
+        setClearColor: () => {},
+        clear: () => {},
+        clearDepth: () => {},
+        render: () => {},
+    };
+    ctx.renderer = mockRenderer;
+
+    const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
+    ctx.planeOverlay = overlay;
+    const strip = new Strip(ctx, overlay);
+    ctx.strip = strip;
+
+    const unit = makePlaneUnit();
+    const home = new Carrel({ name: 'home', mode: 'plane', radius: 10 });
+    home.setPlaneUnit(unit);
+    home.lock('home:m', makeBoundedMember('home:m', 24, 15), { order: 0 });
+    home.updateWorldMatrix(true, true);
+    scene.add(home);
+    carrels.set('home', home);
+
+    // N = 6 other desks (exceeding nearLiveK = 3, and including a ring desk like gomux)
+    const N = 6;
+    const degs = [-50, -30, -10, 10, 30, 50];
+    degs.forEach((deg, i) => {
+        const rad = (deg * Math.PI) / 180;
+        const name = i === 0 ? 'gomux' : `desk-${i}`;
+        const mode = i === 0 ? 'ring' : 'plane';
+        const c = new Carrel({ name, mode, radius: i === 0 ? 40 : 10, animDur: 0 });
+        if (mode === 'plane') c.setPlaneUnit(unit);
+        c.position.set(Math.sin(rad) * 120, 0, -Math.cos(rad) * 120);
+        c.lock(`${name}:m`, makeBoundedMember(`${name}:m`, 24, 15), { order: 0, immediate: true });
+        c.updateWorldMatrix(true, true);
+        scene.add(c);
+        carrels.set(name, c);
+    });
+
+    // ---- Teeth: without strip capture requests, 1° plane camera leaves all N strip cards blank ----
+    {
+        const legacyCards = new CarrelCards(ctx, { live: 3, budgetMs: 0.001, nearLiveHz: 2 });
+        ctx.carrelCards = legacyCards;
+        // Simulate legacy ensureCard that didn't flag stripRequested
+        const origEnsure = legacyCards.ensureCard.bind(legacyCards);
+        legacyCards.ensureCard = (carrelOrName) => {
+            const e = origEnsure(carrelOrName);
+            if (e) e.stripRequested = false;
+            return e;
+        };
+
+        await router.execute('carrel.enter home');
+        camera.fov = 1;
+        camera.updateProjectionMatrix();
+        strip.update();
+        for (let tick = 0; tick < N * 2; tick++) {
+            legacyCards.update(camera, vpH);
+            strip.update();
+        }
+        const populatedLegacy = strip.getState().cards.filter((c) => c.shown && c.hasTexture).length;
+        check(populatedLegacy === 0, `teeth: without strip capture requests, 0/${N} strip cards get a texture in 1°-FOV plane view (got ${populatedLegacy})`);
+        legacyCards.dispose();
+    }
+
+    // ---- Gate: strip requests captures at 256 tier -> placeholder first, then all N populated within N intervals ----
+    const carrelCards = new CarrelCards(ctx, { live: 3, budgetMs: 0.001, nearLiveHz: 2 });
+    ctx.carrelCards = carrelCards;
+
+    // 1. Right after entering the plane (before carrelCards.update runs), strip shows placeholders for all N cards
+    strip.update();
+    const initialCards = strip.getState().cards.filter((c) => c.shown);
+    check(initialCards.length === N, `strip shows all ${N} other desks (got ${initialCards.length})`);
+    const allPlaceholders = initialCards.every((c) => {
+        const item = overlay.items.get(`strip:card:${c.name}`);
+        return c.placeholder === true && c.hasTexture === false && item?.placeholder === true && item?.badge === '…';
+    });
+    check(allPlaceholders, 'before first capture lands, every strip card shows placeholder (placeholder=true, badge="…")');
+
+    // 2. Step N capture intervals (even with budgetMs=0.001 so at most 1 card captures per interval)
+    for (let step = 0; step < N; step++) {
+        carrelCards.update(camera, vpH);
+        strip.update();
+    }
+
+    const afterCards = strip.getState().cards.filter((c) => c.shown);
+    const allPopulated = afterCards.every((c) => {
+        const item = overlay.items.get(`strip:card:${c.name}`);
+        const entry = carrelCards.cards.get(c.name);
+        return (
+            c.hasTexture === true &&
+            c.placeholder === false &&
+            item?.texture != null &&
+            item?.placeholder === false &&
+            entry?.tier === 256
+        );
+    });
+    check(allPopulated, `after ${N} capture intervals, all ${N}/${N} strip cards (including ring desk 'gomux') have 256-tier textures and cleared placeholders`);
+    carrelCards.dispose();
 }
 
 console.log(`ok strip: ${passed}/${passed + failed} checks passed`);

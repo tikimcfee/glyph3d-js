@@ -567,6 +567,7 @@ export default class PlaneOverlay {
                 textRect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
                 rect: { x: snapped.x, y: snapped.y, w: snapW, h: snapH },
                 object: group,
+                texture: texture || null,
                 onClick,
                 data,
                 _panel: panel,
@@ -658,6 +659,8 @@ export default class PlaneOverlay {
         rec.badgeColor = badgeColor;
         rec.opacity = opacity;
         rec.interactive = interactive !== false;
+        rec.texture = texture || null;
+        rec.placeholder = Boolean(data?.placeholder ?? !texture);
         rec.onClick = onClick;
         rec.data = data;
         rec.textRect = { x: snapped.x, y: snapped.y, w: snapW, h: snapH };

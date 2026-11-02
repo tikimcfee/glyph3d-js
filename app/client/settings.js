@@ -702,7 +702,8 @@ export const SETTINGS = [
   { key: 'layers.fanFov', label: 'Depth layers: the fan on the perspective endpoint — the plane lens (°) while the pane prefix is HELD (layers spread by depth; release = plane.fov)', group: 'Planes', type: 'number', default: 30, min: 1, max: 90, step: 1 },
   { key: 'layers.fanPx', label: 'Depth layers: the fan on the orthographic endpoint — device px each layer slides right while the pane prefix is HELD (plane.fan on; whole px — two 8 px columns by default, past a member\'s own padding)', group: 'Planes', type: 'number', default: 16, min: -256, max: 256, step: 1 },
   { key: 'layers.blinkMs', label: 'Depth layers: pane.blink alternation (ms)', group: 'Planes', type: 'number', default: 500, min: 50, max: 10000, step: 50 },
-  { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },
+  { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 2, min: 1, max: 20, step: 1 },
+  { key: 'carrel.heightFactor', label: 'A natural ring widens so the whole member stack fits vertically from the center (× half-height / tan(vFov/2); 0 = off)', group: 'Carrel', type: 'number', default: 1.1, min: 0, max: 5, step: 0.05 },
   // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued
   // last frame. monitor.stats / scene stats are the verb-side twins.
   {
@@ -954,6 +955,7 @@ export const SETTINGS = [
   { key: 'gomux.screenGap', label: "Gap between a book and its agent's screen", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 2000, step: 2 },
   { key: 'gomux.teamMode', label: 'An agent’s own desk (its book + live screen, its helpers) is born a — plane (read flat when entered), wall, or ring', group: 'gomuxai', type: 'enum', options: ['plane', 'grid', 'ring'], default: 'plane' },
   { key: 'gomux.hubForm', label: "The hub's form when it's built: ring (a cylinder around you) or grid (a wall)", group: 'gomuxai', type: 'enum', options: ['ring', 'grid'], default: 'ring' },
+  { key: 'gomux.hubBookForm', label: 'An agent book seated at the hub is shown as', group: 'gomuxai', type: 'enum', options: ['deck', 'scroll'], default: 'scroll', apply: (ctx, v) => ctx.gomuxHub?.setBookForm?.(v) },
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: "Space between books / teams at the hub's desks when they're built (world units)", group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },
   { key: 'gomux.titleLine', label: 'Desk title size (row height)', group: 'gomuxai', type: 'number', default: 28, min: 1, max: 1000, step: 1 },

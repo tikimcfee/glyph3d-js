@@ -252,21 +252,34 @@ function computeCarrelSignature(carrel) {
 }
 
 /**
- * Return true when `carrel` has at least one own non-Carrel surface and no nested child Carrels.
- * Outer hub container carrels (like `gomux` or `agents`) hold child Carrels and are not carded as a single flat quad.
+ * Return true when `carrel` has at least one seated member (for card capture / strip preview).
+ * @param {Object} carrel
+ * @returns {boolean}
+ */
+function hasCardableContent(carrel) {
+    if (!carrel || carrel._dissolving || carrel._dead || !carrel.entries?.size) return false;
+    for (const e of carrel.entries.values()) {
+        if (!e?.grid || e.grid.parent !== carrel || e._borrowed) continue;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Return true when `carrel` can be swapped to a single 3D impostor quad (`'card'` mode):
+ * it must have cardable content, not be a derived ring container (`gomux`, `agents`), and
+ * have no nested child Carrels.
  * @param {Object} carrel
  * @returns {boolean}
  */
 function isCardableCarrel(carrel) {
-    if (!carrel || carrel._dissolving || carrel._dead || !carrel.entries?.size) return false;
+    if (!hasCardableContent(carrel)) return false;
     if (carrel.derived && carrel.mode === 'ring') return false;
-    let hasOwnSurface = false;
     for (const e of carrel.entries.values()) {
         if (!e?.grid || e.grid.parent !== carrel || e._borrowed) continue;
         if (isCarrelNode(e.grid) || String(e.id).startsWith('carrel:')) return false;
-        hasOwnSurface = true;
     }
-    return hasOwnSurface;
+    return true;
 }
 
 export class CarrelCards {
@@ -436,6 +449,10 @@ export class CarrelCards {
                 reason: null,
                 signature: '',
                 savedVis: new Map(),
+                stripRequested: false,
+                stripRequestedAt: 0,
+                stripRequestedFrame: -1,
+                stripTier: CARD_TIERS[0],
             };
             this.cards.set(name, entry);
         }
@@ -769,7 +786,6 @@ export class CarrelCards {
                 if (obj.material && obj.material.visible === false) return;
                 const field = obj.userData?.glyphField;
                 if (field && d.tier !== 'native') {
-                    if (!obj.userData?.glyphBatched && !obj.layers.isEnabled(0)) return;
                     if (field.rowHeight > 0) {
                         const rowWorld = field.rowHeight * obj.matrixWorld.getMaxScaleOnAxis();
                         if (rowWorld * texelsPerUnit < 1.0) return;
@@ -999,9 +1015,6 @@ export class CarrelCards {
                 if (obj.material && obj.material.visible === false) return;
                 const field = obj.userData?.glyphField;
                 if (field && resolvedTier !== 'native') {
-                    // In budget card captures, skip non-batched glyph fields that GlyphFarLod already
-                    // culled off layer 0 (their rows are < 1 px on screen and their VBOs are cold).
-                    if (isBudgetPass && !obj.userData?.glyphBatched && !obj.layers.isEnabled(0)) return;
                     if (nowInTab && texelsPerUnit * 7 < 4.0) return;
                     if (field.rowHeight > 0) {
                         const rowWorld = field.rowHeight * obj.matrixWorld.getMaxScaleOnAxis();
@@ -1134,6 +1147,37 @@ export class CarrelCards {
         const isOneToOne = resolvedTier === 'native' || (rect.nativeW === targetW && rect.nativeH === targetH);
         this._syncFrameGrid(entry, rect, isOneToOne);
 
+        // If a strip card on PlaneOverlay is waiting for this desk's texture, attach it immediately.
+        const overlay = this.ctx?.planeOverlay ?? this.ctx?.strip?.overlay;
+        const stripRec = overlay?.items?.get?.(`strip:card:${entry.name}`);
+        if (stripRec && entry.target?.texture && stripRec.texture !== entry.target.texture) {
+            overlay.setCard(`strip:card:${entry.name}`, {
+                x: stripRec.x,
+                y: stripRec.y,
+                w: stripRec.rect.w,
+                h: stripRec.rect.h,
+                title: stripRec.text,
+                badge: stripRec.badge === '…' ? '' : stripRec.badge,
+                color: stripRec.color,
+                borderColor: stripRec.borderColor,
+                borderWidth: stripRec.borderWidth,
+                badgeColor: stripRec.badgeColor,
+                opacity: stripRec.opacity,
+                z: stripRec.z,
+                texture: entry.target.texture,
+                placeholder: false,
+                kind: stripRec.kind,
+                interactive: stripRec.interactive,
+                onClick: stripRec.onClick,
+                data: stripRec.data ? { ...stripRec.data, placeholder: false, stale: false } : null,
+            });
+            const stripCardState = this.ctx?.strip?._lastCards?.find?.((c) => c.name === entry.name);
+            if (stripCardState) {
+                stripCardState.hasTexture = true;
+                stripCardState.placeholder = false;
+            }
+        }
+
         if (wasShowing === 'card') {
             this.setDisplayMode(carrel, 'card');
         }
@@ -1156,17 +1200,25 @@ export class CarrelCards {
     }
 
     /**
-     * Ensure a card record exists for `carrelOrName` when enabled (used by Strip).
+     * Ensure a card record exists for `carrelOrName` and request a budgeted strip capture
+     * at the cheapest fitting tier (`256` for strip thumbnails) when enabled.
      * Never triggers an FBO capture when `cfg.enabled` is false.
      *
      * @param {string|Object} carrelOrName
+     * @param {number} [requestedWidthPx=256]
      * @returns {Object|null}
      */
-    ensureCard(carrelOrName) {
+    ensureCard(carrelOrName, requestedWidthPx = CARD_TIERS[0]) {
         const carrel = this._resolveCarrel(carrelOrName);
-        if (!carrel || !isCardableCarrel(carrel)) return null;
+        if (!carrel || !hasCardableContent(carrel)) return null;
         if (!this.cfg.enabled) return this.cards.get(carrel.carrelName) ?? null;
-        return this._ensureEntry(carrel);
+        const entry = this._ensureEntry(carrel);
+        const now = this._now();
+        entry.stripRequested = true;
+        entry.stripRequestedAt = now;
+        entry.stripRequestedFrame = this.ctx?.renderPasses?.frames ?? -1;
+        entry.stripTier = tierForProjectedPx(Math.min(CARD_TIERS[0], Math.max(1, Number(requestedWidthPx) || CARD_TIERS[0])));
+        return entry;
     }
 
     /**
@@ -1234,7 +1286,7 @@ export class CarrelCards {
         }
 
         for (const [name, carrel] of carrels) {
-            if (!isCardableCarrel(carrel)) {
+            if (!hasCardableContent(carrel)) {
                 const existing = this.cards.get(name);
                 if (existing) {
                     this._disposeEntry(existing);
@@ -1244,6 +1296,9 @@ export class CarrelCards {
             }
 
             const entry = this._ensureEntry(carrel);
+            if (!entered && entry.stripRequested && (now - (entry.stripRequestedAt || 0)) > 200) {
+                entry.stripRequested = false;
+            }
             const rect = getCardRect(carrel);
             if (!rect) continue;
 
@@ -1278,7 +1333,8 @@ export class CarrelCards {
             nonEnteredIdx++;
         }
 
-        // Budgeted refresh of dirty near-live cards (round-robin, throttled by nearLiveHz, fitted to cfg.budgetMs).
+        // Budgeted refresh of uncaptured strip cards first, then dirty near-live / strip cards
+        // (round-robin, throttled by nearLiveHz, fitted to cfg.budgetMs).
         const budgetMs = Math.max(0, Number(this.cfg.budgetMs) ?? CARREL_CARDS_DEFAULTS.budgetMs);
         const nearLiveHz = Math.max(0.1, Number(this.cfg.nearLiveHz) || CARREL_CARDS_DEFAULTS.nearLiveHz);
         const minIntervalMs = 1000 / nearLiveHz;
@@ -1287,44 +1343,58 @@ export class CarrelCards {
         const swapOut = Math.max(0.1, Number(this.cfg.swapOutRatio) || CARREL_CARDS_DEFAULTS.swapOutRatio);
         const hasRenderLoop = Boolean(this.ctx?.renderPasses);
         if (ranked.length > 0 && budgetMs > 0) {
-            for (let k = 0; k < ranked.length; k++) {
-                const idx = (this._rrIndex + k) % ranked.length;
-                const item = ranked[idx];
-                const { entry, carrel, rect, projLongPx, isEntered } = item;
-                if (isEntered || !entry.nearLive) continue;
-                // A desk whose cheapest tier (256) still exceeds budgetMs is not near-live-refreshed;
-                // it refreshes on leave or explicit capture only.
-                if (entry.overBudget) continue;
-                const isAnimating = typeof carrel.animator?.isAnimating === 'function'
-                    ? carrel.animator.isAnimating()
-                    : Boolean(carrel.animator?.isAnimating);
-                if (isAnimating) continue;
-                if (hasRenderLoop && (curFrame <= entry.dirtyFrame || (now - this._createdAt) < 2200 || (now - entry.dirtyAt) < 350 || (now - this._anyDeskDirtyAt) < 450 || (now - this._sceneChangedAt) < 350)) {
-                    continue;
-                }
-                const maxTexels = rect.nativeW && rect.nativeH
-                    ? Math.max(rect.nativeW, rect.nativeH)
-                    : CARD_TIERS[CARD_TIERS.length - 1];
-                if (projLongPx >= maxTexels * this.cfg.swapInRatio) continue;
-                const rawWantTier = tierForProjectedPx(projLongPx / swapOut);
-                const wantTier = this.pickTierForBudget(carrel, rawWantTier, budgetMs, entry);
-                if (wantTier === null) continue;
-                const chosenTier = wantTier;
-                const estFn = typeof this.cfg.estimateCaptureMs === 'function' ? this.cfg.estimateCaptureMs : null;
-                const estMs = entry.tierCosts.get(chosenTier) ?? (estFn ? estFn(carrel, chosenTier, entry) : 0);
-                if (capturesThisFrame > 0 && spentMs + estMs > budgetMs) continue;
-                const tierChanged = entry.target && entry.capturedAt > 0 && typeof entry.tier === 'number'
-                    && (chosenTier > entry.tier || entry.tier > entry.maxTier);
-                const cooldownElapsed = entry.capturedAt <= 0 || (now - entry.capturedAt) >= minIntervalMs;
-                if (!entry.target || entry.capturedAt <= 0 || ((tierChanged || entry.dirty) && cooldownElapsed)) {
-                    if (hasRenderLoop && !this._warmCarrelStep(carrel, entry, chosenTier, rect)) {
-                        break;
+            for (let pass = 0; pass < 2; pass++) {
+                if (spentMs >= budgetMs || capturesThisFrame >= 1) break;
+                for (let k = 0; k < ranked.length; k++) {
+                    const idx = (this._rrIndex + k) % ranked.length;
+                    const item = ranked[idx];
+                    const { entry, carrel, rect, projLongPx, isEntered } = item;
+                    if (isEntered) continue;
+                    const isStrip = Boolean(entry.stripRequested);
+                    const uncaptured = !entry.target || entry.capturedAt <= 0;
+                    if (pass === 0) {
+                        // Pass 0 prioritizes strip-requested cards that have no texture yet so every
+                        // strip card populates within ~N capture intervals.
+                        if (!uncaptured || !isStrip) continue;
+                    } else {
+                        if (!isStrip && (!entry.nearLive || !isCardableCarrel(carrel))) continue;
                     }
-                    const res = this.capture(carrel, { tier: chosenTier, reason: 'budget' });
-                    spentMs += res?.captureMs ?? 0;
-                    capturesThisFrame++;
-                    this._rrIndex = (idx + 1) % ranked.length;
-                    if (spentMs >= budgetMs || capturesThisFrame >= 1) break;
+                    // A desk whose cheapest tier (256) still exceeds budgetMs is not near-live-refreshed;
+                    // it refreshes on leave or explicit capture only.
+                    if (entry.overBudget) continue;
+                    const isAnimating = typeof carrel.animator?.isAnimating === 'function'
+                        ? carrel.animator.isAnimating()
+                        : Boolean(carrel.animator?.isAnimating);
+                    if (isAnimating) continue;
+                    if (hasRenderLoop && !(uncaptured && isStrip) && (curFrame <= entry.dirtyFrame || (now - this._createdAt) < 2200 || (now - entry.dirtyAt) < 350 || (now - this._anyDeskDirtyAt) < 450 || (now - this._sceneChangedAt) < 350)) {
+                        continue;
+                    }
+                    const maxTexels = rect.nativeW && rect.nativeH
+                        ? Math.max(rect.nativeW, rect.nativeH)
+                        : CARD_TIERS[CARD_TIERS.length - 1];
+                    if (!isStrip && projLongPx >= maxTexels * this.cfg.swapInRatio) continue;
+                    const rawWantTier = isStrip
+                        ? (entry.stripTier || CARD_TIERS[0])
+                        : tierForProjectedPx(projLongPx / swapOut);
+                    const wantTier = this.pickTierForBudget(carrel, rawWantTier, budgetMs, entry);
+                    if (wantTier === null) continue;
+                    const chosenTier = wantTier;
+                    const estFn = typeof this.cfg.estimateCaptureMs === 'function' ? this.cfg.estimateCaptureMs : null;
+                    const estMs = entry.tierCosts.get(chosenTier) ?? (estFn ? estFn(carrel, chosenTier, entry) : 0);
+                    if (capturesThisFrame > 0 && spentMs + estMs > budgetMs) continue;
+                    const tierChanged = entry.target && entry.capturedAt > 0 && typeof entry.tier === 'number'
+                        && ((!isStrip && chosenTier > entry.tier) || entry.tier > entry.maxTier);
+                    const cooldownElapsed = uncaptured || (now - entry.capturedAt) >= minIntervalMs;
+                    if (uncaptured || ((tierChanged || entry.dirty) && cooldownElapsed)) {
+                        if (hasRenderLoop && !this._warmCarrelStep(carrel, entry, chosenTier, rect)) {
+                            break;
+                        }
+                        const res = this.capture(carrel, { tier: chosenTier, reason: 'budget' });
+                        spentMs += res?.captureMs ?? 0;
+                        capturesThisFrame++;
+                        this._rrIndex = (idx + 1) % ranked.length;
+                        if (spentMs >= budgetMs || capturesThisFrame >= 1) break;
+                    }
                 }
             }
         }
@@ -1332,7 +1402,7 @@ export class CarrelCards {
         // Swap live <-> card at texel >= pixel with hysteresis.
         for (const item of ranked) {
             const { entry, carrel, rect, projLongPx, isEntered } = item;
-            if (isEntered || !entry.target || entry.capturedAt <= 0 || !entry.frame) {
+            if (isEntered || !isCardableCarrel(carrel) || !entry.target || entry.capturedAt <= 0 || !entry.frame) {
                 if (entry.showing !== 'live') this.setDisplayMode(carrel, 'live');
                 continue;
             }
