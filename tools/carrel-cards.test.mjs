@@ -483,7 +483,8 @@ console.log('=== carrel-cards.test.mjs ===');
     try {
         browser = await launchGpuBrowser();
         const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-        await page.goto('http://localhost:5173/?session=off', { waitUntil: 'load', timeout: 30000 });
+        const viteOrigin = (process.env.GLYPH_VITE_URL || 'http://localhost:5173').replace(/\/$/, '');
+        await page.goto(`${viteOrigin}/?session=off`, { waitUntil: 'load', timeout: 30000 });
         await page.waitForFunction(() => !!window.__glyphClient?.ctx?.atlas, { timeout: 20000 });
 
         const rootDir = process.cwd();

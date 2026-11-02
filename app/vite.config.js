@@ -3,10 +3,22 @@ import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..'); // app → repo root
+const allowRoots = [repoRoot];
+for (const probe of [
+  path.join(repoRoot, 'node_modules'),
+  path.join(repoRoot, 'node_modules', 'vite'),
+  path.join(here, 'public'),
+]) {
+  try {
+    const real = fs.realpathSync(probe);
+    allowRoots.push( path.basename(probe) === 'vite' ? path.dirname(real) : real );
+  } catch {}
+}
 const require = createRequire(import.meta.url);
 
 // The boot stamp — the page's answer to "what code am I running?". In DEV the tree moves
@@ -71,6 +83,6 @@ export default defineConfig({
     strictPort: true,
     // Workspace packages + the core's font asset resolve to real paths under the
     // repo root (via node_modules symlinks); allow Vite to serve them.
-    fs: { allow: [repoRoot] },
+    fs: { allow: [...new Set(allowRoots)] },
   },
 });

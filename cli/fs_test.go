@@ -23,6 +23,10 @@ func newTestHandler(t *testing.T) (*FSHandler, string, string) {
 	if err != nil {
 		t.Fatalf("NewFSHandler: %v", err)
 	}
+	// Scope extraRoots to the explicit reach dir so sibling t.TempDir() dirs
+	// (and checkouts under /tmp) are genuinely outside. Default /tmp seeding is
+	// covered by TestResolvePath_TempDirReachableByDefault and TestHandleReadFile_TmpEndToEnd.
+	h.extraRoots = []string{reachResolved}
 	t.Cleanup(h.Close)
 	return h, rootResolved, reachResolved
 }
@@ -546,22 +550,17 @@ func TestHandleReadDir_Truncation(t *testing.T) {
 	}
 }
 
-// outsideDir creates a directory that is genuinely OUTSIDE every default
-// reach root. t.TempDir() won't do here — it lives under /tmp, which is a
-// default reach seed, so addRoot against it is a no-op and assertions pass
-// vacuously. The package cwd (cli/ during go test) is not under /tmp.
+// outsideDir creates a directory that is genuinely outside a test handler's
+// root and reach dirs. Because newTestHandler scopes extraRoots to its explicit
+// reach dir (rather than blanket /tmp), a sibling t.TempDir() is guaranteed
+// outside regardless of where the repo checkout lives (including under /tmp).
 func outsideDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp(".", "g3d-outside-*")
+	d, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(d) })
-	abs, err := filepath.Abs(d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return abs
+	return d
 }
 
 func TestHandleAddRoot_MakesResolvable(t *testing.T) {

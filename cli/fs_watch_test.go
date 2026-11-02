@@ -120,6 +120,7 @@ func TestFSWatch_RefcountedDirsAndTenThousandSubdirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFSHandler: %v", err)
 	}
+	h.extraRoots = nil
 	t.Cleanup(h.Close)
 
 	// Tooth: constructing a handler over 10,000 subdirectories must register 0 watches.

@@ -23,8 +23,32 @@ done
 mkdir -p "$I/node_modules/@glyph3d"
 ln -s ../../packages/glyph3d-core "$I/node_modules/@glyph3d/core"
 ln -s ../../packages/glyph3d-r3f "$I/node_modules/@glyph3d/r3f"
+[ -d "$WT/app/public" ] && ln -s "$WT/app/public" "$I/app/public"
+[ -d "$WT/app/node_modules/.vite" ] && mkdir -p "$I/app/node_modules" && cp -r "$WT/app/node_modules/.vite" "$I/app/node_modules/.vite"
+mkdir -p "$I/cli/web" && : > "$I/cli/web/index.html"
 cd "$I"
 if [ $# -gt 0 ]; then list=$(for t in "$@"; do echo "tools/$t.test.mjs"; done); else list=$(ls tools/*.test.mjs); fi
+
+VITE_PID=""
+cleanup() {
+  if [ -n "$VITE_PID" ]; then
+    kill "$VITE_PID" 2>/dev/null || true
+    wait "$VITE_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [ -z "${GLYPH_VITE_URL:-}" ] && grep -q "GLYPH_VITE_URL" $list 2>/dev/null; then
+  SCRATCH_PORT=$(bun -e 'const s = Bun.serve({ port: 0, fetch: () => new Response() }); console.log(s.port); s.stop(true);')
+  (cd "$I/app" && VITE_PORT="$SCRATCH_PORT" "$I/node_modules/.bin/vite" >/dev/null 2>&1) &
+  VITE_PID=$!
+  export GLYPH_VITE_URL="http://localhost:$SCRATCH_PORT"
+  for _ in $(seq 1 100); do
+    bun -e "const r = await fetch('$GLYPH_VITE_URL/__glyph-boot.json').catch(() => null); process.exit(r?.ok ? 0 : 1);" && break
+    sleep 0.1
+  done
+fi
+
 pass=0; fail=0
 for f in $list; do
   if timeout 150 bun "$f" >/dev/null 2>&1; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $f"; fi
