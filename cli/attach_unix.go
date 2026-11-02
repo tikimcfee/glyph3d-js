@@ -121,7 +121,10 @@ func forwardWheelToApp(ptmx *os.File, lines int, sgr bool, cols, rows int) {
 // runTerminal connects to the relay, creates the display grid, attaches a PTY to a
 // tmux session, and runs the bidirectional byte pump until shutdown.
 func runTerminal(cfg terminalConfig) {
-	conn, err := connect(cfg.url)
+	// Anonymous on purpose: connect() names the caller from --as / $AGENT_NAME, which a relay started from
+	// an agent's shell hands every adapter it forks — its terminal.create would then claim every spawned and
+	// re-adopted terminal for that agent. Ownership is decided where the agent asks (terminal.spawn's ack).
+	conn, err := connectAs(cfg.url, "")
 	if err != nil {
 		log.Fatalf("attach: connect: %v", err)
 	}

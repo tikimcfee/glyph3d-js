@@ -313,6 +313,20 @@ export default class SceneRegistry {
         return set ? [...set] : [];
     }
 
+    /**
+     * Merge fields into an entry's meta, re-indexing it (findByMeta stays true) — a fact learned
+     * after registration (the agent that owns a surface). No-op for an unknown id.
+     * @param {string} id @param {Object} patch @returns {boolean} whether the entry exists
+     */
+    setMeta(id, patch) {
+        const entry = this._entries.get(id);
+        if (!entry || !patch) return false;
+        this._metaUnindex(entry);
+        Object.assign(entry.meta, patch);
+        this._metaIndexAdd(entry);
+        return true;
+    }
+
     /** Add an entry to every armed meta-key index (under meta[key], incl. undefined). @private */
     _metaIndexAdd(entry) {
         for (const [key, byValue] of this._metaIndex) {

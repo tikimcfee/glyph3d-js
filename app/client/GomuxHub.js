@@ -3,6 +3,7 @@
 /** @import SessionBooks from './SessionBooks.js' */
 
 import DeskTree from './DeskTree.js';
+import { agentSurfacesOf } from './AgentSurfaces.js';
 import { deskOf } from './tuning.js';
 import { LIFECYCLE } from './SessionDesk.js';
 import { cylinderForm } from '../commands/handlers/carrelCommands.js';
@@ -94,7 +95,9 @@ export default class GomuxHub {
             // An agent's own desk (its book and live screen pinned together; its helpers too) is
             // born a plane — entered, it reads like its terminal.
             teamForm: () => ({ mode: String(getSetting('gomux.teamMode')) }),
-            ownsDesk: (name) => !!this.ctx.registry?.get?.(this.screenId(name)),
+            // …or one with surfaces of its own (a terminal or desktop it made — AgentSurfaces, read from
+            // the model so a reload rebuilds the desk before they re-adopt).
+            ownsDesk: (name) => !!this.ctx.registry?.get?.(this.screenId(name)) || agentSurfacesOf(this.ctx).ownsAny(name),
             gap: () => getSetting('gomux.gap'),
         });
         /** Agents whose screen the hub asked for (or that were detached) — asked once. */
@@ -195,8 +198,13 @@ export default class GomuxHub {
         }
         this._layout();
         for (const a of shown) this._status(a);
-        // An agent gomuxai reports ended leaves every desk it attached to (Participants).
+        // An agent gomuxai reports ended leaves every desk it attached to (Participants); the surfaces
+        // it made stay, marked (AgentSurfaces) — and any not seated yet go to its desk.
         this.ctx.participants?.dropEnded(snap.agents, (x) => this.runs(x));
+        const surfaces = agentSurfacesOf(this.ctx);
+        const byName = new Map(snap.agents.map((x) => [x.name, x]));
+        surfaces.noteRuns((owner) => (byName.has(owner) ? this.runs(byName.get(owner)) : null));
+        surfaces.converge();
         this._seatScreens();
         this._autoScreens(shown);
         this._centerWhenSettled();
@@ -371,6 +379,9 @@ export default class GomuxHub {
             books.clearRequest(a.name);
         }
     }
+
+    /** Re-seat the tree now (an agent's surfaces just made it own a desk). */
+    relayout() { if (!this._disposed && this.snapshot) this._layout(); }
 
     /** Seat every book and team at its desk — spawn order is seat order (DeskTree). @private */
     _layout() {

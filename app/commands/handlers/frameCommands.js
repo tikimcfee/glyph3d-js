@@ -11,6 +11,7 @@
 
 import * as THREE from 'three';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
+import { agentSurfacesOf } from '../../client/AgentSurfaces.js';
 
 /** Default cell budget when dims aren't given — see FrameGrid.deriveGrid. Cell count is
  *  scatter granularity, not image detail, so this is a perf/taste ceiling. */
@@ -619,6 +620,10 @@ export default function registerFrameCommands(router) {
         }
 
         const grid = ensureDesktopFrameGrid(ctx, sum.name, sum.width, sum.height, sum);
+        // An identified caller's desktop is ITS (AgentSurfaces): seated at its plane desk gomux/<caller>,
+        // kept there across reloads (its residence), marked — never stopped — when the agent ends.
+        // An anonymous caller's: as before (no claim).
+        agentSurfacesOf(ctx).claim(ctx.caller, sum.name, 'frame');
         await waitForFirstFrame(sum.name, 2500);
         if (grid && !grid.hasTexture) {
             try {

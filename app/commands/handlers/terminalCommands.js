@@ -23,6 +23,7 @@
 
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import { terminalTheme } from '../../client/settings.js';
+import { agentSurfacesOf } from '../../client/AgentSurfaces.js';
 import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
@@ -105,6 +106,20 @@ export default function registerTerminalCommands(router) {
                 return {
                     text: 'OK: requested terminal spawn (no ack from the relay — it will appear undocked)',
                     data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
+                };
+            }
+            // An identified caller's terminal is ITS (AgentSurfaces): claimed as soon as its id is known —
+            // seated at its desk when the adapter connects — and never docked or focused (the dock and
+            // attention are the person's).
+            if (ctx.caller) {
+                agentSurfacesOf(ctx).claim(ctx.caller, ack.id, 'terminal');
+                const arrivedOwned = await waitForTerminal(ctx.registry, ack.id);
+                const desk = ctx.holding?.holderOf?.(ack.id)?.carrelName ?? null;
+                return {
+                    text: arrivedOwned
+                        ? `OK: terminal '${ack.id}' spawned — ${ctx.caller}'s, at ${desk ?? 'no desk yet'}`
+                        : `OK: terminal '${ack.id}' spawning — ${ctx.caller}'s; it seats at its desk when the adapter connects`,
+                    data: { id: ack.id, owner: ctx.caller, desk, arrived: !!arrivedOwned },
                 };
             }
             const arrived = await waitForTerminal(ctx.registry, ack.id);
@@ -254,6 +269,9 @@ export default function registerTerminalCommands(router) {
             if (ctx.workspace?.setSurfaceView && !ctx.workspace.getSurface?.(id)) {
                 ctx.workspace.setSurfaceView(id, 'terminal', { cols, rows, position: { x: pos.x, y: pos.y, z: pos.z } });
             }
+            // Made by an identified caller: its terminal, at its desk (AgentSurfaces). An adapter's own
+            // create (a spawn landing, a re-adopt) is anonymous — a spawn claims at its ack.
+            if (ctx.caller) agentSurfacesOf(ctx).claim(ctx.caller, id, 'terminal');
             return {
                 text: `OK: terminal '${id}' created (${cols}x${rows}) scale=${gridScale}`,
                 data: { id, cols, rows, gridScale, position: { x: pos.x, y: pos.y, z: pos.z } },
