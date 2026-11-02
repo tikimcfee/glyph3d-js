@@ -1407,11 +1407,21 @@ export class Carrel extends THREE.Object3D {
     /**
      * A member's pin: its scale (its column → the plane's), its size in whole device px at k, and where
      * its cell origin sits inside the pin (dx, dy whole px; ox, oy the origin in member-local units).
-     * A member without cell metrics scales so its main reading row (planeRowHeight — an agent book's
-     * headline) is one plane row; one that states neither is `bookCols` plane columns wide. @private
+     * A frame (naturalPx) pins at one texel per device px. A member without cell metrics scales so its
+     * main reading row (planeRowHeight — an agent book's headline) is one plane row; one that states
+     * neither is `bookCols` plane columns wide. @private
      */
     _pinFit(e, cw, k) {
         const g = e.grid;
+        // A FRAME (a desktop, an image) pins at 1 texel = 1 device px: its natural pixels, its texels
+        // on whole device pixels, nearest-filtered.
+        const nat = g.naturalPx?.();
+        const tex = nat && g.texelSize?.();
+        if (nat && tex?.x > 0) {
+            g.setOneToOne?.(true);
+            const po = g.pixelOrigin();
+            return { m: 1 / (k * tex.x), ox: po.x, oy: po.y, dx: 0, dy: 0, w: nat.w, h: nat.h };
+        }
         const ext = this._extentOf(e);
         const colW = g.metrics?.charWidth;
         const rowH = g.planeRowHeight?.();

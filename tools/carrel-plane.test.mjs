@@ -292,6 +292,22 @@ const pinMap = (desk) => new Map(desk.pinRects().map((p) => [p.id, JSON.stringif
     ok(Math.abs(p.rect.w - 120 * 8) <= 1, `a book pins bookCols (120) columns wide: ${p.rect.w}px`);
 }
 
+// 9b. a frame (a desktop, an image) pins at one texel per device pixel, nearest-filtered
+{
+    const f = new THREE.Object3D();
+    let one = false;
+    f.naturalPx = () => ({ w: 1280, h: 720 });
+    f.width = 40; f.texelSize = () => ({ x: 40 / 1280, y: 40 / 1280 });
+    f.pixelOrigin = () => ({ x: -20, y: 11.25 });
+    f.setOneToOne = (b) => { one = b; };
+    f.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(-20, -11.25, -0.1), new THREE.Vector3(20, 11.25, 0.1));
+    const { desk } = board([['desk1', f]]);
+    const p = desk.pinRects()[0];
+    ok(p.rect.w === 1280 && p.rect.h === 720, `a 1280×720 frame pins at 1280×720 device px (${p.rect.w}×${p.rect.h})`);
+    near(f.scale.x * (40 / 1280) * desk.planeK, 1, 1e-9, 'one texel = one device px');
+    ok(one, 'it is switched to nearest filtering');
+}
+
 // 10. the pin record round-trips; members arriving late (any order) take their saved pins
 {
     const { desk } = board([['a', screen('a', 239, 56)], ['b', screen('b', 100, 20)], ['c', screen('c', 80, 24)]]);
