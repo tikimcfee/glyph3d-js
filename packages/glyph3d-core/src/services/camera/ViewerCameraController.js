@@ -511,6 +511,7 @@ export class ViewerCameraController {
      * @param {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number},
      *          up:{x:number,y:number,z:number}, pxPerUnit:number, fovDeg:number, front:number,
      *          back:number, aim?:{x:number,y:number}, origin?:{x:number,y:number}}} plane
+     *   pxPerUnit: DEVICE px per world unit (the drawing buffer's pixels — see planeViewport);
      *   center/normal/up: the plane's frame in world space (normal faces the viewer); aim: the plane
      *   point at the view center (plane coords, world units, +y up; default its center); origin:
      *   the plane point to pixel-snap (a pane's top-left); front/back: the depth slab around it.
@@ -608,12 +609,12 @@ export class ViewerCameraController {
         const v = this._plane;
         if (!v) return null;
         const cam = this.ctx.camera;
-        const { width, height } = getCanvasViewportSize(this.ctx.canvas);
+        const vp = this.planeViewport();
         return {
             aim: { ...v.aim }, origin: v.origin ? { ...v.origin } : null,
             pxPerUnit: v.pxPerUnit, fovDeg: v.fovDeg, front: v.front, back: v.back,
-            viewport: { width, height, dpr: this.planeViewport().dpr },
-            camera: { fov: cam.fov, near: cam.near, far: cam.far, distance: planeDistance({ fovDeg: v.fovDeg, viewportH: height, pxPerUnit: v.pxPerUnit }) },
+            viewport: vp,
+            camera: { fov: cam.fov, near: cam.near, far: cam.far, distance: planeDistance({ fovDeg: v.fovDeg, viewportH: vp.height, pxPerUnit: v.pxPerUnit }) },
             tweening: !!this._lens, leaving: !!this._lens?.leaving,
             tween: this._lens ? { elapsed: this._lens.elapsed, ms: this._lens.ms } : null,
             locked: this.locked,
@@ -621,27 +622,30 @@ export class ViewerCameraController {
     }
 
     /**
-     * The viewport a plane view fits: CSS size, and the drawing buffer's device px per CSS px
-     * (what pixel snapping must hit — read from the buffer, not window.devicePixelRatio).
+     * The viewport a plane view fits, in DEVICE pixels — the drawing buffer, the pixels that exist.
+     * A plane's scale (pxPerUnit) is device px per world unit and its snap lands on device-pixel
+     * corners, so nothing here depends on window.devicePixelRatio or a rounded CSS size. dpr is the
+     * buffer's device px per CSS px (input arrives in CSS px).
      * @returns {{width:number, height:number, dpr:number}}
      */
     planeViewport() {
         const canvas = this.ctx.canvas;
-        const { width, height } = getCanvasViewportSize(canvas);
-        return { width, height, dpr: canvas?.width && width ? canvas.width / width : 1 };
+        const css = getCanvasViewportSize(canvas);
+        const width = canvas?.width || css.width, height = canvas?.height || css.height;
+        return { width, height, dpr: css.width ? width / css.width : 1 };
     }
 
     /** Snap the aim so the plane's origin (else its center) lands on a device-pixel corner. @private */
     _snapPlaneAim() {
         const v = this._plane;
-        const { width, height } = getCanvasViewportSize(this.ctx.canvas);
-        v.aim = snapAim({ aim: v.aim, origin: v.origin ?? { x: 0, y: 0 }, viewportW: width, viewportH: height, dpr: this.planeViewport().dpr, pxPerUnit: v.pxPerUnit });
+        const { width, height } = this.planeViewport();
+        v.aim = snapAim({ aim: v.aim, origin: v.origin ?? { x: 0, y: 0 }, viewportW: width, viewportH: height, dpr: 1, pxPerUnit: v.pxPerUnit });
     }
 
     /** The lens the plane view sits at now (its target while still). @private */
     _planeLens() {
         const v = this._plane;
-        const { height } = getCanvasViewportSize(this.ctx.canvas);
+        const { height } = this.planeViewport();
         const dist = planeDistance({ fovDeg: v.fovDeg, viewportH: height, pxPerUnit: v.pxPerUnit });
         const { near, far } = planeSlab({ distance: dist, front: v.front, back: v.back });
         const aim = v.center.clone().addScaledVector(v.right, v.aim.x).addScaledVector(v.up, v.aim.y);
@@ -761,17 +765,18 @@ export class ViewerCameraController {
             return;
         }
         const v = this._plane;
+        const dpr = this.planeViewport().dpr;   // input is in CSS px; the plane's scale is device px
         let moved = false;
         if (!this.locked && input.drag.active && (input.drag.dx || input.drag.dy)) {
-            v.aim.x -= input.drag.dx / v.pxPerUnit;
-            v.aim.y += input.drag.dy / v.pxPerUnit;
+            v.aim.x -= input.drag.dx * dpr / v.pxPerUnit;
+            v.aim.y += input.drag.dy * dpr / v.pxPerUnit;
             moved = true;
         }
         input.drag.dx = 0; input.drag.dy = 0;
         if (input.wheel.pageDy !== 0) { this.ctx?.tryPageHovered?.(input.wheel.pageDy); input.wheel.pageDy = 0; }
         if (input.wheel.dy !== 0) {
             if (!this.ctx?.tryScrollHovered?.(input.wheel.dy) && !this.locked) {
-                v.aim.y -= (this.settings.invertScroll ? -input.wheel.dy : input.wheel.dy) / v.pxPerUnit;
+                v.aim.y -= (this.settings.invertScroll ? -input.wheel.dy : input.wheel.dy) * dpr / v.pxPerUnit;
                 moved = true;
             }
             input.wheel.dy = 0;

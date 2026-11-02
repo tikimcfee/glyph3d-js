@@ -71,10 +71,10 @@ for (const dpr of [1, 2]) {
     ok(frames >= 40 && frames <= 44, `dpr ${dpr}: the enter takes its 700 ms (${frames} frames)`);
     ok(clipped === 0, `dpr ${dpr}: the plane is never clipped on the way in (${clipped} frames)`);
 
-    // Scale and snapping, measured through three's projection.
+    // Scale (DEVICE px per unit — the drawing buffer) and snapping, through three's projection.
     const a = proj(camera, onPlane(-30, 10)), b = proj(camera, onPlane(-29, 9));
-    near(b.x - a.x, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: x scale`);
-    near(b.y - a.y, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: y scale`);
+    near((b.x - a.x) * dpr, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: x scale (device px)`);
+    near((b.y - a.y) * dpr, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: y scale (device px)`);
     const o = proj(camera, onPlane(PLANE.origin.x, PLANE.origin.y));
     near(o.x * dpr, Math.round(o.x * dpr), 2e-3, `dpr ${dpr}: origin x on a device-pixel corner`);
     near(o.y * dpr, Math.round(o.y * dpr), 2e-3, `dpr ${dpr}: origin y on a device-pixel corner`);
@@ -118,11 +118,11 @@ for (const dpr of [1, 2]) {
     cc.setPlaneFov(25, { ms: 300 });
     while (cc.planeState().tweening) frame(cc, camera);
     const c1 = proj(camera, onPlane(-30, 10)), c2 = proj(camera, onPlane(-29, 9));
-    near(c2.x - c1.x, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: the fan keeps the plane's scale`);
+    near((c2.x - c1.x) * dpr, PLANE.pxPerUnit, 1e-4, `dpr ${dpr}: the fan keeps the plane's scale`);
     const st = cc.planeState();
     const flat = proj(camera, onPlane(40, 0)), lifted = proj(camera, onPlane(40, 0, 4));
-    const offsetPx = flat.x - W / 2;
-    near(lifted.x - flat.x, parallaxPx({ fovDeg: 25, viewportH: H, pxPerUnit: PLANE.pxPerUnit, depth: 4, offsetPx }), 0.05, `dpr ${dpr}: a layer fans out by the parallax law`);
+    const offsetPx = (flat.x - W / 2) * dpr;   // device px
+    near((lifted.x - flat.x) * dpr, parallaxPx({ fovDeg: 25, viewportH: H * dpr, pxPerUnit: PLANE.pxPerUnit, depth: 4, offsetPx }), 0.05, `dpr ${dpr}: a layer fans out by the parallax law`);
     ok(Math.abs(lifted.x - flat.x) > 1, `dpr ${dpr}: at 25° the fan is visible (${(lifted.x - flat.x).toFixed(2)} px)`);
     ok(st.fovDeg === 25, `dpr ${dpr}: planeState reports the fan fov`);
 

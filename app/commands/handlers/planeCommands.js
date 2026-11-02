@@ -43,10 +43,10 @@ function columnWorldWidth(ctx, obj) {
 }
 
 /** The aim y that opens a surface of `height` world units at its top, or centered if it fits. */
-function openAimY(height, pxPerUnit, viewportH) {
-    const viewH = viewportH / pxPerUnit;
+function openAimY(height, pxPerUnit, vp) {
+    const viewH = vp.height / pxPerUnit;   // device px ÷ device px per unit
     if (height <= viewH) return 0;
-    const margin = Number(getSetting('plane.topMarginPx')) / pxPerUnit;
+    const margin = Number(getSetting('plane.topMarginPx')) * vp.dpr / pxPerUnit;   // the knob is CSS px
     return height / 2 - viewH / 2 + margin;
 }
 
@@ -62,10 +62,9 @@ export default function registerPlaneCommands(router) {
         if (!plane) return { text: `ERR: '${t.id}' has no surface to read (no local bounds)`, data: null };
         const cellPx = args[1] != null ? Number(args[1]) : Number(getSetting('plane.cellPx'));
         if (!(Number.isFinite(cellPx) && cellPx > 0)) return { text: `ERR: cellPx must be a positive number (got ${args[1]})`, data: null };
-        const vp = cc.planeViewport();
-        const dpr = vp.dpr;
-        // Columns land on whole DEVICE pixels: cellPx device px per column = cellPx/dpr CSS px.
-        const pxPerUnit = (cellPx / dpr) / columnWorldWidth(ctx, t.obj);
+        const vp = cc.planeViewport();   // DEVICE px: the drawing buffer
+        // Columns land on whole DEVICE pixels: cellPx device px per column.
+        const pxPerUnit = cellPx / columnWorldWidth(ctx, t.obj);
         const depth = plane.depth ?? 0;
         // The point to pixel-snap: the surface's cell-grid origin when it states one (text), else
         // its top-left corner — in plane coordinates (world units from the plane center, +y up).
@@ -89,13 +88,13 @@ export default function registerPlaneCommands(router) {
             front: depth / 2 + Number(getSetting('plane.front')), back: depth / 2 + Number(getSetting('plane.back')),
             // A surface taller than the view opens at its top (a page is read from its head), the
             // top edge `plane.topMarginPx` below the view's; a shorter one centers.
-            aim: { x: 0, y: openAimY(plane.height, pxPerUnit, vp.height) },
+            aim: { x: 0, y: openAimY(plane.height, pxPerUnit, vp) },
             origin,
         }, { ms: Number(getSetting('plane.enterMs')) });
         ctx.planeTarget = t.id;
         const s = cc.planeState();
         return {
-            text: `OK: reading '${t.id}' at ${cellPx} device px per column (${s.pxPerUnit.toFixed(4)} CSS px/unit, fov ${s.fovDeg}°)`,
+            text: `OK: reading '${t.id}' at ${cellPx} device px per column (${s.pxPerUnit.toFixed(4)} device px/unit, fov ${s.fovDeg}°)`,
             data: { target: t.id, cellPx, ...s },
         };
     }, { description: 'Square to a surface and ease into a pixel-exact flat view (text columns on whole device pixels)', usage: '<target> [cellPx]', returns: '{ target, cellPx, aim, pxPerUnit, fovDeg, camera, viewport, tweening }' });
