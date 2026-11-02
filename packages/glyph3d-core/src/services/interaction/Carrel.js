@@ -182,7 +182,7 @@ export class Carrel extends THREE.Object3D {
         this.planeFrame = null;
         /** The pane layout of a plane desk: a PaneTree over pane ids, each pane a stack of member
          *  ids with one active (tabs); `inbox` is where a member joining lands (nothing else moves). */
-        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0 };
+        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null };
         /** Told whenever the pane layout changes (the app persists it as the desk's Panes). */
         this.onPanesChanged = null;
         /** What this desk was BORN as — every knob's value at construction. A desk's own
@@ -565,9 +565,172 @@ export class Carrel extends THREE.Object3D {
         }
         const leaves = P.tree.leaves();
         P.inbox = leaves[leaves.length - 1];
+        P.focus = leaves[0];
+        P.zoomed = null;
         this._relayout();
         this.onPanesChanged?.();
         return true;
+    }
+
+    // ===================== pane operations (the pane.* verbs on a plane desk) =====================
+
+    /** The focused pane (else the inbox, else the first). @returns {string|null} */
+    focusedPane() {
+        const P = this.panes;
+        if (!P.tree || P.tree.isEmpty()) return null;
+        if (P.focus && P.stacks.has(P.focus) && P.tree.has(P.focus)) return P.focus;
+        return P.tree.has(P.inbox) ? P.inbox : P.tree.leaves()[0];
+    }
+
+    /** The member a pane shows (its active tab when seated, else its newest seated member). */
+    paneFront(paneId) {
+        const st = this.panes.stacks.get(paneId);
+        if (!st) return null;
+        if (st.active && this.entries.has(st.active)) return st.active;
+        return [...st.ids].reverse().find((id) => this.entries.has(id)) ?? null;
+    }
+
+    /** The pane a member sits in. @returns {string|null} */
+    paneOf(memberId) {
+        for (const [id, st] of this.panes.stacks) if (st.ids.includes(memberId)) return id;
+        return null;
+    }
+
+    /** @private */
+    _panesChanged() { this._relayout(); this.onPanesChanged?.(); }
+
+    /** Focus a pane by id, or the pane holding a member. @returns {string|null} the focused pane */
+    paneFocusOn(idOrMember) {
+        const P = this.panes;
+        const pane = P.stacks.has(idOrMember) ? idOrMember : this.paneOf(idOrMember);
+        if (!pane) return null;
+        if (P.zoomed && P.zoomed !== pane) P.zoomed = null;
+        P.focus = pane;
+        this.onPanesChanged?.();
+        if (!P.zoomed) this._relayout();
+        return pane;
+    }
+
+    /** Move focus to the geometric neighbor (i3). @param {'left'|'right'|'up'|'down'} dir @returns {string|null} */
+    paneFocus(dir) {
+        const cur = this.focusedPane();
+        const next = cur ? this.panes.tree.neighbor(cur, dir) : null;
+        return next ? this.paneFocusOn(next) : null;
+    }
+
+    /**
+     * Split the focused pane, putting a member (already seated here) in the new pane — taken out of
+     * whatever stack held it. The new pane is focused. @param {'x'|'y'} axis @param {string} memberId
+     * @param {{before?:boolean}} [opts] @returns {string|null} the new pane
+     */
+    paneSplit(axis, memberId, { before = false } = {}) {
+        const cur = this.focusedPane();
+        if (!cur || !this.entries.has(memberId) || (axis !== 'x' && axis !== 'y')) return null;
+        const from = this.paneOf(memberId);
+        if (from) {
+            const st = this.panes.stacks.get(from);
+            st.ids = st.ids.filter((id) => id !== memberId);
+            if (st.active === memberId) st.active = st.ids[st.ids.length - 1] ?? null;
+        }
+        const id = this._newPaneId();
+        this.panes.stacks.set(id, { ids: [memberId], active: memberId });
+        this.panes.tree.split(cur, axis, id, { before });
+        this.panes.focus = id;
+        this.panes.zoomed = null;
+        this._panesChanged();
+        return id;
+    }
+
+    /** Grow the focused pane along an axis (siblings give up space). @returns {boolean} */
+    paneResize(axis, delta) {
+        const cur = this.focusedPane();
+        if (!cur || !this.panes.tree.resize(cur, axis, delta)) return false;
+        this._panesChanged();
+        return true;
+    }
+
+    /**
+     * Close a pane: its tabs join the pane that takes its place (the sibling that collapses up) —
+     * nothing leaves the desk. The last pane can't close. @param {string} [paneId] (default: focused)
+     * @returns {string|null} the pane its tabs joined
+     */
+    paneClose(paneId = this.focusedPane()) {
+        const P = this.panes;
+        if (!paneId || !P.tree.has(paneId) || P.tree.count() < 2) return null;
+        const moving = P.stacks.get(paneId)?.ids ?? [];
+        const next = P.tree.close(paneId);
+        P.stacks.delete(paneId);
+        const into = P.stacks.get(next);
+        for (const id of moving) if (!into.ids.includes(id)) into.ids.push(id);
+        if (P.inbox === paneId) P.inbox = next;
+        P.focus = next;
+        if (P.zoomed === paneId) P.zoomed = null;
+        this._panesChanged();
+        return next;
+    }
+
+    /** Exchange two panes' contents in place (rects unchanged). @returns {boolean} */
+    paneSwap(a, b) {
+        const P = this.panes;
+        if (!P.stacks.has(a) || !P.stacks.has(b) || a === b) return false;
+        const sa = P.stacks.get(a);
+        P.stacks.set(a, P.stacks.get(b));
+        P.stacks.set(b, sa);
+        this._panesChanged();
+        return true;
+    }
+
+    /**
+     * Change the focused pane's active tab: 'next' / 'prev' cycle, a member id picks it.
+     * @returns {string|null} the active member
+     */
+    paneTab(which = 'next') {
+        const cur = this.focusedPane();
+        const st = cur && this.panes.stacks.get(cur);
+        const ids = st ? st.ids.filter((id) => this.entries.has(id)) : [];
+        if (!ids.length) return null;
+        let next;
+        if (which === 'next' || which === 'prev') {
+            const i = Math.max(0, ids.indexOf(this.paneFront(cur)));
+            next = ids[(i + (which === 'next' ? 1 : ids.length - 1)) % ids.length];
+        } else if (ids.includes(which)) next = which;
+        else return null;
+        st.active = next;
+        this._panesChanged();
+        return next;
+    }
+
+    /** Zoom the focused pane to the whole plane (tmux -Z), or unzoom. @returns {string|null} the zoomed pane */
+    paneZoom(on = !this.panes.zoomed) {
+        const cur = this.focusedPane();
+        if (!cur) return null;
+        this.panes.zoomed = on ? cur : null;
+        this._panesChanged();
+        return this.panes.zoomed;
+    }
+
+    /**
+     * Put a member in a pane: 'tab' — into its stack as the active tab; a direction — a new pane split
+     * off that side of it. @param {string} memberId @param {string} paneId
+     * @param {'tab'|'left'|'right'|'up'|'down'} where @returns {string|null} the member's pane
+     */
+    panePlace(memberId, paneId, where = 'tab') {
+        const P = this.panes;
+        if (!this.entries.has(memberId) || !P.stacks.has(paneId)) return null;
+        if (where === 'tab') {
+            const from = this.paneOf(memberId);
+            if (from) { const st = P.stacks.get(from); st.ids = st.ids.filter((id) => id !== memberId); if (st.active === memberId) st.active = st.ids[st.ids.length - 1] ?? null; }
+            const st = P.stacks.get(paneId);
+            st.ids.push(memberId);
+            st.active = memberId;
+            P.focus = paneId;
+            this._panesChanged();
+            return paneId;
+        }
+        const axis = (where === 'left' || where === 'right') ? 'x' : (where === 'up' || where === 'down') ? 'y' : null;
+        if (!axis) return null;
+        P.focus = paneId;
+        return this.paneSplit(axis, memberId, { before: where === 'left' || where === 'up' });
     }
 
     /**
@@ -623,7 +786,10 @@ export class Carrel extends THREE.Object3D {
         const g = Math.max(0, Math.round(this.paneGapPx));
         const half = g / 2;
         const out = [];
-        for (const [id, r] of tree.rects({ x: 0, y: 0, w: f.widthPx, h: f.heightPx })) {
+        // A zoomed pane takes the whole frame (tmux -Z); the others keep their rects in the tree.
+        const z = this.panes.zoomed;
+        const rects = z && tree.has(z) ? new Map([[z, { x: 0, y: 0, w: f.widthPx, h: f.heightPx }]]) : tree.rects({ x: 0, y: 0, w: f.widthPx, h: f.heightPx });
+        for (const [id, r] of rects) {
             // y-up rect → top-down device px; cut on whole pixels, then take the gap out of every side
             // (half a gap each, so neighbors meet a whole gap apart and the plane edge keeps half).
             const left = Math.round(r.x), right = Math.round(r.x + r.w);
@@ -966,7 +1132,7 @@ export class Carrel extends THREE.Object3D {
         return {
             tree: P.tree.serialize(),
             stacks: [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })),
-            inbox: P.inbox, seq: P.seq,
+            inbox: P.inbox, seq: P.seq, focus: P.focus, zoomed: P.zoomed,
         };
     }
 
@@ -992,6 +1158,8 @@ export class Carrel extends THREE.Object3D {
         P.tree = tree;
         P.stacks = stacks;
         P.inbox = leaves.has(rec.inbox) ? rec.inbox : [...leaves].pop();
+        P.focus = leaves.has(rec.focus) ? rec.focus : P.inbox;
+        P.zoomed = leaves.has(rec.zoomed) ? rec.zoomed : null;
         const maxSeq = Math.max(0, ...[...leaves].map((id) => Number(String(id).split(':')[1]) || 0));
         P.seq = Math.max(Number(rec.seq) || 0, maxSeq);
         this._relayout();
@@ -1018,7 +1186,13 @@ export class Carrel extends THREE.Object3D {
         const cw = f.cellPx / k;                     // the plane's one column, world units
         const byId = new Map(live.map((e) => [e.id, e]));
         let deepest = 0;
-        for (const pane of this.paneRects()) {
+        const panes = this.paneRects();
+        const shownPanes = new Set(panes.map((p) => p.id));
+        for (const [id, st] of this.panes.stacks) {
+            if (shownPanes.has(id)) continue;   // a pane hidden by a zoom hides its whole stack
+            for (const mid of st.ids) { const e = byId.get(mid); if (e && e.grid.visible !== false) e.grid.visible = false; }
+        }
+        for (const pane of panes) {
             // The active tab when it's seated, else the newest seated member of the stack.
             const front = byId.has(pane.active) ? pane.active : [...pane.stack].reverse().find((id) => byId.has(id));
             for (const id of pane.stack) {

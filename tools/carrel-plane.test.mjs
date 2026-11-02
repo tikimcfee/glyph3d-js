@@ -155,5 +155,53 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     ok(threw, 'a stack naming no pane of the tree throws');
 }
 
+// 5. pane operations: focus by direction, split, close merges tabs, swap, tab, zoom, place.
+{
+    const { desk } = deskWith(3);                       // even: three side by side
+    const [pa, pb, pc] = desk.paneRects().map((p) => p.id);
+    desk.paneFocusOn(pa);
+    ok(desk.paneFocus('right') === pb && desk.paneFocus('right') === pc, 'focus walks right across the row');
+    ok(desk.paneFocus('right') === null && desk.focusedPane() === pc, 'no pane past the edge: focus stays');
+    // split the focused pane (pc) down, moving g0 out of pa into the new pane
+    const np = desk.paneSplit('y', 'g0');
+    ok(np && desk.focusedPane() === np && desk.paneFront(np) === 'g0', 'split: the new pane holds the member and has focus');
+    ok(!desk.panes.stacks.get(pa).ids.includes('g0'), 'split: the member left its old stack');
+    const rc = desk.paneRects().find((p) => p.id === pc).rect, rn = desk.paneRects().find((p) => p.id === np).rect;
+    ok(rc.x === rn.x && rc.w === rn.w && rc.y < rn.y, 'split y: the new pane sits under the old one, same columns');
+    // close the new pane: its tab joins pc
+    const into = desk.paneClose(np);
+    ok(into === pc && desk.panes.stacks.get(pc).ids.includes('g0') && !desk.panes.stacks.has(np), 'close: the tabs join the pane that takes its place');
+    // tab cycles within pc (g2 and g0)
+    desk.paneFocusOn(pc);
+    const t1 = desk.paneFront(pc), t2 = desk.paneTab('next');
+    ok(t2 !== t1 && desk.paneTab('next') === t1, 'tab: next cycles the stack');
+    ok(desk.entries.get(t1).grid.visible !== false && desk.entries.get(t2).grid.visible === false, 'tab: only the front tab shows');
+    // swap pa and pb contents; rects unchanged
+    const before = JSON.stringify(desk.paneRects().map((p) => [p.id, p.rect]));
+    const fa = desk.paneFront(pa), fb = desk.paneFront(pb);
+    desk.paneSwap(pa, pb);
+    ok(desk.paneFront(pa) === fb && desk.paneFront(pb) === fa && JSON.stringify(desk.paneRects().map((p) => [p.id, p.rect])) === before, 'swap: contents trade, rects stay');
+    // zoom: the focused pane takes the frame, others hide; unzoom restores the rects
+    desk.paneFocusOn(pb);
+    desk.paneZoom(true);
+    const zr = desk.paneRects();
+    ok(zr.length === 1 && zr[0].id === pb && zr[0].rect.w > 1500, 'zoom: one pane, the whole frame');
+    ok(desk.entries.get(desk.paneFront(pa)).grid.visible === false, 'zoom: the other panes’ members hide');
+    desk.paneZoom(false);
+    ok(JSON.stringify(desk.paneRects().map((p) => [p.id, p.rect])) === before, 'unzoom: every rect as it was');
+    // place: a member as a tab of another pane, then split off a side
+    ok(desk.panePlace('g1', pa, 'tab') === pa && desk.paneFront(pa) === 'g1', 'place tab: the member fronts the target pane');
+    const side = desk.panePlace('g1', pa, 'left');
+    const rs = desk.paneRects().find((p) => p.id === side).rect, ra = desk.paneRects().find((p) => p.id === pa).rect;
+    ok(side && rs.x < ra.x && rs.y === ra.y, 'place left: a new pane split off its left side');
+    // focus + zoom ride the record
+    desk.paneZoom(true);
+    const rec = desk.serializePanes();
+    const fresh = new Carrel({ name: 'p3', form: 'plane', animDur: 0 });
+    fresh.setPlaneFrame(frame);
+    fresh.applyPanes(JSON.parse(JSON.stringify(rec)));
+    ok(fresh.focusedPane() === desk.focusedPane() && fresh.panes.zoomed === desk.panes.zoomed, 'focus and zoom round-trip');
+}
+
 console.log(`${fails ? 'FAIL' : 'ok'} carrel-plane: ${checks - fails}/${checks} checks`);
 process.exit(fails ? 1 : 0);

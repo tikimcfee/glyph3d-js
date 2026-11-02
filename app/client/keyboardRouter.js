@@ -31,8 +31,15 @@
  * keydown chain's job there is the opposite of claiming: keyEncoding declines the paste chord so
  * the keystroke survives to become one.
  *
- * Tiers (top = highest priority): captureToggle → entityTyping → contextEsc → navKeymap, then the
- * camera (WASD, in VCC) as the implicit fallthrough. The DOM-input guard sits above all of them:
+ * Tiers (top = highest priority): captureToggle → planePrefix → entityTyping → contextEsc →
+ * planeEscLeave → navKeymap, then the camera (WASD, in VCC) as the implicit fallthrough.
+ *
+ * PLANE desks (a carrel entered as a window manager): the PREFIX chord (`env.planePrefix`, default
+ * Ctrl+Space — not tmux's Ctrl+B, which the tmux inside our terminals owns) arms one pane command
+ * for the next key — h/j/k/l or arrows focus, z zoom, Tab / Shift+Tab cycle the pane's tabs, x
+ * closes a pane (its tabs move to its neighbor), e/m/s re-lay (even/main/stack), Esc or q leaves —
+ * and sits ABOVE typing so a focused terminal never sees it. A bare Esc that nothing else claims
+ * (no focus to pop) leaves the plane: Esc steps back out, one level at a time. The DOM-input guard sits above all of them:
  * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
  * the command bar and panels keep their own keys (this runs in capture phase, BEFORE the input's
  * own handler, so the guard is what stops us preventing-default on its keystroke).
@@ -176,10 +183,60 @@ function navKeymap(e, env) {
     return true;
 }
 
+// ---- Plane tiers: the pane prefix, and Esc to step out ----
+
+/** The default pane prefix — born configurable (env.planePrefix; Settings ▸ Planes `plane.prefix`). */
+export const PLANE_PREFIX = Object.freeze({ key: ' ', ctrl: true, shift: false, alt: false, meta: false });
+
+/** After the prefix: key → verb. Shift+Tab is matched before Tab. */
+function planeCommandFor(e) {
+    if (e.key === 'Tab') return e.shiftKey ? 'pane.tab prev' : 'pane.tab next';
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    switch (k) {
+        case 'h': case 'ArrowLeft':  return 'pane.focus left';
+        case 'l': case 'ArrowRight': return 'pane.focus right';
+        case 'k': case 'ArrowUp':    return 'pane.focus up';
+        case 'j': case 'ArrowDown':  return 'pane.focus down';
+        case 'z': return 'pane.zoom';
+        case 'x': return 'pane.close';
+        case 'e': return 'pane.layout even';
+        case 'm': return 'pane.layout main';
+        case 's': return 'pane.layout stack';
+        case 'q': case 'Escape': return 'carrel.leave';
+        default: return null;
+    }
+}
+
+/** Tier 1 — the plane prefix. Only while a plane desk is entered: the chord arms it (for
+ *  `env.planePrefixMs`), the next key runs its pane command — or, unknown, disarms and is
+ *  consumed (a stray prefixed key never reaches the terminal as a surprise). */
+function planePrefix(e, env) {
+    if (!env.planeEntered?.()) { env._planeArmed = 0; return false; }
+    if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return false;
+    if (matchesChord(e, env.planePrefix ?? PLANE_PREFIX)) {
+        env._planeArmed = Date.now() + (env.planePrefixMs ?? 1500);
+        return true;
+    }
+    if (!(env._planeArmed > Date.now())) return false;
+    env._planeArmed = 0;
+    const cmd = planeCommandFor(e);
+    if (cmd) env.exec(cmd);
+    return true;
+}
+
+/** Tier 4 — a bare Esc nothing else claimed (no focus left to pop) steps out of the plane. */
+function planeEscLeave(e, env) {
+    if (e.key !== 'Escape' || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return false;
+    if (!env.planeEntered?.()) return false;
+    env.exec('carrel.leave');
+    return true;
+}
+
 /** The ordered chain. Push or reorder to change precedence; the camera (WASD, in VCC) is the
  *  implicit final tier — it sees only keys NO tier here claimed. captureToggle sits ABOVE typing
- *  so the reserved chord releases capture even while the terminal is greedily eating keys. */
-const HANDLERS = [captureToggle, entityTyping, contextEsc, navKeymap];
+ *  so the reserved chord releases capture even while the terminal is greedily eating keys; the
+ *  plane prefix sits above typing for the same reason. */
+const HANDLERS = [captureToggle, planePrefix, entityTyping, contextEsc, planeEscLeave, navKeymap];
 
 /** True while a real DOM input owns focus — the whole chain yields so it keeps its own keys. */
 function domInputFocused(doc) {
@@ -201,6 +258,9 @@ function domInputFocused(doc) {
  * @param {Object} env.gestureEnv  env for resolveGesture (Esc tier)
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]
  *   override the settle/unsettle chord (default CAPTURE_TOGGLE = Ctrl+Shift+Enter)
+ * @param {() => boolean} [env.planeEntered]  a plane desk is entered (the plane tiers' gate)
+ * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.planePrefix]
+ *   the pane prefix chord (default PLANE_PREFIX = Ctrl+Space) @param {number} [env.planePrefixMs]
  * @param {Document} [env.document] injectable for tests; defaults to the global
  * @returns {() => void} uninstall
  */

@@ -671,6 +671,7 @@ export const SETTINGS = [
   { key: 'plane.enterMs', label: 'Enter: the ease into a plane (ms)', group: 'Planes', type: 'number', default: 700, min: 0, max: 5000, step: 50 },
   { key: 'plane.leaveMs', label: 'Leave: the ease back out (ms)', group: 'Planes', type: 'number', default: 600, min: 0, max: 5000, step: 50 },
   { key: 'plane.fanMs', label: 'Fan: the ease when the plane fov changes (ms)', group: 'Planes', type: 'number', default: 400, min: 0, max: 5000, step: 50 },
+  { key: 'plane.prefixMs', label: 'Pane prefix (Ctrl+Space): how long it waits for its command key (ms)', group: 'Planes', type: 'number', default: 1500, min: 200, max: 10000, step: 100 },
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },
   { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },
   // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued

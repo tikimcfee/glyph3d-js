@@ -35,6 +35,7 @@ import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { getSetting } from '../../client/settings.js';
 import { enterPlaneView, atlasColumnWorld } from './planeCommands.js';
 import { wirePanes } from '../../client/carrelPanes.js';
+import { focusPaneFront } from './paneCommands.js';
 import { DESK_KNOBS, tuneOf, applyDeskTune, tuneDesk, readDesk, forgetTune } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
@@ -276,6 +277,7 @@ function enterPlaneDesk(ctx, carrel) {
         aim: { x: 0, y: 0 }, origin: rect.origin,
     });
     ctx.enteredCarrel = carrel.carrelName;
+    focusPaneFront(ctx, carrel);   // attention (and the keyboard, for a terminal) lands at t = 0, before the camera
     const panes = carrel.paneRects();
     return {
         text: `OK: entered '${carrel.carrelName}' — ${panes.length} pane(s) on ${vp.width}×${vp.height} px at ${cellPx} px/column`,
