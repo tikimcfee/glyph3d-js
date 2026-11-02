@@ -9,7 +9,8 @@
  *   plane.leave                     back to where you entered from
  *   plane.fov <deg|default>         the parallax fan: wider spreads layers off the plane with depth
  *   plane.aim <x> <y>               the plane point at the view center (plane coords, world units)
- *   plane.state                     the plane view, for gates: aim, scale, lens, viewport, tweening
+ *   plane.state                     the plane view, for gates: aim, scale, lens, viewport (and whether
+ *                                   its pixels are exact), tweening
  */
 
 import * as THREE from 'three';
@@ -64,39 +65,76 @@ export function atlasColumnWorld(ctx) {
     return cs.width * Number(getSetting('plane.defaultWorldScale'));
 }
 
+/** The controllers whose plane life this module already listens to (one listener each). */
+const listening = new WeakSet();
+
+/**
+ * Space-layer chrome (the tree's ownership traces) steps aside for exactly a plane view's life —
+ * the camera says when it ends, however it ends (a leave, a fly's leave, a restore) — and the
+ * view's target and entered desk are forgotten with it. Installed once per controller.
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
+ */
+function listenToPlaneLife(ctx) {
+    const cc = ctx.cameraController;
+    if (listening.has(cc)) return;
+    listening.add(cc);
+    cc.addPlaneListener((on) => {
+        ctx.contentTreeArrows?.setSuppressed?.(on);
+        if (!on) { ctx.planeTarget = null; ctx.enteredCarrel = null; }
+    });
+}
+
 /**
  * Enter a plane view — the ONE path (plane.enter on any surface, carrel.enter on a plane desk).
- * Space-layer chrome (the tree's ownership traces) steps aside for exactly the view's life — the
- * camera says when it ends, however it ends (a leave, a fly, a restore) — and the view's target
- * is recorded for the verbs that report it.
+ * Entering while entered is a switch (a cut, or a `plane.switchMs` slide). The view's target is
+ * recorded for the verbs that report it. On a canvas whose drawing buffer isn't its device-pixel
+ * box 1:1 the view still enters, but the pixels it promises can't reach the screen: the returned
+ * `notice` says so with the numbers (a verb puts it in its OK line) and the console hears it too.
  * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
  * @param {string} target  the registry id read (`carrel:<name>` for a desk)
  * @param {{center:Object, normal:Object, up:Object, pxPerUnit:number, depth:number,
- *          aim:{x:number,y:number}, origin:{x:number,y:number}}} p
- * @returns {Object} the camera's planeState
+ *          aim?:{x:number,y:number}, referent?:{x:number,y:number}, origin:{x:number,y:number}}} p
+ *   referent: a plane point held where it is on screen through the ease (the end aim follows from
+ *   it); aim: where the view lands when there is no referent to hold — ViewerCameraController.enterPlane
+ * @returns {Object} the camera's planeState, plus `notice` (a string when the box is inexact, else null)
  */
 export function enterPlaneView(ctx, target, p) {
     const cc = ctx.cameraController;
-    cc.onPlaneChange = (on) => {
-        ctx.contentTreeArrows?.setSuppressed?.(on);
-        if (!on) { ctx.planeTarget = null; ctx.enteredCarrel = null; }
-    };
+    listenToPlaneLife(ctx);
     cc.enterPlane({
         center: p.center, normal: p.normal, up: p.up,
         pxPerUnit: p.pxPerUnit, fovDeg: Number(getSetting('plane.fov')),
         front: p.depth / 2 + Number(getSetting('plane.front')), back: p.depth / 2 + Number(getSetting('plane.back')),
-        aim: p.aim, origin: p.origin,
-    }, { ms: Number(getSetting('plane.enterMs')) });
+        aim: p.aim, referent: p.referent, origin: p.origin,
+    }, {
+        ms: Number(getSetting('plane.enterMs')), leaveMs: Number(getSetting('plane.leaveMs')),
+        switchMs: Number(getSetting('plane.switchMs')),
+    });
     ctx.planeTarget = target;
-    return cc.planeState();
+    const s = cc.planeState();
+    const vp = s.viewport;
+    let notice = null;
+    if (!vp.exact) {
+        notice = `NOT pixel-exact: ${vp.why} (buffer ${vp.width}×${vp.height} @ dpr ${vp.dpr})`;
+        console.warn(`[plane] entering '${target}' on an inexact canvas — ${notice}`);
+    }
+    return { ...s, notice };
 }
 
-/** The aim y that opens a surface of `height` world units at its top, or centered if it fits. */
-function openAimY(height, pxPerUnit, vp) {
-    const viewH = vp.height / pxPerUnit;   // device px ÷ device px per unit
-    if (height <= viewH) return 0;
-    const margin = Number(getSetting('plane.topMarginPx')) * vp.dpr / pxPerUnit;   // the knob is CSS px
-    return height / 2 - viewH / 2 + margin;
+/**
+ * The aim that opens a surface of `width` × `height` world units where it is read from: wider
+ * than the view, at its left edge (`plane.leftMarginPx` in); taller, at its top
+ * (`plane.topMarginPx` down); an axis that fits centers.
+ * @returns {{x:number, y:number}}
+ */
+function openAim(width, height, pxPerUnit, vp) {
+    const viewW = vp.width / pxPerUnit, viewH = vp.height / pxPerUnit;   // device px ÷ device px per unit
+    const left = Number(getSetting('plane.leftMarginPx')) * vp.dpr / pxPerUnit;   // the knobs are CSS px
+    const top = Number(getSetting('plane.topMarginPx')) * vp.dpr / pxPerUnit;
+    return {
+        x: width <= viewW ? 0 : -width / 2 + viewW / 2 - left,
+        y: height <= viewH ? 0 : height / 2 - viewH / 2 + top,
+    };
 }
 
 /** @param {import('../../client/CommandProvider.jsx').AppRouter} router */
@@ -125,18 +163,22 @@ export default function registerPlaneCommands(router) {
             const right = new THREE.Vector3().crossVectors(plane.up, plane.normal).normalize();
             origin = { x: d.dot(right), y: d.dot(plane.up) };
         }
+        // Entering never loses your place: the surface point you are looking at stays where it is
+        // on screen. Looking elsewhere (or switching from another plane), it opens where it is read
+        // from: a surface wider than the view at its left edge, taller at its top (openAim).
+        const look = cc.planePointAtView(plane);
+        const onIt = look && Math.abs(look.x) <= plane.width / 2 && Math.abs(look.y) <= plane.height / 2;
         const s = enterPlaneView(ctx, t.id, {
             center: plane.center, normal: plane.normal, up: plane.up, pxPerUnit, depth,
-            // A surface taller than the view opens at its top (a page is read from its head), the
-            // top edge `plane.topMarginPx` below the view's; a shorter one centers.
-            aim: { x: 0, y: openAimY(plane.height, pxPerUnit, vp) },
+            aim: openAim(plane.width, plane.height, pxPerUnit, vp),
+            ...(onIt && !cc.planeState() ? { referent: look } : {}),
             origin,
         });
         return {
-            text: `OK: reading '${t.id}' at ${cellPx} device px per column (${s.pxPerUnit.toFixed(4)} device px/unit, fov ${s.fovDeg}°)`,
+            text: `OK: reading '${t.id}' at ${cellPx} device px per column (${s.pxPerUnit.toFixed(4)} device px/unit, fov ${s.fovDeg}°)${s.notice ? ` — ⚠ ${s.notice}` : ''}`,
             data: { target: t.id, cellPx, ...s },
         };
-    }, { description: 'Square to a surface and ease into a pixel-exact flat view (text columns on whole device pixels)', usage: '<target> [cellPx]', returns: '{ target, cellPx, aim, pxPerUnit, fovDeg, camera, viewport, tweening }' });
+    }, { description: 'Square to a surface and ease into a pixel-exact flat view (text columns on whole device pixels)', usage: '<target> [cellPx]', returns: '{ target, cellPx, aim, pxPerUnit, fovDeg, camera, viewport, tweening, notice }' });
 
     router.register('plane.leave', (_args, ctx) => {
         const cc = ctx.cameraController;
@@ -167,8 +209,8 @@ export default function registerPlaneCommands(router) {
         const s = ctx.cameraController?.planeState?.() ?? null;
         if (!s) return { text: 'OK: open world (no plane view)', data: null };
         return {
-            text: `OK: plane '${ctx.planeTarget}' · ${s.pxPerUnit.toFixed(4)} px/unit · fov ${s.camera.fov.toFixed(3)}° · near ${s.camera.near.toFixed(1)} far ${s.camera.far.toFixed(1)} · ${s.viewport.width}×${s.viewport.height}@${s.viewport.dpr}${s.tweening ? ' · tweening' : ''}`,
+            text: `OK: plane '${ctx.planeTarget}' · ${s.pxPerUnit.toFixed(4)} px/unit · fov ${s.camera.fov.toFixed(3)}° · near ${s.camera.near.toFixed(1)} far ${s.camera.far.toFixed(1)} · ${s.viewport.width}×${s.viewport.height}@${s.viewport.dpr} ${s.viewport.exact ? 'exact' : `INEXACT (${s.viewport.why})`}${s.tweening ? ' · tweening' : ''}`,
             data: { target: ctx.planeTarget ?? null, ...s },
         };
-    }, { description: 'The plane view: aim, scale, lens, viewport, whether a tween runs (null in the open world)', returns: '{ target, aim, pxPerUnit, fovDeg, camera, viewport, tweening } | null' });
+    }, { description: 'The plane view: aim, scale, lens, viewport, whether a tween runs (null in the open world)', returns: '{ target, aim, pxPerUnit, fovDeg, camera, viewport:{width, height, dpr, exact, box, why}, tweening } | null' });
 }

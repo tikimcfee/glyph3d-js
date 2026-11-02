@@ -314,12 +314,21 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   8×15 cell), the surface's cell-grid origin (`pixelOrigin()`, else its top-left) snapped to a
   device-pixel corner, near/far a SLAB around the
   surface (`plane.front`/`plane.back`) so nothing in front of it draws. It stays the one perspective
-  camera every system already handles (picking, culling, far-LOD, batches). Inside, drag pans 1:1,
-  the wheel scrolls the surface under the cursor (else the plane), flight/look/dolly are off; a fly or
-  a restore drops it; `getState` answers with the pose it was entered from (a save mid-plane restores
-  to the open world). A wider `plane.fov` keeps the scale and fans layers off the plane by depth
-  (parallax). `onPlaneChange` marks its life: space-layer chrome (the tree's ownership traces) is
-  suppressed for exactly that span. `pick.at <x> <y>` (the GPU pick) and `scene.at <x> <y>` (a
+  camera every system already handles (picking, culling, far-LOD, batches). The ease SOLVES the eye
+  each frame (`_stepLens` on `planeView.dollyAt`): a referent — the surface point you were looking
+  at (`plane.enter`), or a caller's `referent` — holds its screen spot (< 1 px; the end aim follows
+  from it) at exactly the eased scale k(t); an explicit `aim` glides to the view center instead.
+  Entering another plane while entered is a CUT to its endpoint (`plane.switchMs` 0; a slide above),
+  home kept. Inside, drag pans 1:1, the wheel scrolls the surface under the cursor (else the plane),
+  flight/look/dolly are off; a fly (`flyTo`: camera.focus, agent.focus, a ring desk's enter) first
+  eases back to home, then flies — framed at the home lens; a restore cuts home; `getState` answers
+  with the pose it was entered from (a save mid-plane restores to the open world). A wider
+  `plane.fov` keeps the scale and fans layers off the plane by depth (parallax). Its life is a
+  listener set (`addPlaneListener` / `removePlaneListener`): `enterPlaneView` installs one per
+  controller that suppresses space-layer chrome (the tree's ownership traces) for exactly that span.
+  `planeViewport()` → `{width, height, dpr, exact, box, why}`: exact = the drawing buffer IS the
+  canvas's observed device-pixel box; entering an inexact one still enters, with a `⚠ NOT
+  pixel-exact` notice in the OK line and a console.warn. `pick.at <x> <y>` (the GPU pick) and `scene.at <x> <y>` (a
   raycast naming every object under a point, all layers) say what is on screen where. Gates:
   `tools/plane-view.test.mjs` (the math vs three's projection), `tools/plane-camera.test.mjs` (the
   controller, frame by frame). Text is MONOSPACE on its cell grid (`core/LayoutGenerator.js`): the

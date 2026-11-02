@@ -673,6 +673,8 @@ export const SETTINGS = [
   { key: 'plane.enterMs', label: 'Enter: the ease into a plane (ms)', group: 'Planes', type: 'number', default: 700, min: 0, max: 5000, step: 50 },
   { key: 'plane.leaveMs', label: 'Leave: the ease back out (ms)', group: 'Planes', type: 'number', default: 600, min: 0, max: 5000, step: 50 },
   { key: 'plane.fanMs', label: 'Fan: the ease when the plane fov changes (ms)', group: 'Planes', type: 'number', default: 400, min: 0, max: 5000, step: 50 },
+  { key: 'plane.switchMs', label: 'Switch: entering another plane while in one — 0 cuts straight to it, more slides (ms)', group: 'Planes', type: 'number', default: 0, min: 0, max: 2000, step: 25 },
+  { key: 'plane.leftMarginPx', label: 'A wide surface opens at its left edge, this many CSS px in from the view edge', group: 'Planes', type: 'number', default: 0, min: 0, max: 400, step: 1 },
   { key: 'plane.restoreWaitMs', label: 'After a reload, how long to wait for the plane you were reading to stand up before giving up (ms)', group: 'Planes', type: 'number', default: 60000, min: 1000, max: 600000, step: 1000 },
   { key: 'plane.prefixMs', label: 'Pane prefix (Ctrl+Space): how long it waits for its command key (ms)', group: 'Planes', type: 'number', default: 1500, min: 200, max: 10000, step: 100 },
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },

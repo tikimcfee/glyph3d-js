@@ -90,9 +90,19 @@ export function easeOutCubic(t) {
 }
 
 /**
+ * The signed yaw step from `a` to `b` the short way round: in [−π, π).
+ * @param {number} a @param {number} b @returns {number}
+ */
+export function shortYaw(a, b) {
+    const d = b - a;
+    return d - 2 * Math.PI * Math.floor((d + Math.PI) / (2 * Math.PI));
+}
+
+/**
  * Sample a camera "pose" (position + pitch + yaw) eased from `from` to `to` at normalized
  * time t. Pure — the camera tween's whole interpolation lives here so it's unit-testable
- * away from THREE/the renderer. t=0 → from, t=1 → to, ease-out between.
+ * away from THREE/the renderer. t=0 → from, t=1 → to exactly, ease-out between. Yaw turns the
+ * short way round (across ±π it never spins the long way).
  *
  * @param {{position:{x,y,z}, pitch:number, yaw:number}} from
  * @param {{position:{x,y,z}, pitch:number, yaw:number}} to
@@ -109,6 +119,6 @@ export function tweenPose(from, to, t) {
             z: lerp(from.position.z, to.position.z),
         },
         pitch: lerp(from.pitch, to.pitch),
-        yaw: lerp(from.yaw, to.yaw),
+        yaw: e >= 1 ? to.yaw : from.yaw + shortYaw(from.yaw, to.yaw) * e,
     };
 }

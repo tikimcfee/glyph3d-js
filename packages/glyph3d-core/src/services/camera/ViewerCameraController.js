@@ -12,10 +12,12 @@
  *
  * PLANE VIEW (`enterPlane` / `leavePlane`, driven by `carrel.enter` on a plane-form desk): the
  * camera squares to a flat surface and eases — a dolly zoom, see `planeView.js` — to a narrow fov
- * at the depth where the plane shows at an exact CSS-px-per-unit scale, its pane origin on a
- * device-pixel corner, with near/far bracketing the plane so nothing in front of it draws.
- * Inside, drag pans the plane, the wheel scrolls the surface under the cursor (else the plane),
- * and flight/look/dolly are off. `getState` keeps answering with the pose you entered from.
+ * at the depth where the plane shows at an exact device-px-per-unit scale, its pane origin on a
+ * device-pixel corner, with near/far bracketing the plane so nothing in front of it draws. The
+ * ease holds a referent on screen at exactly the eased scale; entering another plane while
+ * entered is a cut; a fly while entered leaves to home first. Inside, drag pans the plane, the
+ * wheel scrolls the surface under the cursor (else the plane), and flight/look/dolly are off.
+ * `getState` keeps answering with the pose you entered from; `addPlaneListener` hears its life.
  *
  * Movement scales to the distance down your forward axis to whatever you're looking at
  * (`_lookDistance()`). PAN holds a STILL anchor — it SAMPLES that distance once when the
@@ -43,8 +45,8 @@
 import { getCanvasViewportSize } from '../../core/canvasSize.js';
 import { normalizeWheelDelta } from '../../utils/wheelDelta.js';
 import { stateController } from '../state/StateController.js';
-import { zDistanceForFit, worldPerPixel, tweenPose, easeInOutCubic } from '../spatial/spatialMath.js';
-import { planeDistance, planeSlab, snapAim } from './planeView.js';
+import { zDistanceForFit, worldPerPixel, tweenPose, easeInOutCubic, shortYaw } from '../spatial/spatialMath.js';
+import { planeDistance, planeSlab, snapAim, dollyAt } from './planeView.js';
 import { worldBounds } from '../spatial/sceneBounds.js';
 /** @import SceneContext from '../SceneContext.js' */
 
@@ -192,9 +194,14 @@ export class ViewerCameraController {
         // from. `_lens` is the running enter/leave/fov tween (it owns the frame while it runs).
         this._plane = null;
         this._lens = null;
-        // Told when a plane view begins (true) and when it is over (false: a leave landed, or a fly
-        // or restore dropped it) — the app hides space-layer chrome for exactly that span.
-        this.onPlaneChange = null;
+        // A fly asked for while a plane is up: it waits for the leave to land home, then starts.
+        this._pendingFly = null;
+        // Told when a plane view begins (true) and when it is over (false) — addPlaneListener.
+        this._planeListeners = new Set();
+        // The canvas's device-pixel box as the browser reports it (planeViewport's `exact`).
+        this._deviceBox = null;
+        this._deviceBoxWhy = 'the canvas device-pixel box is not observed yet';
+        this._deviceBoxObserver = null;
 
         // Listener registry for clean teardown.
         this._listeners = [];
@@ -228,6 +235,7 @@ export class ViewerCameraController {
     setupEventListeners() {
         const canvas = this.ctx.canvas;
         const input = this.input;
+        this._observeDeviceBox(canvas);
 
         const track = (target, event, handler, opts) => {
             target.addEventListener(event, handler, opts);
@@ -452,7 +460,7 @@ export class ViewerCameraController {
     applyState(s) {
         if (!s) return;
         this._tween = null;
-        this._dropPlane();
+        this._cutHome();
         const p = s.pos;
         if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
             this.ctx.camera.position.set(p.x, p.y, p.z);
@@ -467,17 +475,30 @@ export class ViewerCameraController {
      * Animate the camera to a target pose over `ms` (ease-out). Replayable — calling it again
      * retargets from wherever the camera is now. Interruptible (see applyCamera). The actual
      * interpolation is the pure `tweenPose` (unit-tested); this just holds the from/to/clock.
+     * A fly is open-world motion: while a plane view is up it first LEAVES — the lens eases back
+     * to home, the pose and lens the plane was entered from — and the fly starts from there.
      * @param {{position:{x,y,z}, pitch?:number, yaw?:number}} to
      * @param {{ms?:number}} [opts]
      */
     flyTo(to, { ms = 300 } = {}) {
-        this._dropPlane();   // a fly is open-world motion: the plane's lens goes back to the home lens first
+        const fly = {
+            to: { position: { x: to.position.x, y: to.position.y, z: to.position.z }, pitch: to.pitch ?? 0, yaw: to.yaw ?? 0 },
+            ms: Math.max(1, ms),
+        };
+        if (this._plane) {
+            this._pendingFly = fly;
+            if (!this._lens?.leaving) this.leavePlane();
+            return;
+        }
+        this._startFly(fly);
+    }
+
+    /** Start a fly from wherever the camera is now. @private */
+    _startFly({ to, ms }) {
         const cam = this.ctx.camera;
         this._tween = {
             from: { position: { x: cam.position.x, y: cam.position.y, z: cam.position.z }, pitch: this.pitch, yaw: this.yaw },
-            to:   { position: { x: to.position.x, y: to.position.y, z: to.position.z }, pitch: to.pitch ?? 0, yaw: to.yaw ?? 0 },
-            ms: Math.max(1, ms),
-            elapsed: 0,
+            to, ms, elapsed: 0,
         };
     }
 
@@ -504,58 +525,118 @@ export class ViewerCameraController {
     // ============ Plane view ============
 
     /**
+     * Listen to the plane view's life: `fn(true)` when a view begins, `fn(false)` once when it is
+     * over (a landed leave, a fly's leave, a restore's cut home). A switch to another plane while
+     * entered says nothing — the view goes on. Listeners are a set: each owner adds its own.
+     * @param {(on:boolean) => void} fn
+     */
+    addPlaneListener(fn) {
+        if (typeof fn !== 'function') throw new Error(`addPlaneListener: not a function (${fn})`);
+        this._planeListeners.add(fn);
+    }
+
+    /** @param {(on:boolean) => void} fn */
+    removePlaneListener(fn) { this._planeListeners.delete(fn); }
+
+    /** @private */
+    _emitPlane(on) { for (const fn of [...this._planeListeners]) fn(on); }
+
+    /**
      * Enter a plane view: square to a flat surface and ease (one continuous lens tween from wherever
-     * the camera is) to the depth and fov where the plane shows at exactly `pxPerUnit` CSS px per
-     * world unit, the aim snapped so `origin` lands on a device-pixel corner. Re-entering while
-     * entered retargets and keeps the original home.
+     * the camera is) to the depth and fov where the plane shows at exactly `pxPerUnit` device px per
+     * world unit, the aim snapped so `origin` lands on a device-pixel corner.
+     *
+     * The ease holds a REFERENT: a plane point whose screen position is solved every frame while
+     * the lens narrows and the camera squares up, at exactly the eased scale (planeView.dollyAt).
+     * Given `referent`, it HOLDS its starting screen position (the end aim is solved from it, then
+     * snapped — it moves under half a pixel). Otherwise the view lands on `aim` (default: the plane
+     * center) and the plane point at the view center glides there. A referent that can't be held —
+     * off screen, behind the eye, or a switch — leaves the view to `aim`, else centers it.
+     *
+     * Entering while entered is a SWITCH: a cut to the new plane's endpoint (`switchMs` 0), or a
+     * slide when `switchMs` > 0 — no lens out and back in — and `home` stays the first enter's.
      * @param {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number},
      *          up:{x:number,y:number,z:number}, pxPerUnit:number, fovDeg:number, front:number,
-     *          back:number, aim?:{x:number,y:number}, origin?:{x:number,y:number}}} plane
+     *          back:number, aim?:{x:number,y:number}, referent?:{x:number,y:number},
+     *          origin?:{x:number,y:number}}} plane
      *   pxPerUnit: DEVICE px per world unit (the drawing buffer's pixels — see planeViewport);
-     *   center/normal/up: the plane's frame in world space (normal faces the viewer); aim: the plane
-     *   point at the view center (plane coords, world units, +y up; default its center); origin:
-     *   the plane point to pixel-snap (a pane's top-left); front/back: the depth slab around it.
-     * @param {{ms?:number}} [opts]
+     *   center/normal/up: the plane's frame in world space (normal faces the viewer); aim / referent /
+     *   origin: plane coords (world units from the center, +y up); origin is the point to pixel-snap
+     *   (a pane's top-left); front/back: the depth slab around it.
+     * @param {{ms?:number, leaveMs?:number, switchMs?:number}} [opts] the enter's ease, the default
+     *   leave's (a fly's leave too), and a switch's (0 = a cut)
      */
-    enterPlane(plane, { ms = 700 } = {}) {
+    enterPlane(plane, { ms = 700, leaveMs = 600, switchMs = 0 } = {}) {
         const THREE = this.THREE, cam = this.ctx.camera;
         for (const k of ['pxPerUnit', 'fovDeg', 'front', 'back']) {
             if (!(Number.isFinite(plane?.[k]) && plane[k] >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${plane?.[k]})`);
+        }
+        for (const [k, v] of Object.entries({ ms, leaveMs, switchMs })) {
+            if (!(Number.isFinite(v) && v >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${v})`);
         }
         const n = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z).normalize();
         const up = new THREE.Vector3(plane.up.x, plane.up.y, plane.up.z);
         up.addScaledVector(n, -up.dot(n));
         if (up.lengthSq() < 1e-12) throw new Error('enterPlane: up is parallel to the normal');
         up.normalize();
+        const center = new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z);
+        const switching = !!this._plane && !this._lens?.leaving;
+        const wasEntered = !!this._plane;
         const home = this._plane?.home ?? {
             position: cam.position.clone(), pitch: this.pitch, yaw: this.yaw,
             fov: cam.fov, near: cam.near, far: cam.far, dist: 0,
         };
-        const from = this._lensNow(new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z), n);
-        const entering = !this._plane;
-        if (entering) home.dist = from.dist;   // the leave lands back along this same ray
-        this._plane = {
-            center: new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z),
-            normal: n, up, right: up.clone().cross(n),
-            aim: { x: plane.aim?.x ?? 0, y: plane.aim?.y ?? 0 },
+        const view = {
+            center, normal: n, up, right: up.clone().cross(n),
+            aim: { x: 0, y: 0 },
             origin: plane.origin ? { x: plane.origin.x, y: plane.origin.y } : null,
             pxPerUnit: plane.pxPerUnit, fovDeg: plane.fovDeg, front: plane.front, back: plane.back,
-            home,
+            home, leaveMs,
         };
-        this._snapPlaneAim();
         this._tween = null;
-        this._startLens(from, this._planeLens(), ms, null);
-        if (entering) this.onPlaneChange?.(true);
+        this._pendingFly = null;
+        const from = this._lensNow(center, n);
+        if (!wasEntered) home.dist = from.dist;   // the leave lands back along this same ray
+
+        // The referent: held where it is on screen, if it is on screen and this isn't a switch.
+        let held = null;
+        if (plane.referent && !switching) {
+            const P = this._planePoint(view, plane.referent);
+            const s0 = this._screenOffset(P);
+            const { width: Wd, height: Hd } = this.planeViewport();
+            if (s0 && Math.abs(s0.x) <= Wd / 2 && Math.abs(s0.y) <= Hd / 2) {
+                held = P;
+                view.aim = { x: plane.referent.x - s0.x / plane.pxPerUnit, y: plane.referent.y - s0.y / plane.pxPerUnit };
+            }
+        }
+        if (!held) {
+            const a = plane.aim ?? plane.referent ?? { x: 0, y: 0 };
+            view.aim = { x: a.x, y: a.y };
+        }
+        this._plane = view;
+        this._snapPlaneAim();
+        const to = this._planeLens();
+        if (switching && switchMs <= 0) {
+            this._lens = null;
+            this._setLens(to);   // the cut: the new plane's endpoint, this frame
+            return;
+        }
+        this._startLens(to, {
+            P0: held ?? from.aim, P1: held ?? to.aim, ms: switching ? switchMs : ms,
+        });
+        if (!wasEntered) this._emitPlane(true);
     }
 
     /**
-     * Leave the plane view: ease back to the pose and lens it was entered from.
-     * @param {{ms?:number}} [opts]
+     * Leave the plane view: ease back to the pose and lens it was entered from (a fly waiting on
+     * the leave starts from there). Leaving while already leaving keeps the running leave.
+     * @param {{ms?:number}} [opts] default: the enter's `leaveMs`
      * @returns {boolean} false when not in a plane view
      */
-    leavePlane({ ms = 600 } = {}) {
+    leavePlane({ ms } = {}) {
         const view = this._plane;
         if (!view) return false;
+        if (this._lens?.leaving) return true;
         const THREE = this.THREE;
         const h = view.home;
         const fwd = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(h.pitch, h.yaw, 0, 'YXZ'));
@@ -564,10 +645,16 @@ export class ViewerCameraController {
             aim: h.position.clone().addScaledVector(fwd, dist), dist, pitch: h.pitch, yaw: h.yaw,
             fov: h.fov, near: h.near, far: h.far,
         };
-        this._startLens(this._planeLens(), to, ms, () => {
-            this._plane = null;
-            this._setHome(h);
-            this.onPlaneChange?.(false);
+        this._startLens(to, {
+            P0: this._lensNow(view.center, view.normal).aim, P1: to.aim, ms: ms ?? view.leaveMs, leaving: true,
+            onDone: () => {
+                this._plane = null;
+                this._setHome(h);
+                const fly = this._pendingFly;
+                this._pendingFly = null;
+                if (fly) this._startFly(fly);
+                this._emitPlane(false);
+            },
         });
         return true;
     }
@@ -582,9 +669,10 @@ export class ViewerCameraController {
         const view = this._plane;
         if (!view || this._lens?.leaving) return false;
         if (!(fovDeg > 0 && fovDeg < 179)) throw new Error(`setPlaneFov: fov must be in (0, 179) degrees (got ${fovDeg})`);
-        const from = this._planeLens();
+        const P0 = this._lensNow(view.center, view.normal).aim;
         view.fovDeg = fovDeg;
-        this._startLens(from, this._planeLens(), ms, null);
+        const to = this._planeLens();
+        this._startLens(to, { P0, P1: to.aim, ms });
         return true;
     }
 
@@ -602,8 +690,31 @@ export class ViewerCameraController {
     }
 
     /**
-     * The plane view, for verbs and gates: where it looks, its scale and lens, and whether a tween
-     * is running. Null in the open world.
+     * Where the camera's view axis meets a plane, in that plane's coordinates (world units from
+     * its center along its right/up, +y up) — the point you are looking at. Null when the axis
+     * misses it (parallel, or the plane is behind you).
+     * @param {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number}, up:{x:number,y:number,z:number}}} plane
+     * @returns {{x:number, y:number}|null}
+     */
+    planePointAtView(plane) {
+        const THREE = this.THREE, cam = this.ctx.camera;
+        const n = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z).normalize();
+        const up = new THREE.Vector3(plane.up.x, plane.up.y, plane.up.z);
+        up.addScaledVector(n, -up.dot(n)).normalize();
+        const right = up.clone().cross(n);
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this._quat(this.pitch, this.yaw));
+        const denom = fwd.dot(n);
+        if (!(denom < -1e-6)) return null;
+        const c = new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z);
+        const t = c.clone().sub(cam.position).dot(n) / denom;
+        if (!(t > 0)) return null;
+        const d = cam.position.clone().addScaledVector(fwd, t).sub(c);
+        return { x: d.dot(right), y: d.dot(up) };
+    }
+
+    /**
+     * The plane view, for verbs and gates: where it looks, its scale and lens, the viewport (and
+     * whether its pixels are exact), and whether a tween is running. Null in the open world.
      */
     planeState() {
         const v = this._plane;
@@ -626,13 +737,47 @@ export class ViewerCameraController {
      * A plane's scale (pxPerUnit) is device px per world unit and its snap lands on device-pixel
      * corners, so nothing here depends on window.devicePixelRatio or a rounded CSS size. dpr is the
      * buffer's device px per CSS px (input arrives in CSS px).
-     * @returns {{width:number, height:number, dpr:number}}
+     *
+     * `exact`: the drawing buffer IS the canvas's device-pixel box, 1:1 (the box the browser
+     * reports through ResizeObserver's devicePixelContentBoxSize) — only then does a pixel-exact
+     * plane reach the screen unresampled. `box` is that observed box (null when unobserved) and
+     * `why` says what isn't exact, with the numbers.
+     * @returns {{width:number, height:number, dpr:number, exact:boolean,
+     *            box:{width:number,height:number}|null, why:string|null}}
      */
     planeViewport() {
         const canvas = this.ctx.canvas;
         const css = getCanvasViewportSize(canvas);
         const width = canvas?.width || css.width, height = canvas?.height || css.height;
-        return { width, height, dpr: css.width ? width / css.width : 1 };
+        const box = this._deviceBox ? { ...this._deviceBox } : null;
+        let exact = false, why = null;
+        if (!box) why = this._deviceBoxWhy;
+        else if (box.width === width && box.height === height) exact = true;
+        else why = `drawing buffer ${width}×${height} ≠ the canvas's device-pixel box ${box.width}×${box.height}: the compositor resamples it`;
+        return { width, height, dpr: css.width ? width / css.width : 1, exact, box, why };
+    }
+
+    /**
+     * Watch the canvas's device-pixel box (planeViewport's `exact`). @private
+     * @param {HTMLCanvasElement} canvas
+     */
+    _observeDeviceBox(canvas) {
+        if (typeof ResizeObserver === 'undefined') { this._deviceBoxWhy = 'no ResizeObserver: the canvas device-pixel box is unknown'; return; }
+        const ro = new ResizeObserver(([entry]) => this._onDeviceBox(entry));
+        try { ro.observe(canvas, { box: 'device-pixel-content-box' }); }
+        catch (e) { this._deviceBoxWhy = `device-pixel-content-box unsupported (${e.message}): the canvas device-pixel box is unknown`; return; }
+        this._deviceBoxObserver = ro;
+    }
+
+    /**
+     * One ResizeObserver entry for the canvas: record its device-pixel box. @private
+     * @param {{devicePixelContentBoxSize?: ArrayLike<{inlineSize:number, blockSize:number}>}} entry
+     */
+    _onDeviceBox(entry) {
+        const dev = entry?.devicePixelContentBoxSize?.[0];
+        if (!dev) { this._deviceBox = null; this._deviceBoxWhy = 'the browser reports no devicePixelContentBoxSize: the canvas device-pixel box is unknown'; return; }
+        this._deviceBox = { width: dev.inlineSize, height: dev.blockSize };
+        this._deviceBoxWhy = null;
     }
 
     /** Snap the aim so the plane's origin (else its center) lands on a device-pixel corner. @private */
@@ -648,12 +793,36 @@ export class ViewerCameraController {
         const { height } = this.planeViewport();
         const dist = planeDistance({ fovDeg: v.fovDeg, viewportH: height, pxPerUnit: v.pxPerUnit });
         const { near, far } = planeSlab({ distance: dist, front: v.front, back: v.back });
-        const aim = v.center.clone().addScaledVector(v.right, v.aim.x).addScaledVector(v.up, v.aim.y);
+        const aim = this._planePoint(v, v.aim);
         const fwd = v.normal.clone().multiplyScalar(-1);
         return {
             aim, dist, fov: v.fovDeg, near, far,
             pitch: Math.asin(Math.max(-1, Math.min(1, fwd.y))), yaw: Math.atan2(-fwd.x, -fwd.z),
         };
+    }
+
+    /** A plane point (plane coords) in world space. @private */
+    _planePoint(v, p) {
+        return v.center.clone().addScaledVector(v.right, p.x).addScaledVector(v.up, p.y);
+    }
+
+    /** The camera's orientation for a pitch/yaw (YXZ, as _applyRotation builds it). @private */
+    _quat(pitch, yaw) {
+        return new this.THREE.Quaternion().setFromEuler(new this.THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    }
+
+    /**
+     * Where a world point sits on screen now: its offset from the view center in DEVICE px (+x
+     * right, +y up), its view depth, and the scale there (device px per world unit). Null at or
+     * behind the eye. @private
+     */
+    _screenOffset(P) {
+        const cam = this.ctx.camera;
+        const v = P.clone().sub(cam.position).applyQuaternion(this._quat(this.pitch, this.yaw).invert());
+        const depth = -v.z;
+        if (!(depth > 1e-6)) return null;
+        const k = this.planeViewport().height / (2 * depth * Math.tan((cam.fov * Math.PI / 180) / 2));
+        return { x: v.x * k, y: v.y * k, depth, k };
     }
 
     /**
@@ -663,7 +832,7 @@ export class ViewerCameraController {
      */
     _lensNow(center, normal) {
         const THREE = this.THREE, cam = this.ctx.camera;
-        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this._quat(this.pitch, this.yaw));
         const denom = fwd.dot(normal);
         let dist = denom < -0.05 ? center.clone().sub(cam.position).dot(normal) / denom : -1;
         if (!(dist > 1e-3)) dist = Math.max(center.distanceTo(cam.position), 1);
@@ -673,41 +842,68 @@ export class ViewerCameraController {
         };
     }
 
-    /** @private */
-    _startLens(from, to, ms, onDone) {
-        // Turn the short way round.
-        let dyaw = to.yaw - from.yaw;
-        dyaw -= Math.round(dyaw / (2 * Math.PI)) * 2 * Math.PI;
-        this._lens = { from, to: { ...to, yaw: from.yaw + dyaw }, ms: Math.max(1, ms), elapsed: 0, onDone, leaving: !!onDone };
+    /**
+     * Start a lens tween from the camera as it is now to the lens `to`, carrying the referent
+     * from P0 (on screen now) to P1 (where `to` shows it). Each frame (_stepLens) the fov and the
+     * scale at the referent come from planeView.dollyAt — the fov linear, the scale linear in log
+     * — the orientation eases the short way round, the referent's screen offset eases from where
+     * it is to where it lands, and the eye is SOLVED from those: the referent sits exactly there,
+     * at exactly that scale. @private
+     * @param {{aim:Object, dist:number, pitch:number, yaw:number, fov:number, near:number, far:number}} to
+     * @param {{P0:Object, P1:Object, ms:number, leaving?:boolean, onDone?:Function}} how
+     */
+    _startLens(to, { P0, P1, ms, leaving = false, onDone = null }) {
+        const cam = this.ctx.camera;
+        const s0 = this._screenOffset(P0);
+        if (!s0) throw new Error('_startLens: the referent is behind the camera');
+        const q1 = this._quat(to.pitch, to.yaw);
+        const eye1 = to.aim.clone().addScaledVector(new this.THREE.Vector3(0, 0, -1).applyQuaternion(q1), -to.dist);
+        const v1 = P1.clone().sub(eye1).applyQuaternion(q1.clone().invert());
+        const d1 = -v1.z;
+        if (!(d1 > 1e-6)) throw new Error('_startLens: the referent is behind the landing camera');
+        const k1 = this.planeViewport().height / (2 * d1 * Math.tan((to.fov * Math.PI / 180) / 2));
+        this._lens = {
+            to, P0: P0.clone(), P1: P1.clone(),
+            s0: { x: s0.x, y: s0.y }, s1: { x: v1.x * k1, y: v1.y * k1 }, k0: s0.k, k1,
+            fov0: cam.fov, fov1: to.fov, pitch0: this.pitch, pitch1: to.pitch,
+            yaw0: this.yaw, dyaw: shortYaw(this.yaw, to.yaw),
+            clear0: s0.depth - cam.near, clear1: d1 - to.near, back0: cam.far - s0.depth, back1: to.far - d1,
+            ms: Math.max(1, ms), elapsed: 0, onDone, leaving,
+        };
     }
 
     /**
-     * One frame of the lens tween. The aim, pitch/yaw and fov ease; the distance, near and far ease
-     * in log space (a dolly over orders of magnitude reads even). Near stays in front of the aim by
-     * an eased clearance, so the plane is never clipped on the way in or out. @private
+     * One frame of the lens tween (see _startLens): the referent at its eased screen offset, the
+     * scale there exactly dollyAt's k(t). Near stays in front of the referent by an eased
+     * clearance, far behind it, so the plane is never clipped on the way in or out. @private
      */
     _stepLens(dt) {
         const L = this._lens;
         L.elapsed += dt * 1000;
         const t = Math.min(L.elapsed / L.ms, 1);
-        const e = easeInOutCubic(t);
-        const a = L.from, b = L.to;
         if (t >= 1) {
             // Land ON the target, not on an exp/log round trip of it (still must be bit-still).
-            this._setLens(b);
+            this._setLens(L.to);
             this._lens = null;
             L.onDone?.();
             return;
         }
+        const e = easeInOutCubic(t);
         const lerp = (x, y) => x + (y - x) * e;
-        const loglerp = (x, y) => Math.exp(Math.log(x) + (Math.log(y) - Math.log(x)) * e);
-        const dist = loglerp(a.dist, b.dist);
-        const clear = lerp(a.dist - a.near, b.dist - b.near);
-        const back = lerp(a.far - a.dist, b.far - b.dist);
-        this._setLens({
-            aim: a.aim.clone().lerp(b.aim, e), dist, pitch: lerp(a.pitch, b.pitch), yaw: lerp(a.yaw, b.yaw),
-            fov: lerp(a.fov, b.fov), near: Math.max(dist * 1e-3, dist - clear), far: Math.max(dist + back, dist * 1.001),
+        const { fovDeg, pxPerUnit: k, distance: d } = dollyAt({
+            fromFov: L.fov0, toFov: L.fov1, fromScale: L.k0, toScale: L.k1, viewportH: this.planeViewport().height, t: e,
         });
+        const THREE = this.THREE, cam = this.ctx.camera;
+        this.pitch = lerp(L.pitch0, L.pitch1);
+        this.yaw = L.yaw0 + L.dyaw * e;
+        this._applyRotation();
+        const P = L.P0.clone().lerp(L.P1, e);
+        const local = new THREE.Vector3(lerp(L.s0.x, L.s1.x) / k, lerp(L.s0.y, L.s1.y) / k, -d);
+        cam.position.copy(P).sub(local.applyQuaternion(cam.quaternion));
+        cam.fov = fovDeg;
+        cam.near = Math.max(d * 1e-3, d - lerp(L.clear0, L.clear1));
+        cam.far = Math.max(d + lerp(L.back0, L.back1), d * 1.001);
+        cam.updateProjectionMatrix();
     }
 
     /** Put the camera at a lens: position = aim − forward·dist. @private */
@@ -738,16 +934,18 @@ export class ViewerCameraController {
         cam.updateProjectionMatrix();
     }
 
-    /** Drop the plane view on the spot (an open-world fly or a restore takes over): the home lens comes back, the pose stays. @private */
-    _dropPlane() {
+    /**
+     * Cut straight home, no ease (a restore takes over): the plane view ends with the camera at the
+     * pose and lens it was entered from — never left standing at the plane pose. @private
+     */
+    _cutHome() {
         this._lens = null;
+        this._pendingFly = null;
         const h = this._plane?.home;
         if (!h) return;
         this._plane = null;
-        const cam = this.ctx.camera;
-        cam.fov = h.fov; cam.near = h.near; cam.far = h.far;
-        cam.updateProjectionMatrix();
-        this.onPlaneChange?.(false);
+        this._setHome(h);
+        this._emitPlane(false);
     }
 
     /**
@@ -1207,6 +1405,8 @@ export class ViewerCameraController {
             try { target.removeEventListener(event, handler, opts); } catch {}
         }
         this._listeners = [];
+        this._deviceBoxObserver?.disconnect();
+        this._deviceBoxObserver = null;
         if (this.ctx.canvas) {
             this.ctx.canvas.style.cursor = '';
         }
@@ -1243,6 +1443,17 @@ export class ViewerCameraController {
     }
 
     /**
+     * The lens a fly will be flown with: the camera's own in the open world; while a plane view is
+     * up, its home's (a fly leaves to home first — framing at the plane's 1° lens would put the
+     * target thousands of units away). @private
+     * @returns {{fov:number, aspect:number}}
+     */
+    _openLens() {
+        const cam = this.ctx.camera;
+        return { fov: this._plane?.home.fov ?? cam.fov, aspect: cam.aspect };
+    }
+
+    /**
      * The flyTo pose that REVERSE-BILLBOARDS a plane: the camera squares up to `normal` at a
      * distance that fits width×height head-on (so an oblique surface reads face-on, not as a
      * foreshortened sliver), sitting in front of the slab and looking back along -normal. anchorTop
@@ -1253,15 +1464,15 @@ export class ViewerCameraController {
      * @private
      */
     _billboardPose({ center, normal, up, width, height, depth = 0, fullHeight = height, anchorTop = false, fill = 0.85, topMargin = 0.08 }) {
-        const camera = this.ctx.camera;
+        const lens = this._openLens();
         const n = normal.clone().normalize();
-        const distance = Math.max(zDistanceForFit(camera, width, height, fill), 5);
+        const distance = Math.max(zDistanceForFit(lens, width, height, fill), 5);
 
         // Aim point on the plane: center, or shifted UP toward the top edge so the head sits near
         // the top of the view (the content top, pulled down by the view margin).
         const aim = center.clone();
         if (anchorTop) {
-            const visibleHalfH = distance * Math.tan((camera.fov * Math.PI / 180) / 2);
+            const visibleHalfH = distance * Math.tan((lens.fov * Math.PI / 180) / 2);
             aim.addScaledVector(up.clone().normalize(), fullHeight / 2 - visibleHalfH * (1 - 2 * topMargin));
         }
 
@@ -1296,7 +1507,7 @@ export class ViewerCameraController {
             const b = grid.getBounds?.();
             if (!b || b.isEmpty?.()) return null;
             const size = new THREE.Vector3(); b.getSize(size);
-            const dist = Math.max(zDistanceForFit(this.ctx.camera, size.x, size.y, 0.85), 5);
+            const dist = Math.max(zDistanceForFit(this._openLens(), size.x, size.y, 0.85), 5);
             return { x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2, z: b.max.z + dist, pitch: 0, yaw: 0 };
         }
 

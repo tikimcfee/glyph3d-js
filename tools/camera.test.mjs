@@ -2,7 +2,7 @@
 // the pure heart of the flyTo animation. No THREE camera, no renderer.
 //   bun tools/camera.test.mjs
 
-import { easeOutCubic, tweenPose } from '../packages/glyph3d-core/src/services/spatial/spatialMath.js';
+import { easeOutCubic, tweenPose, shortYaw } from '../packages/glyph3d-core/src/services/spatial/spatialMath.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -34,6 +34,26 @@ ok(easeOutCubic(0.5) > 0.5, 'ease-OUT: past halfway by t=0.5 (fast start)');
   ok(m.position.z < 100 && m.position.z > 40, 'midpoint z is between from and to');
   // ease-out: at t=0.5 it's already past the linear midpoint toward `to`.
   ok(m.position.x > 5, 'ease-out: midpoint is past linear halfway toward target');
+}
+
+// tweenPose turns the SHORT way: across ±π (a ring desk behind you, the hub) yaw never sweeps the
+// long way round through the room. Every sample stays within the short arc, and t=1 lands on `to`.
+{
+  const cases = [
+    [3.0, -3.0], [-3.0, 3.0], [Math.PI - 0.01, -Math.PI + 0.01], [0.2, 6.2], [10, -10], [1, -1],
+  ];
+  for (const [a, b] of cases) {
+    const from = { position: { x: 0, y: 0, z: 0 }, pitch: 0, yaw: a };
+    const to = { position: { x: 0, y: 0, z: 0 }, pitch: 0, yaw: b };
+    const arc = Math.abs(shortYaw(a, b));
+    ok(arc <= Math.PI + 1e-12, `shortYaw(${a}, ${b}) is within π (got ${arc})`);
+    const wrap = (x) => Math.atan2(Math.sin(x), Math.cos(x));
+    near(wrap(a + shortYaw(a, b)), wrap(b), `shortYaw(${a}, ${b}) arrives at b`, 1e-12);
+    let worst = 0;
+    for (let t = 0; t <= 1.0001; t += 0.02) worst = Math.max(worst, Math.abs(wrap(tweenPose(from, to, t).yaw - a)));
+    ok(worst <= arc + 1e-9, `yaw ${a} → ${b} sweeps the short arc (${arc.toFixed(3)} rad), not ${worst.toFixed(3)}`);
+    near(tweenPose(from, to, 1).yaw, b, `yaw ${a} → ${b}: t=1 lands on to.yaw exactly`, 0);
+  }
 }
 
 console.log(`\ncamera: ${pass} passed, ${fail} failed`);
