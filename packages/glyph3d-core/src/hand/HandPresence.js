@@ -56,6 +56,13 @@ class HandPresence {
         /** @type {Map<string, HandRenderer>} keyed by source id */
         this.renderers = new Map();
 
+        /**
+         * The live hand model's view of a source, when it has one: (sourceId) → the hands in view
+         * axes (HandRenderer.updateFromView), or null to draw that source's image-space landmarks.
+         * @type {((sourceId: string) => Array|null)|null}
+         */
+        this.viewProvider = null;
+
         // onPresence replays already-attached devices, so a phone that connected
         // before this object existed still gets a renderer.
         this._unsubscribe = stream.onPresence((event, state) => {
@@ -102,6 +109,9 @@ class HandPresence {
                 const halfH = Math.tan((camera.fov * Math.PI) / 360) * Math.abs(renderer.depth);
                 renderer.viewExtent = { halfW: halfH * (camera.aspect || 1), halfH };
             }
+            // The model's metric hand when it follows this device; else the image-space landmarks.
+            const views = this.viewProvider?.(id);
+            if (views) { renderer.updateFromView(views); continue; }
             const frames = this.stream.latestHands(id);
             if (!frames.length) continue;
             for (const frame of frames) renderer.updateFromFrame(frame);
@@ -120,7 +130,7 @@ class HandPresence {
      * Apply a placement or sizing parameter to all current and future renderers.
      * Stored on rendererOptions too, so a device that attaches later inherits
      * tuning already done rather than appearing at the old settings.
-     * @param {'spread'|'depth'|'scale'|'yaw'|'jointSize'|'boneRadius'} key
+     * @param {'spread'|'depth'|'scale'|'yaw'|'jointSize'|'boneRadius'|'coverage'|'tilt'|'metricScale'} key
      * @param {number} value
      */
     setPlacement(key, value) {

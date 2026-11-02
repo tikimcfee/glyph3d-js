@@ -18,6 +18,8 @@ import { MOTION_DEFAULTS } from '@glyph3d/core/collections/ContentTreeMotion.js'
 import { ARROW_DEFAULTS } from '@glyph3d/core/collections/ContentTreeArrows.js';
 import { LAYOUT_PRESETS, DEFAULT_LAYOUT, setDefaultLayout } from '@glyph3d/core/workers/builders/index.js';
 import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
+import { HAND_SPACE_DEFAULTS, HAND_MODEL_DEFAULTS, CALIBRATION_VIEW_DEFAULTS, HAND_RENDERER_DEFAULTS, STABILIZER_DEFAULTS } from '@glyph3d/core/hand';
+import { HAND_CLOUD_SETTINGS } from './handCloudSettings.js';
 /** @import { AppContext } from './CommandProvider.jsx' */
 
 // Settings schema — the SINGLE source for both the Settings panel (renders a row
@@ -29,6 +31,156 @@ import { setAnalyzeDebounce } from '@glyph3d/core/parsing/SyntaxColorizer.js';
 // `apply(ctx, value)` pushes a live change to its subsystem. `reload: true` marks a
 // boot-time knob — the glyph engine derives its cell metrics once at startup, so a
 // font-size change persists now and takes hold on the next page load.
+
+/** Every signed permutation of the phone axes, for the HandSpace `app.axes` knob. */
+const AXES_OPTIONS = (() => {
+  const perms = [['x', 'y', 'z'], ['x', 'z', 'y'], ['y', 'x', 'z'], ['y', 'z', 'x'], ['z', 'x', 'y'], ['z', 'y', 'x']];
+  const out = [];
+  for (const p of perms) for (let m = 0; m < 8; m++) out.push(p.map((a, i) => ((m >> i) & 1 ? `-${a}` : a)).join(' '));
+  return out;
+})();
+
+/** One HandSpace knob: `hand.space.<stage>.<key>`, live on ctx.handCalib's stages. */
+const spaceKnob = (stage, key, label, extra) => ({
+  key: `hand.space.${stage}.${key}`, label, group: 'Hand space',
+  default: HAND_SPACE_DEFAULTS[stage][key], ...extra,
+  apply: (ctx, v) => ctx.handCalib?.setSpace(`${stage}.${key}`, v),
+});
+const HAND_SPACE_SETTINGS = [
+  spaceKnob('oneEuro', 'enabled', '1€ filter on', { type: 'bool' }),
+  spaceKnob('oneEuro', 'auto', '1€ rest cutoffs from measured noise', { type: 'bool' }),
+  spaceKnob('oneEuro', 'targetJitter', '1€ auto: residual jitter at rest (m)', { type: 'number', min: 0.00001, max: 0.02, step: 0.00005 }),
+  spaceKnob('oneEuro', 'minCutoff', '1€ cutoff at rest (Hz; manual)', { type: 'number', min: 0.01, max: 30, step: 0.05 }),
+  spaceKnob('oneEuro', 'beta', '1€ beta (Hz of cutoff per m/s)', { type: 'number', min: 0, max: 500, step: 0.5 }),
+  spaceKnob('oneEuro', 'zMinCutoff', '1€ depth cutoff at rest (Hz; manual)', { type: 'number', min: 0.01, max: 30, step: 0.05 }),
+  spaceKnob('oneEuro', 'zBeta', '1€ depth beta (Hz per m/s)', { type: 'number', min: 0, max: 500, step: 0.5 }),
+  spaceKnob('oneEuro', 'dCutoff', '1€ speed cutoff (Hz)', { type: 'number', min: 0.01, max: 30, step: 0.05 }),
+  spaceKnob('deadZone', 'enabled', 'Dead zone on', { type: 'bool' }),
+  spaceKnob('deadZone', 'noiseK', 'Dead zone (× calibrated rest noise)', { type: 'number', min: 0, max: 50, step: 0.25 }),
+  spaceKnob('deadZone', 'radius', 'Dead zone radius (m; > 0 overrides)', { type: 'number', min: 0, max: 0.2, step: 0.0005 }),
+  spaceKnob('normalize', 'enabled', 'Volume → unit cube on', { type: 'bool' }),
+  spaceKnob('normalize', 'clamp', 'Clamp to the cube', { type: 'bool' }),
+  spaceKnob('app', 'enabled', 'App axes on', { type: 'bool' }),
+  spaceKnob('app', 'axes', 'App axes (source of out x y z)', { type: 'enum', options: AXES_OPTIONS }),
+  spaceKnob('app', 'scale', 'App units per cube half-width', { type: 'number', min: 0.001, max: 1000, step: 0.1 }),
+  spaceKnob('pinch', 'releaseDwellS', 'Pinch release dwell (s)', { type: 'number', min: 0, max: 1, step: 0.01 }),
+  spaceKnob('pinch', 'pointT', 'Pinch point: thumb → index (0 = thumb)', { type: 'number', min: 0, max: 1, step: 0.05 }),
+  spaceKnob('pinch', 'rewindS', 'Pinch onset: point taken this long before (s)', { type: 'number', min: 0, max: 0.5, step: 0.01 }),
+];
+
+/**
+ * The live hand model's knobs: [key, label, min, max, step]. A `…TauS` (forgetting time) or
+ * drift window takes hold for estimates started after it changes (calib.reset).
+ */
+const MODEL_KNOBS = [
+  ['minConfidence', 'Joint confidence floor', 0, 1, 0.05],
+  ['driftWindowS', 'Settled = steady over (s)', 1, 120, 1],
+  ['boneTauS', 'Bones: forget over (s)', 10, 36000, 10],
+  ['boneMinN', 'Bones: samples before known', 1, 10000, 1],
+  ['boneGate', 'Bones: rebuild a joint off by (fraction)', 0.01, 1, 0.01],
+  ['boneSettled', 'Bones: settled within (m)', 0.00005, 0.02, 0.00005],
+  ['bonePoses', 'Bones: independent poses before known', 1, 1000, 1],
+  ['posePalmM', 'Bones: a new pose = palm moved (m)', 0.001, 0.5, 0.001],
+  ['posePalmDeg', 'Bones: … or turned (°)', 0.5, 90, 0.5],
+  ['boneMinRayWeight', 'Bones: skip bones along the ray (min 1 − cos²)', 0, 1, 0.01],
+  ['rangeNoiseExp', 'Evidence: noise grows as range^k (0 = range-blind)', 0, 4, 0.1],
+  ['rangeRefM', 'Evidence: reference range (m)', 0.05, 1, 0.01],
+  ['volumeTauS', 'Volume: forget over (s)', 5, 36000, 5],
+  ['volumeLowPct', 'Volume: low percentile', 0, 50, 0.5],
+  ['volumeHighPct', 'Volume: high percentile', 50, 100, 0.5],
+  ['volumeMinN', 'Volume: samples before known', 1, 100000, 10],
+  ['volumeSettled', 'Volume: settled within (m)', 0.0005, 0.2, 0.0005],
+  ['stillWindowS', 'Still: window (s)', 0.1, 5, 0.05],
+  ['stillRms', 'Still: palm within (m rms)', 0.0005, 0.05, 0.0005],
+  ['stillSpeed', 'Still: slower than (m/s)', 0.001, 1, 0.005],
+  ['noiseTauS', 'Noise: forget over (s)', 10, 36000, 10],
+  ['noiseMinN', 'Noise: still windows before known', 1, 1000, 1],
+  ['noiseSettled', 'Noise: settled within (m)', 0.00001, 0.01, 0.00001],
+  ['pinchTauS', 'Pinch: forget over (s)', 10, 36000, 10],
+  ['pinchMinRatio', 'Pinch: open ≥ × closed', 1, 50, 0.1],
+  ['pinchCutFrac', 'Pinch: closed = below (× open distance)', 0.05, 0.95, 0.01],
+  ['pinchMinClosed', 'Pinch: closed frames before learned', 1, 10000, 1],
+  ['pinchOnFrac', 'Pinch: on, up the closed→open range', 0, 1, 0.01],
+  ['pinchOffFrac', 'Pinch: off, up the closed→open range', 0, 1, 0.01],
+  ['pinchPriorOn', 'Pinch prior: on (× palm length)', 0, 2, 0.01],
+  ['pinchPriorOff', 'Pinch prior: off (× palm length)', 0, 2, 0.01],
+  ['pinchSettled', 'Pinch: settled within', 0.001, 0.5, 0.001],
+  ['templateTauS', 'Palm template: forget over (s)', 10, 36000, 10],
+  ['templateFlatRms', 'Palm template: flat within (m rms)', 0.0005, 0.03, 0.0005],
+  ['templateMinN', 'Palm template: samples before known', 1, 10000, 1],
+  ['templateSettled', 'Palm template: settled within (m)', 0.00005, 0.02, 0.00005],
+  ['neutralTauS', 'Neutral pose: forget over (s)', 1, 3600, 1],
+  ['bumpDeg', 'Phone moved: turned more than (°)', 0.1, 45, 0.1],
+  ['bumpCeilingM', 'Phone moved: ceiling jumped (m; 0 = off)', 0, 2, 0.01],
+  ['bumpHoldS', 'Phone moved: for at least (s)', 0, 10, 0.05],
+  ['deviceRefTauS', 'Phone reference follows over (s)', 1, 3600, 1],
+  ['trackMaxSpeed', 'Tracking: a hand moves at most (m/s)', 0.1, 20, 0.1],
+  ['trackSlack', 'Tracking: … plus (m)', 0, 0.2, 0.005],
+  ['recentTauS', 'Left/right: recent-evidence window (s)', 0.05, 10, 0.05],
+  ['contradict', 'Left/right: re-vote when recent evidence opposes by', 0.05, 5, 0.05],
+  ['trackLostS', 'Tracking: a hand is gone after (s)', 0.05, 10, 0.05],
+  ['decideVotes', 'Left/right: decided at |vote|', 0.5, 1000, 0.5],
+  ['decideFrames', 'Left/right: after at least (frames)', 1, 1000, 1],
+  ['voteGeometry', 'Left/right vote: anatomy, palm down', 0, 10, 0.05],
+  ['voteFlatPrior', 'Left/right vote: flat-hand prior', 0, 10, 0.05],
+  ['voteLabel', "Left/right vote: Vision's label", 0, 10, 0.05],
+  ['curlMin', 'Left/right: fingers curled at least (m)', 0, 0.05, 0.0005],
+  ['downCos', 'Left/right: palm down within (cos)', 0, 1, 0.01],
+  ['idleS', 'Idle after unseen for (s)', 0.1, 60, 0.1],
+  ['snapshotMinFrames', 'Warm start: hands seen at least (frames)', 0, 100000, 10],
+  ['bumpAccel', 'Phone moved: slid, |acceleration| over (m/s²; 0 = off)', 0, 20, 0.05],
+  ['bumpAccelFrames', 'Phone moved: … on frames', 1, 20, 1],
+  ['bumpAccelWindowS', 'Phone moved: … within (s)', 0.02, 2, 0.01],
+  ['bumpRefractoryS', 'Phone moved: one move lasts up to (s)', 0, 30, 0.1],
+  ['skinPrior', 'Skin depth prior at the palm (m)', 0, 0.04, 0.0005],
+  ['skinFingerFrac', 'Skin depth at fingers (× palm)', 0, 2, 0.05],
+  ['skinTauS', 'Skin depth: forget over (s)', 10, 36000, 10],
+  ['skinMinSpread', 'Skin depth: learned once heights spread (m sd)', 0.002, 0.2, 0.001],
+  ['skinMin', 'Skin depth: learned at least (m)', 0, 0.05, 0.0005],
+  ['skinMax', 'Skin depth: learned at most (m)', 0.001, 0.1, 0.001],
+  ['kabschSigma0', 'Palm fit: weight floor σ0 (m)', 0.0001, 0.02, 0.0001],
+  ['priorWeight', 'Warm start weight (samples)', 0, 10000, 1],
+];
+const HAND_MODEL_SETTINGS = [...MODEL_KNOBS, ['repairLimits', 'Rebuild joints within joint limits'], ['skinLearn', 'Skin depth: correct by the height fit (else the prior)']].map(([k, label, min, max, step]) => ({
+  key: `hand.model.${k}`, label, group: 'Hand model', default: HAND_MODEL_DEFAULTS[k],
+  ...(min == null ? { type: 'bool' } : { type: 'number', min, max, step }),
+  apply: (ctx, v) => { if (ctx.handCalib) ctx.handCalib.model.opts[k] = v; },
+}));
+
+/** The displayed hand's stabilizer (core hand/HandStabilizer.js): [key, label, min, max, step] (bools: [key, label]). */
+const STAB_KNOBS = [
+  ['enabled', 'Stabilize the displayed hand'],
+  ['targetJitter', 'Still joint: residual jitter target (m rms/axis)', 0.00001, 0.005, 0.00001],
+  ['rotTarget', 'Still palm: rotation jitter target (rad rms/axis)', 0.0001, 0.05, 0.0001],
+  ['beta', 'Joint: cutoff Hz per m/s of its own motion', 0, 500, 0.5],
+  ['palmBeta', 'Palm: cutoff Hz per m/s of its motion', 0, 500, 0.5],
+  ['rotBeta', 'Palm: cutoff Hz per rad/s of its turning', 0, 500, 0.5],
+  ['dCutoff', 'Speed estimate cutoff (Hz)', 0.05, 30, 0.05],
+  ['fallbackCutoff', 'Before a joint is measured: cutoff (Hz)', 0.01, 30, 0.05],
+  ['noiseWindowS', 'Noise: line-fit window (s)', 0.1, 5, 0.05],
+  ['stillSpeed', 'Noise: measured when slower than (m/s)', 0.001, 0.2, 0.001],
+  ['noiseTau', 'Noise: averaged over (windows)', 1, 1000, 1],
+  ['holdS', 'An unseen joint holds for (s)', 0, 5, 0.05],
+  ['rotSpeedWindowS', 'Palm turning speed: slope window (s)', 0.05, 2, 0.01],
+  ['leverM', 'Palm-to-tip lever (m)', 0.01, 0.5, 0.01],
+];
+const STAB_SETTINGS = STAB_KNOBS.map(([k, label, min, max, step]) => ({
+  key: `hand.stab.${k}`, label, group: 'Hand stabilizer', default: STABILIZER_DEFAULTS[k],
+  ...(min == null ? { type: 'bool' } : { type: 'number', min, max, step }),
+  apply: (ctx, v) => ctx.handCalib?.setStab(k, v),
+}));
+
+const CALIB_VIEW_SETTINGS = [
+  ['x', 'Calibration view: across (fraction of half width)', -2, 2, 0.01],
+  ['y', 'Calibration view: up (fraction of half height)', -2, 2, 0.01],
+  ['depth', 'Calibration view: depth (× camera.near)', -100, -1, 0.1],
+  ['size', 'Calibration view: size (units per meter)', 0.01, 100, 0.1],
+  ['tiltDeg', 'Calibration view: tilt (°)', -90, 90, 1],
+].map(([k, label, min, max, step]) => ({
+  key: `hand.calibView.${k}`, label, group: 'Hand model', type: 'number',
+  default: CALIBRATION_VIEW_DEFAULTS[k], min, max, step,
+  apply: (ctx, v) => { if (ctx.handCalib) ctx.handCalib.view.place[k] = v; },
+}));
 
 /** apply() for a dock layout knob: push the value to CameraDock.setParam, which
  *  re-packs the live bar. The bare param name (not the `dock.` setting key) goes through. */
@@ -300,9 +452,19 @@ export const SETTINGS = [
     apply: (ctx, v) => ctx.handPresence?.setPlacement('scale', v),
   },
   {
-    key: 'hand.yaw', label: 'Yaw (°; 180 = palms away)', group: 'Hands',
+    key: 'hand.yaw', label: 'Yaw (°; 180 = palms away; image-space hands)', group: 'Hands',
     type: 'number', default: 180, min: -360, max: 360, step: 5,
     apply: (ctx, v) => ctx.handPresence?.setPlacement('yaw', v),
+  },
+  {
+    key: 'hand.tilt', label: 'Model hand: tipped back (°)', group: 'Hands',
+    type: 'number', default: HAND_RENDERER_DEFAULTS.tilt, min: -90, max: 90, step: 1,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('tilt', v),
+  },
+  {
+    key: 'hand.metricScale', label: 'Model hand: size (rig units per meter)', group: 'Hands',
+    type: 'number', default: HAND_RENDERER_DEFAULTS.metricScale, min: 0.01, max: 50, step: 0.05,
+    apply: (ctx, v) => ctx.handPresence?.setPlacement('metricScale', v),
   },
   {
     key: 'hand.jointSize', label: 'Joint size', group: 'Hands',
@@ -314,6 +476,19 @@ export const SETTINGS = [
     type: 'number', default: 0.009, min: 0.001, max: 0.2, step: 0.001,
     apply: (ctx, v) => ctx.handPresence?.setPlacement('boneRadius', v),
   },
+  // Hand space — the calibration bench's pass-through stages (core/hand/HandSpace.js): a raw
+  // phone-frame palm vector → 1€ filter → dead zone → the calibrated volume as the unit cube →
+  // app axes. Each stage can be switched off; nothing is bound to the camera or a verb yet.
+  ...HAND_SPACE_SETTINGS,
+  // Hand model — the always-on hand model (core/hand/HandModel.js HAND_MODEL_DEFAULTS): how it
+  // gates, forgets, decides a quantity has settled, and when the phone has moved.
+  ...HAND_MODEL_SETTINGS,
+  // The displayed hand's stabilizer — what every view draws (still < 0.5 mm p95 is the target).
+  ...STAB_SETTINGS,
+  // The in-scene calibration view (camera-locked, near-plane units).
+  ...CALIB_VIEW_SETTINGS,
+  // Hand cloud — the LiDAR hand tracker (core/hand/cloud) and its in-scene stage view.
+  ...HAND_CLOUD_SETTINGS,
   // View — high-level view primitives (HUD overlays). No live apply(): main.jsx mounts/
   // unmounts the widget off the persisted value via StateController's state-changed event.
   {

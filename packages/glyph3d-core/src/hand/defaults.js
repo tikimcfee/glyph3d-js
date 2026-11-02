@@ -34,6 +34,12 @@ export const HAND_RENDERER_DEFAULTS = {
     // own hands reaching into the scene — a spatial proxy rather than a mirror.
     // A rotation, not a mirror, so chirality is preserved.
     yaw:        180,
+    // A METRIC hand (the live HandModel's, already in view axes — see HandRenderer.updateFromView)
+    // is drawn without the yaw (its mapping is already right), tipped back by `tilt` degrees so
+    // the hand reads from a little above, and `metricScale` rig units per meter of hand before
+    // spread × scale (≈ the size a v1 image-space hand drew at).
+    tilt:        30,
+    metricScale: 1.7,
 };
 
 export const WEBCAM_SOURCE_DEFAULTS = {

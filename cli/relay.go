@@ -39,6 +39,8 @@ type Relay struct {
 	controllers   map[string]*websocket.Conn
 	sources       map[string]*sourceConn
 	nextID        atomic.Int64
+	recMu         sync.Mutex   // guards rec
+	rec           *recorder    // the running source recording, if any (record.go)
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	gxMu          sync.Mutex
 	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
@@ -68,13 +70,14 @@ type displayMsg struct {
 // a lock the frame path deliberately never takes (a per-frame mutex on the hot
 // path would serialize every device through one lock at 30fps each).
 type sourceConn struct {
-	ws      *websocket.Conn
-	id      string
-	kind    string // "hand", "camera", … — declared in the SOURCE handshake
-	since   time.Time
-	frames  atomic.Int64 // frames accepted from this source
-	dropped atomic.Int64 // frames discarded because the display queue was saturated
-	lastTS  atomic.Int64 // unix millis of the most recent frame
+	ws          *websocket.Conn
+	id          string
+	kind        string // "hand", "camera", … — declared in the SOURCE handshake
+	since       time.Time
+	frames      atomic.Int64 // frames queued for the display
+	dropped     atomic.Int64 // frames evicted because the display fell behind (its queue was full)
+	undelivered atomic.Int64 // frames that arrived with no display connected — not the display's fault
+	lastTS      atomic.Int64 // unix millis of the most recent frame
 }
 
 func NewRelay() *Relay {
@@ -157,17 +160,20 @@ func (r *Relay) sendBytesToDisplay(data []byte) {
 //
 // Never blocks: a source must not be able to backpressure into its own read loop
 // (that would stall the device's capture pipeline for a frame nobody will see).
-// Returns true if the frame was enqueued without evicting, false if it displaced one.
-func (r *Relay) sendFrameToDisplay(data []byte) bool {
+//
+// The outcome keeps two losses apart that mean different things: a frame EVICTED
+// because the display fell behind (the page is too slow — worth chasing), and one
+// with NO DISPLAY to go to (a reload, no tab open — nobody's fault).
+func (r *Relay) sendFrameToDisplay(data []byte) frameOutcome {
 	r.mu.RLock()
 	ch := r.displayFrames
 	r.mu.RUnlock()
 	if ch == nil {
-		return false // no display — the frame has nowhere to go
+		return frameNoDisplay
 	}
 	select {
 	case ch <- data:
-		return true
+		return frameQueued
 	default:
 	}
 	// Queue saturated: evict the oldest frame to make room for this fresher one.
@@ -179,8 +185,17 @@ func (r *Relay) sendFrameToDisplay(data []byte) bool {
 	case ch <- data:
 	default: // writer refilled it; this frame is the one we drop
 	}
-	return false
+	return frameEvicted
 }
+
+// frameOutcome is what became of one sensor frame on its way to the display.
+type frameOutcome int
+
+const (
+	frameQueued    frameOutcome = iota // queued without displacing anything
+	frameEvicted                       // queued by evicting the oldest (the display is behind)
+	frameNoDisplay                     // no display connected: nowhere to go
+)
 
 // pushAgentEvent sends one agentEvents/* notification to a display on the events plane:
 // lossless and in order, waiting at most `wait` for room (0 = until the display leaves). errDisplayGone when that display
@@ -378,6 +393,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.mu.Unlock()
 				role = "source"
 				log.Printf("[relay] source '%s' (kind=%s) connected from %s", clientID, kind, ws.RemoteAddr())
+				r.recordSourceEvent("connected", clientID, kind)
 				// The device is told its own id so its frames can be correlated
 				// with what the display renders, and so an operator can name it.
 				hello, _ := json.Marshal(map[string]any{
@@ -420,6 +436,8 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.mu.RLock()
 			src := r.sources[clientID]
 			r.mu.RUnlock()
+			// A running recording takes the raw frame first — display or not.
+			r.recordFrame(clientID, src.kind, msg)
 			envelope, err := json.Marshal(map[string]any{
 				"event":  "source.frame",
 				"source": clientID,
@@ -429,10 +447,14 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			if err != nil {
 				continue
 			}
-			if r.sendFrameToDisplay(envelope) {
+			switch r.sendFrameToDisplay(envelope) {
+			case frameQueued:
 				src.frames.Add(1)
-			} else {
+			case frameEvicted:
+				src.frames.Add(1)
 				src.dropped.Add(1)
+			case frameNoDisplay:
+				src.undelivered.Add(1)
 			}
 			src.lastTS.Store(time.Now().UnixMilli())
 			continue
@@ -625,9 +647,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		delete(r.sources, clientID)
 		r.mu.Unlock()
 		if src != nil {
-			log.Printf("[relay] source '%s' disconnected (%d frames, %d dropped)",
-				clientID, src.frames.Load(), src.dropped.Load())
+			log.Printf("[relay] source '%s' disconnected (%d frames, %d dropped behind the display, %d with no display)",
+				clientID, src.frames.Load(), src.dropped.Load(), src.undelivered.Load())
 			r.notifySourceChange("source_disconnected", src)
+			r.recordSourceEvent("disconnected", clientID, src.kind)
 		}
 	}
 }
@@ -658,12 +681,13 @@ func parseSourceHandshake(raw string) (kind string, ok bool) {
 
 // sourceSummary is the display/CLI-facing view of one connected sensor.
 type sourceSummary struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Frames  int64  `json:"frames"`
-	Dropped int64  `json:"dropped"`
-	Uptime  int64  `json:"uptimeMs"`
-	LastTS  int64  `json:"lastFrameTs"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Frames      int64  `json:"frames"`      // queued for the display
+	Dropped     int64  `json:"dropped"`     // evicted: the display fell behind
+	Undelivered int64  `json:"undelivered"` // no display connected
+	Uptime      int64  `json:"uptimeMs"`
+	LastTS      int64  `json:"lastFrameTs"`
 }
 
 // sourceSummariesLocked snapshots every connected source. Caller holds r.mu.
@@ -673,7 +697,7 @@ func (r *Relay) sourceSummariesLocked() []sourceSummary {
 		out = append(out, sourceSummary{
 			ID:     s.id,
 			Kind:   s.kind,
-			Frames: s.frames.Load(), Dropped: s.dropped.Load(),
+			Frames: s.frames.Load(), Dropped: s.dropped.Load(), Undelivered: s.undelivered.Load(),
 			Uptime: time.Since(s.since).Milliseconds(),
 			LastTS: s.lastTS.Load(),
 		})
@@ -862,6 +886,8 @@ var relayVerbs = map[string]bool{
 	// Answered relay-side: sources are relay state, and asking about them must
 	// work with no display connected (that's exactly when you're debugging one).
 	"source.list": true,
+	// Recording sensor frames is relay state too (record.go): it records with no display.
+	"source.record": true,
 }
 
 // splitRelayVerb splits a raw controller command into (verb, rest) when the
@@ -900,6 +926,8 @@ func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 	}
 
 	switch verb {
+	case "source.record":
+		r.recordCommand(rest, reply, fail)
 	case "source.list":
 		r.mu.RLock()
 		srcs := r.sourceSummariesLocked()
@@ -910,8 +938,8 @@ func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 		}
 		lines := make([]string, 0, len(srcs))
 		for _, s := range srcs {
-			lines = append(lines, fmt.Sprintf("%s  kind=%s  frames=%d dropped=%d  up=%ds",
-				s.ID, s.Kind, s.Frames, s.Dropped, s.Uptime/1000))
+			lines = append(lines, fmt.Sprintf("%s  kind=%s  frames=%d dropped=%d nodisplay=%d  up=%ds",
+				s.ID, s.Kind, s.Frames, s.Dropped, s.Undelivered, s.Uptime/1000))
 		}
 		reply(strings.Join(lines, "\n"), srcs)
 

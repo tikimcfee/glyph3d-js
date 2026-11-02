@@ -9,6 +9,7 @@ import TerminalsPanel from './TerminalsPanel.jsx';
 import AgentsPanel from './AgentsPanel.jsx';
 import CarrelsPanel from './CarrelsPanel.jsx';
 import MonitorPanel from './MonitorPanel.jsx';
+import HandPanel from './HandPanel.jsx';
 import LayoutPanel from './LayoutPanel.jsx';
 import EditorPanel from './EditorPanel.jsx';
 import LspResultsPanel from './LspResultsPanel.jsx';
@@ -48,6 +49,7 @@ const PANELS = [
   { id: 'layout', title: 'Layout', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'settings', title: 'Settings', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'monitor', title: 'Monitor', position: { referencePanel: 'files', direction: 'within' } },
+  { id: 'hand', title: 'Hand', position: { referencePanel: 'files', direction: 'within' } },
   { id: 'editor', title: 'Editor', position: { referencePanel: 'files', direction: 'below' } },
   // The combined Terminals workspace (sub-tab strip + 2D view) lives in the
   // bottom group tabbed with the Editor — the "focused thing in 2D" area — so
@@ -84,6 +86,7 @@ export default function IdeDock({ client }) {
     repo: () => <RepoPanel client={clientRef.current} />,
     settings: () => <SettingsPanel client={clientRef.current} />,
     monitor: () => <MonitorPanel client={clientRef.current} />,
+    hand: () => <HandPanel client={clientRef.current} />,
     terminals: () => <TerminalsPanel client={clientRef.current} />,
     agents: () => <AgentsPanel client={clientRef.current} />,
     carrels: () => <CarrelsPanel client={clientRef.current} />,

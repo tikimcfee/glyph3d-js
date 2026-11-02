@@ -7,6 +7,8 @@ import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js';
 import HandPresence from '@glyph3d/core/hand/HandPresence.js';
+import HandCalib from './HandCalib.js';
+import HandCloud from './HandCloud.js';
 import AgentBooks from '@glyph3d/core/collections/AgentBooks.js';
 import DeltaBooks from '@glyph3d/core/collections/DeltaBooks.js';
 import SearchBook from '@glyph3d/core/collections/SearchBook.js';
@@ -225,6 +227,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
     /** @type {import('@glyph3d/core/services/orchestration/SourceStream.js').default|null} */ sourceStream: null,
     /** @type {import('@glyph3d/core/hand/HandPresence.js').default|null} */ handPresence: null,
+    /** @type {import('./HandCalib.js').default|null} */ handCalib: null,
+    /** @type {import('./HandCloud.js').default|null} */ handCloud: null,
     /** @type {import('@glyph3d/core/services/data/RemoteLspProvider.js').default|null} */ lsp: null,
     /** @type {import('@glyph3d/core/services/interaction/LspNavigator.js').default|null} */ lspNavigator: null,
     /** @type {import('@glyph3d/core/services/data/AgentSessionProvider.js').default|null} */ sessionProvider: null,
@@ -257,7 +261,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     cid: 0,
     /** @type {import('@glyph3d/core/annotations/ConnectionRenderer.js').default|null} */ connectionRenderer: null,
     /** @type {import('@glyph3d/core/services/tour/TourSequencer.js').default|null} */ _tourSequencer: null,
-    /** @type {ReturnType<typeof setInterval>|null} */ _handSimTimer: null,
+    /** @type {{sim: import('@glyph3d/core/hand/HandSim.js').default, timer: ReturnType<typeof setInterval>, mode?: string}|null} */ _handSim: null,
     /** @type {Map<string, import('@glyph3d/core/collections/TerminalGrid.js').default>|null} */ terminals: null,
   };
 }
@@ -315,6 +319,8 @@ function DockRunner({ stateRef }) {
     // camera. Pull, not push: devices stream at their own rate and the scene
     // samples once per rendered frame.
     c?.handPresence?.update(state.camera);
+    // The calibration view rides the same rig (after it has been parked this frame).
+    c?.handCalib?.update(state.camera);
     // Far-LOD last: every system above has moved what it moves this frame.
     c?.glyphFarLod?.update(state.camera, state.size.height);
   });
@@ -657,6 +663,25 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // the next touch. setPlacement stores on rendererOptions too: devices that
     // attach later inherit the tuning.
     applyGroupSettings(state.ctx, 'Hands');
+    // The live hand model: learns the hand and its space from every frame; HandSpace stages read it.
+    state.ctx.handCalib = new HandCalib({
+      stream: state.ctx.sourceStream,
+      presence: state.ctx.handPresence,
+      // The first hand device brings the Hand panel forward, once, if it has never been shown.
+      openPanel: () => state.ctx.dock?.open?.('hand'),
+      // The LiDAR cloud tracker's fit of the hand, when it has one: live outputs only.
+      fitProvider: (source, handedness, t, hand) => state.ctx.handCloud?.fitFor?.(source, handedness, t, hand) ?? null,
+    });
+    applyGroupSettings(state.ctx, 'Hand space');
+    applyGroupSettings(state.ctx, 'Hand model');
+    applyGroupSettings(state.ctx, 'Hand stabilizer');
+    // The LiDAR hand tracker: every hand that arrives with a depth crop, tracked in its worker.
+    state.ctx.handCloud = new HandCloud({
+      stream: state.ctx.sourceStream,
+      presence: state.ctx.handPresence,
+      calib: () => state.ctx.handCalib,
+    });
+    applyGroupSettings(state.ctx, 'Hand cloud');
     // LSP client: present whenever the bridge is, but only functional against a
     // relay started with a project root (the relay gates lsp/* on --root).
     state.ctx.lsp = new RemoteLspProvider(bridge);
@@ -900,6 +925,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.searchBook = null;
       // Presence first: it detaches hand groups from the camera, which must
       // happen before the stream that feeds it goes away.
+      state.ctx.handCloud?.dispose();
+      state.ctx.handCloud = null;
+      state.ctx.handCalib?.dispose();
+      state.ctx.handCalib = null;
       state.ctx.handPresence?.dispose();
       state.ctx.handPresence = null;
       state.ctx.sourceStream?.dispose();

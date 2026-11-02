@@ -498,6 +498,80 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
     them would otherwise be invisible from either side alone.
 
 
+- **`hand-model.test.mjs`** — the live hand model converges to the TRUTH from a cold start
+  while the hand just wanders, and re-converges after the phone moves. `HandSim` (core) emits
+  hand-wire v2 frames of a person using it (roaming, pausing, pinching, resting flat, moving
+  fast, tilting — nothing announced) with known truth per frame; each goes through the real
+  `decodeHandFrame` into `HandModel`. Asserts every quantity settles on the truth: bones
+  (< 4 mm), palm length and hand size (< 2 %), the volume against the sim path's own
+  percentiles, rest noise at the 5-joint centroid's σ/√5 from still moments it found itself,
+  pinch modes with thresholds between them, palm orientation (< 6° raw); depthless tips
+  rebuilt near the true joint; a bump detected within 1.5 s, the volume re-learned in the new
+  frame, the bones kept, and a still phone never bumping; a warm start useful at once and a
+  wrong one outweighed; two hands at once; which hand — a mislabelled burst and a palm-up
+  stretch grow no ghost, a consistently mirrored label is reported (and fails with the anatomy
+  vote off), a 2-frame blip never becomes a hand, a brief hand stays out of the warm start, an
+  unseen hand reads idle; one held pose settles no bone; pinch learned from a real-use
+  distribution (open spread 0.7–1.5 × palm length, 2 % pinches — what a variance split misses)
+  and not from none; the skin depth learned from heights (the sim emits skin points); a hand
+  off the reference skeleton (phalanges × 1.12) learned to < 4 mm; depthless curled tips rebuilt
+  within joint limits (p90 below limits-off); a noisy joint's learned residual singled out; a
+  pure slide caught by the accelerometer and desk rest never; the metrics on tracks with known
+  jitter and delay; the stabilizer on realistic (depth-dominated) noise — a still hand < 0.5 mm p95
+  at every joint vs ~13 mm raw, lag reported moving and tilting; range-aware bone evidence beating
+  range-blind under range-growing noise; the pinch onset point rewound to before the closing
+  motion; plus the numerics (decaying histogram forgetting +
+  its split, Drift, Kabsch, ray–sphere) and the HandSpace stages on the model (auto 1€ hits its
+  target jitter and states its lag, the spike gate (1 % 3 cm spikes held, a real step accepted),
+  dead zone sized after the filter, one isotropic gain frozen once settled and
+  re-learned on a new volume epoch, axes) and pinch hysteresis + release dwell.
+  ```
+  bun tools/hand-model.test.mjs
+  ```
+- **`hand-cloud.test.mjs`** — the LiDAR hand tracker (`hand/cloud/`) against KNOWN truth.
+  `DepthSim` renders `HandSim`'s pose as the depth crop a phone sends: sphere-capsule hand +
+  forearm under the ceiling in a 320×240 map, depth noise growing with range, a slow correlated
+  bias, flying pixels and dropouts along edges, per-pixel confidence — in the exact wire form
+  (`depthWire.js`, base64 u16 inside the handFrame), with Vision blind outside the image. Each
+  frame goes through JSON, `decodeHandFrame` and `HandCloudTracker`. Asserts the wire
+  (base64/u16 round-trip, project ∘ unproject, malformed blocks throw); segmentation against
+  per-pixel part labels (hand precision ≥ 97 %, recall ≥ 90 %, no ceiling, the forearm cut at the
+  wrist); the fitted palm normal (median ≤ 4°, p90 ≤ 7°, beats Vision's at the tail) and the raw
+  plane (≤ 8°); every in-view fingertip named and near its tip; fitted in-view joints (median
+  ≤ 3.5 mm, p90 ≤ 6 mm, ≥ 3× better than Vision's, in flat/tilt/pinch/wander); pinch closed ≥ 95 %
+  and never open-wrong, the enclosed hole alone ≥ 80 % of closed frames and never on an open
+  hand; without Vision, segmentation and the hole still work; the warmed per-frame cost.
+  ```
+  bun tools/hand-cloud.test.mjs
+  ```
+- **`hand-cloud-pipeline.test.mjs`** — the tracker's page side: `CloudPipeline` spawns the real
+  module worker; its simulated phone's frames go through JSON + `decodeHandFrame` and back into
+  the worker. Asserts results carry every stage, latest-wins replacement while busy (a burst of
+  10 tracks the first and the newest), view planes come back as typed arrays and `CloudView`
+  draws each layer (and nothing with every layer off), a knob reaches the worker.
+  ```
+  bun tools/hand-cloud-pipeline.test.mjs
+  ```
+- **`hand-replay.test.mjs`** — a recording round trip through the whole live hand pipeline: a
+  simulated session in the relay's `source.record` JSONL format, replayed through the app's
+  HandCalib (decode → model → merge → stabilizer → metrics → HandSpace). Asserts the acceptance
+  target on the DISPLAYED hand over a mixed session — every joint's still jitter < 0.5 mm p95,
+  lag while moving reported — that the stabilizer-off run jitters by millimetres, that variants
+  compare side by side, and that the model still learns. `tools/hand-replay.mjs` is the tool
+  itself (`--synth <s>` writes a simulated recording; real ones come from the relay).
+  ```
+  bun tools/hand-replay.test.mjs
+  bun tools/hand-replay.mjs <recording.jsonl> [--variant "name:hand.stab.targetJitter=0.0003"] [--joints]
+  ```
+- **`hand-calib-app.test.mjs`** — the app's live hand model controller (`app/client/HandCalib.js`)
+  on the real seams: simulated v2 frames through `SourceStream.injectFrame`, HandPresence's rig,
+  nothing started. Before the model knows, the model-fed stages pass through and say why; after
+  two minutes of wandering they run on the measured noise and volume; the warm start saves
+  itself and a fresh controller (a reload) starts from it; `forget` drops it; a second device
+  gets its own model; a Space knob reaches the live chain; the in-scene view rides the hand rig.
+  ```
+  bun tools/hand-calib-app.test.mjs
+  ```
 - **`verify-tree-sitter.mjs`** — load each vendored grammar, compile its highlight
   query, parse a snippet, report captures. Run after upgrading web-tree-sitter / a
   grammar, adding a language, or editing a query. Catches ABI mismatches, query-compile

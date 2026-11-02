@@ -51,6 +51,14 @@ const RATE_MIN_SAMPLE_MS = 400;
 const STALL_TIMEOUT_MS = 2000;
 
 /**
+ * The arrival-lag baseline window. Device and browser clocks share no epoch, so a frame's
+ * absolute transit time is unknowable here; what IS knowable is how much later a frame
+ * arrived than the fastest frame of the last few seconds (receive − capture, minus its
+ * trailing minimum) — queueing and network jitter, which is what a hand-driven control feels.
+ */
+const LAG_WINDOW_S = 10;
+
+/**
  * @typedef {Object} SourceState
  * @property {string} id - Relay-assigned id, e.g. 'src-hand-0'
  * @property {string} kind - Device class: 'hand', 'camera', …
@@ -60,6 +68,11 @@ const STALL_TIMEOUT_MS = 2000;
  * @property {import('../../hand/HandData.js').HandFrame[]} hands - Latest decoded pose
  * @property {Object|null} scene - Last-known ARKit scene context
  * @property {Object|null} camera - Latest camera preview frame
+ * @property {import('../../hand/HandData.js').DeviceState|null} device - v2: the device's
+ *   latest self-report (mount, gravity, ceiling) — updated by every frame, hand or not
+ * @property {{captureToSend: number|null, arrivalLag: number|null}} latency - seconds:
+ *   capture → send as the device stamps it (v2 `sentAt`), and this frame's arrival delay
+ *   beyond the fastest frame of the trailing LAG_WINDOW_S
  */
 
 class SourceStream {
@@ -215,8 +228,12 @@ class SourceStream {
             hands: [],
             scene: null,
             camera: null,
+            device: null,
+            latency: { captureToSend: null, arrivalLag: null },
             _windowStart: performance.now(),
             _windowCount: 0,
+            // Sliding-window minimum of (receive − capture), a monotone deque of [recvS, offset].
+            _lagDeque: [],
         };
         this.sources.set(id, state);
         console.log(`[source] attached ${id} (kind=${state.kind})`);
@@ -264,6 +281,10 @@ class SourceStream {
         if (hand) {
             state.hands = hand.frames;
             state.scene = hand.scene;
+            if (hand.device) {
+                state.device = hand.device;
+                this._latency(state, hand.device, now / 1000);
+            }
         } else {
             const cam = decodeCameraFrame(payload);
             if (cam) state.camera = cam;
@@ -272,6 +293,17 @@ class SourceStream {
         for (const fn of this._frameListeners) {
             try { fn(state); } catch (e) { console.error('[source] frame listener threw:', e); }
         }
+    }
+
+    /** @private */
+    _latency(state, device, recvS) {
+        state.latency.captureToSend = device.sentAt != null ? device.sentAt - device.timestamp : null;
+        const offset = recvS - device.timestamp;
+        const dq = state._lagDeque;
+        while (dq.length && dq[dq.length - 1][1] >= offset) dq.pop();
+        dq.push([recvS, offset]);
+        while (dq.length && dq[0][0] < recvS - LAG_WINDOW_S) dq.shift();
+        state.latency.arrivalLag = offset - dq[0][1];
     }
 
     /** @private */

@@ -203,6 +203,7 @@ func serveCmd() {
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
 	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
+	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])
 	if *sessionsInterval <= 0 || *maxFollowers <= 0 {
 		log.Fatalf("[serve] --sessions-interval and --max-followers must be positive (got %s, %d)", *sessionsInterval, *maxFollowers)

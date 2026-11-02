@@ -132,10 +132,39 @@ export const Finger = {
 /**
  * @typedef {Object} HandFrame
  * @property {string} handedness - 'left' or 'right'
- * @property {Array<{x: number, y: number, z: number}>} landmarks - 21 joint positions
- * @property {number} timestamp - Frame timestamp in ms
+ * @property {Array<{x: number, y: number, z: number}>} landmarks - 21 joint positions,
+ *   image space: normalized u, v and depth (v1; still sent by v2 devices)
+ * @property {Array<{x: number, y: number, z: number}|null>|null} points - v2: 21 joints in
+ *   METERS in the device's PHONE frame (+y toward its top edge, +z out of its back, +x = y × z);
+ *   null for a joint not seen this frame; the whole field null from a v1 device
+ * @property {number[]|null} confidence - v2: per-joint 0..1; null from a v1 device
+ * @property {Array<{x: number, y: number, z: number}|null>|null} rays - v2: the unit direction
+ *   from the optical centre (the PHONE frame's origin) to each joint seen in 2-D, depth or not;
+ *   a joint with a ray and a null point was detected but has no usable depth
+ * @property {Object|null} cloud - v2: the phone's raw per-hand depth crop (hand/cloud/depthWire.js), undecoded
+ * @property {number} timestamp - Frame timestamp (the device's clock)
  * @property {SceneContext} [scene] - Camera/scene context if available
  */
+
+/**
+ * What a v2 device says about itself on every frame — hand or not.
+ * @typedef {Object} DeviceState
+ * @property {number} v - Wire version
+ * @property {'faceDown'|'faceUp'|'upright'|'unknown'} mount - How the phone lies, from gravity
+ * @property {[number, number, number]|null} gravity - Unit vector, PHONE frame
+ * @property {[number, number, number, number]|null} attitude - CoreMotion quaternion [x, y, z, w]
+ * @property {[number, number, number]|null} userAcceleration - m/s², gravity removed, PHONE frame
+ *   (the latest 100 Hz CoreMotion sample — a point sample, not a peak)
+ * @property {number|null} ceiling - Meters along +z to the static scene outside the hands
+ * @property {number} timestamp - Capture time, seconds, device monotonic clock
+ * @property {number|null} sentAt - Send time on the same clock (capture → send = sentAt − timestamp)
+ */
+
+const MOUNTS = new Set(['faceDown', 'faceUp', 'upright', 'unknown']);
+
+/** A finite [x, y, z] tuple, or null. */
+const vec3OrNull = (a) => (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every(Number.isFinite)
+    ? [a[0], a[1], a[2]] : null);
 
 /**
  * Create an empty hand frame with zeroed landmarks
@@ -176,9 +205,14 @@ export function landmarkDistance(a, b) {
  * so callers pass the last-known scene as `carriedScene` to keep every frame
  * self-contained for downstream consumers.
  *
+ * v2 (hand-wire v2, the face-down phone) adds metric `points` + `confidence` per hand and a
+ * `device` block on every frame — `hands: []` frames included, so presence, mount and ceiling
+ * are known before a hand shows up. A v1 payload decodes with `points`/`confidence` null and
+ * `device` null.
+ *
  * @param {Object} payload - The device message (must be type `handFrame`)
  * @param {SceneContext|null} [carriedScene] - Last-known scene, used when the payload omits one
- * @returns {{frames: HandFrame[], scene: SceneContext|null}|null} null if not a hand frame
+ * @returns {{frames: HandFrame[], scene: SceneContext|null, device: DeviceState|null}|null} null if not a hand frame
  */
 export function decodeHandFrame(payload, carriedScene = null) {
     if (!payload || payload.type !== 'handFrame' || !Array.isArray(payload.hands)) return null;
@@ -193,12 +227,47 @@ export function decodeHandFrame(payload, carriedScene = null) {
                 ? { x: lm[0] || 0, y: lm[1] || 0, z: lm[2] || 0 }
                 : { x: lm?.x || 0, y: lm?.y || 0, z: lm?.z || 0 }
         ));
-        const frame = { handedness: hand?.handedness || 'right', landmarks, timestamp };
+        // A null joint stays null — "not seen" is a measurement, never a zero.
+        const points = Array.isArray(hand?.points)
+            ? hand.points.map((p) => {
+                const v = vec3OrNull(p);
+                return v ? { x: v[0], y: v[1], z: v[2] } : null;
+            })
+            : null;
+        const confidence = Array.isArray(hand?.confidence)
+            ? hand.confidence.map((c) => (Number.isFinite(c) ? c : 0))
+            : null;
+        const rays = Array.isArray(hand?.rays)
+            ? hand.rays.map((r) => {
+                const v = vec3OrNull(r);
+                const l = v ? Math.hypot(v[0], v[1], v[2]) : 0;
+                return l > 0 ? { x: v[0] / l, y: v[1] / l, z: v[2] / l } : null;
+            })
+            : null;
+        // The phone's raw per-hand depth crop rides along undecoded; the cloud tracker (hand/cloud/)
+        // decodes it lazily — nothing else reads it.
+        const frame = { handedness: hand?.handedness || 'right', landmarks, points, confidence, rays, cloud: hand?.cloud ?? null, timestamp };
         if (scene) frame.scene = scene;
         return frame;
     });
 
-    return { frames, scene };
+    let device = null;
+    if (payload.v >= 2) {
+        const att = payload.device?.attitude;
+        device = {
+            v: payload.v,
+            mount: MOUNTS.has(payload.mount) ? payload.mount : 'unknown',
+            gravity: vec3OrNull(payload.device?.gravity),
+            attitude: Array.isArray(att) && att.length >= 4 && att.slice(0, 4).every(Number.isFinite)
+                ? [att[0], att[1], att[2], att[3]] : null,
+            userAcceleration: vec3OrNull(payload.device?.userAcceleration),
+            ceiling: Number.isFinite(payload.ceiling) ? payload.ceiling : null,
+            timestamp,
+            sentAt: Number.isFinite(payload.sentAt) ? payload.sentAt : null,
+        };
+    }
+
+    return { frames, scene, device };
 }
 
 /**

@@ -183,6 +183,42 @@ console.log('liveness');
     ok(!stream.isStalled('src-nope'), 'an unknown device is not stalled');
 }
 
+// ── hand-wire v2 (the face-down phone) ───────────────────────────────────────
+console.log('v2 decode + device state');
+{
+    const v2 = {
+        type: 'handFrame', v: 2, timestamp: 100.0, sentAt: 100.012, mount: 'faceDown',
+        device: { gravity: [0, 0, -1], attitude: [0, 0, 0, 1] }, ceiling: 2.31,
+        hands: [{
+            handedness: 'right',
+            confidence: [0.9, 0.2, 'bad'],
+            points: [[0.01, 0.02, 0.2], null, [1, 2]],
+            landmarks: [[0.5, 0.5, 0.2]],
+        }],
+    };
+    const d = decodeHandFrame(v2);
+    eq(d.frames[0].points, [{ x: 0.01, y: 0.02, z: 0.2 }, null, null], 'points: meters kept, null stays null, a short tuple is unseen');
+    eq(d.frames[0].confidence, [0.9, 0.2, 0], 'confidence: a non-number reads 0');
+    eq(d.device, { v: 2, mount: 'faceDown', gravity: [0, 0, -1], attitude: [0, 0, 0, 1], userAcceleration: null, ceiling: 2.31, timestamp: 100, sentAt: 100.012 }, 'device block (no userAcceleration sent → null)');
+    eq(decodeHandFrame({ ...v2, device: { ...v2.device, userAcceleration: [0.1, -0.2, 0.05] } }).device.userAcceleration, [0.1, -0.2, 0.05], 'userAcceleration decoded');
+    eq(d.frames[0].landmarks, [{ x: 0.5, y: 0.5, z: 0.2 }], 'v1 landmarks still decode on a v2 frame');
+
+    const v1 = decodeHandFrame(handFrame());
+    eq([v1.device, v1.frames[0].points, v1.frames[0].confidence], [null, null, null], 'a v1 frame: no device, no points, no confidence');
+    eq(decodeHandFrame({ ...v2, mount: 'sideways', ceiling: null }).device.mount, 'unknown', 'an unknown mount reads unknown');
+    eq(decodeHandFrame({ ...v2, ceiling: null }).device.ceiling, null, 'ceiling null when unknown');
+
+    // Empty-hand frames still carry the device: presence + mount before any hand shows up.
+    const bridge = stubBridge();
+    const stream = new SourceStream({ bridge });
+    bridge.emit({ event: 'source.frame', source: 'src-hand-0', kind: 'hand', data: { ...v2, hands: [] } });
+    const s = stream.get('src-hand-0');
+    eq([s.hands.length, s.device?.mount, s.device?.ceiling], [0, 'faceDown', 2.31], 'hands:[] frame updates device state');
+    ok(Math.abs(s.latency.captureToSend - 0.012) < 1e-9, 'captureToSend = sentAt − timestamp');
+    eq(s.latency.arrivalLag, 0, 'the first frame is its own arrival baseline');
+    stream.dispose();
+}
+
 // ── teardown ─────────────────────────────────────────────────────────────────
 console.log('dispose');
 {

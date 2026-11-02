@@ -70,6 +70,8 @@ class HandRenderer {
         this._scale    = o.scale;
         this._yaw      = o.yaw;
         this._coverage = o.coverage;
+        this.tilt        = o.tilt;
+        this.metricScale = o.metricScale;
 
         // Visible frustum half-extents at `depth`, in rig-local units — fed per
         // frame by HandPresence (fov/aspect are live). The wrist anchor maps the
@@ -235,7 +237,32 @@ class HandRenderer {
     }
 
     /**
-     * Update hand from a HandFrame
+     * Draw the hands the live hand model sees: each already in VIEW axes (the one phone → view
+     * mapping, HandSpace's app axes) — `anchor` the palm's place across the view (±0.5 at the
+     * measured volume's faces), `shape` the joints in meters relative to the wrist (null =
+     * unseen). Hands not listed are hidden.
+     * @param {{handedness: string, anchor: {x: number, y: number}, shape: ({x:number,y:number,z:number}|null)[]}[]} views
+     */
+    updateFromView(views) {
+        const seen = new Set();
+        for (const v of views) {
+            seen.add(v.handedness);
+            if (!this.hands.has(v.handedness)) this._buildHand(v.handedness);
+            const hand = this.hands.get(v.handedness);
+            hand.group.visible = true;
+            const k = this.metricScale;
+            const shape = v.shape.map((p) => (p ? { x: p.x * k, y: p.y * k, z: p.z * k } : null));
+            this._lastMapped = shape.filter(Boolean);
+            this._lastAnchor = v.anchor;
+            // No yaw: the mapping already puts his right at screen right and his fingers into the
+            // view. Tipped back about x so the hand is seen from a little above.
+            this._draw(hand, v.anchor, shape, { x: (this.tilt * Math.PI) / 180, y: 0 });
+        }
+        for (const [h, hand] of this.hands) if (!seen.has(h)) hand.group.visible = false;
+    }
+
+    /**
+     * Update hand from a HandFrame's image-space landmarks (a v1 device, a webcam, the mouse mock).
      * @param {HandFrame|null} frame
      */
     updateFromFrame(frame) {
@@ -280,30 +307,37 @@ class HandRenderer {
             return;
         }
         const { anchor, shape } = this._splitLandmarks(landmarks, wrist);
-        const mapped = shape;
-        this._lastMapped = mapped;
+        this._lastMapped = shape;
         this._lastAnchor = anchor;
+        // A landmark at (0,0,0) is untracked.
+        const masked = shape.map((p, i) => {
+            const lm = landmarks[i];
+            return lm.x !== 0 || lm.y !== 0 || lm.z !== 0 ? p : null;
+        });
+        // Yaw is a ROTATION, never a mirror: the skeleton keeps its chirality, we just view it
+        // from the other side. At 180° the palms face away from the viewer — the hands read as
+        // your own, reaching into the scene, rather than as someone else's hands facing you.
+        this._draw(hand, anchor, masked, { x: 0, y: (this._yaw * Math.PI) / 180 });
+    }
 
+    /**
+     * Place one hand (anchor across the view rect × coverage, rotated about its own anchor,
+     * sized by spread × scale) and pose its meshes from `mapped` (null = unseen).
+     * @private
+     */
+    _draw(hand, anchor, mapped, rotation) {
         const ext = this.viewExtent || { halfW: 0.5, halfH: 0.5 };
         hand.group.position.set(
             anchor.x * 2 * ext.halfW * this._coverage,
             anchor.y * 2 * ext.halfH * this._coverage,
             0,
         );
-        // Yaw is a ROTATION, never a mirror: the skeleton keeps its chirality, we
-        // just view it from the other side. At 180° the palms face away from the
-        // viewer — the hands read as your own, reaching into the scene, rather
-        // than as someone else's hands facing you. Applied about the hand's own
-        // anchor, so it never displaces the hand across the canvas.
-        hand.group.rotation.y = (this._yaw * Math.PI) / 180;
+        // About the hand's own anchor, so it never displaces the hand across the canvas.
+        hand.group.rotation.set(rotation.x, rotation.y, 0);
         hand.group.scale.setScalar(this._spread * this._scale);
 
-        // Build validity mask — landmark at default (0,0,0) means untracked
         const valid = new Uint8Array(JOINT_COUNT);
-        for (let i = 0; i < JOINT_COUNT; i++) {
-            const lm = landmarks[i];
-            valid[i] = (lm.x !== 0 || lm.y !== 0 || lm.z !== 0) ? 1 : 0;
-        }
+        for (let i = 0; i < JOINT_COUNT; i++) valid[i] = mapped[i] ? 1 : 0;
 
         // Update palm — only show if all palm joints are valid
         let palmValid = true;

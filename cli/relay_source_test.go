@@ -252,14 +252,14 @@ func TestSourceFramesDropOldestWhenSaturated(t *testing.T) {
 
 	// Fill to capacity: these all fit, so none report a drop.
 	for i := 0; i < depth; i++ {
-		if !r.sendFrameToDisplay([]byte{byte(i)}) {
-			t.Fatalf("frame %d reported a drop while the queue had room", i)
+		if got := r.sendFrameToDisplay([]byte{byte(i)}); got != frameQueued {
+			t.Fatalf("frame %d: outcome %d while the queue had room, want queued", i, got)
 		}
 	}
-	// Past capacity: every send must report a drop but still be accepted.
+	// Past capacity: every send must report an eviction but still be accepted.
 	for i := depth; i < depth+20; i++ {
-		if r.sendFrameToDisplay([]byte{byte(i)}) {
-			t.Fatalf("frame %d reported no drop on a full queue", i)
+		if got := r.sendFrameToDisplay([]byte{byte(i)}); got != frameEvicted {
+			t.Fatalf("frame %d: outcome %d on a full queue, want evicted", i, got)
 		}
 	}
 
@@ -282,11 +282,43 @@ func TestSourceFramesDropOldestWhenSaturated(t *testing.T) {
 }
 
 // With no display attached a source's frames have nowhere to go; sending must
-// be a harmless no-op rather than a panic or a block.
+// be a harmless no-op rather than a panic or a block — and must say "no display",
+// never "dropped": a page reload is not the display falling behind.
 func TestSourceFramesWithNoDisplayAreHarmless(t *testing.T) {
 	r := NewRelay()
-	if r.sendFrameToDisplay([]byte(`{"type":"handFrame"}`)) {
-		t.Error("reported delivery with no display connected")
+	if got := r.sendFrameToDisplay([]byte(`{"type":"handFrame"}`)); got != frameNoDisplay {
+		t.Errorf("outcome %d with no display connected, want no-display", got)
+	}
+}
+
+// End-to-end: a source streaming with no display connected counts its frames as
+// undelivered, not dropped — source.list must not blame a display that isn't there.
+func TestSourceFramesWithNoDisplayCountAsUndelivered(t *testing.T) {
+	_, dial := newTestRelay(t)
+	src := dial(t)
+	src.WriteMessage(websocket.TextMessage, []byte("SOURCE hand"))
+	srcID := readJSON(t, src)["sourceId"].(string)
+	const n = 25
+	for i := 0; i < n; i++ {
+		src.WriteMessage(websocket.TextMessage, []byte(`{"type":"handFrame","hands":[]}`))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, s := range summariesOf(t, srcID, dial) {
+			if s.ID != srcID {
+				continue
+			}
+			if s.Undelivered == n {
+				if s.Dropped != 0 || s.Frames != 0 {
+					t.Errorf("no display: frames=%d dropped=%d, want 0 and 0", s.Frames, s.Dropped)
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("undelivered never reached %d", n)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -319,7 +351,7 @@ func TestSourceWritesNeverBlock(t *testing.T) {
 		t.Fatal("source write loop blocked — a slow display must not stall capture")
 	}
 
-	// Every frame must be accounted for as either delivered or dropped.
+	// Every frame must be accounted for (a dropped frame was also counted as queued).
 	time.Sleep(500 * time.Millisecond)
 	found := false
 	for _, s := range summariesOf(t, srcID, dial) {

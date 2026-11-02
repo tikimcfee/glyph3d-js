@@ -153,8 +153,8 @@ const relayRow = await relayVerb('source.list').then(
   (d) => (Array.isArray(d) ? d.find((r) => r.id === hello.sourceId) : null),
 ).catch(() => null);
 if (relayRow) {
-  ok(relayRow.frames + relayRow.dropped >= 90,
-     `relay accounted for every frame sent (delivered ${relayRow.frames}, dropped ${relayRow.dropped})`);
+  ok(relayRow.frames + relayRow.undelivered >= 90,
+     `relay accounted for every frame sent (queued ${relayRow.frames}, of which ${relayRow.dropped} evicted behind the display; ${relayRow.undelivered} with no display)`);
   ok(st.frames <= relayRow.frames,
      `the display received no more than the relay delivered (${st.frames} <= ${relayRow.frames})`);
 } else {

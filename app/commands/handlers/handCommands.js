@@ -18,6 +18,7 @@
  */
 
 import * as THREE from 'three';
+import { HandSim, SIM_MODES } from '@glyph3d/core/hand';
 
 /** Range of a component across landmarks, for spotting a wrong coordinate space. */
 function range(points, key) {
@@ -390,47 +391,50 @@ export default function registerHandCommands(router) {
         const stream = ctx.sourceStream;
         if (!stream) return { text: 'ERR: source stream not ready', data: null };
 
-        const on = (args[0] || 'on') !== 'off';
+        const [cmd = 'on', arg] = args;
         const ID = 'src-sim-hand';
+        const sim = ctx._handSim;
+        const usage = `ERR: usage: hand.simulate on [${SIM_MODES.join('|')}] | mode <mode> | bump [yawDeg] [tiltDeg] | off`;
 
-        if (!on) {
-            if (ctx._handSimTimer) { clearInterval(ctx._handSimTimer); ctx._handSimTimer = null; }
+        if (cmd === 'off') {
+            if (sim) { clearInterval(sim.timer); ctx._handSim = null; }
             stream.detachLocal(ID);
             return { text: 'OK: simulated hand off', data: { simulating: false } };
         }
-        if (ctx._handSimTimer) return { text: 'OK: already simulating', data: { simulating: true } };
+        if (cmd === 'bump') {
+            if (!sim) return { text: 'ERR: not simulating — hand.simulate on first', data: null };
+            const yawDeg = Number(args[1] ?? 10), tiltDeg = Number(args[2] ?? 3);
+            if (!Number.isFinite(yawDeg) || !Number.isFinite(tiltDeg)) return { text: usage, data: null };
+            sim.sim.bump({ yawDeg, tiltDeg });
+            return { text: `OK: the simulated phone moved (yaw ${yawDeg}°, tilt ${tiltDeg}°)`, data: { yawDeg, tiltDeg } };
+        }
+        if (cmd !== 'on' && cmd !== 'mode') return { text: usage, data: null };
+        const mode = cmd === 'mode' ? arg : (arg || 'wander');
+        if (!SIM_MODES.includes(mode)) return { text: usage, data: null };
+        if (cmd === 'mode' && !sim) return { text: 'ERR: not simulating — hand.simulate on first', data: null };
 
-        stream.attachLocal(ID, 'hand');
-        // A slowly waving open hand in the device's own coordinate space: x/y
-        // normalized 0..1, z metres of depth. Renders the same path a phone does,
-        // so if this draws and the phone doesn't, the fault is upstream of here.
-        const t0 = performance.now();
-        ctx._handSimTimer = setInterval(() => {
-            const t = (performance.now() - t0) / 1000;
-            const sway = Math.sin(t) * 0.08;
-            const landmarks = [];
-            for (let f = 0; f < 5; f++) {
-                for (let j = 0; j < 4; j++) {
-                    landmarks.push([
-                        0.5 + (f - 2) * 0.06 + sway * (j + 1) * 0.3,
-                        0.75 - j * 0.09 - (f === 0 ? 0.05 : 0),
-                        0.45 + Math.sin(t + f) * 0.02,
-                    ]);
-                }
-            }
-            // Wrist last, then rotate into MediaPipe order (wrist first).
-            landmarks.unshift([0.5 + sway * 0.2, 0.85, 0.45]);
-            stream.injectFrame(ID, {
-                type: 'handFrame',
-                timestamp: t,
-                hands: [{ handedness: 'right', landmarks: landmarks.slice(0, 21) }],
-            });
-        }, 33);
+        // A face-down phone's v2 stream (core HandSim): metric joints with per-joint noise
+        // and dropouts, gravity, a ceiling, `hands: []` frames when the script shows no hand.
+        // It goes through the same SourceStream path a phone's frames do, so if this draws
+        // and the phone doesn't, the fault is upstream of here.
+        const s = sim || { sim: new HandSim({ seed: Date.now() & 0xffff }), timer: null };
+        if (!sim) {
+            stream.attachLocal(ID, 'hand');
+            const dt = 1000 / s.sim.opts.rate;
+            s.timer = setInterval(() => stream.injectFrame(ID, s.sim.frame(performance.now() / 1000)), dt);
+            ctx._handSim = s;
+        }
+        s.sim.setMode(mode);
+        s.mode = mode;
 
-        return { text: 'OK: simulating a hand (hand.simulate off to stop)', data: { simulating: true } };
+        return {
+            text: `OK: simulating a hand over a face-down phone — mode ${mode} (hand.simulate off to stop)`,
+            data: { simulating: true, mode, id: ID, truth: s.sim.truth },
+        };
     }, {
-        description: 'Inject a synthetic hand with no device attached — bisects network faults from rendering faults',
-        returns: '{ simulating }',
+        description: 'Inject a simulated face-down-phone hand (hand-wire v2) with no device attached; wander = a person using it, the other modes isolate one kind of moment; bump moves the simulated phone',
+        usage: `on [${SIM_MODES.join('|')}] | mode <mode> | bump [yawDeg] [tiltDeg] | off`,
+        returns: '{ simulating, mode, id, truth }',
     });
 
     router.register('hand.show', (_args, ctx) => {
@@ -452,7 +456,7 @@ export default function registerHandCommands(router) {
         if (!presence) return { text: 'ERR: hand presence not ready', data: null };
 
         const [key, raw] = args;
-        const allowed = ['spread', 'depth', 'scale', 'yaw', 'jointSize', 'boneRadius', 'coverage'];
+        const allowed = ['spread', 'depth', 'scale', 'yaw', 'jointSize', 'boneRadius', 'coverage', 'tilt', 'metricScale'];
         if (!key || !allowed.includes(key)) {
             return { text: `ERR: hand.place <${allowed.join('|')}> <value>`, data: null };
         }
@@ -466,7 +470,7 @@ export default function registerHandCommands(router) {
             data: { ...presence.rendererOptions },
         };
     }, {
-        description: 'Tune hands live: spread, depth (near-plane multiples; negative = in front, must exceed -1 to clear the plane), scale, yaw (degrees; 180 = palms away), jointSize, boneRadius, coverage (fraction of the canvas the wrist traverses; 1 = edge to edge)',
+        description: 'Tune hands live: spread, depth (near-plane multiples; negative = in front, must exceed -1 to clear the plane), scale, yaw (degrees; 180 = palms away — image-space hands only), jointSize, boneRadius, coverage (fraction of the canvas the wrist traverses; 1 = edge to edge), tilt (degrees the model\'s metric hand is tipped back), metricScale (rig units per meter of a metric hand)',
         returns: '{ spread, depth, scale, yaw, jointSize, boneRadius }',
     });
 }
