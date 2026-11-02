@@ -33,7 +33,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dialRelay } from './lib/relay.mjs';
-import { decodePng, writePng } from './lib/pixel-metrics.mjs';
+import { decodePng, cropImage, writePng } from './lib/pixel-metrics.mjs';
 import { launchGpuBrowser } from './itest/driver.mjs';
 
 function diffImages(a, b, tol = 0) {
@@ -104,23 +104,24 @@ async function waitRelayListening(port, proc, timeoutMs = 15000) {
     throw new Error(`private relay on :${port} failed to listen within ${timeoutMs}ms: ${stderr.trim()}`);
 }
 
+function makeScratchCode(name, rev = 1) {
+    const lines = [
+        `// ${name}.js — seeded module (rev ${rev})`,
+        `export const MODULE_NAME = '${name}';`,
+        `export const MODULE_REV = ${rev};`,
+        '',
+    ];
+    for (let i = 1; i <= 36; i++) {
+        lines.push(`export function ${name}Step${String(i).padStart(2, '0')}(x = ${i}) { return x * ${rev} + ${i * 3}; }`);
+    }
+    return lines.join('\n') + '\n';
+}
+
 function seedScratchRepo(dir) {
     const src = path.join(dir, 'src');
     fs.mkdirSync(src, { recursive: true });
-    const makeCode = (name, rev = 1) => {
-        const lines = [
-            `// ${name}.js — seeded module (rev ${rev})`,
-            `export const MODULE_NAME = '${name}';`,
-            `export const MODULE_REV = ${rev};`,
-            '',
-        ];
-        for (let i = 1; i <= 36; i++) {
-            lines.push(`export function ${name}Step${String(i).padStart(2, '0')}(x = ${i}) { return x * ${rev} + ${i * 3}; }`);
-        }
-        return lines.join('\n') + '\n';
-    };
     for (const name of ['alpha', 'beta', 'gamma', 'delta']) {
-        fs.writeFileSync(path.join(src, `${name}.js`), makeCode(name, 1));
+        fs.writeFileSync(path.join(src, `${name}.js`), makeScratchCode(name, 1));
     }
     const git = (args) => spawnSync('git', args, { cwd: dir, stdio: 'ignore' });
     git(['init', '-q']);
@@ -128,8 +129,32 @@ function seedScratchRepo(dir) {
     git(['config', 'user.name', 'e2e']);
     git(['add', '.']);
     git(['commit', '-qm', 'seed rev 1']);
-    fs.writeFileSync(path.join(src, 'alpha.js'), makeCode('alpha', 2));
+    fs.writeFileSync(path.join(src, 'alpha.js'), makeScratchCode('alpha', 2));
     git(['commit', '-am', 'alpha rev 2']);
+}
+
+async function assertNotHeldByOtherDesk(reqFn, id, targetDesk) {
+    const chk = (await reqFn('carrel.check')).data?.members ?? [];
+    const hit = chk.find((m) => m.id === id && m.desk && m.desk !== targetDesk);
+    if (hit) {
+        throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${hit.desk}'`);
+    }
+    const list = (await reqFn('carrel.list')).data?.carrels ?? [];
+    for (const c of list) {
+        if (c.name === targetDesk) continue;
+        if ((c.members ?? []).some((m) => m.id === id)) {
+            throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${c.name}'`);
+        }
+    }
+}
+
+async function safeCarrelAdd(reqFn, id, targetDesk) {
+    await assertNotHeldByOtherDesk(reqFn, id, targetDesk);
+    const res = await reqFn(`carrel.add ${id} ${targetDesk}`);
+    if (!/^OK:/.test(res.text ?? '')) {
+        throw new Error(`carrel.add ${id} ${targetDesk} failed: ${res.text}`);
+    }
+    return res;
 }
 
 function runSubscript(scriptRel, args, timeoutMs = 180000) {
@@ -216,9 +241,12 @@ let deskB = opt('back');
 let fileA = null;
 let layerFile = null;
 let createdTempDesks = false;
-const savedGridPositions = [];
+let sharedScratchDir = null;
+const openedScratchFiles = [];
 let initialCamera = null;
 let initialPlane = null;
+let initialAttention = null;
+let initialCheck = [];
 
 try {
     // ── Boot private relay + display when --port is not passed ─────────────────
@@ -272,6 +300,8 @@ try {
             await sleep(500);
         }
         initialCamera = (await req('camera.info')).data;
+        initialAttention = (await req('attention.info')).data;
+        initialCheck = (await req('carrel.check')).data?.members ?? [];
     } else {
         const srcDir = path.join(scratchRoot, 'src');
         await req(`file.openDir ${srcDir}`);
@@ -283,57 +313,45 @@ try {
         fileA = path.join(srcDir, 'alpha.js');
         layerFile = fileA;
         await req(`carrel.create ${deskA}`);
-        await req(`carrel.add ${path.join(srcDir, 'alpha.js')} ${deskA}`);
-        await req(`carrel.add ${path.join(srcDir, 'beta.js')} ${deskA}`);
+        await safeCarrelAdd(req, path.join(srcDir, 'alpha.js'), deskA);
+        await safeCarrelAdd(req, path.join(srcDir, 'beta.js'), deskA);
         await req(`carrel.create ${deskB}`);
-        await req(`carrel.add ${path.join(srcDir, 'gamma.js')} ${deskB}`);
-        await req(`carrel.add ${path.join(srcDir, 'delta.js')} ${deskB}`);
+        await safeCarrelAdd(req, path.join(srcDir, 'gamma.js'), deskB);
+        await safeCarrelAdd(req, path.join(srcDir, 'delta.js'), deskB);
         await sleep(800);
         await req('session.save');
     }
 
     // On shared relay, if --desk/--back were not explicitly provided, stand up two temporary
-    // plane desks with two already-open loose code grids so reload & readability are deterministic.
+    // plane desks with our OWN scratch files under the user cache dir (never touching user files/desks).
     if (sharedMode && (!deskA || !deskB)) {
-        const loose = ((await req('grid.list')).data?.grids ?? []).filter(
-            (g) => typeof g.id === 'string' && g.id.startsWith('/') && g.lines >= 30 && !g.id.endsWith('.md'),
-        );
-        if (loose.length < 2) {
-            throw new Error(`need at least 2 open code files on :${port} to seed temporary plane desks (found ${loose.length})`);
+        const cacheBase = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+        fs.mkdirSync(cacheBase, { recursive: true });
+        sharedScratchDir = fs.mkdtempSync(path.join(cacheBase, 'glyph3d-planes-e2e-'));
+        // Register empty sharedScratchDir as a reach root on the relay without adding to fieldSources.
+        await req(`file.openDir ${sharedScratchDir}`);
+        for (const name of ['e2e-alpha', 'e2e-beta', 'e2e-gamma', 'e2e-delta']) {
+            const f = path.join(sharedScratchDir, `${name}.js`);
+            fs.writeFileSync(f, makeScratchCode(name, 1));
+            await req(`file.open ${f}`);
+            openedScratchFiles.push(f);
         }
-        const gitCommits = (p) => {
-            const r = spawnSync('git', ['log', '--follow', '--oneline', '-n', '3', '--', p], {
-                cwd: path.dirname(p),
-                encoding: 'utf8',
-            });
-            return (r.stdout || '').trim().split('\n').filter(Boolean).length;
-        };
-        const tall = loose.filter((g) => g.lines >= 100);
-        const [g1, g2] = tall.length >= 2 ? tall : loose;
-        fileA = g1.id;
-        layerFile = (loose.find((g) => gitCommits(g.id) >= 2) ?? g1).id;
-        for (const g of [g1, g2]) {
-            const info = (await req(`grid.info ${g.id}`)).data;
-            if (info?.position) savedGridPositions.push({ id: g.id, ...info.position });
-        }
+        fileA = openedScratchFiles[0];
         deskA = deskA || 'e2e-desk-a';
         deskB = deskB || 'e2e-desk-b';
         createdTempDesks = true;
         await req(`carrel.create ${deskA}`);
-        await req(`carrel.add ${g1.id} ${deskA}`);
+        await safeCarrelAdd(req, openedScratchFiles[0], deskA);
+        await safeCarrelAdd(req, openedScratchFiles[1], deskA);
         await req(`carrel.create ${deskB}`);
-        await req(`carrel.add ${g2.id} ${deskB}`);
+        await safeCarrelAdd(req, openedScratchFiles[2], deskB);
+        await safeCarrelAdd(req, openedScratchFiles[3], deskB);
         await sleep(800);
         await req('session.save');
     } else if (sharedMode && !fileA) {
         const chk = (await req(`carrel.check ${deskA}`)).data?.members ?? [];
         const fileMember = chk.find((m) => m.id?.startsWith('/'));
         if (fileMember) fileA = fileMember.id;
-        else {
-            const loose = ((await req('grid.list')).data?.grids ?? []).find((g) => g.id?.startsWith('/'));
-            fileA = loose?.id ?? null;
-        }
-        layerFile = fileA;
     }
 
     // ── 1. plane-live-check (--desk / --back / --reload) ───────────────────────
@@ -410,46 +428,69 @@ try {
             await req('plane.leave');
             await untilPlane((s) => !s, 10000);
         }
-        await req(`plane.enter ${layerFile}`);
-        await untilPlane((s) => s && !s.tweening, 15000);
-        const showRes = await req(`layer.show ${layerFile} 2`, 15000);
-        const layers = showRes.data?.layers ?? [];
-        const hasHistory = /^OK:/.test(showRes.text ?? '') && layers.length >= 2;
+        let fanTarget = layerFile;
+        let createdFanTerm = false;
+        if (!fanTarget) {
+            fanTarget = 'e2e-fan-term';
+            createdFanTerm = true;
+            await req(`terminal.create ${fanTarget} 60 12`);
+            await req(`terminal.move ${fanTarget} -50000 50000 0`);
+            await reqAs('', ['terminal.write', fanTarget, 'live terminal front row 1\r\nlive terminal front row 2\r\n']);
+            const seedLines = Array.from({ length: 30 }, (_, i) => `scrollback line ${i + 1}: layer fan probe`).join('\n');
+            await reqAs('', ['terminal.depth.seed', fanTarget, seedLines]);
+        }
+        try {
+            await req(`plane.enter ${fanTarget}`);
+            await untilPlane((s) => s && !s.tweening, 15000);
+            const showRes = await req(`layer.show ${fanTarget} 2`, 15000);
+            const layers = showRes.data?.layers ?? [];
+            const hasHistory = /^OK:/.test(showRes.text ?? '') && layers.length >= 2;
 
-        // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one unsheared.
-        const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.camera.shear === 0 : s.fovDeg === 1);
-        await req('plane.fan off');
-        await untilPlane(folded, 10000);
-        await sleep(150);
-        const shot1 = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-off.png'), shot1);
+            // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one unsheared.
+            const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.camera.shear === 0 : s.fovDeg === 1);
+            await req('plane.fan off');
+            await untilPlane(folded, 10000);
+            await sleep(400);
+            const shot1 = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
+            if (outDir) writePng(path.join(outDir, 'layer-fan-off.png'), shot1);
 
-        const fanOn = await req('plane.fan on');
-        await untilPlane((s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1), 10000);
-        await sleep(150);
-        const shotFan = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-on.png'), shotFan);
+            const fanOn = await req('plane.fan on');
+            await untilPlane((s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1), 10000);
+            await sleep(400);
+            const shotFan = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
+            if (outDir) writePng(path.join(outDir, 'layer-fan-on.png'), shotFan);
 
-        await req('plane.fan off');
-        await untilPlane(folded, 10000);
-        await sleep(150);
-        const stateDef = (await req('plane.state')).data;
-        const shotDef = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-off-again.png'), shotDef);
+            await req('plane.fan off');
+            await untilPlane(folded, 10000);
+            await sleep(400);
+            const stateDef = (await req('plane.state')).data;
+            const shotDef = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
+            if (outDir) writePng(path.join(outDir, 'layer-fan-off-again.png'), shotDef);
 
-        const diffIdentity = diffImages(shot1, shotDef, 0);
-        const diffFan = diffImages(shot1, shotFan, 5);
-        await req(`layer.hide ${layerFile}`);
-        await req('plane.leave');
-        await untilPlane((s) => !s, 10000);
+            const ov = (await req('overlay.list --all')).data;
+            const stripCards = (ov?.items ?? []).filter((i) => i.kind === 'strip' && String(i.id).startsWith('strip:card:'));
+            const stripRightPx = stripCards.length
+                ? Math.min(shot1.width - 1, Math.max(0, Math.ceil(Math.max(...stripCards.map((c) => c.rect.x + c.rect.w)) + 4)))
+                : 0;
+            const planeRect = { x: stripRightPx, y: 0, w: shot1.width - stripRightPx, h: shot1.height };
+            const diffIdentity = diffImages(cropImage(shot1, planeRect), cropImage(shotDef, planeRect), 0);
+            const diffFan = diffImages(cropImage(shot1, planeRect), cropImage(shotFan, planeRect), 5);
+            await req(`layer.hide ${fanTarget}`);
+            await req('plane.leave');
+            await untilPlane((s) => !s, 10000);
 
-        const ok = hasHistory && folded(stateDef) && diffIdentity.maxDelta === 0 && diffFan.diffPixels > 0;
-        recordVerdict(
-            '5. layer fan identity',
-            ok,
-            performance.now() - t0,
-            `${stateDef?.ortho ? 'orthographic' : 'perspective'}, layers=${layers.length - 1}, off==off maxDelta=${diffIdentity.maxDelta} (diffPx=${diffIdentity.diffPixels}), ${String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0]} diffPx=${diffFan.diffPixels}`,
-        );
+            const ok = hasHistory && folded(stateDef) && diffIdentity.maxDelta === 0 && diffFan.diffPixels > 0;
+            recordVerdict(
+                '5. layer fan identity',
+                ok,
+                performance.now() - t0,
+                `${stateDef?.ortho ? 'orthographic' : 'perspective'}, layers=${layers.length - 1}, off==off maxDelta=${diffIdentity.maxDelta} (diffPx=${diffIdentity.diffPixels}), ${String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0]} diffPx=${diffFan.diffPixels}`,
+            );
+        } finally {
+            if (createdFanTerm) {
+                await req(`terminal.close ${fanTarget}`).catch(() => {});
+            }
+        }
     }
 
     // ── 6. strip band (column 0 right of it) ───────────────────────────────────
@@ -489,6 +530,7 @@ try {
         const t0 = performance.now();
         let teamName = null;
         let injectedSyntheticTeam = false;
+        const preTeams = new Set((await req('team.channel')).data?.teams ?? []);
 
         if (!sharedMode && !hubFlag && page) {
             teamName = 'e2e-team';
@@ -516,27 +558,19 @@ try {
                 books.applyEvents(tName, changes, { agentType: 'claude' });
             }, teamName);
         } else {
-            // Find an existing team with messages (preferring gomux root teams).
+            // Find an existing team with messages (preferring already-shown channels, then gomux roots).
             const gList = (await req('gomux.list')).data?.agents ?? [];
             const roots = gList.filter((a) => !a.parent).map((a) => a.name);
-            const candidates = [...roots, ...gList.map((a) => a.name)];
+            const books = (await req('book.list')).data?.books ?? [];
+            const candidates = [...new Set([...preTeams, ...roots, ...gList.map((a) => a.name), ...books.map((b) => b.lane).filter(Boolean)])];
             for (const c of candidates) {
+                const wasShown = preTeams.has(c);
                 const probe = await req(`team.channel ${c} show`);
                 if (/^OK:/.test(probe.text ?? '') && (probe.data?.messages ?? 0) > 0) {
                     teamName = c;
                     break;
                 }
-            }
-            if (!teamName) {
-                // Fallback if no gomux team had messages
-                const books = (await req('book.list')).data?.books ?? [];
-                for (const b of books) {
-                    const probe = await req(`team.channel ${b.lane} show`);
-                    if (/^OK:/.test(probe.text ?? '') && (probe.data?.messages ?? 0) > 0) {
-                        teamName = b.lane;
-                        break;
-                    }
-                }
+                if (!wasShown) await req(`team.channel ${c} hide`).catch(() => {});
             }
         }
 
@@ -551,8 +585,10 @@ try {
             const liveOk = /^OK:/.test(liveRes.text ?? '') && liveRes.data?.following === true;
             const liveRow = liveRes.data?.top ?? 0;
 
+            if (!preTeams.has(teamName)) {
+                await req(`team.channel ${teamName} hide`).catch(() => {});
+            }
             if (injectedSyntheticTeam && page) {
-                await req(`team.channel ${teamName} hide`);
                 await page.evaluate((tName) => {
                     window.__glyphClient?.ctx?.agentBooks?.remove?.(tName);
                 }, teamName);
@@ -648,21 +684,50 @@ try {
                 await req('carrel.leave');
                 await untilPlane((s) => !s, 8000);
             }
+            // Close our own scratch files first so their registry entries unregister
+            // and prune from the temp desks immediately, then dissolve the temp desks.
+            for (const f of openedScratchFiles) {
+                await req(`grid.close ${f}`).catch(() => {});
+            }
             if (createdTempDesks) {
                 for (const d of [deskA, deskB]) {
-                    if (d) await req(`carrel.dissolve ${d}`);
+                    if (d) await req(`carrel.dissolve ${d}`).catch(() => {});
                 }
-                await sleep(800);
-                for (const p of savedGridPositions) {
-                    await req(`grid.move ${p.id} ${p.x} ${p.y} ${p.z}`);
+                // Wait until both temp desks have finished draining from carrel.list
+                const drainDeadline = Date.now() + 5000;
+                while (Date.now() < drainDeadline) {
+                    const list = (await req('carrel.list')).data?.carrels ?? [];
+                    if (!list.some((c) => c.name === deskA || c.name === deskB)) break;
+                    await sleep(80);
                 }
             }
-            if (initialCamera?.position) {
+            // Re-materialize any pre-existing CodeGrid desk members if reload downgraded them to FileRow
+            const postCheck = (await req('carrel.check')).data?.members ?? [];
+            for (const m0 of initialCheck) {
+                if (m0.heldKind === 'CodeGrid') {
+                    const mNow = postCheck.find((m) => m.desk === m0.desk && m.id === m0.id);
+                    if (mNow && mNow.heldKind !== 'CodeGrid') {
+                        await req(`attention.set primary ${m0.id}`).catch(() => {});
+                    }
+                }
+            }
+            await req(`attention.set primary ${initialAttention?.primary?.id ?? 'none'}`).catch(() => {});
+            await req(`attention.set key ${initialAttention?.key?.id ?? 'none'}`).catch(() => {});
+            if (initialPlane?.target?.startsWith('carrel:')) {
+                await req(`carrel.enter ${initialPlane.target.slice('carrel:'.length)}`).catch(() => {});
+                await untilPlane((s) => s && !s.tweening, 10000);
+            } else if (initialPlane?.target) {
+                await req(`plane.enter ${initialPlane.target}`).catch(() => {});
+                await untilPlane((s) => s && !s.tweening, 10000);
+            } else if (initialCamera?.position) {
                 const { x, y, z } = initialCamera.position;
                 await req(`camera.move ${x} ${y} ${z}`);
             }
             await req('session.save');
         } catch { /* best-effort shared restore */ }
+    }
+    if (sharedScratchDir) {
+        try { fs.rmSync(sharedScratchDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
     try { relay?.close(); } catch { /* ignore */ }
     try { await browser?.close(); } catch { /* ignore */ }

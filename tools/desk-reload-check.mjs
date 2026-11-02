@@ -20,12 +20,43 @@
  * With --live, drives an already-connected display over the relay bus without session.clear.
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { launchGpuBrowser } from './itest/driver.mjs';
 import { dialRelay } from './lib/relay.mjs';
 import { decodePng, cropImage, writePng } from './lib/pixel-metrics.mjs';
 
 const arg = (k, d = null) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const flag = (k) => process.argv.includes(k);
+
+async function assertNotHeldByOtherDesk(req, id, targetDesk) {
+    const chk = (await req('carrel.check')).data?.members ?? [];
+    const hit = chk.find((m) => m.id === id && m.desk && m.desk !== targetDesk);
+    if (hit) {
+        throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${hit.desk}'`);
+    }
+    const list = (await req('carrel.list')).data?.carrels ?? [];
+    for (const c of list) {
+        if (c.name === targetDesk) continue;
+        if ((c.members ?? []).some((m) => m.id === id)) {
+            throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${c.name}'`);
+        }
+    }
+}
+
+function makeScratchCode(name, rev = 1) {
+    const lines = [
+        `// ${name}.js — scratch module (rev ${rev})`,
+        `export const MODULE_NAME = '${name}';`,
+        `export const MODULE_REV = ${rev};`,
+        '',
+    ];
+    for (let i = 1; i <= 36; i++) {
+        lines.push(`export function ${name}Step${String(i).padStart(2, '0')}(x = ${i}) { return x * ${rev} + ${i * 3}; }`);
+    }
+    return lines.join('\n') + '\n';
+}
 
 if (flag('--live')) {
     const port = Number(arg('--port', arg('--relay', '8080')));
@@ -70,21 +101,42 @@ if (flag('--live')) {
 
     const failures = [];
     let createdTemp = false;
-    const savedPos = [];
+    let scratchCacheDir = null;
+    const openedScratchFiles = [];
+    let initialPlane = null;
+    let initialCam = null;
+    let initialAtt = null;
+    let initialCheck = [];
     try {
-        if ((await req('plane.state')).data) {
+        initialPlane = (await req('plane.state')).data;
+        if (initialPlane) {
             await req('carrel.leave');
             await until((s) => !s, 10000);
+            await sleep(400);
         }
+        initialCam = (await req('camera.info')).data;
+        initialAtt = (await req('attention.info')).data;
+        initialCheck = (await req('carrel.check')).data?.members ?? [];
+
         if (!desk) {
             desk = 'reloadcheck-live';
             createdTemp = true;
-            const grids = ((await req('grid.list')).data?.grids ?? []).filter((g) => g.id?.startsWith('/')).slice(0, 2);
+            const cacheBase = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+            fs.mkdirSync(cacheBase, { recursive: true });
+            scratchCacheDir = fs.mkdtempSync(path.join(cacheBase, 'glyph3d-desk-reload-'));
+            // Register empty scratchCacheDir as a reach root on the relay without adding to fieldSources.
+            await req(`file.openDir ${scratchCacheDir}`);
+            for (const name of ['reload-alpha', 'reload-beta']) {
+                const f = path.join(scratchCacheDir, `${name}.js`);
+                fs.writeFileSync(f, makeScratchCode(name, 1));
+                await req(`file.open ${f}`);
+                openedScratchFiles.push(f);
+            }
             await req(`carrel.create ${desk}`);
-            for (const g of grids) {
-                const info = (await req(`grid.info ${g.id}`)).data;
-                if (info?.position) savedPos.push({ id: g.id, ...info.position });
-                await req(`carrel.add ${g.id} ${desk}`);
+            for (const f of openedScratchFiles) {
+                await assertNotHeldByOtherDesk(req, f, desk);
+                const addRes = await req(`carrel.add ${f} ${desk}`);
+                if (!/^OK:/.test(addRes.text ?? '')) throw new Error(`carrel.add ${f} ${desk} failed: ${addRes.text}`);
             }
             await sleep(600);
         }
@@ -124,13 +176,46 @@ if (flag('--live')) {
         await req('carrel.leave');
         await until((s) => !s, 10000);
     } finally {
-        if (createdTemp) {
-            try {
+        try {
+            if ((await req('plane.state')).data) {
+                await req('carrel.leave');
+                await until((s) => !s, 10000);
+            }
+            if (createdTemp) {
+                for (const f of openedScratchFiles) {
+                    await req(`grid.close ${f}`);
+                }
                 await req(`carrel.dissolve ${desk}`);
-                await sleep(800);
-                for (const p of savedPos) await req(`grid.move ${p.id} ${p.x} ${p.y} ${p.z}`);
-                await req('session.save');
-            } catch { /* best effort */ }
+                const tDissolve = Date.now() + 4000;
+                while (Date.now() < tDissolve) {
+                    const list = (await req('carrel.list')).data?.carrels ?? [];
+                    if (!list.some((c) => c.name === desk)) break;
+                    await sleep(60);
+                }
+            }
+            // Re-materialize any pre-existing CodeGrid desk members that restored as FileRow
+            const postCheck = (await req('carrel.check')).data?.members ?? [];
+            for (const m0 of initialCheck) {
+                if (m0.heldKind === 'CodeGrid') {
+                    const mNow = postCheck.find((m) => m.desk === m0.desk && m.id === m0.id);
+                    if (mNow && mNow.heldKind !== 'CodeGrid') {
+                        await req(`attention.set primary ${m0.id}`);
+                    }
+                }
+            }
+            await req(`attention.set primary ${initialAtt?.primary?.id ?? 'none'}`);
+            await req(`attention.set key ${initialAtt?.key?.id ?? 'none'}`);
+            if (initialPlane?.target?.startsWith('carrel:')) {
+                await req(`carrel.enter ${initialPlane.target.slice('carrel:'.length)}`);
+                await until((s) => s && !s.tweening, 10000);
+            } else if (initialCam?.position) {
+                const { x, y, z } = initialCam.position;
+                await req(`camera.move ${x} ${y} ${z}`);
+            }
+            await req('session.save');
+        } catch { /* best effort */ }
+        if (scratchCacheDir) {
+            try { fs.rmSync(scratchCacheDir, { recursive: true, force: true }); } catch { /* ignore */ }
         }
         relay.close();
     }

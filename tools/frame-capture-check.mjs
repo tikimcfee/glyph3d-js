@@ -333,20 +333,42 @@ function buildSharpDesktopDataUrl(w = 240, h = 160) {
  *      gesture, recording `reloadToStreamingMs`.
  *   5. Leaves the camera as found, stops the test desktop, and dissolves the scratch desk.
  */
+function assertNotHeldByOtherDeskCli(id, targetDesk, port) {
+  const chk = runCliJson(['carrel.check'], { port })?.members ?? [];
+  const hit = chk.find((m) => m.id === id && m.desk && m.desk !== targetDesk);
+  if (hit) {
+    throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${hit.desk}'`);
+  }
+  const list = runCliJson(['carrel.list'], { port })?.carrels ?? [];
+  for (const c of list) {
+    if (c.name === targetDesk) continue;
+    if ((c.members ?? []).some((m) => m.id === id)) {
+      throw new Error(`refusing to carrel.add '${id}' to '${targetDesk}': already held by desk '${c.name}'`);
+    }
+  }
+}
+
 async function runLiveDesktopGate({ port = 8080 } = {}) {
   const deskId = 'gate-live-desk';
   const carrelName = 'gate-live-carrel';
   const W = 240;
   const H = 160;
-  const carrelPos = { x: 0, y: 500, z: 0 };
 
   let initialPlane = null;
   let initialCam = null;
+  let initialAtt = null;
+  let initialCheck = [];
   try {
     initialPlane = runCliJson(['plane.state'], { port });
   } catch { /* open world */ }
   try {
     initialCam = runCliJson(['camera.info'], { port });
+  } catch { /* ignore */ }
+  try {
+    initialAtt = runCliJson(['attention.info'], { port });
+  } catch { /* ignore */ }
+  try {
+    initialCheck = runCliJson(['carrel.check'], { port })?.members ?? [];
   } catch { /* ignore */ }
 
   // Pre-clean any leftover scratch objects from an interrupted run
@@ -354,6 +376,7 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
   try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
 
   let reloadHappened = false;
+  let prevRestoreAt = 0;
   try {
     // Ensure the live display has the latest frameCommands (`frame.filter`) loaded before starting
     const dataUrl = buildSharpDesktopDataUrl(W, H);
@@ -364,10 +387,12 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     assert.equal(startData.naturalPx?.h, H, `naturalPx.h must be ${H}`);
     assert.equal(startData.oneToOne, true, 'desktop FrameGrid must default to oneToOne');
 
-    // Create scratch plane carrel at a known world position, seat the desktop, and enter it
-    runCli(['carrel.create', carrelName], { port });
+  // Stand up scratch plane carrel at a clear world spot (`setDown.at`), seat the desktop, and enter it
+    const createData = runCliJson(['carrel.create', carrelName], { port });
+    const carrelPos = createData?.setDown?.at ?? { x: -50000, y: 50000, z: 0 };
     runCli(['carrel.move', carrelName, String(carrelPos.x), String(carrelPos.y), String(carrelPos.z)], { port });
     runCli(['carrel.set', carrelName, 'mode', 'plane'], { port });
+    assertNotHeldByOtherDeskCli(deskId, carrelName, port);
     const addOut = runCli(['carrel.add', deskId, carrelName], { port }).trim();
     console.log('live carrel.add →', addOut);
     assert.ok(addOut.startsWith('OK:'), `carrel.add failed: ${addOut}`);
@@ -505,6 +530,9 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
     await sleep(700);
     try { runCli(['session.save'], { port }); } catch { /* ignore */ }
+    try {
+      prevRestoreAt = runCliJson(['session.status'], { port })?.restore?.at ?? 0;
+    } catch { /* ignore */ }
 
     // ── Reload recovery with NO user gesture ───────────────────────────────────
     const reloadStart = performance.now();
@@ -537,6 +565,16 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
       `desktop "${deskId}" must recover and stream after reload with no user gesture (got ${JSON.stringify(recoveredStatus)})`,
     );
 
+    // Wait for session restore to finish so cleanup in finally doesn't race the restore pipeline
+    const restoreDeadline = Date.now() + 45000;
+    while (Date.now() < restoreDeadline) {
+      try {
+        const sst = runCliJson(['session.status'], { port, timeout: 3000 });
+        if (sst?.autosaveOn && sst?.restore?.at && sst.restore.at !== prevRestoreAt) break;
+      } catch { /* reloading */ }
+      await sleep(150);
+    }
+
     console.log(
       `PASS: frame-capture-check --live (1:1 pin maxDelta=${cmp.maxDelta} <= 1, ` +
       `teeth halfPx maxDelta=${toothHalfPx.maxDelta} FAIL, linear maxDelta=${toothLinear.maxDelta} [greyPx=${toothLinear.greyCheckerPixels}] FAIL, ` +
@@ -550,6 +588,17 @@ async function runLiveDesktopGate({ port = 8080 } = {}) {
     try { runCli(['carrel.dissolve', carrelName], { port }); } catch { /* ignore */ }
     await sleep(reloadHappened ? 650 : 250);
     try {
+      const postCheck = runCliJson(['carrel.check'], { port })?.members ?? [];
+      for (const m0 of initialCheck) {
+        if (m0.heldKind === 'CodeGrid') {
+          const mNow = postCheck.find((m) => m.desk === m0.desk && m.id === m0.id);
+          if (mNow && mNow.heldKind !== 'CodeGrid') {
+            try { runCli(['attention.set', 'primary', m0.id], { port }); } catch { /* ignore */ }
+          }
+        }
+      }
+      try { runCli(['attention.set', 'primary', initialAtt?.primary?.id ?? 'none'], { port }); } catch { /* ignore */ }
+      try { runCli(['attention.set', 'key', initialAtt?.key?.id ?? 'none'], { port }); } catch { /* ignore */ }
       const curPlane = runCliJson(['plane.state'], { port });
       if (!initialPlane && curPlane) {
         try { runCli(['plane.leave'], { port }); } catch { /* ignore */ }
