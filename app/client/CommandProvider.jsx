@@ -53,6 +53,7 @@ import { createStatusChannel } from './statusChannel.js';
 import PlaneOverlay from './PlaneOverlay.js';
 import Deixis from './Deixis.js';
 import Participants from './Participants.js';
+import FileWatch from './FileWatch.js';
 import MapLabels from './MapLabels.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -264,6 +265,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {Set<string>|null} */ _agentShelfSeen: null,
     /** @type {import('./Deixis.js').default|null} */ deixis: null,
     /** @type {import('./Participants.js').default|null} who besides the person is at each carrel (carrel.attach) */ participants: null,
+    /** @type {import('./FileWatch.js').default|null} open files following their files on disk (the relay's watcher) */ fileWatch: null,
     /** @type {string|null} the controller to answer (a relay routing id, 'local', …) */ sender: null,
     /** @type {string|null} the caller's name when identified (`glyph3d-cli --as`); null = anonymous */ caller: null,
     cid: 0,
@@ -864,6 +866,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Saved-state system: the server-side session store. Restore (open files +
     // camera + dock layout) runs once, on the first connect after this page
     // load; autosave arms after. IdeDock registers its dock bridge onto it.
+    // Open files follow their files on disk through the relay's watcher (FileWatch).
+    state.ctx.fileWatch = new FileWatch(state.ctx, bridge);
     const session = new SessionStore({ ctx: state.ctx, router: state.router, bridge });
     state.session = session;
     state.ctx.session = session; // so session.* command handlers can reach it
@@ -876,6 +880,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
         // The relay dropped this display's followers when it went: re-follow the open books,
         // then pull the session list and the gomuxai tree (pushes only announce changes).
         state.ctx.sessionBooks?.reconnect();
+        state.ctx.fileWatch?.reconnect();
         state.ctx.sessionDesk?.refresh();
         state.ctx.gomuxHub?.refresh();
       }
@@ -912,6 +917,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     return () => {
       offFrameWatch();
       offConn?.();
+      state.ctx.fileWatch?.dispose();
+      state.ctx.fileWatch = null;
       for (const [id, prev] of volumeEntries) {
         try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }
         if (prev.mesh) { try { state.ctx.pickingSystem?.unregister?.('group', prev.mesh); } catch (_e) { /* best effort */ } }

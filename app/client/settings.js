@@ -832,6 +832,12 @@ export const SETTINGS = [
     key: 'files.hexBytes', label: 'Hex dump depth (bytes)', group: 'Files',
     type: 'number', default: 262144, min: 4096, max: 1048576, step: 4096,
   },
+  // An open file follows its file on disk (FileWatch: the relay's watcher, fs/watch → fs/changed),
+  // the line you're reading held; a file you're editing here is never overwritten.
+  {
+    key: 'files.followDisk', label: 'Open files follow changes on disk (an agent\'s shell edit, a build) — your reading line held', group: 'Files',
+    type: 'bool', default: true, apply: (ctx) => ctx.fileWatch?.sync?.(),
+  },
   // Motion — the relayout glide (ContentTreeMotion): every re-lay eases the durable
   // nodes from where they were to where the scheme stamped them, on the house
   // exponential. Rate is the whole feel — higher snaps, lower floats; rotation slerps

@@ -667,6 +667,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		if r.fs != nil && r.fs.agents != nil {
 			r.fs.agents.DisplayGone(displayGen)
 		}
+		// Its file-watch subscriptions go with it too.
+		if r.fs != nil && r.fs.watcher != nil {
+			r.fs.watcher.DisplayGone(displayGen)
+		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {
 		r.mu.Lock()

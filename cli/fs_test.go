@@ -23,6 +23,7 @@ func newTestHandler(t *testing.T) (*FSHandler, string, string) {
 	if err != nil {
 		t.Fatalf("NewFSHandler: %v", err)
 	}
+	t.Cleanup(h.Close)
 	return h, rootResolved, reachResolved
 }
 

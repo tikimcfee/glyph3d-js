@@ -7,7 +7,9 @@
  * is open as a code grid, its text is swapped in place, and the ANCHOR — the top visible row of a
  * framed grid, else the line at the plane view's center when a plane is up — keeps its screen row:
  * a framed grid's scroll moves by the lines the edit added or removed above the anchor; a plane
- * view's aim moves by them. A grid you're editing yourself (a caret in it) is never overwritten.
+ * view's aim moves by them. A grid you're editing yourself (a caret in it, or unsaved edits) is
+ * never overwritten. The same landing (landFileText) serves a change on disk with no text in hand —
+ * a shell's sed, a build — through the relay's file watcher (FileWatch).
  */
 
 import * as THREE from 'three';
@@ -38,13 +40,28 @@ export function anchorShift(before, after, line) {
 export async function landAgentEdit(ctx, rec, cwd) {
     if ((rec.action !== 'edit' && rec.action !== 'write') || !rec.target) return null;
     const path = sessionPath(rec.target, cwd);
+    // The file as the call left it when the event carries it whole; else read it now.
+    return landFileText(ctx, path, rec.file?.start === 1 ? rec.file.text : null, `an agent's ${rec.action}`);
+}
+
+/**
+ * Swap an open file's text in place, holding the reader's place: the ANCHOR — the top visible row
+ * of a framed grid, else the line at the plane view's center — keeps its screen row. A grid being
+ * edited here (a caret in it, or unsaved edits) is never overwritten. One path for an agent's edit
+ * and a change on disk (FileWatch).
+ * @param {Object} ctx AppContext @param {string} path the open grid's registry id (its path)
+ * @param {string|null} text the new text, or null to read it from the file provider
+ * @param {string} why  said in the log line
+ * @returns {Promise<{path:string, shift:number, anchor:string}|null>} what landed, or null
+ */
+export async function landFileText(ctx, path, text, why) {
     const grid = ctx.registry?.get?.(path)?.grid;
     if (!grid || typeof grid.loadText !== 'function') return null;
-    if (grid._cursor) {
-        console.info(`[edits] ${path}: an agent edited it while you're editing it here — left as you have it`);
+    if (grid._cursor || grid._modified) {
+        console.info(`[edits] ${path}: ${why} changed it while you're editing it here — left as you have it`);
         return null;
     }
-    const after = rec.file?.start === 1 ? rec.file.text : String((await ctx.fileProvider?.getFile?.(path)) ?? '');
+    const after = text != null ? text : String((await ctx.fileProvider?.getFile?.(path)) ?? '');
     const before = typeof grid.content === 'string' ? grid.content : null;
     if (before == null || after === before) return null;
 
@@ -74,6 +91,6 @@ export async function landAgentEdit(ctx, rec, cwd) {
         const s = Math.abs(grid.getWorldScale(new THREE.Vector3()).y);
         cc.setPlaneAim(plane.aim.x, plane.aim.y - shift * lineH * s);
     }
-    console.info(`[edits] ${path}: an agent's ${rec.action} landed (${shift >= 0 ? '+' : ''}${shift} lines above your anchor, ${anchor})`);
+    console.info(`[edits] ${path}: ${why} landed (${shift >= 0 ? '+' : ''}${shift} lines above your anchor, ${anchor})`);
     return { path, shift, anchor };
 }

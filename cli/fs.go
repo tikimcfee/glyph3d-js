@@ -441,6 +441,17 @@ type FSHandler struct {
 	// agents, if non-nil, serves agentSessions/* and agentEvents/* from gomuxai's
 	// `agent sessions` / `agent transcript` — see agentevents.go. Set by serveCmd.
 	agents *AgentEvents
+
+	// watcher watches the served root and reached roots for on-disk file changes
+	// and emits debounced fs/changed batches for paths subscribed via fs/watch.
+	watcher *FSWatcher
+}
+
+// Close releases background watcher resources held by the handler.
+func (h *FSHandler) Close() {
+	if h != nil && h.watcher != nil {
+		h.watcher.Close()
+	}
 }
 
 // SetNotifyHook wires the FSHandler to the relay's display push channel.
@@ -487,7 +498,9 @@ func NewFSHandler(root string, reach []string) (*FSHandler, error) {
 		extra = append(extra, r)
 	}
 
-	return &FSHandler{root: resolved, extraRoots: extra}, nil
+	h := &FSHandler{root: resolved, extraRoots: extra}
+	h.watcher = NewFSWatcher(h)
+	return h, nil
 }
 
 // evalRootOrEmpty resolves a candidate reach directory to its absolute,
@@ -611,6 +624,10 @@ func (h *FSHandler) Handle(method string, rawID json.RawMessage, params json.Raw
 				h.handleSearch(write, rawID, params)
 			case "fs/searchCancel":
 				h.handleSearchCancel(write, rawID, params)
+			case "fs/watch":
+				h.handleWatch(write, rawID, params, display)
+			case "fs/unwatch":
+				h.handleUnwatch(write, rawID, params, display)
 			case "agentSessions/list":
 				h.handleAgentSessionsList(write, rawID, params)
 			case "agentEvents/follow":
