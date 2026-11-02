@@ -7,7 +7,8 @@
  *   2. carrel.check           (every desk member held live in its seat)
  *   3. frame-capture-check    (--live desktop stream + non-blank frame texture)
  *   4. desk-reload-check      (seated → layout.scheme relayout → save+reload → leave+re-enter)
- *   5. layer fan identity     (plane.fov 1 vs plane.fov default pixel-identical on a layer stack; fan@30° spreads)
+ *   5. layer fan identity     (plane.fan off twice pixel-identical on a layer stack; plane.fan on spreads —
+ *                              the wider lens on the perspective endpoint, the whole-px shear on the orthographic)
  *   6. strip band             (column 0 lands to the right of the left-edge strip cards)
  *   7. team.channel rows      (show → rows -N holds view → rows +N resumes live tail)
  *   8. point.show → list      (deictic point.show does not steal camera/attention; listed in point.list)
@@ -18,8 +19,11 @@
  * headless GPU display so it never disturbs the shared display.
  * Pass `--port 8080` to target the shared relay/display explicitly.
  *
+ * `--ortho` seeds plane.ortho on in the private display: every check runs on the orthographic plane
+ * endpoint (PlaneCamera, DESIGN §4.6). Not with --port (the shared display's settings are the person's).
+ *
  * Usage:
- *   bun tools/planes-e2e.mjs [--port 8080] [--hub] [--out-dir <dir>] [--desk <a] [--back <b>] [--url <viteUrl>]
+ *   bun tools/planes-e2e.mjs [--port 8080] [--hub] [--ortho] [--out-dir <dir>] [--desk <a] [--back <b>] [--url <viteUrl>]
  */
 
 import fs from 'node:fs';
@@ -59,6 +63,8 @@ const flag = (name) => argv.includes(`--${name}`);
 const explicitPort = opt('port');
 const sharedMode = explicitPort != null;
 const hubFlag = flag('hub');
+const orthoFlag = flag('ortho');
+if (orthoFlag && sharedMode) { console.error('planes-e2e: --ortho seeds the private display only (not with --port)'); process.exit(2); }
 const outDir = opt('out-dir');
 const viteUrl = opt('url', process.env.GLYPH3D_TEST_URL || 'http://localhost:5173/');
 
@@ -241,9 +247,10 @@ try {
             viewport: { width: 1600, height: 1000 },
             deviceScaleFactor: 1,
         });
-        await context.addInitScript(() => {
+        await context.addInitScript((ortho) => {
             try { localStorage.setItem('g3d.gomux.autoScreens', 'false'); } catch { /* ignore */ }
-        });
+            if (ortho) try { localStorage.setItem('g3d.plane.ortho', 'true'); } catch { /* ignore */ }
+        }, orthoFlag);
         page = await context.newPage();
         const targetUrl = `${viteUrl}${viteUrl.includes('?') ? '&' : '?'}relay=${port}`;
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -338,6 +345,7 @@ try {
         await reconnectRelay();
         await waitRestoreComplete(60000);
         const summaryLine = r.out.split('\n').filter(Boolean).pop() || '';
+        if (!r.ok) console.log(r.out.split('\n').filter((l) => /✗|FAIL|Error/.test(l)).map((l) => `   ${l}`).join('\n'));
         recordVerdict('1. plane-live-check', r.ok, performance.now() - t0, summaryLine);
     }
 
@@ -395,7 +403,7 @@ try {
         recordVerdict('4. desk-reload-check', r.ok, performance.now() - t0, `${stepsOk}/4 steps (${summary})`);
     }
 
-    // ── 5. layer fan identity (fov 1 vs default on a layer stack) ──────────────
+    // ── 5. layer fan identity (fan off twice identical, fan on spreads, on a layer stack) ──
     {
         const t0 = performance.now();
         if ((await req('plane.state')).data) {
@@ -408,24 +416,26 @@ try {
         const layers = showRes.data?.layers ?? [];
         const hasHistory = /^OK:/.test(showRes.text ?? '') && layers.length >= 2;
 
-        await req('plane.fov 1');
-        await untilPlane((s) => s && !s.tweening && s.fovDeg === 1, 10000);
+        // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one unsheared.
+        const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.camera.shear === 0 : s.fovDeg === 1);
+        await req('plane.fan off');
+        await untilPlane(folded, 10000);
         await sleep(150);
         const shot1 = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-fov1.png'), shot1);
+        if (outDir) writePng(path.join(outDir, 'layer-fan-off.png'), shot1);
 
-        await req('plane.fov 30');
-        await untilPlane((s) => s && !s.tweening && s.fovDeg === 30, 10000);
+        const fanOn = await req('plane.fan on');
+        await untilPlane((s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1), 10000);
         await sleep(150);
         const shotFan = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-fov30.png'), shotFan);
+        if (outDir) writePng(path.join(outDir, 'layer-fan-on.png'), shotFan);
 
-        await req('plane.fov default');
-        await untilPlane((s) => s && !s.tweening && s.fovDeg === 1, 10000);
+        await req('plane.fan off');
+        await untilPlane(folded, 10000);
         await sleep(150);
         const stateDef = (await req('plane.state')).data;
         const shotDef = decodePng(Buffer.from((await req('screenshot', 15000)).data.image, 'base64'));
-        if (outDir) writePng(path.join(outDir, 'layer-fan-default.png'), shotDef);
+        if (outDir) writePng(path.join(outDir, 'layer-fan-off-again.png'), shotDef);
 
         const diffIdentity = diffImages(shot1, shotDef, 0);
         const diffFan = diffImages(shot1, shotFan, 5);
@@ -433,12 +443,12 @@ try {
         await req('plane.leave');
         await untilPlane((s) => !s, 10000);
 
-        const ok = hasHistory && stateDef?.fovDeg === 1 && diffIdentity.maxDelta === 0 && diffFan.diffPixels > 0;
+        const ok = hasHistory && folded(stateDef) && diffIdentity.maxDelta === 0 && diffFan.diffPixels > 0;
         recordVerdict(
             '5. layer fan identity',
             ok,
             performance.now() - t0,
-            `layers=${layers.length - 1}, fov1==default maxDelta=${diffIdentity.maxDelta} (diffPx=${diffIdentity.diffPixels}), fan@30° diffPx=${diffFan.diffPixels}`,
+            `${stateDef?.ortho ? 'orthographic' : 'perspective'}, layers=${layers.length - 1}, off==off maxDelta=${diffIdentity.maxDelta} (diffPx=${diffIdentity.diffPixels}), ${String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0]} diffPx=${diffFan.diffPixels}`,
         );
     }
 

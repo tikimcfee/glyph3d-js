@@ -27,6 +27,7 @@
 
 import * as THREE from 'three';
 import HandRenderer from './HandRenderer.js';
+import { viewHeightAt } from '../services/spatial/spatialMath.js';
 
 class HandPresence {
     /**
@@ -105,8 +106,8 @@ class HandPresence {
             // Fed live because fov/aspect are: the wrist anchor maps the
             // device's tracking range onto this rect × coverage, so the hand
             // traverses the canvas at any window shape or zoom.
-            if (camera?.isPerspectiveCamera) {
-                const halfH = Math.tan((camera.fov * Math.PI) / 360) * Math.abs(renderer.depth);
+            if (camera) {
+                const halfH = viewHeightAt(camera, Math.abs(renderer.depth)) / 2;
                 renderer.viewExtent = { halfW: halfH * (camera.aspect || 1), halfH };
             }
             // The model's metric hand when it follows this device; else the image-space landmarks.

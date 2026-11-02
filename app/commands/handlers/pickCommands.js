@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import { entryForGrid } from '../../client/CanvasInteraction.jsx';
+import { rayFromCamera } from '@glyph3d/core/services/spatial/spatialMath.js';
 
 const parsePoint = (args) => {
     const x = Number(args[0]), y = Number(args[1]);
@@ -59,7 +60,7 @@ export default function registerPickCommands(router) {
         if (!rect?.width) return { text: 'ERR: no canvas to raycast through', data: null };
         const ndc = new THREE.Vector2((p.x / rect.width) * 2 - 1, -(p.y / rect.height) * 2 + 1);
         const ray = new THREE.Raycaster();
-        ray.setFromCamera(ndc, ctx.camera);
+        rayFromCamera(ray, ndc, ctx.camera);
         ray.near = ctx.camera.near;
         ray.far = ctx.camera.far;
         ray.layers.enableAll();   // batched panels/labels draw from instances, off layer 0 — still name them

@@ -13,6 +13,7 @@
 
 import * as THREE from 'three';
 import { worldBounds } from '../spatial/sceneBounds.js';
+import { sphereFitDistance } from '../spatial/spatialMath.js';
 
 const _rsize = new THREE.Vector2();
 const FILL_COLORS = { grid: 0x4f7fff, terminal: 0x3fbf8f, frame: 0xbf8f3f };
@@ -36,7 +37,6 @@ export default class MinimapPass {
         this.registry = registry;
         this.fraction = fraction;
         this.margin = margin;
-        this.fov = fov;
         this.viewDir = viewDir;
 
         this.scene = new THREE.Scene();
@@ -156,7 +156,7 @@ export default class MinimapPass {
         const center = union.getCenter(c);
         const radius = union.isEmpty() ? 200 : Math.max(union.getSize(v).length() * 0.5, 1);
         const dir = v.set(this.viewDir[0], this.viewDir[1], this.viewDir[2]).normalize();
-        const dist = radius / Math.sin((this.fov * Math.PI / 180) / 2) * 1.15;
+        const dist = sphereFitDistance(this.camera, radius) * 1.15;
         const mc = this.camera;
         mc.position.copy(center).addScaledVector(dir, dist);
         mc.up.set(0, 1, 0);

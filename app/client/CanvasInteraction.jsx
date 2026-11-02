@@ -6,6 +6,7 @@ import { resolveGesture } from './gestureResolver.js';
 import { moveVerbFor } from './surfaceInteractions.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections';
 import { interactionTheme } from './settings.js';
+import { worldPerPixel, rayFromCamera } from '@glyph3d/core/services/spatial/spatialMath.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -216,7 +217,7 @@ export function CanvasPicker() {
         if (!books) return null;
         const rect = dom.getBoundingClientRect();
         const ndc = new THREE.Vector2(((s.x - rect.left) / rect.width) * 2 - 1, -((s.y - rect.top) / rect.height) * 2 + 1);
-        scrollRay.setFromCamera(ndc, camera);
+        rayFromCamera(scrollRay, ndc, camera);
         return books.scrollHit(entry.id, scrollRay.ray);
       },
     };
@@ -492,7 +493,7 @@ export function ObjectDragger() {
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
       const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
       const depth = Math.max(1, new THREE.Vector3().copy(p).sub(camera.position).dot(fwd));
-      const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
+      const pixelScale = worldPerPixel(camera, depth, dom.clientHeight);
       const delta = right.multiplyScalar(dx * pixelScale).add(up.multiplyScalar(-dy * pixelScale));
 
       const nx = p.x + delta.x, ny = p.y + delta.y, nz = p.z + delta.z;
@@ -726,7 +727,7 @@ export function ResizeDragger() {
       const up    = _rzUp.set(0, 1, 0).applyQuaternion(q);
       const center = drag.startBounds.getCenter(_rzCenter);
       const depth = Math.max(1, center.sub(camera.position).dot(fwd));
-      const pixelScale = (2 * depth * Math.tan((camera.fov * Math.PI / 180) / 2)) / dom.clientHeight;
+      const pixelScale = worldPerPixel(camera, depth, dom.clientHeight);
       const dragVec = _rzDrag.copy(right).multiplyScalar(dx * pixelScale).addScaledVector(up, -dy * pixelScale);
       const gridRight = _rzGridRight.set(1, 0, 0).applyQuaternion(drag.startQuat);   // panel +X (cols east)
       const gridDown  = _rzGridDown.set(0, -1, 0).applyQuaternion(drag.startQuat);   // panel −Y (rows south)

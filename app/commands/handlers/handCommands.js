@@ -19,6 +19,7 @@
 
 import * as THREE from 'three';
 import { HandSim, SIM_MODES } from '@glyph3d/core/hand';
+import { viewHeightAt } from '@glyph3d/core/services/spatial/spatialMath.js';
 
 /** Range of a component across landmarks, for spotting a wrong coordinate space. */
 function range(points, key) {
@@ -287,10 +288,9 @@ export default function registerHandCommands(router) {
         // Rough on-screen size: how many pixels tall the hand's bounding box is.
         // A number in the single digits means it IS rendering and you can't see it.
         let screenPx = null;
-        if (!empty && camera?.isPerspectiveCamera) {
+        if (!empty && camera) {
             const dist = camera.getWorldPosition(new THREE.Vector3()).distanceTo(center);
-            const vFov = (camera.fov * Math.PI) / 180;
-            const visibleH = 2 * Math.tan(vFov / 2) * Math.max(dist, 1e-6);
+            const visibleH = viewHeightAt(camera, Math.max(dist, 1e-6));
             const canvasH = ctx.renderer?.domElement?.clientHeight || 1000;
             screenPx = Math.round((size.y / visibleH) * canvasH);
         }

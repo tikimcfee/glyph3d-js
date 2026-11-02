@@ -13,6 +13,7 @@ import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
 import { stateController } from '@glyph3d/core/services/state';
+import { PlaneCamera } from '@glyph3d/core/services/camera';
 // Font fallback chain, priority order: clean code monospace first, then fonts
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
 // braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
@@ -86,6 +87,14 @@ function App() {
     coreAssetBase: import.meta.env.BASE_URL,
   });
   const cameraRef = useRef(null);
+  // The view camera: a PlaneCamera — three's PerspectiveCamera (its own matrix) everywhere but a
+  // plane view's orthographic endpoint, which blends it (DESIGN §4.6). One instance for the app's
+  // life; r3f keeps its aspect.
+  const [viewCamera] = useState(() => {
+    const c = new PlaneCamera(70, 1, 1.0, 20000);
+    c.position.set(0, 0, 300);
+    return c;
+  });
   // The wired command client. CommandProvider (inside the Canvas) hands it up via
   // onReady so the DOM sidebar — which can't read the in-canvas context — can use
   // it. One source of truth, prop-drilled to the chrome.
@@ -195,7 +204,7 @@ function App() {
               // library vantage, near 0.1 makes one depth step ~134 world units (the whole
               // sheet pitch z-fights; rear text bleeds through front panels). near 1 is
               // 10× that; see docs/plans/z-order-transparency-reorg.md. Live: camera.nearPlane.
-              camera={{ position: [0, 0, 300], fov: 70, near: 1.0, far: 20000 }}
+              camera={viewCamera}
               // Backdrop is the renderer's clear color, NOT scene.background —
               // a null scene.background means the GPU pick pass never has to
               // touch scene state to keep its ID buffer clean (a set background

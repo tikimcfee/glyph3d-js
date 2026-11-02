@@ -80,13 +80,13 @@ Stand a surface's history behind it on its own cell grid and fan the stack out i
 
 ```sh
 ./glyph3d-cli --as '' layer.show <id> 5
-./glyph3d-cli --as '' plane.fov 18
+./glyph3d-cli --as '' plane.fan on
 ./glyph3d-cli --as '' pane.layer <id> 1
 ```
 
 **What to notice:**
 - `layer.show <id> [n]` stands past pages behind the surface: git revisions (`fs/gitLog --follow`) behind a source file, earlier turns behind an agent scroll, or scrollback screens behind a terminal — stepped back in `z` and raised so each older page's top rows peek above the page in front.
-- Holding `Ctrl+Space` past key-repeat (or running `plane.fov 18`, reset with `plane.fov default`) widens the lens while holding the foreground scale constant, fanning the stack out with parallax.
+- Holding `Ctrl+Space` past key-repeat (or running `plane.fan on`, folded with `plane.fan off`) fans the stack: on the default perspective endpoint it widens the lens to `layers.fanFov` while holding the foreground scale constant (parallax); with `settings.set plane.ortho true` (then re-enter) the endpoint is orthographic, every layer stands 1:1 behind the page, and the fan slides layer i right by i·`layers.fanPx` whole device px (`plane.fan 48` picks the px). `plane.blend 0.5` holds the view between perspective and orthographic (a test handle; `plane.blend default` hands it back).
 - `pane.layer <id> 1` brings a past layer to `z = 0` (`pane.layer <id> now` restores the live surface); `pane.blink <id> 0 1` alternates two layers in place (`pane.blink <id> off` stops).
 
 ---

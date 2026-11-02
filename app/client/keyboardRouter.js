@@ -232,12 +232,13 @@ function planePrefix(e, env) {
     if (!env.planeEntered?.()) { env._planeArmed = 0; env._fanning = false; return false; }
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return false;
     if (matchesChord(e, env.planePrefix ?? PLANE_PREFIX)) {
-        // HELD past the key-repeat delay, the chord is the FAN quasimode (depth as time): the plane's
-        // lens widens (plane.fov env.planeFanFov) so the layers behind a page spread by depth; its
-        // release flattens it (onKeyUp). A tap stays the prefix.
+        // HELD past the key-repeat delay, the chord is the FAN quasimode (depth as time): `plane.fan
+        // on` spreads the layers behind a page (a whole-px shear on the orthographic endpoint, a
+        // wider lens on the perspective one); its release folds them back (onKeyUp). A tap stays
+        // the prefix.
         if (e.repeat) {
             env._planeArmed = 0;
-            if (!env._fanning) { env._fanning = true; env.exec(`plane.fov ${env.planeFanFov ?? 30}`); }
+            if (!env._fanning) { env._fanning = true; env.exec('plane.fan on'); }
             return true;
         }
         env._planeArmed = Date.now() + (env.planePrefixMs ?? 1500);
@@ -321,7 +322,7 @@ export function installKeyboardRouter(env) {
         const parts = [c.key, c.ctrl && 'Control', c.shift && 'Shift', c.alt && 'Alt', c.meta && 'Meta'].filter(Boolean);
         if (!parts.includes(e.key)) return;
         env._fanning = false;
-        env.exec('plane.fov default');
+        env.exec('plane.fan off');
         e.preventDefault();
     };
     doc.addEventListener('keyup', onKeyUp, { capture: true });

@@ -807,7 +807,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       noteKey: () => state.ctx.deixis?.noteKey(),
       replyAgentFor: (id) => (getSetting('gomux.input') === true ? state.ctx.gomuxHub?.screenAgent(id) ?? null : null),
       get planePrefixMs() { return Number(getSetting('plane.prefixMs')); },
-      get planeFanFov() { return Number(getSetting('layers.fanFov')); },
       gestureEnv: {
         exec: (cmd) => state.router.execute(cmd),
         get attention() { return state.ctx.attentionManager; },

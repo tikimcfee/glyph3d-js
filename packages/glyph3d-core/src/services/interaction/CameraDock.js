@@ -63,6 +63,7 @@
 
 import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
+import { viewHeightAt } from '../spatial/spatialMath.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
 import FieldLabel from '../../collections/FieldLabel.js';
@@ -1039,9 +1040,8 @@ export class CameraDock extends THREE.Object3D {
      */
     update(dt, camera) {
         if (camera) {
-            const fov = (camera.fov || 70) * Math.PI / 180;
-            const vh = 2 * this.distance * Math.tan(fov * 0.5);
-            const vw = vh * (camera.aspect || 1.6);
+            const vh = viewHeightAt(camera, this.distance);
+            const vw = vh * camera.aspect;
             // The frame + bar are frustum-normalized; refit the live tiles when the DRAWING FRAME
             // changes size (browser/canvas resize, fov change) so a pinned window stays locked to
             // the canvas. Camera MOVEMENT doesn't trip this (viewW/H are position-independent).

@@ -251,8 +251,21 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   pitch floor; every page states its extent (else culled / far-LOD'd — teeth shown); opaque backs; a fronted page at
   exactly z = 0 with the member's glyphs hidden and shown again; revisions / agent turns / terminal screens as
   layers; the verbs over a fake relay; serialize + restore (waits for the member, refronts).
-- **`layer-fan.test.mjs`** (headless) — holding the pane prefix fans (`plane.fov layers.fanFov`), releasing it
-  flattens, a tap is still the prefix.
+- **`layer-fan.test.mjs`** (headless) — holding the pane prefix fans (`plane.fan on`), releasing it
+  folds (`plane.fan off`), a tap is still the prefix.
+- **`plane-oblique.test.mjs`** (headless) — the orthographic endpoint's fan, through the real controller
+  at odd viewports and dpr 1/2: layers 0..20 land on whole device px, layer i exactly i·n over and i rows
+  up, and the plane itself doesn't move. Teeth: a 2.5 px fan leaves the odd layers off whole px; a shear
+  for an unpinned d₀ breaks it.
+- **`plane-ortho-check.mjs`** (GPU, private relay, two scratch Vites) — before vs after with
+  `plane.ortho` off: the open world and an entered desk give 0 px and a bit-identical camera (the scene
+  without the overlay pass, whose label hysteresis moves a tab a pixel with frame timing). After, an
+  in-place A/B: orthographic vs the 1° perspective on the flat plane (1,543 px, the focus border's inner
+  edge), with layers shown, the fan's teeth, `plane.fan off` folding back exactly, and `pick.at` /
+  `scene.at` at λ = 0, fanned or not.
+  ```
+  bun tools/plane-ortho-check.mjs --before http://127.0.0.1:5181/ --after http://127.0.0.1:5182/ --relay 8099 --dir <scratch git repo = the relay root>
+  ```
 - **`scroll-form.test.mjs`** (headless, gomuxai's corpus + the real font chain) — the agent scroll
   form: every event's headline, call, info rows and body rejoin from the document's rows to the
   record's text (CRLF → LF, one trailing newline dropped); long outputs are one summary row until

@@ -270,12 +270,29 @@ export default class LayerStack extends THREE.Object3D {
         this._now.back.position.z = -2 * getBandDistance(LAYER_BAND.GRID_BACKGROUND);
     }
 
+    /**
+     * The depth between pages, in the stack's own units: `pitchRows` rows, floored at 3·bg — a
+     * page's backing stands `bg` behind its text, so a smaller pitch would put a history page's text
+     * in front of the `now` backing (2·bg back); the floor keeps the order whatever the knob.
+     * @returns {number}
+     */
+    pitch() {
+        return Math.max(this.cfg.pitchRows * this.frame.metrics.lineSpacing, 3 * getBandDistance(LAYER_BAND.GRID_BACKGROUND));
+    }
+
+    /**
+     * The depth between pages in WORLD units (pitch × the stack's world depth scale) — what a
+     * camera fan (PlaneCamera.fanShear) slides by. @returns {number}
+     */
+    worldPitch() {
+        this.updateWorldMatrix(true, false);
+        return this.pitch() * Math.abs(this.getWorldScale(new THREE.Vector3()).z);
+    }
+
     /** Pose every page by its rank (or as the fronted one). @private */
     _place() {
         const ls = this.frame.metrics.lineSpacing, bg = getBandDistance(LAYER_BAND.GRID_BACKGROUND);
-        // A page's backing stands `bg` behind its text: a pitch under 3·bg would put a history page's
-        // text in front of the `now` backing (2·bg back) — the floor keeps the order whatever the knob.
-        const pitch = Math.max(this.cfg.pitchRows * ls, 3 * bg), rise = this.cfg.riseRows * ls;
+        const pitch = this.pitch(), rise = this.cfg.riseRows * ls;
         for (const l of this.pages) {
             // Fronted: its text on the member's plane (z = 0, the member's glyphs hidden), its backing
             // half the backdrop gap behind — in front of the member's backdrop, behind the text.

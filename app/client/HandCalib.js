@@ -20,6 +20,7 @@ import { roundV, round, dist, centroid, palmFacing, PALM_JOINTS } from '@glyph3d
 const PALM = PALM_JOINTS;
 const centroidOf = (pts) => (pts.length ? centroid(pts) : null);
 import { stateController } from '@glyph3d/core/services/state';
+import { viewHeightAt } from '@glyph3d/core/services/spatial/spatialMath.js';
 /** @import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js' */
 /** @import HandPresence from '@glyph3d/core/hand/HandPresence.js' */
 
@@ -245,8 +246,8 @@ export default class HandCalib {
     update(camera) {
         if (!this.view.group.visible) return;
         let extent = null;
-        if (camera?.isPerspectiveCamera) {
-            const halfH = Math.tan((camera.fov * Math.PI) / 360);
+        if (camera) {
+            const halfH = viewHeightAt(camera, 1) / 2;
             extent = { halfW: halfH * (camera.aspect || 1), halfH };
         }
         const h = this.live?.primary;

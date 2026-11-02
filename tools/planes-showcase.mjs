@@ -85,10 +85,10 @@ async function main() {
             await sleep(dwellMs);
 
             if (stop.fan) {
-                const fanOn = await relay.request('plane.fov 18');
+                const fanOn = await relay.request('plane.fan on');
                 console.log(`     [fan] ${fanOn.text}`);
                 await sleep(Math.min(dwellMs, 900));
-                const fanOff = await relay.request('plane.fov default');
+                const fanOff = await relay.request('plane.fan off');
                 console.log(`     [fan] ${fanOff.text}`);
             }
         }

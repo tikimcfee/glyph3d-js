@@ -339,14 +339,23 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   line); the plane prefix's `y` / `n` answer the agent in focus. Gates: `tools/agent-input.test.mjs`,
   `cli/agentinput_test.go`.
 - **Plane view** (`services/camera/planeView.js`, `ViewerCameraController.enterPlane|leavePlane|
-  setPlaneFov`, verbs `plane.enter <target> [cellPx]` / `plane.leave` / `plane.fov` / `plane.aim` /
-  `plane.state`): READING a surface pixel-exact. A perspective camera squared to a plane shows it at
+  setPlaneFov|setPlaneFan|setPlaneBlend`, `services/camera/PlaneCamera.js`, verbs `plane.enter <target>
+  [cellPx]` / `plane.leave` / `plane.fov` / `plane.fan` / `plane.blend` / `plane.aim` / `plane.state`): READING a surface pixel-exact. A perspective camera squared to a plane shows it at
   one uniform scale, so the camera eases (one continuous lens tween — a dolly zoom) to a narrow fov
   (`plane.fov`, 1°) at the depth where a text column is `plane.cellPx` whole device pixels (8 → the
   8×15 cell), the surface's cell-grid origin (`pixelOrigin()`, else its top-left) snapped to a
   device-pixel corner, near/far a SLAB around the
-  surface (`plane.front`/`plane.back`) so nothing in front of it draws. It stays the one perspective
-  camera every system already handles (picking, culling, far-LOD, batches). The ease SOLVES the eye
+  surface (`plane.front`/`plane.back`) so nothing in front of it draws. The view camera is a PlaneCamera (`app/main.jsx`): three's PerspectiveCamera, its own matrix, at blend
+  λ = 1, so the open world is bit-identical, and every system handles it (picking, culling, far-LOD,
+  batches). `plane.ortho` (off by default) makes the endpoint ORTHOGRAPHIC instead: the camera keeps the
+  open-world fov, stops where that lens shows the plane at its scale (d₀ ≈ 60–70 units, not ~5000), and
+  blends λ 1 → 0 in the same ease, d₀ pinned to the referent's depth each frame. Layers behind the
+  page then stand 1:1, and the fan is a whole-px shear. On the flat plane the two endpoints differ only
+  in the anti-aliased inner edge of the focus border, which stands in front of the plane
+  (`tools/plane-ortho-check.mjs`). Every reading of a camera's scale goes through `spatialMath`
+  (`clipW` / `pxPerUnitAt` / `viewHeightAt` / `worldPerPixel` read the projection matrix;
+  `rayFromCamera` replaces three's setFromCamera, which is wrong below λ = 1). No other file takes trig
+  of a fov; a gate in plane-camera.test checks it. The ease SOLVES the eye
   each frame (`_stepLens` on `planeView.dollyAt`): a referent — the surface point you were looking
   at (`plane.enter`), or a caller's `referent` — holds its screen spot (< 1 px; the end aim follows
   from it) at exactly the eased scale k(t); an explicit `aim` glides to the view center instead.
@@ -354,8 +363,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   home kept. Inside, drag pans 1:1, the wheel scrolls the surface under the cursor (else the plane),
   flight/look/dolly are off; a fly (`flyTo`: camera.focus, agent.focus, a ring desk's enter) first
   eases back to home, then flies — framed at the home lens; a restore cuts home; `getState` answers
-  with the pose it was entered from (a save mid-plane restores to the open world). A wider
-  `plane.fov` keeps the scale and fans layers off the plane by depth (parallax). Its life is a
+  with the pose it was entered from (a save mid-plane restores to the open world). The FAN (`plane.fan on|off`, the held pane prefix) spreads layers behind the page: on the
+  perspective endpoint a wider lens (`layers.fanFov`, keeping the scale: parallax); on the orthographic
+  one a projection shear sliding layer i right by i·n whole device px (`layers.fanPx`, `plane.fan <px>`).
+  `plane.blend <0..1|default>` holds a blend (a test handle). Its life is a
   listener set (`addPlaneListener` / `removePlaneListener`): `enterPlaneView` installs one per
   controller that suppresses space-layer chrome (the tree's ownership traces) for exactly that span.
   `planeViewport()` → `{width, height, dpr, exact, box, why}`: exact = the drawing buffer IS the
@@ -363,7 +374,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   pixel-exact` notice in the OK line and a console.warn. `pick.at <x> <y>` (the GPU pick) and `scene.at <x> <y>` (a
   raycast naming every object under a point, all layers) say what is on screen where. Gates:
   `tools/plane-view.test.mjs` (the math vs three's projection), `tools/plane-camera.test.mjs` (the
-  controller, frame by frame). Text is MONOSPACE on its cell grid (`core/LayoutGenerator.js`): the
+  controller, frame by frame; PlaneCamera's matrix against three's at λ = 1 and 0; the open world
+  bit-identical; the fov-trig gate), `tools/plane-oblique.test.mjs` (fanned layers on whole device
+  px), `tools/plane-ortho-check.mjs` (GPU: before/after 0 px, ortho vs 1°, picking at λ = 0). Text is MONOSPACE on its cell grid (`core/LayoutGenerator.js`): the
   pen steps whole cells of `charWidth` (a wide glyph two, a combining mark none) while each quad keeps
   the glyph's true advance (ax/upem × `metrics.emWorld`), so at a whole-pixel cell every column
   starts at the same pixel phase (`tools/layout-cells.test.mjs`; `tools/pixel-check.mjs` measures

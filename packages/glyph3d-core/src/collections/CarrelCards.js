@@ -26,6 +26,7 @@ import FrameGrid from './FrameGrid.js';
 import { cutRect, cutMatrix } from '../core/panelCut.js';
 import { unwatchLayers } from './FlatRenderRoot.js';
 import { isTracked, showGeneration } from './SceneTransforms.js';
+import { pxPerUnitAtPoint } from '../services/spatial/spatialMath.js';
 
 /** Dedicated camera layer for offscreen carrel card passes (layer 0 disabled). */
 export const CARD_LAYER = 29;
@@ -47,8 +48,6 @@ const _v3 = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _up = new THREE.Vector3();
 const _normal = new THREE.Vector3();
-const _camPos = new THREE.Vector3();
-const _camDir = new THREE.Vector3();
 const _box = new THREE.Box3();
 const _memberBox = new THREE.Box3();
 const _invCarrel = new THREE.Matrix4();
@@ -1152,17 +1151,7 @@ export class CarrelCards {
      */
     projectedLongPx(rect, camera, viewportH = 1000) {
         if (!rect || !camera) return 0;
-        const H = Number(viewportH) || 1000;
-        const e = camera.projectionMatrix.elements;
-        const e5 = e[5];
-        camera.getWorldPosition(_camPos);
-        camera.getWorldDirection(_camDir);
-        const dx = rect.center.x - _camPos.x;
-        const dy = rect.center.y - _camPos.y;
-        const dz = rect.center.z - _camPos.z;
-        const depth = Math.max(1e-3, dx * _camDir.x + dy * _camDir.y + dz * _camDir.z);
-        const clipW = Math.max(1e-6, -e[11] * depth + e[15]);
-        const pxPerUnit = (e5 * H) / (2 * clipW);
+        const pxPerUnit = pxPerUnitAtPoint(camera, rect.center, Number(viewportH) || 1000);
         return Math.max(rect.width, rect.height) * pxPerUnit;
     }
 

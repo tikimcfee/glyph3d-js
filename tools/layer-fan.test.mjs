@@ -1,13 +1,13 @@
 // layer-fan.test.mjs — depth as time's FAN quasimode (slice 10a step 3): in a plane, HOLDING the pane
-// prefix chord past the key-repeat delay widens the lens (`plane.fov <env.planeFanFov>` — the layers
-// behind a page spread by depth) and RELEASING it flattens (`plane.fov default`); a TAP is still the
-// prefix. Driven through the real installKeyboardRouter with an injected document.
+// prefix chord past the key-repeat delay fans the layers (`plane.fan on` — the layers behind a page
+// spread: a whole-px shear on the orthographic endpoint, a wider lens on the perspective one) and
+// RELEASING it folds them (`plane.fan off`); a TAP is still the prefix. Driven through the real installKeyboardRouter with an injected document.
 //
 //   bun tools/layer-fan.test.mjs
 //
 // Locks: a tap arms the prefix (its next key runs a pane command, no fan); held (repeat) → exactly one
-// plane.fov <fanFov> however long, the prefix disarmed (the release isn't a command key wait); the
-// chord's key or a modifier lifting → plane.fov default, once; outside a plane the chord isn't claimed
+// plane.fan on however long, the prefix disarmed (the release isn't a command key wait); the
+// chord's key or a modifier lifting → plane.fan off, once; outside a plane the chord isn't claimed
 // and nothing fans; a focused terminal never sees the held chord.
 
 const ROUTER = process.env.KEYBOARD_ROUTER || '../app/client/keyboardRouter.js';
@@ -28,7 +28,7 @@ function harness({ entered = true, terminal = false } = {}) {
         document: doc, am,
         exec: (cmd) => { ran.push(Array.isArray(cmd) ? cmd.join(' ') : cmd); return { text: 'OK' }; },
         gestureEnv: { exec: () => {}, attention: { get: () => null, clear: () => {} }, context: { nodes: () => [] } },
-        planeEntered: () => state.entered, planePrefixMs: 1500, planeFanFov: 30,
+        planeEntered: () => state.entered, planePrefixMs: 1500,
     };
     installKeyboardRouter(env);
     const ev = (key, mods = {}, repeat = false) => ({ key, repeat, ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, altKey: !!mods.alt, metaKey: !!mods.meta,
@@ -50,9 +50,9 @@ const CTRL = { ctrl: true };
     const h = harness();
     h.down(' ', CTRL);
     ok(h.down(' ', CTRL, true) && h.down(' ', CTRL, true) && h.down(' ', CTRL, true), 'the held chord stays claimed');
-    ok(h.ran.join('|') === 'plane.fov 30', `held → one plane.fov 30 (${h.ran.join('|')})`);
+    ok(h.ran.join('|') === 'plane.fan on', `held → one plane.fan on (${h.ran.join('|')})`);
     ok(h.up(' ', CTRL), 'its release is claimed');
-    ok(h.ran.join('|') === 'plane.fov 30|plane.fov default', `released → plane.fov default (${h.ran.join('|')})`);
+    ok(h.ran.join('|') === 'plane.fan on|plane.fan off', `released → plane.fan off (${h.ran.join('|')})`);
     h.up('Control');
     ok(h.ran.length === 2, 'the other key lifting after does nothing more');
     h.down('h');
@@ -62,7 +62,7 @@ const CTRL = { ctrl: true };
     const h = harness();
     h.down(' ', CTRL); h.down(' ', CTRL, true);
     h.up('Control');
-    ok(h.ran.at(-1) === 'plane.fov default', 'lifting Ctrl first flattens too');
+    ok(h.ran.at(-1) === 'plane.fan off', 'lifting Ctrl first folds too');
 }
 {   // outside a plane: not claimed, no fan
     const h = harness({ entered: false });

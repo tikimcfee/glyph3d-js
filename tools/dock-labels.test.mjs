@@ -131,7 +131,7 @@ const fakeTerminal = (name, cols, rows) => {
     const term = fakeTerminal('term-9', 80, 24);
     dock.lock('term-9', term);
     const e = dock.entries.get('term-9');
-    const camera = { fov: 70, aspect: 1.6, quaternion: new THREE.Quaternion(), position: new THREE.Vector3() };
+    const camera = new THREE.PerspectiveCamera(70, 1.6, 0.1, 1000);
     dock.update(1, camera); // park + finish the slide (duration 0.167 << 1s)
     dock.update(1, camera); // second tick: labels' position tween also lands
 
@@ -151,7 +151,7 @@ const fakeTerminal = (name, cols, rows) => {
     const term = fakeTerminal('term-cfg', 80, 24);
     dock.lock('term-cfg', term);
     const e = dock.entries.get('term-cfg');
-    const camera = { fov: 70, aspect: 1.6, quaternion: new THREE.Quaternion(), position: new THREE.Vector3() };
+    const camera = new THREE.PerspectiveCamera(70, 1.6, 0.1, 1000);
     const settle = () => { dock.update(1, camera); dock.update(1, camera); };
     settle();
 

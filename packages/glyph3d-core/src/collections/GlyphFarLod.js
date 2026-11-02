@@ -31,6 +31,7 @@ import * as THREE from 'three';
 import { isShown, isTracked } from './SceneTransforms.js';
 import { liveInstancedFields } from './InstancedField.js';
 import { isBatchedGlyphField } from './GlyphBatch.js';
+import { pxPerUnitAt } from '../services/spatial/spatialMath.js';
 
 export const FAR_LOD_DEFAULTS = Object.freeze({
     /** px per row at or above which a field draws its glyphs; 0 = always draw them */
@@ -153,13 +154,9 @@ export default class GlyphFarLod {
      */
     update(camera, viewportHeightPx) {
         const minPx = this.params.showGlyphsPx;
-        // px on screen per world unit at distance 1 (perspective), or flat (orthographic)
-        const pxPerUnit = camera.isPerspectiveCamera
-            ? viewportHeightPx / (2 * Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV()) / 2))
-            : viewportHeightPx * camera.zoom / Math.max(camera.top - camera.bottom, 1e-9);
         const eye = camera.getWorldPosition(_eye);
         const fwd = camera.getWorldDirection(_fwd);
-        const near = camera.isPerspectiveCamera ? Math.max(camera.near, 1e-3) : 0;
+        const near = Math.max(camera.near, 1e-3);
 
         let fields = 0, far = 0, backdrops = 0;
         for (const field of liveInstancedFields()) {
@@ -179,9 +176,8 @@ export default class GlyphFarLod {
                 _box.getCenter(_c).sub(eye);
                 _box.getSize(_h).multiplyScalar(0.5);
                 const depth = _c.dot(fwd) - (Math.abs(fwd.x) * _h.x + Math.abs(fwd.y) * _h.y + Math.abs(fwd.z) * _h.z);
-                const rowPx = camera.isPerspectiveCamera
-                    ? rowWorld * pxPerUnit / Math.max(depth, near)
-                    : rowWorld * pxPerUnit;
+                // the camera's own scale at that depth (perspective, orthographic, any plane blend)
+                const rowPx = rowWorld * pxPerUnitAt(camera, Math.max(depth, near), viewportHeightPx);
                 isFar = rowPx < minPx;
             }
             if (isFar) {

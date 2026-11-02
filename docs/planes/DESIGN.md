@@ -436,12 +436,13 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
   pages. Each layer has an opaque page backing so overlaps stay legible. An agent's `suggest` strips sit
   at z > 0 over the lines they'd replace, exactly registered when flat (tracing paper); history at
   z < 0.
-- **The fan, first on the camera that exists.** The plane endpoint is a 1° perspective: a layer 50
-  units back is 0.7% smaller (7 px at 1000 px off-center). Slice 10a fans layers with `plane.fov` as
-  it is and asks Ivan whether he reads on fanned layers. Only if he does, slice 10b brings the exact
-  orthographic endpoint (§4.6), where the fan is a projection shear of whole device px per layer.
+- **The fan, on either endpoint.** The perspective plane endpoint is a 1° lens: a layer 50 units
+  back is 0.7% smaller (7 px at 1000 px off-center), and its fan widens the lens (`layers.fanFov`).
+  The orthographic endpoint (§4.6, `plane.ortho`) keeps every layer 1:1 behind the page, and its fan
+  is a projection shear of whole device px per layer (`layers.fanPx`), sliding layer i right by i·n.
+  Holding the pane prefix fans either one (`plane.fan on`); releasing folds it (`plane.fan off`).
 - **Verbs** (NEW). `pane.layer <id> <n|now|label>` (bring a layer to z = 0), `pane.blink <id> <a>
-  <b>`, `grid.history <id> [--at n]`; in 10b `plane.fan <px|off>` replaces `plane.fov` as the fan.
+  <b>`, `grid.history <id> [--at n]`, `plane.fan <on|off|px>` (px on the orthographic endpoint only).
 - **Builds on.** the Book deck (`deck.rise`; in a plane `rise = rowPx / k`, so each sheet behind shows
   exactly one headline row), `collections/terminalDepthHistory.js`, DeltaBooks.
 
@@ -572,7 +573,7 @@ Three substrate conditions make the snap mean anything:
 | main render, culling | projection-agnostic (frustum from P·V) | none |
 | GPU picking | a true perspective camera; `setViewOffset` on the copied pick camera is exact | none; `pick.at` is the gate handle |
 | greek tier | `fwidth`-based, device px; rows are 15 px | none |
-| far-LOD | measures `rowPx` at the box's nearest depth; truthful under a real perspective | none until 10b |
+| far-LOD | measures `rowPx` at the box's nearest depth through `pxPerUnitAt` (the projection matrix) | truthful at any blend |
 | GlyphBatch / PanelBatch | refresh only for cameras that see layer 0; camera-relative writes stay precise at D ≈ 7000 (f32 ulp ≈ 0.0005 units ≈ 0.006 px) | overlay and card cameras use other layers (§3.13, §3.16) |
 | SceneTransforms | matrices only | none |
 | CameraDock, ReaderCompass | parked 10 / 5 units ahead of the eye: inside the slab's near clip | hidden while entered (a plane-life listener) |
@@ -581,12 +582,20 @@ Three substrate conditions make the snap mean anything:
 | world relayout | a world-managed or nested desk can move while entered | the parent's relayout is frozen while entered; the camera re-squares from `matrixWorld` if a pose changes anyway |
 | SessionStore | captures live grid state | `holding.ownViewOf(id)` (§3.2) |
 
-### 4.6 The orthographic endpoint (slice 10b, if the fan earns it)
+### 4.6 The orthographic endpoint (slice 10b)
 
 Depth-as-time read exactly needs layers *behind* the plane to stay 1:1, which a 1° perspective can't
-give. Slice 10b replaces the dolly's endpoint, atomically, with `PlaneCamera extends
-PerspectiveCamera` (`packages/glyph3d-core/src/services/camera/PlaneCamera.js`), a pinned-plane blend
-at a fixed eye. In view space (forward −z), with the plane at depth `d₀`, blend `λ ∈ [0, 1]` and shear
+give. The view camera is `PlaneCamera extends PerspectiveCamera`
+(`packages/glyph3d-core/src/services/camera/PlaneCamera.js`, created in `app/main.jsx`), a pinned-plane
+blend at a fixed eye. At λ = 1 its matrix is three's own, so the open world is bit-identical to a
+PerspectiveCamera (the blend formula at λ = 1 agrees only to ~1e-14). `plane.ortho` chooses the
+endpoint: on, the camera keeps the open-world fov, stops at `d₀`, and blends λ 1 → 0 in the same ease
+as the dolly (d₀ pinned to the referent's depth every frame, where the blend and shear terms vanish,
+so the referent solve holds at every λ); off, it dollies to the 1° lens. **Off by default**: on the
+flat plane the two differ in 1543 of 1.6 M px (`tools/plane-ortho-check.mjs`), all on the inner
+anti-aliased edge of the focus border, which stands in front of the plane, so 1° magnifies it by
+D/(D−d). Text and panels are byte-identical. With layers shown, the 1° endpoint's layers drift where
+the orthographic ones stand 1:1. In view space (forward −z), with the plane at depth `d₀`, blend `λ ∈ [0, 1]` and shear
 `(hx, hy)`:
 
 ```
@@ -602,16 +611,21 @@ w_clip = −λ·z + (1−λ)·d₀
   all λ, so sorting holds.
 - `d₀ = e₅·Hd / (2k)` (e.g. fov 70°, Hd 1080, k 11.03 → 69.9): the eye never backs off, so the dock,
   the overlay and camera-relative batches stay where they are.
-- Shear: `n` px per layer at pitch `p` needs `hx = −2·n_x·d₀ / (Wd·p)` (and `hy` with `Hd`).
+- Shear (horizontal only — layers already rise a row per rank): `n` px per layer at pitch `p` needs
+  `h = −2·n·d₀ / (Wd·p)` (`fanShear`). `p` is the world pitch of the layer stacks in the plane being
+  read; a stack whose pitch differs is named by `plane.fan`.
 - Picking: `copy()` carries λ, `d₀` and the shear; `updateProjectionMatrix()` applies the view offset
-  as an NDC crop, which must equal three's `setViewOffset` at λ = 1. Throws on the WebGPU coordinate
-  system and reversed depth until written.
+  as an NDC crop, equal to three's `setViewOffset` at λ = 1. Below λ = 1 it throws on the WebGPU
+  coordinate system, reversed depth, a zoom or a film offset. Rays come from `rayFromCamera` (three's
+  `setFromCamera` takes the perspective branch at every λ).
 - One truth helper in `services/spatial/spatialMath.js`: `clipW(cam, d) = −e₁₁·d + e₁₅`,
-  `pxPerUnitAt(cam, d, H) = e₅·H / (2·clipW)`, `viewHeightAt(cam, d) = 2·clipW / e₅`. Every fov-trig
-  site moves to it in the same change. A gate: `rg "\.fov\b|getEffectiveFOV|isPerspectiveCamera"
-  packages app` lists only the helper and `camera.info`. Today that matches 36 sites in 12 files,
-  among them `hand/HandPresence.js`, `app/client/HandCalib.js` and `handCommands.js` from the hand arc
-  Ivan dropped (open question 6).
+  `pxPerUnitAt(cam, d, H) = e₅·H / (2·clipW)`, `pxPerUnitAtPoint`, `viewHeightAt(cam, d) = 2·clipW /
+  e₅`, `worldPerPixel`, `rayFromCamera`, `sphereFitDistance`; `zDistanceForFit` stays a perspective
+  fit from the fov (what a fly flies with). Every site that read a scale from a fov reads it. The gate
+  (in `tools/plane-camera.test.mjs`) is trig on a fov — `rg 'getEffectiveFOV|isPerspectiveCamera|
+  setFromCamera\(|Math.(tan|sin|atan)(…fov…)'` lists only spatialMath, PlaneCamera (it derives sx/sy
+  as three does) and `planeView.js` (the pure endpoint math); the `plane.fov` verb and setting names
+  don't count.
 - The far clamp eases with λ: `far(λ) = lerp(planeBack + margin, farSpace, e(λ))`.
 
 ---
@@ -891,8 +905,9 @@ log store (`carrel.enter`, `carrel.leave`, `agent.say`, time entered), so "uses 
   order and registration headless; the z = 0 layer pixel-identical with the fan off and on. **Ivan looks
   at:** a code pin with its last five revisions, fanned; an agent's scroll by turns, fanned: does he
   read on the fanned layers.
-- **10b, the exact endpoint, only if he does.** `PlaneCamera` (§4.6), the truth helper and every
-  fov-trig site in one change; `plane.fan <px|off>`; `plane.blend <0..1>` as a raw test handle. Gate:
+- **10b, the exact endpoint (built; `plane.ortho` off by default, §4.6).** `PlaneCamera` (§4.6), the
+  truth helper and every fov-trig site in one change; `plane.fan <on|off|px>`; `plane.blend <0..1>` as
+  a raw test handle. Gate:
   `tools/plane-camera.test.mjs` grows (λ = 1 equals `PerspectiveCamera` and λ = 0 equals
   `OrthographicCamera` element for element; the plane at `d₀` keeps its NDC size for all λ; `z_ndc`
   monotonic; the NDC crop equals `setViewOffset` at λ = 1; `pxPerUnitAt` agrees with projecting two

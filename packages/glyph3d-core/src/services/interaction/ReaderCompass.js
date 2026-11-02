@@ -25,6 +25,7 @@
  */
 
 import { RENDER_ORDER } from '../../core/renderOrder.js';
+import { viewHeightAt, rayFromCamera } from '../spatial/spatialMath.js';
 
 const MAX_MARKERS = 5;               // top-K by world distance
 const HUD_DISTANCE = 5.0;            // camera-local -Z
@@ -125,8 +126,7 @@ export class ReaderCompass {
         const selected = candidates.slice(0, MAX_MARKERS);
         this._relaxAngles(selected);
 
-        const fovRad = camera.fov * Math.PI / 180;
-        const halfH  = Math.tan(fovRad / 2) * HUD_DISTANCE;
+        const halfH  = viewHeightAt(camera, HUD_DISTANCE) / 2;
         const halfW  = halfH * camera.aspect;
         for (let i = 0; i < this.pool.length; i++) {
             const marker = this.pool[i];
@@ -164,7 +164,7 @@ export class ReaderCompass {
         const { width, height } = viewportSize;
         this._mouseNdc.x =  (clientX / width)  * 2 - 1;
         this._mouseNdc.y = -(clientY / height) * 2 + 1;
-        this._raycaster.setFromCamera(this._mouseNdc, this.camera);
+        rayFromCamera(this._raycaster, this._mouseNdc, this.camera);
         const meshes = [];
         for (const m of this.pool) {
             if (m.mesh.visible && m.entry) meshes.push(m.mesh);

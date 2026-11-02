@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { measureOverlayText, snapOverlayOrigin } from './PlaneOverlay.js';
+import { pxPerUnitAtPoint } from '@glyph3d/core/services/spatial/spatialMath.js';
 /** @import { AppContext } from './CommandProvider.jsx' */
 
 /**
@@ -191,28 +192,6 @@ export function projectWorldToDevicePx(worldPos, camera, viewport) {
     }
     const onScreen = !behind && x >= 0 && x <= W && y >= 0 && y <= H;
     return { x, y, ndcZ: _v3.z, behind, onScreen, dist };
-}
-
-/**
- * Compute device pixels per world unit at `worldPos` under `camera` for a viewport of height `viewportH`.
- *
- * @param {THREE.Vector3|{x:number,y:number,z:number}} worldPos
- * @param {THREE.Camera} camera
- * @param {number} viewportH
- * @returns {number}
- */
-export function pxPerUnitAt(worldPos, camera, viewportH) {
-    const H = Number(viewportH) || 1000;
-    const e = camera.projectionMatrix.elements;
-    const e5 = e[5];
-    camera.getWorldPosition(_camPos);
-    camera.getWorldDirection(_camDir);
-    const dx = worldPos.x - _camPos.x;
-    const dy = worldPos.y - _camPos.y;
-    const dz = worldPos.z - _camPos.z;
-    const depth = Math.max(1e-3, dx * _camDir.x + dy * _camDir.y + dz * _camDir.z);
-    const clipW = Math.max(1e-6, -e[11] * depth + e[15]);
-    return (e5 * H) / (2 * clipW);
 }
 
 /**
@@ -780,7 +759,7 @@ export default class MapLabels {
         for (const c of rawCandidates) {
             const prev = this._records.get(c.id) || null;
             const proj = projectWorldToDevicePx(c.worldPos, camera, vp);
-            const ppu = pxPerUnitAt(_v3.set(c.worldPos.x, c.worldPos.y, c.worldPos.z), camera, vp.height);
+            const ppu = pxPerUnitAtPoint(camera, c.worldPos, Number(vp.height) || 1000);
             const worldTitlePx = c.titleRowWorld > 0 ? c.titleRowWorld * ppu : 0;
 
             // Self-naming handoff with hysteresis (§3.10 / §3.14):

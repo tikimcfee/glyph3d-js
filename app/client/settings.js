@@ -669,7 +669,8 @@ export const SETTINGS = [
   // into a narrow-fov view where text columns are whole device pixels. See planeView.js.
   { key: 'plane.cellPx', label: 'Text size in a plane: device px per text column (rows follow the font; 8 → 8×15, 16 → 16×30 are the whole-pixel rows)', group: 'Planes', type: 'number', default: 8, min: 3, max: 40, step: 1,
     apply: (ctx, v) => { for (const d of ctx.carrels?.values?.() ?? []) if (d.planeUnit) d.setPlaneUnit({ ...d.planeUnit, cellPx: v }); } },
-  { key: 'plane.fov', label: 'Plane lens fov (°) — narrow reads flat; layers off the plane drift under a pixel', group: 'Planes', type: 'number', default: 1, min: 0.05, max: 60, step: 0.05 },
+  { key: 'plane.ortho', label: 'Plane endpoint ORTHOGRAPHIC: the lens keeps its fov and blends to an orthographic view — layers behind the plane stay 1:1, the fan is whole px (off: the narrow plane.fov perspective)', group: 'Planes', type: 'bool', default: false },
+  { key: 'plane.fov', label: 'Plane lens fov (°), the perspective endpoint (plane.ortho off) — narrow reads flat; layers off the plane drift under a pixel', group: 'Planes', type: 'number', default: 1, min: 0.05, max: 60, step: 0.05 },
   { key: 'plane.front', label: 'Slab in front of a plane (world units past its own depth) — nearer is clipped', group: 'Planes', type: 'number', default: 20, min: 0, max: 5000, step: 1 },
   { key: 'plane.back', label: 'Slab behind a plane (world units past its own depth) — farther is clipped', group: 'Planes', type: 'number', default: 20, min: 0, max: 50000, step: 10 },
   { key: 'plane.topMarginPx', label: 'A tall surface opens at its top, this many CSS px below the view top', group: 'Planes', type: 'number', default: 24, min: 0, max: 400, step: 1 },
@@ -697,7 +698,8 @@ export const SETTINGS = [
   { key: 'layers.pitchRows', label: 'Depth layers: depth between pages, in text rows (the plane slab, plane.back, must hold them)', group: 'Planes', type: 'number', default: 1, min: 0.1, max: 100, step: 0.1 },
   { key: 'layers.riseRows', label: 'Depth layers: how far each page behind stands above the one in front, in rows (0 = registered)', group: 'Planes', type: 'number', default: 1, min: 0, max: 20, step: 1 },
   { key: 'layers.backOpacity', label: 'Depth layers: page backing opacity (1 = opaque — overlaps stay legible)', group: 'Planes', type: 'number', default: 1, min: 0, max: 1, step: 0.05 },
-  { key: 'layers.fanFov', label: 'Depth layers: the fan — the plane lens (°) while the pane prefix is HELD (layers spread by depth; release = plane.fov)', group: 'Planes', type: 'number', default: 30, min: 1, max: 90, step: 1 },
+  { key: 'layers.fanFov', label: 'Depth layers: the fan on the perspective endpoint — the plane lens (°) while the pane prefix is HELD (layers spread by depth; release = plane.fov)', group: 'Planes', type: 'number', default: 30, min: 1, max: 90, step: 1 },
+  { key: 'layers.fanPx', label: 'Depth layers: the fan on the orthographic endpoint — device px each layer slides right while the pane prefix is HELD (plane.fan on; whole px — two 8 px columns by default, past a member\'s own padding)', group: 'Planes', type: 'number', default: 16, min: -256, max: 256, step: 1 },
   { key: 'layers.blinkMs', label: 'Depth layers: pane.blink alternation (ms)', group: 'Planes', type: 'number', default: 500, min: 50, max: 10000, step: 50 },
   { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },
   // Live readout (type 'info' — not a knob): submission cost, the draw calls three issued
