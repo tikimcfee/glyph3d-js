@@ -47,20 +47,31 @@ import { pageableBookOf } from './bookFocus.js';
 const ring = (d) => d.mode === 'ring';
 const naturalRing = (d) => d.mode === 'ring' && d.seat === 'natural';
 const uniformRing = (d) => d.mode === 'ring' && d.seat !== 'natural';
-const planeDesk = (d) => d.form === 'plane';
+const planeDesk = (d) => d.mode === 'plane';
+const notPlane = (d) => d.mode !== 'plane';
+const pinBoard = (d) => d.mode === 'plane' && d.planeArrange !== 'tiles';
+const tiledPlane = (d) => d.mode === 'plane' && d.planeArrange === 'tiles';
 
 /** @type {Knob[]} one desk's knobs — Carrel's own params, in HUD order. */
 export const DESK_KNOBS = [
-  { key: 'form', type: 'enum', options: ['space', 'plane'], names: { space: 'space ◇', plane: 'plane ▭' },
-    short: 'form', label: 'Entered as — space (stays 3D) or a plane (panes read flat, pixel-exact: carrel.enter)' },
+  { key: 'mode', type: 'enum', options: ['ring', 'grid', 'plane'], names: { ring: 'ring ◠', grid: 'wall ▦', plane: 'plane ▭' },
+    short: 'shape', label: 'Shape — a ring around you, a flat wall, or a plane (read flat and pixel-exact when entered: carrel.enter)' },
+  { key: 'planeArrange', type: 'enum', options: ['pins', 'tiles'], names: { pins: 'pins ▣', tiles: 'tiles ▥' },
+    short: 'arrange', label: 'A plane’s members — pinned at their own size on shelves, or tiled into panes', shows: planeDesk },
+  { key: 'shelfCols', type: 'number', min: 40, max: 4000, step: 10,
+    short: 'shelf cols', label: 'A pin shelf’s width, in text columns (pins wrap past it)', shows: pinBoard },
+  { key: 'bookCols', type: 'number', min: 20, max: 1000, step: 10,
+    short: 'book cols', label: 'A book on a pin board is this many columns wide', shows: pinBoard },
+  { key: 'tileCols', type: 'number', min: 20, max: 2000, step: 10,
+    short: 'tile cols', label: 'A tiled plane’s width, in text columns', shows: tiledPlane },
+  { key: 'tileRows', type: 'number', min: 5, max: 1000, step: 1,
+    short: 'tile rows', label: 'A tiled plane’s height, in text rows', shows: tiledPlane },
   { key: 'paneGapPx', type: 'number', min: 0, max: 64, step: 1,
-    short: 'pane gap', label: 'Gap between a plane’s panes (device px)', shows: planeDesk },
-  { key: 'mode', type: 'enum', options: ['ring', 'grid'], names: { ring: 'ring ◠', grid: 'wall ▦' },
-    short: 'shape', label: 'Shape — a ring around you, or a flat wall' },
+    short: 'gutter', label: 'Gutter between a plane’s pins or panes (device px)', shows: planeDesk },
   { key: 'seat', type: 'enum', options: ['natural', 'uniform'], names: { natural: 'own size', uniform: 'same size' },
     short: 'seats', label: 'Members — each at its own size, or fitted into same-size seats', shows: ring },
   { key: 'facing', type: 'enum', options: ['in', 'out'], names: { in: 'center', out: 'outward' },
-    short: 'facing', label: 'Members face — the center, or outward' },
+    short: 'facing', label: 'Members face — the center, or outward', shows: notPlane },
   { key: 'radius', type: 'number', min: 20, max: 20000, step: 10,
     short: 'radius', label: 'How far the ring (or wall) stands from the desk’s center — a ring of own-size members widens past it to fit' },
   { key: 'ringMaxRows', type: 'number', min: 1, max: 20, step: 1,
@@ -68,7 +79,7 @@ export const DESK_KNOBS = [
   { key: 'maxArcDeg', type: 'number', min: 60, max: 360, step: 5,
     short: 'arc°', label: 'How far around you the ring wraps (°) — the rest is the doorway', shows: ring },
   { key: 'gapFrac', type: 'number', min: 0, max: 5, step: 0.05,
-    short: 'spacing', label: 'Space between members (× seat height)' },
+    short: 'spacing', label: 'Space between members (× seat height)', shows: notPlane },
   { key: 'boxH', type: 'number', min: 20, max: 600, step: 5,
     short: 'seat size', label: 'Seat height — what each member is fitted into', shows: uniformRing },
   { key: 'boxAspect', type: 'number', min: 0.5, max: 3, step: 0.05, hud: false,
@@ -168,8 +179,8 @@ export function listTunings(ctx) {
 
 /** Set one knob on a desk, live. @returns {boolean} whether the desk changed */
 function setDeskKnob(desk, key, v) {
-  if (key === 'form') return desk.setForm(v);
-  if (key === 'mode') return desk.mode !== v && desk.setMode(v);
+  if (key === 'mode') return desk.setMode(v);
+  if (key === 'planeArrange') return desk.setPlaneArrange(v);
   if (key === 'seat') return desk.setSeat(v);
   if (key === 'facing') return desk.facing !== v && desk.setFacing(v);
   return desk[key] !== v && desk.setParam(key, v);

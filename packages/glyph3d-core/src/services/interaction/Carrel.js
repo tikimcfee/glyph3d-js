@@ -123,8 +123,12 @@ export class Carrel extends THREE.Object3D {
      *   member (a fresh agent book before its first sheet) measures tiny and the fit inflates
      *   it absurdly — the seated-book overlap bug
      * @param {number} [opts.maxArcDeg=300]  - arc span the ring fills; the remainder is the doorway (faces local +z)
-     * @param {'ring'|'grid'} [opts.mode='ring'] - member arrangement: the arc, or its 0-curvature
-     *   limit — a flat semi-grid wall at z=−R facing the doorway (the agent shelf's read)
+     * @param {'ring'|'grid'|'plane'} [opts.mode='ring'] - member arrangement: the arc, its
+     *   0-curvature limit — a flat semi-grid wall at z=−R facing the doorway (the agent shelf's read)
+     *   — or a PLANE: a flat board read pixel-exact when entered (carrel.enter), every member scaled so
+     *   its text column is the plane's one column, its cell grid on whole device pixels. A plane
+     *   stands in the world exactly as it reads entered, and its layout never depends on the viewport
+     *   or the dpr (see setPlaneUnit / planeArrange).
      * @param {'uniform'|'natural'} [opts.seat='uniform'] - the RING's seats: uniform contain-fit
      *   boxes (the dock's grammar), or members at their natural size wrapped along the arc (the
      *   tree's grammar bent into a cylinder — stand at the center and everything is a turn
@@ -140,19 +144,26 @@ export class Carrel extends THREE.Object3D {
      * @param {number} [opts.glowStrength=0.35]  - chrome intensity (0 = chrome invisible)
      * @param {number} [opts.animDur=0.167] - member slide/scale duration (s)
      * @param {number} [opts.yawRate=14]    - member face-target slerp rate (×dt)
-     * @param {'space'|'plane'} [opts.form='space'] - how the desk is ENTERED: 'space' stays 3D
-     *   (rings, walls); 'plane' is a pane layout read flat and pixel-exact — a tiling window
-     *   manager. A plane desk stands in the world exactly as it reads entered: a flat wall at
-     *   z=−R facing the doorway, its members tiled into panes (a PaneTree; each pane a stack of
-     *   members, one active), each member scaled so its text column is the plane's one column
-     *   (see setPlaneFrame), its cell grid on whole pixels.
-     * @param {number} [opts.paneGapPx=8]   - gap between panes (and around them), device px
+     * @param {'pins'|'tiles'} [opts.planeArrange='pins'] - a plane's arrangement: PINS — every
+     *   member at its natural size (a 239-column screen is 239 columns wide), on shelves left to
+     *   right in seat order, never clipped; a newcomer takes the next free slot, a leaver's gap
+     *   stays until settle, a pin only grows — or TILES: a tiling window manager (a PaneTree of
+     *   panes, each a stack of tabs) over a frame of `tileCols × tileRows` cells, members reflowed to
+     *   their panes.
+     * @param {number} [opts.paneGapPx=8]   - gutter between pins / panes, device px
+     * @param {number} [opts.shelfCols=480] - a pin shelf's width in text columns (two 239-col screens
+     *   and a gutter)
+     * @param {number} [opts.tileCols=200]  - a tiled plane's width, text columns
+     * @param {number} [opts.tileRows=60]   - a tiled plane's height, text rows
+     * @param {number} [opts.bookCols=120]  - a member without cell metrics (a book) pins this many
+     *   plane columns wide
      */
     constructor({ name = 'carrel', radius = 240, boxH = 110, boxAspect = 1.15, gapFrac = 0.9,
                   growCap = 1.25, maxArcDeg = 300, mode = 'ring', seat = 'uniform', ringMaxRows = 2,
                   facing = 'in', tableFrac = 1.25,
                   shadowSoft = 0.35, glowColor = 0x6f9fd0, glowStrength = 0.35,
-                  animDur = 0.167, yawRate = 14, form = 'space', paneGapPx = 8 } = {}) {
+                  animDur = 0.167, yawRate = 14, planeArrange = 'pins', paneGapPx = 8, shelfCols = 480,
+                  tileCols = 200, tileRows = 60, bookCols = 120 } = {}) {
         super();
         this.name = `carrel:${name}`;
         this.carrelName = name;
@@ -162,7 +173,7 @@ export class Carrel extends THREE.Object3D {
         this.gapFrac = gapFrac;
         this.growCap = growCap;
         this.maxArcDeg = maxArcDeg;
-        this.mode = mode === 'grid' ? 'grid' : 'ring';
+        this.mode = mode === 'grid' || mode === 'plane' ? mode : 'ring';
         this.seat = seat === 'natural' ? 'natural' : 'uniform';
         this.ringMaxRows = ringMaxRows;
         /** the radius the last layout used — a natural ring grows past `radius` to fit */
@@ -174,16 +185,24 @@ export class Carrel extends THREE.Object3D {
         this.glowStrength = glowStrength;
         this.animDur = animDur;
         this.yawRate = yawRate;
-        this.form = form === 'plane' ? 'plane' : 'space';
+        this.planeArrange = planeArrange === 'tiles' ? 'tiles' : 'pins';
         this.paneGapPx = paneGapPx;
-        /** The frame a plane desk reads at: its size in device px and its scale (device px per
-         *  world unit) and text column (device px). Set by the app from the viewport (setPlaneFrame);
-         *  null until then — a plane desk with no frame lays out as a wall. */
-        this.planeFrame = null;
-        /** The pane layout of a plane desk: a PaneTree over pane ids, each pane a stack of member
-         *  ids with one active (tabs); `inbox` is where a member joining lands (nothing else moves). */
-        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null };
-        /** Told whenever the pane layout changes (the app persists it as the desk's Panes). */
+        this.shelfCols = shelfCols;
+        this.tileCols = tileCols;
+        this.tileRows = tileRows;
+        this.bookCols = bookCols;
+        /** The plane's unit — set by the app from the ATLAS, never the viewport (setPlaneUnit):
+         *  `column` = the one text column in world units every member is scaled to; `cellPx` = device
+         *  px per column when entered (k = cellPx / column device px per world unit); `rowRatio` =
+         *  a row's height over a column's width. Null until set: a plane desk without it lays out as
+         *  a wall. */
+        this.planeUnit = null;
+        /** The plane's layout state — PINS: `pins`, the slots in seat order ({id, w, h} device px at
+         *  k, grow-only; a leaver's slot stays a ghost until settle) and `focus` (a member); TILES: a
+         *  PaneTree over pane ids, each pane a stack of member ids with one active, the `inbox` a
+         *  joiner lands in, `focus` (a pane) and `zoomed`. Durable as the desk's Panes. */
+        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null, pins: [] };
+        /** Told whenever the plane's layout changes (the app persists it as the desk's Panes). */
         this.onPanesChanged = null;
         /** What this desk was BORN as — every knob's value at construction. A desk's own
          *  values (the app's per-desk tuning) are set over these; a knob returned to its
@@ -192,7 +211,7 @@ export class Carrel extends THREE.Object3D {
             radius, boxH, boxAspect, gapFrac, growCap, maxArcDeg,
             mode: this.mode, seat: this.seat, ringMaxRows, facing: this.facing,
             tableFrac, shadowSoft, glowColor, glowStrength, animDur, yawRate,
-            form: this.form, paneGapPx,
+            planeArrange: this.planeArrange, paneGapPx, shelfCols, tileCols, tileRows, bookCols,
         });
 
         this._orderSeq = 0;      // monotonic sort-key source (restore threads saved values past it)
@@ -475,7 +494,7 @@ export class Carrel extends THREE.Object3D {
      */
     setParam(key, value) {
         if (!['radius', 'boxH', 'boxAspect', 'gapFrac', 'growCap', 'maxArcDeg', 'ringMaxRows', 'tableFrac',
-              'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx'].includes(key)) return false;
+              'shadowSoft', 'glowStrength', 'animDur', 'yawRate', 'paneGapPx', 'shelfCols', 'tileCols', 'tileRows', 'bookCols'].includes(key)) return false;
         if (!Number.isFinite(value)) return false;
         this[key] = value;
         if (key === 'glowStrength') this._tintChrome();
@@ -492,26 +511,57 @@ export class Carrel extends THREE.Object3D {
         return true;
     }
 
-    /** Toggle the arrangement: 'ring' wraps the arc, 'grid' flattens it into the
-     *  semi-grid wall (the 0-curvature limit). @param {'ring'|'grid'} mode */
+    /** The arrangement: 'ring' wraps the arc, 'grid' flattens it into the semi-grid wall (the
+     *  0-curvature limit), 'plane' is the board read flat when entered. Leaving plane hands every
+     *  member its own view back. @param {'ring'|'grid'|'plane'} mode */
     setMode(mode) {
-        if (mode !== 'ring' && mode !== 'grid') return false;
+        if (mode !== 'ring' && mode !== 'grid' && mode !== 'plane') return false;
+        if (mode === this.mode) return false;
+        const was = this.mode;
         this.mode = mode;
+        if (was === 'plane') for (const e of this.entries.values()) this._unpane(e);
+        if (mode === 'plane') this._seedTiles();
         this._relayout();
         return true;
     }
 
-    /** How the desk is entered: 'space' (stays 3D) or 'plane' (a pane layout read flat). Leaving
-     *  plane form hands every member its own layout back. @param {'space'|'plane'} form */
-    setForm(form) {
-        if (form !== 'space' && form !== 'plane') return false;
-        if (form === this.form) return false;
-        this.form = form;
-        if (form === 'space') for (const e of this.entries.values()) this._unpane(e);
-        else if ((!this.panes.tree || this.panes.tree.isEmpty()) && this.entries.size) { this.layoutPanes('even'); return true; }
+    /** A plane's arrangement: 'pins' (natural size, shelves) or 'tiles' (a tiling window manager).
+     *  @param {'pins'|'tiles'} arrange */
+    setPlaneArrange(arrange) {
+        if (arrange !== 'pins' && arrange !== 'tiles') return false;
+        if (arrange === this.planeArrange) return false;
+        this.planeArrange = arrange;
+        for (const e of this.entries.values()) this._unpane(e);
+        if (this.mode === 'plane') this._seedTiles();
         this._relayout();
         return true;
     }
+
+    /** A tiled plane with members and no tree yet gets the 'even' layout. @private */
+    _seedTiles() {
+        if (this.mode !== 'plane' || this.planeArrange !== 'tiles') return;
+        if ((!this.panes.tree || this.panes.tree.isEmpty()) && this.entries.size) this.layoutPanes('even', { relayout: false });
+    }
+
+    /**
+     * The plane's unit, from the ATLAS (never the viewport): `column` world units per text column
+     * (every member is scaled so its column is this), `cellPx` device px per column when entered,
+     * `rowRatio` a row's height ÷ a column's width. Re-lays a plane desk when it changes.
+     * @param {{column:number, cellPx:number, rowRatio:number}} u @returns {boolean} changed
+     */
+    setPlaneUnit(u) {
+        for (const k of ['column', 'cellPx', 'rowRatio']) {
+            if (!(Number.isFinite(u?.[k]) && u[k] > 0)) throw new Error(`Carrel.setPlaneUnit(${this.carrelName}): ${k} must be a positive number (got ${u?.[k]})`);
+        }
+        const c = this.planeUnit;
+        if (c && c.column === u.column && c.cellPx === u.cellPx && c.rowRatio === u.rowRatio) return false;
+        this.planeUnit = { column: u.column, cellPx: u.cellPx, rowRatio: u.rowRatio };
+        if (this.mode === 'plane') this._relayout();
+        return true;
+    }
+
+    /** Device px per world unit when entered (k), or null without a unit. */
+    get planeK() { const u = this.planeUnit; return u ? u.cellPx / u.column : null; }
 
     /**
      * Re-lay a plane desk's panes as a named layout over its members (in seat order), one member
@@ -521,14 +571,14 @@ export class Carrel extends THREE.Object3D {
      * @param {'even'|'main'|'stack'} name @param {{perRow?:number, mainRatio?:number}} [opts]
      * @returns {boolean}
      */
-    layoutPanes(name, { perRow = 3, mainRatio = 0.6 } = {}) {
+    layoutPanes(name, { perRow = 3, mainRatio = 0.6, relayout = true } = {}) {
         if (!['even', 'main', 'stack'].includes(name)) return false;
         const ids = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((e) => e.id);
         const P = this.panes;
         P.stacks = new Map();
         P.tree = null;
         P.inbox = null;
-        if (!ids.length) { this._relayout(); this.onPanesChanged?.(); return true; }
+        if (!ids.length) { if (relayout) this._relayout(); this.onPanesChanged?.(); return true; }
         const add = (memberIds) => { const id = this._newPaneId(); P.stacks.set(id, { ids: [...memberIds], active: memberIds[memberIds.length - 1] ?? null }); return id; };
         // Split `from` into equal parts along `axis`, one new pane per extra member list.
         const fan = (from, axis, lists) => {
@@ -567,7 +617,7 @@ export class Carrel extends THREE.Object3D {
         P.inbox = leaves[leaves.length - 1];
         P.focus = leaves[0];
         P.zoomed = null;
-        this._relayout();
+        if (relayout) this._relayout();
         this.onPanesChanged?.();
         return true;
     }
@@ -734,39 +784,38 @@ export class Carrel extends THREE.Object3D {
     }
 
     /**
-     * The frame a plane desk reads at — the entered viewport. The plane is widthPx × heightPx device
-     * px; one world unit is pxPerUnit device px; a text column is cellPx device px (every member is
-     * scaled so its column is cellPx / pxPerUnit world units). Re-lays the panes when it changes.
-     * @param {{widthPx:number, heightPx:number, pxPerUnit:number, cellPx:number}} f
-     * @returns {boolean} changed
+     * A TILED plane's frame in device px at k — a desk value in cells (tileCols × tileRows), never the
+     * viewport. Null without a unit.
+     * @returns {{widthPx:number, heightPx:number}|null}
      */
-    setPlaneFrame(f) {
-        for (const k of ['widthPx', 'heightPx', 'pxPerUnit', 'cellPx']) {
-            if (!(Number.isFinite(f?.[k]) && f[k] > 0)) throw new Error(`Carrel.setPlaneFrame: ${k} must be a positive number (got ${f?.[k]})`);
-        }
-        const cur = this.planeFrame;
-        if (cur && cur.widthPx === f.widthPx && cur.heightPx === f.heightPx && cur.pxPerUnit === f.pxPerUnit && cur.cellPx === f.cellPx) return false;
-        this.planeFrame = { widthPx: f.widthPx, heightPx: f.heightPx, pxPerUnit: f.pxPerUnit, cellPx: f.cellPx };
-        if (this.form === 'plane') this._relayout();
-        return true;
+    tileFrame() {
+        const u = this.planeUnit;
+        if (!u) return null;
+        return {
+            widthPx: Math.max(1, Math.round(this.tileCols)) * u.cellPx,
+            heightPx: Math.round(Math.max(1, Math.round(this.tileRows)) * u.cellPx * u.rowRatio),
+        };
     }
 
     /**
-     * The plane a plane desk reads on, in WORLD space: its center, the normal facing the viewer
-     * (the doorway), its up, its size in world units, and its top-left in plane coordinates (world
-     * units from the center, +y up) — the point a plane view snaps to a device-pixel corner.
-     * Null unless the desk is plane form with a frame.
+     * The board a plane desk reads on, in WORLD space: its center, the normal facing the viewer (the
+     * doorway), its up, its size in world units, and its top-left in plane coordinates (world units
+     * from the center, +y up) — the point a plane view snaps to a device-pixel corner. PINS: the
+     * union of the pins (at least one cell); TILES: the tile frame. The board's top-left is a fixed
+     * point of the desk (local (−shelf/2, 0) at z = −R), so a growing board never moves what's on it.
+     * Null unless the desk is a plane with a unit.
      * @returns {{center:Object, normal:Object, up:Object, width:number, height:number, origin:{x:number,y:number}}|null}
      */
     getPlaneRect() {
-        const f = this.planeFrame;
-        if (this.form !== 'plane' || !f) return null;
-        const W = f.widthPx / f.pxPerUnit, H = f.heightPx / f.pxPerUnit;
-        const R = Math.max(this.radius, 1e-3);
+        const box = this._boardPx();
+        if (!box) return null;
+        const k = this.planeK;
+        const W = box.w / k, H = box.h / k;
+        const tl = this._boardTopLeft();
         this.updateWorldMatrix(true, false);
         const q = this.getWorldQuaternion(new THREE.Quaternion());
         return {
-            center: this.localToWorld(new THREE.Vector3(0, H / 2, -R)),
+            center: this.localToWorld(new THREE.Vector3(tl.x + W / 2, tl.y - H / 2, tl.z)),
             normal: new THREE.Vector3(0, 0, 1).applyQuaternion(q).normalize(),
             up: new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize(),
             width: W, height: H,
@@ -774,14 +823,38 @@ export class Carrel extends THREE.Object3D {
         };
     }
 
+    /** The board's size in device px at k (pins: their union; tiles: the frame). @private */
+    _boardPx() {
+        if (this.mode !== 'plane' || !this.planeUnit) return null;
+        if (this.planeArrange === 'tiles') {
+            const f = this.tileFrame();
+            return { w: f.widthPx, h: f.heightPx };
+        }
+        let w = this.planeUnit.cellPx, h = Math.round(this.planeUnit.cellPx * this.planeUnit.rowRatio);
+        for (const p of this.panes.pins) {
+            if (p.x == null) continue;
+            w = Math.max(w, p.x + p.w);
+            h = Math.max(h, p.y + p.h);
+        }
+        return { w, h };
+    }
+
+    /** The board's top-left, desk-local: fixed (local (−shelf/2, 0) at z = −R). @private */
+    _boardTopLeft() {
+        const u = this.planeUnit, k = this.planeK;
+        const shelfW = this.planeArrange === 'tiles' ? this.tileFrame().widthPx / k : Math.max(1, this.shelfCols) * u.column;
+        return { x: -shelfW / 2, y: 0, z: -Math.max(this.radius, 1e-3) };
+    }
+
     /**
-     * Every pane of a plane desk: its id, rect (device px from the plane's top-left, +y DOWN,
-     * whole pixels, gaps taken out), its stack and active member. The pane layout's one reading —
-     * placement, verbs and gates all use it.
+     * Every pane of a TILED plane: its id, rect (device px from the board's top-left, +y DOWN, whole
+     * pixels, gaps taken out), its stack and active member. The tile layout's one reading — placement,
+     * verbs and gates all use it. Empty for a pin board.
      * @returns {Array<{id:string, rect:{x:number,y:number,w:number,h:number}, stack:string[], active:string|null}>}
      */
     paneRects() {
-        const f = this.planeFrame, tree = this.panes.tree;
+        const f = this.mode === 'plane' && this.planeArrange === 'tiles' ? this.tileFrame() : null;
+        const tree = this.panes.tree;
         if (!f || !tree || tree.isEmpty()) return [];
         const g = Math.max(0, Math.round(this.paneGapPx));
         const half = g / 2;
@@ -791,7 +864,7 @@ export class Carrel extends THREE.Object3D {
         const rects = z && tree.has(z) ? new Map([[z, { x: 0, y: 0, w: f.widthPx, h: f.heightPx }]]) : tree.rects({ x: 0, y: 0, w: f.widthPx, h: f.heightPx });
         for (const [id, r] of rects) {
             // y-up rect → top-down device px; cut on whole pixels, then take the gap out of every side
-            // (half a gap each, so neighbors meet a whole gap apart and the plane edge keeps half).
+            // (half a gap each, so neighbors meet a whole gap apart and the board edge keeps half).
             const left = Math.round(r.x), right = Math.round(r.x + r.w);
             const top = Math.round(f.heightPx - (r.y + r.h)), bottom = Math.round(f.heightPx - r.y);
             const x = left + Math.ceil(half), y = top + Math.ceil(half);
@@ -800,6 +873,18 @@ export class Carrel extends THREE.Object3D {
             out.push({ id, rect: { x, y, w, h }, stack: [...st.ids], active: st.active });
         }
         return out;
+    }
+
+    /**
+     * Every pin of a PIN board, in seat order: the member id, its rect (device px from the board's
+     * top-left, +y down, whole pixels), and whether it's a GHOST (its member left; the gap stays until
+     * settle). Empty for a tiled plane.
+     * @returns {Array<{id:string, rect:{x:number,y:number,w:number,h:number}, ghost:boolean}>}
+     */
+    pinRects() {
+        if (this.mode !== 'plane' || this.planeArrange !== 'pins') return [];
+        return this.panes.pins.filter((p) => p.x != null)
+            .map((p) => ({ id: p.id, rect: { x: p.x, y: p.y, w: p.w, h: p.h }, ghost: !this.entries.has(p.id) }));
     }
 
     /** The ring's seats: 'uniform' contain-fit boxes or 'natural' sizes (see the ctor). */
@@ -858,6 +943,11 @@ export class Carrel extends THREE.Object3D {
      *  its room back) and re-seat — the explicit settle (`carrel.settle`). */
     settle() {
         this._relearnSeats();
+        if (this.mode === 'plane' && this.planeArrange === 'pins') {
+            // Repack: ghosts go, every pin re-measures from its member as it stands (it may shrink).
+            this.panes.pins = this.panes.pins.filter((p) => this.entries.has(p.id)).map((p) => ({ id: p.id, w: 0, h: 0 }));
+            this.onPanesChanged?.();
+        }
         this._relayout();
         return this;
     }
@@ -961,20 +1051,18 @@ export class Carrel extends THREE.Object3D {
         members.forEach((e, i) => { e.slot = i; });
 
         const live = members.filter((e) => e.grid.parent === this && !e._borrowed);
-        if (this.form === 'plane') {
-            this._reconcilePanes(members);
-            if (this.planeFrame) {
-                this._layoutPlane(live);
-                this._refreshChrome();
-                this._notifyFootprint();
-                return;
-            }
+        if (this.mode === 'plane' && this.planeUnit) {
+            if (this.planeArrange === 'tiles') { this._reconcilePanes(members); this._layoutTiles(live); }
+            else this._layoutPins(members, live);
+            this._refreshChrome();
+            this._notifyFootprint();
+            return;
         }
         const boxW = this.boxH * this.boxAspect;
         const boxH = this.boxH;
         const gap = this._gap;
         let R = Math.max(this.radius, 1e-3);
-        const grid = this.mode === 'grid';
+        const grid = this.mode === 'grid' || this.mode === 'plane';   // a plane without its unit yet stands as a wall
         const natural = grid || this.seat === 'natural';
         if (this._expected && live.length >= this._expected) {   // complement arrived
             this._expected = 0;
@@ -1123,16 +1211,20 @@ export class Carrel extends THREE.Object3D {
     }
 
     /**
-     * The pane layout as a plain record (the desk's Panes) — null when it has none.
-     * @returns {{tree:Object, stacks:Array<{id:string, ids:string[], active:string|null}>, inbox:string|null, seq:number}|null}
+     * The plane's layout as a plain record (the desk's Panes) — null when it has none: the tile tree
+     * and its stacks (null tree for a pin board), and the pin slots in seat order (sizes only; their
+     * places follow from the order).
+     * @returns {{tree:Object|null, stacks:Array<{id:string, ids:string[], active:string|null}>, inbox:string|null, seq:number, focus:string|null, zoomed:string|null, pins:Array<{id:string,w:number,h:number}>}|null}
      */
     serializePanes() {
         const P = this.panes;
-        if (!P.tree || P.tree.isEmpty()) return null;
+        const hasTree = !!(P.tree && !P.tree.isEmpty());
+        if (!hasTree && !P.pins.length) return null;
         return {
-            tree: P.tree.serialize(),
-            stacks: [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })),
+            tree: hasTree ? P.tree.serialize() : null,
+            stacks: hasTree ? [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })) : [],
             inbox: P.inbox, seq: P.seq, focus: P.focus, zoomed: P.zoomed,
+            pins: P.pins.map((p) => ({ id: p.id, w: p.w, h: p.h })),
         };
     }
 
@@ -1143,8 +1235,20 @@ export class Carrel extends THREE.Object3D {
      * @param {ReturnType<Carrel['serializePanes']>} rec
      */
     applyPanes(rec) {
-        if (!rec || typeof rec !== 'object' || !rec.tree || !Array.isArray(rec.stacks)) {
+        if (!rec || typeof rec !== 'object' || !Array.isArray(rec.stacks) || (rec.pins != null && !Array.isArray(rec.pins))) {
             throw new Error(`Carrel.applyPanes(${this.carrelName}): malformed record ${JSON.stringify(rec)?.slice(0, 200)}`);
+        }
+        const pins = (rec.pins || []).map((p) => {
+            if (typeof p?.id !== 'string' || !(p.w >= 0) || !(p.h >= 0)) throw new Error(`Carrel.applyPanes(${this.carrelName}): pin ${JSON.stringify(p)} is malformed`);
+            return { id: p.id, w: p.w, h: p.h };
+        });
+        if (!rec.tree) {
+            // A pin board: slots only.
+            const P = this.panes;
+            P.pins = pins;
+            P.focus = typeof rec.focus === 'string' ? rec.focus : null;
+            this._relayout();
+            return;
         }
         const tree = PaneTree.deserialize(rec.tree);
         const leaves = new Set(tree.leaves());
@@ -1160,6 +1264,7 @@ export class Carrel extends THREE.Object3D {
         P.inbox = leaves.has(rec.inbox) ? rec.inbox : [...leaves].pop();
         P.focus = leaves.has(rec.focus) ? rec.focus : P.inbox;
         P.zoomed = leaves.has(rec.zoomed) ? rec.zoomed : null;
+        P.pins = pins;
         const maxSeq = Math.max(0, ...[...leaves].map((id) => Number(String(id).split(':')[1]) || 0));
         P.seq = Math.max(Number(rec.seq) || 0, maxSeq);
         this._relayout();
@@ -1169,21 +1274,142 @@ export class Carrel extends THREE.Object3D {
     _newPaneId() { return `pane:${++this.panes.seq}`; }
 
     /**
-     * Lay the panes out on the plane and seat each pane's active member in it (the rest of its
-     * stack hidden, still members). The plane is a wall at z=−R facing the doorway, bottom on the
-     * table: world size = frame px / pxPerUnit. Each member is scaled so its text column is the
-     * plane's (cellPx / pxPerUnit world units) and placed so its cell-grid origin (pixelOrigin, else
-     * its top-left) sits at its pane's top-left — whole device pixels when the plane is read square.
-     * A member that can reflow (a CodeGrid: setLayout + setFrameRows) takes the pane's columns and
-     * rows; foreign content (a terminal) keeps its size. A member without cell metrics (a book) is
-     * contain-fit into its pane. @private
+     * PINS: every member at its natural size, scaled so its text column is the plane's, on shelves in
+     * seat order. Slots are the record (`panes.pins`, device px at k): a new member APPENDS (no earlier
+     * pin moves), a pin's size only grows (a member that outgrows it moves only the pins after it), a
+     * leaver's slot stays a ghost until settle. Each member's cell-grid origin (pixelOrigin, else its
+     * top-left) lands on a whole device pixel inside its pin. Nothing here reads the viewport. @private
      */
-    _layoutPlane(live) {
-        const f = this.planeFrame;
-        const k = f.pxPerUnit;
-        const W = f.widthPx / k, H = f.heightPx / k;
-        const R = Math.max(this.radius, 1e-3);
-        const cw = f.cellPx / k;                     // the plane's one column, world units
+    _layoutPins(members, live) {
+        const u = this.planeUnit, k = this.planeK, cw = u.column;
+        const P = this.panes;
+        let changed = false;
+        const have = new Set(P.pins.map((p) => p.id));
+        for (const e of members) if (!have.has(e.id)) { P.pins.push({ id: e.id, w: 0, h: 0 }); changed = true; }
+        const byId = new Map(live.map((e) => [e.id, e]));
+        const placed = new Map();
+        for (const p of P.pins) {
+            const e = byId.get(p.id);
+            if (!e) continue;
+            if (e.grid.visible === false) e.grid.visible = true;   // a pin board hides nothing
+            const fit = this._pinFit(e, cw, k);
+            if (fit.w > p.w) { p.w = fit.w; changed = true; }
+            if (fit.h > p.h) { p.h = fit.h; changed = true; }
+            placed.set(p.id, fit);
+        }
+        const gap = Math.max(0, Math.round(this.paneGapPx));
+        const wrapW = Math.max(1, Math.round(this.shelfCols)) * u.cellPx;
+        let x = 0, y = 0, rowH = 0;
+        for (const p of P.pins) {
+            if (!(p.w > 0 && p.h > 0)) { p.x = p.y = null; continue; }   // never measured: no slot yet
+            if (x > 0 && x + p.w > wrapW) { x = 0; y += rowH + gap; rowH = 0; }
+            p.x = x; p.y = y;
+            x += p.w + gap;
+            rowH = Math.max(rowH, p.h);
+        }
+        const tl = this._boardTopLeft();
+        let deepest = 0;
+        for (const p of P.pins) {
+            const fit = placed.get(p.id);
+            if (!fit || p.x == null) continue;
+            const e = byId.get(p.id);
+            // The cell origin at a whole-pixel offset inside the pin, the pin at whole pixels on the board.
+            const tx = tl.x + (p.x + fit.dx) / k - fit.ox * fit.m;
+            const ty = tl.y - (p.y + fit.dy) / k - fit.oy * fit.m;
+            this._placePaneMember(e, tx, ty, tl.z, fit.m);
+            deepest = Math.max(deepest, (this._extentOf(e)?.d ?? 0) * fit.m);
+        }
+        if (!P.focus || !byId.has(P.focus)) P.focus = P.pins.find((p) => byId.has(p.id) && p.x != null)?.id ?? null;
+        const box = this._boardPx();
+        this._rows = 1;
+        this._layoutW = box.w / k;
+        this._layoutD = deepest;
+        this._stackH = box.h / k;
+        this._ringR = Math.max(this.radius, 1e-3);
+        if (changed) this.onPanesChanged?.();
+    }
+
+    /**
+     * A member's pin: its scale (its column → the plane's), its size in whole device px at k, and where
+     * its cell origin sits inside the pin (dx, dy whole px; ox, oy the origin in member-local units).
+     * A member without cell metrics (a book) is scaled to `bookCols` plane columns wide. @private
+     */
+    _pinFit(e, cw, k) {
+        const g = e.grid;
+        const ext = this._extentOf(e);
+        const colW = g.metrics?.charWidth;
+        const m = Number.isFinite(colW) && colW > 0 ? cw / colW : (Math.max(1, this.bookCols ?? 120) * cw) / Math.max(ext.w, 1e-6);
+        const left = ext.cx - ext.w / 2, top = ext.cy + ext.h / 2;
+        const po = g.pixelOrigin?.() ?? { x: left, y: top };
+        const dx = Math.round((po.x - left) * m * k), dy = Math.round((top - po.y) * m * k);
+        return {
+            m, ox: po.x, oy: po.y, dx: Math.max(0, dx), dy: Math.max(0, dy),
+            w: Math.ceil(ext.w * m * k - 1e-6), h: Math.ceil(ext.h * m * k - 1e-6),
+        };
+    }
+
+    /**
+     * The plane-view aim (plane coordinates: world units from the board center, +y up) that shows a
+     * pin in a viewport: centered when it fits, else its top-left `marginPx` in from the view's
+     * top-left (read from the head). Null for no such pin.
+     * @param {string} id @param {{width:number, height:number}} vp device px @param {number} marginPx device px
+     */
+    pinAim(id, vp, marginPx = 0) {
+        const pin = this.pinRects().find((p) => p.id === id);
+        const box = this._boardPx();
+        if (!pin || !box) return null;
+        const r = pin.rect, k = this.planeK;
+        const ax = r.w <= vp.width - 2 * marginPx ? r.x + r.w / 2 : r.x - marginPx + vp.width / 2;
+        const ay = r.h <= vp.height - 2 * marginPx ? r.y + r.h / 2 : r.y - marginPx + vp.height / 2;
+        return { x: -box.w / (2 * k) + ax / k, y: box.h / (2 * k) - ay / k };
+    }
+
+    /** The focused pin's member (pins), else null. */
+    focusedPin() {
+        const f = this.panes.focus;
+        return f && this.entries.has(f) && this.panes.pins.some((p) => p.id === f && p.x != null) ? f : null;
+    }
+
+    /** Focus a pin (a member on the board). @returns {string|null} */
+    pinFocusOn(memberId) {
+        if (!this.pinRects().some((p) => p.id === memberId && !p.ghost)) return null;
+        this.panes.focus = memberId;
+        this.onPanesChanged?.();
+        return memberId;
+    }
+
+    /** Focus the nearest pin in a direction (geometry, like PaneTree.neighbor; +y down here). */
+    pinFocus(dir) {
+        const pins = this.pinRects().filter((p) => !p.ghost);
+        const from = pins.find((p) => p.id === this.focusedPin());
+        if (!from) return null;
+        const c = (r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+        const fc = c(from.rect);
+        const horiz = dir === 'left' || dir === 'right';
+        const sign = (dir === 'right' || dir === 'down') ? 1 : -1;
+        let best = null, bestScore = Infinity;
+        for (const p of pins) {
+            if (p.id === from.id) continue;
+            const pc = c(p.rect);
+            const primary = horiz ? pc.x - fc.x : pc.y - fc.y;
+            if (primary * sign <= 1e-9) continue;
+            const score = Math.abs(primary) + 2 * Math.abs(horiz ? pc.y - fc.y : pc.x - fc.x);
+            if (score < bestScore) { bestScore = score; best = p.id; }
+        }
+        return best ? this.pinFocusOn(best) : null;
+    }
+
+    /**
+     * TILES: lay the panes out on the tile frame and seat each pane's active member in it (the rest of
+     * its stack hidden, still members). Each member is scaled so its text column is the plane's and
+     * placed so its cell-grid origin (pixelOrigin, else its top-left) sits at its pane's top-left. A
+     * member that can reflow (a CodeGrid: setLayout + setFrameRows) takes the pane's columns and rows;
+     * foreign content (a terminal) keeps its size. A member without cell metrics (a book) is contain-fit
+     * into its pane. @private
+     */
+    _layoutTiles(live) {
+        const u = this.planeUnit, k = this.planeK, cw = u.column;
+        const tl = this._boardTopLeft();
         const byId = new Map(live.map((e) => [e.id, e]));
         let deepest = 0;
         const panes = this.paneRects();
@@ -1206,7 +1432,7 @@ export class Carrel extends THREE.Object3D {
                 let m, ox, oy, headPx = 0;
                 if (Number.isFinite(colW) && colW > 0) {
                     m = cw / colW;
-                    headPx = this._reflowToPane(e, r, f);
+                    headPx = this._reflowToPane(e, r, u);
                     const po = e.grid.pixelOrigin?.() ?? (() => { const lb = e.grid.getLocalBounds?.(); return lb && !lb.isEmpty() ? { x: lb.min.x, y: lb.max.y } : { x: 0, y: 0 }; })();
                     ox = po.x; oy = po.y;
                 } else {
@@ -1214,19 +1440,19 @@ export class Carrel extends THREE.Object3D {
                     m = Math.min((r.w / k) / ext.w, (r.h / k) / ext.h);
                     ox = ext.cx - ext.w / 2; oy = ext.cy + ext.h / 2;
                 }
-                // Pane top-left in desk-local coordinates (plane top-left = (−W/2, H)).
                 // A header (a grid's filename) sits in whole rows above row 0, so the row phase holds.
-                const tx = -W / 2 + r.x / k - ox * m;
-                const ty = H - (r.y + headPx) / k - oy * m;
-                this._placePaneMember(e, tx, ty, -R, m);
+                const tx = tl.x + r.x / k - ox * m;
+                const ty = tl.y - (r.y + headPx) / k - oy * m;
+                this._placePaneMember(e, tx, ty, tl.z, m);
                 deepest = Math.max(deepest, (this._extentOf(e)?.d ?? 0) * m);
             }
         }
+        const box = this._boardPx();
         this._rows = 1;
-        this._layoutW = W;
+        this._layoutW = box.w / k;
         this._layoutD = deepest;
-        this._stackH = H;
-        this._ringR = R;
+        this._stackH = box.h / k;
+        this._ringR = Math.max(this.radius, 1e-3);
     }
 
     /** Seat a pane's member exactly (facing the doorway), animating only real motion. @private */
@@ -1432,13 +1658,13 @@ export class Carrel extends THREE.Object3D {
      * @returns {Object} THREE.Box3
      */
     getLocalBounds(target = new THREE.Box3()) {
-        const f = this.planeFrame;
-        if (this.form === 'plane' && f) {
-            // A plane desk's airspace is its plane: the wall, its depth, the table under it.
-            const W = f.widthPx / f.pxPerUnit, H = f.heightPx / f.pxPerUnit;
-            const R = Math.max(this.radius, 1e-3), d = Math.max(this._layoutD ?? 0, 1);
-            target.min.set(-W / 2, 0, -R - d);
-            target.max.set(W / 2, H, -R + d);
+        const board = this._boardPx();
+        if (board) {
+            // A plane desk's airspace is its board: the flat wall of pins / tiles and its depth.
+            const k = this.planeK, tl = this._boardTopLeft();
+            const W = board.w / k, H = board.h / k, d = Math.max(this._layoutD ?? 0, 1);
+            target.min.set(tl.x, tl.y - H, tl.z - d);
+            target.max.set(tl.x + W, tl.y, tl.z + d);
             return target;
         }
         const hx = this._shadow.scale.x / 2, hz = this._shadow.scale.z / 2;

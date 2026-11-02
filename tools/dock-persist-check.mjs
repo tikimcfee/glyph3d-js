@@ -63,7 +63,6 @@ function makeCameraDock() {
     releaseAll() { entries.clear(); },
     reflowTile() {},
     list() { return [...entries.values()].sort((a, b) => a.order - b.order).map((e, i) => ({ id: e.id, slot: i })); },
-    homePosition() { return null; },
     setLayout(m) { this.layoutMode = m; return true; },
   };
 }

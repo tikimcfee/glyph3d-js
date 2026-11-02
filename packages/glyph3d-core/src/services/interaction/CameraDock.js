@@ -363,18 +363,6 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /**
-     * The HOME position a docked window will return to on release (in its home
-     * parent's space) — NOT its current tile-local position. Persistence reads this
-     * so a docked window's saved position is its world home, not the tile coordinate.
-     * @param {string} id
-     * @returns {{x:number,y:number,z:number}|null}
-     */
-    homePosition(id) {
-        const e = this.entries.get(id);
-        return e ? { x: e.home.pos.x, y: e.home.pos.y, z: e.home.pos.z } : null;
-    }
-
-    /**
      * The world AABB the docked window had at home — for framing it on focus.
      * @param {string} id
      * @returns {Object|null} a THREE.Box3 clone, or null

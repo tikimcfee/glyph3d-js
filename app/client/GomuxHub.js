@@ -3,6 +3,7 @@
 /** @import SessionBooks from './SessionBooks.js' */
 
 import DeskTree from './DeskTree.js';
+import { deskOf } from './tuning.js';
 import { LIFECYCLE } from './SessionDesk.js';
 import { cylinderForm } from '../commands/handlers/carrelCommands.js';
 import { getSetting } from './settings.js';
@@ -259,6 +260,8 @@ export default class GomuxHub {
             if (same >= 2) {
                 this._centering = false;
                 this._centered = true;
+                // A plane being read (or about to be re-entered after the reload) keeps the camera.
+                if (this.ctx.enteredCarrel || this.ctx.pendingEnter) return;
                 const cc = this.ctx.cameraController;
                 if (cc?.input?.drag?.active || Object.values(cc?.input?.keys || {}).some(Boolean)) return;
                 Promise.resolve(this._exec(['carrel.enter', GOMUX_HUB]))
@@ -306,6 +309,7 @@ export default class GomuxHub {
             const id = this.screenId(name);
             const grid = this.ctx.registry?.get(id)?.grid;
             if (!grid || book.aside === grid) continue;   // riding it (or docked from it — it comes home to the book)
+            if (deskOf(this.ctx, book)?.mode === 'plane' && deskOf(this.ctx, grid) === deskOf(this.ctx, book)) continue;   // its own pin already
             this.seatScreen(name, id);
         }
     }
@@ -406,6 +410,16 @@ export default class GomuxHub {
         const entry = this.ctx.registry?.get(id);
         if (!lane || !entry) return null;
         const held = this.ctx.holding?.holderOf(id);
+        // On a PLANE desk the screen is its own pin, seated right after its book (a terminal read at
+        // its own size, every column), never the book's aside.
+        const desk = deskOf(this.ctx, lane.book);
+        if (desk?.mode === 'plane' && (!held || held === desk)) {
+            if (lane.book.aside === entry.grid) lane.book.setAside(null);
+            if (held === desk) return desk.carrelName;
+            const bookId = this.ctx.registry?.getIdByGrid?.(lane.book);
+            const order = (desk.entries.get(bookId)?.order ?? desk._orderSeq) + 0.5;
+            return this.ctx.holding.seat({ id, grid: entry.grid }, desk, { order }) ? desk.carrelName : null;
+        }
         if (held) return held.carrelName ?? 'dock';
         lane.book.setAside(entry.grid, { gap: Number(getSetting('gomux.screenGap')) || 24 });
         this.ctx.agentBooks._requestRelayout();   // the book's seat grew by the screen

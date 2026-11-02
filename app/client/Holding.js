@@ -251,6 +251,25 @@ export default class Holding {
     /** The window's true home record — the residence chain, never a ride's seat. */
     homeOf(id) { return this.carrels.homeOf(id) ?? this.dock.homeOf(id); }
 
+    /**
+     * A window's OWN view — what a save records for it, never its holder's dressing: the position
+     * of its home (seated at a desk or riding the dock, the place it returns to; loose, where it is)
+     * and its own frame rows (a plane desk's pane lends it the pane's while it's tiled —
+     * userData.paneOwn keeps its own).
+     * @param {string} id @returns {{position:{x:number,y:number,z:number}, frameRows:number}|null}
+     */
+    ownViewOf(id) {
+        const grid = this.ctx.registry?.get?.(id)?.grid;
+        if (!grid) return null;
+        const home = this.homeOf(id);
+        const p = home?.pos ?? grid.position;
+        const own = grid.userData?.paneOwn;
+        return {
+            position: { x: p.x, y: p.y, z: p.z },
+            frameRows: (own ? own.frameRows : grid.getFrameRows?.()) || 0,
+        };
+    }
+
     // ── handoffs ──────────────────────────────────────────────────────────────
 
     /**

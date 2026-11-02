@@ -36,8 +36,9 @@
  *
  * PLANE desks (a carrel entered as a window manager): the PREFIX chord (`env.planePrefix`, default
  * Ctrl+Space — not tmux's Ctrl+B, which the tmux inside our terminals owns) arms one pane command
- * for the next key — h/j/k/l or arrows focus, z zoom, Tab / Shift+Tab cycle the pane's tabs, x
- * closes a pane (its tabs move to its neighbor), e/m/s re-lay (even/main/stack), Esc or q leaves —
+ * for the next key — h/j/k/l or arrows focus (the neighbor pin or pane), Tab back to the last plane
+ * (carrel.back), and on a tiled plane z zoom, ] / [ cycle the pane's tabs, x closes a pane (its tabs
+ * move to its neighbor), e/m/s re-lay (even/main/stack); Esc or q leaves —
  * and sits ABOVE typing so a focused terminal never sees it. A bare Esc that nothing else claims
  * (no focus to pop) leaves the plane: Esc steps back out, one level at a time. The DOM-input guard sits above all of them:
  * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
@@ -190,7 +191,9 @@ export const PLANE_PREFIX = Object.freeze({ key: ' ', ctrl: true, shift: false, 
 
 /** After the prefix: key → verb. Shift+Tab is matched before Tab. */
 function planeCommandFor(e) {
-    if (e.key === 'Tab') return e.shiftKey ? 'pane.tab prev' : 'pane.tab next';
+    if (e.key === 'Tab') return 'carrel.back';
+    if (e.key === ']') return 'pane.tab next';
+    if (e.key === '[') return 'pane.tab prev';
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     switch (k) {
         case 'h': case 'ArrowLeft':  return 'pane.focus left';

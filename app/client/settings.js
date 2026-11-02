@@ -660,10 +660,12 @@ export const SETTINGS = [
   { key: 'carrel.glowStrength', label: 'Floor shadow brightness', group: 'Carrel', type: 'number', default: 0.35, min: 0, max: 2, step: 0.05 },
   // A CYLINDER desk — the gomuxai hub and the agents desk are born one (cylinderForm): every
   // member at its own size around you, rows stacking before the ring widens past its radius.
+  { key: 'carrel.createMode', label: 'A desk you set down (carrel.create) is born a — plane (read flat when entered), wall, or ring', group: 'Carrel', type: 'enum', options: ['plane', 'grid', 'ring'], default: 'plane' },
   { key: 'carrel.cylinderRadius', label: "A new cylinder desk's least radius (the gomuxai hub, the agents desk — it widens to fit)", group: 'Carrel', type: 'number', default: 900, min: 50, max: 50000, step: 50 },
   // Planes (plane.* verbs, carrel.enter on a plane desk): the camera squares to a surface and eases
   // into a narrow-fov view where text columns are whole device pixels. See planeView.js.
-  { key: 'plane.cellPx', label: 'Text size in a plane: device px per text column (rows follow the font)', group: 'Planes', type: 'number', default: 8, min: 3, max: 40, step: 1 },
+  { key: 'plane.cellPx', label: 'Text size in a plane: device px per text column (rows follow the font; 8 → 8×15, 16 → 16×30 are the whole-pixel rows)', group: 'Planes', type: 'number', default: 8, min: 3, max: 40, step: 1,
+    apply: (ctx, v) => { for (const d of ctx.carrels?.values?.() ?? []) if (d.planeUnit) d.setPlaneUnit({ ...d.planeUnit, cellPx: v }); } },
   { key: 'plane.fov', label: 'Plane lens fov (°) — narrow reads flat; layers off the plane drift under a pixel', group: 'Planes', type: 'number', default: 1, min: 0.05, max: 60, step: 0.05 },
   { key: 'plane.front', label: 'Slab in front of a plane (world units past its own depth) — nearer is clipped', group: 'Planes', type: 'number', default: 20, min: 0, max: 5000, step: 1 },
   { key: 'plane.back', label: 'Slab behind a plane (world units past its own depth) — farther is clipped', group: 'Planes', type: 'number', default: 20, min: 0, max: 50000, step: 10 },
@@ -671,6 +673,7 @@ export const SETTINGS = [
   { key: 'plane.enterMs', label: 'Enter: the ease into a plane (ms)', group: 'Planes', type: 'number', default: 700, min: 0, max: 5000, step: 50 },
   { key: 'plane.leaveMs', label: 'Leave: the ease back out (ms)', group: 'Planes', type: 'number', default: 600, min: 0, max: 5000, step: 50 },
   { key: 'plane.fanMs', label: 'Fan: the ease when the plane fov changes (ms)', group: 'Planes', type: 'number', default: 400, min: 0, max: 5000, step: 50 },
+  { key: 'plane.restoreWaitMs', label: 'After a reload, how long to wait for the plane you were reading to stand up before giving up (ms)', group: 'Planes', type: 'number', default: 60000, min: 1000, max: 600000, step: 1000 },
   { key: 'plane.prefixMs', label: 'Pane prefix (Ctrl+Space): how long it waits for its command key (ms)', group: 'Planes', type: 'number', default: 1500, min: 200, max: 10000, step: 100 },
   { key: 'plane.defaultWorldScale', label: 'Glyph world scale assumed for a surface with no cell metrics of its own (a desk, a book)', group: 'Planes', type: 'number', default: 0.025, min: 0.001, max: 1, step: 0.001 },
   { key: 'carrel.cylinderMaxRows', label: 'A new cylinder desk: rows stacked before it widens around you', group: 'Carrel', type: 'number', default: 3, min: 1, max: 20, step: 1 },

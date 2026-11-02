@@ -58,6 +58,9 @@ export const COMPONENT_SCHEMA = {
   // A plane desk's pane layout (tree, stacks, inbox) on its `carrel:<name>` surface —
   // client/carrelPanes.js reads and writes it, SessionStore saves it as `panes`.
   Panes:           { table: 'durable', keys: ['panes'] },
+  // The plane desk you were reading (the `view:plane` surface) — client/planeEntered.js reads and
+  // writes it, SessionStore saves it as `entered` and re-enters it once the desk stands.
+  Entered:         { table: 'durable', keys: ['entered'] },
   // Which agents get a book at all (the `agents:visibility` surface) — client/AgentVisibility.js
   // reads and writes it, SessionStore saves it as `agentVisibility`.
   Visibility:      { table: 'durable', keys: ['hidden'] },

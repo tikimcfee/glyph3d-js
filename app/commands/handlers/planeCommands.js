@@ -41,6 +41,19 @@ function columnWorldWidth(ctx, obj) {
 }
 
 /**
+ * A plane desk's unit, from the ATLAS and Settings — never the viewport: its one text column (world
+ * units), the device px per column when entered (`plane.cellPx`), and a row's height over a column's
+ * width (the atlas cell's). Carrel.setPlaneUnit takes it.
+ * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
+ * @returns {{column:number, cellPx:number, rowRatio:number}}
+ */
+export function planeUnitOf(ctx) {
+    const cs = ctx.atlas?.getCharSize?.();
+    if (!cs?.width || !cs?.height) throw new Error('plane: no atlas char size for a plane unit');
+    return { column: atlasColumnWorld(ctx), cellPx: Number(getSetting('plane.cellPx')), rowRatio: cs.height / cs.width };
+}
+
+/**
  * The atlas's text column at the default glyph world scale, in world units — the one column a
  * plane desk normalizes its members to.
  * @param {import('../../client/CommandProvider.jsx').AppContext} ctx @returns {number}

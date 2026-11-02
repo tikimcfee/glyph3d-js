@@ -13,6 +13,7 @@
  */
 
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
+import { getSetting } from '../../client/settings.js';
 
 /** Split-axis vocabulary: h/x → 'x' (side-by-side), v/y → 'y' (stacked). tmux/i3 spelling welcome. */
 const AXES = { h: 'x', x: 'x', horizontal: 'x', v: 'y', y: 'y', vertical: 'y' };
@@ -24,12 +25,37 @@ const paneId = (ctx, arg) => {
     return 'error' in r ? null : r.id;
 };
 
-/** The entered plane desk, or null (the verbs then drive the CameraDock frame). @param {AppContext} ctx */
+/** The entered TILED plane desk, or null (the verbs then drive the CameraDock frame). @param {AppContext} ctx */
 const enteredDesk = (ctx) => {
+    const desk = enteredPlane(ctx);
+    return desk && desk.planeArrange === 'tiles' ? desk : null;
+};
+
+/** The entered plane desk (pins or tiles), or null. @param {AppContext} ctx */
+const enteredPlane = (ctx) => {
     const n = ctx.enteredCarrel;
     const desk = n ? ctx.carrels?.get?.(n) : null;
-    return desk && desk.form === 'plane' ? desk : null;
+    return desk && desk.mode === 'plane' ? desk : null;
 };
+
+/** On a pin board: focus a pin and slide the plane's aim to show it. @returns {string|null} */
+function focusPin(ctx, desk, idOrDir) {
+    const id = DIRS.includes(idOrDir) ? desk.pinFocus(idOrDir) : desk.pinFocusOn(idOrDir);
+    if (!id) return null;
+    const cc = ctx.cameraController;
+    if (cc?.setPlaneAim) {
+        const vp = cc.planeViewport();
+        const a = desk.pinAim(id, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1));
+        if (a) cc.setPlaneAim(a.x, a.y);
+    }
+    const type = ctx.registry?.get?.(id)?.type;
+    ctx.attentionManager?.set?.('primary', id, { registry: ctx.registry });
+    ctx.attentionManager?.set?.('key', type === 'terminal' ? id : null, { registry: ctx.registry });
+    return id;
+}
+
+/** The answer a tiles-only verb gives on a pin board. */
+const tilesOnly = (desk, verb) => ({ text: `ERR: ${verb} arranges tiles — '${desk.carrelName}' is a pin board (carrel.set ${desk.carrelName} planeArrange tiles)`, data: null });
 
 /**
  * Hand attention to the focused pane's front member: primary always, the keyboard when it's a
@@ -98,6 +124,14 @@ export default function registerPaneCommands(router) {
     }, { description: 'Split the active pane, tiling a window into the new leaf (h=side-by-side, v=stacked)', usage: '<h|v> <id|index>', returns: '{ id, axis }' });
 
     router.register('pane.focus', (args, ctx) => {
+        const board = enteredPlane(ctx);
+        if (board && board.planeArrange === 'pins') {
+            const a = String(args[0] ?? '').toLowerCase();
+            const target = DIRS.includes(a) ? a : (paneId(ctx, args[0]) ?? String(args[0] ?? ''));
+            const id = focusPin(ctx, board, target);
+            if (!id) return { text: DIRS.includes(a) ? `ERR: no pin to the ${a}` : `ERR: no pin '${args[0] ?? ''}' on '${board.carrelName}'`, data: null };
+            return { text: `OK: focus → '${id}'`, data: { id } };
+        }
         const desk = enteredDesk(ctx);
         if (desk) {
             const a = String(args[0] ?? '').toLowerCase();
@@ -172,7 +206,7 @@ export default function registerPaneCommands(router) {
 
     router.register('pane.zoom', (args, ctx) => {
         const desk = enteredDesk(ctx);
-        if (!desk) return { text: 'ERR: pane.zoom works inside a plane desk (carrel.enter <name>)', data: null };
+        if (!desk) return enteredPlane(ctx) ? tilesOnly(enteredPlane(ctx), 'pane.zoom') : { text: 'ERR: pane.zoom works inside a plane desk (carrel.enter <name>)', data: null };
         const a = String(args[0] ?? '').toLowerCase();
         const z = desk.paneZoom(a === 'on' ? true : a === 'off' ? false : undefined);
         focusPaneFront(ctx, desk);
@@ -181,7 +215,7 @@ export default function registerPaneCommands(router) {
 
     router.register('pane.tab', (args, ctx) => {
         const desk = enteredDesk(ctx);
-        if (!desk) return { text: 'ERR: pane.tab works inside a plane desk (carrel.enter <name>)', data: null };
+        if (!desk) return enteredPlane(ctx) ? tilesOnly(enteredPlane(ctx), 'pane.tab') : { text: 'ERR: pane.tab works inside a plane desk (carrel.enter <name>)', data: null };
         const a = String(args[0] ?? 'next');
         const which = a === 'next' || a === 'prev' ? a : paneId(ctx, a);
         const id = which ? desk.paneTab(which) : null;
@@ -192,7 +226,7 @@ export default function registerPaneCommands(router) {
 
     router.register('pane.place', (args, ctx) => {
         const desk = enteredDesk(ctx);
-        if (!desk) return { text: 'ERR: pane.place works inside a plane desk (carrel.enter <name>)', data: null };
+        if (!desk) return enteredPlane(ctx) ? tilesOnly(enteredPlane(ctx), 'pane.place') : { text: 'ERR: pane.place works inside a plane desk (carrel.enter <name>)', data: null };
         const r = ctx.holding.resolve(args[0]);
         if ('error' in r) return { text: `ERR: ${r.error}`, data: null };
         const target = deskPane(desk, ctx, args[1]);
@@ -207,13 +241,20 @@ export default function registerPaneCommands(router) {
 
     router.register('pane.layout', (args, ctx) => {
         const desk = enteredDesk(ctx);
-        if (!desk) return { text: 'ERR: pane.layout works inside a plane desk (carrel.enter <name>)', data: null };
+        if (!desk) return enteredPlane(ctx) ? tilesOnly(enteredPlane(ctx), 'pane.layout') : { text: 'ERR: pane.layout works inside a plane desk (carrel.enter <name>)', data: null };
         if (!desk.layoutPanes(String(args[0] ?? ''))) return { text: 'ERR: usage: pane.layout <even|main|stack>', data: null };
         focusPaneFront(ctx, desk);
         return { text: `OK: laid out ${args[0]} — ${desk.paneRects().length} pane(s)`, data: deskPaneList(desk) };
     }, { description: "Re-lay the entered plane desk's panes as a named layout", usage: '<even|main|stack>', returns: '{ panes, text }' });
 
     router.register('pane.list', (_args, ctx) => {
+        const board = enteredPlane(ctx);
+        if (board && board.planeArrange === 'pins') {
+            const focus = board.focusedPin();
+            const pins = board.pinRects();
+            const text = pins.map((p) => `${p.id === focus ? '*' : ' '}${p.id} ${p.rect.w}×${p.rect.h}+${p.rect.x}+${p.rect.y}${p.ghost ? ' (ghost — carrel.settle repacks)' : ''}`).join('\n');
+            return { text: `OK: '${board.carrelName}' — ${pins.length} pin(s)\n${text}`, data: { desk: board.carrelName, arrange: 'pins', focus, pins } };
+        }
         const desk = enteredDesk(ctx);
         if (desk) {
             const l = deskPaneList(desk);

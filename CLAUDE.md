@@ -324,22 +324,30 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   starts at the same pixel phase (`tools/layout-cells.test.mjs`; `tools/pixel-check.mjs` measures
   pitch, stem crispness, stillness and advance on a screenshot or the live display). `tools/agent-display.mjs` is a self-healing headless display (real
   GPU) for agents to drive and screenshot while no person has the app open.
-- **Plane desks** (`Carrel` form `plane`, `carrel.set <name> form plane`): a carrel ENTERED as a
-  tiling window manager. It stands in the world exactly as it reads entered — a flat wall at z=−R
-  facing the doorway — and `carrel.enter <name>` sets its frame to the viewport (device px, the
-  plane's `plane.cellPx` column), lays its panes out and eases the camera into the plane view squared
-  to it; `carrel.leave` eases back (a space-form desk keeps today's stand-at-the-center enter). Panes
-  are a PaneTree over pane ids (`Carrel.paneRects()`: whole device-pixel rects, `paneGapPx` apart),
-  each a STACK of members with one active (the rest hidden): a member joining lands in the INBOX
-  pane as its active tab and no other pane moves; a member leaving leaves its stack (its pane stays).
-  Named layouts re-lay them: `carrel.layout even|main|stack`; `carrel.panes` reads them. Each member
-  is scaled so its text column is the plane's and its cell-grid origin (`pixelOrigin`) sits on its
-  pane's top-left; a reflowable one (a CodeGrid) takes the pane's cols × rows and lends its header
-  out (saves keep its OWN frame via `userData.paneOwn`), all handed back when it leaves; a member
-  without cell metrics (a book) is contain-fit. The layout is durable — the model's Panes component
-  on `carrel:<name>` (`app/client/carrelPanes.js`, the snapshot's `panes`, restored beside tunings
-  before desks stand up); a stack naming members not seated yet holds their place. Gate:
-  `tools/carrel-plane.test.mjs`.
+- **Plane desks** (`Carrel` mode `plane` — beside `ring` and `grid`; `carrel.create` makes one by
+  default, `carrel.createMode`): a desk ENTERED and read flat, pixel-exact. It stands in the world
+  exactly as it reads entered — a flat board at z=−R facing the doorway, its top-left a fixed point of
+  the desk — and its layout NEVER depends on the viewport or the dpr: its unit is the atlas's
+  (`Carrel.setPlaneUnit` from `planeUnitOf`: one text column every member is scaled to, `plane.cellPx`
+  device px per column when entered). `carrel.enter <name>` eases the camera into the plane view
+  squared to the board at that scale, aimed at the focused member, attention there at t = 0;
+  `carrel.leave` eases back; `carrel.back` returns to the previous plane desk; Esc steps out.
+  Arrangement (`planeArrange`, per desk): PINS (default) — every member at its natural size (a
+  239-column screen is 239 columns wide, never clipped) on shelves `shelfCols` columns wide in seat
+  order, `paneGapPx` gutters, every pin and cell origin on whole device pixels; a newcomer APPENDS (no
+  earlier pin moves), a pin only grows (a grower moves only the pins after it), a leaver's slot stays a
+  ghost until `carrel.settle` repacks; a book pins `bookCols` wide; a gomuxai agent's screen is its own
+  pin right after its book (not the book's aside). TILES — a tiling window manager over a desk-sized
+  frame (`tileCols × tileRows` cells): a PaneTree of panes, each a stack of members (tabs), a joiner
+  lands in the INBOX pane, reflowable members take their pane's cols × rows and lend out their header.
+  `pane.*` act on the entered plane (pins: `pane.focus` by direction slides the aim to the neighbor
+  pin; tiles: split/focus/resize/close/swap/zoom/tab/place/layout), else the CameraDock frame. Keys:
+  the plane PREFIX (Ctrl+Space, above terminal typing) then h/j/k/l focus, Tab back, z/]/[/x/e/m/s on
+  tiles, q leave. The layout is durable (the Panes component on `carrel:<name>`, `carrelPanes.js`);
+  so is the plane being read (the Entered component, `planeEntered.js` — re-entered after a reload
+  once the desk stands, the hub's load centering standing down meanwhile). A save records a member's
+  OWN view, never its holder's (`Holding.ownViewOf`). Gates: `tools/carrel-plane.test.mjs`,
+  `tools/plane-keys.test.mjs`.
 - **Per-instance knobs** (`app/client/tuning.js`): Settings are the values a desk or a shelf book
   is BORN with — a Settings change never pushes onto a live one. A value set on ONE instance
   (`carrel.set <name> <knob> <v>`, `book.set [id] <knob> <v>`, `book.form`) is its own and wins:

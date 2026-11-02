@@ -6,8 +6,8 @@
 //
 // Locks:
 //   - outside a plane the prefix chord is not claimed (it reaches whatever would get it)
-//   - inside a plane: prefix + h/j/k/l/arrows → pane.focus, z → pane.zoom, Tab / Shift+Tab →
-//     pane.tab next/prev, x → pane.close, e/m/s → pane.layout, q/Esc → carrel.leave
+//   - inside a plane: prefix + h/j/k/l/arrows → pane.focus, Tab → carrel.back, z → pane.zoom,
+//     ] / [ → pane.tab next/prev, x → pane.close, e/m/s → pane.layout, q/Esc → carrel.leave
 //   - a focused terminal never sees the prefix or its command key (claimed above typing), and
 //     still gets every other key
 //   - an unknown key after the prefix is consumed (no surprise bytes) and disarms
@@ -69,7 +69,7 @@ function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
 {
     const table = [
         [['h'], 'pane.focus left'], [['ArrowRight'], 'pane.focus right'], [['k'], 'pane.focus up'], [['j'], 'pane.focus down'],
-        [['z'], 'pane.zoom'], [['Tab'], 'pane.tab next'], [['Tab', { shift: true }], 'pane.tab prev'], [['x'], 'pane.close'],
+        [['z'], 'pane.zoom'], [['Tab'], 'carrel.back'], [[']'], 'pane.tab next'], [['['], 'pane.tab prev'], [['x'], 'pane.close'],
         [['e'], 'pane.layout even'], [['m'], 'pane.layout main'], [['s'], 'pane.layout stack'], [['q'], 'carrel.leave'], [['Escape'], 'carrel.leave'],
     ];
     for (const [[key, mods], verb] of table) {

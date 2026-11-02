@@ -45,14 +45,16 @@ function mockGrid(name) {
     return g;
 }
 
-const frame = { widthPx: 1600, heightPx: 942, pxPerUnit: 8 / CW, cellPx: 8 };
+const UNIT = { column: CW, cellPx: 8, rowRatio: LS / CW };   // 8 px columns → 15 px rows
+const frame = { widthPx: 1600, heightPx: 930 };              // tileCols 200 × tileRows 62 at 8×15
+const TILES = { mode: 'plane', planeArrange: 'tiles', tileCols: 200, tileRows: 62, animDur: 0 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function deskWith(n, { layout = 'even' } = {}) {
     const scene = new THREE.Scene();
-    const desk = new Carrel({ name: 'p', form: 'plane', animDur: 0 });
+    const desk = new Carrel({ name: 'p', ...TILES });
     scene.add(desk);
-    desk.setPlaneFrame(frame);
+    desk.setPlaneUnit(UNIT);
     const grids = [];
     for (let i = 0; i < n; i++) {
         const g = mockGrid(`g${i}`);
@@ -107,15 +109,15 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
 {
     const { desk, grids } = deskWith(3);
     await flush(); desk._relayout(); settle(desk);
-    const f = desk.planeFrame;
-    const W = f.widthPx / f.pxPerUnit, H = f.heightPx / f.pxPerUnit;
+    const f = { cellPx: UNIT.cellPx, pxPerUnit: desk.planeK };
+    const tl = desk._boardTopLeft();
     for (const p of desk.paneRects()) {
         const g = desk.entries.get(p.active).grid;
         near(g.scale.x * CW, f.cellPx / f.pxPerUnit, 1e-9, `${p.active}: its column is the plane's`);
-        // The cell origin in desk-local → device px from the plane's top-left.
+        // The cell origin in desk-local → device px from the board's top-left.
         const o = g.pixelOrigin();
         const lx = g.position.x + o.x * g.scale.x, ly = g.position.y + o.y * g.scale.y;
-        const px = (lx + W / 2) * f.pxPerUnit, py = (H - ly) * f.pxPerUnit;
+        const px = (lx - tl.x) * f.pxPerUnit, py = (tl.y - ly) * f.pxPerUnit;
         near(px, p.rect.x, 1e-6, `${p.active}: cell origin x at its pane's left`);
         near(py, p.rect.y, 1e-6, `${p.active}: cell origin y at its pane's top`);
         ok(Math.abs(px - Math.round(px)) < 1e-6 && Math.abs(py - Math.round(py)) < 1e-6, `${p.active}: on a whole device pixel`);
@@ -132,10 +134,10 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     await flush();
     ok(g0._wrap === 0 && g0._frame === 0 && g0.config.showFilename === true && !g0.userData.paneOwn, 'leaving hands back wrap, frame, header');
     ok(!desk.paneRects().some((p) => p.stack.includes(p0.active)), 'leaving takes it out of its stack');
-    // turning space hands everyone back
-    desk.setForm('space');
+    // turning ring hands everyone back
+    desk.setMode('ring');
     await flush();
-    ok(grids.filter((g) => g !== g0).every((g) => g._wrap === 0 && g.config.showFilename === true && g.visible !== false), 'turning space hands every member back');
+    ok(grids.filter((g) => g !== g0).every((g) => g._wrap === 0 && g.config.showFilename === true && g.visible !== false), 'turning ring hands every member back');
 }
 
 // 4. round-trip; pending claims hold their place; malformed refused.
@@ -143,8 +145,8 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     const { desk } = deskWith(4, { layout: 'main' });
     const rec = desk.serializePanes();
     const rects = JSON.stringify(desk.paneRects().map((p) => [p.id, p.rect, p.stack]));
-    const fresh = new Carrel({ name: 'p2', form: 'plane', animDur: 0 });
-    fresh.setPlaneFrame(frame);
+    const fresh = new Carrel({ name: 'p2', ...TILES });
+    fresh.setPlaneUnit(UNIT);
     fresh.applyPanes(JSON.parse(JSON.stringify(rec)));
     ok(JSON.stringify(fresh.paneRects().map((p) => [p.id, p.rect, p.stack])) === rects, 'serialize → apply reproduces panes, rects and stacks exactly');
     // members arriving later go back to THEIR panes, not the inbox
@@ -197,10 +199,105 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     // focus + zoom ride the record
     desk.paneZoom(true);
     const rec = desk.serializePanes();
-    const fresh = new Carrel({ name: 'p3', form: 'plane', animDur: 0 });
-    fresh.setPlaneFrame(frame);
+    const fresh = new Carrel({ name: 'p3', ...TILES });
+    fresh.setPlaneUnit(UNIT);
     fresh.applyPanes(JSON.parse(JSON.stringify(rec)));
     ok(fresh.focusedPane() === desk.focusedPane() && fresh.panes.zoomed === desk.panes.zoomed, 'focus and zoom round-trip');
+}
+
+// ── PIN BOARD (the default plane arrangement) ─────────────────────────────────────────────────
+/** A terminal-like member: cols × rows cells, bounds from its origin (top-left) down/right. */
+function screen(name, cols, rows) {
+    const g = mockGrid(name);
+    g.setLayout = undefined; g.setFrameRows = undefined;   // foreign: keeps its size
+    g._cols = cols; g._rows = rows;
+    g.pixelOrigin = () => ({ x: 0, y: 0 });
+    g.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(0, -g._rows * LS, -0.5), new THREE.Vector3(g._cols * CW, 0, 0.5));
+    return g;
+}
+function board(members, opts = {}) {
+    const scene = new THREE.Scene();
+    const desk = new Carrel({ name: 'b', mode: 'plane', animDur: 0, ...opts });
+    scene.add(desk);
+    desk.setPlaneUnit(UNIT);
+    for (const [id, g] of members) { scene.add(g); desk.lock(id, g, { immediate: true }); }
+    return { scene, desk };
+}
+const pinMap = (desk) => new Map(desk.pinRects().map((p) => [p.id, JSON.stringify(p.rect)]));
+
+// 6. pins: natural size, whole px, shelves wrap at shelfCols, column scale, cell origin on whole px
+{
+    const { desk } = board([['a', screen('a', 239, 56)], ['b', screen('b', 239, 56)], ['c', screen('c', 120, 40)]]);
+    const pins = desk.pinRects();
+    ok(pins.length === 3 && pins.every((p) => [p.rect.x, p.rect.y, p.rect.w, p.rect.h].every(Number.isInteger)), 'pins: whole device pixels');
+    const [pa, pb, pc] = pins;
+    ok(pa.rect.w === 239 * 8 && pa.rect.h === 56 * 15, `a 239×56 screen pins at its own size: ${pa.rect.w}×${pa.rect.h} (every column, every row)`);
+    ok(pb.rect.y === pa.rect.y && pb.rect.x === pa.rect.x + pa.rect.w + 8, 'two 239-col screens share the first 480-col shelf, a gutter apart');
+    ok(pc.rect.x === 0 && pc.rect.y === pa.rect.y + pa.rect.h + 8, 'the third wraps to the next shelf');
+    const k = desk.planeK, tl = desk._boardTopLeft();
+    for (const id of ['a', 'b', 'c']) {
+        const g = desk.entries.get(id).grid;
+        near(g.scale.x * CW, UNIT.cellPx / k, 1e-9, `${id}: its column is the plane's`);
+        const px = (g.position.x - tl.x) * k, py = (tl.y - g.position.y) * k;   // pixelOrigin is (0,0)
+        ok(Math.abs(px - Math.round(px)) < 1e-6 && Math.abs(py - Math.round(py)) < 1e-6, `${id}: cell origin on a whole device pixel (${px.toFixed(4)}, ${py.toFixed(4)})`);
+    }
+    ok(desk.focusedPin() === 'a', 'the first pin has focus by default');
+}
+
+// 7. a join appends — no earlier pin moves; a leave leaves a ghost; settle repacks
+{
+    const { desk, scene } = board([['a', screen('a', 239, 56)], ['b', screen('b', 100, 20)]]);
+    const before = pinMap(desk);
+    const g = screen('n', 80, 24); scene.add(g);
+    desk.lock('n', g, { immediate: true });
+    const after = pinMap(desk);
+    ok([...before].every(([id, r]) => after.get(id) === r), 'a join moves no earlier pin (zero tolerance)');
+    ok(after.has('n'), 'the newcomer has a pin');
+    desk.release('a');
+    const left = desk.pinRects();
+    ok(left.find((p) => p.id === 'a')?.ghost === true, 'a leaver leaves a ghost');
+    ok(left.filter((p) => p.id !== 'a').every((p) => after.get(p.id) === JSON.stringify(p.rect)), 'a leave moves no pin');
+    desk.settle();
+    const packed = desk.pinRects();
+    ok(!packed.some((p) => p.id === 'a') && packed[0].rect.x === 0 && packed[0].id === 'b', 'settle drops the ghost and repacks');
+}
+
+// 8. growth: only the pins after it on its shelf move; a pin never shrinks until settle
+{
+    const gb = screen('b', 100, 20);
+    const { desk } = board([['a', screen('a', 100, 20)], ['b', gb], ['c', screen('c', 100, 20)], ['d', screen('d', 300, 20)]]);
+    const before = pinMap(desk);
+    gb._cols = 140; desk.reflow('b');
+    const after = pinMap(desk);
+    ok(after.get('a') === before.get('a'), 'growth: an earlier pin stays');
+    ok(JSON.parse(after.get('b')).w === 140 * 8 && JSON.parse(after.get('c')).x > JSON.parse(before.get('c')).x, 'growth: it grows and the next pin on its shelf moves along');
+    gb._cols = 60; desk.reflow('b');
+    ok(JSON.parse(pinMap(desk).get('b')).w === 140 * 8, 'a shrink keeps the pin (grow-only until settle)');
+    desk.settle();
+    ok(JSON.parse(pinMap(desk).get('b')).w === 60 * 8, 'settle re-measures it');
+}
+
+// 9. a book (no cell metrics) pins bookCols wide
+{
+    const book = new THREE.Object3D();
+    book.getLocalBounds = () => new THREE.Box3(new THREE.Vector3(-200, -150, -5), new THREE.Vector3(200, 150, 5));
+    const { desk } = board([['book', book]], { bookCols: 120 });
+    const p = desk.pinRects()[0];
+    ok(Math.abs(p.rect.w - 120 * 8) <= 1, `a book pins bookCols (120) columns wide: ${p.rect.w}px`);
+}
+
+// 10. the pin record round-trips; members arriving late (any order) take their saved pins
+{
+    const { desk } = board([['a', screen('a', 239, 56)], ['b', screen('b', 100, 20)], ['c', screen('c', 80, 24)]]);
+    const rec = JSON.parse(JSON.stringify(desk.serializePanes()));
+    const want = JSON.stringify([...pinMap(desk)]);
+    const scene = new THREE.Scene();
+    const fresh = new Carrel({ name: 'b2', mode: 'plane', animDur: 0 });
+    scene.add(fresh);
+    fresh.setPlaneUnit(UNIT);
+    fresh.applyPanes(rec);
+    for (const [id, c, r] of [['c', 80, 24], ['a', 239, 56], ['b', 100, 20]]) { const g = screen(id, c, r); scene.add(g); fresh.lock(id, g, { immediate: true }); }
+    ok(JSON.stringify([...pinMap(fresh)]) === want, 'serialize → apply → members in reverse order: identical pins');
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} carrel-plane: ${checks - fails}/${checks} checks`);

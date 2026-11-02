@@ -33,8 +33,9 @@
 import * as THREE from 'three';
 import Carrel from '@glyph3d/core/services/interaction/Carrel.js';
 import { getSetting } from '../../client/settings.js';
-import { enterPlaneView, atlasColumnWorld } from './planeCommands.js';
+import { enterPlaneView, planeUnitOf } from './planeCommands.js';
 import { wirePanes } from '../../client/carrelPanes.js';
+import { recordEntered, armEnteredLife } from '../../client/planeEntered.js';
 import { focusPaneFront } from './paneCommands.js';
 import { DESK_KNOBS, tuneOf, applyDeskTune, tuneDesk, readDesk, forgetTune } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
@@ -119,6 +120,7 @@ export function buildCarrel(ctx, name, { radius, managed = false, nested = false
     }
     if (Number.isFinite(radius)) born.radius = radius;
     const carrel = new Carrel({ name, ...born, ...(form || {}) });
+    if (ctx.atlas) carrel.setPlaneUnit(planeUnitOf(ctx));
     applyDeskTune(carrel, tuneOf(ctx, carrel.name));
     wirePanes(ctx, carrel);
 
@@ -164,6 +166,7 @@ export function restoreCarrel(ctx, saved, expected = 0) {
     if (!map || !ctx.scene || !saved?.name) return null;
     if (map.has(saved.name)) return map.get(saved.name);
     const carrel = new Carrel({ name: saved.name, ...(saved.params || {}) });
+    if (ctx.atlas) carrel.setPlaneUnit(planeUnitOf(ctx));
     applyDeskTune(carrel, tuneOf(ctx, carrel.name));
     wirePanes(ctx, carrel);
     // A world-MANAGED desk re-registers as its grouping — the layout owns its pose
@@ -259,30 +262,52 @@ function autoShelf(ctx, map) {
 }
 
 /**
- * Enter a PLANE desk: its frame is the viewport (device px) at the plane's text column, its panes
- * lay out for it, and the camera eases into the plane view squared to its wall, the plane's
- * top-left on a device-pixel corner. The desk's members are already seated where they read.
+ * Enter a PLANE desk: the camera eases into the plane view squared to its board at the desk's own
+ * scale (its unit — never the viewport), aimed at the focused pin (pins) or the frame (tiles), and
+ * attention lands on the focused member at t = 0, before the camera does. The members are already
+ * where they read: entering moves only the camera. Entering another plane while one is entered is
+ * the camera's switch (its home stays the first one's).
  * @param {import('../../client/CommandProvider.jsx').AppContext} ctx @param {Object} carrel
  */
 function enterPlaneDesk(ctx, carrel) {
     const cc = ctx.cameraController;
-    const vp = cc.planeViewport();
-    const cellPx = Number(getSetting('plane.cellPx'));
-    const pxPerUnit = cellPx / atlasColumnWorld(ctx);
-    carrel.setPlaneFrame({ widthPx: vp.width, heightPx: vp.height, pxPerUnit, cellPx });
     const rect = carrel.getPlaneRect();
+    if (!rect) return { text: `ERR: '${carrel.carrelName}' has no plane yet (no unit — the atlas isn't ready)`, data: null };
+    const k = carrel.planeK;
+    const vp = cc.planeViewport();
+    const prev = ctx.enteredCarrel;
+    let aim = { x: 0, y: 0 };
+    let focus = null;
+    if (carrel.planeArrange === 'pins') {
+        focus = carrel.focusedPin();
+        aim = (focus && carrel.pinAim(focus, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1))) || aim;
+        setFocusTo(ctx, focus);
+    } else {
+        focus = focusPaneFront(ctx, carrel);
+    }
     ctx.activeCarrel = carrel.carrelName;
     const s = enterPlaneView(ctx, `carrel:${carrel.carrelName}`, {
-        center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit, depth: 2 * Math.max(carrel._layoutD ?? 0, 1),
-        aim: { x: 0, y: 0 }, origin: rect.origin,
+        center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit: k, depth: 2 * Math.max(carrel._layoutD ?? 0, 1),
+        aim, origin: rect.origin,
     });
+    if (prev && prev !== carrel.carrelName) ctx.carrelBack = prev;
     ctx.enteredCarrel = carrel.carrelName;
-    focusPaneFront(ctx, carrel);   // attention (and the keyboard, for a terminal) lands at t = 0, before the camera
-    const panes = carrel.paneRects();
+    ctx.pendingEnter = null;
+    armEnteredLife(ctx);
+    recordEntered(ctx, carrel.carrelName);
+    const count = carrel.planeArrange === 'pins' ? carrel.pinRects().filter((p) => !p.ghost).length : carrel.paneRects().length;
     return {
-        text: `OK: entered '${carrel.carrelName}' — ${panes.length} pane(s) on ${vp.width}×${vp.height} px at ${cellPx} px/column`,
-        data: { name: carrel.carrelName, form: 'plane', panes, ...s },
+        text: `OK: entered '${carrel.carrelName}' — ${count} ${carrel.planeArrange === 'pins' ? 'pin' : 'pane'}(s) at ${carrel.planeUnit.cellPx} px/column${focus ? `, focus '${focus}'` : ''}`,
+        data: { name: carrel.carrelName, mode: 'plane', arrange: carrel.planeArrange, focus, ...s },
     };
+}
+
+/** Attention to one member: primary always, the keyboard when it's a terminal. */
+function setFocusTo(ctx, id) {
+    if (!id) return;
+    const type = ctx.registry?.get?.(id)?.type;
+    ctx.attentionManager?.set?.('primary', id, { registry: ctx.registry });
+    ctx.attentionManager?.set?.('key', type === 'terminal' ? id : null, { registry: ctx.registry });
 }
 
 /**
@@ -299,9 +324,9 @@ export default function registerCarrelCommands(router) {
             name = `carrel-${n}`;
         }
         if (map.has(name)) return { text: `ERR: carrel '${name}' already exists`, data: null };
-        const carrel = buildCarrel(ctx, name, { radius: parseFloat(args[1]) });
+        const carrel = buildCarrel(ctx, name, { radius: parseFloat(args[1]), form: { mode: String(getSetting('carrel.createMode')) } });
         ctx.activeCarrel = name;
-        return { text: `OK: carrel '${name}' set down (r=${carrel.radius})`, data: { name, radius: carrel.radius } };
+        return { text: `OK: carrel '${name}' set down (${carrel.mode}, r=${carrel.radius})`, data: { name, mode: carrel.mode, radius: carrel.radius } };
     }, { description: 'Set down a new carrel (world-anchored desk) ahead of the camera', usage: '[name] [radius]', returns: '{ name, radius }' });
 
     router.register('carrel.add', (args, ctx) => {
@@ -384,7 +409,7 @@ export default function registerCarrelCommands(router) {
         if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
         const cc = ctx.cameraController;
         if (!cc?.flyTo) return { text: 'ERR: no camera controller', data: null };
-        if (carrel.form === 'plane') return enterPlaneDesk(ctx, carrel);
+        if (carrel.mode === 'plane') return enterPlaneDesk(ctx, carrel);
         ctx.activeCarrel = carrel.carrelName;
         // Stand at the desk's center (its table origin), eyes at its members' mean height,
         // facing its back (local −z): a ring's arc centers ahead, a grid's wall stands ahead.
@@ -413,27 +438,13 @@ export default function registerCarrelCommands(router) {
         return { text: `OK: leaving carrel '${was}'`, data: { name: was } };
     }, { description: 'Ease back out of the entered plane desk to exactly where you entered from', returns: '{ name }' });
 
-    router.register('carrel.layout', (args, ctx) => {
-        const name = String(args[0] ?? '');
-        const carrel = findCarrel(ctx, args[1] ?? ctx.enteredCarrel ?? ctx.activeCarrel);
-        if (!carrel) return { text: `ERR: no carrel '${args[1] ?? ''}'`, data: null };
-        if (carrel.form !== 'plane') return { text: `ERR: '${carrel.carrelName}' is a space desk (carrel.set ${carrel.carrelName} form plane)`, data: null };
-        if (!carrel.layoutPanes(name)) return { text: 'ERR: usage: carrel.layout <even|main|stack> [carrel]', data: null };
-        return { text: `OK: '${carrel.carrelName}' laid out ${name} — ${carrel.paneRects().length} pane(s)`, data: { name: carrel.carrelName, layout: name, panes: carrel.paneRects() } };
-    }, { description: "Re-lay a plane desk's panes: even (rows side by side), main (one wide + a stack), stack (one pane of tabs)", usage: '<even|main|stack> [carrel]', returns: '{ name, layout, panes }' });
-
-    router.register('carrel.panes', (args, ctx) => {
-        const carrel = findCarrel(ctx, args[0] ?? ctx.enteredCarrel ?? ctx.activeCarrel);
-        if (!carrel) return { text: `ERR: no carrel '${args[0] ?? ''}'`, data: null };
-        if (carrel.form !== 'plane') return { text: `ERR: '${carrel.carrelName}' is a space desk (carrel.set ${carrel.carrelName} form plane)`, data: null };
-        const panes = carrel.paneRects();
-        const f = carrel.planeFrame;
-        const lines = panes.map((p) => `  ${p.id}  ${p.rect.w}×${p.rect.h}+${p.rect.x}+${p.rect.y}  ${p.stack.map((id) => (id === p.active ? `[${id}]` : id)).join(' ') || '(empty)'}${p.id === carrel.panes.inbox ? '  ← inbox' : ''}`);
-        return {
-            text: `OK: '${carrel.carrelName}' ${f ? `${f.widthPx}×${f.heightPx} px at ${f.cellPx} px/column` : '(no frame yet — carrel.enter sets it)'}\n${lines.join('\n') || '  (no panes)'}`,
-            data: { name: carrel.carrelName, frame: f, inbox: carrel.panes.inbox, panes },
-        };
-    }, { description: "A plane desk's panes: device-px rects, stacks (active in brackets), the inbox", usage: '[name]', returns: '{ name, frame, inbox, panes:[{id, rect, stack, active}] }' });
+    router.register('carrel.back', (_args, ctx) => {
+        const name = ctx.carrelBack;
+        const carrel = name ? findCarrel(ctx, name) : null;
+        if (!carrel) return { text: 'ERR: no carrel to go back to (enter two plane desks first)', data: null };
+        if (carrel.mode !== 'plane') return { text: `ERR: '${name}' is no longer a plane desk`, data: null };
+        return enterPlaneDesk(ctx, carrel);
+    }, { description: 'Back to the plane desk you were in before this one (i3 back-and-forth, tmux last-window)', returns: '{ name, focus, … plane.state }' });
 
     router.register('carrel.dissolve', (args, ctx) => {
         const map = carrels(ctx);

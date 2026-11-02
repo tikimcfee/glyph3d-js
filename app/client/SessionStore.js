@@ -61,6 +61,7 @@ import { openSession, sessionList } from '../commands/handlers/agentCommands.js'
 import { restoreCarrel, carrelSweep } from '../commands/handlers/carrelCommands.js';
 import { listTunings, projectTune, tuneOf } from './tuning.js';
 import { listPanes, restorePanes } from './carrelPanes.js';
+import { captureEntered, restoreEntered } from './planeEntered.js';
 import { getSetting } from './settings.js';
 import { laneForSession } from './SessionBooks.js';
 import { pruneDockLayout } from './dockLayoutPrune.js';
@@ -200,9 +201,10 @@ export default class SessionStore {
       const grid = (s.panelId && ctx.registry.has(s.panelId)) ? ctx.registry.get(s.panelId).grid : null;
       if (grid) {
         sheetPanelIds.add(s.panelId);
-        // A docked grid's .position is its tiny tile-local coordinate; persist the
-        // HOME it returns to on release instead, so the saved position is meaningful.
-        const p = (ctx.cameraDock?.has?.(s.panelId) && ctx.cameraDock.homePosition(s.panelId)) || grid.position;
+        // Its OWN view (Holding.ownViewOf): a docked or seated grid's .position is its holder's
+        // (a tile's, a desk seat's, a plane pin's) — persist the HOME it returns to instead.
+        const own = ctx.holding.ownViewOf(s.panelId);
+        const p = own.position;
         entry.x = round(p.x); entry.y = round(p.y); entry.z = round(p.z);
         // Window state: a code grid sized to a cols×rows scrollable viewport (grid.window).
         if (grid.isWindowed?.()) {
@@ -212,8 +214,7 @@ export default class SessionStore {
         // Frame state (Step 3c.2): a clipped/scrolled code grid restores its window.
         // Omit zeros so unframed grids stay terse and the dedup compare stays stable.
         if (typeof grid.getFrameRows === 'function') {
-          // A grid dressed by a plane desk's pane saves its OWN frame, not the pane's (Carrel paneOwn).
-          const frameRows = (grid.userData?.paneOwn ? grid.userData.paneOwn.frameRows : grid.getFrameRows()) || 0;
+          const frameRows = own.frameRows;   // its own, never a pane's
           const scrollOffset = (grid.getScrollOffset?.() || 0);
           if (frameRows) entry.frameRows = frameRows;
           if (scrollOffset) entry.scrollOffset = scrollOffset;
@@ -335,6 +336,8 @@ export default class SessionStore {
     const tunings = listTunings(ctx);
     // Pane layouts: every plane desk's tree + stacks (the model's Panes component), keyed by desk.
     const panes = listPanes(ctx);
+    // The plane desk being read (Entered) — re-entered once it stands after a reload.
+    const entered = captureEntered(ctx);
 
     // Hidden agents (AgentVisibility): which agents get no book — the hub and the agents desk
     // consult it before opening anything on the next load.
@@ -357,6 +360,7 @@ export default class SessionStore {
       carrelMembers,
       tunings,
       panes,
+      entered,
       agentVisibility,
     };
 
@@ -501,7 +505,12 @@ export default class SessionStore {
         // pre-shaped for its complement, and files a membership manifest — so
         // stage 2's windows (books, terminals, grids) seat IN PLACE the moment
         // they materialize instead of flying to a desk that arrived late.
-        ['carrels', () => { this._restoreTunings(snap); restorePanes(this.ctx, snap.panes); this._restoreCarrels(snap); }, ['tunings', 'panes', 'carrels']],
+        ['carrels', () => {
+          this._restoreTunings(snap);
+          restorePanes(this.ctx, snap.panes);
+          this._restoreCarrels(snap);
+          restoreEntered(this.ctx, snap.entered, (cmd) => this.router.execute(cmd), Number(getSetting('plane.restoreWaitMs')));
+        }, ['tunings', 'panes', 'carrels', 'entered']],
         // The hidden agents BEFORE any book: the hub and the agents desk wait on this to open.
         ['visibility', () => this.ctx.agentVisibility?.restore(snap.agentVisibility), ['agentVisibility']]]],
       [
