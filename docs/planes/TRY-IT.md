@@ -140,6 +140,21 @@ Reply to or approve waiting agents directly from where you read them once opt-in
 
 ---
 
+## Checking It All
+
+One command runs every plane feature's live check on a relay and display of its own (a scratch root,
+its own tmux socket, agent screens off — it never touches your display) and prints one verdict table;
+`--port 8080` points it at the running display instead:
+
+```sh
+bun tools/planes-e2e.mjs [--out-dir <dir>]
+```
+
+The headless gates for the whole branch: `tools/verify-staged.sh` (every `tools/*.test.mjs` on the
+committed snapshot, GPU gates on a scratch Vite), and `cd cli && go test ./...`.
+
+---
+
 ## One-Command Showcase
 
 Run the non-destructive showcase script to step through the live desks, plane state, layer stacks, team channels, points, and cards on the command bus (or pass `--no-camera` to inspect without moving the camera):
