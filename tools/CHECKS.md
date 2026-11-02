@@ -119,6 +119,19 @@ not pass a flag, and a tool author cannot forget the rule. Correctness gates
 (evaluator parity, does-it-boot) keep using `launchBrowser()` and stay headless
 everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 
+- **Memory on the live display** — where the heap goes, without a multi-GB heap snapshot:
+  `scene.memory` (CPU-side geometry arrays by owner — the render share), `scene.textures` (GPU
+  textures vs what the scene references, by owner and by kind with CPU texel bytes; a gap that grows
+  at a constant scene is a leak), and `tools/agent-display.mjs`'s sampling heap profiler (on from
+  every load): `pkill -USR2 -f '^bun tools/agent-display.mjs'` writes the exact JS heap plus the
+  live sampled bytes by allocation site to `/tmp/glyph3d/agent-display-heap-<time>.txt`. Two dumps
+  minutes apart, diffed by site, name what grows.
+  ```
+  ./glyph3d-cli --as '' scene.memory
+  ./glyph3d-cli --as '' scene.textures
+  pkill -USR2 -f '^bun tools/agent-display.mjs'; tail -1 /tmp/glyph3d/agent-display.log
+  ```
+
 - **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
   `device.queue.writeBuffer`/`writeTexture`, counts display frames, reports a
   per-label bytes/frame histogram plus a greppable verdict line. The law it enforces:

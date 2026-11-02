@@ -1,5 +1,5 @@
 /**
- * Scene commands: scene.info, scene.transforms, scene.clear_grids
+ * Scene commands: scene.info, scene.memory, scene.textures, scene.transforms, scene.clear_grids
  * Uses registry as source of truth for scene object counts.
  */
 
@@ -42,6 +42,105 @@ export default function registerSceneCommands(router) {
             }
         };
     }, { description: 'Show scene details' });
+
+    // Where the CPU-side render memory sits: every geometry attribute's array (counted once — an
+    // interleaved buffer or a shared array is one), by owner (the nearest registered ancestor's
+    // kind), largest first. The heap's render share; a heap snapshot names the rest.
+    router.register('scene.memory', (args, ctx) => {
+        const arrays = new Map();   // ArrayBuffer view → owner
+        const objects = {};
+        const ownerOf = (obj) => {
+            for (let o = obj; o; o = o.parent) {
+                const id = ctx.registry?.getIdByGrid?.(o);
+                if (id) { const e = ctx.registry.get(id); return `${e?.type ?? 'registered'}${e?.role ? `:${e.role}` : ''}`; }
+            }
+            return obj.type || 'Object3D';
+        };
+        ctx.scene.traverse((obj) => {
+            const g = obj.geometry;
+            if (!g?.attributes) return;
+            const owner = ownerOf(obj);
+            objects[owner] = (objects[owner] || 0) + 1;
+            const attrs = [...Object.values(g.attributes), ...(g.index ? [g.index] : [])];
+            for (const a of attrs) {
+                const arr = a?.data?.array ?? a?.array;   // interleaved → its buffer's array
+                if (arr?.buffer && !arrays.has(arr)) arrays.set(arr, owner);
+            }
+        });
+        const by = {};
+        let total = 0;
+        for (const [arr, owner] of arrays) {
+            const b = arr.byteLength;
+            total += b;
+            const r = (by[owner] ||= { bytes: 0, arrays: 0 });
+            r.bytes += b; r.arrays++;
+        }
+        const rows = Object.entries(by).sort((a, b) => b[1].bytes - a[1].bytes);
+        const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+        const heap = typeof performance !== 'undefined' ? performance.memory?.usedJSHeapSize ?? null : null;
+        return {
+            text: `OK: ${mb(total)} in ${arrays.size} geometry arrays${heap != null ? ` (JS heap ${mb(heap)})` : ''}\n`
+                + rows.map(([o, r]) => `  ${mb(r.bytes).padStart(9)}  ${String(r.arrays).padStart(6)} arrays  ${String(objects[o] ?? 0).padStart(5)} objects  ${o}`).join('\n'),
+            data: { total, arrays: arrays.size, heap, by },
+        };
+    }, { description: 'CPU-side geometry memory by owner — where the render share of the heap sits', returns: '{ total, arrays, heap, by }' });
+
+    // GPU textures against what the scene still references — the gap is textures alive on the GPU
+    // that nothing draws with (render targets, the overlay's, and anything never disposed). Run it
+    // twice and compare: a gap that grows at a constant scene is a leak. Owners are the nearest
+    // registered ancestor (its registry id's kind), else the object's own type.
+    router.register('scene.textures', (args, ctx) => {
+        const gpu = ctx.renderer?.info?.memory?.textures ?? null;
+        const seen = new Map();   // texture → owner
+        const ownerOf = (obj) => {
+            for (let o = obj; o; o = o.parent) {
+                const id = ctx.registry?.getIdByGrid?.(o);
+                if (id) {
+                    const e = ctx.registry.get(id);
+                    return `${e?.type ?? 'registered'}${e?.role ? `:${e.role}` : ''}`;
+                }
+            }
+            return obj.type || obj.constructor?.name || 'Object3D';
+        };
+        const take = (v, owner) => {
+            if (!v) return;
+            if (Array.isArray(v)) { for (const x of v) take(x, owner); return; }
+            if (v.isTexture && !seen.has(v)) seen.set(v, owner);
+        };
+        const visit = (obj) => {
+            const mats = Array.isArray(obj.material) ? obj.material : obj.material ? [obj.material] : [];
+            if (!mats.length) return;
+            const owner = ownerOf(obj);
+            for (const m of mats) {
+                for (const k of Object.keys(m)) take(m[k], owner);
+                if (m.uniforms) for (const u of Object.values(m.uniforms)) take(u?.value, owner);
+            }
+        };
+        ctx.scene.traverse(visit);
+        take(ctx.scene.background, 'scene.background');
+        take(ctx.scene.environment, 'scene.environment');
+        const byOwner = {}, byKind = {};
+        let bytes = 0;
+        for (const [tex, owner] of seen) {
+            byOwner[owner] = (byOwner[owner] || 0) + 1;
+            const img = tex.image || {};
+            const b = img.data?.byteLength ?? 0;
+            bytes += b;
+            const kind = `${tex.constructor?.name || 'Texture'} ${img.width ?? '?'}×${img.height ?? '?'}${tex.name ? ` '${tex.name}'` : ''}`;
+            const k = (byKind[kind] ||= { n: 0, bytes: 0 });
+            k.n++; k.bytes += b;
+        }
+        const rows = Object.entries(byOwner).sort((a, b) => b[1] - a[1]);
+        const kinds = Object.entries(byKind).sort((a, b) => b[1].bytes - a[1].bytes || b[1].n - a[1].n).slice(0, 15);
+        const gap = gpu == null ? null : gpu - seen.size;
+        const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+        return {
+            text: `OK: ${gpu ?? '?'} textures on the GPU, ${seen.size} referenced by the scene (gap ${gap ?? '?'}), ${mb(bytes)} of CPU-side texel data\n`
+                + rows.map(([o, n]) => `  ${String(n).padStart(5)}  ${o}`).join('\n')
+                + '\n by kind (CPU bytes):\n' + kinds.map(([k, v]) => `  ${String(v.n).padStart(5)}  ${mb(v.bytes).padStart(9)}  ${k}`).join('\n'),
+            data: { gpu, referenced: seen.size, gap, bytes, byOwner, byKind },
+        };
+    }, { description: 'GPU textures vs what the scene references, by owner — a gap that grows at a constant scene is a leak', returns: '{ gpu, referenced, gap, byOwner }' });
 
     // The world-matrix walk: what the last frame's walk visited and recomputed, then a check of
     // every world matrix against a recompute from scratch. A stale node is a change the walk never
