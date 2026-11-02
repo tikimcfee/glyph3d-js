@@ -273,7 +273,6 @@ function enterPlaneDesk(ctx, carrel) {
     const cc = ctx.cameraController;
     const rect = carrel.getPlaneRect();
     if (!rect) return { text: `ERR: '${carrel.carrelName}' has no plane yet (no unit — the atlas isn't ready)`, data: null };
-    const k = carrel.planeK;
     const vp = cc.planeViewport();
     const prev = ctx.enteredCarrel;
     let aim = { x: 0, y: 0 };
@@ -287,7 +286,7 @@ function enterPlaneDesk(ctx, carrel) {
     }
     ctx.activeCarrel = carrel.carrelName;
     const s = enterPlaneView(ctx, `carrel:${carrel.carrelName}`, {
-        center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit: k, depth: 2 * Math.max(carrel._layoutD ?? 0, 1),
+        center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit: rect.pxPerUnit, depth: 2 * Math.max(carrel._layoutD ?? 0, 1) * rect.scale,
         aim, origin: rect.origin,
     });
     if (prev && prev !== carrel.carrelName) ctx.carrelBack = prev;

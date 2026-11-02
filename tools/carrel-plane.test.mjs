@@ -16,6 +16,8 @@
 //   - the pane layout round-trips (serializePanes → applyPanes), stacks naming members not seated
 //     yet hold their place until they arrive; a malformed record throws
 //   - named layouts: even (rows of ≤3) and main (one wide + a stack) tile the frame
+//   - a nested plane desk (scaled by its parent) answers its plane rect + pin aim in WORLD units, so a
+//     column still reads cellPx device px; a non-uniform world scale fails loud
 
 import './headless-canvas.mjs';
 import * as THREE from 'three';
@@ -320,6 +322,42 @@ const pinMap = (desk) => new Map(desk.pinRects().map((p) => [p.id, JSON.stringif
     fresh.applyPanes(rec);
     for (const [id, c, r] of [['c', 80, 24], ['a', 239, 56], ['b', 100, 20]]) { const g = screen(id, c, r); scene.add(g); fresh.lock(id, g, { immediate: true }); }
     ok(JSON.stringify([...pinMap(fresh)]) === want, 'serialize → apply → members in reverse order: identical pins');
+}
+
+// 10. a NESTED plane desk (a team desk inside the hub, which stands it scaled): the plane rect is in
+//     WORLD units, so a column reads cellPx device px however its parent scales it
+{
+    const s = 0.655;
+    const flat = board([['a', screen('a', 120, 40)], ['b', screen('b', 80, 30)]]);
+    const scene = new THREE.Scene();
+    const parent = new THREE.Group();
+    parent.scale.setScalar(s);
+    parent.position.set(30, 4, -12);
+    scene.add(parent);
+    const desk = new Carrel({ name: 'n', mode: 'plane', animDur: 0 });
+    parent.add(desk);
+    desk.setPlaneUnit(UNIT);
+    for (const [id, g] of [['a', screen('a', 120, 40)], ['b', screen('b', 80, 30)]]) { scene.add(g); desk.lock(id, g, { immediate: true }); }
+    scene.updateMatrixWorld(true);
+    const r = desk.getPlaneRect(), r1 = flat.desk.getPlaneRect();
+    near(r.pxPerUnit, desk.planeK / s, 1e-9, 'nested: px per WORLD unit = planeK / its world scale');
+    near(r.width * r.pxPerUnit, r1.width * r1.pxPerUnit, 1e-6, 'nested: the board is the same device px wide as an unnested one');
+    // A member's column, measured in WORLD units through its world matrix, reads cellPx at the rect's k.
+    const g = desk.entries.get('a').grid;
+    g.updateWorldMatrix(true, false);
+    const p0 = new THREE.Vector3(0, 0, 0).applyMatrix4(g.matrixWorld), p1 = new THREE.Vector3(CW, 0, 0).applyMatrix4(g.matrixWorld);
+    near(p0.distanceTo(p1) * r.pxPerUnit, UNIT.cellPx, 1e-6, `nested: one column = ${UNIT.cellPx} device px (got ${(p0.distanceTo(p1) * r.pxPerUnit).toFixed(4)})`);
+    ok(Math.abs(p0.distanceTo(p1) * desk.planeK - UNIT.cellPx) > 1, 'teeth: read at planeK (desk-local) the same column is off by the parent scale');
+    const vp = { width: 1600, height: 942 };
+    const a = desk.pinAim('a', vp, 24), a1 = flat.desk.pinAim('a', vp, 24);
+    near(a.x, a1.x * s, 1e-9, 'nested: pinAim is in world units (x)');
+    near(a.y, a1.y * s, 1e-9, 'nested: pinAim is in world units (y)');
+    // A non-uniform scale can't be read pixel-exact: it fails loud.
+    parent.scale.set(s, s * 2, s);
+    scene.updateMatrixWorld(true);
+    let threw = null;
+    try { desk.getPlaneRect(); } catch (e) { threw = e.message; }
+    ok(!!threw && /uniform world scale/.test(threw), `a non-uniform world scale fails loud (${threw})`);
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} carrel-plane: ${checks - fails}/${checks} checks`);

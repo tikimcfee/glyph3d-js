@@ -837,13 +837,33 @@ export class Carrel extends THREE.Object3D {
         const tl = this._boardTopLeft();
         this.updateWorldMatrix(true, false);
         const q = this.getWorldQuaternion(new THREE.Quaternion());
+        // The camera's plane is in WORLD units; a desk nested in another (a team desk at the hub)
+        // stands scaled, so its k (px per desk-local unit) is k / s per world unit.
+        const s = this._planeScale();
         return {
             center: this.localToWorld(new THREE.Vector3(tl.x + W / 2, tl.y - H / 2, tl.z)),
             normal: new THREE.Vector3(0, 0, 1).applyQuaternion(q).normalize(),
             up: new THREE.Vector3(0, 1, 0).applyQuaternion(q).normalize(),
-            width: W, height: H,
-            origin: { x: -W / 2, y: H / 2 },
+            width: W * s, height: H * s,
+            origin: { x: -W * s / 2, y: H * s / 2 },
+            pxPerUnit: k / s,
+            scale: s,
         };
+    }
+
+    /**
+     * The desk's world scale along its plane — one number, since the plane camera maps one world
+     * unit to one px count on both axes. A non-uniform world scale can't be read pixel-exact:
+     * it fails loud with the scale it found. @private @returns {number}
+     */
+    _planeScale() {
+        this.updateWorldMatrix(true, false);
+        const v = this.getWorldScale(new THREE.Vector3());
+        const sx = Math.abs(v.x), sy = Math.abs(v.y);
+        if (!(sx > 0) || Math.abs(sx - sy) > 1e-6 * Math.max(sx, sy)) {
+            throw new Error(`carrel '${this.carrelName}': a plane needs a uniform world scale on its plane, found (${v.x}, ${v.y}, ${v.z})`);
+        }
+        return sx;
     }
 
     /** The board's size in device px at k (pins: their union; tiles: the frame). @private */
@@ -1463,7 +1483,7 @@ export class Carrel extends THREE.Object3D {
         const pin = this.pinRects().find((p) => p.id === id);
         const box = this._boardPx();
         if (!pin || !box) return null;
-        const r = pin.rect, k = this.planeK;
+        const r = pin.rect, k = this.planeK / this._planeScale();   // px per WORLD unit
         const ax = r.w <= vp.width - 2 * marginPx ? r.x + r.w / 2 : r.x - marginPx + vp.width / 2;
         const ay = r.h <= vp.height - 2 * marginPx ? r.y + r.h / 2 : r.y - marginPx + vp.height / 2;
         return { x: -box.w / (2 * k) + ax / k, y: box.h / (2 * k) - ay / k };

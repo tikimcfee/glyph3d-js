@@ -273,9 +273,10 @@ export default class GomuxHub {
             if (same >= 2) {
                 this._centering = false;
                 this._centered = true;
-                // A plane being read (or about to be re-entered after the reload) keeps the camera.
-                if (this.ctx.enteredCarrel || this.ctx.pendingEnter) return;
+                // A plane being read (or about to be re-entered after the reload) keeps the camera —
+                // a desk's plane, or any plane the camera is in (plane.enter on one surface).
                 const cc = this.ctx.cameraController;
+                if (this.ctx.enteredCarrel || this.ctx.pendingEnter || cc?.planeState?.()) return;
                 if (cc?.input?.drag?.active || Object.values(cc?.input?.keys || {}).some(Boolean)) return;
                 Promise.resolve(this._exec(['carrel.enter', GOMUX_HUB]))
                     .catch((e) => console.warn('[gomux] centering on the hub failed —', e?.message || e));
