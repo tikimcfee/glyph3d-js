@@ -370,6 +370,16 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/map-labels.test.mjs
   ```
 
+- **`carrel-session.test.mjs`** (headless, the real CommandRouter + AttentionManager) — shared
+  carrels: an anonymous `carrel.attach` fails loud; `carrel.who` lists identified callers once,
+  oldest first, with what each seated there (`carrel.add` attributes); attention writes and
+  `point.go` from an identified caller are refused, nested in another verb too, while anonymous
+  writes land; presence drops when gomuxai reports an agent ended or its desk folds. Teeth: under
+  the old dispatch (a nested call starts anonymous) the nested write gets through.
+  ```
+  bun tools/carrel-session.test.mjs
+  ```
+
 - **`deixis-lite.test.mjs`** (headless) — pointing, lite (`app/client/Deixis.js`,
   `deixisCommands.js`) on a real CodeGrid and TerminalGrid line model: a code glyph resolves to
   `path:line «token»`, a terminal glyph to `<terminal> line N «text»` by its running line number;

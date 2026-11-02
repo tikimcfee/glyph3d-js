@@ -138,7 +138,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 
 - **AttentionManager** (`services/interaction`) owns three slots: `hover`, `primary`
   (sticky focus), `key` (keyboard target). One writer per slot; `attention.set <slot>
-  <id|none>`.
+  <id|none>`. Attention is the person's: `attention.set|clear|capture` (and `point.go`) refuse an
+  IDENTIFIED caller (`glyph3d-cli --as`, default `AGENT_NAME` — the per-call `ctx.caller`, nested
+  calls included); an agent points (`point.show`) or waits (`agent.waiting`) instead. Agents are
+  PRESENT at desks (`carrel.attach|detach|who`, `app/client/Participants.js`: listed in their hue
+  in the Carrels panel, what they seat there carries their name; ephemeral — dropped when gomuxai
+  reports them ended or the desk folds). Gate: `tools/carrel-session.test.mjs`.
 - **Keyboard responder chain** (`app/client/keyboardRouter.js`, the keyboard twin of
   `gestureResolver`) is the one capture-phase listener: an ordered, composable tier list
   (entity typing → Esc/context pop → nav keymap; camera WASD is the bubble fallthrough).

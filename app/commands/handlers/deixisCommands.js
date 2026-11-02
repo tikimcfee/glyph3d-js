@@ -142,6 +142,7 @@ export default function registerDeixisCommands(router) {
     }, { description: 'The live points (one per agent), newest first', returns: 'Point[]' });
 
     router.register('point.go', async (args, ctx) => {
+        if (ctx.caller) return fail(`point.go is the person's verb — it moves attention and the camera; '${ctx.caller}' points (point.show) instead`);
         const pts = ctx.deixis?.list() ?? [];
         const p = args[0] ? ctx.deixis?.points.get(String(args[0])) : pts[0];
         if (!p) return fail(args[0] ? `no point '${args[0]}' (point.list)` : 'no points');

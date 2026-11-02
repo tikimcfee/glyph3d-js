@@ -13,6 +13,9 @@
  * compass and reader mode use, so the command bar is a consumer
  * of attention.primary rather than an independent attention axis.
  *
+ * The writers (set / clear / capture) refuse an IDENTIFIED caller (an agent): attention is the
+ * person's. attention.info answers anyone.
+ *
  * All verbs return the standard { text, data } shape so controllers
  * (glyph3d-cli) can script focus changes for tests.
  */
@@ -22,11 +25,25 @@ import { materializeActor } from './fileLoader.js';
 const VALID_SLOTS = ['hover', 'primary', 'key'];
 
 /**
+ * Attention is the PERSON's: one writer per slot. An identified caller (an agent — `glyph3d-cli
+ * --as <name>`, the per-call `ctx.caller`, nested calls included) may not move it; it points
+ * (`point.show`) or waits (`agent.waiting`) instead. Anonymous callers — the UI, a person's own
+ * CLI, test drivers — write as before. @returns {{text: string, data: null}|null} the refusal
+ */
+function refuseIdentified(verb, ctx) {
+    if (!ctx.caller) return null;
+    console.info(`[attention] refused ${verb} from ${ctx.caller}: attention is the person's`);
+    return { text: `ERR: ${verb} refused for '${ctx.caller}' — attention is the person's (one writer per slot); point at it instead (point.show) or ask (agent.waiting)`, data: null };
+}
+
+/**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerAttentionCommands(router) {
 
     router.register('attention.set', (args, ctx) => {
+        const refused = refuseIdentified('attention.set', ctx);
+        if (refused) return refused;
         if (args.length < 2) {
             return {
                 text: `ERR: usage: attention.set <slot> <id|none>  (slot ∈ ${VALID_SLOTS.join('|')})`,
@@ -113,6 +130,8 @@ export default function registerAttentionCommands(router) {
     });
 
     router.register('attention.clear', (args, ctx) => {
+        const refused = refuseIdentified('attention.clear', ctx);
+        if (refused) return refused;
         if (!ctx.attentionManager) {
             return { text: 'ERR: AttentionManager not wired into ctx', data: null };
         }
@@ -141,6 +160,8 @@ export default function registerAttentionCommands(router) {
     // lock button passes its own, since its press bypasses click-to-focus) — capture implies key
     // focus, so we make it the keyboard target first. With no id it acts on the current key entity.
     router.register('attention.capture', (args, ctx) => {
+        const refused = refuseIdentified('attention.capture', ctx);
+        if (refused) return refused;
         const am = ctx.attentionManager;
         if (!am) return { text: 'ERR: AttentionManager not wired into ctx', data: null };
 

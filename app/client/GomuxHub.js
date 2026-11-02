@@ -195,6 +195,8 @@ export default class GomuxHub {
         }
         this._layout();
         for (const a of shown) this._status(a);
+        // An agent gomuxai reports ended leaves every desk it attached to (Participants).
+        this.ctx.participants?.dropEnded(snap.agents, (x) => this.runs(x));
         this._seatScreens();
         this._autoScreens(shown);
         this._centerWhenSettled();

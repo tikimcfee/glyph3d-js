@@ -16,6 +16,9 @@ import { DESK_KNOBS } from './client/tuning.js';
  *   click a member row  → camera.focus + attention.set primary
  *   ↩ on a member       → carrel.release  (send it home)
  *
+ * A desk with participants (carrel.attach — agents present as themselves) shows a `with` row
+ * of their names in their hues, each with how many things it seated there.
+ *
  * THE SEAT MENU — right-click a desk row (or its ⊕) for a categorized picker of
  * everything hostable: open files, terminals, agent books, frames. Each item is
  * a TOGGLE — seated here shows ✓ and clicks release; free shows · and clicks
@@ -119,6 +122,8 @@ const basename = (p) => {
 };
 
 const hex = (n) => `#${(n >>> 0).toString(16).padStart(6, '0')}`;
+/** A {r,g,b} 0–1 colour as CSS. */
+const rgbCss = (c) => `rgb(${[c?.r, c?.g, c?.b].map((v) => Math.round(255 * Math.max(0, Math.min(1, Number(v) || 0)))).join(',')})`;
 
 /** A member's display name: an agent book by its lane id, anything else by basename.
  *  @param {AppContext} ctx */
@@ -173,6 +178,8 @@ export default function CarrelsPanel({ client }) {
             seat: c.seat,
             dissolving: !!c._dissolving,
             members: c.list().map((m) => m.id),
+            // Presence (client/Participants.js): who besides the person is here, in their hue.
+            who: (ctx.participants?.who(c.carrelName) ?? []).map((p) => ({ name: p.name, hue: rgbCss(p.hue), seated: p.seated.length })),
             knobs: Object.fromEntries(DESK_KNOBS.map(({ key }) => [key, c[key]])),
         })));
     }, [client]);
@@ -180,8 +187,9 @@ export default function CarrelsPanel({ client }) {
     useEffect(() => {
         refresh();
         const off = client?.ctx?.workspace?.on?.('change:surfaces', refresh);
+        const offWho = client?.ctx?.participants?.onChange?.(refresh);
         const t = setInterval(refresh, 1000);
-        return () => { off?.(); clearInterval(t); };
+        return () => { off?.(); offWho?.(); clearInterval(t); };
     }, [client, refresh]);
 
     const exec = useCallback((cmd) => client?.router?.execute(cmd), [client]);
@@ -239,6 +247,14 @@ export default function CarrelsPanel({ client }) {
                                 onClick={(e) => { e.stopPropagation(); after(['carrel.dissolve', d.name]); }}
                                 title={`Fold ${d.name} — members slide home (carrel.dissolve)`}>✕</span>
                         </div>
+                        {d.who.length > 0 && (
+                            <div style={S.knobRow} title={`attached here (carrel.who ${d.name})`}>
+                                <span style={S.knobLabel}>with</span>
+                                <span>{d.who.map((p, i) => (
+                                    <span key={p.name} style={{ color: p.hue }}>{i ? ' · ' : ''}{p.name}{p.seated ? ` (${p.seated})` : ''}</span>
+                                ))}</span>
+                            </div>
+                        )}
                         {knobsFor === d.name && (
                             <div style={S.knobRow}>
                                 <span style={S.knobLabel}>mode</span>

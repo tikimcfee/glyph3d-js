@@ -356,10 +356,12 @@ export default function registerCarrelCommands(router) {
         if (how === 'returned') return { text: `OK: '${r.id}' put back in its seat at '${carrel.carrelName}'`, data: { id: r.id, carrel: carrel.carrelName } };
         if (!how) return { text: `ERR: could not seat '${r.id}'`, data: null };
         worldTouch(ctx, carrel);
+        // An attached caller's seat carries its name (carrel.who lists it).
+        const by = ctx.participants?.noteSeated(ctx.caller, carrel.carrelName, r.id) ? ctx.caller : null;
         // Name the species in the receipt: a driver seating "books" by bare
         // index will read `seated terminal 'term-9'` and catch itself.
         const kindTag = r.kind ? `${r.kind} ` : '';
-        return { text: `OK: seated ${kindTag}'${r.id}' at '${carrel.carrelName}'`, data: { id: r.id, kind: r.kind ?? null, carrel: carrel.carrelName } };
+        return { text: `OK: seated ${kindTag}'${r.id}' at '${carrel.carrelName}'${by ? ` (by ${by})` : ''}`, data: { id: r.id, kind: r.kind ?? null, carrel: carrel.carrelName, by } };
     }, { description: 'Seat a window or whole book at a carrel (default: the active one); docked windows hand over cleanly, a borrowed one goes back to its seat', usage: '<id|index|book> [carrel]', returns: '{ id, carrel }' });
 
     router.register('carrel.release', (args, ctx) => {
@@ -380,6 +382,39 @@ export default function registerCarrelCommands(router) {
         worldTouch(ctx, carrel);
         return { text: `OK: '${carrel.carrelName}' re-seated from its members' sizes now`, data: { carrel: carrel.carrelName } };
     }, { description: "Re-seat a desk's members by their sizes now — a seat otherwise only grows (a member shrinking keeps its room until the desk re-learns)", usage: '[name]', returns: '{ carrel }' });
+
+    // ── Presence: who besides the person is at a desk (client/Participants.js) ──
+    router.register('carrel.attach', (args, ctx) => {
+        if (!ctx.participants) return { text: 'ERR: participants not wired', data: null };
+        if (!ctx.caller) return { text: 'ERR: carrel.attach needs an identified caller — glyph3d-cli --as <name> (AGENT_NAME); an anonymous call has no one to list', data: null };
+        const carrel = findCarrel(ctx, args[0]);
+        if (!carrel || !args[0]) return { text: `ERR: usage: carrel.attach <carrel>${args[0] ? ` (no carrel '${args[0]}')` : ''}`, data: null };
+        const r = ctx.participants.attach(ctx.caller, carrel.carrelName);
+        if (!r.ok) return { text: `ERR: ${r.error}`, data: null };
+        return { text: `OK: ${ctx.caller} ${r.already ? 'already at' : 'attached to'} '${carrel.carrelName}'`, data: { name: ctx.caller, carrel: carrel.carrelName, already: r.already } };
+    }, { description: "Be present at a carrel as yourself (an identified caller): listed in carrel.who in your hue; what you seat there carries your name", usage: '<carrel>', returns: '{ name, carrel, already }' });
+
+    router.register('carrel.detach', (args, ctx) => {
+        if (!ctx.participants) return { text: 'ERR: participants not wired', data: null };
+        if (!ctx.caller) return { text: 'ERR: carrel.detach needs an identified caller — glyph3d-cli --as <name> (AGENT_NAME)', data: null };
+        const left = ctx.participants.detach(ctx.caller, args[0] != null ? String(args[0]) : null);
+        if (!left.length) return { text: `ERR: ${ctx.caller} is not attached${args[0] != null ? ` to '${args[0]}'` : ' anywhere'}`, data: null };
+        return { text: `OK: ${ctx.caller} left ${left.map((c) => `'${c}'`).join(', ')}`, data: { name: ctx.caller, left } };
+    }, { description: 'Leave a carrel you attached to (every carrel when none is named)', usage: '[carrel]', returns: '{ name, left }' });
+
+    router.register('carrel.who', (args, ctx) => {
+        if (!ctx.participants) return { text: 'ERR: participants not wired', data: null };
+        let name = null;
+        if (args[0] != null) {
+            const carrel = findCarrel(ctx, args[0]);
+            if (!carrel) return { text: `ERR: no carrel '${args[0]}'`, data: null };
+            name = carrel.carrelName;
+        }
+        ctx.participants.prune();
+        const who = ctx.participants.who(name).map((p) => ({ name: p.name, carrel: p.carrel, since: p.since, seated: [...p.seated] }));
+        const line = who.length ? who.map((p) => `${p.name}@${p.carrel}${p.seated.length ? ` [${p.seated.join(', ')}]` : ''}`).join('  ') : '(no one)';
+        return { text: `OK: ${line}`, data: { carrel: name, participants: who } };
+    }, { description: 'Who is attached to a carrel (or to any) — presence, oldest first, with what each seated there', usage: '[carrel]', returns: '{ carrel, participants:[{name,carrel,since,seated}] }' });
 
     router.register('carrel.list', (_args, ctx) => {
         const map = carrels(ctx);

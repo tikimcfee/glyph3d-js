@@ -52,6 +52,7 @@ import errorTracker from '@glyph3d/core/utils/ErrorTracker.js';
 import { createStatusChannel } from './statusChannel.js';
 import PlaneOverlay from './PlaneOverlay.js';
 import Deixis from './Deixis.js';
+import Participants from './Participants.js';
 import MapLabels from './MapLabels.js';
 // The spine, ported verbatim — handlers register lazily; nothing here knows the
 // shell. Their only deps are @glyph3d/core, three, and sibling helpers.
@@ -262,6 +263,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {ReturnType<typeof setTimeout>|null} */ _carrelSweepTimer: null,
     /** @type {Set<string>|null} */ _agentShelfSeen: null,
     /** @type {import('./Deixis.js').default|null} */ deixis: null,
+    /** @type {import('./Participants.js').default|null} who besides the person is at each carrel (carrel.attach) */ participants: null,
     /** @type {string|null} the controller to answer (a relay routing id, 'local', …) */ sender: null,
     /** @type {string|null} the caller's name when identified (`glyph3d-cli --as`); null = anonymous */ caller: null,
     cid: 0,
@@ -463,6 +465,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
 
     // Deixis: the live points (one per agent) and the point.mark → CommandBar draft channel.
     state.ctx.deixis = new Deixis(state.ctx);
+    // Presence: identified callers attached to desks (carrel.attach / who); ephemeral.
+    state.ctx.participants = new Participants(state.ctx);
 
     // Relayout motion: every re-lay becomes a glide — durable nodes ease from where
     // they were to where the scheme stamped them (<DockRunner/> ticks it; while it
