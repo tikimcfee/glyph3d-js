@@ -43,6 +43,19 @@ export function armEnteredLife(ctx) {
   cc.addPlaneListener((on) => { if (!on) recordEntered(ctx, null); });
 }
 
+/**
+ * The plane being READ right now: the camera in a plane view that isn't easing out of it, and the
+ * plane desk entered, if any (`plane.enter` on one surface has none). Null in the open world. The
+ * pointer and keyboard chains ask it: inside a plane a click or a bare nav key never flies the camera.
+ * @param {AppContext} ctx @returns {{desk: import('@glyph3d/core/services/interaction/Carrel.js').default|null}|null}
+ */
+export function planeReading(ctx) {
+  const st = ctx?.cameraController?.planeState?.();
+  if (!st || st.leaving) return null;
+  const desk = ctx.enteredCarrel ? ctx.carrels?.get?.(ctx.enteredCarrel) : null;
+  return { desk: desk && desk.mode === 'plane' ? desk : null };
+}
+
 /** The record for the snapshot. @param {AppContext} ctx */
 export function captureEntered(ctx) {
   return ctx.workspace?.getSurface?.(SURFACE)?.view?.entered ?? null;

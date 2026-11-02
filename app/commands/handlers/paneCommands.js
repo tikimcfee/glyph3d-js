@@ -40,12 +40,15 @@ const enteredPlane = (ctx) => {
     return desk && desk.mode === 'plane' ? desk : null;
 };
 
-/** On a pin board: focus a pin and slide the plane's aim to show it. @returns {string|null} */
-function focusPin(ctx, desk, idOrDir) {
+/**
+ * On a pin board: focus a pin and slide the plane's aim to show it — unless `keepView` (a click on a
+ * pin you can see: the view stays where it is). @returns {string|null}
+ */
+function focusPin(ctx, desk, idOrDir, keepView = false) {
     const id = DIRS.includes(idOrDir) ? desk.pinFocus(idOrDir) : desk.pinFocusOn(idOrDir);
     if (!id) return null;
     const cc = ctx.cameraController;
-    if (cc?.setPlaneAim) {
+    if (!keepView && cc?.setPlaneAim) {
         const vp = cc.planeViewport();
         const a = desk.pinAim(id, vp, Number(getSetting('plane.topMarginPx')) * (vp.dpr || 1));
         if (a) cc.setPlaneAim(a.x, a.y);
@@ -130,12 +133,14 @@ export default function registerPaneCommands(router) {
         return { text: `OK: split ${axis === 'x' ? 'H' : 'V'} → '${r.id}'`, data: { id: r.id, axis } };
     }, { description: 'Split the active pane, tiling a window into the new leaf (h=side-by-side, v=stacked)', usage: '<h|v> <id|index>', returns: '{ id, axis }' });
 
-    router.register('pane.focus', (args, ctx) => {
+    router.register('pane.focus', (rawArgs, ctx) => {
+        const keepView = rawArgs.includes('--keep-view');
+        const args = rawArgs.filter((a) => a !== '--keep-view');
         const board = enteredPlane(ctx);
         if (board && board.planeArrange === 'pins') {
             const a = String(args[0] ?? '').toLowerCase();
             const target = DIRS.includes(a) ? a : (paneId(ctx, args[0]) ?? String(args[0] ?? ''));
-            const id = focusPin(ctx, board, target);
+            const id = focusPin(ctx, board, target, keepView);
             if (!id) return { text: DIRS.includes(a) ? `ERR: no pin to the ${a}` : `ERR: no pin '${args[0] ?? ''}' on '${board.carrelName}'`, data: null };
             return { text: `OK: focus → '${id}'`, data: { id } };
         }
@@ -157,7 +162,7 @@ export default function registerPaneCommands(router) {
         ctx.attentionManager?.set?.('primary', next, { registry: ctx.registry });
         ctx.attentionManager?.set?.('key', type === 'terminal' ? next : null, { registry: ctx.registry });
         return { text: `OK: focus ${dir} → '${next}'`, data: { id: next } };
-    }, { description: 'Move pane focus to the geometric neighbor in a direction (hjkl-style)', usage: '<left|right|up|down>', returns: '{ id }' });
+    }, { description: 'Move pane focus to the geometric neighbor in a direction (hjkl-style), or on a plane desk to a member; a pin board slides the view to show the pin unless --keep-view (a click on a pin)', usage: '<left|right|up|down|member> [--keep-view]', returns: '{ id }' });
 
     router.register('pane.resize', (args, ctx) => {
         const axis = AXES[String(args[0] ?? '').toLowerCase()];

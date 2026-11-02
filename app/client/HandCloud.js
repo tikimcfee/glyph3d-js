@@ -13,6 +13,7 @@
  */
 
 import { CloudPipeline, CloudView, HAND_CLOUD_DEFAULTS } from '@glyph3d/core/hand/cloud/index.js';
+import { handsOn } from './handsOn.js';
 /** @import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js' */
 /** @import HandPresence from '@glyph3d/core/hand/HandPresence.js' */
 
@@ -44,7 +45,7 @@ export default class HandCloud {
             onResult: (r) => this._onResult(r),
             onSimFrame: (payload) => { if (this.simulating) this.stream.injectFrame(SIM_SOURCE_ID, payload); },
         });
-        // A picture-in-picture: the frame's `cloud` pass draws it (app/client/FramePasses.js).
+        // A picture-in-picture: the frame's `cloud` pass draws it (renderPip; app/client/FramePasses.js).
         this.view = new CloudView();
         this.view.displayProvider = () => this._display();
         /** handedness → {t, status, hand, pinch, at} */
@@ -77,6 +78,13 @@ export default class HandCloud {
         this.opts[key] = value;
         this.pipeline.setOpts({ [key]: value });
     }
+
+    /**
+     * Draw the picture-in-picture (the frame's `cloud` pass), shown or not by `cloud.view` — and only
+     * while a hand device is attached: with no hand there is nothing to show, only an empty box.
+     * @param {import('three').WebGLRenderer} renderer
+     */
+    renderPip(renderer) { if (handsOn(this.stream)) this.view.render(renderer); }
 
     /** Forget the tracker's temporal state and the last results. */
     reset() { this.pipeline.reset(); this.last.clear(); this._fits.clear(); }

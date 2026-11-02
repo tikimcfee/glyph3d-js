@@ -405,7 +405,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `pane.*` act on the entered plane (pins: `pane.focus` by direction slides the aim to the neighbor
   pin; tiles: split/focus/resize/close/swap/zoom/tab/place/layout), else the CameraDock frame. Keys:
   the plane PREFIX (Ctrl+Space, above terminal typing) then h/j/k/l focus, Tab back, z/]/[/x/e/m/s on
-  tiles, q leave. The layout is durable (the Panes component on `carrel:<name>`, `carrelPanes.js`);
+  tiles, q leave; unprefixed, with nothing holding the keyboard, h/j/k/l and the arrows hop pins too
+  (`keymap.js` PLANE_BINDINGS — never the open world's tree walk). A click inside a plane focuses
+  and never moves the camera (`gestureResolver.js`, `planeReading`): primary, a terminal's keyboard,
+  the desk's pin (`pane.focus <id> --keep-view`), never `camera.focus`. The layout is durable (the Panes component on `carrel:<name>`, `carrelPanes.js`);
   so is the plane being read (the Entered component, `planeEntered.js` — re-entered after a reload
   once the desk stands, the hub's load centering standing down meanwhile). A save records a member's
   OWN view, never its holder's (`Holding.ownViewOf`). Gates: `tools/carrel-plane.test.mjs`,
@@ -562,8 +565,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   jitter p95 (target < 0.5 mm, tips included) and lag while moving. Real sessions are RECORDED by
   the relay (`source.record start [name] | stop | status` → JSONL in the user cache dir, or
   `serve --record-dir`) and replayed headlessly through the same code (`bun tools/hand-replay.mjs
-  <file> [--variant "name:hand.stab.k=v"]…`). Verbs `calib.status|inspect|reset|save|forget|pin|view`; the Hand
-  dock panel is the convergence board. `hand/HandSim.js` is a face-down hand with known truth
+  <file> [--variant "name:hand.stab.k=v"]…`). Verbs `calib.status|inspect|reset|save|forget|pin|view`; the Hand dock panel is the convergence board.
+  It polls `calib.status` only while a hand device is attached (`app/client/handsOn.js`
+  pollWhileHands), and the hand cloud's picture-in-picture (`cloud.view`, born off) draws only then
+  (`HandCloud.renderPip`). `hand/HandSim.js` is a face-down hand with known truth
   that just wanders (`hand.simulate on [mode] | bump`); gates `tools/hand-model.test.mjs`,
   `tools/hand-calib-app.test.mjs`. Gesture→verb and hand→camera binding are not built yet.
 - **All glyph metrics come from the atlas at runtime** — never hardcode character

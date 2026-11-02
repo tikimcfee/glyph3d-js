@@ -24,20 +24,35 @@
  *   typically claims only gestures targeting ITS entity and declines the rest —
  *   the decline IS "retarget as fresh focus", formalized (root handles it).
  *
- * env = { exec, attention, placeCaretFromPointer, scrollHitAt }
+ * env = { exec, attention, ctx, placeCaretFromPointer, scrollHitAt }
  *   exec: (cmd) => router.execute(cmd) — verbs only, never direct mutation.
+ *   ctx: the app context, read (never written) for the dock and the plane being read.
  *   scrollHitAt: (entry) => what the pointer is over on an agent book's scroll document
  *     ({step, part} — AgentBooks.scrollHit), or null.
+ *
+ * Inside a PLANE (planeReading — the camera reading a surface) a click focuses and never moves the
+ * camera: no camera.focus, whose fly would ease out of the plane first.
  *
  * NOT in the chain (the always tier lives in its own components, on purpose):
  * camera orbit/pan drag, wheel-scroll-by-hover, Ctrl-drag move, grip resize.
  * Modal-izing those would recreate "where did my WASD go" at scale.
  */
 
-/** Re-affirm primary; camera flight belongs to a focus CHANGE only. */
-function flyIfChanged(env, id) {
+import { planeReading } from './planeEntered.js';
+
+/**
+ * Focus what was clicked: re-affirm primary; camera flight belongs to a focus CHANGE only, and only
+ * in the open world. Inside a plane the view never moves for a click (a fly leaves the plane first):
+ * on a plane desk the clicked member's pin (or pane) takes the desk's focus, the view kept.
+ */
+function focusTarget(env, id) {
     const prev = env.attention.get('primary')?.id;
     env.exec(`attention.set primary ${id}`);
+    const plane = planeReading(env.ctx);
+    if (plane) {
+        if (plane.desk?.entries?.has?.(id)) env.exec(['pane.focus', id, '--keep-view']);
+        return;
+    }
     if (id !== prev) env.exec(`camera.focus ${id}`);
 }
 
@@ -50,7 +65,7 @@ const POLICIES = {
             if (g.target?.id !== node.id) return false; // a different target → bubble (fresh focus)
             // A 'sticky edit' user policy (config plane) would claim the foreign-target
             // case above instead of declining — the one-line seam for that snowflake.
-            flyIfChanged(env, node.id);
+            focusTarget(env, node.id);
             env.exec(`attention.set key ${node.id}`);
             env.placeCaretFromPointer(g.target);
             return true;
@@ -67,7 +82,7 @@ const POLICIES = {
     key: {
         click(g, node, env) {
             if (g.target?.id !== node.id) return false;
-            flyIfChanged(env, node.id);
+            focusTarget(env, node.id);
             env.exec(`attention.set key ${node.id}`);
             return true;
         },
@@ -86,7 +101,7 @@ const POLICIES = {
     focus: {
         click(g, node, env) {
             if (g.target?.id !== node.id) return false;
-            flyIfChanged(env, node.id);
+            focusTarget(env, node.id);
             if (g.target.type === 'terminal') {
                 env.exec(`attention.set key ${node.id}`); // terminals always take the keyboard on click
                 return true;
@@ -103,7 +118,7 @@ const POLICIES = {
 const ROOT = {
     click(g, env) {
         if (!g.target) { env.exec('attention.set key none'); return true; } // empty space frees the keyboard
-        flyIfChanged(env, g.target.id);
+        focusTarget(env, g.target.id);
         // Terminals take keyboard focus on click (type immediately); grids get
         // visual focus only — entering edit is the deliberate dblclick gesture.
         env.exec(g.target.type === 'terminal'
@@ -124,7 +139,7 @@ const ROOT = {
 /**
  * Walk the chain: innermost node → outward → root tier.
  * @param {{type: string, target: object|null}} gesture
- * @param {{exec: Function, attention: object, context: object, cameraDock: object, placeCaretFromPointer: Function, scrollHitAt?: Function}} env
+ * @param {{exec: Function, attention: object, ctx?: object, context: object, cameraDock: object, placeCaretFromPointer: Function, scrollHitAt?: Function}} env
  * @returns {boolean} whether anything claimed the gesture
  */
 export function resolveGesture(gesture, env) {
@@ -145,7 +160,7 @@ export function resolveGesture(gesture, env) {
     // (click again drops it back) AND focus it (keyboard-live for terminals), with no
     // camera move. ALL of that behavior lives in the verb — the click emits ONE verb,
     // so click ≡ CLI ≡ RPC (no UI-composed fork). Pre-empts the responder chain (its
-    // flyIfChanged would move the camera); ejecting a tile back to the world stays
+    // focusTarget would fly the camera); ejecting a tile back to the world stays
     // dock.focus / dock.toggle (verbs). dblclick falls through to normal handling.
     if (gesture.type === 'click' && gesture.target && env.ctx?.holding.isDocked(gesture.target.id)) {
         env.exec(['dock.spotlight', gesture.target.id]);

@@ -13,13 +13,19 @@
 //   - an unknown key after the prefix is consumed (no surprise bytes) and disarms
 //   - the prefix times out (planePrefixMs)
 //   - a bare Esc leaves the plane only when nothing else claims it (a focus to pop goes first)
+//   - the bare nav layer follows the plane being read: in the open world h/j/k/l/u/i walk the tree
+//     (focus.neighbor/parent/child) and arrows are unbound; on a plane desk h/j/k/l and the arrows
+//     hop pins (pane.focus <dir>, one press one hop) and u/i are unbound; in a plane read with no
+//     desk none of them run anything; the book keys page in all three; a terminal holding the
+//     keyboard still types them. Teeth: routing the plane through the open world's table fails it.
 
 import { installKeyboardRouter } from '../app/client/keyboardRouter.js';
 
 let fails = 0, checks = 0;
 const ok = (c, m) => { checks++; if (!c) { fails++; console.error(`FAIL ${m}`); } };
+const J = (v) => JSON.stringify(v);
 
-function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
+function harness({ entered = true, terminal = false, popsFocus = false, reading = entered ? 'desk' : null } = {}) {
     const listeners = new Map();
     const doc = {
         activeElement: null,
@@ -34,7 +40,7 @@ function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
         on: () => () => {},
     };
     const ran = [];
-    const state = { entered };
+    const state = { entered, reading };
     const env = {
         document: doc, am,
         exec: (cmd) => { ran.push(Array.isArray(cmd) ? cmd.join(' ') : cmd); return { text: 'OK' }; },
@@ -45,11 +51,13 @@ function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
             context: { nodes: () => (popsFocus ? [{ kind: 'edit' }] : []) },
         },
         planeEntered: () => state.entered,
+        // The plane being read: a desk, a surface with no desk (plane.enter), or none (the open world).
+        planeReading: () => (state.reading === 'desk' ? { desk: {} } : state.reading === 'surface' ? { desk: null } : null),
         planePrefixMs: 1500,
     };
     installKeyboardRouter(env);
     const press = (key, mods = {}) => {
-        const e = { key, ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, altKey: !!mods.alt, metaKey: !!mods.meta,
+        const e = { key, ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, altKey: !!mods.alt, metaKey: !!mods.meta, repeat: !!mods.repeat,
             claimed: false, preventDefault() { this.claimed = true; }, stopImmediatePropagation() {} };
         listeners.get('keydown')(e);
         return e.claimed;
@@ -120,6 +128,48 @@ function harness({ entered = true, terminal = false, popsFocus = false } = {}) {
     const h2 = harness({ entered: false });
     h2.press('Escape');
     ok(!h2.ran.includes('carrel.leave'), 'outside a plane Esc never leaves');
+}
+
+// the bare nav layer follows the plane being read
+{
+    const DIRS = { h: 'left', j: 'down', k: 'up', l: 'right', ArrowLeft: 'left', ArrowDown: 'down', ArrowUp: 'up', ArrowRight: 'right' };
+    const tree = { h: 'focus.neighbor left', j: 'focus.neighbor down', k: 'focus.neighbor up', l: 'focus.neighbor right', u: 'focus.parent', i: 'focus.child' };
+    const treeWalk = (ran) => ran.some((c) => c.startsWith('focus.'));
+    // control: the open world walks the tree
+    for (const [key, verb] of Object.entries(tree)) {
+        const w = harness({ entered: false });
+        ok(w.press(key) && w.ran.at(-1) === verb, `open world: ${key} → ${verb} (got ${w.ran.at(-1)})`);
+    }
+    for (const key of ['ArrowLeft', 'ArrowUp']) {
+        const w = harness({ entered: false });
+        ok(!w.press(key) && w.ran.length === 0, `open world: ${key} is unbound (it reaches the camera)`);
+    }
+    // a plane desk: h/j/k/l and the arrows hop pins
+    for (const [key, dir] of Object.entries(DIRS)) {
+        const p = harness();
+        ok(p.press(key) && p.ran.join() === `pane.focus ${dir}`, `plane desk: ${key} → pane.focus ${dir} (got ${J(p.ran)})`);
+        ok(!p.press(key, { repeat: true }) && p.ran.length === 1, `plane desk: a held ${key} hops once`);
+    }
+    for (const key of ['u', 'i']) {
+        const p = harness();
+        p.press(key);
+        ok(!treeWalk(p.ran) && p.ran.length === 0, `plane desk: ${key} runs nothing (got ${J(p.ran)})`);
+    }
+    // a plane read with no desk: nothing walks, nothing hops
+    for (const key of [...Object.keys(DIRS), 'u', 'i']) {
+        const s1 = harness({ entered: false, reading: 'surface' });
+        s1.press(key);
+        ok(s1.ran.length === 0, `plane read, no desk: ${key} runs nothing (got ${J(s1.ran)})`);
+    }
+    // the book keys page in all three
+    for (const reading of [null, 'desk', 'surface']) {
+        const b = harness({ entered: reading === 'desk', reading });
+        ok(b.press(',') && b.ran.join() === 'book.page prev', `${reading ?? 'open world'}: , pages the book (got ${J(b.ran)})`);
+    }
+    // a terminal holding the keyboard types them
+    const t = harness({ terminal: true });
+    t.press('h'); t.press('ArrowLeft');
+    ok(t.sent.length === 2 && t.ran.length === 0, `plane desk, a focused terminal: h and ← type (sent ${t.sent.length}, ran ${J(t.ran)})`);
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} plane-keys: ${checks - fails}/${checks} checks`);

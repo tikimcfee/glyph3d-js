@@ -132,6 +132,22 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   pkill -USR2 -f '^bun tools/agent-display.mjs'; tail -1 /tmp/glyph3d/agent-display.log
   ```
 
+- **`plane-click.test.mjs`** and **`plane-keys.test.mjs`** (headless) — input inside a plane: a click
+  focuses and never moves the camera (the real `resolveGesture`, `pane.*` verbs and a pin-board Carrel;
+  the open world's click still flies — the control; teeth: dropping the plane branch fails 15), and
+  bare h/j/k/l / arrows hop pins (`pane.focus <dir>`), never the open world's tree walk (teeth: the
+  open-world table in a plane fails 20).
+  ```
+  bun tools/plane-click.test.mjs
+  bun tools/plane-keys.test.mjs
+  ```
+- **`hands-on.test.mjs`** (headless) — the hand panel polls `calib.status` only while a hand device is
+  attached, and the cloud picture-in-picture draws only then (teeth: an unconditional poll fails 3; an
+  ungated pass draws the empty box).
+  ```
+  bun tools/hands-on.test.mjs
+  ```
+
 - **`agent-answer-check.mjs`** (live, private) — answering an agent end to end without touching the
   person's display or agents: it spawns a scratch shell agent (`agent spawn … --backend shell`), a
   private relay (gomuxai on, scratch root and tmux socket) and a private display whose own store has

@@ -15,6 +15,7 @@ import SearchBook from '@glyph3d/core/collections/SearchBook.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import AttentionManager from '@glyph3d/core/services/interaction/AttentionManager.js';
 import { installKeyboardRouter } from './keyboardRouter.js';
+import { planeReading } from './planeEntered.js';
 import InteractionContext from '@glyph3d/core/services/interaction/InteractionContext.js';
 import LspNavigator from '@glyph3d/core/services/interaction/LspNavigator.js';
 import CameraDock from '@glyph3d/core/services/interaction/CameraDock.js';
@@ -730,9 +731,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       presence: state.ctx.handPresence,
       calib: () => state.ctx.handCalib,
     });
-    // Its picture-in-picture draws after the overlay, through the view camera the presence follows.
+    // Its picture-in-picture draws after the overlay, through the view camera the presence follows,
+    // while a hand device is attached (renderPip).
     const offCloudPass = state.ctx.renderPasses.add('cloud', PASS_ORDER.cloud, (r, cam) => {
-      if (cam === state.ctx.handPresence.camera) state.ctx.handCloud?.view.render(r);
+      if (cam === state.ctx.handPresence.camera) state.ctx.handCloud?.renderPip(r);
     });
     applyGroupSettings(state.ctx, 'Hand cloud');
     // LSP client: present whenever the bridge is, but only functional against a
@@ -804,6 +806,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       am: state.ctx.attentionManager,
       exec: (cmd) => state.router.execute(cmd),
       planeEntered: () => !!state.ctx.enteredCarrel,
+      planeReading: () => planeReading(state.ctx),
       noteKey: () => state.ctx.deixis?.noteKey(),
       replyAgentFor: (id) => (getSetting('gomux.input') === true ? state.ctx.gomuxHub?.screenAgent(id) ?? null : null),
       get planePrefixMs() { return Number(getSetting('plane.prefixMs')); },

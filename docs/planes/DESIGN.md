@@ -218,6 +218,15 @@ the terminal, so plane keys need their own tier:
 - **Esc.** In soft focus Esc is the context pop, and the entered plane is the outermost context: the
   first Esc releases the key slot to the plane (focus stays drawn), the second leaves. In capture
   (settled, greedy) Esc goes to the program, as today.
+- **Unprefixed, with nothing holding the keyboard**, the nav layer is the plane's (`app/client/keymap.js`
+  `PLANE_BINDINGS`): `h j k l` and the arrows hop pins (`pane.focus <dir>`, one press one hop) and
+  the book keys page. The tree walk (`focus.neighbor` / `parent` / `child`, whose focus flies the
+  camera out of the plane) belongs to the open world. A plane read with no desk (`plane.enter` on one surface) keeps only the book keys.
+- **The pointer.** A click inside a plane focuses and never moves the camera
+  (`app/client/gestureResolver.js` `focusTarget`, asking `planeReading`). It sets primary, gives a
+  terminal the keyboard, and on a desk gives the clicked pin the desk's focus
+  (`pane.focus <id> --keep-view`), so the hops go on from it. It never sends `camera.focus`, whose fly
+  leaves the plane first.
 - **Enter in space.** With a carrel in the primary slot (or its label hovered), Enter enters it (a
   nav-keymap binding, born configurable).
 

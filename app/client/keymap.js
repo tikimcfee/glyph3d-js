@@ -26,7 +26,7 @@
  */
 
 /**
- * @type {Binding[]} The nav layer — all movement SCOPED to the current directory:
+ * The nav layer — all movement SCOPED to the current directory:
  *   h / j / k / l  — nearest sibling left / down / up / right (spatial direction,
  *                    but candidates are tree-siblings only, so it never crosses a
  *                    directory boundary — moves match the eye, stay in scope).
@@ -41,6 +41,16 @@
  *   , / .          — previous / next sheet (older / newer in an agent run; held, they flip)
  *   < / >          — first sheet / last sheet (the newest — live-follow resumes)
  */
+
+/** @type {Binding[]} The book keys, in every nav layer. */
+export const BOOK_BINDINGS = [
+    { key: ',', command: ['book.page', 'prev'],       label: 'book: previous sheet', repeat: true },
+    { key: '.', command: ['book.page', 'next'],       label: 'book: next sheet', repeat: true },
+    { key: '<', command: ['book.page', 'first'],      label: 'book: first sheet' },
+    { key: '>', command: ['book.page', 'last'],       label: 'book: last sheet (live)' },
+];
+
+/** @type {Binding[]} The open world's nav layer: the tree walk, then the book keys. */
 export const NAV_BINDINGS = [
     { key: 'h', command: ['focus.neighbor', 'left'],  label: 'sibling left' },
     { key: 'j', command: ['focus.neighbor', 'down'],  label: 'sibling down' },
@@ -48,10 +58,25 @@ export const NAV_BINDINGS = [
     { key: 'l', command: ['focus.neighbor', 'right'], label: 'sibling right' },
     { key: 'u', command: ['focus.parent'],            label: 'out to parent directory' },
     { key: 'i', command: ['focus.child'],             label: 'into child directory' },
-    { key: ',', command: ['book.page', 'prev'],       label: 'book: previous sheet', repeat: true },
-    { key: '.', command: ['book.page', 'next'],       label: 'book: next sheet', repeat: true },
-    { key: '<', command: ['book.page', 'first'],      label: 'book: first sheet' },
-    { key: '>', command: ['book.page', 'last'],       label: 'book: last sheet (live)' },
+    ...BOOK_BINDINGS,
+];
+
+/**
+ * @type {Binding[]} Reading a PLANE DESK: h/j/k/l and the arrows hop to the neighbor pin (or pane) —
+ * `pane.focus <dir>`, the prefixed keys' verb, unprefixed — and the book keys page. The tree walk
+ * (whose focus flies the camera, out of the plane) is the open world's. A plane read with no desk
+ * (`plane.enter` on one surface) has the book keys only (BOOK_BINDINGS).
+ */
+export const PLANE_BINDINGS = [
+    { key: 'h', command: ['pane.focus', 'left'],          label: 'pin left' },
+    { key: 'j', command: ['pane.focus', 'down'],          label: 'pin down' },
+    { key: 'k', command: ['pane.focus', 'up'],            label: 'pin up' },
+    { key: 'l', command: ['pane.focus', 'right'],         label: 'pin right' },
+    { key: 'ArrowLeft', command: ['pane.focus', 'left'],  label: 'pin left' },
+    { key: 'ArrowDown', command: ['pane.focus', 'down'],  label: 'pin down' },
+    { key: 'ArrowUp', command: ['pane.focus', 'up'],      label: 'pin up' },
+    { key: 'ArrowRight', command: ['pane.focus', 'right'], label: 'pin right' },
+    ...BOOK_BINDINGS,
 ];
 
 /**

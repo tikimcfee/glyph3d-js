@@ -39,7 +39,8 @@
  * for the next key — h/j/k/l or arrows focus (the neighbor pin or pane), Tab back to the last plane
  * (carrel.back), and on a tiled plane z zoom, ] / [ cycle the pane's tabs, x closes a pane (its tabs
  * move to its neighbor), e/m/s re-lay (even/main/stack); Esc or q leaves —
- * and sits ABOVE typing so a focused terminal never sees it. A bare Esc that nothing else claims
+ * and sits ABOVE typing so a focused terminal never sees it. Unprefixed, h/j/k/l and the arrows hop
+ * pins too, when nothing holds the keyboard (the nav layer reading a plane desk). A bare Esc that nothing else claims
  * (no focus to pop) leaves the plane: Esc steps back out, one level at a time. The DOM-input guard sits above all of them:
  * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
  * the command bar and panels keep their own keys (this runs in capture phase, BEFORE the input's
@@ -52,7 +53,7 @@
 
 import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { resolveGesture } from './gestureResolver.js';
-import { resolveKeyBinding } from './keymap.js';
+import { resolveKeyBinding, NAV_BINDINGS, PLANE_BINDINGS, BOOK_BINDINGS } from './keymap.js';
 
 // ---- Capture-toggle tier: the reserved settle/unsettle chord ----
 
@@ -188,9 +189,12 @@ function contextEsc(e, env) {
 
 /** Tier 3 — NAV mode: a bare key (hjkl / ui, the book keys) maps to a verb. Holding a key
  *  doesn't sweep the field — auto-repeats resolve only for bindings that opt in (book
- *  paging: hold to flip); otherwise one press = one jump. */
+ *  paging: hold to flip); otherwise one press = one jump. Reading a plane, the layer is the
+ *  plane's (keymap.js): on a plane desk h/j/k/l and the arrows hop pins, and never the tree walk,
+ *  whose focus flies the camera out of the plane. */
 function navKeymap(e, env) {
-    const cmd = resolveKeyBinding(e);
+    const plane = env.planeReading?.() ?? null;
+    const cmd = resolveKeyBinding(e, plane ? (plane.desk ? PLANE_BINDINGS : BOOK_BINDINGS) : NAV_BINDINGS);
     if (!cmd) return false;
     env.exec(cmd);
     return true;
@@ -286,6 +290,8 @@ function domInputFocused(doc) {
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]
  *   override the settle/unsettle chord (default CAPTURE_TOGGLE = Ctrl+Shift+Enter)
  * @param {() => boolean} [env.planeEntered]  a plane desk is entered (the plane tiers' gate)
+ * @param {() => ({desk: Object|null}|null)} [env.planeReading]  the plane being read (planeEntered.js
+ *   planeReading), null in the open world — picks the nav layer
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.planePrefix]
  *   the pane prefix chord (default PLANE_PREFIX = Ctrl+Space) @param {number} [env.planePrefixMs]
  * @param {() => void} [env.noteKey]  told of every keydown, claimed or not (Deixis' typing gate)

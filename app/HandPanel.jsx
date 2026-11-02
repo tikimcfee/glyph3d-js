@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { stateController } from '@glyph3d/core/services/state';
 import { PANEL_SEEN_KEY } from './client/HandCalib.js';
+import { pollWhileHands } from './client/handsOn.js';
 /** @import { AppClient } from './client/CommandProvider.jsx' */
 
 /**
@@ -11,8 +12,13 @@ import { PANEL_SEEN_KEY } from './client/HandCalib.js';
  *
  * One-way state→view (the HUD discipline): it polls `calib.status` and issues `calib.*` /
  * `hand.simulate` verbs; every number comes from the verb, so the CLI and this panel never
- * disagree. Polls at 5 Hz while the document is visible — it's watched with a hand in the air.
+ * disagree. Polls at 5 Hz while a hand device is attached and the document is visible — it's
+ * watched with a hand in the air; with no hand it reads once (and again as a device comes or goes),
+ * then rests.
  */
+
+/** The board's refresh period while a hand device is attached (ms). */
+const POLL_MS = 200;
 
 const S = {
     content: {
@@ -116,12 +122,11 @@ export default function HandPanel({ client }) {
 
     useEffect(() => {
         aliveRef.current = true;
-        refresh();
-        const timer = setInterval(() => {
+        const stop = pollWhileHands(client?.ctx?.sourceStream, () => {
             if (typeof document === 'undefined' || !document.hidden) refresh();
-        }, 200);
-        return () => { aliveRef.current = false; clearInterval(timer); };
-    }, [refresh]);
+        }, POLL_MS);
+        return () => { aliveRef.current = false; stop(); };
+    }, [client, refresh]);
 
     const run = useCallback(async (...cmd) => {
         const res = await exec(cmd);
