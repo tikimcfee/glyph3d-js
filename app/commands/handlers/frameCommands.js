@@ -11,7 +11,44 @@
 
 import * as THREE from 'three';
 import FrameGrid from '@glyph3d/core/collections/FrameGrid.js';
+import { emitLogRecord } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import { agentSurfacesOf } from '../../client/AgentSurfaces.js';
+
+/** Write one `[desktop]` record (scope 'desktop') to the relay log store. */
+function recordDesktopLog(verb, ctx, fields = {}) {
+    const by = ctx?.caller ? ` by ${ctx.caller}` : '';
+    const text = fields.text ? ` ${fields.text}` : '';
+    emitLogRecord('info', 'desktop', `[desktop] ${verb}${by}${text}`, {
+        verb,
+        caller: ctx?.caller ?? null,
+        sender: ctx?.sender ?? null,
+        cid: ctx?.cid ?? null,
+        ...fields,
+    });
+}
+
+/**
+ * Ownership gate for driving a desktop: when a desktop is owned (AgentSurfaces or
+ * registry `meta.agent`), only its owning agent (`ctx.caller`) or the anonymous
+ * person (`!ctx.caller`) may drive it; another identified agent is refused.
+ */
+function checkDesktopOwner(ctx, name, verb) {
+    const owner = agentSurfacesOf(ctx).ownerOf(name)
+        || ctx?.registry?.get?.(name)?.meta?.agent
+        || ctx?.registry?.get?.(name)?.meta?.desktop?.owner
+        || null;
+    const caller = ctx?.caller || null;
+    if (owner && caller && caller !== owner) {
+        recordDesktopLog(verb, ctx, {
+            name,
+            owner,
+            denied: true,
+            text: `${name} refused (owned by ${owner})`,
+        });
+        return `ERR: ${verb}: desktop "${name}" is owned by ${owner} (caller ${caller} may not drive it)`;
+    }
+    return null;
+}
 
 /** Default cell budget when dims aren't given — see FrameGrid.deriveGrid. Cell count is
  *  scatter granularity, not image detail, so this is a perf/taste ceiling. */
@@ -388,13 +425,16 @@ export default function registerFrameCommands(router) {
 
         const syncDesktops = async () => {
             try {
-                const res = await bridge.rpcRequest('desktop/list', {}, 3000);
+                const res = await bridge.rpcRequest('desktop/list', {}, 15000);
                 for (const d of res?.desktops || []) {
                     if (!d?.name || stoppedDesktops.has(d.name)) continue;
                     const grid = ensureDesktopFrameGrid(router.context, d.name, d.width, d.height, d);
-                    if (grid && !grid.hasTexture) {
+                    if (d.owner && router.context) {
+                        agentSurfacesOf(router.context).claim(d.owner, d.name, 'frame');
+                    }
+                    if (grid) {
                         const still = await bridge.rpcRequest('desktop/still', { name: d.name }, 5000);
-                        if (still?.pngBase64 && !grid.hasTexture) {
+                        if (still?.pngBase64) {
                             await ingestBinaryFrame(
                                 d.name,
                                 decodeBase64Bytes(still.pngBase64),
@@ -409,10 +449,15 @@ export default function registerFrameCommands(router) {
             }
         };
 
-        // On connect / reload: pull active relay-owned desktops so their FrameGrids
-        // materialize immediately with no user gesture.
+        // On connect / reload (or when a restored desktop source connects): pull active
+        // relay-owned desktops so their FrameGrids and ownership materialize with no gesture.
         bridge.onConnectionChange?.((connected) => {
             if (connected) syncDesktops();
+        });
+        bridge.onSourceEvent?.((ev) => {
+            if (ev?.event === 'source_connected' && ev?.kind === 'desktop') {
+                syncDesktops();
+            }
         });
         if (bridge.connected) {
             syncDesktops();
@@ -609,7 +654,14 @@ export default function registerFrameCommands(router) {
 
         let sum;
         try {
-            sum = await bridge.rpcRequest('desktop/start', { name, width, height, url, chromium }, 20000);
+            sum = await bridge.rpcRequest('desktop/start', {
+                name,
+                width,
+                height,
+                url,
+                chromium,
+                owner: ctx.caller || '',
+            }, 20000);
         } catch (err) {
             // If producer startup failed and no texture ever landed, remove the empty placeholder grid.
             const g = ctx.registry?.get(name)?.grid;
@@ -623,7 +675,14 @@ export default function registerFrameCommands(router) {
         // An identified caller's desktop is ITS (AgentSurfaces): seated at its plane desk gomux/<caller>,
         // kept there across reloads (its residence), marked — never stopped — when the agent ends.
         // An anonymous caller's: as before (no claim).
-        agentSurfacesOf(ctx).claim(ctx.caller, sum.name, 'frame');
+        agentSurfacesOf(ctx).claim(ctx.caller || sum.owner, sum.name, 'frame');
+        recordDesktopLog('desktop.start', ctx, {
+            name: sum.name,
+            width: sum.width,
+            height: sum.height,
+            url: sum.url,
+            text: `${sum.name} ${sum.width}x${sum.height} ${sum.url}`,
+        });
         await waitForFirstFrame(sum.name, 2500);
         if (grid && !grid.hasTexture) {
             try {
@@ -703,6 +762,9 @@ export default function registerFrameCommands(router) {
             let grid = ctx.registry?.get(d.name)?.grid;
             if (!stoppedDesktops.has(d.name)) {
                 grid = ensureDesktopFrameGrid(ctx, d.name, d.width, d.height, d);
+                if (d.owner) {
+                    agentSurfacesOf(ctx).claim(d.owner, d.name, 'frame');
+                }
                 if (grid && !grid.hasTexture) {
                     try {
                         const still = await bridge.rpcRequest('desktop/still', { name: d.name }, 5000);
@@ -781,4 +843,140 @@ export default function registerFrameCommands(router) {
             data: res,
         };
     }, { description: 'Capture a lossless PNG still of a relay-owned desktop via CDP Page.captureScreenshot', usage: '<name>' });
+
+    router.register('desktop.go', async (args, ctx) => {
+        const name = String(args[0] ?? '').trim();
+        const url = String(args[1] ?? '').trim();
+        if (!name || !url) return { text: 'ERR: usage: desktop.go <name> <url>', data: null };
+        const denied = checkDesktopOwner(ctx, name, 'desktop.go');
+        if (denied) return { text: denied, data: null };
+
+        const bridge = ctx.wsbridge || router.bridge;
+        if (bridge) bindBridge(bridge);
+        if (!bridge?.connected) {
+            return { text: 'ERR: desktop.go requires a connected relay', data: null };
+        }
+        let sum;
+        try {
+            sum = await bridge.rpcRequest('desktop/go', { name, url, caller: ctx.caller || '' }, 15000);
+        } catch (err) {
+            return { text: `ERR: ${err?.message || err}`, data: null };
+        }
+        ensureDesktopFrameGrid(ctx, sum.name, sum.width, sum.height, sum);
+        recordDesktopLog('desktop.go', ctx, { name: sum.name, url: sum.url, text: `${sum.name} -> ${sum.url}` });
+        return {
+            text: `OK: desktop "${sum.name}" -> ${sum.url}`,
+            data: sum,
+        };
+    }, { description: 'Navigate a relay-owned desktop to a URL', usage: '<name> <url>' });
+
+    router.register('desktop.click', async (args, ctx) => {
+        const name = String(args[0] ?? '').trim();
+        const x = Number(args[1]);
+        const y = Number(args[2]);
+        if (!name || !Number.isFinite(x) || !Number.isFinite(y)) {
+            return { text: 'ERR: usage: desktop.click <name> <x> <y>', data: null };
+        }
+        const denied = checkDesktopOwner(ctx, name, 'desktop.click');
+        if (denied) return { text: denied, data: null };
+
+        const bridge = ctx.wsbridge || router.bridge;
+        if (bridge) bindBridge(bridge);
+        if (!bridge?.connected) {
+            return { text: 'ERR: desktop.click requires a connected relay', data: null };
+        }
+        let res;
+        try {
+            res = await bridge.rpcRequest('desktop/click', { name, x, y, caller: ctx.caller || '' }, 10000);
+        } catch (err) {
+            return { text: `ERR: ${err?.message || err}`, data: null };
+        }
+        recordDesktopLog('desktop.click', ctx, { name, x, y, text: `${name} (${x}, ${y})` });
+        return {
+            text: `OK: desktop "${name}" clicked (${x}, ${y})`,
+            data: res,
+        };
+    }, { description: 'Click at (x, y) in the desktop\'s own pixel coordinates', usage: '<name> <x> <y>' });
+
+    router.register('desktop.type', async (args, ctx) => {
+        const name = String(args[0] ?? '').trim();
+        const text = args.slice(1).join(' ');
+        if (!name || !text.length) {
+            return { text: 'ERR: usage: desktop.type <name> <text>', data: null };
+        }
+        const denied = checkDesktopOwner(ctx, name, 'desktop.type');
+        if (denied) return { text: denied, data: null };
+
+        const bridge = ctx.wsbridge || router.bridge;
+        if (bridge) bindBridge(bridge);
+        if (!bridge?.connected) {
+            return { text: 'ERR: desktop.type requires a connected relay', data: null };
+        }
+        let res;
+        try {
+            res = await bridge.rpcRequest('desktop/type', { name, text, caller: ctx.caller || '' }, 10000);
+        } catch (err) {
+            return { text: `ERR: ${err?.message || err}`, data: null };
+        }
+        recordDesktopLog('desktop.type', ctx, { name, length: text.length, text: `${name} (${text.length} chars)` });
+        return {
+            text: `OK: desktop "${name}" typed ${text.length} chars`,
+            data: res,
+        };
+    }, { description: 'Insert text into the focused element of a relay-owned desktop', usage: '<name> <text>' });
+
+    router.register('desktop.key', async (args, ctx) => {
+        const name = String(args[0] ?? '').trim();
+        const key = String(args[1] ?? '');
+        if (!name || !key) {
+            return { text: 'ERR: usage: desktop.key <name> <key>', data: null };
+        }
+        const denied = checkDesktopOwner(ctx, name, 'desktop.key');
+        if (denied) return { text: denied, data: null };
+
+        const bridge = ctx.wsbridge || router.bridge;
+        if (bridge) bindBridge(bridge);
+        if (!bridge?.connected) {
+            return { text: 'ERR: desktop.key requires a connected relay', data: null };
+        }
+        let res;
+        try {
+            res = await bridge.rpcRequest('desktop/key', { name, key, caller: ctx.caller || '' }, 10000);
+        } catch (err) {
+            return { text: `ERR: ${err?.message || err}`, data: null };
+        }
+        recordDesktopLog('desktop.key', ctx, { name, key: res?.key || key, text: `${name} key=${res?.key || key}` });
+        return {
+            text: `OK: desktop "${name}" key ${res?.key || key}`,
+            data: res,
+        };
+    }, { description: 'Press a key in a relay-owned desktop (e.g. Enter, Tab, Escape, Backspace, ArrowDown, a)', usage: '<name> <key>' });
+
+    router.register('desktop.scroll', async (args, ctx) => {
+        const name = String(args[0] ?? '').trim();
+        const dx = Number(args[1]);
+        const dy = Number(args[2]);
+        if (!name || !Number.isFinite(dx) || !Number.isFinite(dy)) {
+            return { text: 'ERR: usage: desktop.scroll <name> <dx> <dy>', data: null };
+        }
+        const denied = checkDesktopOwner(ctx, name, 'desktop.scroll');
+        if (denied) return { text: denied, data: null };
+
+        const bridge = ctx.wsbridge || router.bridge;
+        if (bridge) bindBridge(bridge);
+        if (!bridge?.connected) {
+            return { text: 'ERR: desktop.scroll requires a connected relay', data: null };
+        }
+        let res;
+        try {
+            res = await bridge.rpcRequest('desktop/scroll', { name, dx, dy, caller: ctx.caller || '' }, 10000);
+        } catch (err) {
+            return { text: `ERR: ${err?.message || err}`, data: null };
+        }
+        recordDesktopLog('desktop.scroll', ctx, { name, dx, dy, text: `${name} dx=${dx} dy=${dy}` });
+        return {
+            text: `OK: desktop "${name}" scrolled (${dx}, ${dy})`,
+            data: res,
+        };
+    }, { description: 'Scroll a relay-owned desktop by (dx, dy) pixels', usage: '<name> <dx> <dy>' });
 }

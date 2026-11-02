@@ -42,11 +42,17 @@ type Relay struct {
 	recMu         sync.Mutex   // guards rec
 	rec           *recorder    // the running source recording, if any (record.go)
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
-	gxMu          sync.Mutex
-	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
-	desktopsMu    sync.RWMutex
-	desktops      map[string]*desktopSession // relay-owned headless Chromium producers (desktop.go)
-	upgrader      websocket.Upgrader
+	gxMu             sync.Mutex
+	gxForked         map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
+	desktopsMu       sync.RWMutex
+	desktops         map[string]*desktopSession // relay-owned headless Chromium producers (desktop.go)
+	desktopSpecsMu   sync.Mutex
+	desktopSpecs     map[string]desktopSpec // persisted desktop specs for relay restart recovery
+	desktopStatePath string                 // path to desktops.json (resolved from served root or cache dir)
+	restoreMu        sync.Mutex
+	restoreDone      chan struct{} // non-nil while boot-time desktop restoration is in flight
+	testCDPDial      func(p desktopStartParams) (*websocket.Conn, error)
+	upgrader         websocket.Upgrader
 	fs            *FSHandler      // nil if --root not provided
 	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers
 	port          int             // port this relay serves on (spawned adapters connect back here)
@@ -88,11 +94,12 @@ func NewRelay() *Relay {
 		log.Fatalf("[relay] log store: %v", err)
 	}
 	return &Relay{
-		controllers: make(map[string]*websocket.Conn),
-		sources:     make(map[string]*sourceConn),
-		desktops:    make(map[string]*desktopSession),
-		logs:        logs,
-		logSubs:     make(map[string]bool),
+		controllers:  make(map[string]*websocket.Conn),
+		sources:      make(map[string]*sourceConn),
+		desktops:     make(map[string]*desktopSession),
+		desktopSpecs: make(map[string]desktopSpec),
+		logs:         logs,
+		logSubs:      make(map[string]bool),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -391,7 +398,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"sources":     srcs,
 				})
 				r.sendToDisplay(ack)
-				r.replayDesktopsToDisplay()
+				go r.replayDesktopsToDisplay()
 				continue
 			} else if kind, isSource := parseSourceHandshake(raw); isSource {
 				// A sensor device: upstream-only, many allowed. Unlike DISPLAY there
@@ -517,7 +524,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.mu.RUnlock()
 
 			if d == nil {
-				if r.tryRelayDesktopWhenNoDisplay(ws, raw) {
+				if r.tryRelayDesktopWhenNoDisplay(ws, raw, callerName) {
 					continue
 				}
 				ws.WriteMessage(websocket.TextMessage, []byte("ERR: no display connected. Open the viewer in a browser first."))
@@ -1293,6 +1300,8 @@ func RunServer(cfg ServerConfig) error {
 	// round-trip-confirm a save and reload the affected grid.
 	if cfg.FSHandler != nil {
 		relay.wireFS(cfg.FSHandler)
+	} else {
+		relay.desktopStatePath = defaultUserDesktopStatePath()
 	}
 
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
@@ -1347,7 +1356,7 @@ func RunServer(cfg ServerConfig) error {
 	}
 	log.Printf("[glyph3d] ══════════════════════════════════════")
 
-	return listenAndServe(addr, mux)
+	return listenAndServe(addr, mux, relay.BeginRestoreDesktops)
 }
 
 // listenAndServe binds addr with a short retry window, then serves. The dev loop
@@ -1357,7 +1366,7 @@ func RunServer(cfg ServerConfig) error {
 // terminal. Retrying the bind for ~5s turns that race into a brief wait. A genuine
 // second server already up will exhaust the window and fail loudly — the honest answer
 // (one port, one relay). Non-EADDRINUSE errors fail immediately (bad addr / perms).
-func listenAndServe(addr string, handler http.Handler) error {
+func listenAndServe(addr string, handler http.Handler, onBound func()) error {
 	const tries, gap = 25, 200 * time.Millisecond // ~5s total
 	var ln net.Listener
 	var err error
@@ -1376,6 +1385,9 @@ func listenAndServe(addr string, handler http.Handler) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: still in use after %v (another server already running?): %w",
 			addr, time.Duration(tries)*gap, err)
+	}
+	if onBound != nil {
+		onBound()
 	}
 	return http.Serve(ln, handler)
 }
@@ -1396,6 +1408,8 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay.port = port
 	if fsHandler != nil {
 		relay.wireFS(fsHandler)
+	} else {
+		relay.desktopStatePath = defaultUserDesktopStatePath()
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
@@ -1403,7 +1417,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	mux.Handle("/", relay)
 
 	log.Printf("[relay] glyph3d WebSocket relay on %s", addr)
-	return listenAndServe(addr, mux)
+	return listenAndServe(addr, mux, relay.BeginRestoreDesktops)
 }
 
 func getLANAddresses() []string {
