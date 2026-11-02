@@ -166,7 +166,7 @@ export default class GlyphFarLod {
             const mesh = field.instanceMesh;
             const L = field.layoutBounds;
             if (isBatchedGlyphField(field)) continue;   // GlyphBatch owns its layer and draws it
-            if (!mesh || !mesh.frustumCulled || !L || !(field.rowHeight > 0)) {
+            if (field.isFrame || !mesh || !mesh.frustumCulled || !L || !(field.rowHeight > 0)) {
                 if (mesh && !mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.enable(VIEW_LAYER);
                 continue;
             }

@@ -50,6 +50,7 @@ uniform int maxGroups;
 // Optional per-glyph highlight: RGBA8 DataTexture (1024 wide, wrapped)
 uniform sampler2D highlightTexture;
 uniform int hasHighlight;
+uniform int uRenderMode; // 0 = glyph (per-slot glyphMapTexture), 1 = frame (whole field samples frameTexture)
 
 flat out int vCurveStart;
 flat out int vCurveCount;
@@ -65,15 +66,22 @@ out vec3 vGroupRgb;
 
 void main() {
     int gid = int(aGlyphId + 0.5);
-    int mapW = glyphMapWidth > 0 ? glyphMapWidth : 1024;
-    uvec4 info = texelFetch(glyphMapTexture, ivec2(gid % mapW, gid / mapW), 0);
+    if (uRenderMode == 1) {
+        vCurveStart = 0;
+        vCurveCount = 0;
+        vMode       = 3; // 3 = frame cell
+        vEmojiCell  = gid;
+    } else {
+        int mapW = glyphMapWidth > 0 ? glyphMapWidth : 1024;
+        uvec4 info = texelFetch(glyphMapTexture, ivec2(gid % mapW, gid / mapW), 0);
 
-    vCurveStart = int(info.x);
-    vCurveCount = int(info.y);
-    vMode       = int(info.z); // 0 = slug vector, 1 = bitmap emoji, 2 = blank
-    vEmojiCell  = int(info.w);
+        vCurveStart = int(info.x);
+        vCurveCount = int(info.y);
+        vMode       = int(info.z); // 0 = slug vector, 1 = bitmap emoji, 2 = blank
+        vEmojiCell  = int(info.w);
+    }
 
-    // Quad sizing: bitmap emoji get square quad (height x height); outline gets advance
+    // Quad sizing: bitmap emoji get square quad (height x height); outline & frame cells get advance
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
 
     // Local quad: pen origin is at left edge (x=0) and cell vertical center (y=0)
@@ -106,8 +114,9 @@ void main() {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     }
 
-    // Unpack 24-bit packed color (little-endian RGB888 in float)
-    int uCol = int(aColor + 0.5);
+    // Unpack 24-bit packed color (little-endian RGB888 in float; exact integer in [0, 2^24-1] —
+    // never add +0.5, which at [2^23, 2^24) has ULP 1.0 and rounds odd values like 0xFFFFFF to 0x1000000)
+    int uCol = int(aColor);
     vec3 iColor = vec3(
         float(uCol & 0xFF),
         float((uCol >> 8) & 0xFF),
@@ -149,6 +158,10 @@ uniform highp usampler2D curveTexture;
 uniform sampler2D emojiTexture;
 uniform int emojiCols;
 uniform int emojiRows;
+uniform sampler2D frameTexture;
+uniform int frameCols;
+uniform int frameRows;
+uniform int uFrameFlipY;
 
 // Greeking: a glyph whose quad is under this many px tall on screen draws as a bar (0 = never)
 uniform float uGreekPx;
@@ -234,6 +247,34 @@ float computeCoverage(float invDiameter, vec2 p0, vec2 p1, vec2 p2) {
 void main() {
     // Mode 2: blank cell
     if (vMode == 2) discard;
+
+    // ── Frame branch (vMode == 3): external NxM video/image grid ────
+    if (vMode == 3) {
+        float cols = float(frameCols > 0 ? frameCols : 1);
+        float rows = float(frameRows > 0 ? frameRows : 1);
+        float fcell = float(vEmojiCell);
+        float col = mod(fcell, cols);
+        float row = floor(fcell / cols);
+        // Row 0 of FrameGrid is at the TOP (+y); vGlyphUV.y runs 0 (bottom of cell) .. 1 (top of cell).
+        // When uFrameFlipY != 0 (WebGL UNPACK_FLIP_Y_WEBGL=true, e.g. VideoTexture / CanvasTexture),
+        // texture v=1 is the top of the frame and v=0 is the bottom.
+        // When uFrameFlipY == 0 (ImageBitmap / DataTexture / flipY=false), texture v=0 is top and v=1 is bottom.
+        float v = (uFrameFlipY != 0)
+            ? (rows - 1.0 - row + vGlyphUV.y) / rows
+            : (row + (1.0 - vGlyphUV.y)) / rows;
+        vec2 frameUV = vec2((col + vGlyphUV.x) / cols, v);
+        vec4 texel = texture(frameTexture, frameUV);
+        float outAlpha = texel.a * vGroupAlpha;
+        if (outAlpha < 0.01) discard;
+        vec3 rgb = texel.rgb * vColor;
+        if (vFillAmount > 0.0) {
+            rgb = mix(rgb, vAddedColor, vFillAmount);
+        } else if (length(vAddedColor) > 0.0) {
+            rgb = clamp(rgb + vAddedColor, 0.0, 1.0);
+        }
+        fragColor = vec4(rgb * outAlpha, outAlpha);
+        return;
+    }
 
     // ── Bitmap / emoji branch (vMode == 1) ──────────────────────────
     if (vMode == 1) {
@@ -409,7 +450,9 @@ export function getGlyphGreekPx() {
 export function createGlyphMaterial(options = {}) {
     const curveTex = options.curveTexture || makePlaceholderUintTexture();
     const glyphMapTex = options.glyphMapTexture || makePlaceholderUintTexture();
-    const emojiTex = options.emojiTexture || makePlaceholderRGBATexture();
+    const placeholderRGBA = makePlaceholderRGBATexture();
+    const emojiTex = options.emojiTexture || placeholderRGBA;
+    const frameTex = options.frameTexture || placeholderRGBA;
     const maxGroups = options.maxGroups || 64;
 
     const uniforms = {
@@ -421,6 +464,11 @@ export function createGlyphMaterial(options = {}) {
         emojiTexture: { value: emojiTex },
         emojiCols: { value: options.emojiCols || 16 },
         emojiRows: { value: options.emojiRows || 16 },
+        frameTexture: { value: frameTex },
+        frameCols: { value: options.frameCols || 1 },
+        frameRows: { value: options.frameRows || 1 },
+        uFrameFlipY: { value: options.frameFlipY || 0 },
+        uRenderMode: { value: options.renderMode || 0 },
         highlightTexture: { value: null },
         hasHighlight: { value: 0 },
         uGreekPx: { value: _greekPx },
@@ -438,6 +486,7 @@ export function createGlyphMaterial(options = {}) {
         side: THREE.DoubleSide,
         forceSinglePass: true,   // planar quads: three's back/front two-pass would only re-derive the program twice per draw
     });
+    material.userData.placeholderRGBA = placeholderRGBA;
 
     _activeMaterials.add(material);
     material.addEventListener('dispose', () => {

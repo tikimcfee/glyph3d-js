@@ -26,26 +26,89 @@ function parseDims(arg) {
 }
 
 /**
+ * Create a live moving-pattern MediaStream on an offscreen canvas (`canvas.captureStream(fps)`)
+ * so the full `<video>` -> `VideoTexture` -> `FrameGrid` -> `InstancedField` pipeline can be
+ * exercised via CLI/RPC without a user click gesture or special browser launch flags.
+ * @param {{ width?: number, height?: number, fps?: number }} [opts]
+ * @returns {{ stream: MediaStream, stop: () => void, width: number, height: number }}
+ */
+function createTestPatternStream({ width = 640, height = 360, fps = 30 } = {}) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const g = canvas.getContext('2d');
+    const bars = ['#e63946', '#f4a261', '#e9c46a', '#2a9d8f', '#457b9d', '#6d597a', '#f1faee', '#1d3557'];
+    let frame = 0;
+    let timer = null;
+
+    const draw = () => {
+        const bw = width / bars.length;
+        for (let i = 0; i < bars.length; i++) {
+            g.fillStyle = bars[i];
+            g.fillRect(i * bw, 0, Math.ceil(bw), height);
+        }
+        // Moving sweep bar + alternating checkerboard band so every tick changes pixels across the frame
+        const sweepX = ((frame * 24) % width);
+        g.fillStyle = (frame & 1) ? '#ffffff' : '#ff00ff';
+        g.fillRect(sweepX, 0, Math.max(48, Math.floor(width * 0.12)), height);
+        g.fillStyle = (frame & 1) ? '#00ffff' : '#ffff00';
+        g.fillRect(0, ((frame * 18) % height), width, Math.max(36, Math.floor(height * 0.12)));
+        frame++;
+    };
+    draw();
+    timer = setInterval(draw, Math.max(16, Math.round(1000 / fps)));
+    const stream = canvas.captureStream(fps);
+    const stop = () => {
+        if (timer) {
+            clearInterval(timer);
+            timer = null;
+        }
+        for (const t of stream.getTracks()) t.stop();
+    };
+    return { stream, stop, width, height };
+}
+
+/**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerFrameCommands(router) {
     router.register('frame.capture', async (args, ctx) => {
-        const md = (typeof navigator !== 'undefined') && navigator.mediaDevices;
-        if (!md || typeof md.getDisplayMedia !== 'function') {
-            return { text: 'ERR: getDisplayMedia not available in this environment', data: null };
+        const rest = [];
+        let testMode = false;
+        for (const a of args) {
+            if (a === '--test') testMode = true;
+            else rest.push(a);
         }
 
         // Explicit "COLSxROWS" wins; otherwise the grid is derived from the real capture
         // size below (once getSettings() is known). If arg0 isn't dims, it's the name.
-        const explicitDims = parseDims(args[0]);
-        const name = (explicitDims ? args[1] : args[0]) || `screen-${Date.now()}`;
+        const explicitDims = parseDims(rest[0]);
+        const name = (explicitDims ? rest[1] : rest[0]) || `screen-${Date.now()}`;
 
-        // Must run inside the click gesture — await directly, no pre-work.
-        let stream;
-        try {
-            stream = await md.getDisplayMedia({ video: true, audio: false });
-        } catch (err) {
-            return { text: `ERR: screen capture denied or failed: ${err?.message || err}`, data: null };
+        let stream = null;
+        let stopSource = null;
+        let fallbackW = 0, fallbackH = 0;
+
+        if (testMode) {
+            if (typeof document === 'undefined') {
+                return { text: 'ERR: test capture requires a browser document', data: null };
+            }
+            const tp = createTestPatternStream();
+            stream = tp.stream;
+            stopSource = tp.stop;
+            fallbackW = tp.width;
+            fallbackH = tp.height;
+        } else {
+            const md = (typeof navigator !== 'undefined') && navigator.mediaDevices;
+            if (!md || typeof md.getDisplayMedia !== 'function') {
+                return { text: 'ERR: getDisplayMedia not available in this environment', data: null };
+            }
+            // Must run inside the click gesture — await directly, no pre-work.
+            try {
+                stream = await md.getDisplayMedia({ video: true, audio: false });
+            } catch (err) {
+                return { text: `ERR: screen capture denied or failed: ${err?.message || err}`, data: null };
+            }
         }
 
         // Drive a VideoTexture off a hidden <video>. getSettings() gives the real
@@ -63,23 +126,20 @@ export default function registerFrameCommands(router) {
         try { await video.play(); } catch { /* autoplay of a muted stream is allowed; ignore */ }
 
         const settings = stream.getVideoTracks()[0]?.getSettings?.() || {};
-        const aspect = (settings.width && settings.height)
-            ? settings.width / settings.height
-            : (16 / 9);
+        const srcW = settings.width || video.videoWidth || fallbackW;
+        const srcH = settings.height || video.videoHeight || fallbackH;
+        const aspect = (srcW && srcH) ? srcW / srcH : (16 / 9);
 
         // Cell grid: honor an explicit COLSxROWS, else derive one proportional to the
         // real capture size, bounded by the cell budget (always within the buffer).
         const { cols, rows } = explicitDims
-            || FrameGrid.deriveGrid(settings.width, settings.height, { budget: DEFAULT_CELL_BUDGET });
+            || FrameGrid.deriveGrid(srcW, srcH, { budget: DEFAULT_CELL_BUDGET });
 
         const texture = new THREE.VideoTexture(video);
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        // SRGBColorSpace is three's documented WebGPU VideoTexture path: the texture
-        // node linearizes on sample, and the frame branch does NOT manually pow(). See
-        // the colorspace dial note in GlyphField's frame branch if this looks off.
-        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.colorSpace = THREE.NoColorSpace;
 
         const grid = new FrameGrid(ctx.scene, ctx.atlas, { name, cols, rows, aspect });
 
@@ -91,7 +151,7 @@ export default function registerFrameCommands(router) {
             grid.quaternion.copy(cam.quaternion);
         }
 
-        grid.setFrameSource({ texture, stream, video });
+        grid.setFrameSource({ texture, stream, video, stop: stopSource });
 
         // Registered as type 'frame' so grid/surface consumers (virtualizer, camera
         // framing, edit/keystroke routing) skip it — it's a display surface, not an
@@ -111,7 +171,7 @@ export default function registerFrameCommands(router) {
             text: `OK: capturing screen → "${registryId}" (${cols}x${rows} cells, aspect ${aspect.toFixed(2)})`,
             data: { registryId, cols, rows, cells: grid.getCellCount(), aspect },
         };
-    }, { description: 'Capture the OS screen share into a FrameGrid', usage: '[COLSxROWS] [name]' });
+    }, { description: 'Capture the OS screen share (or --test pattern) into a FrameGrid', usage: '[--test] [COLSxROWS] [name]' });
 
     router.register('frame.regrid', (args, ctx) => {
         const id   = args[0];
@@ -137,13 +197,35 @@ export default function registerFrameCommands(router) {
     //    intent (source label, place, resume) lands with the state-model work.
 
     /** Summarize one FrameGrid for list/info output. */
-    const frameSummary = (id, grid) => ({
-        id,
-        cols: grid.cols,
-        rows: grid.rows,
-        cells: grid.getCellCount?.() ?? grid.cols * grid.rows,
-        aspect: +(grid.aspect ?? 0).toFixed(3),
-    });
+    const frameSummary = (id, grid) => {
+        const status = grid.getStreamStatus?.() || null;
+        return {
+            id,
+            cols: grid.cols,
+            rows: grid.rows,
+            cells: grid.getCellCount?.() ?? grid.cols * grid.rows,
+            aspect: +(grid.aspect ?? 0).toFixed(3),
+            ...(status ? {
+                live: status.live,
+                stalled: status.stalled,
+                fps: status.fps,
+                frames: status.frames,
+                lastFrameAgeMs: status.lastFrameAgeMs,
+                size: status.size,
+                latencyMs: status.latencyMs,
+            } : {}),
+        };
+    };
+
+    /** Format one stream status record as a human-readable line. */
+    const formatStatusLine = (s) => {
+        const state = s.live ? (s.stalled ? 'STALLED' : 'live') : 'stopped';
+        const dims = (s.size?.width && s.size?.height) ? `${s.size.width}x${s.size.height}` : '0x0';
+        const age = s.lastFrameAgeMs != null ? `${s.lastFrameAgeMs}ms` : '—';
+        const latVal = s.latencyMs?.captureToPresent ?? s.latencyMs?.processing ?? null;
+        const lat = latVal != null ? `${latVal}ms` : '—';
+        return `${s.id}  ${state}  ${dims}  ${Number(s.fps || 0).toFixed(1)} fps  ${s.frames} frames  age ${age}  latency ${lat}  grid ${s.grid.cols}x${s.grid.rows}`;
+    };
 
     router.register('frame.list', (args, ctx) => {
         const entries = ctx.registry?.findByType?.('frame') ?? [];
@@ -163,6 +245,29 @@ export default function registerFrameCommands(router) {
         const info = frameSummary(id, grid);
         return { text: `${info.id}: ${info.cols}x${info.rows}, ${info.cells} cells, aspect ${info.aspect}`, data: info };
     }, { description: 'Show one capture’s grid + dims', usage: '<id>' });
+
+    router.register('frame.status', (args, ctx) => {
+        const id = args[0];
+        if (id) {
+            const grid = ctx.registry?.get(id)?.grid;
+            if (!grid || typeof grid.getStreamStatus !== 'function') {
+                return { text: `ERR: no FrameGrid "${id}"`, data: null };
+            }
+            const status = { ...grid.getStreamStatus(), id };
+            return { text: formatStatusLine(status), data: status };
+        }
+        const entries = ctx.registry?.findByType?.('frame') ?? [];
+        const streams = entries
+            .filter((e) => typeof e.grid?.getStreamStatus === 'function')
+            .map((e) => {
+                const fid = ctx.registry.getIdByGrid(e.grid);
+                return { ...e.grid.getStreamStatus(), id: fid };
+            });
+        const text = streams.length
+            ? streams.map(formatStatusLine).join('\n')
+            : '(no captures)';
+        return { text, data: { streams, count: streams.length } };
+    }, { description: 'Report stream liveness (fps, last-frame age, size, latency) for one or all captures', usage: '[id]' });
 
     router.register('frame.kill', (args, ctx) => {
         const id = args[0];

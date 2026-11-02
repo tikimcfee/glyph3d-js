@@ -79,18 +79,24 @@ uniform int glyphMapWidth;
 uniform sampler2D groupTexture;
 uniform int maxGroups;
 uniform int uBasePickingId;
+uniform int uRenderMode;
 
 flat out int vPickingId;
 
 void main() {
     int gid = int(aGlyphId + 0.5);
-    int mapW = glyphMapWidth > 0 ? glyphMapWidth : 1024;
-    uvec4 info = texelFetch(glyphMapTexture, ivec2(gid % mapW, gid / mapW), 0);
-    int vMode = int(info.z);
+    int vMode = 0;
+    if (uRenderMode == 1) {
+        vMode = 3;
+    } else {
+        int mapW = glyphMapWidth > 0 ? glyphMapWidth : 1024;
+        uvec4 info = texelFetch(glyphMapTexture, ivec2(gid % mapW, gid / mapW), 0);
+        vMode = int(info.z);
 
-    if (vMode == 2) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
+        if (vMode == 2) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
     }
 
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
@@ -238,7 +244,7 @@ export class PickingSystem {
         const dummyGlyphMap = new THREE.DataTexture(new Uint32Array(4), 1, 1, THREE.RGBAIntegerFormat, THREE.UnsignedIntType);
         dummyGlyphMap.needsUpdate = true;
 
-        return new THREE.RawShaderMaterial({
+        const mat = new THREE.RawShaderMaterial({
             glslVersion: THREE.GLSL3,
             vertexShader: GLYPH_PICK_VS,
             fragmentShader: GLYPH_PICK_FS,
@@ -248,12 +254,15 @@ export class PickingSystem {
                 maxGroups: { value: gf?.maxGroups || 1 },
                 glyphMapTexture: { value: gf?.glyphMapTexture || dummyGlyphMap },
                 glyphMapWidth: { value: gf?.glyphMapWidth || 1 },
+                uRenderMode: { value: gf?.isFrame ? 1 : 0 },
             },
             side: THREE.DoubleSide,
             depthWrite: true,
             depthTest: true,
             blending: THREE.NoBlending,
         });
+        if (gf) gf._pickMaterial = mat;
+        return mat;
     }
 
     _createFlatPickMaterial(startId) {

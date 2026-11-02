@@ -32,6 +32,11 @@ import { RENDER_ORDER } from '../core/renderOrder.js';
 import { mimeForFormat } from '../core/fileKind.js';
 /** @import GlyphAtlas from '../GlyphAtlas.js' */
 
+/** Trailing window (ms) over which observed stream FPS is measured. */
+const RATE_WINDOW_MS = 2000;
+/** Stream frame age (ms) past which a live stream is flagged as stalled. */
+const STALL_TIMEOUT_MS = 2000;
+
 class FrameGrid extends FramedGlyphField {
     /**
      * Choose a cell grid (cols × rows) for a source frame of srcW × srcH: matches the
@@ -93,16 +98,24 @@ class FrameGrid extends FramedGlyphField {
         this._renderer = new InstancedField(scene, atlas, {
             maxInstances: this._cellCount,
             defaultColor: { r: 1, g: 1, b: 1 },
+            renderMode: 1,
         });
 
         // A dedicated group (identity by default) so the whole field can be faded /
         // offset / scaled in one O(1) write later (setGroupOffset/Color/Alpha).
         this._groupId = this._renderer.createGroup();
 
-        // Capture lifecycle handles (owned by the caller, torn down here on dispose).
+        // Capture lifecycle handles (owned by the caller, torn down here on dispose) + stream telemetry.
         this._texture = null;
         this._stream  = null;
         this._video   = null;
+        this._stopSource = null;
+        this._rvfcId  = 0;
+        this._frames  = 0;
+        this._lastFrameAt = 0;
+        this._frameTimes = [];
+        this._sourceSize = { width: 0, height: 0 };
+        this._latencyMs  = { captureToPresent: null, processing: null };
 
         this._build();
 
@@ -221,10 +234,17 @@ class FrameGrid extends FramedGlyphField {
     setFrameTexture(texture) {
         this._texture = texture || null;
         this._renderer.setFrameTexture(this._texture, this.cols, this.rows);
+        const img = this._texture?.image;
+        if (img?.width > 0 && img?.height > 0) {
+            this._sourceSize = { width: img.width, height: img.height };
+        }
+        if (this._texture && !this._video && !this._stream && this._frames === 0) {
+            this.noteFrame({ width: img?.width || 0, height: img?.height || 0 });
+        }
     }
 
     /**
-     * Decode raw image bytes → a WebGPU-ready texture (filterable RGBA, SRGB, no mipmaps). The
+     * Decode raw image bytes → a filterable RGBA texture (sRGB bytes in RGBA8, no mipmaps). The
      * single home for "image bytes → a frame texture", shared by file.open's image path AND the
      * agent trail's image snapshots — the decode dials live in ONE place. Returns the texture plus
      * the source pixel dims (for aspect + registry type metadata).
@@ -236,23 +256,145 @@ class FrameGrid extends FramedGlyphField {
         const blob = new Blob([bytes], { type: mimeForFormat(format) });
         const bitmap = await createImageBitmap(blob);
         const texture = new THREE.Texture(bitmap);
+        texture.flipY = false;   // WebGL2 ignores UNPACK_FLIP_Y_WEBGL for ImageBitmap; keep flipY truthful
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        texture.colorSpace = THREE.SRGBColorSpace;   // matches the VideoTexture capture path
+        texture.colorSpace = THREE.NoColorSpace;   // raw sRGB bytes in RGBA8, matching VideoTexture in RawShaderMaterial
         texture.needsUpdate = true;
         return { texture, width: bitmap.width, height: bitmap.height };
     }
 
     /**
-     * Attach the full capture source so dispose() can stop it. The texture is applied
-     * immediately; the stream/video are retained only for teardown.
-     * @param {{texture: THREE.Texture, stream?: MediaStream, video?: HTMLVideoElement}} source
+     * Attach the full capture source so dispose() can stop it, and wire per-frame stream
+     * telemetry (`requestVideoFrameCallback` when backed by an HTMLVideoElement).
+     * @param {{texture: THREE.Texture, stream?: MediaStream, video?: HTMLVideoElement, stop?: Function}} source
      */
-    setFrameSource({ texture, stream = null, video = null }) {
+    setFrameSource({ texture, stream = null, video = null, stop = null }) {
+        if (this._video && this._rvfcId && typeof this._video.cancelVideoFrameCallback === 'function') {
+            this._video.cancelVideoFrameCallback(this._rvfcId);
+            this._rvfcId = 0;
+        }
         this._stream = stream;
         this._video  = video;
+        this._stopSource = stop;
+
+        const settings = stream?.getVideoTracks?.()?.[0]?.getSettings?.() || {};
+        const initW = video?.videoWidth || settings.width || 0;
+        const initH = video?.videoHeight || settings.height || 0;
+        if (initW > 0 && initH > 0) {
+            this._sourceSize = { width: initW, height: initH };
+        }
+
         this.setFrameTexture(texture);
+
+        if (video && typeof video.requestVideoFrameCallback === 'function') {
+            const onVideoFrame = (now, meta) => {
+                if (this._video !== video) return;
+                const w = meta?.width || video.videoWidth || 0;
+                const h = meta?.height || video.videoHeight || 0;
+                const processing = meta?.processingDuration != null
+                    ? +(meta.processingDuration * 1000).toFixed(2)
+                    : null;
+                const captureToPresent = meta?.captureTime != null
+                    ? +Math.max(0, (meta.expectedDisplayTime || now) - meta.captureTime).toFixed(2)
+                    : (meta?.presentationTime != null ? +Math.max(0, now - meta.presentationTime).toFixed(2) : null);
+                this.noteFrame({ width: w, height: h, now, processing, captureToPresent });
+                if (w > 0 && h > 0) {
+                    const nextAspect = w / h;
+                    if (Math.abs(nextAspect - this.aspect) > 1e-3) this.setAspect(nextAspect);
+                }
+                this._rvfcId = video.requestVideoFrameCallback(onVideoFrame);
+            };
+            this._rvfcId = video.requestVideoFrameCallback(onVideoFrame);
+        }
+    }
+
+    /**
+     * Record delivery of one frame for liveness/FPS/latency reporting. Called automatically by
+     * `requestVideoFrameCallback` for `<video>` captures, and available to custom frame producers.
+     * @param {{width?: number, height?: number, now?: number, processing?: number|null, captureToPresent?: number|null}} [info]
+     */
+    noteFrame({ width = 0, height = 0, now = performance.now(), processing = null, captureToPresent = null } = {}) {
+        this._frames++;
+        this._lastFrameAt = now;
+        if (width > 0 && height > 0) {
+            this._sourceSize.width = width;
+            this._sourceSize.height = height;
+        }
+        if (processing != null) this._latencyMs.processing = processing;
+        if (captureToPresent != null) this._latencyMs.captureToPresent = captureToPresent;
+        const cutoff = now - RATE_WINDOW_MS;
+        while (this._frameTimes.length && this._frameTimes[0] < cutoff) {
+            this._frameTimes.shift();
+        }
+        this._frameTimes.push(now);
+    }
+
+    /**
+     * Current stream/frame telemetry: liveness, observed FPS, last-frame age, pixel dimensions,
+     * grid dimensions, and frame latency.
+     * @param {number} [now=performance.now()]
+     */
+    getStreamStatus(now = performance.now()) {
+        // Fallback for environments where <video> advances without firing requestVideoFrameCallback
+        if (this._video) {
+            const quality = this._video.getVideoPlaybackQuality?.();
+            const total = quality?.totalVideoFrames ?? 0;
+            if (total > this._frames) {
+                this.noteFrame({
+                    width: this._video.videoWidth || 0,
+                    height: this._video.videoHeight || 0,
+                    now,
+                });
+                this._frames = total;
+            }
+        }
+        const cutoff = now - RATE_WINDOW_MS;
+        while (this._frameTimes.length && this._frameTimes[0] < cutoff) {
+            this._frameTimes.shift();
+        }
+        const track = this._stream?.getVideoTracks?.()?.[0] || null;
+        const settings = track?.getSettings?.() || {};
+        const width = this._video?.videoWidth || this._sourceSize.width || settings.width || this._texture?.image?.width || 0;
+        const height = this._video?.videoHeight || this._sourceSize.height || settings.height || this._texture?.image?.height || 0;
+        const isStream = !!(this._stream || this._video || this._stopSource);
+        const kind = isStream ? 'stream' : (this._texture ? 'static' : 'empty');
+        const ageMs = this._lastFrameAt > 0 ? Math.max(0, Math.round(now - this._lastFrameAt)) : null;
+        const stalled = isStream && this._frames > 0 && ageMs != null && ageMs > STALL_TIMEOUT_MS;
+        let fps = 0;
+        if (isStream && !stalled && this._frameTimes.length >= 2) {
+            const span = this._frameTimes[this._frameTimes.length - 1] - this._frameTimes[0];
+            if (span > 0) fps = +(((this._frameTimes.length - 1) * 1000) / span).toFixed(1);
+        }
+        const live = isStream
+            ? (track ? track.readyState === 'live' : (!this._video || (!this._video.paused && !this._video.ended)))
+            : !!this._texture;
+        return {
+            id: this.name,
+            kind,
+            live,
+            stalled,
+            frames: this._frames,
+            fps,
+            lastFrameAgeMs: ageMs,
+            size: { width, height },
+            grid: {
+                cols: this.cols,
+                rows: this.rows,
+                cells: this._cellCount,
+                aspect: +(this.aspect ?? 0).toFixed(3),
+            },
+            latencyMs: { ...this._latencyMs },
+            track: track ? {
+                label: track.label || null,
+                readyState: track.readyState || null,
+                enabled: !!track.enabled,
+                muted: !!track.muted,
+                displaySurface: settings.displaySurface || null,
+                frameRate: settings.frameRate != null ? +Number(settings.frameRate).toFixed(1) : null,
+            } : null,
+        };
     }
 
     /**
@@ -426,6 +568,14 @@ class FrameGrid extends FramedGlyphField {
      * all fields, so it is intentionally NOT disposed here.
      */
     dispose() {
+        if (this._stopSource) {
+            try { this._stopSource(); } catch { /* ignore */ }
+            this._stopSource = null;
+        }
+        if (this._video && this._rvfcId && typeof this._video.cancelVideoFrameCallback === 'function') {
+            this._video.cancelVideoFrameCallback(this._rvfcId);
+            this._rvfcId = 0;
+        }
         if (this._stream) {
             for (const track of this._stream.getTracks()) track.stop();
             this._stream = null;

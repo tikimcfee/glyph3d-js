@@ -58,6 +58,11 @@ export default class InstancedField {
         this.renderedTexts = new Map();
         this.nextId = 1;
         this._cachedMetrics = null;
+        this._renderMode = options.renderMode ? 1 : 0;
+        this._frameTexture = null;
+        this._frameCols = 1;
+        this._frameRows = 1;
+        this._pickMaterial = null;
 
         // Slot buffer (32-byte RenderSlot records)
         this.slotBuffer = new InstancedSlotBuffer(Math.max(this.maxInstances, 256));
@@ -196,6 +201,7 @@ export default class InstancedField {
             emojiTexture: ea?.getTexture?.(THREE) || null,
             emojiCols: ea?.cols || 16,
             emojiRows: ea?.rows || 16,
+            renderMode: this._renderMode,
         });
     }
 
@@ -840,10 +846,36 @@ export default class InstancedField {
         }
     }
 
+    /** True when this field renders an external frame texture (FrameGrid) rather than glyphs. */
+    get isFrame() {
+        return this._renderMode === 1;
+    }
+
     setFrameTexture(tex, cols, rows) {
         this._frameTexture = tex || null;
         this._frameCols = Math.max(1, Math.floor(cols) || 1);
         this._frameRows = Math.max(1, Math.floor(rows) || 1);
+        this._renderMode = this._frameTexture ? 1 : 0;
+
+        const u = this.material?.uniforms;
+        if (u) {
+            if (this._frameTexture) {
+                const isBitmap = typeof ImageBitmap !== 'undefined' && this._frameTexture.image instanceof ImageBitmap;
+                const flipY = (!isBitmap && this._frameTexture.flipY) ? 1 : 0;
+                u.frameTexture.value = this._frameTexture;
+                u.frameCols.value = this._frameCols;
+                u.frameRows.value = this._frameRows;
+                u.uFrameFlipY.value = flipY;
+                u.uRenderMode.value = 1;
+            } else {
+                u.frameTexture.value = this.material.userData?.placeholderRGBA || null;
+                u.uRenderMode.value = 0;
+            }
+            this.material.needsUpdate = true;
+        }
+        if (this._pickMaterial?.uniforms?.uRenderMode) {
+            this._pickMaterial.uniforms.uRenderMode.value = this._renderMode;
+        }
     }
 
     /**

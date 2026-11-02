@@ -196,6 +196,19 @@ const cx = (L.min.x + L.max.x) / 2, cy = (L.min.y + L.max.y) / 2;
     for (const f of many) f.dispose();
 }
 
+// ── FrameGrid (isFrame) fields are exempt from glyph far-LOD replacement ─────────────────
+{
+    const frameField = new InstancedField(scene, null, { maxInstances: 64, renderMode: 1 });
+    frameField.setLayoutExtent(new THREE.Box3(new THREE.Vector3(-12, -6.75, 0), new THREE.Vector3(12, 6.75, 0)));
+    scene.updateMatrixWorld();
+    lookFrom(0, 0, 1e6);
+    const st = lod.update(camera, H);
+    ok(frameField.isFrame === true, 'renderMode: 1 field reports isFrame === true');
+    ok(viewOn(frameField), 'frame field keeps its view layer even when cellH < 1 px');
+    ok(st.far === 1 && st.backdrops === 1, 'only the glyph field is replaced by a far backdrop, not the frame field');
+    frameField.dispose();
+}
+
 // ── dispose restores every view layer ────────────────────────────────────────────────────
 {
     lookFrom(cx, cy, 1e6);
