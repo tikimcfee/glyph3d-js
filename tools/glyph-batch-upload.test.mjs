@@ -14,6 +14,9 @@
 //     one range per row, with more the whole table
 //   - two refreshes before an upload never narrow a pending whole-table upload to ranges (the GPU
 //     copy stays exact)
+//   - a still label's math is skipped, and the skip never goes stale: after a move, a fade, a hide,
+//     a re-show, a table growth, a camera move, the rows equal a fresh batch's (teeth: a skip blind
+//     to a label's movement fails)
 
 import * as THREE from 'three';
 import SceneTransforms from '../packages/glyph3d-core/src/collections/SceneTransforms.js';
@@ -142,6 +145,52 @@ function twoRefreshes(forget) {
     ok(tex.version !== v, 'teeth: an every-frame needsUpdate moves the version at rest (the rest check catches it)');
     const x = twoRefreshes(true);
     ok(!exact(x.batch.arena._groupData, x.g.copy), `teeth: narrowing the pending whole upload leaves the GPU copy wrong (${JSON.stringify(x.g.uploads)})`);
+}
+
+// ── 5. A still label's math is skipped (its world matrix, the camera, its group row and whether it
+//       shows all held) — and the skip never goes stale: after each kind of change the batch's rows
+//       equal a FRESH batch's, built from scratch. Teeth: a skip blind to a label's movement fails.
+function rowsMatchFresh(w) {
+    const fresh = new GlyphBatch(w.scene, {});
+    fresh.update(w.camera);
+    const A = w.batch.arena._groupData, B = fresh.arena._groupData;
+    // A dark row (alpha 0) draws nothing whatever else it holds: compare its alpha only.
+    const rowSame = (g) => {
+        const r = g * ROW;
+        if (B[r + 11] === 0) return A[r + 11] === 0;
+        for (let k = 0; k < ROW; k++) if (!Object.is(A[r + k], B[r + k])) return false;
+        return true;
+    };
+    const same = w.batch._members.every((m, i) => m.mesh === fresh._members[i].mesh && rowSame(i + 1));
+    fresh.dispose();
+    return same;
+}
+{
+    const w = world(6);
+    w.frame(); w.frame();
+    const steps = [
+        ['nothing changed', () => {}],
+        ['a label moved, camera still', () => { w.labels[2].instanceMesh.position.y += 3; w.scene.updateMatrixWorld(); }],
+        ['a label faded', () => { w.labels[4].setGroupAlpha(0, 0.3); }],
+        ['a label hidden', () => { w.labels[1].instanceMesh.visible = false; }],
+        ['a label shown again', () => { w.labels[1].instanceMesh.visible = true; }],
+        ['a label\'s table grew, then faded', () => { w.labels[3].createGroup(); w.labels[3].setGroupAlpha(0, 0.7); }],
+        ['the camera moved', () => { w.camera.position.z -= 20; w.camera.updateMatrixWorld(); }],
+        ['still again', () => {}],
+    ];
+    for (const [what, act] of steps) {
+        act();
+        w.frame();
+        ok(rowsMatchFresh(w), `${what}: the rows equal a fresh batch's`);
+        ok(exact(w.batch.arena._groupData, w.g.copy), `${what}: and the GPU copy is exact`);
+    }
+    // Teeth: a skip blind to the label's movement (its remembered matrix overwritten with the new one).
+    w.labels[5].instanceMesh.position.x += 9;
+    w.scene.updateMatrixWorld();
+    const rec = w.batch._records.get(w.labels[5].instanceMesh);
+    rec.mw.set(w.labels[5].instanceMesh.matrixWorld.elements);
+    w.frame();
+    ok(!rowsMatchFresh(w), 'teeth: a skip that misses a moved label leaves its row stale');
 }
 
 console.log(`${fails ? 'FAIL' : 'ok'} glyph-batch-upload: ${checks - fails}/${checks} checks`);
