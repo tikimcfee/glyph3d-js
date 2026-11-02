@@ -11,10 +11,13 @@ import { getSetting } from './settings.js';
  * local sessions at the `agents` desk) share.
  *
  *   the hub   — one world-managed desk, a sibling of the file tree;
- *   a team    — a node with shown helpers gets its own desk, `<hub>/<id>`, seated where its
- *               book would be: its own book first, then its helpers (books, or their own
- *               teams) in the order given. Nesting is as deep as the tree. A team whose
- *               helpers have all gone folds its desk.
+ *   a team    — a node with shown helpers, or one that OWNS a desk (the owner's `ownsDesk`:
+ *               a gomuxai agent with a live screen — its book and screen pinned together),
+ *               gets its own desk, `<hub>/<id>`, seated where its book would be: its own book
+ *               first, then its helpers (books, or their own teams) in the order given.
+ *               Nesting is as deep as the tree. A team whose helpers (and screen) have all
+ *               gone folds its desk. Team desks are born in the owner's `teamForm` (the hub's:
+ *               a plane — Settings ▸ gomuxai `gomux.teamMode`).
  *
  * Every desk the tree builds is `derived` — rebuilt from its owner's data every boot, never
  * saved (each keeps the values set on it by hand: those persist by desk name). A book the
@@ -32,15 +35,19 @@ export default class DeskTree {
     /**
      * @param {AppContext} ctx
      * @param {{hub: string, hubTitle?: string|null, hubForm: () => Object,
+     *          teamForm?: () => Object, ownsDesk?: (id: string) => boolean,
      *          gap?: () => number|null}} opts
-     *        hubForm: the hub desk's birth form (a cylinder, a wall); gap: the space desks are
-     *        born spacing their members (world units; null = Settings ▸ Carrel's)
+     *        hubForm: the hub desk's birth form (a cylinder, a wall); teamForm: a team desk's
+     *        (default a wall); ownsDesk: a node that gets its own desk without helpers; gap: the
+     *        space desks are born spacing their members (world units; null = Settings ▸ Carrel's)
      */
-    constructor(ctx, { hub, hubTitle = null, hubForm, gap = () => null }) {
+    constructor(ctx, { hub, hubTitle = null, hubForm, teamForm = () => ({ mode: 'grid' }), ownsDesk = () => false, gap = () => null }) {
         this.ctx = ctx;
         this.hub = hub;
         this.hubTitle = hubTitle;
         this._hubForm = hubForm;
+        this._teamForm = teamForm;
+        this._ownsDesk = ownsDesk;
         this._gap = gap;
         /** Team desks built, by desk name → the desk the team sits at. */
         this._teamParent = new Map();
@@ -72,7 +79,8 @@ export default class DeskTree {
             if (!kids.has(p)) kids.set(p, []);
             kids.get(p).push(n);
         }
-        const hasTeam = (id) => (kids.get(id) || []).some((k) => k.book || kids.has(k.id));
+        const hasTeam = (id) => (kids.get(id) || []).some((k) => k.book || kids.has(k.id))
+            || (!!nodes.find((n) => n.id === id)?.book && this._ownsDesk(id));
         const books = this.ctx.agentBooks?.lanes;
         for (const id of [...this.seated.keys()]) if (!books?.has(id)) this.seated.delete(id);
         const teams = new Set(nodes.filter((n) => hasTeam(n.id)).map((n) => this.teamDesk(n.id)));
@@ -83,7 +91,7 @@ export default class DeskTree {
             if (hasTeam(n.id)) {
                 const team = this.desk(this.teamDesk(n.id));
                 const helpers = (kids.get(n.id) || []).length;
-                this._title(team, `${n.label} · ${helpers} helper${helpers === 1 ? '' : 's'}`);
+                this._title(team, helpers ? `${n.label} · ${helpers} helper${helpers === 1 ? '' : 's'}` : n.label);
                 this._seatDesk(parentDesk, team, order);
                 if (n.book) this._seatBook(team, n.book, 0);
                 (kids.get(n.id) || []).forEach((k, i) => place(team, k, i + 1));
@@ -113,7 +121,7 @@ export default class DeskTree {
         const gap = g == null ? NaN : Number(g);
         const boxH = Number(getSetting('carrel.boxH'));
         const form = {
-            ...(hub ? this._hubForm() : { mode: 'grid' }),
+            ...(hub ? this._hubForm() : this._teamForm()),
             ...(Number.isFinite(gap) && gap >= 0 && boxH > 0 ? { gapFrac: gap / boxH } : {}),
         };
         const desk = buildCarrel(this.ctx, name, { managed: hub, nested: !hub, form });

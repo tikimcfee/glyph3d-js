@@ -905,6 +905,7 @@ export const SETTINGS = [
   { key: 'gomux.enabled', label: 'Show the gomuxai tree', group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.autoScreens', label: "Open each live agent's screen beside its book", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.screenGap', label: "Gap between a book and its agent's screen", group: 'gomuxai', type: 'number', default: 24, min: 0, max: 2000, step: 2 },
+  { key: 'gomux.teamMode', label: 'An agent’s own desk (its book + live screen, its helpers) is born a — plane (read flat when entered), wall, or ring', group: 'gomuxai', type: 'enum', options: ['plane', 'grid', 'ring'], default: 'plane' },
   { key: 'gomux.hubForm', label: "The hub's form when it's built: ring (a cylinder around you) or grid (a wall)", group: 'gomuxai', type: 'enum', options: ['ring', 'grid'], default: 'ring' },
   { key: 'gomux.centerOnLoad', label: "Stand at the hub's center once everything loads", group: 'gomuxai', type: 'bool', default: true },
   { key: 'gomux.gap', label: "Space between books / teams at the hub's desks when they're built (world units)", group: 'gomuxai', type: 'number', default: 180, min: 0, max: 5000, step: 10 },

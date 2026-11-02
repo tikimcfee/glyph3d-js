@@ -91,6 +91,10 @@ export default class GomuxHub {
         this.tree = new DeskTree(ctx, {
             hub: GOMUX_HUB, hubTitle: 'gomuxai',
             hubForm: () => (getSetting('gomux.hubForm') !== 'grid' ? cylinderForm() : { mode: 'grid' }),
+            // An agent's own desk (its book and live screen pinned together; its helpers too) is
+            // born a plane — entered, it reads like its terminal.
+            teamForm: () => ({ mode: String(getSetting('gomux.teamMode')) }),
+            ownsDesk: (name) => !!this.ctx.registry?.get?.(this.screenId(name)),
             gap: () => getSetting('gomux.gap'),
         });
         /** Agents whose screen the hub asked for (or that were detached) — asked once. */
@@ -105,7 +109,14 @@ export default class GomuxHub {
         this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
         this._offCloses = this.tree.watchCloses(() => this._layout());
-        this._onRegistry = () => this._seatScreens();   // a screen (re-)adopted: seat it
+        this._onRegistry = () => {   // a screen (re-)adopted: its agent may now own a desk; seat it
+            if (this._inRegistry) return;   // building a desk registers it — don't re-enter
+            this._inRegistry = true;
+            try {
+                if (this._deskDrift()) this._layout();
+                this._seatScreens();
+            } finally { this._inRegistry = false; }
+        };
         ctx.registry?.addChangeListener?.(this._onRegistry);
         this._offVisibility = ctx.agentVisibility?.onChange(() => { if (this.snapshot) this.apply(this.snapshot); }) ?? null;
         this._disposed = false;
@@ -315,6 +326,20 @@ export default class GomuxHub {
             } else if (book.aside === grid) continue;   // riding it (or docked from it — it comes home to the book)
             this.seatScreen(name, id);
         }
+    }
+
+    /** Does an agent with a book own a screen but no desk (or a desk but neither screen nor
+     *  helpers)? Then the tree must re-seat. @private */
+    _deskDrift() {
+        const lanes = this.ctx.agentBooks?.lanes;
+        const standing = new Set(this.tree.desks().map((d) => d.carrelName));
+        for (const a of this.nodes.values()) {
+            if (!lanes?.has(a.name)) continue;
+            const screen = !!this.ctx.registry?.get?.(this.screenId(a.name));
+            const helpers = [...this.nodes.values()].some((k) => k.parent === a.name && lanes.has(k.name));
+            if ((screen || helpers) !== standing.has(this.tree.teamDesk(a.name))) return true;
+        }
+        return false;
     }
 
     /** The agent's screen was closed on purpose — don't reopen it. */

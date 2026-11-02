@@ -190,7 +190,7 @@ function hubWorld() {
     ok(hubDesk && team, 'the hub builds its desk and the team desk');
     ok(hubDesk.mode === 'ring' && hubDesk.seat === 'natural' && hubDesk.radius === getSetting('carrel.cylinderRadius')
         && hubDesk.ringMaxRows === getSetting('carrel.cylinderMaxRows'), 'the hub desk is born a cylinder (Settings ▸ Carrel cylinder defaults)');
-    ok(team.mode === 'grid' && team.derived && hubDesk.derived, 'a team desk is born a wall; hub desks are derived');
+    ok(team.mode === getSetting('gomux.teamMode') && team.mode === 'plane' && team.derived && hubDesk.derived, 'a team desk is born in gomux.teamMode (a plane by default); hub desks are derived');
     ok(Math.abs(hubDesk.gapFrac * hubDesk.boxH - getSetting('gomux.gap')) < 1e-6, 'hub desks are born gomux.gap apart');
     ok(deskOf(w.ctx, w.lanes.get('h1').book.sheets[0].recto) === team, "deskOf: a seated book's card sits at its team desk");
     ok(deskOf(w.ctx, w.lanes.get('solo').book) === hubDesk, 'deskOf: a book seated at the hub');

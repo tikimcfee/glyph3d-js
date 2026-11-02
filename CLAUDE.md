@@ -267,9 +267,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   agent that moves on to a new session keeps its book. The tree is desks (`app/client/DeskTree.js`): the world-managed
   `gomux` carrel — born a CYLINDER by default (`gomux.hubForm`: a natural-seat ring whose rows
   stack up to `carrel.cylinderMaxRows` before it widens past `carrel.cylinderRadius`; everything
-  around you is a camera turn away); an agent with helpers gets a flat `gomux/<name>` team carrel
-  seated in its parent's desk (its book first, then its helpers), titled `<name> · N helpers`,
-  born `gomux.gap` apart.
+  around you is a camera turn away); an agent with helpers OR a live screen gets its own
+  `gomux/<name>` desk seated in its parent's desk (its book first, then its helpers), titled
+  `<name>` (`· N helpers` with helpers), born `gomux.gap` apart and in `gomux.teamMode` — a PLANE
+  by default, so its book and its screen are pins side by side and entering it reads the agent's
+  terminal at your terminal's size.
   Desks seat a Book by `getSeatBounds()` — the room it draws in (cover pad, tab ruler, nameplate)
   — while framing and the tree keep its page box (`getLocalBounds`). An agent book RESERVES its
   room (`Book.setReserve`, at its sheet cap): its frame (`frameBounds` — the spread, the deck

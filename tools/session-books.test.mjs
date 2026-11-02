@@ -618,7 +618,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     ok(!rs._failedSections.has('agents'), 'an aged-out book is a clean skip, not a failure');
 }
 
-// ── 11. an agent's screen rides its book, whichever arrives first ─────────────────────
+// ── 11. an agent's screen sits beside its book, whichever arrives first ─────────────────────
 {
     const { default: registerGomuxCommands } = await import('../app/commands/handlers/gomuxCommands.js');
     const screen = (id) => {   // a terminal-shaped window: an Object3D with local bounds
@@ -651,41 +651,50 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
         return w;
     };
     const agent = (name, sid, parent = '') => ({ name, parent, sessionId: sid, harness: 'claude', live: true, attached: true, status: 'idle', createdAt: new Date().toISOString() });
-    const rides = (w, name) => {
+    // A screen sits BESIDE its book: as the book's aside (a ring / wall desk), or — an agent with a
+    // screen owning its own PLANE desk (gomux.teamMode) — as its own pin on that same desk.
+    const beside = (w, name) => {
         const book = w.books.lanes.get(name)?.book, grid = w.ctx.registry.get(`gx-${name}`)?.grid;
-        return !!book && !!grid && book.aside === grid && grid.parent === book;
+        if (!book || !grid) return false;
+        if (book.aside === grid && grid.parent === book) return true;
+        const desk = w.ctx.holding.holderOf(`gx-${name}`);
+        return !!desk && desk === w.ctx.holding.holderOf(w.books.lanes.get(name).groupId) && desk.mode === 'plane';
     };
+    const deskOfAgent = (w, name) => w.ctx.carrels.get(`${GOMUX_HUB}/${name}`);
 
-    // (a) the book opens first: autoScreens attaches, and the screen rides the book
+    // (a) the book opens first: autoScreens attaches, and the agent gets its OWN plane desk — book + screen
     const a = hubWorld();
     a.relay.add(session('B1', { workgroup: { name: 'boss' } }), [say(0, 'b')]);
     a.hub.apply({ gen: 1, dirs: [], agents: [agent('boss', 'B1')] });
     await opened(a, 'B1'); await sleep(20);
-    ok(rides(a, 'boss'), 'a screen attached once its book opens rides the book');
-    // a team forms around it, then folds: the screen goes where its book goes
+    ok(holderName(a, 'boss') === `${GOMUX_HUB}/boss` && deskOfAgent(a, 'boss')?.mode === 'plane' && beside(a, 'boss'),
+        'an agent with a screen owns a plane desk: its book and its screen pinned together');
+    // a helper (with its own screen) joins: it gets its own desk, inside the agent's
     a.relay.add(session('K1', { workgroup: { name: 'kid' } }), [say(0, 'k')]);
     a.hub.apply({ gen: 2, dirs: [], agents: [agent('boss', 'B1'), agent('kid', 'K1', 'boss')] });
     await opened(a, 'K1'); await sleep(20);
-    ok(holderName(a, 'boss') === `${GOMUX_HUB}/boss` && rides(a, 'boss') && rides(a, 'kid'),
-        'a team desk forms: the agent\'s book moves onto it with its screen; the helper\'s screen rides the helper\'s book');
+    ok(holderName(a, 'boss') === `${GOMUX_HUB}/boss` && beside(a, 'boss') && holderName(a, 'kid') === `${GOMUX_HUB}/kid` && beside(a, 'kid')
+        && !!deskOfAgent(a, 'boss')?.has(`carrel:${GOMUX_HUB}/kid`),
+        'a helper with a screen gets its own desk inside its agent\'s; each screen beside its own book');
     a.run('agent.clear', 'kid'); await sleep(20);
-    ok(holderName(a, 'boss') === GOMUX_HUB && rides(a, 'boss'), 'the team folds: the book is back at the hub, its screen still beside it');
+    ok(holderName(a, 'boss') === `${GOMUX_HUB}/boss` && beside(a, 'boss'), 'the helper goes: the agent keeps its desk (it still owns a screen), book and screen together');
     a.hub.dispose();
 
-    // (b) a reload: the adapter re-adopts the screen BEFORE the book opens — no attach, still seated
+    // (b) a reload: the adapter re-adopts the screen BEFORE the book opens — no attach, still together
     const b = hubWorld();
     b.ctx.registry.register('gx-boss', screen('gx-boss'), { type: 'terminal' });
     b.relay.add(session('B1', { workgroup: { name: 'boss' } }), [say(0, 'b')]);
     b.hub.apply({ gen: 1, dirs: [], agents: [agent('boss', 'B1')] });
     await opened(b, 'B1'); await sleep(20);
-    ok(!b.attaches.length && rides(b, 'boss'), 'a screen re-adopted before its book opened rides the book (no second attach)');
+    ok(!b.attaches.length && beside(b, 'boss'), 'a screen re-adopted before its book opened sits beside it (no second attach)');
     // a screen re-adopted AFTER its book opened (and after autoScreens looked) is seated as it lands
     b.relay.add(session('K1', { workgroup: { name: 'kid' } }), [say(0, 'k')]);
     b.hub.apply({ gen: 2, dirs: [], agents: [agent('boss', 'B1'), agent('kid', 'K1', 'boss')] });
     b.hub.declineScreen('kid');   // (keep autoScreens from attaching it: the adapter re-adopts on its own)
     await opened(b, 'K1');
     b.ctx.registry.register('gx-kid', screen('gx-kid'), { type: 'terminal' });
-    ok(rides(b, 'kid'), 'a screen registering after its book is up is seated as it lands');
+    await sleep(20);
+    ok(beside(b, 'kid') && holderName(b, 'kid') === `${GOMUX_HUB}/kid`, 'a screen registering after its book is up gets its agent a desk, seated as it lands');
     b.hub.dispose();
 }
 
