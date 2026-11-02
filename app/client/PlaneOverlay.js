@@ -148,6 +148,9 @@ function setOverlayLayers(root) {
  * Drawn after the main 3D scene pass on the same WebGLRenderer with depth cleared and
  * an OrthographicCamera at 1 unit = 1 device pixel (`left: 0, right: Wdev, top: 0, bottom: -Hdev`).
  */
+/** Press-to-release travel (CSS px) past which a press is a drag, not a click — CanvasInteraction's DRAG_PX. */
+const CLICK_TRAVEL_PX = 5;
+
 export default class PlaneOverlay {
     /**
      * @param {AppContext} ctx
@@ -172,19 +175,29 @@ export default class PlaneOverlay {
         this._dotGeo = null;
 
 
+        /** @type {{x:number,y:number}|null} where the primary press went down (a drag is never a click) */
+        this._downClient = null;
+
         this._domCanvas = ctx?.renderer?.domElement ?? ctx?.canvas ?? null;
+        this._onDomPointerDown = (e) => {
+            if (e.pointerType === 'touch') return;
+            if (e.button != null && e.button !== 0) return;
+            this._downClient = { x: e.clientX, y: e.clientY };
+        };
         this._onDomClick = (e) => {
             if (e.button != null && e.button !== 0) return;
-            const vp = this.viewport();
-            const rect = this._domCanvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
-            const devX = (e.clientX - rect.left) * vp.dpr;
-            const devY = (e.clientY - rect.top) * vp.dpr;
-            const hit = this.hitTest(devX, devY);
+            if (this._downClient && Math.hypot(e.clientX - this._downClient.x, e.clientY - this._downClient.y) > CLICK_TRAVEL_PX) {
+                this._downClient = null;
+                return;
+            }
+            this._downClient = null;
+            const hit = this.hitTestAtClient(e.clientX, e.clientY);
             if (hit && typeof hit.onClick === 'function') {
                 e.stopPropagation?.();
                 hit.onClick(hit);
             }
         };
+        this._domCanvas?.addEventListener?.('pointerdown', this._onDomPointerDown, true);
         this._domCanvas?.addEventListener?.('click', this._onDomClick, true);
     }
 
@@ -686,6 +699,23 @@ export default class PlaneOverlay {
     }
 
     /**
+     * Convert CSS client coordinates `(clientX, clientY)` relative to the viewport into
+     * device pixels and resolve the topmost hit interactive overlay item.
+     *
+     * @param {number} clientX
+     * @param {number} clientY
+     * @returns {Object|null}
+     */
+    hitTestAtClient(clientX, clientY) {
+        const vp = this.viewport();
+        const canvas = this._domCanvas ?? this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
+        const rect = canvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+        const devX = (Number(clientX) - rect.left) * vp.dpr;
+        const devY = (Number(clientY) - rect.top) * vp.dpr;
+        return this.hitTest(devX, devY);
+    }
+
+    /**
      * Convert CSS client coordinates `(clientX, clientY)` relative to the canvas into
      * device pixels and invoke `clickAt`.
      *
@@ -695,7 +725,7 @@ export default class PlaneOverlay {
      */
     pickAt(clientX, clientY) {
         const vp = this.viewport();
-        const canvas = this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
+        const canvas = this._domCanvas ?? this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
         const rect = canvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
         const devX = (clientX - rect.left) * vp.dpr;
         const devY = (clientY - rect.top) * vp.dpr;
@@ -747,9 +777,13 @@ export default class PlaneOverlay {
     /**
      * List overlay items as plain serializable records.
      * @param {{ kind?: string|null }} [opts]
-     * @returns {Array<{ id: string, type: string, kind: string, x: number, y: number, z: number, px: number, scale: number, text: string, opacity: number, cols: number, rows: number, textRect: { x: number, y: number, w: number, h: number }, rect: { x: number, y: number, w: number, h: number } }>}
+     * @returns {Array<{ id: string, type: string, kind: string, x: number, y: number, z: number, px: number, scale: number, text: string, opacity: number, cols: number, rows: number, textRect: { x: number, y: number, w: number, h: number }, rect: { x: number, y: number, w: number, h: number }, screenRect: { x: number, y: number, w: number, h: number } }>}
      */
     list({ kind = null } = {}) {
+        const vp = this.viewport();
+        const dpr = vp.dpr || 1;
+        const canvas = this._domCanvas ?? this.ctx?.renderer?.domElement ?? this.ctx?.canvas ?? null;
+        const domRect = canvas?.getBoundingClientRect?.() ?? { left: 0, top: 0 };
         const out = [];
         for (const rec of this.items.values()) {
             if (kind && rec.kind !== kind) continue;
@@ -768,6 +802,12 @@ export default class PlaneOverlay {
                 rows: rec.rows,
                 textRect: { ...rec.textRect },
                 rect: { ...rec.rect },
+                screenRect: {
+                    x: domRect.left + rec.rect.x / dpr,
+                    y: domRect.top + rec.rect.y / dpr,
+                    w: rec.rect.w / dpr,
+                    h: rec.rect.h / dpr,
+                },
             });
         }
         return out;
@@ -816,9 +856,12 @@ export default class PlaneOverlay {
     }
 
     dispose() {
+        this._domCanvas?.removeEventListener?.('pointerdown', this._onDomPointerDown, true);
         this._domCanvas?.removeEventListener?.('click', this._onDomClick, true);
         this._domCanvas = null;
+        this._onDomPointerDown = null;
         this._onDomClick = null;
+        this._downClient = null;
         this.clear();
         this._dotGeo?.dispose();
         this._dotGeo = null;

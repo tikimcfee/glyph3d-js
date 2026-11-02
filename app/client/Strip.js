@@ -662,12 +662,17 @@ export class Strip {
     /**
      * @param {Object} ctx - AppContext
      * @param {import('./PlaneOverlay.js').default} overlay
-     * @param {Partial<typeof DEFAULT_STRIP_CONFIG>} [opts]
+     * @param {{exec: (cmd: string) => any} & Partial<typeof DEFAULT_STRIP_CONFIG>} opts
+     *   exec: runs a verb on the live command bus (a card's click is `carrel.enter <name>`) — required:
+     *   the strip runs on the provider's raw ctx, which carries no router of its own
      */
-    constructor(ctx, overlay, opts = {}) {
+    constructor(ctx, overlay, opts) {
+        const { exec, ...cfgOpts } = opts ?? {};
+        if (typeof exec !== 'function') throw new Error('Strip: opts.exec (the command bus) is required');
         this.ctx = ctx;
         this.overlay = overlay;
-        this.config = { ...DEFAULT_STRIP_CONFIG, ...opts };
+        this._exec = exec;
+        this.config = { ...DEFAULT_STRIP_CONFIG, ...cfgOpts };
         /** @type {Array<{name:string, bearing:number, waitingCount:number, waitingNames:string[], shown:boolean, rect:{x:number,y:number,w:number,h:number}|null}>} */
         this._lastCards = [];
         /** @type {Array<{id:string, kind:'deixis'|'waiting', edge:'left'|'right'|'top'|'bottom', x:number, y:number, text:string}>} */
@@ -896,15 +901,7 @@ export class Strip {
                     placeholder,
                     stale: cardEntry ? cardEntry.stale : true,
                 },
-                onClick: () => {
-                    if (typeof ctx.execute === 'function') {
-                        return ctx.execute(['carrel.enter', targetName]);
-                    }
-                    if (ctx.commandRouter?.execute) {
-                        return ctx.commandRouter.execute(`carrel.enter ${JSON.stringify(targetName)}`);
-                    }
-                    return null;
-                },
+                onClick: () => this._exec(`carrel.enter ${JSON.stringify(targetName)}`),
             });
 
             this._lastCards.push({

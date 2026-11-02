@@ -514,7 +514,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const offOverlayPass = state.ctx.renderPasses.add('overlay', PASS_ORDER.overlay, (r) => state.ctx.planeOverlay?.render(r));
     state.ctx.carrelCards = new CarrelCards(state.ctx);
     state.ctx.mapLabels = new MapLabels(state.ctx);
-    state.ctx.strip = new Strip(state.ctx, state.ctx.planeOverlay);
+    state.ctx.strip = new Strip(state.ctx, state.ctx.planeOverlay, { exec: (cmd) => state.router.execute(cmd) });
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Labels');             // fold persisted map-label declutter dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot

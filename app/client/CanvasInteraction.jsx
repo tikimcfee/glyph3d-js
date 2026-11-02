@@ -147,6 +147,8 @@ export function CanvasPicker() {
     // must still be within DRAG_PX of where the grip pick sampled, so a press never
     // acts on a stale grip the cursor has already left.
     const isGripPress = (clientX, clientY) => {
+      const overlayHit = client.ctx.planeOverlay?.hitTestAtClient?.(clientX, clientY);
+      if (overlayHit && typeof overlayHit.onClick === 'function') return true;
       const hh = client.ctx.handleHover, at = client.ctx.handleHoverAt;
       return !!(hh && at && Math.hypot(clientX - at.x, clientY - at.y) <= DRAG_PX);
     };
@@ -229,6 +231,10 @@ export function CanvasPicker() {
       if (client.ctx.manipulating) return;
       // Only a click if the pointer barely moved (else it was an orbit/pan/drag).
       if (Math.hypot(e.clientX - s.downX, e.clientY - s.downY) > DRAG_PX) return;
+      // An interactive 2D screen overlay item (e.g. a strip card) sits in front of the
+      // 3D scene and owns its click via PlaneOverlay; do not fire a 3D scene gesture behind it.
+      const overlayHit = client.ctx.planeOverlay?.hitTestAtClient?.(e.clientX, e.clientY);
+      if (overlayHit && typeof overlayHit.onClick === 'function') return;
       // Act on exactly what's highlighted (the grid-channel hover result the
       // hover loop keeps current). hoverEntry null = empty space. Modifiers ride
       // along so meta+click can toggle dock membership (gestureResolver).
@@ -279,6 +285,16 @@ export function CanvasPicker() {
     // Resolve a picked entry into the hover slot. Always refresh the cached entry
     // (cheap); only fire the command + cursor change when the id changes.
     const applyHover = (entry) => {
+      const overlayHit = s.in ? client.ctx.planeOverlay?.hitTestAtClient?.(s.x, s.y) : null;
+      if (overlayHit && typeof overlayHit.onClick === 'function') {
+        s.hoverEntry = null;
+        if (s.hoverId !== null) {
+          s.hoverId = null;
+          client.router.execute('attention.set hover none');
+        }
+        dom.style.cursor = 'pointer';
+        return;
+      }
       const id = entry?.id ?? null;
       s.hoverEntry = entry ?? null;
       if (id === s.hoverId) return;
@@ -329,6 +345,20 @@ export function CanvasPicker() {
       s.px = c.position.x; s.py = c.position.y; s.pz = c.position.z;
       s.qx = c.quaternion.x; s.qy = c.quaternion.y; s.qz = c.quaternion.z; s.qw = c.quaternion.w;
       s.pickWanted = true;   // latched: a move during an in-flight pick is picked up after it lands
+    }
+    const overlayHit = s.in ? client.ctx.planeOverlay?.hitTestAtClient?.(s.x, s.y) : null;
+    if (overlayHit && typeof overlayHit.onClick === 'function') {
+      s.overlayHoverId = overlayHit.id;
+      applyHandleHover(null);
+      applyHover(null);
+      applyGlyphHover(null, null);
+      dom.style.cursor = 'pointer';
+      s.pickWanted = false;
+      return;
+    } else if (s.overlayHoverId) {
+      s.overlayHoverId = null;
+      dom.style.cursor = s.hoverId ? 'pointer' : 'default';
+      s.pickWanted = true;
     }
     if (!s.pickWanted) return;
 

@@ -55,6 +55,9 @@ if [ -z "${GLYPH_VITE_URL:-}" ] && grep -q "GLYPH_VITE_URL" $list 2>/dev/null; t
   done
 fi
 
+# Tests that need a relay get the worktree's built binary (Go is gated by go test, not here).
+[ -z "${GLYPH_CLI:-}" ] && [ -x "$WT/glyph3d-cli" ] && export GLYPH_CLI="$WT/glyph3d-cli"
+
 pass=0; fail=0
 for f in $list; do
   if timeout 150 bun "$f" >/dev/null 2>&1; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $f"; fi

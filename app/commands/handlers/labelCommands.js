@@ -2,7 +2,7 @@
  * Screen overlay, map label, and carrel card commands:
  *   overlay.text <id> <x> <y> <px> <text...>
  *   overlay.clear [id]
- *   overlay.list
+ *   overlay.list [kind]
  *   label.list
  *   label.explain <id>
  *   label.freeze [on|off]
@@ -119,8 +119,7 @@ export default function registerLabelCommands(router) {
     router.register('overlay.list', (args, ctx) => {
         const overlay = ensureOverlay(ctx);
         const vp = overlay.syncCamera();
-        const all = args.includes('--all');
-        const items = overlay.list({ kind: all ? null : 'manual' });
+        const items = overlay.list({ kind: args[0] ?? null });
         if (items.length === 0) {
             return {
                 text: box('OVERLAY', ['(empty)'], 48) + '\nOK: 0 overlay items',
@@ -141,8 +140,8 @@ export default function registerLabelCommands(router) {
             data: { items, count: items.length, viewport: vp },
         };
     }, {
-        description: 'List items in the screen overlay',
-        usage: '[--all]',
+        description: 'List the screen overlay\'s items (all, or one kind: manual, strip, …), each with its device-px rect and page-CSS screenRect',
+        usage: '[kind]',
     });
 
     // ================================================================

@@ -570,7 +570,7 @@ try {
         const enterRes = await req(`plane.enter ${fileA}`);
         await untilPlane((s) => s && !s.tweening, 15000);
         const s = (await req('plane.state')).data;
-        const ov = (await req('overlay.list --all')).data;
+        const ov = (await req('overlay.list')).data;
         const stripCards = (ov?.items ?? []).filter((i) => i.kind === 'strip' && String(i.id).startsWith('strip:card:'));
         const stripRightPx = stripCards.length
             ? Math.max(...stripCards.map((c) => c.rect.x + c.rect.w))

@@ -524,6 +524,16 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/strip.test.mjs
   bun tools/carrel-cards.test.mjs
   ```
+- **`strip-click.test.mjs`** (GPU, a real browser on a private relay: `--no-gomuxai`, scratch tmux
+  socket, `gomux.autoScreens` off) — a REAL pointer on a strip card: hovering it shows the pointer
+  cursor (CanvasInteraction's hover loop yields to an interactive overlay item), and `page.mouse.click`
+  at its `overlay.list` screenRect runs `carrel.enter <that desk>` (the strip runs verbs through the
+  `exec` it's built with), lands `plane.state` on it, and its card back returns; the 3D scene behind a
+  card neither hovers nor clicks. Teeth: the strip reaching for a router on the raw ctx (the old click)
+  enters nothing.
+  ```
+  bun tools/strip-click.test.mjs
+  ```
 
 - **`deixis-lite.test.mjs`** (headless) — pointing, lite (`app/client/Deixis.js`,
   `deixisCommands.js`) on a real CodeGrid and TerminalGrid line model: a code glyph resolves to

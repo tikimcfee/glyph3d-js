@@ -338,7 +338,7 @@ console.log('=== strip.test.mjs ===');
 {
     const { ctx, router, scene, carrels } = makeTestContext(1600, 1000);
     const overlay = new PlaneOverlay({ width: 1600, height: 1000, dpr: 1 });
-    const strip = new Strip(ctx, overlay);
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
     // Create 1 entered carrel at origin facing -Z (normal = +Z) and 8 other carrels at known bearings
@@ -408,7 +408,7 @@ console.log('=== strip.test.mjs ===');
 {
     const { ctx, router, scene, camera, carrels, registry } = makeTestContext(1600, 1000);
     const overlay = new PlaneOverlay({ width: 1600, height: 1000, dpr: 1 });
-    const strip = new Strip(ctx, overlay);
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
     const desk = new Carrel({ name: 'work', mode: 'plane', radius: 10 });
@@ -467,7 +467,7 @@ console.log('=== strip.test.mjs ===');
     const vpW = 1600, vpH = 1000;
     const { ctx, router, scene, carrels } = makeTestContext(vpW, vpH);
     const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
-    const strip = new Strip(ctx, overlay);
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
     // Create a plane desk with a wide pin (1500 px wide in a 1600 px viewport: centered at x=50,
@@ -531,7 +531,7 @@ console.log('=== strip.test.mjs ===');
     const vpW = 1600, vpH = 942;
     const { ctx, router, scene, carrels, registry } = makeTestContext(vpW, vpH);
     const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
-    const strip = new Strip(ctx, overlay);
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
     // Set up a pin desk with two pins (like `gomux/glyph3d-js-root` with an AgentBook + wide terminal)
@@ -607,7 +607,7 @@ console.log('=== strip.test.mjs ===');
 
     const overlay = new PlaneOverlay({ width: vpW, height: vpH, dpr: 1 });
     ctx.planeOverlay = overlay;
-    const strip = new Strip(ctx, overlay);
+    const strip = new Strip(ctx, overlay, { exec: (cmd) => router.execute(cmd) });
     ctx.strip = strip;
 
     const unit = makePlaneUnit();
