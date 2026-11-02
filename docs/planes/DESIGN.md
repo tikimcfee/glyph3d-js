@@ -224,6 +224,10 @@ the terminal, so plane keys need their own tier:
   (`plane.fan toggle`; holding the chord fans while the OS repeats it). No bytes reach the PTY.
   `keys.trace on` logs each key event the router sees (key, code, modifiers, repeat, the claiming
   tier, the plane state) as a `[keys]` record, so what a browser delivers is read rather than guessed.
+  A key has no command bar to print its answer, so a verb it runs that fails (an ERR answer, a throw,
+  a rejection) or answers with a `notice` shows on the status line. `keyVerb` sends it to
+  `ctx.status.notice`, and the line fades after `keys.noticeMs` (`tools/key-notice.test.mjs`). Verbs
+  run from the command bar or the CLI never pass through `keyVerb`.
 - **Esc.** In soft focus Esc is the context pop, and the entered plane is the outermost context: the
   first Esc releases the key slot to the plane (focus stays drawn), the second leaves. In capture
   (settled, greedy) Esc goes to the program, as today.

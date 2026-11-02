@@ -20,7 +20,9 @@
  * A handler is a plain function `(e, env) → claimed?`:
  *   env = {
  *     am,             AttentionManager — read the 'key' slot + capture state
- *     exec,           (cmd) => router.execute(cmd) — fire a verb (toggle / nav tiers)
+ *     exec,           (cmd) => router.execute(cmd) — fire a verb (toggle / nav tiers), always
+ *                     through keyVerb
+ *     notify,         (text, kind) => show it on the display — a key verb's ERR or notice
  *     gestureEnv,     the env resolveGesture wants (Esc pops the context chain)
  *     captureToggle,  optional chord override for the settle/unsettle key (default CAPTURE_TOGGLE)
  *   }
@@ -46,6 +48,11 @@
  * when a real <input>/<textarea>/<select>/contenteditable holds focus the whole chain yields, so
  * the command bar and panels keep their own keys (this runs in capture phase, BEFORE the input's
  * own handler, so the guard is what stops us preventing-default on its keystroke).
+ *
+ * A KEY'S VERB SAYS WHAT WENT WRONG: every verb a key runs goes through keyVerb, and an answer
+ * that starts with ERR (or throws, or rejects), or one carrying a `notice`, goes to `env.notify`
+ * (the status line's fading notice) — a key has no command bar to print its answer. Verbs run any
+ * other way (the command bar, the CLI) never pass here.
  *
  * CAPTURE: when the key entity is "settled" (AttentionManager.isCaptured()), entity typing goes
  * greedy — Esc encodes to bytes too, so vim/readline get it — and the reserved captureToggle chord
@@ -78,7 +85,7 @@ function matchesChord(e, c) {
 function captureToggle(e, env) {
     if (!matchesChord(e, env.captureToggle ?? CAPTURE_TOGGLE)) return false;
     if (!env.am?.get?.('key')) return false;
-    env.exec('attention.capture toggle');
+    keyVerb(env, 'attention.capture toggle');
     return true;
 }
 
@@ -162,7 +169,7 @@ function agentReply(e, env) {
     const id = env.am?.get?.('key')?.id;
     const name = id ? env.replyAgentFor?.(id) : null;
     if (!name) return false;
-    env.exec(['agent.reply', name, e.key]);
+    keyVerb(env, ['agent.reply', name, e.key]);
     return true;
 }
 
@@ -185,7 +192,9 @@ function entityTyping(e, env) {
  *  resolved through the same responder chain a click uses. Claims only when something popped. */
 function contextEsc(e, env) {
     if (e.key !== 'Escape') return false;
-    return !!resolveGesture({ type: 'esc', target: null }, env.gestureEnv);
+    // The gesture env as it is, its verbs run as key verbs (their failures shown).
+    const g = env.gestureEnv;
+    return !!resolveGesture({ type: 'esc', target: null }, Object.create(g, { exec: { value: (cmd) => keyVerb(env, cmd, (c) => g.exec(c)) } }));
 }
 
 /** Tier 3 — NAV mode: a bare key (hjkl / ui, the book keys) maps to a verb. Holding a key
@@ -197,7 +206,7 @@ function navKeymap(e, env) {
     const plane = env.planeReading?.() ?? null;
     const cmd = resolveKeyBinding(e, plane ? (plane.desk ? PLANE_BINDINGS : BOOK_BINDINGS) : NAV_BINDINGS);
     if (!cmd) return false;
-    env.exec(cmd);
+    keyVerb(env, cmd);
     return true;
 }
 
@@ -244,7 +253,7 @@ function planePrefix(e, env) {
         // the prefix.
         if (e.repeat) {
             env._planeArmed = 0;
-            if (!env._fanning) { env._fanning = true; env.exec('plane.fan on'); }
+            if (!env._fanning) { env._fanning = true; keyVerb(env, 'plane.fan on'); }
             return true;
         }
         env._planeArmed = Date.now() + (env.planePrefixMs ?? 1500);
@@ -253,7 +262,7 @@ function planePrefix(e, env) {
     if (!(env._planeArmed > Date.now())) return false;
     env._planeArmed = 0;
     const cmd = planeCommandFor(e);
-    if (cmd) env.exec(cmd);
+    if (cmd) keyVerb(env, cmd);
     return true;
 }
 
@@ -261,7 +270,7 @@ function planePrefix(e, env) {
 function planeEscLeave(e, env) {
     if (e.key !== 'Escape' || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return false;
     if (!env.planeEntered?.()) return false;
-    env.exec('carrel.leave');
+    keyVerb(env, 'carrel.leave');
     return true;
 }
 
@@ -297,6 +306,32 @@ function domInputFocused(doc) {
 }
 
 /**
+ * Run a verb a KEY asked for, and show what went wrong: an answer whose text starts with ERR, an
+ * exec that throws or a promise that rejects (`ERR: <message>`, also console.error'd with the
+ * verb), or an answer carrying a non-empty `data.notice`, is handed to `env.notify(text, kind)`
+ * ('err' | 'notice'). Returns exec's answer as it came (undefined after a throw).
+ * @param {Object} env the router env (notify optional — without it nothing is shown)
+ * @param {string|string[]} cmd @param {(cmd: string|string[]) => any} [exec] default env.exec
+ */
+export function keyVerb(env, cmd, exec = env.exec) {
+    const line = Array.isArray(cmd) ? cmd.join(' ') : String(cmd);
+    const fail = (err) => {
+        console.error(`[keys] '${line}' failed:`, err);
+        env.notify?.(`ERR: ${line}: ${err?.message ?? err}`, 'err');
+    };
+    const report = (res) => {
+        const text = res?.text;
+        if (typeof text === 'string' && /^ERR/i.test(text)) env.notify?.(text, 'err');
+        else if (typeof res?.data?.notice === 'string' && res.data.notice) env.notify?.(res.data.notice, 'notice');
+    };
+    let res;
+    try { res = exec(cmd); } catch (err) { fail(err); return undefined; }
+    if (typeof res?.then === 'function') res.then(report, fail);
+    else report(res);
+    return res;
+}
+
+/**
  * Install the keyboard responder chain: one capture-phase keydown listener that runs the
  * ordered tiers and, on the first claim, consumes the event so nothing downstream sees it.
  * Also wires the keyboard-target lifecycle hook (when the 'key' slot leaves a grid, exit its
@@ -305,6 +340,8 @@ function domInputFocused(doc) {
  * @param {Object} env
  * @param {import('@glyph3d/core/services/interaction/AttentionManager.js').default} env.am
  * @param {(cmd: string|string[]) => any} env.exec
+ * @param {(text: string, kind: 'err'|'notice') => void} [env.notify]  shows what a key's verb said
+ *   went wrong (its ERR, a thrown or rejected error) or its notice — the status line (keyVerb)
  * @param {Object} env.gestureEnv  env for resolveGesture (Esc tier)
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]
  *   override the settle/unsettle chord (default CAPTURE_TOGGLE = Ctrl+Shift+Enter)
@@ -353,7 +390,7 @@ export function installKeyboardRouter(env) {
         const parts = [c.key, c.ctrl && 'Control', c.shift && 'Shift', c.alt && 'Alt', c.meta && 'Meta'].filter(Boolean);
         if (!parts.includes(e.key)) return;
         env._fanning = false;
-        env.exec('plane.fan off');
+        keyVerb(env, 'plane.fan off');
         e.preventDefault();
     };
     doc.addEventListener('keyup', onKeyUp, { capture: true });

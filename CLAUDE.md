@@ -151,6 +151,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Terminal/grid byte+edit translation comes from `keyEncoding` (`services/interaction`).
   `keys.trace on|off` logs each key event the router sees (key, code, modifiers, repeat, the tier that
   claimed it, the plane state it met) as a `[keys]` record in the log store.
+  A verb a key runs that fails (ERR, a throw, a rejection) or answers with a `notice` shows on the status
+  line (`keyVerb` → `ctx.status.notice` → the StatusBar, fading after `keys.noticeMs`); the command bar
+  and the CLI never pass there (`tools/key-notice.test.mjs`).
 - **HUD is one-way state→view** — it reflects attention/registry/edit state and issues
   verbs; it owns no behavior.
 

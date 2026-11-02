@@ -154,6 +154,19 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/plane-follow.test.mjs
   ```
+- **`key-notice.test.mjs`** (headless, the real installKeyboardRouter, statusChannel and StatusBar) — a
+  verb run from a key says what went wrong on the display: prefix + Tab running `carrel.back` and its
+  ERR reaches notify once, as an error; so do a bare nav key, Esc's plane leave, Esc popping the context
+  chain, and the held chord's fan and its release. An awaited ERR, a rejection and a throw show too (the
+  key stays claimed, the console names the verb); a `data.notice` shows as a notice; OK answers show
+  nothing, nor does `env.exec` called straight (the command bar, the CLI). The channel: a notice lives
+  its ms, a newer one replaces it, activity and notice never clear each other, bad input fails loud.
+  The StatusBar (server render): the notice replaces the hint, red for an ERR, multi-line joined by
+  ' · ', fading over the last third (≤ 600 ms). Teeth: a keyVerb that only runs the verb fails 12;
+  HEAD's StatusBar fails 4. KEYBOARD_ROUTER= / STATUS_BAR= run it against others.
+  ```
+  bun tools/key-notice.test.mjs
+  ```
 - **`hands-on.test.mjs`** (headless) — the hand panel polls `calib.status` only while a hand device is
   attached, and the cloud picture-in-picture draws only then (teeth: an unconditional poll fails 3; an
   ungated pass draws the empty box).

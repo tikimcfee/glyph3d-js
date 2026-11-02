@@ -808,6 +808,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       exec: (cmd) => state.router.execute(cmd),
       planeEntered: () => !!state.ctx.enteredCarrel,
       planeReading: () => planeReading(state.ctx),
+      // A verb a key runs that fails (or answers with a notice) shows on the status line, fading.
+      notify: (text, kind) => state.ctx.status.notice(text, { kind, ms: Number(getSetting('keys.noticeMs')) }),
       trace: () => state.ctx.keysTrace === true,
       noteKey: () => state.ctx.deixis?.noteKey(),
       replyAgentFor: (id) => (getSetting('gomux.input') === true ? state.ctx.gomuxHub?.screenAgent(id) ?? null : null),
