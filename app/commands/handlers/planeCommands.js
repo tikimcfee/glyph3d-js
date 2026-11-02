@@ -10,9 +10,9 @@
  *   plane.enter <target> [cellPx]   a registry id (a grid, terminal, book, `carrel:<name>`) or a grid
  *                                   index/name; cellPx = device px per text column (Settings ▸ Planes)
  *   plane.leave                     back to where you entered from
- *   plane.fan <on|off|px>           the depth-as-time fan: orthographic, the layer pages slide whole
+ *   plane.fan <on|off|toggle|px>    the depth-as-time fan: orthographic, the layer pages slide whole
  *                                   device px per rank (`on` = layers.fanPx); perspective, `on` widens the
- *                                   lens to layers.fanFov (no px form). off folds it back
+ *                                   lens to layers.fanFov (no px form). off folds it back; toggle flips it
  *   plane.fov <deg|default>         the perspective endpoint's lens (wider spreads layers with depth)
  *   plane.blend <0..1|default>      the raw blend handle (1 perspective, 0 orthographic), for gates
  *   plane.aim <x> <y>               the plane point at the view center (plane coords, world units)
@@ -218,25 +218,30 @@ export default function registerPlaneCommands(router) {
 
     router.register('plane.fan', (args, ctx) => {
         const cc = ctx.cameraController;
-        const raw = String(args[0] ?? '');
+        let raw = String(args[0] ?? '');
         const s = cc?.planeState?.();
         if (!s) return { text: 'ERR: not in a plane view', data: null };
         const ms = Number(getSetting('plane.fanMs'));
+        // toggle (the prefix's f — the fan without holding a key): off when fanned, else on.
+        if (raw === 'toggle') {
+            const fanned = s.ortho ? !!s.fan : s.fovDeg !== Number(getSetting('plane.fov'));
+            raw = fanned ? 'off' : 'on';
+        }
         if (!s.ortho) {
             // The perspective endpoint's fan is its lens: on widens it, off narrows it back.
-            if (raw !== 'on' && raw !== 'off') return { text: `ERR: the plane endpoint is perspective (plane.ortho off): plane.fan takes on|off (a px fan needs plane.ortho on)`, data: null };
+            if (raw !== 'on' && raw !== 'off') return { text: `ERR: the plane endpoint is perspective (plane.ortho off): plane.fan takes on|off|toggle (a px fan needs plane.ortho on)`, data: null };
             const fov = Number(getSetting(raw === 'on' ? 'layers.fanFov' : 'plane.fov'));
             cc.setPlaneFov(fov, { ms });
             return { text: `OK: plane fan ${raw} — perspective lens ${fov}° (scale held)`, data: { fovDeg: fov } };
         }
         const px = raw === 'off' ? 0 : raw === 'on' ? Number(getSetting('layers.fanPx')) : Number(raw);
-        if (!Number.isInteger(px)) return { text: `ERR: usage: plane.fan <on|off|px> — px is WHOLE device px per layer (got '${raw}')`, data: null };
+        if (!Number.isInteger(px)) return { text: `ERR: usage: plane.fan <on|off|toggle|px> — px is WHOLE device px per layer (got '${raw}')`, data: null };
         // The orthographic endpoint's fan is the pages' own slide (LayerStacks hears the camera's fan).
         layerStacksOf(ctx);
         cc.setPlaneFan(px, { ms });
         if (px === 0) return { text: 'OK: plane fan off — the layers fold back behind the page', data: { px: 0 } };
         return { text: `OK: plane fan → ${px} device px per layer (each page behind slides rigidly; the member stays)`, data: { px } };
-    }, { description: 'The depth-as-time fan: orthographic, the layer pages slide whole device px per rank; perspective, the wider lens', usage: '<on|off|px>', returns: '{ px } | { fovDeg }' });
+    }, { description: 'The depth-as-time fan: orthographic, the layer pages slide whole device px per rank; perspective, the wider lens; toggle flips it (the pane prefix then f)', usage: '<on|off|toggle|px>', returns: '{ px } | { fovDeg }' });
 
     router.register('plane.blend', (args, ctx) => {
         const cc = ctx.cameraController;

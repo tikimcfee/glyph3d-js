@@ -214,7 +214,10 @@ the terminal, so plane keys need their own tier:
 - **A plane tier above `entityTyping`**, beside `captureToggle`: a reserved prefix chord
   `plane.prefix` (born configurable; a chord no terminal program reads), then one key: `h j k l`
   focus the neighbor pin (the aim slides to it), `Tab` = `carrel.back`, `q` = `carrel.leave`,
-  `y` / `n` = approve / deny (slice 1b), `p` = point (slice 2). No bytes reach the PTY.
+  `y` / `n` = approve / deny (slice 1b), `p` = point (slice 2), `f` = the fan, toggled
+  (`plane.fan toggle`; holding the chord fans while the OS repeats it). No bytes reach the PTY.
+  `keys.trace on` logs each key event the router sees (key, code, modifiers, repeat, the claiming
+  tier, the plane state) as a `[keys]` record, so what a browser delivers is read rather than guessed.
 - **Esc.** In soft focus Esc is the context pop, and the entered plane is the outermost context: the
   first Esc releases the key slot to the plane (focus stays drawn), the second leaves. In capture
   (settled, greedy) Esc goes to the program, as today.

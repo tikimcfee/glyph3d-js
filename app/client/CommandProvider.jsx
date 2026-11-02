@@ -287,6 +287,7 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('./MapLabels.js').default|null} */ mapLabels: null,
     /** @type {import('@glyph3d/core/collections/CarrelCards.js').default|null} */ carrelCards: null,
     /** @type {import('./Strip.js').default|null} */ strip: null,
+    /** @type {boolean} the keyboard router logs each key event it sees (`keys.trace`) */ keysTrace: false,
   };
 }
 
@@ -807,6 +808,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       exec: (cmd) => state.router.execute(cmd),
       planeEntered: () => !!state.ctx.enteredCarrel,
       planeReading: () => planeReading(state.ctx),
+      trace: () => state.ctx.keysTrace === true,
       noteKey: () => state.ctx.deixis?.noteKey(),
       replyAgentFor: (id) => (getSetting('gomux.input') === true ? state.ctx.gomuxHub?.screenAgent(id) ?? null : null),
       get planePrefixMs() { return Number(getSetting('plane.prefixMs')); },

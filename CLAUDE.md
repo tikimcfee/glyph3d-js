@@ -149,6 +149,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (entity typing → Esc/context pop → nav keymap; camera WASD is the bubble fallthrough).
   The first tier to claim a key consumes it; it yields wholesale when a DOM input is focused.
   Terminal/grid byte+edit translation comes from `keyEncoding` (`services/interaction`).
+  `keys.trace on|off` logs each key event the router sees (key, code, modifiers, repeat, the tier that
+  claimed it, the plane state it met) as a `[keys]` record in the log store.
 - **HUD is one-way state→view** — it reflects attention/registry/edit state and issues
   verbs; it owns no behavior.
 
@@ -404,8 +406,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   lands in the INBOX pane, reflowable members take their pane's cols × rows and lend out their header.
   `pane.*` act on the entered plane (pins: `pane.focus` by direction slides the aim to the neighbor
   pin; tiles: split/focus/resize/close/swap/zoom/tab/place/layout), else the CameraDock frame. Keys:
-  the plane PREFIX (Ctrl+Space, above terminal typing) then h/j/k/l focus, Tab back, z/]/[/x/e/m/s on
-  tiles, q leave; unprefixed, with nothing holding the keyboard, h/j/k/l and the arrows hop pins too
+  the plane PREFIX (Ctrl+Space, above terminal typing) then h/j/k/l focus, Tab back, f fan (toggle),
+  z/]/[/x/e/m/s on tiles, q leave; unprefixed, with nothing holding the keyboard, h/j/k/l and the arrows hop pins too
   (`keymap.js` PLANE_BINDINGS — never the open world's tree walk). A click inside a plane focuses
   and never moves the camera (`gestureResolver.js`, `planeReading`): primary, a terminal's keyboard,
   the desk's pin (`pane.focus <id> --keep-view`), never `camera.focus`. The layout is durable (the Panes component on `carrel:<name>`, `carrelPanes.js`);
@@ -425,7 +427,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   exactly the member's width (a page's glyphs clip to its columns; the member's reaches up through its title band), so
   a translucent member never shows what's behind. `pane.layer <id> <n>` fronts a page at EXACTLY z = 0 (the member's
   glyph meshes hide meanwhile); `now` restores the member. The fan is the plane's (`plane.fan`): holding the pane prefix
-  (Ctrl+Space) past key-repeat sends `plane.fan on`, release `plane.fan off`. A desk the plane view reads
+  (Ctrl+Space) past key-repeat sends `plane.fan on`, release `plane.fan off`; the prefix then `f` toggles
+  it (`plane.fan toggle`), with no key-repeat needed. A desk the plane view reads
   (entered, or holding the member read) draws live, never as its card, so its members' pages stand in
   the scene. `layer.where` says where the pages stand, in the world and on screen. Stacks are saved
   (`LayerStacks.serialize` → the snapshot's `layerStacks`) and re-shown once each member stands up again. Gates:

@@ -38,7 +38,8 @@
  * Ctrl+Space — not tmux's Ctrl+B, which the tmux inside our terminals owns) arms one pane command
  * for the next key — h/j/k/l or arrows focus (the neighbor pin or pane), Tab back to the last plane
  * (carrel.back), and on a tiled plane z zoom, ] / [ cycle the pane's tabs, x closes a pane (its tabs
- * move to its neighbor), e/m/s re-lay (even/main/stack); Esc or q leaves —
+ * move to its neighbor), e/m/s re-lay (even/main/stack), f toggles the fan (held, the chord itself
+ * fans while it repeats); Esc or q leaves —
  * and sits ABOVE typing so a focused terminal never sees it. Unprefixed, h/j/k/l and the arrows hop
  * pins too, when nothing holds the keyboard (the nav layer reading a plane desk). A bare Esc that nothing else claims
  * (no focus to pop) leaves the plane: Esc steps back out, one level at a time. The DOM-input guard sits above all of them:
@@ -221,6 +222,7 @@ function planeCommandFor(e) {
         case 'e': return 'pane.layout even';
         case 'm': return 'pane.layout main';
         case 's': return 'pane.layout stack';
+        case 'f': return 'plane.fan toggle';  // the fan without holding: no key-repeat needed
         case 'p': return 'point.mark here';   // `this = <what the cursor is on>` into the CommandBar
         case 'y': return 'agent.approve';     // the focused agent's permission prompt (gomux.input)
         case 'n': return 'agent.deny';
@@ -263,11 +265,28 @@ function planeEscLeave(e, env) {
     return true;
 }
 
+/**
+ * The TRACE (`keys.trace on`, env.trace): one `[keys]` console record per key event the router sees —
+ * the key, its code, the modifiers, whether it is an auto-repeat, the tier that claimed it (null: none,
+ * it went on to the camera; 'dom-input': a focused input kept it), and the plane state it met (a plane
+ * desk entered, the prefix armed, the fan held) — so what a browser and OS actually deliver is read
+ * from the log store, not guessed.
+ * @param {Object} env @param {'down'|'up'} phase @param {KeyboardEvent} e @param {string|null} tier
+ * @param {boolean} [armed] the prefix was armed when the key arrived
+ */
+function traceKey(env, phase, e, tier, armed = env._planeArmed > Date.now()) {
+    if (!env.trace?.()) return;
+    console.info(`[keys] ${phase} ${JSON.stringify({
+        key: e.key, code: e.code ?? null, ctrl: !!e.ctrlKey, shift: !!e.shiftKey, alt: !!e.altKey, meta: !!e.metaKey,
+        repeat: !!e.repeat, tier, plane: !!env.planeEntered?.(), armed, fanning: !!env._fanning,
+    })}`);
+}
+
 /** The ordered chain. Push or reorder to change precedence; the camera (WASD, in VCC) is the
  *  implicit final tier — it sees only keys NO tier here claimed. captureToggle sits ABOVE typing
  *  so the reserved chord releases capture even while the terminal is greedily eating keys; the
  *  plane prefix sits above typing for the same reason. */
-const HANDLERS = [captureToggle, planePrefix, agentReply, entityTyping, contextEsc, planeEscLeave, navKeymap];
+const HANDLERS = Object.entries({ captureToggle, planePrefix, agentReply, entityTyping, contextEsc, planeEscLeave, navKeymap });   // [tier name, handler] — names as data, so a minified build traces them too
 
 /** True while a real DOM input owns focus — the whole chain yields so it keeps its own keys. */
 function domInputFocused(doc) {
@@ -295,6 +314,7 @@ function domInputFocused(doc) {
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.planePrefix]
  *   the pane prefix chord (default PLANE_PREFIX = Ctrl+Space) @param {number} [env.planePrefixMs]
  * @param {() => void} [env.noteKey]  told of every keydown, claimed or not (Deixis' typing gate)
+ * @param {() => boolean} [env.trace]  log each key event as a `[keys]` record (`keys.trace`)
  * @param {(id: string) => string|null} [env.replyAgentFor]  the agent a focused screen answers to,
  *   when answering agents is on (the reply-line tier), else null
  * @param {Document} [env.document] injectable for tests; defaults to the global
@@ -305,10 +325,13 @@ export function installKeyboardRouter(env) {
 
     const onKeyDown = (e) => {
         env.noteKey?.();                    // the person is typing (agents' points wait — Deixis)
-        if (domInputFocused(doc)) return;   // a focused <input> keeps its keys
+        if (domInputFocused(doc)) { traceKey(env, 'down', e, 'dom-input'); return; }   // a focused <input> keeps its keys
 
-        for (const handler of HANDLERS) {
+        // Read before the tiers run: the prefix tier re-arms and disarms as it claims.
+        const armed = env._planeArmed > Date.now();
+        for (const [tier, handler] of HANDLERS) {
             if (handler(e, env)) {
+                traceKey(env, 'down', e, tier, armed);
                 // First tier to claim wins: suppress the browser default (Tab focus,
                 // Backspace nav, space scroll) AND stop every downstream listener — the
                 // camera's bubble-phase WASD drain included.
@@ -317,12 +340,14 @@ export function installKeyboardRouter(env) {
                 return;
             }
         }
+        traceKey(env, 'down', e, null, armed);
         // Nobody claimed it: leave the event alone so it bubbles to the camera (WASD).
     };
     doc.addEventListener('keydown', onKeyDown, { capture: true });
 
     // The FAN quasimode ends on the chord's release — its key or any of its modifiers lifting.
     const onKeyUp = (e) => {
+        traceKey(env, 'up', e, env._fanning ? 'fan' : null);
         if (!env._fanning) return;
         const c = env.planePrefix ?? PLANE_PREFIX;
         const parts = [c.key, c.ctrl && 'Control', c.shift && 'Shift', c.alt && 'Alt', c.meta && 'Meta'].filter(Boolean);

@@ -19,6 +19,14 @@ import { recentConsole } from '@glyph3d/core/services/orchestration/consoleForwa
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
  */
 export default function registerObservabilityCommands(router) {
+    // ── keys.trace — what the keyboard router actually receives ──
+    router.register('keys.trace', (args, ctx) => {
+        const a = String(args[0] ?? '');
+        if (a !== 'on' && a !== 'off') return { text: `ERR: usage: keys.trace on|off (now ${ctx.keysTrace ? 'on' : 'off'})`, data: { on: !!ctx.keysTrace } };
+        ctx.keysTrace = a === 'on';
+        return { text: `OK: keys trace ${a}${a === 'on' ? ' — each key event the router sees is a [keys] record (log.search "[keys]")' : ''}`, data: { on: ctx.keysTrace } };
+    }, { description: 'Log every key event the keyboard router sees as a [keys] record: key, code, modifiers, repeat, the tier that claimed it, the plane state it met — a test handle for what the browser and OS deliver', usage: 'on|off', returns: '{ on }' });
+
     // ── error.* — the structured error buffer (ErrorTracker) ──
     router.register('error.list', (args) => {
         const n = args[0] ? Number(args[0]) : 20;
