@@ -3,7 +3,8 @@
  * member, by registry id. `show` builds a member's stack from its source (layerSources.js) and
  * parents it to the member's text frame (layerFrameOf), so it rides every transform the member
  * does; `front` brings a layer to z = 0; `blink` alternates two at `layers.blinkMs`; `hide` frees
- * it. A stack is a snapshot of the member's past when it was shown — `show` again re-reads it.
+ * it. The plane's orthographic fan (the camera's plane fan listener) slides every stack's pages
+ * (LayerStack.setFan). A stack is a snapshot of the member's past when it was shown — `show` again re-reads it.
  * The verbs (layerCommands.js) are the only writers; a session saves `serialize()` (which members
  * have a stack, how deep, which layer is fronted) and `restore` re-shows each once its member
  * stands up again.
@@ -18,6 +19,7 @@ export function layerStackOpts() {
     return {
         pitchRows: Number(getSetting('layers.pitchRows')),
         riseRows: Number(getSetting('layers.riseRows')),
+        riseFrom: String(getSetting('layers.riseFrom')),
         backOpacity: Number(getSetting('layers.backOpacity')),
     };
 }
@@ -33,6 +35,14 @@ export default class LayerStacks {
         this.ctx = ctx;
         /** @type {Map<string, {stack: LayerStack, member: Object, n: number, blink: ReturnType<typeof setInterval>|null}>} */
         this.byId = new Map();
+        /** The plane's orthographic fan as it stands (device px per layer, the plane's device px per unit). */
+        this.fan = { px: 0, pxPerUnit: null };
+        // The fan is the pages' own slide: the camera eases it, every stack takes it (a stack shown
+        // while fanned joins at once).
+        ctx.cameraController?.addPlaneFanListener((px, pxPerUnit) => {
+            this.fan = { px, pxPerUnit };
+            for (const r of this.byId.values()) r.stack.setFan(px, pxPerUnit);
+        });
     }
 
     /**
@@ -48,6 +58,7 @@ export default class LayerStacks {
         stack.name = `layers:${entry.id}`;
         stack.setLayers(layers);
         parent.add(stack);
+        stack.setFan(this.fan.px, this.fan.pxPerUnit);
         this.byId.set(entry.id, { stack, member: entry.grid, n, blink: null });
         return stack;
     }

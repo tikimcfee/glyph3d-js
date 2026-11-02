@@ -14,8 +14,8 @@
  *   grid.history <id> [--at n]       a file grid's revisions (newest first); --at n brings revision n
  *                                    to z = 0
  *
- * The fan is the plane's (plane.fan — the perspective endpoint's wider lens, the orthographic one's
- * shear); these verbs never move the camera.
+ * The fan is the plane's (plane.fan — the perspective endpoint's wider lens; on the orthographic one
+ * the pages slide whole px per rank, LayerStack.setFan); these verbs never move the camera.
  */
 
 import * as THREE from 'three';

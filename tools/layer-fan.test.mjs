@@ -1,6 +1,7 @@
 // layer-fan.test.mjs — depth as time's FAN quasimode (slice 10a step 3): in a plane, HOLDING the pane
 // prefix chord past the key-repeat delay fans the layers (`plane.fan on` — the layers behind a page
-// spread: a whole-px shear on the orthographic endpoint, a wider lens on the perspective one) and
+// spread: the pages slide whole px per rank on the orthographic endpoint, a wider lens on the
+// perspective one) and
 // RELEASING it folds them (`plane.fan off`); a TAP is still the prefix. Driven through the real installKeyboardRouter with an injected document.
 //
 //   bun tools/layer-fan.test.mjs

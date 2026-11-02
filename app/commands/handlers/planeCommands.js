@@ -10,8 +10,8 @@
  *   plane.enter <target> [cellPx]   a registry id (a grid, terminal, book, `carrel:<name>`) or a grid
  *                                   index/name; cellPx = device px per text column (Settings ▸ Planes)
  *   plane.leave                     back to where you entered from
- *   plane.fan <on|off|px>           the depth-as-time fan: orthographic, a shear of whole device px
- *                                   per layer (`on` = layers.fanPx); perspective, `on` widens the
+ *   plane.fan <on|off|px>           the depth-as-time fan: orthographic, the layer pages slide whole
+ *                                   device px per rank (`on` = layers.fanPx); perspective, `on` widens the
  *                                   lens to layers.fanFov (no px form). off folds it back
  *   plane.fov <deg|default>         the perspective endpoint's lens (wider spreads layers with depth)
  *   plane.blend <0..1|default>      the raw blend handle (1 perspective, 0 orthographic), for gates
@@ -23,6 +23,7 @@
 import * as THREE from 'three';
 import { getSetting } from '../../client/settings.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
+import { layerStacksOf } from '../../client/LayerStacks.js';
 
 /**
  * Resolve a plane target: a grid first, through the ONE grid resolver and as a live actor (a
@@ -148,34 +149,6 @@ export function openAim(width, height, pxPerUnit, vp, leftInsetPx = 0) {
     };
 }
 
-/**
- * The world depth between layers a fan slides by: the pitch of the layer stacks IN the plane being
- * read (its surface, or the members seated on its desk — a stack's ancestors include it; the one
- * pitch most of them share), else the plane row × `layers.pitchRows`. `odd` names any stack there
- * whose pitch differs — its layers won't land on whole px, and the verb says so.
- * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
- * @returns {{pitch:number, odd:{id:string, pitch:number}[]}}
- */
-function fanPitch(ctx) {
-    const target = String(ctx.planeTarget ?? '');
-    const root = target.startsWith('carrel:') ? ctx.carrels?.get?.(target.slice(7)) : ctx.registry?.get?.(target)?.grid;
-    const inPlane = (obj) => { for (let o = obj; o; o = o.parent) if (o === root) return true; return false; };
-    const stacks = [...(ctx.layerStacks?.byId ?? new Map())]
-        .filter(([, r]) => root && inPlane(r.stack))
-        .map(([id, r]) => ({ id, pitch: r.stack.worldPitch() }));
-    if (!stacks.length) {
-        const u = planeUnitOf(ctx);
-        return { pitch: u.column * u.rowRatio * Number(getSetting('layers.pitchRows')), odd: [] };
-    }
-    const same = (a, b) => Math.abs(a - b) <= 1e-9 * Math.max(a, b);
-    let best = stacks[0].pitch, bestN = 0;
-    for (const s of stacks) {
-        const n = stacks.filter((o) => same(o.pitch, s.pitch)).length;
-        if (n > bestN) { best = s.pitch; bestN = n; }
-    }
-    return { pitch: best, odd: stacks.filter((s) => !same(s.pitch, best)) };
-}
-
 /** @param {import('../../client/CommandProvider.jsx').AppRouter} router */
 export default function registerPlaneCommands(router) {
     router.register('plane.enter', (args, ctx) => {
@@ -258,15 +231,12 @@ export default function registerPlaneCommands(router) {
         }
         const px = raw === 'off' ? 0 : raw === 'on' ? Number(getSetting('layers.fanPx')) : Number(raw);
         if (!Number.isInteger(px)) return { text: `ERR: usage: plane.fan <on|off|px> — px is WHOLE device px per layer (got '${raw}')`, data: null };
-        if (px === 0) {
-            cc.setPlaneFan(0, 0, { ms });
-            return { text: 'OK: plane fan off — the layers fold back behind the page', data: { px: 0, pitch: null, odd: [] } };
-        }
-        const { pitch, odd } = fanPitch(ctx);
-        cc.setPlaneFan(px, pitch, { ms });
-        const warn = odd.length ? ` — ⚠ ${odd.map((o) => `${o.id} pitch ${o.pitch.toPrecision(6)}`).join(', ')} ≠ ${pitch.toPrecision(6)}: those layers will NOT land on whole px` : '';
-        return { text: `OK: plane fan → ${px} device px per layer (pitch ${pitch.toPrecision(6)} world units)${warn}`, data: { px, pitch, odd } };
-    }, { description: 'The depth-as-time fan: orthographic, a shear of whole device px per layer; perspective, the wider lens', usage: '<on|off|px>', returns: '{ px, pitch, odd } | { fovDeg }' });
+        // The orthographic endpoint's fan is the pages' own slide (LayerStacks hears the camera's fan).
+        layerStacksOf(ctx);
+        cc.setPlaneFan(px, { ms });
+        if (px === 0) return { text: 'OK: plane fan off — the layers fold back behind the page', data: { px: 0 } };
+        return { text: `OK: plane fan → ${px} device px per layer (each page behind slides rigidly; the member stays)`, data: { px } };
+    }, { description: 'The depth-as-time fan: orthographic, the layer pages slide whole device px per rank; perspective, the wider lens', usage: '<on|off|px>', returns: '{ px } | { fovDeg }' });
 
     router.register('plane.blend', (args, ctx) => {
         const cc = ctx.cameraController;

@@ -253,10 +253,11 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   layers; the verbs over a fake relay; serialize + restore (waits for the member, refronts).
 - **`layer-fan.test.mjs`** (headless) — holding the pane prefix fans (`plane.fan on`), releasing it
   folds (`plane.fan off`), a tap is still the prefix.
-- **`plane-oblique.test.mjs`** (headless) — the orthographic endpoint's fan, through the real controller
-  at odd viewports and dpr 1/2: layers 0..20 land on whole device px, layer i exactly i·n over and i rows
-  up, and the plane itself doesn't move. Teeth: a 2.5 px fan leaves the odd layers off whole px; a shear
-  for an unpinned d₀ breaks it.
+- **`plane-oblique.test.mjs`** (headless, a real LayerStack) — the orthographic endpoint's fan: history
+  pages slide rigidly, page i exactly i·n whole device px (at two pitches and an odd scale), text and
+  backing together, while the member, its backdrop, focus border and the camera move 0. Teeth: a
+  projection shear moves the backdrop and tears a page's backing off its text; a 2.5 px fan leaves odd
+  pages off whole px.
 - **`plane-ortho-check.mjs`** (GPU, private relay, two scratch Vites) — before vs after with
   `plane.ortho` off: the open world and an entered desk give 0 px and a bit-identical camera (the scene
   without the overlay pass, whose label hysteresis moves a tab a pixel with frame timing). After, an

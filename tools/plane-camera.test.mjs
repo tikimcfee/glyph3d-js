@@ -25,13 +25,14 @@
 //     formula differs in the last bits); the formula at λ = 1 is three's to 1e-12; λ = 0 is
 //     OrthographicCamera (× the homogeneous d₀) element for element; the plane at d₀ keeps its NDC
 //     size for every λ; z_ndc is monotonic over [near, far]; the NDC crop is setViewOffset at λ = 1;
-//     pxPerUnitAt agrees with projecting two points; copy carries λ, d₀, the shear; what isn't
+//     pxPerUnitAt agrees with projecting two points; copy carries λ and d₀; what isn't
 //     written below λ = 1 throws by name; rayFromCamera's ray passes through what projects there
 //   - the controller: an orthographic enter keeps the open-world fov and lands at λ = 0 at
 //     d₀ = e₅·Hd/(2k), the plane exact and snapped, the referent held < 1 px every frame of the
-//     blend, layers behind the plane 1:1; the fan slides layer i by i·n device px; a leave lands
+//     blend, layers behind the plane 1:1; the fan moves NO camera — its listeners hear it eased
+//     0 → n (and the plane's px per unit), back to 0 on off, a leave or a restore; a leave lands
 //     home with the matrix bit-identical; a switch cuts; the blend handle holds the scale
-//   - picking at λ = 0 (and fanned): the pick camera's one-pixel window centres the world point
+//   - picking at λ = 0: the pick camera's one-pixel window centres the world point
 //     under that pixel
 //   - the fov-trig gate: no file derives a scale from a fov but the helper, the camera itself and
 //     the pure endpoint math
@@ -40,7 +41,7 @@ import * as THREE from 'three';
 import { ViewerCameraController } from '../packages/glyph3d-core/src/services/camera/ViewerCameraController.js';
 import { parallaxPx, planeDistance } from '../packages/glyph3d-core/src/services/camera/planeView.js';
 import { enterPlaneView } from '../app/commands/handlers/planeCommands.js';
-import PlaneCamera, { fanShear } from '../packages/glyph3d-core/src/services/camera/PlaneCamera.js';
+import PlaneCamera from '../packages/glyph3d-core/src/services/camera/PlaneCamera.js';
 import { pxPerUnitAt, viewHeightAt, clipW, rayFromCamera, zDistanceForFit } from '../packages/glyph3d-core/src/services/spatial/spatialMath.js';
 
 let fails = 0, checks = 0;
@@ -570,7 +571,7 @@ const OFFSET = [1600, 942, 812.5, 300.5, 1, 1];
 
     // The NDC crop at λ = 1 is setViewOffset; below 1 it crops the blended view the same way.
     const full = new PlaneCamera(70, 1600 / 942, 50, 90), win = new PlaneCamera(70, 1600 / 942, 50, 90);
-    for (const cam of [full, win]) { cam.blend = 0.35; cam.planeDepth = d0; cam.shear = 0.02; }
+    for (const cam of [full, win]) { cam.blend = 0.35; cam.planeDepth = d0; }
     win.setViewOffset(1600, 942, 700, 200, 64, 32);
     full.updateProjectionMatrix();
     let cropMax = 0;
@@ -596,11 +597,11 @@ const OFFSET = [1600, 942, 812.5, 300.5, 1, 1];
     ok(ppuMax <= 1e-12, `pxPerUnitAt / viewHeightAt agree with projecting two points (max rel ${ppuMax.toExponential(2)})`);
     ok(clipW(new THREE.PerspectiveCamera(70, 1, 1, 100), 42) === 42, 'clipW under perspective is the depth');
 
-    // copy / clone / the pick path's new constructor().copy carry λ, d₀ and the shear.
+    // copy / clone / the pick path's new constructor().copy carry λ and d₀.
     const src = new PlaneCamera(70, 1.6, 50, 90);
-    src.blend = 0.2; src.planeDepth = 61; src.shear = -0.03; src.updateProjectionMatrix();
+    src.blend = 0.2; src.planeDepth = 61; src.updateProjectionMatrix();
     for (const [what, cc] of [['copy', new PlaneCamera().copy(src)], ['clone', src.clone()], ['new constructor().copy', new src.constructor().copy(src, false)]]) {
-        ok(cc.isPlaneCamera && cc.blend === 0.2 && cc.planeDepth === 61 && cc.shear === -0.03, `${what} carries λ, d₀ and the shear`);
+        ok(cc.isPlaneCamera && cc.blend === 0.2 && cc.planeDepth === 61, `${what} carries λ and d₀`);
         cc.updateProjectionMatrix();
         ok(cc.projectionMatrix.equals(src.projectionMatrix), `${what}: the same matrix`);
     }
@@ -626,8 +627,8 @@ const OFFSET = [1600, 942, 812.5, 300.5, 1, 1];
     eye.position.set(10, 20, 30); eye.rotation.set(0.2, -0.4, 0); eye.updateMatrixWorld(true);
     eye.planeDepth = d0;
     let rayMax = 0;
-    for (const lam of [1, 0.5, 0]) for (const shear of [0, 0.03]) {
-        eye.blend = lam; eye.shear = shear; eye.updateProjectionMatrix();
+    for (const lam of [1, 0.5, 0]) {
+        eye.blend = lam; eye.updateProjectionMatrix();
         for (const P of [new THREE.Vector3(5, 10, -40), new THREE.Vector3(-20, 30, -35), new THREE.Vector3(8, 25, -50)]) {
             const ndc = P.clone().project(eye);
             const r = rayFromCamera(new THREE.Raycaster(), ndc, eye);
@@ -635,7 +636,7 @@ const OFFSET = [1600, 942, 812.5, 300.5, 1, 1];
         }
     }
     ok(rayMax <= 1e-6, `rayFromCamera passes through what projects there, every λ (max miss ${rayMax.toExponential(2)})`);
-    eye.blend = 1; eye.shear = 0; eye.updateProjectionMatrix();
+    eye.blend = 1; eye.updateProjectionMatrix();
     const ndc = new THREE.Vector2(0.3, -0.2);
     const mine = rayFromCamera(new THREE.Raycaster(), ndc, eye), three = new THREE.Raycaster();
     three.setFromCamera(ndc, eye);
@@ -698,24 +699,28 @@ for (const dpr of [1, 2]) {
     for (let i = 0; i < 20; i++) frame(cc, camera);
     ok([...camera.position.toArray(), ...camera.projectionMatrix.elements].every((v, i) => v === snap[i]), `ortho dpr ${dpr}: a still view is bit-identical frame to frame`);
 
-    // The fan: layer i slides exactly i·n device px; off folds it back.
+    // The fan: the camera doesn't move (bit for bit); its listeners hear it eased 0 → 4 with the
+    // plane's px per unit; off eases it back to 0. (LayerStack.setFan moves the pages —
+    // plane-oblique.test.)
     let msg = '';
     try { cc.setPlaneFov(25); } catch (e) { msg = e.message; }
     ok(/orthographic/.test(msg), `ortho dpr ${dpr}: setPlaneFov is refused, naming the fan (${msg})`);
     const pitch = 2.5;
-    const unfanned = proj(camera, onPlane(10, 5));
-    cc.setPlaneFan(4, pitch, { ms: 300 });
-    while (cc.planeState().tweening) frame(cc, camera);
-    const fanned = proj(camera, onPlane(10, 5));
-    ok(Math.abs(fanned.x - unfanned.x) <= 1e-9 && Math.abs(fanned.y - unfanned.y) <= 1e-9, `ortho dpr ${dpr}: the fan leaves the plane itself where it was (the shear pinned at d₀)`);
-    let fanBad = 0;
-    for (let i = 0; i <= 5; i++) {
-        const q = proj(camera, onPlane(10, 5, -i * pitch)), q0 = proj(camera, onPlane(10, 5));
-        if (Math.abs((q.x - q0.x) * dpr - 4 * i) > 1e-6 || Math.abs(q.y - q0.y) > 1e-9) fanBad++;
+    const heard = [];
+    const hear = (px, ppu) => heard.push({ px, ppu });
+    cc.addPlaneFanListener(hear);
+    const still = [...camera.position.toArray(), ...camera.projectionMatrix.elements];
+    cc.setPlaneFan(4, { ms: 300 });
+    let moved = 0;
+    while (cc.planeState().tweening) {
+        frame(cc, camera);
+        if (![...camera.position.toArray(), ...camera.projectionMatrix.elements].every((v, i) => v === still[i])) moved++;
     }
-    ok(fanBad === 0, `ortho dpr ${dpr}: fanned, layer i lands i·4 device px right (${fanBad} off)`);
-    ok(cc.planeState().fan?.px === 4, `ortho dpr ${dpr}: planeState reports the fan`);
-    // Picking at λ = 0, fanned: the pick camera's one-pixel window centres what is under that pixel.
+    ok(moved === 0, `ortho dpr ${dpr}: the fan moves no camera — position and matrix bit-identical every frame (${moved} moved)`);
+    ok(heard.length > 2 && heard.every((h, i) => h.ppu === PLANE.pxPerUnit && (i === 0 || h.px > heard[i - 1].px)) && heard.at(-1).px === 4,
+        `ortho dpr ${dpr}: its listeners hear it eased 0 → 4 at the plane's px per unit (${heard.length} steps, last ${heard.at(-1)?.px})`);
+    ok(cc.planeState().fan?.px === 4 && cc.planeState().fanPx === 4 && cc.planeFanPx() === 4, `ortho dpr ${dpr}: planeState reports the fan`);
+    // Picking at λ = 0: the pick camera's one-pixel window centres what is under that pixel.
     let pickMax = 0;
     for (const Q of [onPlane(10, 5), onPlane(-20, 3, -2 * pitch), onPlane(40, -8, -pitch)]) {
         const q = proj(camera, Q);
@@ -724,10 +729,13 @@ for (const dpr of [1, 2]) {
         const v = new THREE.Vector3(Q.x, Q.y, Q.z).project(pc);
         pickMax = Math.max(pickMax, Math.abs(v.x), Math.abs(v.y));
     }
-    ok(pickMax <= 1e-6, `ortho dpr ${dpr}: a pick window centres the point under its pixel at λ = 0, fanned (max ${pickMax.toExponential(2)} NDC)`);
-    cc.setPlaneFan(0, 0, { ms: 300 });
+    ok(pickMax <= 1e-6, `ortho dpr ${dpr}: a pick window centres the point under its pixel at λ = 0 (max ${pickMax.toExponential(2)} NDC)`);
+    cc.setPlaneFan(0, { ms: 300 });
     while (cc.planeState().tweening) frame(cc, camera);
-    ok(camera.shear === 0 && cc.planeState().fan === null, `ortho dpr ${dpr}: plane.fan off folds the layers`);
+    ok(heard.at(-1).px === 0 && cc.planeState().fan === null && cc.planeFanPx() === 0, `ortho dpr ${dpr}: plane.fan off folds the layers (heard ${heard.at(-1).px})`);
+    cc.setPlaneFan(4, { ms: 0 });
+    frame(cc, camera);
+    ok(heard.at(-1).px === 4, `ortho dpr ${dpr}: fanned again before leaving`);
 
     // The raw blend handle: the plane's scale held at any λ.
     cc.setPlaneBlend(0.5);
@@ -744,20 +752,23 @@ for (const dpr of [1, 2]) {
     // Leave: λ back to 1, home exactly — the matrix bit-identical.
     cc.leavePlane({ ms: 600 });
     while (cc._lens) frame(cc, camera);
-    ok(camera.blend === 1 && camera.shear === 0, `ortho dpr ${dpr}: left, λ = 1 and no shear`);
+    ok(camera.blend === 1 && heard.at(-1).px === 0 && cc.planeFanPx() === 0, `ortho dpr ${dpr}: left, λ = 1 and the fan folded (heard ${heard.at(-1).px})`);
+    cc.removePlaneFanListener(hear);
     ok(camera.projectionMatrix.equals(homeMatrix) && camera.position.equals(homePos), `ortho dpr ${dpr}: left, the home matrix and pose bit-identical`);
 }
 {
-    // A restore while entered orthographic cuts home: λ = 1, no shear, the home matrix exactly.
+    // A restore while entered orthographic cuts home: λ = 1, the fan folded, the home matrix exactly.
     const { cc, camera } = orthoRig();
     const homeMatrix = camera.projectionMatrix.clone();
     cc.enterPlane(ORTHO, { ms: 100 });
     while (cc.planeState().tweening) frame(cc, camera);
-    cc.setPlaneFan(3, 2, { ms: 0 });
+    let last = null;
+    cc.addPlaneFanListener((px) => { last = px; });
+    cc.setPlaneFan(3, { ms: 0 });
     frame(cc, camera);
-    ok(camera.blend === 0 && camera.shear !== 0, 'entered orthographic and fanned');
+    ok(camera.blend === 0 && last === 3, 'entered orthographic and fanned');
     cc.applyState(cc.getState());
-    ok(camera.blend === 1 && camera.shear === 0 && camera.projectionMatrix.equals(homeMatrix), `a restore cuts home: λ = 1, no shear, the home matrix (λ ${camera.blend}, shear ${camera.shear})`);
+    ok(camera.blend === 1 && last === 0 && camera.projectionMatrix.equals(homeMatrix), `a restore cuts home: λ = 1, the fan folded, the home matrix (λ ${camera.blend}, fan ${last})`);
 }
 {
     // ortho needs a PlaneCamera; the fan needs ortho.
@@ -767,7 +778,7 @@ for (const dpr of [1, 2]) {
     ok(/PlaneCamera/.test(msg) && cc.planeState() === null, `an orthographic enter on a plain PerspectiveCamera is refused by name (${msg})`);
     cc.enterPlane(PLANE);
     msg = '';
-    try { cc.setPlaneFan(4, 2); } catch (e) { msg = e.message; }
+    try { cc.setPlaneFan(4); } catch (e) { msg = e.message; }
     ok(/perspective/.test(msg), `the px fan on the perspective endpoint is refused by name (${msg})`);
 }
 

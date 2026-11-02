@@ -10,8 +10,9 @@
  *   5. layer fan identity     (on the layers themselves — the scene alone, cropped to the member and the band
  *                              where its history pages peek: visible, plane.fan off twice byte-identical,
  *                              plane.fan on moves the band but not the member; with the layers hidden it moves
- *                              nothing there — the wider lens on the perspective endpoint, the shear on the
- *                              orthographic)
+ *                              nothing there — the wider lens on the perspective endpoint; on the
+ *                              orthographic the pages slide whole px and the member's whole box is
+ *                              byte-identical)
  *   6. strip band             (column 0 lands to the right of the left-edge strip cards)
  *   7. team.channel rows      (show → rows -N holds view → rows +N resumes live tail)
  *   8. point.show → list      (deictic point.show does not steal camera/attention; listed in point.list)
@@ -434,9 +435,12 @@ try {
     //    layers.riseRows each, past the member's title); nothing but the pages draws there.
     //      visible   the band with the layers vs without (layer.hide) differs — the pages show
     //      identity  fan off, on, off: the member + layer crop byte-identical (maxDelta 0)
-    //      moves     fan on moves the band (perspective: the wider lens' parallax; orthographic: the shear)
+    //      moves     fan on moves the band (perspective: the wider lens' parallax; orthographic: the
+    //                pages' own whole-px slide)
     //      member    the member's own text (its glyphs' box) stays put with the fan on: resampling
-    //                noise only (≤ MEMBER_NOISE), never a move
+    //                noise only (≤ MEMBER_NOISE), never a move; on the orthographic endpoint the
+    //                member's WHOLE box — text, backdrop, focus border — is byte-identical (only the
+    //                pages slide; on the perspective one the lens' parallax rightly moves its chrome)
     //      control   the same fan with the layers hidden moves nothing in the band — the member's own
     //                resampling (what a whole-frame diff counts) can't pass the measure
     {
@@ -464,9 +468,9 @@ try {
             const layers = showRes.data?.layers ?? [];
             const hasHistory = /^OK:/.test(showRes.text ?? '') && layers.length >= 2;
 
-            // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one unsheared.
-            const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.camera.shear === 0 : s.fovDeg === 1);
-            const fanned = (s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 : s.fovDeg > 1);
+            // Folded: the perspective endpoint at its own lens (fov 1), the orthographic one's pages home.
+            const folded = (s) => s && !s.tweening && (s.ortho ? s.fan === null && s.fanPx === 0 : s.fovDeg === 1);
+            const fanned = (s) => s && !s.tweening && (s.ortho ? s.fan?.px > 0 && s.fanPx === s.fan.px : s.fovDeg > 1);
             const shotAt = async (pred, name) => {
                 await untilPlane(pred, 10000);
                 await sleep(400);
@@ -522,8 +526,8 @@ try {
                 const band = pxBox({ x: L.x, y: L.y, w: L.w, h: Math.floor(M.y) - 1 - L.y });   // above the member's edge row
                 // The member's own text: its glyphs' stated extent (layer.where's member-text, which carries
                 // a row of right-side overdraw), inside the member's box less MEMBER_EDGE px — not its
-                // backdrop or focus border, which stand off the plane and so slide with the fan (the
-                // orthographic shear moves the backdrop, 0.5 units behind, n/3 px at a 1.5-unit pitch).
+                // backdrop or focus border, which stand off the plane, so the perspective fan's parallax
+                // moves them (the orthographic one leaves the whole box still: checked below).
                 const MEMBER_EDGE = 10;
                 const tx0 = Math.max(Math.ceil(wOff.text.x), Math.ceil(M.x + MEMBER_EDGE)), ty0 = Math.max(Math.ceil(wOff.text.y), Math.ceil(M.y + MEMBER_EDGE));
                 const tx1 = Math.min(Math.floor(wOff.text.x + wOff.text.w), Math.floor(M.x + M.w - MEMBER_EDGE)), ty1 = Math.min(Math.floor(wOff.text.y + wOff.text.h), Math.floor(M.y + M.h - MEMBER_EDGE));
@@ -533,14 +537,19 @@ try {
                 const identity = d(off1, off2, crop);
                 const moves = d(off1, on, band, 5);
                 const member = d(off1, on, inner);
+                const wx0 = Math.ceil(M.x), wy0 = Math.ceil(M.y);
+                const whole = d(off1, on, { x: wx0, y: wy0, w: Math.floor(M.x + M.w) - wx0, h: Math.floor(M.y + M.h) - wy0 });
+                const ortho = !!stateDef?.ortho;
                 const control = d(bareOff, bareOn, band, 5);
                 const controlMember = d(bareOff, bareOn, inner);
                 ok = folded(stateDef) && band.h > 0 && visible.diffPixels > 0 && identity.maxDelta === 0
-                    && moves.diffPixels > 0 && member.maxDelta <= MEMBER_NOISE && control.diffPixels === 0;
+                    && moves.diffPixels > 0 && member.maxDelta <= MEMBER_NOISE && control.diffPixels === 0
+                    && (!ortho || whole.maxDelta === 0);
                 const fanText = String(fanOn.text ?? '').replace(/^OK: /, '').split(' (')[0];
                 detail = `${stateDef?.ortho ? 'orthographic' : 'perspective'}, ${layers.length - 1} layers, band ${band.w}×${band.h} px: `
                     + `visible ${visible.diffPixels} px, off==off maxDelta=${identity.maxDelta} (${identity.diffPixels} px of ${crop.w}×${crop.h}), `
-                    + `${fanText}: band moved ${moves.diffPixels} px, member maxDelta=${member.maxDelta} (≤${MEMBER_NOISE}); `
+                    + `${fanText}: band moved ${moves.diffPixels} px, member text maxDelta=${member.maxDelta} (≤${MEMBER_NOISE}), `
+                    + `member box maxDelta=${whole.maxDelta}${ortho ? ' (=0)' : ''}; `
                     + `control (layers hidden): band ${control.diffPixels} px, member ${controlMember.diffPixels} px`;
             }
             recordVerdict('5. layer fan identity', ok, performance.now() - t0, detail);

@@ -67,6 +67,15 @@ await grid.loadFile('probe.js', SOURCE);
 const { frame, parent } = layerFrameOf(grid);
 ok(parent === grid && frame.originY === grid._layoutOriginY && frame.rows === grid.getTotalVisualRows(), `a code grid's frame (${J({ originY: frame.originY, rows: frame.rows, cols: frame.cols })})`);
 const m = grid.metrics, ls = m.lineSpacing;
+{
+    // A code grid's columns are CELLS as it lays them out (its widest line), never characters ÷ a world cell width.
+    const g40 = new CodeGrid(new THREE.Scene(), ATLAS, { name: 'w.js', showFilename: true });
+    await g40.loadFile('w.js', ['abc', 'x'.repeat(40), 'de'].join('\n'));
+    const c40 = layerFrameOf(g40).frame.cols;
+    ok(c40 === 40, `a 40-column code grid's frame is 40 cols (${c40}; characters ÷ charWidth ${g40.metrics.charWidth.toFixed(3)} would be ${Math.ceil(40 / g40.metrics.charWidth)})`);
+    ok(Math.ceil(40 / g40.metrics.charWidth) !== 40, 'teeth: the cell width is no unit — dividing characters by it gives another count');
+    g40.dispose?.();
+}
 // The member's own slots, by line.
 const memberSlots = slotsOf(grid._renderer);
 const lineSlots = (ln) => {
@@ -141,10 +150,57 @@ const lineSlots = (ln) => {
     stack.dispose(); grid.remove(stack);
 }
 {
-    // RISE: each history page raised rank rows, so its top row shows over the page in front.
+    // RISE — counted from the member's frame top, title included: page 1's top row shows ABOVE the
+    // member's title band (its bounds top: the filename row and the backdrop's margin), page k one
+    // row above page k−1, every lift a whole number of rows (the plane's cell grid).
+    const top = grid.getLocalBounds().max.y;
+    ok(frame.titleHeight > ls && Math.abs(frame.titleHeight - (top - (grid._layoutOriginY + ls / 2))) < 1e-9, `a code grid's frame states its title band (${frame.titleHeight.toFixed(3)} > a row ${ls.toFixed(3)})`);
+    const rowBottom = (st, id) => stack0Row(st, id) - m.charHeight / 2;
+    function stack0Row(st, id) { const l = st.layer(id); return l.field.slotBuffer.f32[LANE_POS_Y] + l.group.position.y; }
+    const pages3 = [1, 2, 3].map((k) => ({ id: `r${k}`, kind: 'history', rows: textRows(SOURCE).rows }));
     const stack = new LayerStack(ATLAS, frame, { riseRows: 1 });
-    stack.setLayers([1, 2, 3].map((k) => ({ id: `r${k}`, kind: 'history', rows: textRows(SOURCE).rows })));
-    ok([1, 2, 3].every((k) => Math.abs(stack.layer(`r${k}`).group.position.y - k * ls) < 1e-9), 'history page k stands k rows up');
+    stack.setLayers(pages3);
+    ok(rowBottom(stack, 'r1') >= top - 1e-9, `page 1's top row clears the member's frame top, title included (its bottom ${rowBottom(stack, 'r1').toFixed(3)} ≥ ${top.toFixed(3)})`);
+    ok([2, 3].every((k) => rowBottom(stack, `r${k}`) >= stack0Row(stack, `r${k - 1}`) + m.charHeight / 2 - 1e-9), 'page k\'s top row clears page k−1\'s');
+    ok([1, 2, 3].every((k) => { const q = stack.layer(`r${k}`).group.position.y / ls; return Math.abs(q - Math.round(q)) < 1e-9; }), `every lift is whole rows (${[1, 2, 3].map((k) => stack.layer(`r${k}`).group.position.y / ls).join(', ')})`);
+    ok([2, 3].every((k) => Math.abs(stack.layer(`r${k}`).group.position.y - stack.layer(`r${k - 1}`).group.position.y - ls) < 1e-9), 'one rise (riseRows) between pages');
+    // What falls in the title band stays BEHIND the member: its opaque backing reaches up through the
+    // band to exactly page 1's headline bottom; no page's backing reaches into the next page's headline.
+    const backTop = (b, dy = 0) => b.position.y + b.scale.y / 2 + dy;
+    const nowTop = backTop(stack._now.back);
+    ok(nowTop >= top - 1e-9 && Math.abs(nowTop - rowBottom(stack, 'r1')) < 1e-6, `the member's backing covers its title band, up to page 1's headline (top ${nowTop.toFixed(3)} ≥ frame top ${top.toFixed(3)}; = ${rowBottom(stack, 'r1').toFixed(3)})`);
+    ok([1, 2].every((k) => backTop(stack.layer(`r${k}`).back, stack.layer(`r${k}`).group.position.y) <= rowBottom(stack, `r${k + 1}`) + 1e-6), "no page's backing reaches into the headline row of the page behind it");
+    stack.dispose();
+    // Teeth: counted from the first text row (today's rise, riseFrom 'text') page 1's row sits in the title band.
+    const old = new LayerStack(ATLAS, frame, { riseRows: 1, riseFrom: 'text' });
+    old.setLayers(pages3);
+    ok(Math.abs(old.layer('r1').group.position.y - ls) < 1e-9 && rowBottom(old, 'r1') < top, `teeth: from the text row, page 1 rises one row into the title band (bottom ${rowBottom(old, 'r1').toFixed(3)} < ${top.toFixed(3)})`);
+    old.dispose();
+    const reg = new LayerStack(ATLAS, frame, { riseRows: 0 });
+    reg.setLayers(pages3);
+    ok(reg.pages.every((l) => l.group.position.y === 0), 'riseRows 0 stays registered (no title lift)');
+    reg.dispose();
+    let threw = false; try { new LayerStack(ATLAS, frame, { riseFrom: 'top' }); } catch { threw = true; }
+    ok(threw, 'riseFrom is title|text — anything else throws');
+}
+{
+    // WIDTH — a revision with lines LONGER than the member: its backing is exactly the member's frame
+    // width (never under a neighbour), its glyphs clipped to the member's columns, none dropped.
+    const long = SOURCE + '\n' + 'x'.repeat(frame.cols + 21) + ' // a line the member never had';
+    const rows = textRows(long).rows;
+    const stack = new LayerStack(ATLAS, frame, { riseRows: 1 });
+    stack.setLayers([{ id: 'wide', kind: 'history', rows }, { id: 'strip', kind: 'suggest', row0: 1, rows: textRows('x'.repeat(frame.cols + 9)).rows }]);
+    const pad = stack.cfg.padCells * m.charWidth, W = frame.cols * m.charWidth;
+    for (const id of ['wide', 'strip']) {
+        const l = stack.layer(id), gd = l.field._groupData;
+        ok(Math.abs(l.back.scale.x - (W + 2 * pad)) < 1e-9 && Math.abs(l.back.position.x - W / 2) < 1e-9, `${id}: its backing is exactly the member's width (${l.back.scale.x.toFixed(3)} = ${(W + 2 * pad).toFixed(3)}; ${frame.cols} cols)`);
+        ok(gd[4 * 4 + 3] === 1 && gd[6 * 4 + 0] === 0 && Math.abs(gd[6 * 4 + 1] - W) < 1e-4, `${id}: its glyphs clip to the member's columns [0, ${W.toFixed(2)}] (${gd[6 * 4 + 0]}, ${gd[6 * 4 + 1].toFixed(2)})`);
+        ok(l.field.geometry.boundingBox.max.x <= W + l.field._maxQuad + 1e-6, `${id}: its stated extent stays within the member's columns (+ one quad's overdraw: ${l.field.geometry.boundingBox.max.x.toFixed(2)} ≤ ${(W + l.field._maxQuad).toFixed(2)})`);
+    }
+    const chars = rows.reduce((n, r) => n + (r.segs || []).reduce((a, g) => a + Array.from(g.text).filter((c) => c !== '\t').length, 0), 0);
+    ok(stack.layer('wide').field.slotBuffer.count >= chars - 8, `nothing dropped: the page holds every glyph of its text (${stack.layer('wide').field.slotBuffer.count} slots for ${chars} chars)`);
+    const rowCols = Math.max(...rows.map((r) => (r.segs || []).reduce((n, g) => n + Array.from(g.text).length, 0)));
+    ok(rowCols > frame.cols, `teeth: the page's own widest row (${rowCols} cols) is wider than the member (${frame.cols}) — sized by its rows, the backing would run under a neighbour`);
     stack.dispose();
 }
 

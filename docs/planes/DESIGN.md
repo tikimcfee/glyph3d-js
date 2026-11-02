@@ -439,7 +439,11 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
 - **The fan, on either endpoint.** The perspective plane endpoint is a 1° lens: a layer 50 units
   back is 0.7% smaller (7 px at 1000 px off-center), and its fan widens the lens (`layers.fanFov`).
   The orthographic endpoint (§4.6, `plane.ortho`) keeps every layer 1:1 behind the page, and its fan
-  is a projection shear of whole device px per layer (`layers.fanPx`), sliding layer i right by i·n.
+  slides the pages themselves: page i right by i·n whole device px (`layers.fanPx`), rigidly, its
+  backing with its text (`LayerStack.setFan`, eased by the camera's fan listener). The member and
+  everything at its own depth (its backdrop, focus border, `now` backing) stay byte-still. A
+  projection shear can't do that: it is linear in depth, so it holds one depth still and slides the
+  member's backdrop (0.5 units behind its text) by a fraction of a layer step.
   Holding the pane prefix fans either one (`plane.fan on`); releasing folds it (`plane.fan off`).
 - **Verbs** (NEW). `pane.layer <id> <n|now|label>` (bring a layer to z = 0), `pane.blink <id> <a>
   <b>`, `grid.history <id> [--at n]`, `plane.fan <on|off|px>` (px on the orthographic endpoint only).
@@ -592,17 +596,17 @@ give. The view camera is `PlaneCamera extends PerspectiveCamera`
 blend at a fixed eye. At λ = 1 its matrix is three's own, so the open world is bit-identical to a
 PerspectiveCamera (the blend formula at λ = 1 agrees only to ~1e-14). `plane.ortho` chooses the
 endpoint: on, the camera keeps the open-world fov, stops at `d₀`, and blends λ 1 → 0 in the same ease
-as the dolly (d₀ pinned to the referent's depth every frame, where the blend and shear terms vanish,
+as the dolly (d₀ pinned to the referent's depth every frame, where the blend terms vanish,
 so the referent solve holds at every λ); off, it dollies to the 1° lens. **Off by default**: on the
 flat plane the two differ in 1543 of 1.6 M px (`tools/plane-ortho-check.mjs`), all on the inner
 anti-aliased edge of the focus border, which stands in front of the plane, so 1° magnifies it by
 D/(D−d). Text and panels are byte-identical. With layers shown, the 1° endpoint's layers drift where
-the orthographic ones stand 1:1. In view space (forward −z), with the plane at depth `d₀`, blend `λ ∈ [0, 1]` and shear
-`(hx, hy)`:
+the orthographic ones stand 1:1. In view space (forward −z), with the plane at depth `d₀` and blend
+`λ ∈ [0, 1]`:
 
 ```
-x_clip = sx·x + (1−λ)·hx·(z + d₀)        sx = 1/(aspect·tan(φ/2)),  sy = 1/tan(φ/2)
-y_clip = sy·y + (1−λ)·hy·(z + d₀)
+x_clip = sx·x                             sx = 1/(aspect·tan(φ/2)),  sy = 1/tan(φ/2)
+y_clip = sy·y
 z_clip = A·z + B                          A = −(λ(f+n) + 2(1−λ)d₀)/(f−n),  B = −(λn + (1−λ)d₀) + A·n
 w_clip = −λ·z + (1−λ)·d₀
 ```
@@ -613,10 +617,11 @@ w_clip = −λ·z + (1−λ)·d₀
   all λ, so sorting holds.
 - `d₀ = e₅·Hd / (2k)` (e.g. fov 70°, Hd 1080, k 11.03 → 69.9): the eye never backs off, so the dock,
   the overlay and camera-relative batches stay where they are.
-- Shear (horizontal only — layers already rise a row per rank): `n` px per layer at pitch `p` needs
-  `h = −2·n·d₀ / (Wd·p)` (`fanShear`). `p` is the world pitch of the layer stacks in the plane being
-  read; a stack whose pitch differs is named by `plane.fan`.
-- Picking: `copy()` carries λ, `d₀` and the shear; `updateProjectionMatrix()` applies the view offset
+- The fan is not the camera's (§3.15): `setPlaneFan(n)` eases n device px per rank and hands it, with
+  the plane's px per world unit, to its fan listeners; LayerStacks slides each stack's history pages
+  `rank·n / pxPerUnit` world units right. At λ = 0 that is exactly rank·n device px whatever the
+  stack's pitch or scale, and the camera doesn't move bit for bit.
+- Picking: `copy()` carries λ and `d₀`; `updateProjectionMatrix()` applies the view offset
   as an NDC crop, equal to three's `setViewOffset` at λ = 1. Below λ = 1 it throws on the WebGPU
   coordinate system, reversed depth, a zoom or a film offset. Rays come from `rayFromCamera` (three's
   `setFromCamera` takes the perspective branch at every λ).
@@ -913,8 +918,10 @@ log store (`carrel.enter`, `carrel.leave`, `agent.say`, time entered), so "uses 
   `tools/plane-camera.test.mjs` grows (λ = 1 equals `PerspectiveCamera` and λ = 0 equals
   `OrthographicCamera` element for element; the plane at `d₀` keeps its NDC size for all λ; `z_ndc`
   monotonic; the NDC crop equals `setViewOffset` at λ = 1; `pxPerUnitAt` agrees with projecting two
-  points); `tools/plane-oblique.test.mjs` (layers 0..20 land on integer device px, layer i offset exactly
-  i·n; teeth: a non-integer n and an unpinned `d₀` fail); picking at λ = 0; the rg gate. **Felt property:
+  points); `tools/plane-oblique.test.mjs` (a real LayerStack's 20 pages land on integer device px, page i
+  rigidly i·n over, the member's text, backdrop, frame and `now` backing and the camera unmoved; teeth:
+  a projection shear (clip x += h·(z + d₀)) moves the backdrop and tears a page's backing off its text, and
+  a non-integer n fails); picking at λ = 0; the rg gate. **Felt property:
   the past is right behind the page, and you can read it without flattening.**
 
 ### Slice 11. Impostors

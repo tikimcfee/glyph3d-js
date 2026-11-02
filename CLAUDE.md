@@ -351,7 +351,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   batches). `plane.ortho` (off by default) makes the endpoint ORTHOGRAPHIC instead: the camera keeps the
   open-world fov, stops where that lens shows the plane at its scale (d₀ ≈ 60–70 units, not ~5000), and
   blends λ 1 → 0 in the same ease, d₀ pinned to the referent's depth each frame. Layers behind the
-  page then stand 1:1, and the fan is a whole-px shear. On the flat plane the two endpoints differ only
+  page then stand 1:1, and the fan slides each history page rigidly by whole px. On the flat plane the two endpoints differ only
   in the anti-aliased inner edge of the focus border, which stands in front of the plane
   (`tools/plane-ortho-check.mjs`). Every reading of a camera's scale goes through `spatialMath`
   (`clipW` / `pxPerUnitAt` / `viewHeightAt` / `worldPerPixel` read the projection matrix;
@@ -366,7 +366,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   eases back to home, then flies — framed at the home lens; a restore cuts home; `getState` answers
   with the pose it was entered from (a save mid-plane restores to the open world). The FAN (`plane.fan on|off`, the held pane prefix) spreads layers behind the page: on the
   perspective endpoint a wider lens (`layers.fanFov`, keeping the scale: parallax); on the orthographic
-  one a projection shear sliding layer i right by i·n whole device px (`layers.fanPx`, `plane.fan <px>`).
+  one the history pages slide rigidly, page i right by i·n whole device px (`layers.fanPx`, `plane.fan <px>`;
+  `setPlaneFan` eases its own tween and tells `addPlaneFanListener` listeners — the camera never moves),
+  while the member, its backdrop, focus border and suggest strips stay still.
   `plane.blend <0..1|default>` holds a blend (a test handle). Its life is a
   listener set (`addPlaneListener` / `removePlaneListener`): `enterPlaneView` installs one per
   controller that suppresses space-layer chrome (the tree's ownership traces) for exactly that span.
@@ -414,8 +416,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   file's revisions (the relay's read-only `fs/gitLog`: `git log --follow` + each revision's text, `cli/gitlog.go`;
   leading copies of what's shown skipped), an agent scroll's turns (`AgentBooks.turnLayers`), a terminal's
   scrollback by screen (`terminalPageLayers`). History at z = −rank·pitch (`layers.pitchRows`, floored so page text
-  never pokes through), raised `layers.riseRows` per rank so each page's top row peeks over the one in front; suggest
-  strips in front, exactly over the lines they'd replace. Every page and the member itself get an opaque backing, so
+  never pokes through), raised `layers.riseRows` per rank so each page's top row peeks over the one in front —
+  counted from the member's frame top, title included (`layers.riseFrom`), so page 1's shows above the title; suggest
+  strips in front, exactly over the lines they'd replace. Every page and the member itself get an opaque backing
+  exactly the member's width (a page's glyphs clip to its columns; the member's reaches up through its title band), so
   a translucent member never shows what's behind. `pane.layer <id> <n>` fronts a page at EXACTLY z = 0 (the member's
   glyph meshes hide meanwhile); `now` restores the member. The fan is the plane's (`plane.fan`): holding the pane prefix
   (Ctrl+Space) past key-repeat sends `plane.fan on`, release `plane.fan off`. A desk the plane view reads

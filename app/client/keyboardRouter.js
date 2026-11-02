@@ -233,8 +233,8 @@ function planePrefix(e, env) {
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return false;
     if (matchesChord(e, env.planePrefix ?? PLANE_PREFIX)) {
         // HELD past the key-repeat delay, the chord is the FAN quasimode (depth as time): `plane.fan
-        // on` spreads the layers behind a page (a whole-px shear on the orthographic endpoint, a
-        // wider lens on the perspective one); its release folds them back (onKeyUp). A tap stays
+        // on` spreads the layers behind a page (the pages slide whole px per rank on the
+        // orthographic endpoint, a wider lens on the perspective one); its release folds them back (onKeyUp). A tap stays
         // the prefix.
         if (e.repeat) {
             env._planeArmed = 0;

@@ -47,7 +47,6 @@ import { normalizeWheelDelta } from '../../utils/wheelDelta.js';
 import { stateController } from '../state/StateController.js';
 import { zDistanceForFit, worldPerPixel, pxPerUnitAt, viewHeightAt, tweenPose, easeInOutCubic, shortYaw } from '../spatial/spatialMath.js';
 import { planeDistance, planeScale, planeSlab, snapAim, dollyAt } from './planeView.js';
-import { fanShear } from './PlaneCamera.js';
 import { worldBounds } from '../spatial/sceneBounds.js';
 /** @import SceneContext from '../SceneContext.js' */
 
@@ -199,6 +198,10 @@ export class ViewerCameraController {
         this._pendingFly = null;
         // Told when a plane view begins (true) and when it is over (false) — addPlaneListener.
         this._planeListeners = new Set();
+        // The orthographic fan as it stands this frame (device px per layer, eased) — and who hears it.
+        this._fanPx = 0;
+        this._fanTween = null;
+        this._fanListeners = new Set();
         // The canvas's device-pixel box as the browser reports it (planeViewport's `exact`).
         this._deviceBox = null;
         this._deviceBoxWhy = 'the canvas device-pixel box is not observed yet';
@@ -543,6 +546,48 @@ export class ViewerCameraController {
     _emitPlane(on) { for (const fn of [...this._planeListeners]) fn(on); }
 
     /**
+     * Listen to the orthographic fan: `fn(px, pxPerUnit)` whenever it moves — every frame of its
+     * ease, then once at rest; `px` device px per layer (0 = folded), `pxPerUnit` the plane's device
+     * px per world unit (null once the view is over). The fan is the layers' own move (LayerStacks
+     * slides each stack's pages, LayerStack.setFan); the camera never shears.
+     * @param {(px:number, pxPerUnit:number|null) => void} fn
+     */
+    addPlaneFanListener(fn) {
+        if (typeof fn !== 'function') throw new Error(`addPlaneFanListener: not a function (${fn})`);
+        this._fanListeners.add(fn);
+    }
+
+    /** @param {(px:number, pxPerUnit:number|null) => void} fn */
+    removePlaneFanListener(fn) { this._fanListeners.delete(fn); }
+
+    /** The fan this frame (device px per layer; 0 = folded). */
+    planeFanPx() { return this._fanPx; }
+
+    /** Ease the fan to `px` over `ms` (0 = at once). @private */
+    _fanTo(px, ms) {
+        if (!(ms > 0)) { this._fanTween = null; this._setFan(px); return; }
+        this._fanTween = { from: this._fanPx, to: px, ms, elapsed: 0 };
+    }
+
+    /** One frame of the fan's ease. @private */
+    _stepFan(dt) {
+        const T = this._fanTween;
+        if (!T) return;
+        T.elapsed += dt * 1000;
+        const t = Math.min(T.elapsed / T.ms, 1);
+        if (t >= 1) { this._fanTween = null; this._setFan(T.to); return; }
+        this._setFan(T.from + (T.to - T.from) * easeInOutCubic(t));
+    }
+
+    /** Move the fan (told only when it changes). @private @param {number} px */
+    _setFan(px) {
+        if (px === this._fanPx) return;
+        this._fanPx = px;
+        const ppu = this._plane?.pxPerUnit ?? null;
+        for (const fn of [...this._fanListeners]) fn(px, ppu);
+    }
+
+    /**
      * Enter a plane view: square to a flat surface and ease (one continuous lens tween from wherever
      * the camera is) to the depth and fov where the plane shows at exactly `pxPerUnit` device px per
      * world unit, the aim snapped so `origin` lands on a device-pixel corner.
@@ -630,6 +675,7 @@ export class ViewerCameraController {
         }
         const before = this._plane;
         this._plane = view;
+        if (wasEntered) this._fanTo(0, switching ? switchMs : 0);   // a new plane starts folded
         let to;
         try {
             this._snapPlaneAim();
@@ -665,8 +711,10 @@ export class ViewerCameraController {
         const dist = Math.max(h.dist, 1e-3);
         const to = {
             aim: h.position.clone().addScaledVector(fwd, dist), dist, pitch: h.pitch, yaw: h.yaw,
-            fov: h.fov, near: h.near, far: h.far, blend: 1, shear: 0,
+            fov: h.fov, near: h.near, far: h.far, blend: 1,
         };
+        view.fan = null;
+        this._fanTo(0, ms ?? view.leaveMs);
         this._startLens(to, {
             P0: this._lensNow(view.center, view.normal).aim, P1: to.aim, ms: ms ?? view.leaveMs, leaving: true,
             onDone: () => {
@@ -700,24 +748,22 @@ export class ViewerCameraController {
     }
 
     /**
-     * The orthographic endpoint's fan: layers `pitch` world units apart behind the plane slide
-     * `px` whole device px each (a projection shear — PlaneCamera.fanShear), eased; `px` 0 folds
-     * them back. Only on an orthographic endpoint (else the fan is setPlaneFov).
+     * The orthographic endpoint's fan: the layer pages behind the plane slide `px` device px per
+     * rank (layer i by i·px — whole px when px is whole), eased with the lens; `px` 0 folds them
+     * back. The camera doesn't move: the fan listeners (addPlaneFanListener) move the pages, so the
+     * member and everything at its own depth stay still. Only on an orthographic endpoint (else the
+     * fan is setPlaneFov).
      * @param {number} px  device px per layer (whole, for whole-pixel layers)
-     * @param {number} pitch  world units between layers
      * @param {{ms?:number}} [opts]
      * @returns {boolean} false when not in a plane view
      */
-    setPlaneFan(px, pitch, { ms = 400 } = {}) {
+    setPlaneFan(px, { ms = 400 } = {}) {
         const view = this._plane;
         if (!view || this._lens?.leaving) return false;
         if (!view.ortho) throw new Error('setPlaneFan: the plane endpoint is perspective (plane.ortho off) — its fan is setPlaneFov');
         if (!Number.isFinite(px)) throw new Error(`setPlaneFan: px must be finite (got ${px})`);
-        if (px !== 0 && !(Number.isFinite(pitch) && pitch > 0)) throw new Error(`setPlaneFan: pitch must be a finite number > 0 (got ${pitch})`);
-        const P0 = this._lensNow(view.center, view.normal).aim;
-        view.fan = px === 0 ? null : { px, pitch };
-        const to = this._planeLens();
-        this._startLens(to, { P0, P1: to.aim, ms });
+        view.fan = px === 0 ? null : { px };
+        this._fanTo(px, ms);
         return true;
     }
 
@@ -790,9 +836,10 @@ export class ViewerCameraController {
             viewport: vp,
             camera: {
                 fov: cam.fov, near: cam.near, far: cam.far, distance: this._planeLens().dist,
-                blend: cam.blend ?? 1, planeDepth: cam.planeDepth ?? null, shear: cam.shear ?? 0,
+                blend: cam.blend ?? 1, planeDepth: cam.planeDepth ?? null,
             },
-            tweening: !!this._lens, leaving: !!this._lens?.leaving,
+            fanPx: this._fanPx,
+            tweening: !!this._lens || !!this._fanTween, leaving: !!this._lens?.leaving, fanning: !!this._fanTween,
             tween: this._lens ? { elapsed: this._lens.elapsed, ms: this._lens.ms } : null,
             locked: this.locked,
         };
@@ -856,7 +903,7 @@ export class ViewerCameraController {
     /** The lens the plane view sits at now (its target while still). @private */
     _planeLens() {
         const v = this._plane;
-        const { width, height } = this.planeViewport();
+        const { height } = this.planeViewport();
         // The orthographic endpoint keeps the open-world fov — the eye stops where that lens shows
         // the plane at pxPerUnit, and the blend flattens it; the perspective one narrows to fovDeg.
         const fov = v.ortho ? v.home.fov : v.fovDeg;
@@ -865,9 +912,8 @@ export class ViewerCameraController {
         const aim = this._planePoint(v, v.aim);
         const fwd = v.normal.clone().multiplyScalar(-1);
         const blend = v.blend ?? (v.ortho ? 0 : 1);
-        const shear = v.ortho && v.fan ? fanShear({ px: v.fan.px, pitch: v.fan.pitch, planeDepth: dist, viewportW: width }) : 0;
         return {
-            aim, dist, fov, near, far, blend, shear,
+            aim, dist, fov, near, far, blend,
             pitch: Math.asin(Math.max(-1, Math.min(1, fwd.y))), yaw: Math.atan2(-fwd.x, -fwd.z),
         };
     }
@@ -910,7 +956,7 @@ export class ViewerCameraController {
         return {
             aim: cam.position.clone().addScaledVector(fwd, dist), dist,
             pitch: this.pitch, yaw: this.yaw, fov: cam.fov, near: cam.near, far: cam.far,
-            blend: cam.blend ?? 1, shear: cam.shear ?? 0,
+            blend: cam.blend ?? 1,
         };
     }
 
@@ -943,7 +989,7 @@ export class ViewerCameraController {
             fov0: cam.fov, fov1: to.fov, pitch0: this.pitch, pitch1: to.pitch,
             yaw0: this.yaw, dyaw: shortYaw(this.yaw, to.yaw),
             clear0: s0.depth - cam.near, clear1: d1 - to.near, back0: cam.far - s0.depth, back1: to.far - d1,
-            blend0: cam.blend ?? 1, blend1: to.blend, shear0: cam.shear ?? 0, shear1: to.shear,
+            blend0: cam.blend ?? 1, blend1: to.blend,
             ms: Math.max(1, ms), elapsed: 0, onDone, leaving,
         };
     }
@@ -976,28 +1022,28 @@ export class ViewerCameraController {
         const P = L.P0.clone().lerp(L.P1, e);
         const local = new THREE.Vector3(lerp(L.s0.x, L.s1.x) / k, lerp(L.s0.y, L.s1.y) / k, -d);
         cam.position.copy(P).sub(local.applyQuaternion(cam.quaternion));
-        // The blend pins the referent's depth d: it holds exactly k there at every λ (the shear
-        // and blend terms vanish at z = −d₀), so the solve above stays the whole truth.
+        // The blend pins the referent's depth d: it holds exactly k there at every λ (the blend
+        // terms vanish at z = −d₀), so the solve above stays the whole truth.
         this._project({
             fov: fovDeg, near: Math.max(d * 1e-3, d - lerp(L.clear0, L.clear1)), far: Math.max(d + lerp(L.back0, L.back1), d * 1.001),
-            blend: lerp(L.blend0, L.blend1), dist: d, shear: lerp(L.shear0, L.shear1),
+            blend: lerp(L.blend0, L.blend1), dist: d,
         });
     }
 
     /**
      * Set the camera's projection: fov / near / far, and on a PlaneCamera the blend about the
-     * plane depth `dist` and the fan's shear (a plain perspective camera only ever takes λ = 1).
-     * Recomputes the matrix only when something changed (a still plane view is bit-still). @private
-     * @param {{fov:number, near:number, far:number, blend?:number, dist?:number, shear?:number}} l
+     * plane depth `dist` (a plain perspective camera only ever takes λ = 1). Recomputes the matrix
+     * only when something changed (a still plane view is bit-still). @private
+     * @param {{fov:number, near:number, far:number, blend?:number, dist?:number}} l
      */
     _project(l) {
         const cam = this.ctx.camera;
-        const blend = l.blend ?? 1, shear = l.shear ?? 0;
+        const blend = l.blend ?? 1;
         let changed = cam.fov !== l.fov || cam.near !== l.near || cam.far !== l.far;
         if (cam.isPlaneCamera) {
             const depth = blend === 1 ? cam.planeDepth : l.dist;
-            changed ||= cam.blend !== blend || cam.planeDepth !== depth || cam.shear !== shear;
-            cam.blend = blend; cam.planeDepth = depth; cam.shear = shear;
+            changed ||= cam.blend !== blend || cam.planeDepth !== depth;
+            cam.blend = blend; cam.planeDepth = depth;
         } else if (blend !== 1) {
             throw new Error(`_project: blend ${blend} needs a PlaneCamera (the view camera is a ${cam.type})`);
         }
@@ -1027,7 +1073,9 @@ export class ViewerCameraController {
         this.pitch = h.pitch;
         this.yaw = h.yaw;
         this._applyRotation();
-        if (cam.isPlaneCamera) { cam.blend = 1; cam.shear = 0; }
+        if (cam.isPlaneCamera) cam.blend = 1;
+        this._fanTween = null;
+        this._setFan(0);
         cam.fov = h.fov; cam.near = h.near; cam.far = h.far;
         cam.updateProjectionMatrix();
     }
@@ -1053,6 +1101,7 @@ export class ViewerCameraController {
      */
     _applyPlane(dt) {
         const input = this.input;
+        this._stepFan(dt);
         if (this._lens) {
             // A tween owns the frame; input during it is dropped (an enter/leave always lands).
             input.drag.dx = 0; input.drag.dy = 0; input.wheel.dy = 0;
