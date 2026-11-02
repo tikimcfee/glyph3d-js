@@ -132,6 +132,18 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   pkill -USR2 -f '^bun tools/agent-display.mjs'; tail -1 /tmp/glyph3d/agent-display.log
   ```
 
+- **`render-passes.test.mjs`** (headless, real r3f) and **`render-passes-check.mjs`** (GPU) — the ONE
+  render owner (`app/client/FramePasses.js`, mounted as `<RenderPasses/>`): passes main → overlay →
+  cloud → minimap in a declared order, each once a frame, timed; a throwing pass contained and named
+  once; a second positive-priority useFrame logged loudly and shown FAIL in `scene.render`, the frame
+  still drawn. The check builds before/after in two scratch worktrees served by two private Vites
+  against one private relay (`--no-gomuxai`) and compares frames — 0 pixels differ in the open world
+  and an entered plane desk with the minimap on; without the overlay or minimap pass they differ.
+  ```
+  bun tools/render-passes.test.mjs
+  bun tools/render-passes-check.mjs --dir <scratch>
+  ```
+
 - **`flat-root.test.mjs`** (headless) and **`flat-root-check.mjs`** (GPU) — the flat render root
   (`collections/FlatRenderRoot.js`): the view camera renders a flat list of the drawables it sees,
   rebuilt only when visibility, membership or layers move. The test locks the list against a fresh walk

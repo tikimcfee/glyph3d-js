@@ -103,7 +103,8 @@ console.log(`  pipeline: ${JSON.stringify(pipe.stats)}  last frame ${JSON.string
     try { view.setLayer('nope', true); } catch { threw = true; }
     ok(threw, 'an unknown layer throws');
 
-    // A stub renderer: the overlay draws only for the hooked camera on screen, and restores state.
+    // A stub renderer: the picture-in-picture draws its own scene into its corner and restores state
+    // (the frame's `cloud` pass calls it after the overlay, for the view camera — FramePasses.js).
     const THREE = await import('three');
     const calls = [];
     let vp = new THREE.Vector4(0, 0, 1600, 900), sc = new THREE.Vector4(0, 0, 1600, 900), st = false, target = null;
@@ -116,22 +117,18 @@ console.log(`  pipeline: ${JSON.stringify(pipe.stats)}  last frame ${JSON.string
         setScissorTest: (v) => { st = v; }, setClearColor: (c) => { cc.set(c); }, clear: () => calls.push('clear'),
         render: (sceneArg, cam) => calls.push(['render', sceneArg === view2.scene, cam === view2.camera, vp.x, vp.y, vp.z, vp.w]),
     };
-    const main = new THREE.Scene(), mainCam = new THREE.PerspectiveCamera(), other = new THREE.PerspectiveCamera();
     const view2 = new CloudView(); // eslint-disable-line prefer-const
-    view2.hook(main, mainCam);
+    view2.render(gl);
+    ok(calls.length === 0, 'hidden, it draws nothing');
     view2.setVisible(true);
     view2.setFrame(r.view, lastHand);
-    main.onAfterRender(gl, main, other);
-    target = {}; main.onAfterRender(gl, main, mainCam); target = null;
-    ok(calls.length === 0, 'no overlay for another camera, nor into a render target (a pick pass)');
-    main.onAfterRender(gl, main, mainCam);
+    view2.render(gl);
     const rc = calls.find((c) => Array.isArray(c));
     ok(rc && rc[1] && rc[2], 'the overlay renders its own scene through its own camera');
     ok(rc && rc[3] === 12 && rc[6] === Math.round(900 * 0.36) && rc[4] === 900 - rc[6] - 12, `into the top-left corner (${rc?.slice(3)})`);
     ok(calls.includes('clear') && gl.autoClear === true && st === false && vp.z === 1600 && sc.z === 1600 && cc.getHex() === 0x123456,
         'and leaves viewport, scissor, clear colour and autoClear as it found them');
     view2.dispose();
-    ok(typeof main.onAfterRender === 'function' && (calls.length, main.onAfterRender(gl, main, mainCam), calls.filter((c) => Array.isArray(c)).length === 1), 'dispose unhooks it');
     view.dispose();
 }
 

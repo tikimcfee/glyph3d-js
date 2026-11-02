@@ -730,6 +730,7 @@ export class CarrelCards {
         const t1 = performance.now();
 
         entry.captureMs = +(t1 - t0).toFixed(3);
+        this.ctx?.renderPasses?.record('cards', t1 - t0);   // drawn on its own schedule; the frame owner reports it
         entry.capturedAt = t1;
         entry.lastUsedAt = t1;
         entry.dirty = false;

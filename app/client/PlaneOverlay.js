@@ -171,11 +171,6 @@ export default class PlaneOverlay {
         /** @type {THREE.PlaneGeometry|null} shared unit quad for dot markers */
         this._dotGeo = null;
 
-        this._hookedScene = null;
-        this._prevAfterRender = null;
-        if (ctx?.scene?.isScene) {
-            this.hookScene(ctx.scene);
-        }
 
         this._domCanvas = ctx?.renderer?.domElement ?? ctx?.canvas ?? null;
         this._onDomClick = (e) => {
@@ -193,34 +188,6 @@ export default class PlaneOverlay {
         this._domCanvas?.addEventListener?.('click', this._onDomClick, true);
     }
 
-    /**
-     * Hook `mainScene.onAfterRender` so the overlay draws automatically after the
-     * main view pass on the same renderer.
-     * @param {THREE.Scene} mainScene
-     */
-    hookScene(mainScene) {
-        if (!mainScene?.isScene || this._hookedScene === mainScene) return;
-        this.unhookScene();
-        this._hookedScene = mainScene;
-        const prev = mainScene.onAfterRender;
-        this._prevAfterRender = prev;
-        mainScene.onAfterRender = (renderer, sc, camera) => {
-            if (typeof prev === 'function') prev.call(sc, renderer, sc, camera);
-            // Only draw after the main view pass (layer 0 to the default framebuffer).
-            if (renderer?.getRenderTarget?.() == null && camera?.layers?.isEnabled?.(0)) {
-                this.render(renderer);
-            }
-        };
-    }
-
-    /** Unhook from `mainScene.onAfterRender`. */
-    unhookScene() {
-        if (this._hookedScene && this._prevAfterRender !== null) {
-            this._hookedScene.onAfterRender = this._prevAfterRender;
-        }
-        this._hookedScene = null;
-        this._prevAfterRender = null;
-    }
 
     /**
      * Read the viewport in DEVICE pixels (the drawing buffer `canvas.width × canvas.height`),
@@ -823,7 +790,8 @@ export default class PlaneOverlay {
     }
 
     /**
-     * Render the overlay scene over the current framebuffer with depth cleared.
+     * Render the overlay scene over the current framebuffer with depth cleared — the frame's
+     * `overlay` pass (FramePasses.js), right after the main pass.
      * @param {THREE.WebGLRenderer} [renderer]
      */
     render(renderer = this.ctx?.renderer) {
@@ -848,7 +816,6 @@ export default class PlaneOverlay {
         this._domCanvas?.removeEventListener?.('click', this._onDomClick, true);
         this._domCanvas = null;
         this._onDomClick = null;
-        this.unhookScene();
         this.clear();
         this._dotGeo?.dispose();
         this._dotGeo = null;

@@ -182,12 +182,16 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **Flat render root** (`collections/FlatRenderRoot.js`): the view camera renders a flat list of the
   drawables it can see — rebuilt only when visibility, scene membership or layers move (layer writes are
   watched; go through the `Layers` methods) — not the scene tree: three's walk visits what draws, not
-  every container (~6.5k visits a frame → ~1k on the hub). The seam is the renderer's `render` (r3f's
-  frame, the minimap's main pass, a screenshot); a camera off layer 0 (picking, overlays, cards) gets the
-  scene itself. What three must walk itself (a Group with renderOrder, lights, LODs) goes in whole; a
+  every container (~6.5k visits a frame → ~1k on the hub). The frame's main pass renders it
+  (`app/client/FramePasses.js` — the ONE render owner, `<RenderPasses/>`: one `useFrame(…, 1)`, passes
+  main → overlay → cloud → minimap declared with `ctx.renderPasses.add`, never a second
+  positive-priority useFrame nor a scene onAfterRender hook; a second loop owner is logged loudly and
+  shown FAIL in `scene.render`; screenshots draw through it); cameras off layer 0 (overlay, cards) take
+  the scene, picks their own lists (`pick.flatRoot`). What three must walk itself (a Group with renderOrder, lights, LODs) goes in whole; a
   drawable whose own onBeforeRender may read the scene, or a shadow-casting light, switches it off
   loudly (named) until the scene changes. `render.flatRoot` (on) is the A/B; `scene.render [time n]`
-  reports it and checks it against a fresh walk. Gates: `tools/flat-root.test.mjs`, `tools/flat-root-check.mjs`.
+  reports it and checks it against a fresh walk. Gates: `tools/flat-root.test.mjs`, `tools/flat-root-check.mjs`,
+  `tools/render-passes.test.mjs`, `tools/render-passes-check.mjs`.
 - **Glyph tiers** by on-screen size, nothing in between: exact Slug coverage (counted once,
   premultiplied); under `glyph.greekPx` (default 8 px tall) a glyph is a bar through the
   x-height where its ink would be (`core/glyphMaterial.js`, about as much light as the text);

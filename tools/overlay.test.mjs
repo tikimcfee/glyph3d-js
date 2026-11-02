@@ -197,23 +197,23 @@ console.log('=== overlay.test.mjs ===');
             'overlay mesh layer untouched by 3D camera batches');
     }
 
-    // Verify mainScene.onAfterRender hook triggers overlay render on main pass, and skips pick passes.
-    mainScene.onAfterRender(mockRenderer, mainScene, cam3d);
-    ok(renderCalls === 1 && depthClears === 1, 'main pass triggers overlay depth clear + render');
+    // The overlay is the frame's `overlay` pass (app/client/FramePasses.js): its render draws over the
+    // main pass with depth cleared and restores the renderer's state.
+    overlay.render(mockRenderer);
+    ok(renderCalls === 1 && depthClears === 1, 'the overlay pass clears depth and renders the overlay scene');
     ok(mockRenderer.autoClear === true && mockRenderer.info.autoReset === true,
         'overlay pass restores renderer.autoClear and renderer.info.autoReset');
 
-    // Offscreen render target (e.g. picking pass) should be skipped.
+    // No render of the main scene draws it (the frame owner calls it, once): not the main pass, not an
+    // offscreen pass (picking), not another camera.
+    mainScene.onAfterRender(mockRenderer, mainScene, cam3d);
     currentTarget = {};
     mainScene.onAfterRender(mockRenderer, mainScene, cam3d);
-    ok(renderCalls === 1, 'offscreen render target pass does not trigger overlay render');
     currentTarget = null;
-
-    // Non-layer-0 camera should be skipped.
     const pickCam = new THREE.PerspectiveCamera();
     pickCam.layers.set(31);
     mainScene.onAfterRender(mockRenderer, mainScene, pickCam);
-    ok(renderCalls === 1, 'non-layer-0 camera pass does not trigger overlay render');
+    ok(renderCalls === 1, 'no render of the main scene draws the overlay (it is a frame pass, never a scene hook)');
 
     overlay.dispose();
     glyphBatch.dispose();

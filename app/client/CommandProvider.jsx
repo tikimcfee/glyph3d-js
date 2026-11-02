@@ -35,6 +35,8 @@ import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
 import GlyphBatch from '@glyph3d/core/collections/GlyphBatch.js';
 import SceneTransforms from '@glyph3d/core/collections/SceneTransforms.js';
 import FlatRenderRoot from '@glyph3d/core/collections/FlatRenderRoot.js';
+import FramePasses, { PASS_ORDER } from './FramePasses.js';
+import RenderPasses from './RenderPasses.jsx';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -89,6 +91,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     camera,
     renderer,
     atlas,
+    // The frame's passes, in a declared order — the ONE render owner (<RenderPasses/> draws them).
+    renderPasses: new FramePasses({ renderer, scene }),
 
     registry,
     getGrids,
@@ -407,7 +411,7 @@ function resolveRelay(loc, relayParam) {
   return { url, port: port || Number(loc.port) || null, autoConnect: !!port || isLocal };
 }
 
-export default function CommandProvider({ atlas, relay = null, repo = null, cameraControllerRef, onReady, children }) {
+export default function CommandProvider({ atlas, relay = null, repo = null, cameraControllerRef, onReady, minimap = false, children }) {
   const { scene, camera, gl } = useThree();
   const registryBundle = useGridRegistry();
   /** @type {{ current: AppClient | null }} */
@@ -445,14 +449,13 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     pickingSystem.flatLists = getSetting('pick.flatRoot');   // each pick channel renders its flat list (needs the SceneTransforms)
 
     // The view renders a flat list of the drawables it sees, not the scene tree: three's walk visits
-    // what draws, not every container (render.flatRoot toggles it). The seam is the renderer — every
-    // render of the scene goes through it (r3f's frame, the minimap's main pass, a screenshot); a
-    // camera off layer 0 (picking, overlays, cards) gets the scene itself.
+    // what draws, not every container (render.flatRoot toggles it). The frame's main pass renders it.
     const flatRoot = new FlatRenderRoot(scene);
     flatRoot.enabled = getSetting('render.flatRoot');
     state.ctx.flatRoot = flatRoot;
-    const baseRender = gl.render;
-    gl.render = function (s, c) { return baseRender.call(this, s === scene ? flatRoot.target(c) : s, c); };
+    state.ctx.renderPasses.flatRoot = flatRoot;
+    // Picks draw on their own schedule; their passes' time is the frame owner's to report.
+    pickingSystem.onRenderTiming = (ms) => state.ctx.renderPasses.record('pick', ms);
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
     // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node
@@ -504,6 +507,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // Labels (book tabs, nameplates, dock titles) draw as ranges of one glyph field, one draw for all.
     state.ctx.glyphBatch = new GlyphBatch(scene, atlas);
     state.ctx.planeOverlay = new PlaneOverlay(state.ctx);
+    // The overlay draws right after the main pass, depth cleared (whichever overlay ctx holds — a
+    // headless path may make one later).
+    const offOverlayPass = state.ctx.renderPasses.add('overlay', PASS_ORDER.overlay, (r) => state.ctx.planeOverlay?.render(r));
     state.ctx.carrelCards = new CarrelCards(state.ctx);
     state.ctx.mapLabels = new MapLabels(state.ctx);
     state.ctx.strip = new Strip(state.ctx, state.ctx.planeOverlay);
@@ -723,6 +729,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       stream: state.ctx.sourceStream,
       presence: state.ctx.handPresence,
       calib: () => state.ctx.handCalib,
+    });
+    // Its picture-in-picture draws after the overlay, through the view camera the presence follows.
+    const offCloudPass = state.ctx.renderPasses.add('cloud', PASS_ORDER.cloud, (r, cam) => {
+      if (cam === state.ctx.handPresence.camera) state.ctx.handCloud?.view.render(r);
     });
     applyGroupSettings(state.ctx, 'Hand cloud');
     // LSP client: present whenever the bridge is, but only functional against a
@@ -957,6 +967,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.carrelCards = null;
       state.ctx.mapLabels?.dispose?.();
       state.ctx.mapLabels = null;
+      offOverlayPass();
       state.ctx.planeOverlay?.dispose?.();
       state.ctx.planeOverlay = null;
       state.ctx.glyphBatch?.dispose();      // chained after the panel batch's hook: unhook it first
@@ -965,7 +976,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.panelBatch = null;
       state.ctx.glyphFarLod?.dispose();
       state.ctx.glyphFarLod = null;
-      gl.render = baseRender;
+      state.ctx.renderPasses.flatRoot = null;
       state.ctx.flatRoot = null;
       state.ctx.sceneTransforms?.dispose();   // hands scene.updateMatrixWorld back — a second boot takes it over again
       state.ctx.sceneTransforms = null;
@@ -992,6 +1003,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.ctx.searchBook = null;
       // Presence first: it detaches hand groups from the camera, which must
       // happen before the stream that feeds it goes away.
+      offCloudPass();
       state.ctx.handCloud?.dispose();
       state.ctx.handCloud = null;
       state.ctx.handCalib?.dispose();
@@ -1021,6 +1033,10 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     <AppCommandContext.Provider value={stateRef.current}>
       <AgentRunner stateRef={stateRef} />
       <DockRunner stateRef={stateRef} />
+      {/* The ONE render-loop owner: the frame's passes in order (main → overlay → hand cloud →
+          minimap); the minimap pass — schematic boxes + the camera as a frustum cone, in a
+          scissored corner — follows view.minimap. */}
+      <RenderPasses passes={stateRef.current.ctx.renderPasses} registry={stateRef.current.ctx.registry} minimap={minimap} />
       {children}
     </AppCommandContext.Provider>
   );

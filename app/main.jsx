@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three';
-import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment, Minimap } from '@glyph3d/r3f';
+import { useGlyphEngine, GlyphCanvas, ViewerCamera, SceneEnvironment } from '@glyph3d/r3f';
 import CommandProvider from './client/CommandProvider.jsx';
 import ButtonBar from './ButtonBar.jsx';
 import IdeDock from './IdeDock.jsx';
@@ -125,10 +125,9 @@ function App() {
     if (el) el.style.display = 'none';
   }, []);
 
-  // The 3D minimap mounts/unmounts off its persisted setting — the toolbar button, the
-  // Settings panel, and the `view.minimap` verb all flip the one key, and StateController
-  // fires a `state-changed` event we re-read here. Unmounting cleanly returns the render
-  // loop to r3f's auto-render; mounting hands it to <Minimap>'s scissored second pass.
+  // The 3D minimap follows its persisted setting — the toolbar button, the Settings panel, and
+  // the `view.minimap` verb all flip the one key, and StateController fires a `state-changed`
+  // event we re-read here; CommandProvider's <RenderPasses> declares or removes the minimap pass.
   useEffect(() => {
     const sync = () => { setShowMinimap(getSetting('view.minimap')); forceSettings(); };
     window.addEventListener('state-changed', sync);
@@ -249,11 +248,6 @@ function App() {
                 majorCell={getSetting('env.majorCell')}
                 fadeFar={getSetting('env.fadeFar')}
               />
-              {/* 3D overview HUD — schematic boxes (per surface bounds) + the camera as a
-                  moving frustum-cone, rendered as a scissored second pass. Mounts off the
-                  view.minimap setting (toolbar button / Settings / `view.minimap` verb);
-                  unmounting returns the render loop to r3f. */}
-              {showMinimap && <Minimap />}
               {/* IDE starts empty; files arrive via file.open (sidebar click or CLI).
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider
@@ -262,6 +256,7 @@ function App() {
                 repo={repoParam}
                 cameraControllerRef={cameraRef}
                 onReady={setClient}
+                minimap={showMinimap}
               >
                 {/* Imperative-scene interaction (the grids are Object3Ds, not r3f
                     JSX): GPU-pick hover/click, Ctrl-drag move, grip-drag resize,

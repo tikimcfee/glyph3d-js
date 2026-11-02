@@ -183,12 +183,11 @@ export default function registerSceneCommands(router) {
             // The frame rendered n times each way, interleaved (the same pixels — tools/flat-root-check.mjs):
             // the render call's JS cost, flat list vs three's full walk. A one-off hitch of ~2n renders.
             const n = Math.max(3, Math.min(200, Number(args[1]) || 30));
-            if (!flat.enabled) throw new Error('scene.render time: render.flatRoot is off');
+            if (!flat.enabled || flat.refused) throw new Error(`scene.render time: the flat root doesn't serve (${!flat.enabled ? 'render.flatRoot is off' : 'refused'})`);
             const r = ctx.renderer, ms = { flat: [], full: [] };
             for (let k = 0; k < n; k++) {
-                let t = performance.now(); r.render(ctx.scene, ctx.camera); ms.flat.push(performance.now() - t);
-                flat.enabled = false;
-                try { t = performance.now(); r.render(ctx.scene, ctx.camera); ms.full.push(performance.now() - t); } finally { flat.enabled = true; }
+                let t = performance.now(); r.render(flat.target(ctx.camera), ctx.camera); ms.flat.push(performance.now() - t);
+                t = performance.now(); r.render(ctx.scene, ctx.camera); ms.full.push(performance.now() - t);
             }
             const med = (a) => a.sort((x, y) => x - y)[a.length >> 1];
             const out = { n, flatMs: med(ms.flat), fullMs: med(ms.full), served: !flat.refused };
@@ -224,6 +223,13 @@ export default function registerSceneCommands(router) {
         }
         const pickLines = picks.map(({ ch, root, v }) => `  pick ${ch}: ${!ps.flatLists ? 'off (pick.flatRoot)' : v.refused ? `REFUSED — ${v.refused.reason}: ${v.refused.object}` : 'serving'} · ${root.stats.drawables} meshes · ${root.stats.rebuilds} rebuilds · ${v.missing.length} missing · ${v.extra.length} extra`);
         const pickStale = picks.reduce((n, { v }) => n + v.missing.length + v.extra.length, 0);
+        // The frame's passes (FramePasses.js): the owner, its passes in order, each pass's ms.
+        const rp = ctx.renderPasses;
+        const passStats = rp ? rp.stats() : [];
+        const passLines = rp ? [
+            rp.fault ? `  FAIL owner: a second render-loop owner beside RenderPasses — ${rp.fault.offenders.join(' | ')}` : `  owner: RenderPasses (the one render-loop owner) · ${rp.frames} frames · order ${rp.order().join(' → ')}`,
+            ...passStats.map((p) => `  ${p.frame ? 'pass' : 'off-frame'} ${p.name.padEnd(8)} p50 ${p.p50.toFixed(2)} ms · p95 ${p.p95.toFixed(2)} ms · last ${p.last.toFixed(2)} ms · ${p.count} timed`),
+        ] : [];
         const name = (o) => `  ${pathOf(o)}`;
         const detail = [
             refused ? `  refused: ${refused.reason}: ${refused.object}` : '',
@@ -233,9 +239,11 @@ export default function registerSceneCommands(router) {
         const stale = missing.length + extra.length + pickStale;
         return {
             text: box('RENDER LIST', lines, 60) + (detail ? '\n' + detail : '') + (pickLines.length ? '\n' + pickLines.join('\n') : '')
-                + (stale ? `\nFAIL: a list is stale (${stale})` : '\nOK: every list matches a fresh walk'),
+                + (passLines.length ? '\n' + passLines.join('\n') : '')
+                + (stale ? `\nFAIL: a list is stale (${stale})` : rp?.fault ? '\nFAIL: a second render-loop owner' : '\nOK: every list matches a fresh walk'),
             data: {
                 enabled: flat.enabled, refused, stats: { ...st }, missing: missing.map(pathOf), extra: extra.map(pathOf),
+                passes: { order: rp?.order() ?? [], fault: rp?.fault ?? null, frames: rp?.frames ?? 0, stats: passStats },
                 picks: Object.fromEntries(picks.map(({ ch, root, v }) => [ch, { enabled: ps.flatLists, refused: v.refused, stats: { ...root.stats }, missing: v.missing.map(pathOf), extra: v.extra.map(pathOf) }])),
             },
         };

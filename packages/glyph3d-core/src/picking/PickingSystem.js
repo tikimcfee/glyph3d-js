@@ -195,6 +195,8 @@ export class PickingSystem {
          * the picked scene to carry a SceneTransforms (FlatRenderRoot throws otherwise).
          */
         this.flatLists = false;
+        /** @type {((ms: number) => void)|null} told each pick's pass time (the frame owner reports it) */
+        this.onRenderTiming = null;
     }
 
     // -------------------------------------------------------------------------
@@ -475,6 +477,7 @@ export class PickingSystem {
         const t1 = performance.now();
         const px = await read;
         this._lastRenderMs = t1 - t0;
+        this.onRenderTiming?.(this._lastRenderMs);
         this._lastReadMs = performance.now() - t1;
 
         channelNames.forEach((name, i) => {

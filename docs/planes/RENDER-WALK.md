@@ -131,10 +131,11 @@ more than the change does — 2.2 to 4.7 ms across baselines — so the claim re
 
 ## Built: the flat render root
 
-`collections/FlatRenderRoot.js`, installed in `CommandProvider` at the renderer: every
-`renderer.render(scene, camera)` — r3f's frame, the minimap's main pass, a screenshot — renders the
-root instead when the camera sees layer 0 (`render.flatRoot`, Settings ▸ Performance, on by default).
-Cameras off layer 0 (pick channels, the plane overlay, carrel cards) render the scene as before.
+`collections/FlatRenderRoot.js`: the frame's `main` pass (`app/client/FramePasses.js`, the one
+render owner — DESIGN §3.13) renders `flatRoot.target(camera)`, which is the root when it serves
+(`render.flatRoot`, Settings ▸ Performance, on by default) and the scene itself otherwise. A
+screenshot draws through the same owner. Renders through cameras off layer 0 (the plane overlay,
+carrel cards) take the scene as before; the pick channels have their own lists (below).
 
 - **The key.** The list is rebuilt when SceneTransforms' show generation (visibility, membership), the
   module's layer generation, or the camera's mask moves. The layer generation hooks `THREE.Layers`'
@@ -151,7 +152,8 @@ Cameras off layer 0 (pick channels, the plane overlay, carrel cards) render the 
   check passes again. The agents' display first met one this way — the ownership traces are fat
   lines (`LineSegments2`), whose prototype hook reads only the renderer.
 - **`scene.render`** reports serving/refused, list size, rebuilds, and checks the list against a
-  fresh walk; `scene.render time [n]` times the render call both ways on the live frame.
+  fresh walk; `scene.render time [n]` times the main pass both ways on the live frame. It also lists
+  the frame's passes (the owner, their order, each pass's ms).
 
 Gates: `tools/flat-root.test.mjs` (three's walk replicated over the root and the scene: same render
 items × group order and lights after every kind of change; rebuild counts; refusals; mutation-tested:

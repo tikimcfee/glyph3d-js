@@ -213,8 +213,8 @@ export default function registerSystemCommands(router) {
         if (!canvas) {
             return { text: 'ERR: no renderer available', data: null };
         }
-        // Force a render to ensure the buffer has current content
-        ctx.renderer.render(ctx.scene, ctx.camera);
+        // Draw the frame now, as the frame owner does (every pass — what you see), and read it back.
+        ctx.renderPasses.renderFrame(ctx.camera);
         const dataUrl = canvas.toDataURL('image/png');
         // Strip the data:image/png;base64, prefix — caller gets raw base64
         const base64 = dataUrl.split(',')[1];

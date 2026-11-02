@@ -3,9 +3,9 @@
  * same frame as three's walk of the scene, byte for byte, on the GPU — and what does it save?
  *
  * At each sample it renders the live scene twice in the same turn and reads the pixels back:
- *   FLAT — the app's frame: renderer.render(scene, camera), which the app routes through the flat
- *          root (its list rebuilt only when its key moved)
- *   FULL — the same call with the flat root off (render.flatRoot): three's walk of the whole tree
+ *   FLAT — the frame's main pass: renderer.render(flatRoot.target(camera), camera) (the list
+ *          rebuilt only when its key moved)
+ *   FULL — renderer.render(scene, camera): three's walk of the whole tree
  * and requires 0 bytes to differ. Teeth: a list with every other entry dropped must differ (the
  * comparison sees the list). Samples: fit-all at several distances, a moving camera (a fly to a grid,
  * sampled mid-flight — at least 3 distinct poses), a plane view on that grid, then the library
@@ -44,12 +44,10 @@ function sample() {
         return { px, calls };
     };
     const diff = (a, b) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
-    // The app routes every render of the scene through the flat root (the renderer is the seam):
-    // FULL is the same call with the flat root off.
-    const fullWalk = () => { flat.enabled = false; try { return grab(scene); } finally { flat.enabled = true; } };
+    // FLAT is the frame's main pass (FramePasses.js renders flat.target); FULL is the scene itself.
     const served = flat.target(cam) === flat.root;
-    const f = grab(scene);
-    const full = fullWalk();
+    const f = grab(flat.target(cam));
+    const full = grab(scene);
     // Teeth: every other list entry dropped.
     const list = flat.root.children;
     flat.root.children = list.filter((_, i) => i % 2 === 0);
@@ -64,10 +62,8 @@ function sample() {
     // The render's JS cost both ways, interleaved, medians of 15.
     const ms = { flat: [], full: [] };
     for (let k = 0; k < 15; k++) {
-        let t = performance.now(); rnd.render(scene, cam); ms.flat.push(performance.now() - t);
-        flat.enabled = false;
+        let t = performance.now(); rnd.render(flat.target(cam), cam); ms.flat.push(performance.now() - t);
         t = performance.now(); rnd.render(scene, cam); ms.full.push(performance.now() - t);
-        flat.enabled = true;
     }
     gl.finish();
     const med = (a) => a.sort((x, y) => x - y)[a.length >> 1];

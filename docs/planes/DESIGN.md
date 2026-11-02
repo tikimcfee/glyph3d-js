@@ -383,10 +383,18 @@ is connected; delivery held to breakpoints graded by scale; ghost diffs through 
 
 ### 3.13 The screen overlay and the render-pass owner
 
-- **One pass owner.** r3f auto-renders unless a positive-priority `useFrame` takes the loop, and
-  `packages/glyph3d-r3f/src/Minimap.jsx` already does (main scene, then a scissored pass). The first
-  overlay brings ONE render-pass owner (`RenderPasses`: main → minimap → overlay; cards later) with
-  Minimap folded in, never a second `useFrame(…, 1)`.
+- **One pass owner** (built: `app/client/FramePasses.js`, mounted as `<RenderPasses/>` —
+  `app/client/RenderPasses.jsx`). r3f auto-renders unless a positive-priority `useFrame` takes the
+  loop; the app's one such `useFrame` draws the frame through `ctx.renderPasses`, in a declared order:
+  **main** (the view camera; the flat render root when it serves) → **overlay** (the plane overlay,
+  depth cleared) → **cloud** (the hand cloud's picture-in-picture) → **minimap** (the scissored
+  corner, `MinimapPass`, while `view.minimap`). A pass is a named entry (`renderPasses.add`), never a
+  second `useFrame(…, 1)` and never a scene `onAfterRender` hook. The screenshot verb draws through the
+  same owner (what you see). Card captures and picks keep their own schedules and report their time
+  (`record`); `scene.render` lists every pass's ms. A second positive-priority `useFrame` is a fault —
+  logged loudly, shown as FAIL in `scene.render`, and the owner keeps drawing (a frozen display is
+  worse than a loud one). Gates: `tools/render-passes.test.mjs` (real r3f), `tools/render-passes-check.mjs`
+  (byte-identical to the passes it replaced).
 - **Data.** An overlay scene with its own `OrthographicCamera` at 1 unit = 1 device px, depth cleared,
   on a camera layer the batches skip. FieldLabel always enrolls in GlyphBatch and PanelBatch (which
   hook the main scene only), and `isShown` / `rootOf` need a SceneTransforms on the scene, so overlay

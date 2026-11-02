@@ -44,9 +44,8 @@ export default class HandCloud {
             onResult: (r) => this._onResult(r),
             onSimFrame: (payload) => { if (this.simulating) this.stream.injectFrame(SIM_SOURCE_ID, payload); },
         });
-        // A picture-in-picture: drawn after the main scene renders to the screen through the view camera.
+        // A picture-in-picture: the frame's `cloud` pass draws it (app/client/FramePasses.js).
         this.view = new CloudView();
-        this.view.hook(presence.scene, presence.camera);
         this.view.displayProvider = () => this._display();
         /** handedness → {t, status, hand, pinch, at} */
         this.last = new Map();

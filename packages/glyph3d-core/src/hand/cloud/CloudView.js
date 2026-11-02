@@ -123,7 +123,6 @@ export default class CloudView {
         this._center = null;
         this.data = null;
         this._dirty = false;
-        this._hooked = null;
     }
 
     /** @private */
@@ -132,20 +131,6 @@ export default class CloudView {
         this._cap = Math.max(n, this._cap * 2);
         this.pointGeom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * this._cap), 3));
         this.pointGeom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(3 * this._cap), 3));
-    }
-
-    /**
-     * Draw after `scene` renders through `camera` to the screen (never into a render target —
-     * a pick pass — nor through another camera). Chains any onAfterRender already there.
-     * @param {THREE.Scene} scene @param {THREE.Camera} camera
-     */
-    hook(scene, camera) {
-        const prev = scene.onAfterRender;
-        scene.onAfterRender = (renderer, s, cam) => {
-            prev.call(scene, renderer, s, cam);
-            if (cam === camera && renderer.getRenderTarget() === null) this.render(renderer);
-        };
-        this._hooked = { scene, prev };
     }
 
     setVisible(v) { this.visible = !!v; }
@@ -392,7 +377,6 @@ export default class CloudView {
     }
 
     dispose() {
-        if (this._hooked) { this._hooked.scene.onAfterRender = this._hooked.prev; this._hooked = null; }
         this.scene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
         this.fitJoints.dispose();
         this.visionJoints.dispose();
