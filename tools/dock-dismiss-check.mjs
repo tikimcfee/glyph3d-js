@@ -44,7 +44,7 @@ ok(dock.isFramed('t1') && dock.focusedPane === 't1', 'precondition: t1 is the fr
 // ---- close the FRAMED docked window → dismiss cascades ----
 ok(dock.dismiss('t1') === true, 'dismiss(framed): returns true');
 ok(!dock.has('t1'), 'dismiss: entry dropped');
-ok(dock.paneTree === null && dock.focusedPane === null, 'dismiss(framed): frame emptied');
+ok(dock.panes.isEmpty() && dock.focusedPane === null, 'dismiss(framed): frame emptied');
 ok(g1.parent !== dock, 'dismiss: orphan lifted out of the bar (no dead child left animating)');
 ok(!dock.tiles.has(g1), 'dismiss: removed from the camera-speed tiles set');
 ok(dock.has('t2'), 'dismiss: the sibling tile is untouched');

@@ -104,7 +104,7 @@ ok(same(posOf(g2), before2), 'return: t2 dropped back into its own reserved slot
 
 // ---- return: spotlight t1 again → placeholder sweeps, tile drops back into its slot ----
 ok(dock.spotlight('t1') === 'returned', 'spotlight(again): returns returned');
-ok(dock.paneTree === null, 'return: nothing framed');
+ok(dock.panes.isEmpty(), 'return: nothing framed');
 settle(dock);
 ok(dock._ghosts.size === 0, 'return: no placeholders left');
 ok(near(g1.position.z, g2.position.z, 0.5), 'return: t1 dropped back to bar depth (its reserved slot)');

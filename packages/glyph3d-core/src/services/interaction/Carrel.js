@@ -71,7 +71,7 @@ import * as THREE from 'three';
 import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes, squareWrap } from '../../collections/layouts/flowBoxes.js';
 import { RENDER_ORDER } from '../../core/renderOrder.js';
-import PaneTree from './PaneTree.js';
+import PaneLayout from './PaneLayout.js';
 
 const _z = new THREE.Vector3(0, 0, 1);
 const _dir = new THREE.Vector3();
@@ -158,7 +158,7 @@ export class Carrel extends THREE.Object3D {
      * @param {'pins'|'tiles'} [opts.planeArrange='pins'] - a plane's arrangement: PINS — every
      *   member at its natural size (a 239-column screen is 239 columns wide), on shelves left to
      *   right in seat order, never clipped; a newcomer takes the next free slot, a leaver's gap
-     *   stays until settle, a pin only grows — or TILES: a tiling window manager (a PaneTree of
+     *   stays until settle, a pin only grows — or TILES: a tiling window manager (a PaneLayout:
      *   panes, each a stack of tabs) over a frame of `tileCols × tileRows` cells, members reflowed to
      *   their panes.
      * @param {number} [opts.paneGapPx=8]   - gutter between pins / panes, device px
@@ -212,10 +212,11 @@ export class Carrel extends THREE.Object3D {
          *  world units — a seat is remembered: a leaver's stays a GHOST (its room kept) that a newcomer
          *  may take, a member not seated yet holds its own, only settle repacks.
          *  The plane's layout state — PINS: `pins`, the slots in seat order ({id, w, h} device px at
-         *  k, grow-only; a leaver's slot stays a ghost until settle) and `focus` (a member); TILES: a
-         *  PaneTree over pane ids, each pane a stack of member ids with one active, the `inbox` a
-         *  joiner lands in, `focus` (a pane) and `zoomed`. Durable as the desk's Panes. */
-        this.panes = { tree: null, stacks: new Map(), inbox: null, seq: 0, focus: null, zoomed: null, pins: [], seats: [] };
+         *  k, grow-only; a leaver's slot stays a ghost until settle) and `focus` (a member); TILES:
+         *  `tiles`, a PaneLayout (panes of member stacks, the inbox a joiner lands in, the focused
+         *  and the zoomed pane — the same layout the CameraDock's frame is). Durable as the desk's
+         *  Panes. */
+        this.panes = { tiles: new PaneLayout(), pins: [], seats: [], focus: null };
         /** Told whenever the plane's layout changes (the app persists it as the desk's Panes). */
         this.onPanesChanged = null;
         /** What this desk was BORN as — every knob's value at construction. A desk's own
@@ -563,7 +564,7 @@ export class Carrel extends THREE.Object3D {
     /** A tiled plane with members and no tree yet gets the 'even' layout. @private */
     _seedTiles() {
         if (this.mode !== 'plane' || this.planeArrange !== 'tiles') return;
-        if ((!this.panes.tree || this.panes.tree.isEmpty()) && this.entries.size) this.layoutPanes('even', { relayout: false });
+        if (this.panes.tiles.isEmpty() && this.entries.size) this.layoutPanes('even', { relayout: false });
     }
 
     /**
@@ -595,51 +596,8 @@ export class Carrel extends THREE.Object3D {
      * @returns {boolean}
      */
     layoutPanes(name, { perRow = 3, mainRatio = 0.6, relayout = true } = {}) {
-        if (!['even', 'main', 'stack'].includes(name)) return false;
         const ids = [...this.entries.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map((e) => e.id);
-        const P = this.panes;
-        P.stacks = new Map();
-        P.tree = null;
-        P.inbox = null;
-        if (!ids.length) { if (relayout) this._relayout(); this.onPanesChanged?.(); return true; }
-        const add = (memberIds) => { const id = this._newPaneId(); P.stacks.set(id, { ids: [...memberIds], active: memberIds[memberIds.length - 1] ?? null }); return id; };
-        // Split `from` into equal parts along `axis`, one new pane per extra member list.
-        const fan = (from, axis, lists) => {
-            const out = [from];
-            for (let i = 1; i < lists.length; i++) {
-                const id = add(lists[i]);
-                P.tree.split(out[out.length - 1], axis, id, { ratio: 1 / (lists.length - i + 1) });
-                out.push(id);
-            }
-            return out;
-        };
-        if (name === 'stack') {
-            P.tree = PaneTree.leaf(add(ids));
-        } else if (name === 'main' && ids.length > 1) {
-            const main = add([ids[0]]);
-            P.tree = PaneTree.leaf(main);
-            const side = add([ids[1]]);
-            P.tree.split(main, 'x', side, { ratio: mainRatio });
-            fan(side, 'y', ids.slice(1).map((id) => [id]));
-        } else {
-            const rows = [];
-            for (let i = 0; i < ids.length; i += Math.max(1, perRow)) rows.push(ids.slice(i, i + Math.max(1, perRow)));
-            const first = add([rows[0][0]]);
-            P.tree = PaneTree.leaf(first);
-            // Rows first (stacked, top to bottom), each row's first pane standing for it…
-            const rowHeads = [first];
-            for (let r = 1; r < rows.length; r++) {
-                const id = add([rows[r][0]]);
-                P.tree.split(rowHeads[rowHeads.length - 1], 'y', id, { ratio: 1 / (rows.length - r + 1) });
-                rowHeads.push(id);
-            }
-            // …then each row fans out side by side.
-            rows.forEach((row, r) => fan(rowHeads[r], 'x', row.map((id) => [id])));
-        }
-        const leaves = P.tree.leaves();
-        P.inbox = leaves[leaves.length - 1];
-        P.focus = leaves[0];
-        P.zoomed = null;
+        if (!this.panes.tiles.layout(name, ids, { perRow, mainRatio })) return false;
         if (relayout) this._relayout();
         this.onPanesChanged?.();
         return true;
@@ -648,46 +606,32 @@ export class Carrel extends THREE.Object3D {
     // ===================== pane operations (the pane.* verbs on a plane desk) =====================
 
     /** The focused pane (else the inbox, else the first). @returns {string|null} */
-    focusedPane() {
-        const P = this.panes;
-        if (!P.tree || P.tree.isEmpty()) return null;
-        if (P.focus && P.stacks.has(P.focus) && P.tree.has(P.focus)) return P.focus;
-        return P.tree.has(P.inbox) ? P.inbox : P.tree.leaves()[0];
-    }
+    focusedPane() { return this.panes.tiles.focused(); }
 
     /** The member a pane shows (its active tab when seated, else its newest seated member). */
-    paneFront(paneId) {
-        const st = this.panes.stacks.get(paneId);
-        if (!st) return null;
-        if (st.active && this.entries.has(st.active)) return st.active;
-        return [...st.ids].reverse().find((id) => this.entries.has(id)) ?? null;
-    }
+    paneFront(paneId) { return this.panes.tiles.front(paneId, (id) => this.entries.has(id)); }
 
     /** The pane a member sits in. @returns {string|null} */
-    paneOf(memberId) {
-        for (const [id, st] of this.panes.stacks) if (st.ids.includes(memberId)) return id;
-        return null;
-    }
+    paneOf(memberId) { return this.panes.tiles.paneOf(memberId); }
 
     /** @private */
     _panesChanged() { this._relayout(); this.onPanesChanged?.(); }
 
     /** Focus a pane by id, or the pane holding a member. @returns {string|null} the focused pane */
     paneFocusOn(idOrMember) {
-        const P = this.panes;
-        const pane = P.stacks.has(idOrMember) ? idOrMember : this.paneOf(idOrMember);
+        const T = this.panes.tiles;
+        const pane = T.focusOn(idOrMember);
         if (!pane) return null;
-        if (P.zoomed && P.zoomed !== pane) P.zoomed = null;
-        P.focus = pane;
         this.onPanesChanged?.();
-        if (!P.zoomed) this._relayout();
+        if (!T.zoomed) this._relayout();
         return pane;
     }
 
     /** Move focus to the geometric neighbor (i3). @param {'left'|'right'|'up'|'down'} dir @returns {string|null} */
     paneFocus(dir) {
-        const cur = this.focusedPane();
-        const next = cur ? this.panes.tree.neighbor(cur, dir) : null;
+        const T = this.panes.tiles;
+        const cur = T.focused();
+        const next = cur ? T.tree.neighbor(cur, dir) : null;
         return next ? this.paneFocusOn(next) : null;
     }
 
@@ -697,27 +641,15 @@ export class Carrel extends THREE.Object3D {
      * @param {{before?:boolean}} [opts] @returns {string|null} the new pane
      */
     paneSplit(axis, memberId, { before = false } = {}) {
-        const cur = this.focusedPane();
-        if (!cur || !this.entries.has(memberId) || (axis !== 'x' && axis !== 'y')) return null;
-        const from = this.paneOf(memberId);
-        if (from) {
-            const st = this.panes.stacks.get(from);
-            st.ids = st.ids.filter((id) => id !== memberId);
-            if (st.active === memberId) st.active = st.ids[st.ids.length - 1] ?? null;
-        }
-        const id = this._newPaneId();
-        this.panes.stacks.set(id, { ids: [memberId], active: memberId });
-        this.panes.tree.split(cur, axis, id, { before });
-        this.panes.focus = id;
-        this.panes.zoomed = null;
-        this._panesChanged();
+        if (!this.entries.has(memberId)) return null;
+        const id = this.panes.tiles.split(axis, memberId, { before });
+        if (id) this._panesChanged();
         return id;
     }
 
     /** Grow the focused pane along an axis (siblings give up space). @returns {boolean} */
     paneResize(axis, delta) {
-        const cur = this.focusedPane();
-        if (!cur || !this.panes.tree.resize(cur, axis, delta)) return false;
+        if (!this.panes.tiles.resize(axis, delta)) return false;
         this._panesChanged();
         return true;
     }
@@ -728,27 +660,14 @@ export class Carrel extends THREE.Object3D {
      * @returns {string|null} the pane its tabs joined
      */
     paneClose(paneId = this.focusedPane()) {
-        const P = this.panes;
-        if (!paneId || !P.tree.has(paneId) || P.tree.count() < 2) return null;
-        const moving = P.stacks.get(paneId)?.ids ?? [];
-        const next = P.tree.close(paneId);
-        P.stacks.delete(paneId);
-        const into = P.stacks.get(next);
-        for (const id of moving) if (!into.ids.includes(id)) into.ids.push(id);
-        if (P.inbox === paneId) P.inbox = next;
-        P.focus = next;
-        if (P.zoomed === paneId) P.zoomed = null;
-        this._panesChanged();
+        const next = this.panes.tiles.close(paneId, { merge: true });
+        if (next) this._panesChanged();
         return next;
     }
 
     /** Exchange two panes' contents in place (rects unchanged). @returns {boolean} */
     paneSwap(a, b) {
-        const P = this.panes;
-        if (!P.stacks.has(a) || !P.stacks.has(b) || a === b) return false;
-        const sa = P.stacks.get(a);
-        P.stacks.set(a, P.stacks.get(b));
-        P.stacks.set(b, sa);
+        if (!this.panes.tiles.swap(a, b)) return false;
         this._panesChanged();
         return true;
     }
@@ -758,28 +677,17 @@ export class Carrel extends THREE.Object3D {
      * @returns {string|null} the active member
      */
     paneTab(which = 'next') {
-        const cur = this.focusedPane();
-        const st = cur && this.panes.stacks.get(cur);
-        const ids = st ? st.ids.filter((id) => this.entries.has(id)) : [];
-        if (!ids.length) return null;
-        let next;
-        if (which === 'next' || which === 'prev') {
-            const i = Math.max(0, ids.indexOf(this.paneFront(cur)));
-            next = ids[(i + (which === 'next' ? 1 : ids.length - 1)) % ids.length];
-        } else if (ids.includes(which)) next = which;
-        else return null;
-        st.active = next;
-        this._panesChanged();
+        const next = this.panes.tiles.tab(which, (id) => this.entries.has(id));
+        if (next) this._panesChanged();
         return next;
     }
 
     /** Zoom the focused pane to the whole plane (tmux -Z), or unzoom. @returns {string|null} the zoomed pane */
-    paneZoom(on = !this.panes.zoomed) {
-        const cur = this.focusedPane();
-        if (!cur) return null;
-        this.panes.zoomed = on ? cur : null;
+    paneZoom(on = !this.panes.tiles.zoomed) {
+        if (!this.panes.tiles.focused()) return null;
+        const z = this.panes.tiles.zoom(on);
         this._panesChanged();
-        return this.panes.zoomed;
+        return z;
     }
 
     /**
@@ -788,22 +696,10 @@ export class Carrel extends THREE.Object3D {
      * @param {'tab'|'left'|'right'|'up'|'down'} where @returns {string|null} the member's pane
      */
     panePlace(memberId, paneId, where = 'tab') {
-        const P = this.panes;
-        if (!this.entries.has(memberId) || !P.stacks.has(paneId)) return null;
-        if (where === 'tab') {
-            const from = this.paneOf(memberId);
-            if (from) { const st = P.stacks.get(from); st.ids = st.ids.filter((id) => id !== memberId); if (st.active === memberId) st.active = st.ids[st.ids.length - 1] ?? null; }
-            const st = P.stacks.get(paneId);
-            st.ids.push(memberId);
-            st.active = memberId;
-            P.focus = paneId;
-            this._panesChanged();
-            return paneId;
-        }
-        const axis = (where === 'left' || where === 'right') ? 'x' : (where === 'up' || where === 'down') ? 'y' : null;
-        if (!axis) return null;
-        P.focus = paneId;
-        return this.paneSplit(axis, memberId, { before: where === 'left' || where === 'up' });
+        if (!this.entries.has(memberId)) return null;
+        const at = this.panes.tiles.place(memberId, paneId, where);
+        if (at) this._panesChanged();
+        return at;
     }
 
     /**
@@ -897,25 +793,8 @@ export class Carrel extends THREE.Object3D {
      */
     paneRects() {
         const f = this.mode === 'plane' && this.planeArrange === 'tiles' ? this.tileFrame() : null;
-        const tree = this.panes.tree;
-        if (!f || !tree || tree.isEmpty()) return [];
-        const g = Math.max(0, Math.round(this.paneGapPx));
-        const half = g / 2;
-        const out = [];
-        // A zoomed pane takes the whole frame (tmux -Z); the others keep their rects in the tree.
-        const z = this.panes.zoomed;
-        const rects = z && tree.has(z) ? new Map([[z, { x: 0, y: 0, w: f.widthPx, h: f.heightPx }]]) : tree.rects({ x: 0, y: 0, w: f.widthPx, h: f.heightPx });
-        for (const [id, r] of rects) {
-            // y-up rect → top-down device px; cut on whole pixels, then take the gap out of every side
-            // (half a gap each, so neighbors meet a whole gap apart and the board edge keeps half).
-            const left = Math.round(r.x), right = Math.round(r.x + r.w);
-            const top = Math.round(f.heightPx - (r.y + r.h)), bottom = Math.round(f.heightPx - r.y);
-            const x = left + Math.ceil(half), y = top + Math.ceil(half);
-            const w = Math.max(0, right - Math.floor(half) - x), h = Math.max(0, bottom - Math.floor(half) - y);
-            const st = this.panes.stacks.get(id) || { ids: [], active: null };
-            out.push({ id, rect: { x, y, w, h }, stack: [...st.ids], active: st.active });
-        }
-        return out;
+        if (!f || this.panes.tiles.isEmpty()) return [];
+        return this.panes.tiles.rects({ widthPx: f.widthPx, heightPx: f.heightPx, gapPx: this.paneGapPx });
     }
 
     /**
@@ -1281,21 +1160,12 @@ export class Carrel extends THREE.Object3D {
      * desk (_unstack). @private
      */
     _reconcilePanes(members) {
-        const P = this.panes;
-        const placed = new Set([...P.stacks.values()].flatMap((st) => st.ids));
+        const T = this.panes.tiles;
         let changed = false;
+        // A member not in any stack JOINS: the inbox's active tab — no pane splits, no rect moves.
         for (const e of members) {
-            if (placed.has(e.id)) continue;
-            if (!P.tree || P.tree.isEmpty()) {
-                const id = this._newPaneId();
-                P.tree = PaneTree.leaf(id);
-                P.stacks.set(id, { ids: [], active: null });
-                P.inbox = id;
-            }
-            if (!P.inbox || !P.stacks.has(P.inbox)) P.inbox = P.tree.leaves()[P.tree.leaves().length - 1];
-            const st = P.stacks.get(P.inbox);
-            st.ids.push(e.id);
-            st.active = e.id;
+            if (T.paneOf(e.id)) continue;
+            T.join(e.id);
             changed = true;
         }
         if (changed) this.onPanesChanged?.();
@@ -1303,15 +1173,7 @@ export class Carrel extends THREE.Object3D {
 
     /** A member leaving the desk leaves its pane's stack (the pane stays). @private */
     _unstack(id) {
-        let changed = false;
-        for (const st of this.panes.stacks.values()) {
-            const i = st.ids.indexOf(id);
-            if (i < 0) continue;
-            st.ids.splice(i, 1);
-            if (st.active === id) st.active = st.ids[st.ids.length - 1] ?? null;
-            changed = true;
-        }
-        if (changed) this.onPanesChanged?.();
+        if (this.panes.tiles.leave(id)) this.onPanesChanged?.();
     }
 
     /**
@@ -1322,12 +1184,13 @@ export class Carrel extends THREE.Object3D {
      */
     serializePanes() {
         const P = this.panes;
-        const hasTree = !!(P.tree && !P.tree.isEmpty());
-        if (!hasTree && !P.pins.length && !P.seats.length) return null;
+        const tiles = P.tiles.serialize();
+        if (!tiles && !P.pins.length && !P.seats.length) return null;
         return {
-            tree: hasTree ? P.tree.serialize() : null,
-            stacks: hasTree ? [...P.stacks].map(([id, st]) => ({ id, ids: [...st.ids], active: st.active })) : [],
-            inbox: P.inbox, seq: P.seq, focus: P.focus, zoomed: P.zoomed,
+            tree: tiles?.tree ?? null,
+            stacks: tiles?.stacks ?? [],
+            inbox: tiles?.inbox ?? null, seq: P.tiles.seq,
+            focus: tiles ? tiles.focus : P.focus, zoomed: tiles?.zoomed ?? null,
             pins: P.pins.map((p) => ({ id: p.id, w: p.w, h: p.h })),
             seats: P.seats.map((st) => ({ id: st.id, w: st.w, h: st.h, ghost: !!st.ghost })),
         };
@@ -1361,28 +1224,11 @@ export class Carrel extends THREE.Object3D {
             this._relayout();
             return;
         }
-        const tree = PaneTree.deserialize(rec.tree);
-        const leaves = new Set(tree.leaves());
-        const stacks = new Map();
-        for (const st of rec.stacks) {
-            if (!leaves.has(st?.id) || !Array.isArray(st.ids)) throw new Error(`Carrel.applyPanes(${this.carrelName}): stack ${JSON.stringify(st)} names no pane of the tree`);
-            stacks.set(st.id, { ids: st.ids.map(String), active: st.active ?? null });
-        }
-        for (const id of leaves) if (!stacks.has(id)) stacks.set(id, { ids: [], active: null });
         const P = this.panes;
-        P.tree = tree;
-        P.stacks = stacks;
-        P.inbox = leaves.has(rec.inbox) ? rec.inbox : [...leaves].pop();
-        P.focus = leaves.has(rec.focus) ? rec.focus : P.inbox;
-        P.zoomed = leaves.has(rec.zoomed) ? rec.zoomed : null;
+        P.tiles.apply(rec);
         P.pins = pins;
-        const maxSeq = Math.max(0, ...[...leaves].map((id) => Number(String(id).split(':')[1]) || 0));
-        P.seq = Math.max(Number(rec.seq) || 0, maxSeq);
         this._relayout();
     }
-
-    /** @private */
-    _newPaneId() { return `pane:${++this.panes.seq}`; }
 
     /**
      * PINS: every member at its natural size, scaled so its text column is the plane's, on shelves in
@@ -1539,7 +1385,7 @@ export class Carrel extends THREE.Object3D {
         let deepest = 0;
         const panes = this.paneRects();
         const shownPanes = new Set(panes.map((p) => p.id));
-        for (const [id, st] of this.panes.stacks) {
+        for (const [id, st] of this.panes.tiles.stacks) {
             if (shownPanes.has(id)) continue;   // a pane hidden by a zoom hides its whole stack
             for (const mid of st.ids) { const e = byId.get(mid); if (e && e.grid.visible !== false) e.grid.visible = false; }
         }

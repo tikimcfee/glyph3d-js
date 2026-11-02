@@ -15,7 +15,7 @@
  * never in the bar.
  *
  * A framed tile leaves the bar and enters the VIEW-FRAME — a configurable rect of the camera
- * frustum (full-screen, or a 2/3 / left / right pane). The frame's occupancy is a {@link PaneTree}:
+ * frustum (full-screen, or a 2/3 / left / right pane). The frame's occupancy is a {@link PaneLayout}:
  * a binary-BSP tiling where each leaf is one window resized to fill its sub-rect. A SINGLE-leaf
  * tree fills the whole frame — the old single-occupant "pin / spotlight" state, unchanged. Multi-
  * pane splits (splitPane) grow the tree; the frame's size per pane is a pure function of (frustum,
@@ -66,7 +66,7 @@ import { SpatialAnimator } from '../spatial/SpatialAnimator.js';
 import { flowBoxes } from '../../collections/layouts/flowBoxes.js';
 import { BORDER_FLAGS } from '../../collections/panelMaterial.js';
 import FieldLabel from '../../collections/FieldLabel.js';
-import PaneTree from './PaneTree.js';
+import PaneLayout from './PaneLayout.js';
 
 const _forward = new THREE.Vector3();
 const _z = new THREE.Vector3(0, 0, 1);
@@ -224,15 +224,12 @@ export class CameraDock extends THREE.Object3D {
         this._ghostGeo = null; // shared unit-rect outline geometry, lazily built, scaled per ghost
         this._ghostClock = 0;  // seconds, advances each update() to drive the breathe
 
-        /** The FRAME's occupancy: a PaneTree tiling the view-frame rect into panes, each leaf a
-         *  docked window id. null = nothing framed (all entries are bar tiles). A single-leaf tree
-         *  is the old single-occupant "spotlight/pin" — it fills the whole frame, identically.
-         *  @type {PaneTree|null} */
-        this.paneTree = null;
-
-        /** The ACTIVE pane (keyboard target / which leaf is "current") within the tree, or null.
-         *  pane.focus walks it; splits follow it; the Pin button tracks it. @type {string|null} */
-        this.focusedPane = null;
+        /** The FRAME's occupancy: the PaneLayout a tiled plane desk uses too, tiling the view-frame
+         *  rect into panes — one docked window per pane, the pane named after its window. Empty =
+         *  nothing framed (all entries are bar tiles); one pane is the single-occupant
+         *  "spotlight/pin" that fills the whole frame. Its focused pane is the ACTIVE one (pane.focus
+         *  walks it; splits follow it; the Pin button tracks it). @type {PaneLayout} */
+        this.panes = new PaneLayout({ paneIds: 'member' });
 
         this.animator = new SpatialAnimator();
 
@@ -259,7 +256,13 @@ export class CameraDock extends THREE.Object3D {
     has(id) { return this.entries.has(id); }
 
     /** @param {string} id @returns {boolean} tiled in the view-frame (a pane), vs a loose bar tile. */
-    isFramed(id) { return this.paneTree?.has(id) ?? false; }
+    isFramed(id) { return this.panes.has(id); }
+
+    /** The ACTIVE pane's window (the focused pane), or null when nothing is framed. @returns {string|null} */
+    get focusedPane() {
+        const p = this.panes.focused();
+        return p ? this.panes.front(p) : null;
+    }
 
     /** @returns {Array<{id:string, slot:number, layout:string, focused:boolean, zoom:number}>} */
     list() {
@@ -280,10 +283,10 @@ export class CameraDock extends THREE.Object3D {
      */
     spotlight(id) {
         if (!this.entries.has(id)) return false;
-        const framed = this.paneTree ? this.paneTree.leaves() : [];
+        const framed = this.panes.members();
         // Toggle off: `id` is already the SOLE frame occupant → unframe it back to the bar.
         if (framed.length === 1 && framed[0] === id) {
-            this._setFrame(null);
+            this.panes.clear();
             this.entries.get(id)?.grid?.setControlActive?.('pin', false);
             this._relayout();
             return 'returned';
@@ -292,17 +295,10 @@ export class CameraDock extends THREE.Object3D {
         // buttons unlight); a one-leaf tree fills the whole frame — the old single-occupant behavior.
         // Multi-pane layouts are built deliberately with splitPane(), not by spotlighting.
         for (const f of framed) this.entries.get(f)?.grid?.setControlActive?.('pin', false);
-        this._setFrame(PaneTree.leaf(id));
-        this.focusedPane = id;
+        this.panes.layout('stack', [id]);
         this.entries.get(id)?.grid?.setControlActive?.('pin', true);
         this._relayout();
         return 'spotlit';
-    }
-
-    /** Replace the frame's pane tree, clearing focus when it empties. @private */
-    _setFrame(tree) {
-        this.paneTree = tree && !tree.isEmpty() ? tree : null;
-        if (!this.paneTree) this.focusedPane = null;
     }
 
     /**
@@ -312,10 +308,9 @@ export class CameraDock extends THREE.Object3D {
      * @returns {boolean}
      */
     splitPane(axis, newId, opts = {}) {
-        if (!this.paneTree || !this.focusedPane) return false; // need a live frame to split
-        if (!this.entries.has(newId) || this.paneTree.has(newId)) return false;
-        if (!this.paneTree.split(this.focusedPane, axis, newId, opts)) return false;
-        this.focusedPane = newId;
+        if (this.panes.isEmpty()) return false; // need a live frame to split
+        if (!this.entries.has(newId) || this.panes.has(newId)) return false;
+        if (!this.panes.split(axis, newId, { ratio: opts.ratio, before: opts.before })) return false;
         this.entries.get(newId)?.grid?.setControlActive?.('pin', true);
         this._relayout();
         return true;
@@ -324,24 +319,22 @@ export class CameraDock extends THREE.Object3D {
     /** Move the ACTIVE pane focus to the geometric neighbor in `dir`; returns the new active id.
      *  @param {'left'|'right'|'up'|'down'} dir @returns {string|null} */
     focusPane(dir) {
-        if (!this.paneTree || !this.focusedPane) return null;
-        const next = this.paneTree.neighbor(this.focusedPane, dir);
-        if (next) this.focusedPane = next;
+        if (this.panes.isEmpty()) return null;
+        this.panes.focusDir(dir);
         return this.focusedPane;
     }
 
     /** Grow the ACTIVE pane by `delta` along `axis` (proportional; siblings give up space).
      *  @param {'x'|'y'} axis @param {number} delta @returns {boolean} */
     resizePane(axis, delta) {
-        if (!this.paneTree || !this.focusedPane) return false;
-        if (!this.paneTree.resize(this.focusedPane, axis, delta)) return false;
+        if (!this.panes.resize(axis, delta)) return false;
         this._relayout();
         return true;
     }
 
     /** Exchange two panes' windows in place (positions unchanged). @param {string} a @param {string} b @returns {boolean} */
     swapPanes(a, b) {
-        if (!this.paneTree || !this.paneTree.swap(a, b)) return false;
+        if (!this.panes.swap(a, b)) return false;
         this._relayout();
         return true;
     }
@@ -352,10 +345,8 @@ export class CameraDock extends THREE.Object3D {
      * @param {string} id @returns {boolean}
      */
     unframePane(id) {
-        if (!this.paneTree?.has(id)) return false;
-        const next = this.paneTree.close(id);
-        if (this.paneTree.isEmpty()) this._setFrame(null);
-        else this.focusedPane = next;
+        if (!this.panes.has(id)) return false;
+        this.panes.close(id, { merge: false });   // its sibling collapses up, ratios kept; focus moves there
         const e = this.entries.get(id);
         e?.grid?.setControlActive?.('pin', false);
         this._relayout();
@@ -561,9 +552,8 @@ export class CameraDock extends THREE.Object3D {
         this._disposeLabel(e);
         this.entries.delete(id);
         this.tiles.delete(e.grid); // back to world content for the camera the moment it heads home
-        if (this.paneTree?.has(id)) {
-            const next = this.paneTree.close(id);       // collapse the sibling up, ratios preserved
-            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+        if (this.panes.has(id)) {
+            this.panes.close(id, { merge: false });     // collapse the sibling up, ratios preserved
             e.grid?.setControlActive?.('pin', false);
         }
 
@@ -608,9 +598,8 @@ export class CameraDock extends THREE.Object3D {
         this.entries.delete(id);
         this._releasing.delete(id);
         this.tiles.delete(e.grid);
-        if (this.paneTree?.has(id)) {
-            const next = this.paneTree.close(id);
-            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+        if (this.panes.has(id)) {
+            this.panes.close(id, { merge: false });
             e.grid?.setControlActive?.('pin', false);
         }
         this.animator.cancelAll(e.grid);
@@ -651,9 +640,8 @@ export class CameraDock extends THREE.Object3D {
         this.entries.delete(id);
         this._releasing.delete(id);            // abandon any in-flight release of the same id
         this.tiles.delete(e.grid);
-        if (this.paneTree?.has(id)) {
-            const next = this.paneTree.close(id);       // collapse the sibling up, ratios preserved
-            if (this.paneTree.isEmpty()) this._setFrame(null); else this.focusedPane = next;
+        if (this.panes.has(id)) {
+            this.panes.close(id, { merge: false });     // collapse the sibling up, ratios preserved
             e.grid?.setControlActive?.('pin', false);
         }
 
@@ -748,7 +736,7 @@ export class CameraDock extends THREE.Object3D {
     }
 
     /** Place ONE pane: contain-fit its window into the normalized sub-rect `r01` (= {x,y,w,h} in
-     *  [0,1], y-up, from PaneTree.rects) mapped into the view-frame rect. A single-leaf tree has
+     *  [0,1], y-up, from PaneLayout.unitRects) mapped into the view-frame rect. A single-leaf tree has
      *  r01 = the unit rect, so this reduces EXACTLY to the old whole-frame occupant placement. Zoom
      *  is DIVIDED OUT (the frame owns the size; _animateTile re-divides user), so a pane always sits
      *  wholly inside its rect — tall files pillarbox, wide terminals letterbox. Pulled toward the eye
@@ -917,7 +905,7 @@ export class CameraDock extends THREE.Object3D {
      *  (footprint == box, independent of content/zoom); each pane contain-fits its sub-rect of
      *  the frame (single leaf == the whole frame). */
     _relayout() {
-        const framed = new Set(this.paneTree ? this.paneTree.leaves() : []);
+        const framed = new Set(this.panes.members());
         // Sort by `order` (stable per-tile key) so a tile that re-adopted late on restore still sits
         // in its saved position. Slots are dense 0..n-1 LABELS over ALL entries (dock.list order) —
         // assigned in this ONE place, framed or not, so every tile keeps a UNIQUE label and its
@@ -1015,11 +1003,9 @@ export class CameraDock extends THREE.Object3D {
         }
 
         // ---- frame: tile the pane tree over the view-frame rect (single leaf == the whole frame) ----
-        if (this.paneTree) {
-            for (const [id, r01] of this.paneTree.rects()) {
-                const e = this.entries.get(id);
-                if (e) this._placePane(e, r01);
-            }
+        for (const [id, r01] of this.panes.unitRects()) {
+            const e = this.entries.get(this.panes.front(id));
+            if (e) this._placePane(e, r01);
         }
 
         // Placeholders whose windows returned to the bar (or left the dock) sweep away here —
@@ -1040,7 +1026,7 @@ export class CameraDock extends THREE.Object3D {
         const e = this.entries.get(id);
         if (!e) return false;
         e.label?.setText(this._labelText(e)); // live info (cols×rows) tracks the new size
-        if (this.paneTree?.has(id)) this._placePane(e, this.paneTree.rects().get(id));
+        if (this.panes.has(id)) this._placePane(e, this.panes.unitRects().get(id));
         else this._relayout();
         return true;
     }
@@ -1079,8 +1065,8 @@ export class CameraDock extends THREE.Object3D {
         this._tickGhosts(dt);
     }
 
-    /** Serialize the frame's pane tree for persistence, or null if nothing is framed. */
-    serializeFrame() { return this.paneTree ? { tree: this.paneTree.serialize(), focused: this.focusedPane } : null; }
+    /** Serialize the frame's pane layout, or null if nothing is framed. */
+    serializeFrame() { return this.panes.serialize(); }
 
     dispose() {
         this.animator.dispose();
@@ -1091,7 +1077,7 @@ export class CameraDock extends THREE.Object3D {
         this.entries.clear();
         this._releasing.clear();
         this.tiles.clear();
-        this._setFrame(null);
+        this.panes.clear();
     }
 }
 

@@ -44,9 +44,9 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     const d = rig();
     const a = makeGrid(80, 24);
     d.lock('a', a); d.settle();
-    ok(d.paneTree === null, 'lock alone frames nothing (a is a bar tile)');
+    ok(d.panes.isEmpty(), 'lock alone frames nothing (a is a bar tile)');
     d.spotlight('a'); d.settle();
-    ok(d.isFramed('a') && d.paneTree.count() === 1 && d.focusedPane === 'a', 'spotlight → one-leaf tree, a is the active pane');
+    ok(d.isFramed('a') && d.panes.count() === 1 && d.focusedPane === 'a', 'spotlight → one-leaf tree, a is the active pane');
     const fullH = apparentH(a);
     // centered on the frame: a top-left-anchored 80×24 grid's CENTER lands at the frame center (0,0)·fd.
     // (position = center*fd - extCenter*eff; here center=(0,0), so position = -extCenter*eff.)
@@ -62,7 +62,7 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     d.spotlight('a'); d.settle();
     const soloH = apparentH(a);
     d.splitPane('x', 'b'); d.settle();
-    ok(d.paneTree.count() === 2 && d.isFramed('a') && d.isFramed('b'), 'split: a and b are both panes');
+    ok(d.panes.count() === 2 && d.isFramed('a') && d.isFramed('b'), 'split: a and b are both panes');
     ok(d.focusedPane === 'b', 'split: focus follows the new pane (b)');
     ok(a.position.x < b.position.x, 'split H: a sits LEFT of b');
     near(apparentH(a), apparentH(b), 'split: equal windows → equal pane size');
@@ -91,11 +91,11 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     const soloH = apparentH(a);
     d.splitPane('x', 'b'); d.settle();
     d.unframePane('b'); d.settle();
-    ok(!d.isFramed('b') && d.paneTree.count() === 1 && d.isFramed('a'), 'unframe b: a is sole pane again');
+    ok(!d.isFramed('b') && d.panes.count() === 1 && d.isFramed('a'), 'unframe b: a is sole pane again');
     near(apparentH(a), soloH, 'unframe: a re-fills the whole frame (scale restored)');
     ok(d.list().some((t) => t.id === 'b' && !t.focused), 'unframe: b is back in the bar');
     d.unframePane('a'); d.settle();
-    ok(d.paneTree === null && d.focusedPane === null, 'unframe last pane → frame empty');
+    ok(d.panes.isEmpty() && d.focusedPane === null, 'unframe last pane → frame empty');
 }
 
 // ---- spotlight is a TOGGLE and collapses a multi-pane layout to the sole occupant ----
@@ -105,8 +105,8 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     d.lock('a', a); d.lock('b', b);
     d.spotlight('a'); d.splitPane('x', 'b'); d.settle();
     ok(d.spotlight('a') === 'spotlit', 'spotlight a over a split → re-frames a as SOLE occupant');
-    ok(d.paneTree.count() === 1 && d.isFramed('a') && !d.isFramed('b'), 'spotlight: b returned to the bar');
-    ok(d.spotlight('a') === 'returned' && d.paneTree === null, 'spotlight a again → toggles the frame off');
+    ok(d.panes.count() === 1 && d.isFramed('a') && !d.isFramed('b'), 'spotlight: b returned to the bar');
+    ok(d.spotlight('a') === 'returned' && d.panes.isEmpty(), 'spotlight a again → toggles the frame off');
 }
 
 // ---- release a framed pane sends it home AND collapses the tree ----
@@ -116,7 +116,7 @@ const apparentH = (g) => g.scale.x * g.rows * LH; // world panel height
     d.lock('a', a); d.lock('b', b);
     d.spotlight('a'); d.splitPane('x', 'b'); d.settle();
     d.release('b'); d.settle();
-    ok(!d.has('b') && d.paneTree.count() === 1 && d.isFramed('a'), 'release b: gone from dock, a collapses to sole pane');
+    ok(!d.has('b') && d.panes.count() === 1 && d.isFramed('a'), 'release b: gone from dock, a collapses to sole pane');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

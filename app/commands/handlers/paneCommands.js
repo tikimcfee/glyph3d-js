@@ -74,7 +74,7 @@ export function focusPaneFront(ctx, desk) {
 /** A desk pane address: a pane id, or a member (→ its pane). */
 const deskPane = (desk, ctx, arg) => {
     if (arg == null || arg === '') return desk.focusedPane();
-    if (desk.panes.stacks.has(String(arg))) return String(arg);
+    if (desk.panes.tiles.has(String(arg))) return String(arg);
     const id = paneId(ctx, arg);
     return id ? desk.paneOf(id) : null;
 };
@@ -107,7 +107,7 @@ export default function registerPaneCommands(router) {
         }
         const dock = ctx.holding.dock.live;
         if (!dock) return { text: 'ERR: camera dock not ready', data: null };
-        if (!dock.paneTree || !dock.focusedPane) return { text: 'ERR: no framed pane to split — pin a window first', data: null };
+        if (dock.panes.isEmpty()) return { text: 'ERR: no framed pane to split — pin a window first', data: null };
         const axis = AXES[String(args[0] ?? '').toLowerCase()];
         if (!axis) return { text: 'ERR: usage: pane.split <h|v> <id|index>', data: null };
         const r = ctx.holding.resolve(args[1]);
@@ -261,8 +261,8 @@ export default function registerPaneCommands(router) {
             return { text: `OK: '${desk.carrelName}' — ${l.panes.length} pane(s)\n${l.text}`, data: { desk: desk.carrelName, panes: l.panes } };
         }
         const dock = ctx.holding.dock.live;
-        if (!dock?.paneTree) return { text: 'OK: nothing framed', data: { panes: [] } };
-        const panes = [...dock.paneTree.rects()].map(([id, rect]) => ({ id, rect, active: id === dock.focusedPane }));
+        if (!dock || dock.panes.isEmpty()) return { text: 'OK: nothing framed', data: { panes: [] } };
+        const panes = [...dock.panes.unitRects()].map(([id, rect]) => ({ id, rect, active: id === dock.focusedPane }));
         const summary = panes.map((p) => `${p.active ? '*' : ''}${p.id}`).join('  ');
         return { text: `OK: ${panes.length} pane(s) — ${summary}`, data: { panes } };
     }, { description: 'List the frame panes and their normalized rects (the layout tree, flattened)', returns: '{ panes:[{id,rect,active}] }' });

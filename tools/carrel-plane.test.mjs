@@ -93,7 +93,7 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
 {
     const { desk, scene } = deskWith(3);
     const before = new Map(desk.paneRects().map((p) => [p.id, JSON.stringify(p.rect)]));
-    const inbox = desk.panes.inbox;
+    const inbox = desk.panes.tiles.inbox;
     const g = mockGrid('late');
     scene.add(g);
     desk.lock('late', g, { immediate: true });
@@ -169,12 +169,12 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     // split the focused pane (pc) down, moving g0 out of pa into the new pane
     const np = desk.paneSplit('y', 'g0');
     ok(np && desk.focusedPane() === np && desk.paneFront(np) === 'g0', 'split: the new pane holds the member and has focus');
-    ok(!desk.panes.stacks.get(pa).ids.includes('g0'), 'split: the member left its old stack');
+    ok(!desk.panes.tiles.stacks.get(pa).ids.includes('g0'), 'split: the member left its old stack');
     const rc = desk.paneRects().find((p) => p.id === pc).rect, rn = desk.paneRects().find((p) => p.id === np).rect;
     ok(rc.x === rn.x && rc.w === rn.w && rc.y < rn.y, 'split y: the new pane sits under the old one, same columns');
     // close the new pane: its tab joins pc
     const into = desk.paneClose(np);
-    ok(into === pc && desk.panes.stacks.get(pc).ids.includes('g0') && !desk.panes.stacks.has(np), 'close: the tabs join the pane that takes its place');
+    ok(into === pc && desk.panes.tiles.stacks.get(pc).ids.includes('g0') && !desk.panes.tiles.stacks.has(np), 'close: the tabs join the pane that takes its place');
     // tab cycles within pc (g2 and g0)
     desk.paneFocusOn(pc);
     const t1 = desk.paneFront(pc), t2 = desk.paneTab('next');
@@ -204,7 +204,7 @@ for (const [layout, n] of [['even', 5], ['main', 4], ['stack', 3], ['even', 1]])
     const fresh = new Carrel({ name: 'p3', ...TILES });
     fresh.setPlaneUnit(UNIT);
     fresh.applyPanes(JSON.parse(JSON.stringify(rec)));
-    ok(fresh.focusedPane() === desk.focusedPane() && fresh.panes.zoomed === desk.panes.zoomed, 'focus and zoom round-trip');
+    ok(fresh.focusedPane() === desk.focusedPane() && fresh.panes.tiles.zoomed === desk.panes.tiles.zoomed, 'focus and zoom round-trip');
 }
 
 // ── PIN BOARD (the default plane arrangement) ─────────────────────────────────────────────────
