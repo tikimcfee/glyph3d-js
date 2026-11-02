@@ -180,6 +180,12 @@ otherwise registered today or in the working tree), **test handles** and the **c
   - **Switching.** `carrel.enter` or `carrel.back` while entered is a **cut** to the other plane's
     endpoint pose: no lens out and back in. `plane.switchMs` (default 0; a slide when > 0), born
     configurable. Ceiling: 200 ms from key to the new plane pixel-exact.
+  - **The desk carries the view.** A desk can move while it's read: the hub ring re-seats a nested
+    team desk when its members change, and the hub itself is re-placed (a reload re-enters before the
+    hub has settled). `carrel.enter` gives the camera a `track` (the desk's `getPlaneRect`), read every
+    frame. A moved, grown or rescaled board re-poses the view with the board's top-left on the same
+    device pixel and the aim at the same device px from it, so what's on screen stays put. Mid-ease,
+    the ease lands on the moved board. A still board changes nothing. Gate: `tools/plane-follow.test.mjs`.
   - **A fly while entered** (`camera.focus`, `agent.focus`, a ring desk's `carrel.enter`) first
     leaves to `home`, then flies. Nothing drops the plane in place: `_dropPlane` keeps the plane pose,
     which at the endpoint is about 7000 units out on a 70° lens.

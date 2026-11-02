@@ -141,6 +141,19 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/plane-click.test.mjs
   bun tools/plane-keys.test.mjs
   ```
+- **`plane-follow.test.mjs`** (headless, the real controller and `carrel.enter`, real Carrels) — a plane
+  that moves while it's read carries the view. With no track, a moved board leaves the view (the
+  control); with one, a board translated and turned, grown from its fixed top-left, or rescaled keeps
+  its top-left and a board point on the same device pixels, inside the slab, at 100 px per 100 px. A
+  still tracked view is bit-identical, one track read per frame; a move mid-ease lands centred on the
+  moved board in the ease's own time; a throwing track is reported once and the view stays put. End to
+  end: a plane team desk nested in a ring hub, entered with carrel.enter, keeps every pin's cell origin
+  on its pixel while five members join the hub and the hub moves 400 units. Teeth: carrel.enter without
+  the track fails the 7 re-seat checks (pins ~10,000 px off screen); a controller that never follows
+  fails 28. `CARREL_COMMANDS=<path>` runs it against another carrelCommands.js.
+  ```
+  bun tools/plane-follow.test.mjs
+  ```
 - **`hands-on.test.mjs`** (headless) — the hand panel polls `calib.status` only while a hand device is
   attached, and the cloud picture-in-picture draws only then (teeth: an unconditional poll fails 3; an
   ungated pass draws the empty box).

@@ -101,9 +101,12 @@ function listenToPlaneLife(ctx) {
  * @param {import('../../client/CommandProvider.jsx').AppContext} ctx
  * @param {string} target  the registry id read (`carrel:<name>` for a desk)
  * @param {{center:Object, normal:Object, up:Object, pxPerUnit:number, depth:number,
- *          aim?:{x:number,y:number}, referent?:{x:number,y:number}, origin:{x:number,y:number}}} p
+ *          aim?:{x:number,y:number}, referent?:{x:number,y:number}, origin:{x:number,y:number},
+ *          track?:() => Object|null}} p
  *   referent: a plane point held where it is on screen through the ease (the end aim follows from
- *   it); aim: where the view lands when there is no referent to hold — ViewerCameraController.enterPlane
+ *   it); aim: where the view lands when there is no referent to hold; track: the plane as it stands
+ *   now ({center, normal, up, pxPerUnit, origin} — a desk's getPlaneRect), read every frame, so a
+ *   plane that moves while it's read keeps its place on screen — ViewerCameraController.enterPlane
  * @returns {Object} the camera's planeState, plus `notice` (a string when the box is inexact, else null)
  */
 export function enterPlaneView(ctx, target, p) {
@@ -113,7 +116,7 @@ export function enterPlaneView(ctx, target, p) {
         center: p.center, normal: p.normal, up: p.up,
         pxPerUnit: p.pxPerUnit, fovDeg: Number(getSetting('plane.fov')), ortho: !!getSetting('plane.ortho'),
         front: p.depth / 2 + Number(getSetting('plane.front')), back: p.depth / 2 + Number(getSetting('plane.back')),
-        aim: p.aim, referent: p.referent, origin: p.origin,
+        aim: p.aim, referent: p.referent, origin: p.origin, track: p.track,
     }, {
         ms: Number(getSetting('plane.enterMs')), leaveMs: Number(getSetting('plane.leaveMs')),
         switchMs: Number(getSetting('plane.switchMs')),

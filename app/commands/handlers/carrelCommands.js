@@ -295,7 +295,8 @@ function autoShelf(ctx, map) {
  * scale (its unit — never the viewport), aimed at the focused pin (pins) or the frame (tiles), and
  * attention lands on the focused member at t = 0, before the camera does. The members are already
  * where they read: entering moves only the camera. Entering another plane while one is entered is
- * the camera's switch (its home stays the first one's).
+ * the camera's switch (its home stays the first one's). A desk that moves while it's read (re-seated
+ * in its ring, the ring re-placed) carries the view with it (the camera's plane track).
  * @param {import('../../client/CommandProvider.jsx').AppContext} ctx @param {Object} carrel
  */
 function enterPlaneDesk(ctx, carrel) {
@@ -318,6 +319,9 @@ function enterPlaneDesk(ctx, carrel) {
     const s = enterPlaneView(ctx, `carrel:${carrel.carrelName}`, {
         center: rect.center, normal: rect.normal, up: rect.up, pxPerUnit: rect.pxPerUnit, depth: 2 * Math.max(carrel._layoutD ?? 0, 1) * rect.scale,
         aim, origin: rect.origin,
+        // The desk can move while it's read (its ring re-seats it, the ring is re-placed): the view
+        // follows its board, so what's on screen stays put.
+        track: () => carrel.getPlaneRect(),
     });
     if (prev && prev !== carrel.carrelName) ctx.carrelBack = prev;
     ctx.enteredCarrel = carrel.carrelName;

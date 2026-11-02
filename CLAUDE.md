@@ -363,7 +363,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   at (`plane.enter`), or a caller's `referent` — holds its screen spot (< 1 px; the end aim follows
   from it) at exactly the eased scale k(t); an explicit `aim` glides to the view center instead.
   Entering another plane while entered is a CUT to its endpoint (`plane.switchMs` 0; a slide above),
-  home kept. Inside, drag pans 1:1, the wheel scrolls the surface under the cursor (else the plane),
+  home kept. A plane that moves while it's read follows: `enterPlane`'s `track` (carrel.enter: the desk's
+  `getPlaneRect`) is read every frame, and a moved, grown or rescaled board keeps its top-left on the same
+  device pixel (`_followPlane`; `tools/plane-follow.test.mjs`). Inside, drag pans 1:1, the wheel scrolls the surface under the cursor (else the plane),
   flight/look/dolly are off; a fly (`flyTo`: camera.focus, agent.focus, a ring desk's enter) first
   eases back to home, then flies — framed at the home lens; a restore cuts home; `getState` answers
   with the pose it was entered from (a save mid-plane restores to the open world). The FAN (`plane.fan on|off`, the held pane prefix) spreads layers behind the page: on the

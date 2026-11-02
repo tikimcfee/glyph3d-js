@@ -118,6 +118,17 @@ const SOFT_BOUNDS_SETTLE = 0.5;
 // keypress: nav bindings (hjkl → focus.neighbor) issue a fly AND hold a key, so
 // a blanket "any key held" cancel would kill the fly the same frame it starts.
 const FLIGHT_KEYS = new Set(['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'KeyQ', 'KeyE']);
+/**
+ * A plane's frame as a caller states it (enterPlane, its `track`): world center / normal / up, the
+ * scale, and the origin to pixel-snap (plane coords).
+ * @typedef {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number},
+ *            up:{x:number,y:number,z:number}, pxPerUnit:number, origin?:{x:number,y:number}|null}} PlaneFrame
+ */
+
+/** A plane frame's identity — equal exactly when nothing about it moved. @param {PlaneFrame} f */
+const frameKey = (f) => [f.center.x, f.center.y, f.center.z, f.normal.x, f.normal.y, f.normal.z,
+    f.up.x, f.up.y, f.up.z, f.pxPerUnit, f.origin?.x ?? '', f.origin?.y ?? ''].join(',');
+
 const anyFlightKey = (keys) => {
     for (const k of FLIGHT_KEYS) if (keys.has(k)) return true;
     return false;
@@ -601,14 +612,20 @@ export class ViewerCameraController {
      *
      * Entering while entered is a SWITCH: a cut to the new plane's endpoint (`switchMs` 0), or a
      * slide when `switchMs` > 0 — no lens out and back in — and `home` stays the first enter's.
+     *
+     * A plane that MOVES while it's read (a desk re-seated in its ring, its ring re-placed) is
+     * followed when the caller gives `track`: every frame it answers the plane's frame as it stands
+     * now, and a change re-poses the view so the board's px under each screen pixel stay the same
+     * (the aim kept relative to `origin`, in device px) — mid-ease, the ease lands on the moved plane.
      * @param {{center:{x:number,y:number,z:number}, normal:{x:number,y:number,z:number},
      *          up:{x:number,y:number,z:number}, pxPerUnit:number, fovDeg:number, front:number,
      *          back:number, aim?:{x:number,y:number}, referent?:{x:number,y:number},
-     *          origin?:{x:number,y:number}}} plane
+     *          origin?:{x:number,y:number}, track?:() => PlaneFrame|null}} plane
      *   pxPerUnit: DEVICE px per world unit (the drawing buffer's pixels — see planeViewport);
      *   center/normal/up: the plane's frame in world space (normal faces the viewer); aim / referent /
      *   origin: plane coords (world units from the center, +y up); origin is the point to pixel-snap
-     *   (a pane's top-left); front/back: the depth slab around it.
+     *   (a pane's top-left); front/back: the depth slab around it; track: the plane as it stands now
+     *   (null = unchanged), read each frame while entered.
      * @param {{ms?:number, leaveMs?:number, switchMs?:number}} [opts] the enter's ease, the default
      *   leave's (a fly's leave too), and a switch's (0 = a cut)
      */
@@ -620,10 +637,6 @@ export class ViewerCameraController {
         for (const k of ['front', 'back']) {
             if (!(Number.isFinite(plane?.[k]) && plane[k] >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${plane?.[k]})`);
         }
-        for (const k of ['center', 'normal', 'up']) {
-            const v = plane[k];
-            if (!(Number.isFinite(v?.x) && Number.isFinite(v?.y) && Number.isFinite(v?.z))) throw new Error(`enterPlane: ${k} must be a finite {x, y, z} (got ${JSON.stringify(v)})`);
-        }
         for (const k of ['aim', 'referent', 'origin']) {
             const v = plane[k];
             if (v != null && !(Number.isFinite(v.x) && Number.isFinite(v.y))) throw new Error(`enterPlane: ${k} must be finite plane coordinates {x, y} (got {x: ${v.x}, y: ${v.y}})`);
@@ -631,14 +644,10 @@ export class ViewerCameraController {
         for (const [k, v] of Object.entries({ ms, leaveMs, switchMs })) {
             if (!(Number.isFinite(v) && v >= 0)) throw new Error(`enterPlane: ${k} must be a finite number ≥ 0 (got ${v})`);
         }
+        if (plane.track != null && typeof plane.track !== 'function') throw new Error(`enterPlane: track must be a function (got ${typeof plane.track})`);
         const ortho = !!plane.ortho;
         if (ortho && !cam.isPlaneCamera) throw new Error(`enterPlane: an orthographic endpoint needs a PlaneCamera (the view camera is a ${cam.type})`);
-        const n = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z).normalize();
-        const up = new THREE.Vector3(plane.up.x, plane.up.y, plane.up.z);
-        up.addScaledVector(n, -up.dot(n));
-        if (up.lengthSq() < 1e-12) throw new Error('enterPlane: up is parallel to the normal');
-        up.normalize();
-        const center = new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z);
+        const { center, normal: n, up, right } = this._planeFrame(plane, 'enterPlane');
         const switching = !!this._plane && !this._lens?.leaving;
         const wasEntered = !!this._plane;
         const home = this._plane?.home ?? {
@@ -646,12 +655,13 @@ export class ViewerCameraController {
             fov: cam.fov, near: cam.near, far: cam.far, dist: 0,
         };
         const view = {
-            center, normal: n, up, right: up.clone().cross(n),
+            center, normal: n, up, right,
             aim: { x: 0, y: 0 },
             origin: plane.origin ? { x: plane.origin.x, y: plane.origin.y } : null,
             pxPerUnit: plane.pxPerUnit, fovDeg: plane.fovDeg, front: plane.front, back: plane.back,
             ortho, fan: null, blend: null,
             home, leaveMs,
+            track: plane.track ?? null, tracked: plane.track ? frameKey(plane) : null,
         };
         this._tween = null;
         this._pendingFly = null;
@@ -693,6 +703,62 @@ export class ViewerCameraController {
             return;
         }
         if (!wasEntered) this._emitPlane(true);
+    }
+
+    /**
+     * A plane's world frame from its center / normal / up (up squared to the normal), validated.
+     * @private @param {PlaneFrame} plane @param {string} who the caller, for the error
+     */
+    _planeFrame(plane, who) {
+        const THREE = this.THREE;
+        for (const k of ['center', 'normal', 'up']) {
+            const v = plane[k];
+            if (!(Number.isFinite(v?.x) && Number.isFinite(v?.y) && Number.isFinite(v?.z))) throw new Error(`${who}: ${k} must be a finite {x, y, z} (got ${JSON.stringify(v)})`);
+        }
+        const n = new THREE.Vector3(plane.normal.x, plane.normal.y, plane.normal.z).normalize();
+        const up = new THREE.Vector3(plane.up.x, plane.up.y, plane.up.z);
+        up.addScaledVector(n, -up.dot(n));
+        if (up.lengthSq() < 1e-12) throw new Error(`${who}: up is parallel to the normal`);
+        up.normalize();
+        return { center: new THREE.Vector3(plane.center.x, plane.center.y, plane.center.z), normal: n, up, right: up.clone().cross(n) };
+    }
+
+    /**
+     * Follow a plane that moved while it's read (see enterPlane's `track`): the view takes its new
+     * frame and scale, the aim kept at the same device px from its origin (the board's top-left), so
+     * what's on screen stays where it is; an ease in progress lands on the moved plane in the time it
+     * had left. A still plane (the same frame) changes nothing — a still view stays bit-still. A
+     * track that throws stops following, said once in the console. @private
+     */
+    _followPlane() {
+        const v = this._plane;
+        if (!v?.track || this._lens?.leaving) return;
+        let f;
+        try {
+            f = v.track();
+            if (!f) return;
+            const key = frameKey(f);
+            if (key === v.tracked) return;
+            if (!(Number.isFinite(f.pxPerUnit) && f.pxPerUnit > 0)) throw new Error(`pxPerUnit must be a finite number > 0 (got ${f.pxPerUnit})`);
+            const frame = this._planeFrame(f, 'the plane track');
+            const o0 = v.origin ?? { x: 0, y: 0 }, o1 = f.origin ?? o0;
+            const r = v.pxPerUnit / f.pxPerUnit;   // the aim's offset from the origin, kept in device px
+            v.aim = { x: o1.x + (v.aim.x - o0.x) * r, y: o1.y + (v.aim.y - o0.y) * r };
+            Object.assign(v, frame);
+            v.origin = f.origin ? { x: f.origin.x, y: f.origin.y } : v.origin;
+            v.pxPerUnit = f.pxPerUnit;
+            v.tracked = key;
+        } catch (e) {
+            v.track = null;
+            console.error(`[plane] following the plane failed — the view stays where it is, no longer following: ${e?.message ?? e}`);
+            return;
+        }
+        this._snapPlaneAim();
+        const L = this._lens;
+        if (L) {
+            const to = this._planeLens();
+            this._startLens(to, { P0: this._lensNow(v.center, v.normal).aim, P1: to.aim, ms: Math.max(1, L.ms - L.elapsed), onDone: L.onDone });
+        }
     }
 
     /**
@@ -1102,6 +1168,7 @@ export class ViewerCameraController {
     _applyPlane(dt) {
         const input = this.input;
         this._stepFan(dt);
+        this._followPlane();
         if (this._lens) {
             // A tween owns the frame; input during it is dropped (an enter/leave always lands).
             input.drag.dx = 0; input.drag.dy = 0; input.wheel.dy = 0;
