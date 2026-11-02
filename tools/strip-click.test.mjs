@@ -362,6 +362,50 @@ try {
             `Every visible strip label in real browser sits below its card and inside stripRightPx=${scrollSetup.stripRightPx}`
         );
 
+        // Teeth + Gate: 3D map labels (MapLabels) must treat the strip's occupied rect as taken
+        const mapLabelStripExpanded = await app.evalPage(async () => {
+            const ctx = window.__glyphClient.ctx;
+            const overlap = (a, b) => (
+                a && b &&
+                a.x < b.x + b.w &&
+                a.x + a.w > b.x &&
+                a.y < b.y + b.h &&
+                a.y + a.h > b.y
+            );
+
+            // Teeth: if MapLabels ignores strip occupiedRect, a 3D map label (like desk-extra-1) draws over the band
+            const origGetRects = ctx.mapLabels._getStripOccupiedRects.bind(ctx.mapLabels);
+            ctx.mapLabels._getStripOccupiedRects = () => [];
+            ctx.mapLabels.solvePlacement(ctx.camera);
+            const occ = ctx.strip.occupiedRect();
+            const teethOverlaps = [];
+            for (const [id, it] of ctx.planeOverlay.items.entries()) {
+                if (it.kind === 'map' && it.visible !== false && overlap(it.rect, occ)) {
+                    teethOverlaps.push(id);
+                }
+            }
+
+            // Restore and re-solve with strip occupiedRect active
+            ctx.mapLabels._getStripOccupiedRects = origGetRects;
+            ctx.mapLabels.solvePlacement(ctx.camera);
+            const liveOverlaps = [];
+            for (const [id, it] of ctx.planeOverlay.items.entries()) {
+                if (it.kind === 'map' && it.visible !== false && overlap(it.rect, occ)) {
+                    liveOverlaps.push({ id, rect: it.rect });
+                }
+            }
+            return { occ, teethOverlaps, liveOverlaps };
+        });
+
+        check(
+            mapLabelStripExpanded.teethOverlaps.length > 0,
+            `Teeth: without strip occupiedRect in MapLabels, 3D map labels draw over the strip band (${mapLabelStripExpanded.teethOverlaps.join(', ')})`
+        );
+        check(
+            mapLabelStripExpanded.liveOverlaps.length === 0,
+            `Expanded strip: zero 3D map labels overlap strip occupiedRect (${JSON.stringify(mapLabelStripExpanded.occ)})`
+        );
+
         const shotDir = process.env.STRIP_SCREENSHOT_DIR || '';
         if (shotDir) {
             fs.mkdirSync(shotDir, { recursive: true });
@@ -464,9 +508,25 @@ try {
                 const ctx = window.__glyphClient.ctx;
                 const res = await window.__glyphClient.router.execute('overlay.list');
                 const items = res?.data?.items || [];
+                const occ = ctx.strip.occupiedRect();
+                const overlap = (a, b) => (
+                    a && b &&
+                    a.x < b.x + b.w &&
+                    a.x + a.w > b.x &&
+                    a.y < b.y + b.h &&
+                    a.y + a.h > b.y
+                );
+                const mapOverlaps = [];
+                for (const [id, it] of ctx.planeOverlay.items.entries()) {
+                    if (it.kind === 'map' && it.visible !== false && overlap(it.rect, occ)) {
+                        mapOverlaps.push({ id, rect: it.rect });
+                    }
+                }
                 return {
                     collapsed: ctx.strip.isCollapsed(),
                     stripRightPx: ctx.strip.stripRightPx(),
+                    occupiedRect: occ,
+                    mapOverlaps,
                     persisted: window.localStorage.getItem('g3d.strip.collapsed'),
                     cardCountInOverlay: items.filter((it) => String(it.id).startsWith('strip:card:')).length,
                     hasHeader: items.some((it) => it.id === 'strip:header'),
@@ -480,6 +540,12 @@ try {
                     && afterHeaderCollapse.cardCountInOverlay === 0
                     && afterHeaderCollapse.hasHeader === true,
                 `Clicking strip:header collapses strip (collapsed=${afterHeaderCollapse.collapsed}, stripRightPx=${afterHeaderCollapse.stripRightPx}, persisted=${afterHeaderCollapse.persisted}, overlayCards=${afterHeaderCollapse.cardCountInOverlay})`
+            );
+            check(
+                afterHeaderCollapse.occupiedRect
+                    && afterHeaderCollapse.occupiedRect.h <= 40
+                    && afterHeaderCollapse.mapOverlaps.length === 0,
+                `Collapsed strip: occupiedRect is header-only (${JSON.stringify(afterHeaderCollapse.occupiedRect)}) and zero 3D map labels overlap it`
             );
 
             if (shotDir) {

@@ -460,6 +460,133 @@ async function main() {
         `120 still frames -> 0 label moves (moves=${stillMoves})`
     );
 
+    // -------------------------------------------------------------------------
+    // 10. Strip occupied screen gate (expanded band + collapsed header, with teeth)
+    // -------------------------------------------------------------------------
+    camera.position.set(0, 0, 1000);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+
+    const expandedBandRect = { x: 0, y: 0, w: 192, h: 1000 };
+    const collapsedHeaderRect = { x: 12, y: 52, w: 168, h: 26 };
+
+    const stripCandidates = [
+        // Deep inside the left strip band (screen x ≈ 90, y ≈ 490)
+        { id: 'carrel:desk-extra-1', class: 'P3', text: 'desk-extra-1', x: -820, y: 12, z: 0, interest: 45 },
+        // Just outside the right edge of the strip band (screen x ≈ 205, y ≈ 300):
+        // 'above' centered at x=205 extends left into [0, 192], so solver must pick 'right'
+        { id: 'carrel:near-band', class: 'P3', text: 'near-band-desk', x: -687, y: 231, z: 0, interest: 40 },
+        // Near the top-left header (screen x ≈ 90, y ≈ 72)
+        { id: 'carrel:under-header', class: 'P3', text: 'header-neighbor', x: -820, y: 494, z: 0, interest: 38 },
+        // Off-screen left waiting agent (clamps to left edge unless pushed past strip band)
+        { id: 'agent:left-edge-wait', class: 'P1', text: 'left-helper · waiting', x: -3500, y: 0, z: 0, interest: 95, isWaiting: true, isAgent: true },
+    ];
+
+    // 10a. TEETH: without strip occupied rect (strip disabled / absent), `carrel:desk-extra-1`
+    // and `carrel:near-band` draw directly over the strip band [0, 0, 192, 1000].
+    ctx.strip = null;
+    ctx.mapLabels.resetHistory();
+    ctx.mapLabels.setSyntheticCandidates(stripCandidates);
+    ctx.mapLabels.solvePlacement(camera);
+    const snapWithoutStrip = ctx.mapLabels.snapshot();
+    const extraWithoutStrip = snapWithoutStrip.candidates.find((c) => c.id === 'carrel:desk-extra-1');
+    const nearWithoutStrip = snapWithoutStrip.candidates.find((c) => c.id === 'carrel:near-band');
+    const edgeWithoutStrip = snapWithoutStrip.candidates.find((c) => c.id === 'agent:left-edge-wait');
+    check(
+        extraWithoutStrip?.state === 'placed' && rectsOverlap(extraWithoutStrip.rect, expandedBandRect, 0),
+        'Teeth: without strip occupiedRect, carrel:desk-extra-1 is placed directly over the strip band',
+        JSON.stringify(extraWithoutStrip?.rect)
+    );
+    check(
+        nearWithoutStrip?.state === 'placed' && nearWithoutStrip?.anchor === 'above' && rectsOverlap(nearWithoutStrip.rect, expandedBandRect, 0),
+        'Teeth: without strip occupiedRect, carrel:near-band uses centered above anchor and overlaps strip band',
+        JSON.stringify(nearWithoutStrip?.rect)
+    );
+    check(
+        edgeWithoutStrip?.state === 'edge' && rectsOverlap(edgeWithoutStrip.rect, expandedBandRect, 0),
+        'Teeth: without strip occupiedRect, left off-screen edge marker clamps inside the strip band',
+        JSON.stringify(edgeWithoutStrip?.rect)
+    );
+
+    // 10b. EXPANDED STRIP: full band [0, 0, 192, 1000] is occupied screen.
+    // Every map label / dot / edge marker must be hidden or placed completely clear of expandedBandRect.
+    ctx.strip = {
+        occupiedRect: () => ({ ...expandedBandRect }),
+    };
+    ctx.mapLabels.resetHistory();
+    ctx.mapLabels.setSyntheticCandidates(stripCandidates);
+    ctx.mapLabels.solvePlacement(camera);
+    const snapExpanded = ctx.mapLabels.snapshot();
+
+    const extraExpanded = snapExpanded.candidates.find((c) => c.id === 'carrel:desk-extra-1');
+    check(
+        extraExpanded?.state === 'hidden' && extraExpanded?.whyHidden === 'collided:strip',
+        'Expanded strip: candidate deep inside band is hidden with whyHidden=collided:strip (neither label nor dot drawn over band)',
+        `${extraExpanded?.state} (${extraExpanded?.whyHidden})`
+    );
+
+    const nearExpanded = snapExpanded.candidates.find((c) => c.id === 'carrel:near-band');
+    const nearExplain = ctx.mapLabels.explain('carrel:near-band');
+    const aboveBlockedByStrip = nearExplain?.triedAnchors?.some((a) => a.anchor === 'above' && a.blockedBy === 'strip');
+    check(
+        nearExpanded?.state === 'placed'
+            && nearExpanded?.anchor === 'right'
+            && !rectsOverlap(nearExpanded.rect, expandedBandRect, 0)
+            && Boolean(aboveBlockedByStrip),
+        'Expanded strip: candidate near band edge shifts anchor from above (blockedBy=strip) to right, clear of band',
+        JSON.stringify({ anchor: nearExpanded?.anchor, rect: nearExpanded?.rect, tried: nearExplain?.triedAnchors })
+    );
+
+    const edgeExpanded = snapExpanded.candidates.find((c) => c.id === 'agent:left-edge-wait');
+    check(
+        edgeExpanded?.state === 'edge' && !rectsOverlap(edgeExpanded.rect, expandedBandRect, 0) && edgeExpanded.rect.x >= expandedBandRect.w,
+        'Expanded strip: left-side off-screen P1 edge marker is inset past the strip band',
+        JSON.stringify(edgeExpanded?.rect)
+    );
+
+    const anyExpandedOverlap = snapExpanded.candidates
+        .filter((c) => c.state === 'placed' || c.state === 'dot' || c.state === 'edge')
+        .some((c) => c.rect && rectsOverlap(c.rect, expandedBandRect, 0));
+    check(
+        !anyExpandedOverlap,
+        'Expanded strip: zero visible map labels, dots, or edge markers overlap the strip band rect'
+    );
+
+    // 10c. COLLAPSED STRIP: only the header rect { x: 12, y: 52, w: 168, h: 26 } is occupied screen.
+    // Desks below the header (`carrel:desk-extra-1` at y≈490) reclaim the column and place cleanly;
+    // candidates near the header (`carrel:under-header` at y≈72) avoid the header rect.
+    ctx.strip = {
+        occupiedRect: () => ({ ...collapsedHeaderRect }),
+    };
+    // Calling update() when strip state changes should automatically re-solve even within the 8 Hz window
+    ctx.mapLabels.update(camera, 0.001);
+    const snapCollapsed = ctx.mapLabels.snapshot();
+
+    const extraCollapsed = snapCollapsed.candidates.find((c) => c.id === 'carrel:desk-extra-1');
+    check(
+        extraCollapsed?.state === 'placed' && !rectsOverlap(extraCollapsed.rect, collapsedHeaderRect, 0),
+        'Collapsed strip: candidate below header (desk-extra-1) places cleanly once band collapses',
+        JSON.stringify({ state: extraCollapsed?.state, rect: extraCollapsed?.rect })
+    );
+
+    const underHeaderCollapsed = snapCollapsed.candidates.find((c) => c.id === 'carrel:under-header');
+    const underHeaderExplain = ctx.mapLabels.explain('carrel:under-header');
+    const headerBlockedAbove = underHeaderExplain?.triedAnchors?.some((a) => a.anchor === 'above' && a.blockedBy === 'strip');
+    check(
+        Boolean(headerBlockedAbove)
+            && (underHeaderCollapsed?.state === 'hidden' || !rectsOverlap(underHeaderCollapsed.rect, collapsedHeaderRect, 0)),
+        'Collapsed strip: candidate near header has above anchor blocked by strip header and does not overlap header rect',
+        JSON.stringify({ state: underHeaderCollapsed?.state, anchor: underHeaderCollapsed?.anchor, rect: underHeaderCollapsed?.rect })
+    );
+
+    const anyCollapsedOverlap = snapCollapsed.candidates
+        .filter((c) => c.state === 'placed' || c.state === 'dot' || c.state === 'edge')
+        .some((c) => c.rect && rectsOverlap(c.rect, collapsedHeaderRect, 0));
+    check(
+        !anyCollapsedOverlap,
+        'Collapsed strip: zero visible map labels, dots, or edge markers overlap the collapsed header rect'
+    );
+
     ctx.planeOverlay.dispose();
 
     console.log(`ok map-labels: ${passed}/${passed + failed} checks passed`);

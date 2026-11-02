@@ -522,7 +522,10 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   hysteresis (`worldTitlePx >= labelPx` → `whyHidden: 'self-named'`, and world title + map
   label are never both shown); cluster labels (`gomux · 7 agents · 2 waiting` — a waiting
   count never aggregates away); off-screen `P0/P1` edge markers; and never-truncated /
-  never-shrunk (`px ∈ {16, 14, 13, 12, 11}`, floor 11) invariants.
+  never-shrunk (`px ∈ {16, 14, 13, 12, 11}`, floor 11) invariants; the desk strip's screen rect is
+  taken (`Strip.occupiedRect`: the band expanded, the header collapsed) — a label near it moves to a
+  clear anchor, one inside it hides (`collided:strip`, no dot), a left edge marker sits past the band
+  (teeth: without the strip's rect, labels land on the band).
   ```
   bun tools/map-labels.test.mjs
   ```

@@ -921,15 +921,20 @@ export class Strip {
     configure(opts = {}) {
         if (!opts || typeof opts !== 'object') return;
         const prevWidth = this.config.cardWidthPx;
+        const prevEnabled = this.config.enabled;
         const { collapsed, ...rest } = opts;
         Object.assign(this.config, rest);
         if (collapsed !== undefined) {
             this.setCollapsed(collapsed, { persist: false });
             return;
         }
-        if (rest.cardWidthPx !== undefined && this.config.cardWidthPx !== prevWidth) {
+        if ((rest.cardWidthPx !== undefined && this.config.cardWidthPx !== prevWidth) ||
+            (rest.enabled !== undefined && this.config.enabled !== prevEnabled)) {
             this.update();
             this._reaimPlaneForReserveChange();
+            if (!this.ctx?.mapLabels?.frozen) {
+                this.ctx?.mapLabels?.solvePlacement?.(this.ctx?.camera);
+            }
         }
     }
 
@@ -977,6 +982,9 @@ export class Strip {
         this.update();
         if (prev !== next) {
             this._reaimPlaneForReserveChange();
+            if (!this.ctx?.mapLabels?.frozen) {
+                this.ctx?.mapLabels?.solvePlacement?.(this.ctx?.camera);
+            }
         }
         return this._collapsed;
     }
@@ -1097,15 +1105,56 @@ export class Strip {
     }
 
     /**
+     * Return the device-pixel screen rect occupied by the strip:
+     * - When disabled or no live desks exist: `null`
+     * - When collapsed: only the header's rect (`{ x, y, w, h }`)
+     * - When expanded: the full left band (`{ x: 0, y: 0, w: stripRightPx, h: vpH }`)
+     *
+     * Used by `MapLabels` so 3D map labels treat the strip's screen rect as taken.
+     *
+     * @param {{ width?: number, height?: number, dpr?: number }} [vpArg]
+     * @returns {{ x: number, y: number, w: number, h: number }|null}
+     */
+    occupiedRect(vpArg = null) {
+        if (!this.isEnabled()) return null;
+        const map = this.ctx?.carrels instanceof Map ? this.ctx.carrels : null;
+        if (!map) return null;
+        let liveCount = 0;
+        for (const c of map.values()) {
+            if (!c || c._dissolving) continue;
+            liveCount++;
+        }
+        if (liveCount === 0) return null;
+        const vp = vpArg ?? this.overlay.viewport();
+        const dpr = vp.dpr || 1;
+        const vpH = vp.height || 1000;
+        if (this.isCollapsed()) {
+            if (this._lastHeader?.rect) return { ...this._lastHeader.rect };
+            return {
+                x: Math.round(this.config.edgeLeftPx * dpr),
+                y: Math.round(this.config.edgeTopPx * dpr),
+                w: Math.round(this.config.cardWidthPx * dpr),
+                h: Math.round(this.config.headerHeightPx * dpr),
+            };
+        }
+        const rightPx = this._lastStripRightPx > 0
+            ? this._lastStripRightPx
+            : Math.round((this.config.edgeLeftPx + this.config.cardWidthPx + this.config.pinClearancePx) * dpr);
+        return { x: 0, y: 0, w: rightPx, h: vpH };
+    }
+
+    /**
      * Inspect current strip placement state (for verbs and test gates).
      */
     getState() {
+        const occ = this.occupiedRect();
         return {
             enabled: this.isEnabled(),
             collapsed: this.isCollapsed(),
             order: this.orderMode(),
             enteredCarrel: this.ctx?.enteredCarrel ?? null,
             stripRightPx: this._lastStripRightPx,
+            occupiedRect: occ ? { ...occ } : null,
             scrollPx: this._scrollPx,
             maxScrollPx: this._maxScrollPx,
             contentHeightPx: this._contentHeightPx,

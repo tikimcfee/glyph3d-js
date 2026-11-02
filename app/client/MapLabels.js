@@ -342,6 +342,20 @@ export default class MapLabels {
         this._cameraMoving = false;
         this._lastCamPos = new THREE.Vector3(NaN, NaN, NaN);
         this._lastCamQuat = new THREE.Quaternion(NaN, NaN, NaN, NaN);
+        this._lastStripKey = '';
+    }
+
+    /**
+     * Resolve the device-pixel screen rect(s) occupied by the desk strip (expanded band
+     * or collapsed header rect). Map labels treat these rects as taken.
+     *
+     * @param {{ width: number, height: number, dpr?: number }} vp
+     * @returns {Array<{ x: number, y: number, w: number, h: number }>}
+     * @private
+     */
+    _getStripOccupiedRects(vp) {
+        const r = this.ctx?.strip?.occupiedRect(vp) ?? null;   // the strip owns its rect; a bare ctx has no strip
+        return r && r.w > 0 && r.h > 0 ? [r] : [];
     }
 
     /**
@@ -770,7 +784,12 @@ export default class MapLabels {
         const periodMs = 1000 / Math.max(1, Number(this.cfg.placeHz) || 8);
         this._accumMs += Math.max(0, Number(dt) || 0) * 1000;
 
-        if (!this.frozen && (!this._hasSolvedOnce || justRested || this._accumMs >= periodMs)) {
+        const vp = overlay.viewport();
+        const stripRects = this._getStripOccupiedRects(vp);
+        const stripKey = stripRects.map((r) => `${r.x},${r.y},${r.w},${r.h}`).join('|');
+        const stripChanged = stripKey !== this._lastStripKey;
+
+        if (!this.frozen && (!this._hasSolvedOnce || justRested || stripChanged || this._accumMs >= periodMs)) {
             this._accumMs = 0;
             this.solvePlacement(camera);
         } else {
@@ -865,6 +884,11 @@ export default class MapLabels {
         });
 
         const grid = new CollisionGrid(gridPx);
+        const stripRects = this._getStripOccupiedRects(vp);
+        this._lastStripKey = stripRects.map((r) => `${r.x},${r.y},${r.w},${r.h}`).join('|');
+        for (const sr of stripRects) {
+            grid.insert('strip', sr, null);
+        }
         /** @type {Map<string, Array<Object>>} groupKey -> collided candidates in that group */
         const collidedByGroup = new Map();
 
@@ -885,7 +909,7 @@ export default class MapLabels {
             // 2. Off-screen handling: P0 and P1 get viewport-clamped edge markers; P2–P8 hide
             if (!item.screen.onScreen) {
                 if (item.class === 'P0' || item.class === 'P1') {
-                    this._placeEdgeMarker(item, vp, atlas, grid, edgeMargin);
+                    this._placeEdgeMarker(item, vp, atlas, grid, edgeMargin, stripRects);
                 } else {
                     item.state = 'hidden';
                     item.whyHidden = 'offscreen';
@@ -985,15 +1009,25 @@ export default class MapLabels {
                     if (!collidedByGroup.has(item.groupKey)) collidedByGroup.set(item.groupKey, []);
                     collidedByGroup.get(item.groupKey).push(item);
                 }
-                item.state = 'dot';
-                item.anchor = 'center';
                 const dotS = Math.max(2, Number(this.cfg.dotPx) || 5);
                 const snappedDot = snapOverlayOrigin(item.solveScreen.x, item.solveScreen.y);
-                item.x = snappedDot.x;
-                item.y = snappedDot.y;
-                item.rect = { x: snappedDot.x - dotS * 0.5, y: snappedDot.y - dotS * 0.5, w: dotS, h: dotS };
-                item.textRect = { ...item.rect };
-                item.whyHidden = `collided:${blockerId}`;
+                const dotRect = { x: snappedDot.x - dotS * 0.5, y: snappedDot.y - dotS * 0.5, w: dotS, h: dotS };
+                const dotOverlapsStrip = stripRects.some((sr) => rectsOverlap(dotRect, sr, 2));
+                if (dotOverlapsStrip || blockerId === 'strip') {
+                    item.state = 'hidden';
+                    item.anchor = null;
+                    item.rect = null;
+                    item.textRect = null;
+                    item.whyHidden = `collided:${blockerId}`;
+                } else {
+                    item.state = 'dot';
+                    item.anchor = 'center';
+                    item.x = snappedDot.x;
+                    item.y = snappedDot.y;
+                    item.rect = dotRect;
+                    item.textRect = { ...dotRect };
+                    item.whyHidden = `collided:${blockerId}`;
+                }
             }
         }
 
@@ -1137,7 +1171,7 @@ export default class MapLabels {
      * Discrete edge sizes: 16 / 14 / 12 px based on world distance.
      * @private
      */
-    _placeEdgeMarker(item, vp, atlas, grid, edgeMargin) {
+    _placeEdgeMarker(item, vp, atlas, grid, edgeMargin, stripRects = []) {
         const dist = item.screen.dist || 0;
         const edgePx = dist < 1200 ? 16 : dist < 3000 ? 14 : 12;
         item.px = snapDiscretePx(edgePx, this.cfg.minPx);
@@ -1149,10 +1183,22 @@ export default class MapLabels {
         const padX = baseMeasured.textRect.x - baseMeasured.rect.x;
         const padY = baseMeasured.textRect.y - baseMeasured.rect.y;
 
+        let minX = edgeMargin;
+        for (const sr of stripRects) {
+            if (sr.x <= edgeMargin && sr.h >= vp.height * 0.5) {
+                minX = Math.max(minX, sr.x + sr.w + 6);
+            }
+        }
+
         const anchorX = item.solveScreen?.x ?? item.screen.x;
         const anchorY = item.solveScreen?.y ?? item.screen.y;
-        const clampedX = Math.max(edgeMargin, Math.min(vp.width - edgeMargin - w, anchorX - w * 0.5));
-        const clampedY = Math.max(edgeMargin, Math.min(vp.height - edgeMargin - h, anchorY - h * 0.5));
+        const clampedX = Math.max(minX, Math.min(vp.width - edgeMargin - w, anchorX - w * 0.5));
+        let clampedY = Math.max(edgeMargin, Math.min(vp.height - edgeMargin - h, anchorY - h * 0.5));
+        for (const sr of stripRects) {
+            if (sr.h < vp.height * 0.5 && rectsOverlap({ x: clampedX, y: clampedY, w, h }, sr, 2)) {
+                clampedY = Math.min(vp.height - edgeMargin - h, sr.y + sr.h + 6);
+            }
+        }
 
         let edgeAnchor = 'edge-right';
         if (anchorX < 0) edgeAnchor = 'edge-left';
@@ -1186,6 +1232,7 @@ export default class MapLabels {
         const atlas = this.ctx?.atlas ?? overlay.atlas;
         const gapPx = Math.max(0, Number(this.cfg.anchorGapPx) ?? 6);
         const hystPx = Math.max(0, Number(this.cfg.hysteresisPx) ?? 4);
+        const stripRects = this._getStripOccupiedRects(vp);
 
         for (const rec of this._records.values()) {
             if (!rec.worldPos) continue;
@@ -1208,6 +1255,10 @@ export default class MapLabels {
                     gapPx,
                     style.plate
                 );
+                if (!this.frozen && stripRects.some((sr) => rectsOverlap(measured.rect, sr, 2))) {
+                    this.solvePlacement(camera);
+                    return;
+                }
                 rec.x = measured.x;
                 rec.y = measured.y;
                 rec.rect = measured.rect;
@@ -1215,10 +1266,15 @@ export default class MapLabels {
             } else if (rec.state === 'dot') {
                 const dotS = Math.max(2, Number(this.cfg.dotPx) || 5);
                 const snapped = snapOverlayOrigin(nextSolve.x, nextSolve.y);
+                const dotRect = { x: snapped.x - dotS * 0.5, y: snapped.y - dotS * 0.5, w: dotS, h: dotS };
+                if (!this.frozen && stripRects.some((sr) => rectsOverlap(dotRect, sr, 2))) {
+                    this.solvePlacement(camera);
+                    return;
+                }
                 rec.x = snapped.x;
                 rec.y = snapped.y;
-                rec.rect = { x: snapped.x - dotS * 0.5, y: snapped.y - dotS * 0.5, w: dotS, h: dotS };
-                rec.textRect = { ...rec.rect };
+                rec.rect = dotRect;
+                rec.textRect = { ...dotRect };
             }
         }
     }
