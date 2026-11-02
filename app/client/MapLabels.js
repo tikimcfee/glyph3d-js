@@ -509,8 +509,8 @@ export default class MapLabels {
         const lanes = ctx.agentBooks?.lanes;
         if (lanes instanceof Map) {
             for (const [agentId, lane] of lanes.entries()) {
-                if (!lane?.book || !lane.book.visible) continue;
-                const cid = lane.groupId || `agent:book:${agentId}`;
+                const cid = lane?.groupId || `agent:book:${agentId}`;
+                if (!lane?.book || !this._isCandidateVisible(lane.book, cid)) continue;
                 seenIds.add(cid);
                 const gx = lane.meta?.gomux;
                 const status = String(gx?.status || lane.state || 'active').toLowerCase();
@@ -562,8 +562,8 @@ export default class MapLabels {
         const terminals = ctx.registry?.findByType?.('terminal') ?? [];
         for (const entry of terminals) {
             const obj = entry.grid;
-            if (!obj || !obj.visible) continue;
             const cid = entry.id;
+            if (!obj || !this._isCandidateVisible(obj, cid)) continue;
             if (seenIds.has(cid)) continue;
             seenIds.add(cid);
             const isAttended = attendedIds.has(cid);
@@ -592,8 +592,8 @@ export default class MapLabels {
         for (const entry of grids) {
             if (entry.role === 'card') continue;
             const obj = entry.grid;
-            if (!obj || !obj.visible) continue;
             const cid = entry.id;
+            if (!obj || !this._isCandidateVisible(obj, cid)) continue;
             if (seenIds.has(cid)) continue;
             seenIds.add(cid);
             const isAttended = attendedIds.has(cid);
@@ -655,11 +655,61 @@ export default class MapLabels {
     }
 
     /**
+     * Check whether a candidate Object3D is logically visible in the scene, accounting for
+     * `CarrelCards` impostor swaps (where a desk's live member has `obj.visible = false`
+     * only because the desk's card quad is currently standing in for it).
+     * @private
+     */
+    _isCandidateVisible(obj, id) {
+        if (!obj) return false;
+        if (obj.visible) return true;
+        const parent = obj.parent;
+        if (parent && (parent.isCarrel || typeof parent.carrelName === 'string')) {
+            if (!parent.visible || parent._dead || parent._dissolving) return false;
+            const cardEntry = this.ctx?.carrelCards?.cards?.get?.(parent.carrelName);
+            if (cardEntry && cardEntry.showing === 'card') {
+                return cardEntry.savedVis?.has?.(id) ? Boolean(cardEntry.savedVis.get(id)) : true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolve a device-pixel screen anchor `(x, y)` with `hystPx` deadband hysteresis
+     * against `prevSolveScreen` so `solvePlacement()` and `_reprojectPlaced()` always
+     * share a single pure coordinate for a still camera.
+     * @private
+     */
+    _resolveScreenAnchor(proj, prevSolveScreen, hystPx) {
+        let x = proj.x;
+        let y = proj.y;
+        if (prevSolveScreen && hystPx > 0) {
+            const drift = Math.hypot(proj.x - prevSolveScreen.x, proj.y - prevSolveScreen.y);
+            if (drift <= hystPx) {
+                x = prevSolveScreen.x;
+                y = prevSolveScreen.y;
+            }
+        }
+        return { x, y };
+    }
+
+    /**
      * Compute a stable world-space anchor point for a 3D Object3D.
      * @private
      */
     _worldAnchorOf(obj, edge = 'top') {
         if (!obj) return { x: 0, y: 0, z: 0 };
+        if (typeof obj.frameBounds === 'function') {
+            const fb = obj.frameBounds();
+            if (fb && !fb.isEmpty?.()) {
+                _box.copy(fb).applyMatrix4(obj.matrixWorld);
+                return {
+                    x: (_box.min.x + _box.max.x) * 0.5,
+                    y: edge === 'top' ? _box.max.y : (_box.min.y + _box.max.y) * 0.5,
+                    z: (_box.min.z + _box.max.z) * 0.5,
+                };
+            }
+        }
         if (typeof obj.getWorldBounds === 'function') {
             const b = obj.getWorldBounds();
             if (b && !b.isEmpty?.()) {
@@ -777,15 +827,9 @@ export default class MapLabels {
 
             // Screen-space solver coordinate with sub-cell deadband hysteresis:
             const wasPlaced = prev && (prev.state === 'placed' || prev.state === 'edge');
-            let solveX = proj.x;
-            let solveY = proj.y;
-            if (prev?.solveScreen && hystPx > 0) {
-                const drift = Math.hypot(proj.x - prev.solveScreen.x, proj.y - prev.solveScreen.y);
-                if (drift <= hystPx) {
-                    solveX = prev.solveScreen.x;
-                    solveY = prev.solveScreen.y;
-                }
-            }
+            const solveScreen = this._resolveScreenAnchor(proj, prev?.solveScreen, hystPx);
+            const solveX = solveScreen.x;
+            const solveY = solveScreen.y;
 
             // Degree of interest: base interest + screen-center proximity + incumbent hysteresis bonus
             const centerBonus = Math.max(0, 1 - Math.hypot(solveX - centerX, solveY - centerY) / maxDiag) * 5;
@@ -795,7 +839,7 @@ export default class MapLabels {
             prepared.push({
                 ...c,
                 screen: proj,
-                solveScreen: { x: solveX, y: solveY },
+                solveScreen,
                 worldTitlePx,
                 selfNamed,
                 effectiveInterest,
@@ -944,7 +988,7 @@ export default class MapLabels {
                 item.state = 'dot';
                 item.anchor = 'center';
                 const dotS = Math.max(2, Number(this.cfg.dotPx) || 5);
-                const snappedDot = snapOverlayOrigin(item.screen.x, item.screen.y);
+                const snappedDot = snapOverlayOrigin(item.solveScreen.x, item.solveScreen.y);
                 item.x = snappedDot.x;
                 item.y = snappedDot.y;
                 item.rect = { x: snappedDot.x - dotS * 0.5, y: snappedDot.y - dotS * 0.5, w: dotS, h: dotS };
@@ -969,20 +1013,22 @@ export default class MapLabels {
             const clusterPx = this.pxForClass(clusterClass);
             const style = CLASS_STYLE[clusterClass];
 
-            // Centroid of lost members
-            let sx = 0, sy = 0, wx = 0, wy = 0, wz = 0;
+            // 3D centroid of lost members -> projected screen anchor with identical hysteresis deadband
+            let wx = 0, wy = 0, wz = 0;
             for (const m of lostMembers) {
-                sx += m.solveScreen.x;
-                sy += m.solveScreen.y;
                 wx += m.worldPos.x;
                 wy += m.worldPos.y;
                 wz += m.worldPos.z;
             }
-            sx /= lostMembers.length;
-            sy /= lostMembers.length;
             wx /= lostMembers.length;
             wy /= lostMembers.length;
             wz /= lostMembers.length;
+            const clusterWorldPos = { x: wx, y: wy, z: wz };
+            const clusterProj = projectWorldToDevicePx(clusterWorldPos, camera, vp);
+            const prevCluster = this._records.get(clusterId) || null;
+            const clusterSolve = this._resolveScreenAnchor(clusterProj, prevCluster?.solveScreen, hystPx);
+            const sx = clusterSolve.x;
+            const sy = clusterSolve.y;
 
             let clusterPlaced = null;
             for (const anchor of ANCHOR_ORDER) {
@@ -1008,8 +1054,9 @@ export default class MapLabels {
                     sourceText: clusterText,
                     text: clusterText,
                     px: clusterPx,
-                    worldPos: { x: wx, y: wy, z: wz },
-                    screen: { x: sx, y: sy, onScreen: true },
+                    worldPos: clusterWorldPos,
+                    screen: clusterProj,
+                    solveScreen: clusterSolve,
                     state: 'placed',
                     anchor: clusterPlaced.anchor,
                     x: clusterPlaced.measured.x,
@@ -1102,13 +1149,15 @@ export default class MapLabels {
         const padX = baseMeasured.textRect.x - baseMeasured.rect.x;
         const padY = baseMeasured.textRect.y - baseMeasured.rect.y;
 
-        const clampedX = Math.max(edgeMargin, Math.min(vp.width - edgeMargin - w, item.screen.x - w * 0.5));
-        const clampedY = Math.max(edgeMargin, Math.min(vp.height - edgeMargin - h, item.screen.y - h * 0.5));
+        const anchorX = item.solveScreen?.x ?? item.screen.x;
+        const anchorY = item.solveScreen?.y ?? item.screen.y;
+        const clampedX = Math.max(edgeMargin, Math.min(vp.width - edgeMargin - w, anchorX - w * 0.5));
+        const clampedY = Math.max(edgeMargin, Math.min(vp.height - edgeMargin - h, anchorY - h * 0.5));
 
         let edgeAnchor = 'edge-right';
-        if (item.screen.x < 0) edgeAnchor = 'edge-left';
-        else if (item.screen.x > vp.width) edgeAnchor = 'edge-right';
-        else if (item.screen.y < 0) edgeAnchor = 'edge-top';
+        if (anchorX < 0) edgeAnchor = 'edge-left';
+        else if (anchorX > vp.width) edgeAnchor = 'edge-right';
+        else if (anchorY < 0) edgeAnchor = 'edge-top';
         else edgeAnchor = 'edge-bottom';
 
         const snapped = snapOverlayOrigin(clampedX + padX, clampedY + padY);
@@ -1126,7 +1175,8 @@ export default class MapLabels {
 
     /**
      * Re-project placed labels every frame so screen positions track camera motion smoothly
-     * between `placeHz` declutter passes.
+     * between `placeHz` declutter passes while sharing the exact same hysteresis deadband
+     * (`solveScreen`) at rest so a still camera never alternates or jitters.
      * @private
      */
     _reprojectPlaced(camera) {
@@ -1135,18 +1185,24 @@ export default class MapLabels {
         const vp = overlay.syncCamera();
         const atlas = this.ctx?.atlas ?? overlay.atlas;
         const gapPx = Math.max(0, Number(this.cfg.anchorGapPx) ?? 6);
+        const hystPx = Math.max(0, Number(this.cfg.hysteresisPx) ?? 4);
 
         for (const rec of this._records.values()) {
-            if (rec.state !== 'placed' && rec.state !== 'dot') continue;
+            if (!rec.worldPos) continue;
             const proj = projectWorldToDevicePx(rec.worldPos, camera, vp);
             rec.screen = proj;
+            const nextSolve = this._resolveScreenAnchor(proj, rec.solveScreen, hystPx);
+            if (rec.solveScreen && nextSolve.x === rec.solveScreen.x && nextSolve.y === rec.solveScreen.y) {
+                continue;
+            }
+            rec.solveScreen = nextSolve;
             if (rec.state === 'placed' && ANCHOR_ORDER.includes(rec.anchor)) {
                 const style = CLASS_STYLE[rec.class] || CLASS_STYLE.P6;
                 const measured = computeAnchoredPlacement(
                     atlas,
                     rec.text,
-                    proj.x,
-                    proj.y,
+                    nextSolve.x,
+                    nextSolve.y,
                     rec.px,
                     rec.anchor,
                     gapPx,
@@ -1158,7 +1214,7 @@ export default class MapLabels {
                 rec.textRect = measured.textRect;
             } else if (rec.state === 'dot') {
                 const dotS = Math.max(2, Number(this.cfg.dotPx) || 5);
-                const snapped = snapOverlayOrigin(proj.x, proj.y);
+                const snapped = snapOverlayOrigin(nextSolve.x, nextSolve.y);
                 rec.x = snapped.x;
                 rec.y = snapped.y;
                 rec.rect = { x: snapped.x - dotS * 0.5, y: snapped.y - dotS * 0.5, w: dotS, h: dotS };

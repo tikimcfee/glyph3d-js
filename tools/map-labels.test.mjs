@@ -400,6 +400,66 @@ async function main() {
         'After label.freeze off, update() runs placement solver'
     );
 
+    // -------------------------------------------------------------------------
+    // 9. Still-camera gate: 120 still frames -> 0 label moves
+    //    (Teeth: before fix, solvePlacement vs _reprojectPlaced alternated between
+    //     solveScreen and proj at 8 Hz, and cluster:gomux alternated between 2D screen
+    //     mean and 3D centroid projection, producing 87 label moves across 120 frames.)
+    // -------------------------------------------------------------------------
+    ctx.mapLabels.resetHistory();
+    ctx.mapLabels.setSyntheticCandidates([
+        { id: 'carrel:alpha', class: 'P3', text: 'alpha-desk', x: -120, y: 40, z: 0, interest: 40 },
+        { id: 'carrel:bravo', class: 'P3', text: 'bravo-desk', x: -82, y: 40, z: 0, interest: 35 },
+        { id: 'dot:loser', class: 'P6', text: 'shadowed-file.js', x: -120, y: 40, z: 0, interest: 5 },
+        { id: 'agent:edge-wait', class: 'P1', text: 'edge-helper · waiting', x: 3200, y: 120, z: 0, interest: 90, isWaiting: true, isAgent: true },
+        { id: 'agent:g0', class: 'P1', text: 'worker-0 · waiting', x: 60, y: -30, z: -80, interest: 90, groupKey: 'gomux', isWaiting: true, isAgent: true },
+        { id: 'agent:g1', class: 'P4', text: 'worker-1', x: 62, y: -28, z: 0, interest: 30, groupKey: 'gomux', isAgent: true },
+        { id: 'agent:g2', class: 'P4', text: 'worker-2', x: 64, y: -32, z: 80, interest: 29, groupKey: 'gomux', isAgent: true },
+    ]);
+
+    camera.position.set(0, 0, 1000);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
+    ctx.mapLabels.update(camera, 1 / 60);
+
+    // Pan slightly (inside the 4 px hysteresis deadband) and come to rest:
+    camera.position.set(2.2, 1.4, 1000);
+    camera.lookAt(2.2, 1.4, 0);
+    camera.updateMatrixWorld();
+    ctx.mapLabels.update(camera, 1 / 60); // moving frame
+
+    let stillMoves = 0;
+    let prevPosById = null;
+    for (let f = 0; f < 120; f++) {
+        ctx.mapLabels.update(camera, 1 / 60);
+        const snapNow = ctx.mapLabels.snapshot();
+        const curPosById = new Map();
+        for (const c of snapNow.candidates) {
+            if (c.state === 'placed' || c.state === 'dot' || c.state === 'edge') {
+                curPosById.set(c.id, `${c.state}:${c.anchor}:${c.x},${c.y}`);
+            }
+        }
+        // Also verify overlay items match
+        for (const [id, item] of ctx.planeOverlay.items.entries()) {
+            curPosById.set(`ov:${id}`, `${item.kind}:${item.x},${item.y}`);
+        }
+        if (prevPosById) {
+            for (const [id, sig] of curPosById.entries()) {
+                if (prevPosById.get(id) !== sig) {
+                    stillMoves++;
+                }
+            }
+            if (curPosById.size !== prevPosById.size) {
+                stillMoves++;
+            }
+        }
+        prevPosById = curPosById;
+    }
+    check(
+        stillMoves === 0,
+        `120 still frames -> 0 label moves (moves=${stillMoves})`
+    );
+
     ctx.planeOverlay.dispose();
 
     console.log(`ok map-labels: ${passed}/${passed + failed} checks passed`);
