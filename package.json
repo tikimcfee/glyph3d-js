@@ -6,7 +6,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "app"
+    "app",
+    "wall"
   ],
   "scripts": {
     "serve": "./glyph3d-cli serve --port 8000"

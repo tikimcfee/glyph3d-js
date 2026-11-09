@@ -64,6 +64,21 @@
         "three": ">=0.183",
       },
     },
+    "wall": {
+      "name": "glyph3d-wall",
+      "dependencies": {
+        "@glyph3d/core": "workspace:*",
+        "@glyph3d/r3f": "workspace:*",
+        "@react-three/fiber": "^9.0.0",
+        "react": "^19.0.0",
+        "react-dom": "^19.0.0",
+        "three": "^0.185.1",
+      },
+      "devDependencies": {
+        "@vitejs/plugin-react": "^4.3.4",
+        "vite": "^5.4.11",
+      },
+    },
   },
   "packages": {
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],
@@ -319,6 +334,8 @@
     "gensync": ["gensync@1.0.0-beta.2", "", {}, "sha512-3hN7NaskYvMDLQY55gnW3NQ+mesEAepTqlg+VEbj7zzqEMBVNhzcGYYeqFo/TlYz6eQiFcp1HcsCZO+nGgS8zg=="],
 
     "glyph3d-ide": ["glyph3d-ide@workspace:app"],
+
+    "glyph3d-wall": ["glyph3d-wall@workspace:wall"],
 
     "harfbuzzjs": ["harfbuzzjs@0.4.15", "", {}, "sha512-p1edvnlc+vpRe2kz7OKzcscf0gyFiDZpco+miDxAiiZ67cu1oNlbuOkmP/A/i1l/w938VrkF2FdZ8scNcnkPrQ=="],
 

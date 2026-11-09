@@ -1,0 +1,22 @@
+{
+  "name": "glyph3d-wall",
+  "private": true,
+  "type": "module",
+  "description": "glyph3d wall — an infinite canvas of terminals on @glyph3d/core + @glyph3d/r3f.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@glyph3d/core": "workspace:*",
+    "@glyph3d/r3f": "workspace:*",
+    "@react-three/fiber": "^9.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}
