@@ -11,14 +11,17 @@ const STYLE = {
 /**
  * MapLabels — the DOM layer for map-style terminal names: one constant-size label per terminal
  * that's too small on screen for its title bar, placed by labelPlacement so no two overlap, with
- * a trace line to its terminal's border when the label isn't touching it. Clicking a label
- * frames its terminal. Positions are written in the same frame the canvas renders (the wall's
+ * a trace line to its terminal's border when the label isn't touching it. A press on a label
+ * goes to the wall's pointer (a click frames the terminal, a drag moves it). Positions are written in the same frame the canvas renders (the wall's
  * tick), from the same camera — no lag, no deadband.
  */
 export default class MapLabels {
-    /** @param {HTMLElement} host - the element the canvas fills @param {(id: string) => void} onPick */
-    constructor(host, onPick) {
-        this._onPick = onPick;
+    /**
+     * @param {HTMLElement} host - the element the canvas fills
+     * @param {(id: string, e: PointerEvent) => void} onPress - a pointer pressed a label
+     */
+    constructor(host, onPress) {
+        this._onPress = onPress;
         this._root = document.createElement('div');
         Object.assign(this._root.style, { position: 'absolute', inset: '0', pointerEvents: 'none', overflow: 'hidden', zIndex: '4' });
         this._svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -48,8 +51,7 @@ export default class MapLabels {
             padding: `0 ${PAD_X}px`, font: FONT, whiteSpace: 'nowrap', borderRadius: '4px', borderWidth: '1px',
             borderStyle: 'solid', pointerEvents: 'auto', cursor: 'pointer', boxSizing: 'border-box', willChange: 'transform',
         });
-        el.addEventListener('pointerdown', (e) => { e.stopPropagation(); });
-        el.addEventListener('click', (e) => { e.stopPropagation(); this._onPick(id); });
+        el.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); this._onPress(id, e); });
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         line.setAttribute('stroke-width', '1');
         const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');

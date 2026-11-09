@@ -42,6 +42,17 @@ test('strict pass avoids covering other targets; relaxed pass allows it before h
     expect(hidden.get('x')).toBeNull();
 });
 
+test('relaxed fallback prefers the detached ring (with a trace line) over hugging a neighbour', () => {
+    // A tight 3×3 grid: the middle target's every adjacent slot sits on a neighbour.
+    const targets = [];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) targets.push(box(300 + c * 70, 300 + r * 50, 60, 40));
+    const mid = targets[4];
+    const out = placeLabels([{ id: 'mid', target: mid, w: 90, h: 16 }], view, new Map(), targets);
+    const p = out.get('mid');
+    expect(['above2', 'below2']).toContain(p.cand);
+    expect(p.leader).not.toBeNull();
+});
+
 test('leader runs from the label edge to the nearest point on the target border', () => {
     const t = box(100, 100, 50, 30);
     const far = { left: 300, top: 110, right: 360, bottom: 126 };   // to the right, detached

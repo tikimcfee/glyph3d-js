@@ -12,6 +12,12 @@
 
 /** Candidate positions around a target, in preference order (a second ring sits farther out). */
 export const CANDIDATES = ['above', 'below', 'right', 'left', 'above2', 'below2'];
+/**
+ * The relaxed pass (labels may cover OTHER terminals) tries the detached ring first: a label that
+ * has to sit on someone else's terminal is unambiguous with a trace line to its own, and ambiguous
+ * snug against a neighbour's edge.
+ */
+export const RELAXED_ORDER = ['above2', 'below2', 'above', 'below', 'right', 'left'];
 
 /**
  * @typedef {{ left: number, top: number, right: number, bottom: number }} Box
@@ -82,10 +88,10 @@ export function placeLabels(items, view, prev = new Map(), obstacles = items.map
     const freeOfLabels = (b) => !placed.some((p) => boxesOverlap(b, p));
     const freeOfTargets = (b, own) => !obstacles.some((o) => o !== own && boxesOverlap(b, o));
     for (const it of items) {
-        const order = prev.has(it.id) ? [prev.get(it.id), ...CANDIDATES.filter((c) => c !== prev.get(it.id))] : CANDIDATES;
+        const strictOrder = prev.has(it.id) ? [prev.get(it.id), ...CANDIDATES.filter((c) => c !== prev.get(it.id))] : CANDIDATES;
         let hit = null;
         for (const strict of [true, false]) {
-            for (const cand of order) {
+            for (const cand of strict ? strictOrder : RELAXED_ORDER) {
                 const box = candidateBox(cand, it.target, it.w, it.h, gap);
                 if (!inView(box) || !freeOfLabels(box)) continue;
                 if (strict && !freeOfTargets(box, it.target)) continue;
