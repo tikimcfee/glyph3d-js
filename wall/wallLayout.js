@@ -4,8 +4,8 @@
  * are plain `{ minX, minY, maxX, maxY }` in world units (y up), so this is testable headless.
  */
 
-/** World units between neighbouring terminals in the flow layout. */
-export const FLOW_GAP = 6;
+/** World units between neighbouring terminals in the flow layout — room for a title bar (TitleBar caps at 80% of it). */
+export const FLOW_GAP = 12;
 /** Terminals per row before the flow wraps. */
 export const FLOW_COLUMNS = 3;
 

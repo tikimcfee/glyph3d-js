@@ -10,8 +10,9 @@ import { BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
 import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import registerTerminalCommands from '../app/commands/handlers/terminalCommands.js';
 import { wheelScrollCommand } from '../app/client/surfaceInteractions.js';
+import TitleBar from './TitleBar.js';
 import {
-    freeFlowSlot, fitRect, unionRect, edgesAt, edgeCursor, cycle, resizeFromDrag,
+    freeFlowSlot, fitRect, unionRect, edgesAt, edgeCursor, cycle, resizeFromDrag, FLOW_GAP,
 } from './wallLayout.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
@@ -93,6 +94,8 @@ export default class TerminalWall {
         this.focusedId = null;
         this.hoveredId = null;
         this._listeners = new Set();
+        /** Each terminal's title bar, by id. @type {Map<string, TitleBar>} */
+        this._bars = new Map();
         this._positions = readStore(POSITIONS_KEY);
         this._names = readStore(NAMES_KEY);
         this._anim = null;      // { x, y, zoom } camera target while easing
@@ -185,7 +188,28 @@ export default class TerminalWall {
         this._view.w = size.width;
         this._view.h = size.height;
         this._stepCamera(dt);
+        this._layoutBars();
         this.farLod.update(this.camera, size.height);
+    }
+
+    /** Keep every title bar on its terminal's top edge, named, at this frame's zoom (cheap when
+     *  nothing changed — each bar skips a layout whose inputs it already applied). */
+    _layoutBars() {
+        const zoom = this.camera.zoom;
+        for (const [id, bar] of this._bars) {
+            const grid = this.ctx.terminals.get(id);
+            if (!grid) continue;
+            bar.setName(this.nameOf(id));
+            bar.setFocused(id === this.focusedId);
+            bar.layout(grid, zoom);
+        }
+    }
+
+    /** A terminal's rect plus its title bar at `zoom` — what the person sees as the window. */
+    _windowRect(id, zoom = this.camera.zoom) {
+        const r = rectOf(this.ctx.terminals.get(id));
+        const bar = this._bars.get(id);
+        return bar ? { ...r, maxY: r.maxY + bar.worldHeight(zoom) } : r;
     }
 
     /** Ease the camera toward the framing target, if one is set. */
@@ -280,14 +304,17 @@ export default class TerminalWall {
 
     /** The camera pose that frames one terminal: fit to the view, capped at FRAME_MAX_LINE_PX rows. */
     _frameTarget(grid) {
-        return fitRect(rectOf(grid), this._view.w, this._view.h, 0.94, FRAME_MAX_LINE_PX / grid.cellStride.y);
+        const cap = FRAME_MAX_LINE_PX / grid.cellStride.y;
+        const first = fitRect(rectOf(grid), this._view.w, this._view.h, 0.94, cap);
+        return fitRect(this._windowRect(grid.terminalId, first.zoom), this._view.w, this._view.h, 0.94, cap);
     }
 
     /** Ease the camera to fit every terminal. */
     fitAll() {
-        const rects = this.order.map((id) => rectOf(this.ctx.terminals.get(id)));
-        const all = unionRect(rects);
-        if (all) this._anim = fitRect(all, this._view.w, this._view.h, 0.9);
+        const all = unionRect(this.order.map((id) => rectOf(this.ctx.terminals.get(id))));
+        if (!all) return;
+        const first = fitRect(all, this._view.w, this._view.h, 0.9);
+        this._anim = fitRect(unionRect(this.order.map((id) => this._windowRect(id, first.zoom))), this._view.w, this._view.h, 0.9);
     }
 
     /** Toggle between framing the focused terminal and fitting everything. */
@@ -335,7 +362,13 @@ export default class TerminalWall {
             for (const { role } of TerminalGrid.CONTROL_SPEC) grid.setControlVisible(role, false);
             grid.onResize(() => this._emit());
             grid.onWindowTitle(() => this._emit());
+            const bar = new TitleBar({ atlas: this.ctx.atlas, maxWorldHeight: FLOW_GAP * 0.8 });
+            grid.add(bar);
+            this._bars.set(id, bar);
             changed = true;
+        }
+        for (const [id, bar] of this._bars) {
+            if (!live.has(id)) { bar.dispose(); this._bars.delete(id); }
         }
         const before = this.order.length;
         this.order = this.order.filter((id) => live.has(id));
@@ -378,18 +411,23 @@ export default class TerminalWall {
         };
     }
 
-    /** What's under a world point: a border grab beats a body hit; the focused terminal is on top. */
+    /**
+     * What's under a world point: a border grab (of the whole window — bar included, so the top
+     * edge is the bar's top) beats the rest; then the title bar, then the body. The focused
+     * terminal is on top. @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|null}
+     */
     _hit(p) {
         const tol = EDGE_GRAB_PX / this.camera.zoom;
         const ids = this.focusedId ? [this.focusedId, ...[...this.order].reverse().filter((i) => i !== this.focusedId)] : [...this.order].reverse();
         for (const id of ids) {
-            const r = rectOf(this.ctx.terminals.get(id));
-            const edges = edgesAt(r, p.x, p.y, tol);
-            if (edges) return { id, edges };
+            const edges = edgesAt(this._windowRect(id), p.x, p.y, tol);
+            if (edges) return { id, part: 'edge', edges };
         }
         for (const id of ids) {
-            const r = rectOf(this.ctx.terminals.get(id));
-            if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) return { id, edges: null };
+            const w = this._windowRect(id);
+            if (p.x < w.minX || p.x > w.maxX || p.y < w.minY || p.y > w.maxY) continue;
+            const top = rectOf(this.ctx.terminals.get(id)).maxY;
+            return { id, part: p.y > top ? 'title' : 'body' };
         }
         return null;
     }
@@ -431,7 +469,7 @@ export default class TerminalWall {
         const p = this._toWorld(e.clientX, e.clientY);
         const hit = e.button === 0 ? this._hit(p) : null;
         const base = { startX: e.clientX, startY: e.clientY, startWorld: p, camStart: this.camera.position.clone() };
-        if (hit?.edges) {
+        if (hit?.part === 'edge') {
             const grid = this.ctx.terminals.get(hit.id);
             this._drag = {
                 ...base, kind: 'resize', id: hit.id, edges: hit.edges,
@@ -441,9 +479,13 @@ export default class TerminalWall {
                 last: { cols: grid.cols, rows: grid.rows },
             };
             this.focus(hit.id);
-        } else if (hit) {
+        } else if (hit?.part === 'title') {
+            // The title bar is the handle: press + drag moves the terminal; a click focuses it.
             const grid = this.ctx.terminals.get(hit.id);
             this._drag = { ...base, kind: 'press', id: hit.id, startPos: grid.position.clone() };
+        } else if (hit) {
+            // The body only focuses — a press there never drags the window.
+            this._drag = { ...base, kind: 'focus', id: hit.id };
         } else {
             this._drag = { ...base, kind: 'pan', moved: false };
         }
@@ -486,7 +528,7 @@ export default class TerminalWall {
         if (!d) return;
         this._drag = null;
         this.canvas.releasePointerCapture?.(e.pointerId);
-        if (d.kind === 'press') this.focus(d.id);
+        if (d.kind === 'press' || d.kind === 'focus') this.focus(d.id);
         else if (d.kind === 'pan' && !d.moved) this.focus(null);
         else if (d.kind === 'move' || d.kind === 'resize') {
             const grid = this.ctx.terminals.get(d.id);
@@ -496,7 +538,7 @@ export default class TerminalWall {
 
     _onDoubleClick(e) {
         const hit = this._hit(this._toWorld(e.clientX, e.clientY));
-        if (hit && !hit.edges) this.focus(hit.id, { frame: true });
+        if (hit && hit.part !== 'edge') this.focus(hit.id, { frame: true });
         else if (!hit) this.fitAll();
     }
 
@@ -508,7 +550,8 @@ export default class TerminalWall {
             this.ctx.terminals.get(id)?.setBorderFlag(BORDER_FLAGS.HOVERED, true);
             this.hoveredId = id;
         }
-        this.canvas.style.cursor = hit?.edges ? edgeCursor(hit.edges) : hit ? 'default' : 'grab';
+        this.canvas.style.cursor = hit?.part === 'edge' ? edgeCursor(hit.edges)
+            : hit?.part === 'title' ? 'move' : hit ? 'text' : 'grab';
     }
 
     // ── keyboard ────────────────────────────────────────────────────────────
