@@ -469,6 +469,10 @@ func ensureTmuxSession(cfg terminalConfig) error {
 	tmuxCmd("set-option", "-g", "window-size", "latest").Run() // single client's SIGWINCH drives the window
 	tmuxCmd("set-option", "-g", "prefix", "None").Run()
 	tmuxCmd("set-option", "-g", "prefix2", "None").Run()
+	// Forward each pane's title (set by the shell: the prompt's path, the running command) to the
+	// client as an OSC title, so the display can name the terminal without asking the relay.
+	tmuxCmd("set-option", "-g", "set-titles", "on").Run()
+	tmuxCmd("set-option", "-g", "set-titles-string", "#T").Run()
 	for _, table := range []string{"prefix", "root", "copy-mode", "copy-mode-vi"} {
 		tmuxCmd("unbind-key", "-a", "-T", table).Run()
 	}

@@ -27,8 +27,10 @@ const FRAME_MAX_LINE_PX = 28;
 /** Zoom clamp, CSS px per world unit. Plain floats are ample at this range. */
 const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 200;
-/** localStorage key for terminal positions — the wall's one piece of durable layout. */
+/** localStorage keys — the wall's durable per-browser state: where each terminal sits, and the
+ *  names the person gave them. Both keyed by terminal id. */
 const POSITIONS_KEY = 'glyph3d.wall.positions';
+const NAMES_KEY = 'glyph3d.wall.names';
 const BORDER_STYLE = { color: 0x3b4352, width: 1.5, intensity: 1 };
 
 /**
@@ -52,12 +54,17 @@ function rectOf(grid) {
     };
 }
 
-function readPositions() {
-    try { return JSON.parse(localStorage.getItem(POSITIONS_KEY) || '{}') || {}; }
+function readStore(key) {
+    try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; }
     catch { return {}; }
 }
-function writePositions(map) {
-    try { localStorage.setItem(POSITIONS_KEY, JSON.stringify(map)); } catch { /* storage blocked: layout just won't persist */ }
+function writeStore(key, map) {
+    try { localStorage.setItem(key, JSON.stringify(map)); } catch { /* storage blocked: it just won't persist */ }
+}
+
+/** A shell title, shortened for naming: drop the `user@host:` prefix prompts put in front. */
+function shortTitle(title) {
+    return (title || '').replace(/^[^@\s]+@[^:\s]+:/, '').trim();
 }
 
 /**
@@ -86,7 +93,8 @@ export default class TerminalWall {
         this.focusedId = null;
         this.hoveredId = null;
         this._listeners = new Set();
-        this._positions = readPositions();
+        this._positions = readStore(POSITIONS_KEY);
+        this._names = readStore(NAMES_KEY);
         this._anim = null;      // { x, y, zoom } camera target while easing
         this._drag = null;      // active pointer gesture
         this._view = { w: 1, h: 1 };
@@ -203,7 +211,25 @@ export default class TerminalWall {
     /** Subscribe to state changes (connection, terminal set, focus). Returns an unsubscribe. */
     onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
 
-    /** @returns {{ connected: boolean, focusedId: string|null, terminals: {id:string, cols:number, rows:number, preview:string}[] }} */
+    /**
+     * A terminal's name: the one the person gave it, else its shell's title, else its id.
+     * @param {string} id @returns {string}
+     */
+    nameOf(id) {
+        return this._names[id] || shortTitle(this.ctx.terminals.get(id)?.windowTitle) || id;
+    }
+
+    /** Name a terminal; an empty name clears it back to the shell's title. */
+    rename(id, name) {
+        if (!this.ctx.terminals.has(id)) return false;
+        const n = (name || '').trim();
+        if (n) this._names[id] = n; else delete this._names[id];
+        writeStore(NAMES_KEY, this._names);
+        this._emit();
+        return true;
+    }
+
+    /** @returns {{ connected: boolean, focusedId: string|null, terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string}[] }} */
     snapshot() {
         return {
             connected: !!this.bridge.connected,
@@ -213,7 +239,7 @@ export default class TerminalWall {
                 const lines = g?.readText?.() ?? [];
                 let preview = '';
                 for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { preview = lines[i].trim(); break; } }
-                return { id, cols: g?.cols ?? 0, rows: g?.rows ?? 0, preview };
+                return { id, name: this.nameOf(id), named: !!this._names[id], cols: g?.cols ?? 0, rows: g?.rows ?? 0, preview };
             }),
         };
     }
@@ -308,6 +334,7 @@ export default class TerminalWall {
             grid.setBorderFlag(BORDER_FLAGS.EDGE, true);   // the always-visible frame
             for (const { role } of TerminalGrid.CONTROL_SPEC) grid.setControlVisible(role, false);
             grid.onResize(() => this._emit());
+            grid.onWindowTitle(() => this._emit());
             changed = true;
         }
         const before = this.order.length;
@@ -335,7 +362,7 @@ export default class TerminalWall {
     _remember(grid) {
         if (!grid.terminalId) return;
         this._positions[grid.terminalId] = { x: grid.position.x, y: grid.position.y };
-        writePositions(this._positions);
+        writeStore(POSITIONS_KEY, this._positions);
     }
 
     _emit() { for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } } }

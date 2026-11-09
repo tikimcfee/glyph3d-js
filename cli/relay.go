@@ -1148,12 +1148,18 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		if !strings.HasPrefix(session, "glyph-") {
 			continue
 		}
+		id := strings.TrimPrefix(session, "glyph-")
+		// Seed past EVERY existing session, adopted or not: a live adapter survives a relay
+		// restart, and a post-restart counter that only skipped re-adopted ids would mint
+		// `term-1` again — attaching a second client to someone's live session.
+		if n, e := strconv.ParseInt(strings.TrimPrefix(id, "term-"), 10, 64); e == nil && n > maxSeq {
+			maxSeq = n
+		}
 		// Already adopted? A session with an attached client has a live adapter — skip it.
 		clients, _ := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output()
 		if strings.TrimSpace(string(clients)) != "" {
 			continue
 		}
-		id := strings.TrimPrefix(session, "glyph-")
 		args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket}
 		if sz, e := exec.Command("tmux", "-L", tmuxSocket, "display-message", "-t", session, "-p", "#{pane_width} #{pane_height}").Output(); e == nil {
 			if f := strings.Fields(strings.TrimSpace(string(sz))); len(f) == 2 {
@@ -1170,11 +1176,8 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		log.Printf("[relay] recovered terminal '%s' (pid %d)", id, cmd.Process.Pid)
 		go func(c *exec.Cmd) { c.Wait() }(cmd)
 		recovered = append(recovered, id)
-		if n, e := strconv.ParseInt(strings.TrimPrefix(id, "term-"), 10, 64); e == nil && n > maxSeq {
-			maxSeq = n
-		}
 	}
-	// Don't let a post-restart seq reset later mint an id that collides with a recovered one.
+	// Don't let a post-restart seq reset later mint an id that collides with an existing session.
 	for {
 		cur := r.termSeq.Load()
 		if cur >= maxSeq || r.termSeq.CompareAndSwap(cur, maxSeq) {

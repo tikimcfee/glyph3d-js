@@ -50,6 +50,17 @@ export default class TerminalEmulator {
     }
 
     /**
+     * Subscribe to window-title changes (OSC 0/2) in the byte stream — behind tmux these are the
+     * pane titles tmux forwards with `set-titles` (cli/attach_unix.go). Returns an unsubscribe.
+     * @param {(title: string) => void} cb
+     * @returns {() => void}
+     */
+    onTitleChange(cb) {
+        const d = this._term.onTitleChange(cb);
+        return () => d.dispose();
+    }
+
+    /**
      * Feed raw VT bytes (a Uint8Array from the OUTPUT data-plane frame, or a string).
      * @param {Uint8Array|string} bytes
      */

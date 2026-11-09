@@ -283,6 +283,19 @@ export default class TerminalGrid extends FramedGlyphField {
         // and drives applyScreen. TerminalGrid stays a pure cell renderer; the
         // emulator is one source feeding it (file-slice / graphics are others, later).
         this._emulator = new TerminalEmulator(this.cols, this.rows, (screen) => this.applyScreen(screen));
+
+        /**
+         * The window title the terminal's program last set (OSC 0/2 — behind tmux, the pane title:
+         * the shell's prompt path or the running command). Empty until one arrives.
+         * @type {string}
+         */
+        this.windowTitle = '';
+        this._emulator.onTitleChange((title) => {
+            this.windowTitle = title;
+            if (this._titleListeners) {
+                for (const cb of this._titleListeners) { try { cb(title); } catch (e) { /* ignore tap errors */ } }
+            }
+        });
     }
 
     // ================================================================
@@ -654,6 +667,16 @@ export default class TerminalGrid extends FramedGlyphField {
         if (!this._byteListeners) this._byteListeners = new Set();
         this._byteListeners.add(cb);
         return () => { this._byteListeners?.delete(cb); };
+    }
+
+    /**
+     * Subscribe to window-title changes (see windowTitle). Returns an unsubscribe fn.
+     * @param {(title: string) => void} cb
+     */
+    onWindowTitle(cb) {
+        if (!this._titleListeners) this._titleListeners = new Set();
+        this._titleListeners.add(cb);
+        return () => { this._titleListeners?.delete(cb); };
     }
 
     // onResize(cb) — subscribe to size-change taps (fires after resize with the new cols/rows; a

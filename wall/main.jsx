@@ -76,7 +76,7 @@ function Chrome({ wall }) {
         </span>
       </div>
       <div style={styles.hint}>
-        {state.focusedId ? `typing → ${state.focusedId}` : 'click a terminal to type'}
+        {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
         {' · '}⌘[ ⌘] cycle · ⌘↵ frame/overview · ⌘K find · drag border to resize · drag to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}
       </div>
