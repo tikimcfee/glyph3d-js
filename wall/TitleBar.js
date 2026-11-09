@@ -62,6 +62,11 @@ export default class TitleBar extends THREE.Object3D {
         this._key = '';   // re-truncate on the next layout
     }
 
+    /** Show or hide the name text (a map label carries the name when the bar is too small). */
+    setNameVisible(on) {
+        this.label.visible = !!on;
+    }
+
     setFocused(on) {
         if (on === this._focused) return;
         this._focused = on;

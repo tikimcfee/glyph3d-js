@@ -11,6 +11,7 @@ import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncodi
 import registerTerminalCommands from '../app/commands/handlers/terminalCommands.js';
 import { wheelScrollCommand } from '../app/client/surfaceInteractions.js';
 import TitleBar from './TitleBar.js';
+import MapLabels from './MapLabels.js';
 import {
     freeFlowSlot, fitRect, unionRect, edgesAt, edgeCursor, cycle, resizeFromDrag, FLOW_GAP,
 } from './wallLayout.js';
@@ -25,6 +26,10 @@ const MIN_SIZE = { minCols: 20, minRows: 5 };
 const EASE_RATE = 14;
 /** Framing a terminal never magnifies its rows past this line height (CSS px): fit, but capped. */
 const FRAME_MAX_LINE_PX = 28;
+/** A terminal narrower than this on screen (CSS px) shows its name as a map label instead of in
+ *  its bar; wider than MAP_LABEL_OFF_PX, back in the bar. The band between is hysteresis. */
+const MAP_LABEL_ON_PX = 140;
+const MAP_LABEL_OFF_PX = 170;
 /** Zoom clamp, CSS px per world unit. Plain floats are ample at this range. */
 const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 200;
@@ -96,6 +101,8 @@ export default class TerminalWall {
         this._listeners = new Set();
         /** Each terminal's title bar, by id. @type {Map<string, TitleBar>} */
         this._bars = new Map();
+        /** Terminals whose name is currently a map label (vs in the bar). @type {Set<string>} */
+        this._mapMode = new Set();
         this._positions = readStore(POSITIONS_KEY);
         this._names = readStore(NAMES_KEY);
         this._anim = null;      // { x, y, zoom } camera target while easing
@@ -163,6 +170,7 @@ export default class TerminalWall {
         window.addEventListener('pointerup', this._handlers.pointerup);
         window.addEventListener('keydown', this._handlers.keydown, true);
         document.addEventListener('paste', this._handlers.paste);
+        this.mapLabels = new MapLabels(this.canvas.parentElement, (id) => this.focus(id, { frame: true }));
         this.bridge.connect();
     }
 
@@ -177,6 +185,7 @@ export default class TerminalWall {
         document.removeEventListener('paste', this._handlers.paste);
         this.ctx.registry.removeChangeListener(this._onRegistry);
         this.bridge.disconnect();
+        this.mapLabels.dispose();
         this.farLod.dispose();
         this.glyphBatch.dispose();   // its scene hook chains after the panel batch's: unhook it first
         this.panelBatch.dispose();
@@ -189,7 +198,45 @@ export default class TerminalWall {
         this._view.h = size.height;
         this._stepCamera(dt);
         this._layoutBars();
+        this._updateMapLabels();
         this.farLod.update(this.camera, size.height);
+    }
+
+    /** A world rect → screen box (CSS px, y down, canvas-relative) through this frame's camera. */
+    _toScreenBox(r) {
+        const c = this.camera, w = this._view.w, h = this._view.h;
+        return {
+            left: w / 2 + (r.minX - c.position.x) * c.zoom, right: w / 2 + (r.maxX - c.position.x) * c.zoom,
+            top: h / 2 - (r.maxY - c.position.y) * c.zoom, bottom: h / 2 - (r.minY - c.position.y) * c.zoom,
+        };
+    }
+
+    /**
+     * Map-style names: a terminal too narrow on screen for its bar to carry its name gets a
+     * constant-size label instead, placed so no two labels overlap, with a trace line to its border
+     * when detached. Priority: focused, hovered, then arrival order. Off-screen terminals get none.
+     */
+    _updateMapLabels() {
+        if (!this.mapLabels) return;
+        const view = { w: this._view.w, h: this._view.h, margin: 4, gap: 4 };
+        const boxes = new Map();
+        for (const id of this.order) {
+            const b = this._toScreenBox(this._windowRect(id));
+            if (b.right < 0 || b.left > view.w || b.bottom < 0 || b.top > view.h) continue;
+            boxes.set(id, b);
+            const wpx = b.right - b.left;
+            if (wpx < MAP_LABEL_ON_PX) this._mapMode.add(id);
+            else if (wpx > MAP_LABEL_OFF_PX) this._mapMode.delete(id);
+        }
+        const rank = (id) => (id === this.focusedId ? 0 : id === this.hoveredId ? 1 : 2);
+        const items = [];
+        for (const id of this.order) {
+            const on = this._mapMode.has(id) && boxes.has(id);
+            this._bars.get(id)?.setNameVisible(!this._mapMode.has(id));
+            if (on) items.push({ id, name: this.nameOf(id), focused: id === this.focusedId, target: boxes.get(id) });
+        }
+        items.sort((a, b) => rank(a.id) - rank(b.id));
+        this.mapLabels.update(items, view, [...boxes.values()]);
     }
 
     /** Keep every title bar on its terminal's top edge, named, at this frame's zoom (cheap when
