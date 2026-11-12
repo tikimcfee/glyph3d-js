@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { chordLabel } from './chord.js';
 
 /** Subsequence match score: lower is better, null when `q` isn't a subsequence of `s`. */
 function score(q, s) {
@@ -15,17 +16,23 @@ function score(q, s) {
 /**
  * The floating find-by-name palette. FIND mode: type to filter terminals (by name, id and last
  * screen line), ↑/↓ to choose, Enter to focus + frame, Esc to close; actions ride along (new
- * terminal, fit all, rename the focused terminal). RENAME mode: the input edits the focused
- * terminal's name — Enter saves, an empty name goes back to the shell's title.
+ * terminal, fit all, rename the focused terminal). RENAME mode: the input edits the name of the
+ * terminal that was focused when rename began (focus may move meanwhile) — Enter saves, an empty
+ * name goes back to the shell's title; if that terminal goes away, rename mode ends.
  */
 export default function Palette({ wall, state, onClose }) {
   const [mode, setMode] = useState('find');
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
+  const [renameId, setRenameId] = useState(null);
   const inputRef = useRef(null);
   useEffect(() => { inputRef.current?.focus(); }, [mode]);
 
   const focused = state.terminals.find((t) => t.id === state.focusedId) || null;
+  const target = mode === 'rename' ? state.terminals.find((t) => t.id === renameId) || null : null;
+  useEffect(() => {
+    if (mode === 'rename' && !target) { setMode('find'); setQuery(''); setIndex(0); }
+  }, [mode, target]);
 
   const items = useMemo(() => {
     if (mode !== 'find') return [];
@@ -38,11 +45,11 @@ export default function Palette({ wall, state, onClose }) {
       .filter((t) => t.s != null)
       .sort((x, y) => x.s - y.s);
     const actions = [
-      { kind: 'action', id: 'spawn', label: '+ new terminal', detail: '⌘⇧↵', run: () => { wall.spawn(); onClose(); } },
-      { kind: 'action', id: 'fit', label: 'fit all', detail: '⌘0', run: () => { wall.fitAll(); onClose(); } },
+      { kind: 'action', id: 'spawn', label: '+ new terminal', detail: chordLabel(['↵'], { shift: true }), run: () => { wall.spawn(); onClose(); } },
+      { kind: 'action', id: 'fit', label: 'fit all', detail: chordLabel(['0']), run: () => { wall.fitAll(); onClose(); } },
       focused && {
         kind: 'action', id: 'rename', label: `rename "${focused.name}"…`, detail: 'focused terminal',
-        run: () => { setMode('rename'); setQuery(focused.named ? focused.name : ''); },
+        run: () => { setRenameId(focused.id); setMode('rename'); setQuery(focused.named ? focused.name : ''); },
       },
     ].filter(Boolean).filter((a) => score(query, a.label) != null);
     return [...terms, ...actions];
@@ -57,7 +64,7 @@ export default function Palette({ wall, state, onClose }) {
   const onKeyDown = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
     if (mode === 'rename') {
-      if (e.key === 'Enter') { e.preventDefault(); wall.rename(focused.id, query); onClose(); }
+      if (e.key === 'Enter' && target) { e.preventDefault(); wall.rename(target.id, query); onClose(); }
       return;
     }
     if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((i) => Math.min(items.length - 1, i + 1)); }
@@ -68,13 +75,13 @@ export default function Palette({ wall, state, onClose }) {
   return (
     <div style={styles.scrim} onMouseDown={onClose}>
       <div style={styles.box} onMouseDown={(e) => e.stopPropagation()}>
-        {mode === 'rename' && <div style={styles.caption}>rename {focused?.id} — empty uses the shell's title</div>}
+        {target && <div style={styles.caption}>rename {target.id} — empty uses the shell's title</div>}
         <input
           ref={inputRef}
           value={query}
           onChange={(e) => { setQuery(e.target.value); setIndex(0); }}
           onKeyDown={onKeyDown}
-          placeholder={mode === 'rename' ? (focused?.name ?? '') : 'find a terminal…'}
+          placeholder={target ? target.name : 'find a terminal…'}
           style={styles.input}
         />
         {mode === 'find' && (
