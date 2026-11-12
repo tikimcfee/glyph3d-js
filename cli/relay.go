@@ -33,6 +33,7 @@ type Relay struct {
 	displayBytes  chan []byte     // terminal OUTPUT binary frames (blocking send = lossless backpressure)
 	displayFrames chan []byte     // sensor frames (drop-oldest — freshness beats completeness)
 	displayEvents chan []byte     // agentEvents/* pushes (lossless, waits for room up to a deadline)
+	displayStatus chan []byte     // termd/status notifications (one slot, latest wins: a state, not a log)
 	displayDone   chan struct{}   // closed on display teardown — unblocks writer + blocked byte senders
 	displayGen    uint64          // the connected display's id (agentEvents subscriptions are per display)
 	nextDisplay   uint64          // display id source (guarded by mu)
@@ -52,6 +53,9 @@ type Relay struct {
 	logSubs       map[string]bool // controller ids subscribed via log.follow (guarded by mu)
 	readoptMu     sync.Mutex
 	readopted     map[string][]time.Time // when each terminal's dead adapter was replaced (readoptOrphan)
+	// termdStatus follows the termd namespace's status document for the display (termdstatus.go);
+	// nil until the server starts it.
+	termdStatus *termdStatusFollower
 	// adapters counts this relay's live adapters per terminal id. While termd's brain restarts,
 	// every adapter is disconnected and termd lists each terminal with no owner; a terminal whose
 	// adapter is alive (riding the restart) is not vacant, so terminal.recover leaves it.
@@ -234,13 +238,49 @@ func (r *Relay) pushAgentEvent(display uint64, method string, params any, wait t
 	}
 }
 
-// startDisplayWriter serializes all writes to the one display WebSocket, draining four
+// pushTermdStatus puts one termd/status notification on the display's status plane: a single
+// slot where the newest replaces one not yet written (each carries the whole state, so a display
+// that is behind skips straight to the latest). Never blocks.
+func (r *Relay) pushTermdStatus(p termdStatusParams) {
+	msg, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "termd/status", "params": p})
+	if err != nil {
+		return
+	}
+	r.mu.RLock()
+	ch := r.displayStatus
+	r.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	for range 2 {
+		select {
+		case ch <- msg:
+			return
+		default:
+		}
+		select {
+		case <-ch: // the one waiting is older: this one replaces it
+		default:
+		}
+	}
+}
+
+// startTermdStatus starts the relay's status connection to its termd namespace (termdstatus.go).
+func (r *Relay) startTermdStatus() {
+	r.termdStatus = newTermdStatusFollower(termdNS, r.pushTermdStatus, func() {
+		log.Printf("[relay] termd's brain answers again: re-adopting terminals whose adapters gave up")
+		r.recoverTerminals(func(any) {})
+	})
+	go r.termdStatus.Run()
+}
+
+// startDisplayWriter serializes all writes to the one display WebSocket, draining five
 // queues with CONTROL PRIORITY: control (JSON responses + RPC binary result frames) is
-// always flushed before bulk terminal bytes, sensor frames or agent-event lines, so a
-// flood of output never head-of-line blocks interactive control traffic. Exits when the display tears down
+// always flushed before bulk terminal bytes, sensor frames, agent-event lines or termd status,
+// so a flood of output never head-of-line blocks interactive control traffic. Exits when the display tears down
 // (`done`) or a write fails. The data channels are never closed (abandoned to GC) so a
 // controller blocked in sendBytesToDisplay can't hit a send-on-closed panic.
-func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, framesCh chan []byte, eventsCh chan []byte, done chan struct{}) {
+func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, bytesCh chan []byte, framesCh chan []byte, eventsCh chan []byte, statusCh chan []byte, done chan struct{}) {
 	write := func(m displayMsg) bool {
 		mt := websocket.TextMessage
 		if m.binary {
@@ -282,6 +322,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 			case data := <-eventsCh:
 				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
 					log.Printf("[relay] display event-write error: %v", err)
+					return
+				}
+			case data := <-statusCh:
+				if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("[relay] display status-write error: %v", err)
 					return
 				}
 			case <-done:
@@ -349,6 +394,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				// frames at 30fps is ~130ms; deeper would just buffer staleness.
 				framesCh := make(chan []byte, 4)
 				eventsCh := make(chan []byte, 16) // agentEvents batches (≤256 KB each)
+				statusCh := make(chan []byte, 1)  // termd/status: the latest only
 				done := make(chan struct{})
 				r.nextDisplay++
 				displayGen = r.nextDisplay
@@ -356,6 +402,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.displayBytes = bytesCh
 				r.displayFrames = framesCh
 				r.displayEvents = eventsCh
+				r.displayStatus = statusCh
 				r.displayDone = done
 				r.displayGen = displayGen
 				role = "display"
@@ -369,7 +416,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.mu.Unlock()
 
 				// Start the single writer goroutine for this display connection
-				r.startDisplayWriter(ws, ch, bytesCh, framesCh, eventsCh, done)
+				r.startDisplayWriter(ws, ch, bytesCh, framesCh, eventsCh, statusCh, done)
 				if r.fs != nil && r.fs.agents != nil {
 					r.fs.agents.DisplayConnected(displayGen)
 				}
@@ -386,6 +433,10 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"sources":     srcs,
 				})
 				r.sendToDisplay(ack)
+				// termd's state as the relay last saw it, so a (re)loaded page renders at once.
+				if r.termdStatus != nil {
+					r.pushTermdStatus(r.termdStatus.Params())
+				}
 				continue
 			} else if kind, isSource := parseSourceHandshake(raw); isSource {
 				// A sensor device: upstream-only, many allowed. Unlike DISPLAY there
@@ -544,6 +595,14 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					continue
 				}
 				switch {
+				case rpc.Method == "termd/status":
+					// The last notification, as the request's result (the push carries the same).
+					var params any = nil
+					if r.termdStatus != nil {
+						params = r.termdStatus.Params()
+					}
+					resp, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(rpc.ID), "result": params})
+					r.sendToDisplay(resp)
 				case strings.HasPrefix(rpc.Method, "lsp/"):
 					if r.lsp != nil {
 						r.lsp.Handle(rpc.Method, rpc.ID, rpc.Params, r.sendToDisplay)
@@ -620,6 +679,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		r.displayBytes = nil
 		r.displayFrames = nil
 		r.displayEvents = nil
+		r.displayStatus = nil
 		r.displayDone = nil
 		r.displayGen = 0
 		r.mu.Unlock()
@@ -895,6 +955,8 @@ var relayVerbs = map[string]bool{
 	"source.list": true,
 	// Recording sensor frames is relay state too (record.go): it records with no display.
 	"source.record": true,
+	// termd's status as the relay's status connection last saw it (termdstatus.go): page-less.
+	"termd.status": true,
 }
 
 // splitRelayVerb splits a raw controller command into (verb, rest) when the
@@ -933,6 +995,13 @@ func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 	}
 
 	switch verb {
+	case "termd.status":
+		if r.termdStatus == nil {
+			fail(fmt.Errorf("this relay has no termd status connection"))
+			return
+		}
+		p := r.termdStatus.Params()
+		reply(termdStatusText(p), p)
 	case "source.record":
 		r.recordCommand(rest, reply, fail)
 	case "source.list":
@@ -1106,6 +1175,9 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []str
 		return
 	}
 	tc.Close()
+	if r.termdStatus != nil {
+		r.termdStatus.Kick() // the daemon may have just started: follow it now, not at the next redial
+	}
 	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
 	pid, err := r.startAdapter(id, cols, rows, argv)
 	if err != nil {
@@ -1396,6 +1468,7 @@ func RunServer(cfg ServerConfig) error {
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
+	relay.startTermdStatus()
 
 	// Wire the fs/writeFile notify hook so successful writes echo an
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
@@ -1504,6 +1577,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay.fs = fsHandler
 	relay.port = port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
+	relay.startTermdStatus()
 	if fsHandler != nil {
 		relay.wireFS(fsHandler)
 	}

@@ -23,7 +23,11 @@
  *   - `g3d upgrade` to a copy of the binary: the adapters reconnect at once, grids stay, typing works;
  *   - termd's holder SIGKILLed (every shell dies with it): the adapter says LOST termd in the relay
  *     log and closes the grid, terminal.recover lists nothing live (not an error), and the next
- *     spawn starts a fresh daemon.
+ *     spawn starts a fresh daemon;
+ *   - termd's status reaches the display with no per-terminal query: a termd/status push with each
+ *     relay state the run passes through (ok with termd's document listing the terminals, one at
+ *     registration after a relay restart, restarting across the brain crash, lost when the holder
+ *     dies), the display's own termd/status request, and the CLI's page-less termd.status.
  * Everything it started (relay, daemons, shells) is stopped on exit. Exit 1 on any FAIL.
  */
 import { execFileSync, spawn } from 'node:child_process';
@@ -126,6 +130,10 @@ async function waitFor(fn, ms, what) {
     while (Date.now() < until) { if (await fn()) return true; await sleep(25); }
     throw new Error(`timed out waiting for ${what}`);
 }
+/** The termd/status pushes the display got, from index `from` on. */
+const statuses = (from = 0) => events.slice(from).filter((e) => e.jsonrpc === '2.0' && e.method === 'termd/status').map((e) => e.params);
+const statusSeen = (from, fn, ms = 10_000, what = 'a termd/status push') =>
+    waitFor(() => statuses(from).find(fn), ms, what).then(() => statuses(from).find(fn), () => null);
 const relayEvent = async (msg, event, ms = 8000) => {
     const from = events.length;
     display.send(JSON.stringify(msg));
@@ -160,6 +168,22 @@ try {
     type(A, 'echo hello-$((6*7))\r');
     ok(await screenHas(A, 'hello-42'), 'typing reaches the shell and its echo reaches the display');
     ok(term(A).sizes[0]?.join('x') === '80x24', `OUTPUT frames carry the display's size (${term(A).sizes[0]?.join('x')})`);
+
+    // ── termd's status reaches the display: pushed, asked for, and page-less ──
+    {
+        const st = await statusSeen(0, (p) => p.relay.state === 'ok' && p.status?.terminals?.some((t) => t.id === A), 10_000);
+        ok(!!st, `a termd/status push says ok with termd's document listing ${A} (${st ? `${st.status.daemon.version}, ns ${st.relay.ns}, bundled ${st.relay.bundled}` : 'none'})`);
+        ok(statuses(0).some((p) => p.relay.state === 'absent'), 'before the first spawn it read absent (no daemon yet)');
+        ok(!!st && st.relay.bundled === st.status.daemon.version, `the relay ships the termd it runs (${st?.relay.bundled})`);
+        const id = 777;
+        display.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'termd/status', params: {} }));
+        let reply = null;
+        await waitFor(() => (reply = events.find((e) => e.jsonrpc === '2.0' && e.id === id)), 3000, 'the termd/status reply').catch(() => {});
+        ok(reply?.result?.relay?.state === 'ok' && reply.result.status?.terminals?.length >= 1, "the display's termd/status request answers with the last notification");
+        let cli = '';
+        try { cli = execFileSync(BIN, ['--port', String(PORT), 'termd.status'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { cli = `${e.stdout ?? ''}${e.message}`; }
+        ok(/termd ok · ns tr · g3d-termd\/\S+ · brain \d+ gen 1 · 1 terminal/.test(cli) && cli.includes(A), `the CLI's termd.status answers page-less (${cli.split('\n')[0]})`);
+    }
 
     // ── a spawn with no argv: the account's login shell, in the served root, termd's environment ──
     const sd = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24 }, 'terminal.spawning');
@@ -218,7 +242,10 @@ try {
     for (const id of [A, W]) { term(id).owner = null; term(id).text = ''; }
     ok(termdPid(termd.dir, NS) === daemon1, 'termd outlives the relay');
     await startRelay();
+    const evAtRestart = events.length;
     await connectDisplay();
+    const pushed = await statusSeen(evAtRestart, (p) => p.relay.state === 'ok', 10_000);
+    ok(!!pushed, 'a restarted relay pushes termd/status to the display that registers (ok, its document)');
     const rec = await relayEvent({ relay: 'terminal.recover' }, 'terminal.recovered');
     ok(rec.ids?.includes(A) && rec.live?.includes(A), `terminal.recover re-adopts ${A} (ids ${JSON.stringify(rec.ids)}, live ${JSON.stringify(rec.live)})`);
     await waitFor(() => term(A).owner, 8000, 'the new adapter to re-create the grid');
@@ -254,6 +281,7 @@ try {
     ok(!!brain1 && brain1 !== daemon1, `found termd's brain (pid ${brain1}) beside its holder (pid ${daemon1})`);
     const closesBefore = term(A).closes + term(s2.id).closes;
     const logAtBrain = relayLog.length;
+    const evAtBrain = events.length;
     term(A).text = '';
     if (brain1) process.kill(brain1, 'SIGKILL');
     // While no brain answers, the list is unknown: recover says so, or lists A once a brain is back.
@@ -267,6 +295,9 @@ try {
     ok(term(A).closes + term(s2.id).closes === closesBefore, 'no grid closed across the brain restart');
     ok(!/LOST termd/.test(relayLog.slice(logAtBrain)), 'the relay log has no termd loss for a brain restart');
     ok(termdPid(termd.dir, NS) === daemon1, 'the holder (and every shell) outlived its brain');
+    ok(!!(await statusSeen(evAtBrain, (p) => p.relay.state === 'restarting', 5000)), 'termd/status said restarting while the brain was down');
+    const gen2 = await statusSeen(evAtBrain, (p) => p.relay.state === 'ok' && p.status?.daemon.brain.generation === 2, 10_000);
+    ok(gen2?.status.daemon.brain.restarts.crash === 1, `...then ok on generation 2, the crash counted (${JSON.stringify(gen2?.status.daemon.brain.restarts)})`);
 
     // ── g3d upgrade: a planned brain replacement, reconnected at once ──
     const next = path.join(termd.dir, 'g3d-termd-next');
@@ -287,11 +318,14 @@ try {
 
     // ── termd's holder dies (every shell with it): loud, and the next spawn starts a fresh daemon ──
     const logAtCrash = relayLog.length;
+    const evAtCrash = events.length;
     process.kill(daemon1, 'SIGKILL');
     await waitFor(() => term(A).closes > 0 && term(s2.id).closes > 0, 8000, 'the adapters to close their grids').catch(() => {});
     ok(term(A).closes > 0 && term(s2.id).closes > 0, 'every adapter closes its grid when termd dies');
     await waitFor(() => /LOST termd/.test(relayLog.slice(logAtCrash)), 3000, 'the loss in the relay log').catch(() => {});
     ok(/\[attach\] term-1: LOST termd \(namespace "tr"\)/.test(relayLog.slice(logAtCrash)), 'the relay log names the loss: "[attach] term-1: LOST termd (namespace "tr")…"');
+    const lost = await statusSeen(evAtCrash, (p) => p.relay.state === 'lost', 10_000);
+    ok(!!lost && lost.status === null, 'termd/status says lost when the holder dies with terminals in it (no document)');
     const rec2 = await relayEvent({ relay: 'terminal.recover' }, 'terminal.recovered');
     ok(!rec2.error && Array.isArray(rec2.live) && rec2.live.length === 0, `after the crash nothing is live, and that is not an error (${JSON.stringify(rec2)})`);
     const s3 = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: ['sh'] }, 'terminal.spawning');

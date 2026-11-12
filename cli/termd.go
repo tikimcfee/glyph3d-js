@@ -54,7 +54,7 @@ const (
 	termdEvent      = 0x84
 	termdRepaint    = 0x85
 	termdErrorFrame = 0xFF
-	// The largest payload 1.0 allows.
+	// The largest payload 1.x allows.
 	termdMaxFrame = 16 << 20
 )
 
@@ -214,7 +214,7 @@ func dialTermd(ns string) (*termdClient, error) {
 		return nil, fmt.Errorf("termd at %s: %w", path, err)
 	}
 	r := bufio.NewReaderSize(conn, 256<<10)
-	hello, _ := json.Marshal(map[string]any{"proto": []int{1, 0}, "client": "glyph3d-cli/" + Version})
+	hello, _ := json.Marshal(map[string]any{"proto": []int{1, 1}, "client": "glyph3d-cli/" + Version})
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := conn.Write(encodeTermdFrame(termdHello, 0, hello)); err != nil {
 		conn.Close()
