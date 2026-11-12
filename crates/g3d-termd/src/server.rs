@@ -1,61 +1,257 @@
-//! The socket side: accepting connections, the handshake, routing requests and input to
-//! owner threads. No terminal state lives here (DESIGN.md, "Threading").
+//! The brain: its start (the hold link's handshake, restoring every terminal), the socket side
+//! (accepting connections, the handshake, routing requests and input to owner threads), and
+//! the upgrade handoff. No terminal state lives here (DESIGN.md, "Threading").
 
+use crate::hold::{self, Exit, Hold};
 use crate::out::ConnOut;
-use crate::owner::{self, Cmd, CreateSpec, Registry, TermOp, TermRef, reply_err, reply_ok};
+use crate::owner::{self, Cmd, CreateSpec, Registry, Restored, TermOp, TermRef, reply_err, reply_ok};
 use g3d_wire::frame::{self, Frame, FrameDecoder, FrameError, ty};
 use g3d_wire::msg::*;
 use rustix::process::Signal;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, watch};
 
+/// The emulator: libghostty's version.
 pub const ENGINE: &str = "libghostty-vt/1.0.1";
+/// What a snapshot restores into: the engine plus its snapshot format (outside libghostty's ABI
+/// promise, so a snapshot restores only into exactly this).
+pub const SNAPSHOT_ENGINE: &str = "libghostty-vt/1.0.1 snapshot/1";
+
+/// Test hook: the brain's heartbeat to the holder stops (the watchdog test).
+pub static WEDGED: AtomicBool = AtomicBool::new(false);
 
 pub struct Server {
     pub reg: Arc<Registry>,
-    pub socket: PathBuf,
+    hold: Arc<Hold>,
     conns: AtomicUsize,
     next_conn: AtomicU64,
     create_lock: tokio::sync::Mutex<()>,
     uid: u32,
+    /// Every open connection's queue, for the upgrade's `ERROR restart`.
+    outs: Mutex<HashMap<u64, Arc<ConnOut>>>,
+    accepting: watch::Sender<bool>,
+    /// The running upgrade's inbox for the holder's `candidate`, `commit`, `upgrade_abort`.
+    upgrade_tx: Mutex<Option<mpsc::UnboundedSender<Value>>>,
+    upgrade_deadline: Duration,
 }
 
-/// Removes the socket and exits the process. Terminals must already be gone.
-pub fn exit_daemon(socket: &PathBuf, why: &str) -> ! {
+/// Leaves: the holder ends the namespace (removing the socket) once this brain has gone.
+fn end_namespace(hold: &Hold, why: &str) -> ! {
     crate::log(&format!("exiting: {why}"));
-    let _ = std::fs::remove_file(socket);
+    hold.send(&json!({"m": "exit_namespace", "why": why}), &[]);
     std::process::exit(0);
 }
 
-pub async fn run(listener: std::os::unix::net::UnixListener, reg: Arc<Registry>, idle_exit: Duration, socket: PathBuf) {
+/// `g3d-termd --brain`: take what the holder hands over, restore every terminal, serve.
+pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, log_path: PathBuf) -> ! {
+    g3d_hold::log::set_role("brain");
+    let _ = log_path;
+    // SAFETY: plain signal dispositions, set before any other thread exists.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: PR_SET_NAME with a NUL-terminated name of at most 16 bytes.
+        unsafe { libc::prctl(libc::PR_SET_NAME, c"g3d-termd-brain".as_ptr()) };
+        // The restartable process is the one the kernel's OOM killer should pick.
+        let cur: i32 =
+            std::fs::read_to_string("/proc/self/oom_score_adj").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let want = (cur + args.brain_oom_score_adj).clamp(-1000, 1000);
+        if let Err(e) = std::fs::write("/proc/self/oom_score_adj", want.to_string()) {
+            crate::log(&format!("oom_score_adj {want}: {e}"));
+        }
+    }
+    let test_hooks = std::env::var("G3D_TERMD_TEST_HOOKS").as_deref() == Ok("1");
+    if test_hooks
+        && let Ok(p) = std::env::var("G3D_TERMD_TEST_BRAIN_FAIL_FILE")
+        && std::path::Path::new(&p).exists()
+    {
+        crate::log(&format!("test hook: {p} exists; this brain exits at start"));
+        std::process::exit(3);
+    }
+    let engine = match std::env::var("G3D_TERMD_TEST_ENGINE_FILE") {
+        Ok(p) if test_hooks => {
+            std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into())
+        }
+        _ => SNAPSHOT_ENGINE.into(),
+    };
+    let mut start = hold::start(fd, &engine);
+    let w = &start.hold.welcome;
+    crate::log(&format!(
+        "{} brain (generation {}{}) for holder pid {}; {} terminal(s) to restore",
+        crate::VERSION,
+        w.generation,
+        if w.candidate { ", upgrade candidate" } else { "" },
+        w.holder_pid,
+        start.terms.len()
+    ));
+    let candidate = w.candidate;
+    let reg = Registry::new(
+        owner::Config {
+            ns,
+            socket: socket.clone(),
+            default_scrollback: args.scrollback.min(args.max_scrollback),
+            max_scrollback: args.max_scrollback,
+            test_hooks,
+            snapshot_interval: Duration::from_millis(args.snapshot_interval_ms),
+            kill_grace: Duration::from_secs(args.kill_grace),
+            engine,
+        },
+        start.hold.clone(),
+        start.marks.clone(),
+    );
+    let terms = std::mem::take(&mut start.terms);
+    let exited: Vec<String> = terms.iter().filter(|t| t.exit.is_some()).map(|t| t.id.clone()).collect();
+    let restored = owner::restore(&reg, terms);
+    let mut counts = [0usize; 3];
+    let mut unseen_total = 0u64;
+    let mut not_exact = Vec::new();
+    for (id, r) in &restored {
+        match r {
+            Ok((how, unseen)) => {
+                counts[*how as usize] += 1;
+                unseen_total += unseen;
+                if *how != Restored::Exact && !exited.contains(id) {
+                    not_exact.push(id.clone());
+                }
+            }
+            Err(e) => {
+                crate::log(&format!("terminal {id}: could not be restored: {e}"));
+                not_exact.push(id.clone());
+            }
+        }
+    }
+    if !restored.is_empty() {
+        crate::log(&format!(
+            "restored {} terminal(s): {} exact, {} from snapshots, {} blank; {unseen_total} B unseen",
+            restored.len(),
+            counts[Restored::Exact as usize],
+            counts[Restored::Snapshot as usize],
+            counts[Restored::Blank as usize]
+        ));
+    }
+    if candidate {
+        if !not_exact.is_empty() {
+            let why = format!("terminals not handed over exactly: {}", not_exact.join(", "));
+            crate::log(&format!("upgrade candidate refuses: {why}"));
+            start.hold.send(&json!({"m": "upgrade_abort", "why": why}), &[]);
+            std::process::exit(1);
+        }
+        start.hold.send(&json!({"m": "ready"}), &[]);
+    }
+    let to_owner = {
+        let reg = reg.clone();
+        move |h: u32, e: Exit| {
+            if let Some(t) = reg.by_handle(h) {
+                let _ = t.send(Cmd { conn: 0, out: ConnOut::new(), req: 0, op: TermOp::Exited(e), done: None });
+            }
+        }
+    };
+    start.wait_go(&to_owner);
+    reg.go();
+    let listener = std::os::unix::net::UnixListener::from(std::mem::replace(&mut start.listener, dup_null()));
+    let (hold, ctl) = start.spawn_reader(Box::new(to_owner));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("termd-io")
+        .enable_all()
+        .build()
+        .unwrap_or_else(|e| {
+            crate::log(&format!("runtime: {e}"));
+            std::process::exit(1)
+        });
+    let heartbeat = if args.brain_watchdog == 0 {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_millis((args.brain_watchdog * 1000 / 6).clamp(100, 5000))
+    };
+    rt.block_on(run(
+        listener,
+        reg,
+        hold,
+        ctl,
+        Duration::from_secs(args.idle_exit),
+        heartbeat,
+        Duration::from_secs(args.upgrade_deadline),
+    ));
+    std::process::exit(0);
+}
+
+fn dup_null() -> rustix::fd::OwnedFd {
+    rustix::fs::open("/dev/null", rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
+        .expect("/dev/null")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run(
+    listener: std::os::unix::net::UnixListener,
+    reg: Arc<Registry>,
+    hold: Arc<Hold>,
+    mut ctl: hold::Ctl,
+    idle_exit: Duration,
+    heartbeat: Duration,
+    upgrade_deadline: Duration,
+) {
     listener.set_nonblocking(true).expect("nonblocking listener");
     let listener = tokio::net::UnixListener::from_std(listener).expect("tokio listener");
+    let (accepting, mut accepting_rx) = watch::channel(true);
     let srv = Arc::new(Server {
         reg,
-        socket,
+        hold,
         conns: AtomicUsize::new(0),
         next_conn: AtomicU64::new(1),
         create_lock: tokio::sync::Mutex::new(()),
         uid: rustix::process::getuid().as_raw(),
+        outs: Mutex::new(HashMap::new()),
+        accepting,
+        upgrade_tx: Mutex::new(None),
+        upgrade_deadline,
     });
 
-    // A clean shutdown: every terminal is killed and reaped, then the socket goes.
+    // The heartbeat: the holder's watchdog aborts a brain that goes quiet.
     {
         let srv = srv.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-            let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
-            let which = tokio::select! { _ = term.recv() => "SIGTERM", _ = int.recv() => "SIGINT" };
-            crate::log(&format!("{which}: killing {} terminal(s)", srv.reg.len()));
-            owner::kill_all(&srv.reg).await;
-            exit_daemon(&srv.socket, which);
+            loop {
+                if !WEDGED.load(SeqCst) {
+                    srv.hold.send(&json!({"m": "alive"}), &[]);
+                }
+                tokio::time::sleep(heartbeat).await;
+            }
+        });
+    }
+
+    // The holder's word: shutdown (SIGTERM to the holder), and an upgrade's steps.
+    {
+        let srv = srv.clone();
+        tokio::spawn(async move {
+            while let Some(m) = ctl.recv().await {
+                match g3d_hold::link::name(&m) {
+                    "shutdown" => {
+                        crate::log(&format!(
+                            "the holder is ending the namespace: killing {} terminal(s)",
+                            srv.reg.len()
+                        ));
+                        owner::kill_all(&srv.reg).await;
+                        end_namespace(&srv.hold, "SIGTERM");
+                    }
+                    "candidate" | "commit" | "upgrade_abort" => {
+                        if let Some(tx) = srv.upgrade_tx.lock().unwrap().as_ref() {
+                            let _ = tx.send(m);
+                        }
+                    }
+                    other => crate::log(&format!("hold link: unexpected {other:?}")),
+                }
+            }
         });
     }
 
@@ -68,7 +264,7 @@ pub async fn run(listener: std::os::unix::net::UnixListener, reg: Arc<Registry>,
                 if srv.reg.len() == 0 && srv.conns.load(SeqCst) == 0 {
                     let since = *idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= idle_exit {
-                        exit_daemon(&srv.socket, &format!("no terminals and no connections for {idle_exit:?}"));
+                        end_namespace(&srv.hold, &format!("no terminals and no connections for {idle_exit:?}"));
                     }
                 } else {
                     idle_since = None;
@@ -78,19 +274,27 @@ pub async fn run(listener: std::os::unix::net::UnixListener, reg: Arc<Registry>,
     }
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let srv = srv.clone();
-                srv.conns.fetch_add(1, SeqCst);
-                tokio::spawn(async move {
-                    conn_task(&srv, stream).await;
-                    srv.conns.fetch_sub(1, SeqCst);
-                });
-            }
-            Err(e) => {
-                crate::log(&format!("accept: {e}"));
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+        if !*accepting_rx.borrow_and_update() {
+            // An upgrade's cut: new connections wait in the backlog for the next brain.
+            let _ = accepting_rx.changed().await;
+            continue;
+        }
+        tokio::select! {
+            r = listener.accept() => match r {
+                Ok((stream, _)) => {
+                    let srv = srv.clone();
+                    srv.conns.fetch_add(1, SeqCst);
+                    tokio::spawn(async move {
+                        conn_task(&srv, stream).await;
+                        srv.conns.fetch_sub(1, SeqCst);
+                    });
+                }
+                Err(e) => {
+                    crate::log(&format!("accept: {e}"));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+            _ = accepting_rx.changed() => {}
         }
     }
 }
@@ -135,6 +339,7 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
         tokio::spawn(async move { out.run_writer(wr).await })
     };
     let mut c = Conn { id: srv.next_conn.fetch_add(1, SeqCst), out: out.clone(), hello: false, subs: HashMap::new() };
+    srv.outs.lock().unwrap().insert(c.id, out.clone());
     let mut dec = FrameDecoder::default();
     let mut buf = vec![0u8; 64 * 1024];
     'conn: loop {
@@ -165,6 +370,7 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
             }
         }
     }
+    srv.outs.lock().unwrap().remove(&c.id);
     for t in c.subs.values() {
         owner::detach(t, c.id);
     }
@@ -189,14 +395,18 @@ async fn handle_frame(srv: &Arc<Server>, c: &mut Conn, f: Frame) -> Flow {
             );
         }
         c.hello = true;
+        let hw = &srv.hold.welcome;
         let w = Welcome {
             proto: PROTO,
-            daemon: concat!("g3d-termd/", env!("CARGO_PKG_VERSION")).into(),
+            daemon: crate::VERSION.into(),
             engine: ENGINE.into(),
             ns: srv.reg.cfg.ns.clone(),
             pid: Some(std::process::id()),
-            features: FEATURES.iter().map(|s| s.to_string()).collect(),
+            features: DAEMON_FEATURES.iter().map(|s| s.to_string()).collect(),
             max_frame: frame::DEFAULT_MAX_FRAME as u64,
+            instance: Some(hw.instance.clone()),
+            generation: Some(hw.generation),
+            holder: Some(HolderInfo { pid: hw.holder_pid, version: hw.holder_version.clone() }),
         };
         c.out.frame(frame::encode_json(ty::WELCOME, 0, &w));
         return Flow::Continue;
@@ -307,6 +517,10 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 }
             };
             let _g = srv.create_lock.lock().await;
+            if srv.reg.upgrading.load(SeqCst) {
+                reply_err(&c.out, req, code::BUSY, "termd is upgrading; create after it");
+                return Flow::Continue;
+            }
             if let Some(t) = srv.reg.by_id(&spec.id) {
                 if adopt {
                     let i = t.info.lock().unwrap().clone();
@@ -405,10 +619,133 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             let srv = srv.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                exit_daemon(&srv.socket, "stop");
+                end_namespace(&srv.hold, "stop");
             });
             return Flow::Close;
         }
+        Op::Upgrade(u) => {
+            if u.holder == Some(true) {
+                reply_err(
+                    &c.out,
+                    req,
+                    code::UNSUPPORTED,
+                    "replacing the holder (g3d upgrade --holder) is not built yet",
+                );
+                return Flow::Continue;
+            }
+            if let Some(b) = &u.binary {
+                use std::os::unix::fs::PermissionsExt;
+                let ok = std::fs::metadata(b).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+                if !ok {
+                    reply_err(&c.out, req, code::BAD_REQUEST, format!("{b:?} is not an executable file"));
+                    return Flow::Continue;
+                }
+            }
+            let _g = srv.create_lock.lock().await;
+            if srv.reg.upgrading.swap(true, SeqCst) {
+                reply_err(&c.out, req, code::BUSY, "an upgrade is running");
+                return Flow::Continue;
+            }
+            reply_ok(&c.out, req, &UpgradeReply { generation: srv.hold.welcome.generation });
+            let (srv, out) = (srv.clone(), c.out.clone());
+            tokio::spawn(async move { upgrade(srv, u.binary, out).await });
+        }
     }
     Flow::Continue
+}
+
+/// Sends every terminal's owner thread one op and waits for each answer.
+async fn to_all(reg: &Registry, op: impl Fn() -> TermOp) -> Vec<(String, bool)> {
+    let mut waits = Vec::new();
+    for t in reg.all() {
+        let (tx, rx) = oneshot::channel();
+        let cmd = Cmd { conn: 0, out: ConnOut::new(), req: 0, op: op(), done: Some(tx) };
+        if t.send(cmd).is_ok() {
+            waits.push((t.id.clone(), rx));
+        }
+    }
+    let mut out = Vec::new();
+    for (id, rx) in waits {
+        out.push((id, rx.await.unwrap_or(false)));
+    }
+    out
+}
+
+/// `upgrade` (DESIGN.md, "Screens after an upgrade"): the holder starts the candidate; this brain
+/// stops accepting, cuts every terminal between reads into a handoff blob, and waits. On
+/// `commit` it closes every connection with `ERROR restart` and exits; the candidate continues
+/// each terminal at exactly its cut. On failure everything resumes and the asker hears why.
+async fn upgrade(srv: Arc<Server>, binary: Option<String>, asker: Arc<ConnOut>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *srv.upgrade_tx.lock().unwrap() = Some(tx);
+    let mut msg = json!({"m": "upgrade"});
+    if let Some(b) = &binary {
+        msg["binary"] = json!(b);
+    }
+    crate::log(&format!("upgrade requested ({})", binary.as_deref().unwrap_or("the holder's binary")));
+    srv.hold.send(&msg, &[]);
+    let wait = srv.upgrade_deadline + Duration::from_secs(5);
+    let Some(m) = next(&mut rx, wait).await else {
+        srv.hold.send(&json!({"m": "upgrade_cancel", "why": "no candidate in time"}), &[]);
+        return upgrade_failed(&srv, &asker, "the holder started no candidate in time".into()).await;
+    };
+    if g3d_hold::link::name(&m) != "candidate" {
+        let why = m.get("why").and_then(Value::as_str).unwrap_or("?").to_owned();
+        return upgrade_failed(&srv, &asker, why).await;
+    }
+    let engine = m.get("engine").and_then(Value::as_str).unwrap_or("").to_owned();
+    let same = engine == srv.reg.cfg.engine;
+    crate::log(&format!(
+        "upgrade: candidate pid {} ({engine}); handing over {} terminal(s) as {}",
+        m.get("pid").and_then(Value::as_u64).unwrap_or(0),
+        srv.reg.len(),
+        if same { "snapshots" } else { "VT repaints (another engine)" }
+    ));
+    let _ = srv.accepting.send(false);
+    let cut = to_all(&srv.reg, || TermOp::Cut { snapshot: same }).await;
+    let bad: Vec<String> = cut.into_iter().filter(|(_, ok)| !ok).map(|(id, _)| id).collect();
+    if !bad.is_empty() {
+        let why = format!("could not hand over {}", bad.join(", "));
+        srv.hold.send(&json!({"m": "upgrade_cancel", "why": why}), &[]);
+        return upgrade_failed(&srv, &asker, why).await;
+    }
+    srv.hold.send(&json!({"m": "handoff_done"}), &[]);
+    let Some(m) = next(&mut rx, wait).await else {
+        srv.hold.send(&json!({"m": "upgrade_cancel", "why": "no commit in time"}), &[]);
+        return upgrade_failed(&srv, &asker, "the candidate was not ready in time".into()).await;
+    };
+    if g3d_hold::link::name(&m) != "commit" {
+        let why = m.get("why").and_then(Value::as_str).unwrap_or("?").to_owned();
+        return upgrade_failed(&srv, &asker, why).await;
+    }
+    let outs: Vec<Arc<ConnOut>> = srv.outs.lock().unwrap().values().cloned().collect();
+    crate::log(&format!("upgrade: handed over; closing {} connection(s) with ERROR restart", outs.len()));
+    for o in &outs {
+        o.frame(frame::encode_json(
+            ty::ERROR,
+            0,
+            &WireError::new(code::RESTART, "termd's engine is being replaced; reconnect now"),
+        ));
+        o.close_after_drain();
+    }
+    let until = Instant::now() + Duration::from_secs(1);
+    while srv.conns.load(SeqCst) > 0 && Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::process::exit(0);
+}
+
+async fn next(rx: &mut mpsc::UnboundedReceiver<Value>, wait: Duration) -> Option<Value> {
+    tokio::time::timeout(wait, rx.recv()).await.ok().flatten()
+}
+
+/// The upgrade didn't happen: every terminal reads again, connections are accepted again, and
+/// the asker hears why on stream 0.
+async fn upgrade_failed(srv: &Arc<Server>, asker: &Arc<ConnOut>, why: String) {
+    *srv.upgrade_tx.lock().unwrap() = None;
+    to_all(&srv.reg, || TermOp::Resume).await;
+    let _ = srv.accepting.send(true);
+    srv.reg.upgrading.store(false, SeqCst);
+    crate::log(&format!("upgrade failed: {why}; carrying on"));
+    asker.frame(frame::encode_json(ty::EVENT, 0, &Event::UpgradeFailed { message: why }));
 }

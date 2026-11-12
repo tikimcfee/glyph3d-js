@@ -1,5 +1,6 @@
-# The terminal daemon: PTYs, one libghostty-vt Terminal per terminal on its own owner
-# thread, and the Unix-socket server. Unix only.
+# The terminal daemon, one binary in two roles: the holder (crates/g3d-hold: the shells, their
+# PTY fds, the store) and the brain (one libghostty-vt Terminal per terminal on its own owner
+# thread, and the Unix-socket server). Unix only.
 [package]
 name = "g3d-termd"
 version.workspace = true
@@ -15,6 +16,9 @@ path = "src/main.rs"
 [dependencies]
 g3d-wire.workspace = true
 g3d.workspace = true
+g3d-hold.workspace = true
+lz4_flex.workspace = true
+crc32fast.workspace = true
 libghostty-vt.workspace = true
 serde.workspace = true
 serde_json.workspace = true

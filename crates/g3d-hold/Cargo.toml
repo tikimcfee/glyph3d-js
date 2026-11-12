@@ -1,0 +1,16 @@
+# The holder: the small, single-threaded half of g3d-termd that parents every shell and keeps
+# the PTY masters, the lock, the listening socket and the snapshot store across brain restarts
+# (docs/termd/DESIGN.md, "Holder and brain"). No libghostty and no tokio: Cargo keeps them out.
+[package]
+name = "g3d-hold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+g3d-wire.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+libc = "0.2.177"

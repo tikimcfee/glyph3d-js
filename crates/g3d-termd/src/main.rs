@@ -1,10 +1,15 @@
-//! g3d-termd: keeps terminals alive. Owns every terminal's PTY, program and libghostty-vt
-//! emulator, and serves them over a Unix socket (docs/termd/PROTOCOL.md). One daemon per
-//! namespace; it outlives its clients (docs/termd/DESIGN.md).
+//! g3d-termd: keeps terminals alive (docs/termd/DESIGN.md, PROTOCOL.md). One binary, two roles:
 //!
-//!   g3d-termd [--ns NAME | --socket PATH] [--daemon] [--idle-exit SECS]
-//!             [--scrollback BYTES] [--max-scrollback BYTES]
+//! - `g3d-termd [--ns NAME | --socket PATH] [--daemon] …` is the namespace's **holder**
+//!   (crates/g3d-hold): the shells' parent, keeper of their PTY fds and the snapshot store. It
+//!   starts the brain itself and restarts it after a crash.
+//! - `g3d-termd --brain --hold-fd N …` is the **brain**: one libghostty-vt emulator per terminal
+//!   on its owner thread, and the socket protocol. Never started by hand.
+//!
+//! Every holder flag is passed on to the brain it starts, so both read one set of settings.
 
+mod blob;
+mod hold;
 mod out;
 mod owner;
 mod repaint;
@@ -12,16 +17,14 @@ mod server;
 mod spawn;
 
 use clap::Parser;
-use rustix::fs::{FlockOperation, Mode, OFlags};
-use std::io::{Read, Seek, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Parser)]
+pub const VERSION: &str = concat!("g3d-termd/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Parser, Clone)]
 #[command(name = "g3d-termd", version, about = "The glyph3d terminal daemon")]
-struct Args {
+pub struct Args {
     /// The namespace: its socket is <runtime dir>/g3d/termd-<ns>.sock.
     #[arg(long)]
     ns: Option<String>,
@@ -33,19 +36,59 @@ struct Args {
     daemon: bool,
     /// Exit after this many seconds with no terminals and no connections (0 = never).
     #[arg(long, default_value_t = 300)]
-    idle_exit: u64,
+    pub idle_exit: u64,
     /// Default primary-screen scrollback per terminal, in bytes.
     #[arg(long, default_value_t = 2 << 20)]
-    scrollback: u64,
+    pub scrollback: u64,
     /// The most scrollback a create may ask for, in bytes.
     #[arg(long, default_value_t = 16 << 20)]
-    max_scrollback: u64,
+    pub max_scrollback: u64,
+    /// How often a terminal with new output saves a crash snapshot, in milliseconds (0 = never).
+    #[arg(long, default_value_t = 2000)]
+    pub snapshot_interval_ms: u64,
+    /// After a brain crash, wait this long before starting the next (systemd's RestartSec).
+    #[arg(long, default_value_t = 100)]
+    brain_restart_delay_ms: u64,
+    /// At most this many brain starts within --brain-start-interval; past it the brain is failed.
+    #[arg(long, default_value_t = 5)]
+    brain_start_burst: usize,
+    /// The window --brain-start-burst counts in, in seconds.
+    #[arg(long, default_value_t = 10)]
+    brain_start_interval: u64,
+    /// A failed brain is retried after this many seconds, doubling...
+    #[arg(long, default_value_t = 30)]
+    brain_failed_backoff: u64,
+    /// ...to at most this many.
+    #[arg(long, default_value_t = 600)]
+    brain_failed_backoff_max: u64,
+    /// Abort a brain that sends the holder nothing for this many seconds (0 = off).
+    #[arg(long, default_value_t = 30)]
+    pub brain_watchdog: u64,
+    /// A candidate brain must be ready within this many seconds or the upgrade fails.
+    #[arg(long, default_value_t = 10)]
+    pub upgrade_deadline: u64,
+    /// After `kill`'s signal, SIGKILL a program still running this many seconds later.
+    #[arg(long, default_value_t = 2)]
+    pub kill_grace: u64,
+    /// The most terminals one namespace holds (the size of the seq_marks page).
+    #[arg(long, default_value_t = 8192)]
+    max_terminals: usize,
+    /// The brain's oom_score_adj above the holder's (Linux).
+    #[arg(long, default_value_t = 300)]
+    pub brain_oom_score_adj: i32,
+    /// Internal: run as the brain on this hold-link fd.
+    #[arg(long, hide = true)]
+    brain: bool,
+    #[arg(long, hide = true, requires = "brain")]
+    hold_fd: Option<i32>,
+    /// Internal: this brain is an upgrade's candidate.
+    #[arg(long, hide = true, requires = "brain")]
+    pub candidate: bool,
 }
 
-/// One log line on stderr (the log file, once daemonized).
+/// One log line (the namespace's log once daemonized).
 pub fn log(msg: &str) {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    eprintln!("[termd {}.{:03}] {msg}", t.as_secs(), t.subsec_millis());
+    g3d_hold::log::log(msg);
 }
 
 fn die(msg: &str) -> ! {
@@ -53,100 +96,9 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn ensure_private_dir(dir: &Path) {
-    if !dir.exists() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .unwrap_or_else(|e| die(&format!("create {}: {e}", dir.display())));
-    }
-}
-
-/// Takes the namespace's lock (`<socket>.lock`) for the daemon's whole life.
-fn take_lock(socket: &Path) -> std::fs::File {
-    let path = PathBuf::from(format!("{}.lock", socket.display()));
-    let fd: OwnedFd =
-        rustix::fs::open(&path, OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC, Mode::from_raw_mode(0o600))
-            .unwrap_or_else(|e| die(&format!("open {}: {e}", path.display())));
-    let mut f = std::fs::File::from(fd);
-    if let Err(e) = rustix::fs::flock(&f, FlockOperation::NonBlockingLockExclusive) {
-        let mut s = String::new();
-        let _ = f.read_to_string(&mut s);
-        let holder = s.trim();
-        die(&format!(
-            "another g3d-termd{} serves {} ({e})",
-            if holder.is_empty() { String::new() } else { format!(" (pid {holder})") },
-            socket.display()
-        ));
-    }
-    f
-}
-
-fn write_pid(lock: &mut std::fs::File) {
-    let _ = lock.set_len(0);
-    let _ = lock.rewind();
-    let _ = writeln!(lock, "{}", std::process::id());
-}
-
-/// Double-forks into the background (DESIGN.md, "Who starts it"). Runs before any thread
-/// exists. The listener and lock fds survive; stdio goes to /dev/null and the log.
-fn daemonize(log_path: &Path, keep: &[i32]) {
-    // SAFETY: called from main before the runtime or any other thread starts, so fork is
-    // safe; the children only make plain syscalls before continuing as the daemon.
-    unsafe {
-        match libc::fork() {
-            -1 => die(&format!("fork: {}", std::io::Error::last_os_error())),
-            0 => {}
-            child => {
-                let mut status = 0;
-                libc::waitpid(child, &mut status, 0);
-                std::process::exit(if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 1 });
-            }
-        }
-        if libc::setsid() == -1 {
-            die(&format!("setsid: {}", std::io::Error::last_os_error()));
-        }
-        match libc::fork() {
-            -1 => die(&format!("fork: {}", std::io::Error::last_os_error())),
-            0 => {}
-            _ => libc::_exit(0),
-        }
-        libc::umask(0o077);
-        let _ = std::env::set_current_dir("/");
-        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
-        if let Some(dir) = log_path.parent() {
-            ensure_private_dir(dir);
-        }
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path);
-        if let Ok(f) = &log {
-            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        libc::dup2(null, 0);
-        match &log {
-            Ok(f) => {
-                libc::dup2(f.as_raw_fd(), 1);
-                libc::dup2(f.as_raw_fd(), 2);
-            }
-            Err(_) => {
-                libc::dup2(null, 1);
-                libc::dup2(null, 2);
-            }
-        }
-        drop(log);
-        // Nothing the starter left open (a relay's sockets, a terminal) stays with us.
-        for fd in 3..1024 {
-            if !keep.contains(&fd) {
-                libc::close(fd);
-            }
-        }
-    }
-}
-
-fn main() {
-    let args = Args::parse();
+/// The namespace (when not an explicit socket), the socket and the log.
+fn paths(args: &Args) -> (Option<String>, PathBuf, PathBuf) {
     let (ns, socket) = match (&args.ns, &args.socket) {
-        // An explicit socket names no namespace.
         (_, Some(p)) => {
             let abs = if p.is_absolute() { p.clone() } else { std::env::current_dir().unwrap_or_default().join(p) };
             (None, abs)
@@ -158,49 +110,55 @@ fn main() {
             (Some(ns), path)
         }
     };
-    let log_path = match &ns {
+    let log = match &ns {
         Some(ns) => g3d::paths::log_path(ns),
         None => PathBuf::from(format!("{}.log", socket.display())),
     };
-    if let Some(dir) = socket.parent() {
-        ensure_private_dir(dir);
-    }
-    if socket.as_os_str().len() > 100 {
-        die(&format!("socket path {} is too long for a Unix socket", socket.display()));
-    }
+    (ns, socket, log)
+}
 
-    let mut lock = take_lock(&socket);
-    // We hold the lock, so a socket file left here is stale.
-    let _ = std::fs::remove_file(&socket);
-    let listener = std::os::unix::net::UnixListener::bind(&socket)
-        .unwrap_or_else(|e| die(&format!("bind {}: {e}", socket.display())));
-    let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-
-    if args.daemon {
-        daemonize(&log_path, &[listener.as_raw_fd(), lock.as_raw_fd()]);
+fn main() {
+    let args = Args::parse();
+    let (ns, socket, log_path) = paths(&args);
+    if args.brain {
+        let fd = args.hold_fd.unwrap_or_else(|| die("--brain needs --hold-fd"));
+        server::brain(args.clone(), fd, ns, socket, log_path);
     }
-    write_pid(&mut lock);
-    let serving = ns.as_ref().map_or_else(|| "its own socket".to_owned(), |n| format!("namespace {n:?}"));
-    log(&format!(
-        "g3d-termd {} (pid {}) serving {serving} at {}",
-        env!("CARGO_PKG_VERSION"),
-        std::process::id(),
-        socket.display()
-    ));
-
-    let reg = owner::Registry::new(owner::Config {
+    // The holder. Every brain gets the same flags (an explicit socket made absolute, so a brain
+    // started from "/" after daemonizing finds it), minus --daemon.
+    let mut brain_args = Vec::new();
+    let mut it = std::env::args_os().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--daemon" || a.to_string_lossy().starts_with("--socket=") {
+            continue;
+        }
+        if a == "--socket" {
+            it.next();
+            continue;
+        }
+        brain_args.push(a);
+    }
+    if args.socket.is_some() {
+        brain_args.push("--socket".into());
+        brain_args.push(socket.clone().into_os_string());
+    }
+    let s = Duration::from_secs;
+    g3d_hold::run(g3d_hold::Config {
         ns,
-        socket: socket.clone(),
-        default_scrollback: args.scrollback.min(args.max_scrollback),
-        max_scrollback: args.max_scrollback,
-        test_hooks: std::env::var("G3D_TERMD_TEST_HOOKS").as_deref() == Ok("1"),
+        socket,
+        log: log_path,
+        daemon: args.daemon,
+        version: VERSION.to_owned(),
+        brain_args,
+        idle_exit: s(args.idle_exit),
+        restart_delay: Duration::from_millis(args.brain_restart_delay_ms),
+        start_burst: args.brain_start_burst.max(1),
+        start_interval: s(args.brain_start_interval),
+        failed_backoff: s(args.brain_failed_backoff.max(1)),
+        failed_backoff_max: s(args.brain_failed_backoff_max.max(args.brain_failed_backoff.max(1))),
+        watchdog: s(args.brain_watchdog),
+        upgrade_deadline: s(args.upgrade_deadline.max(1)),
+        kill_grace: s(args.kill_grace),
+        max_terminals: args.max_terminals.max(1),
     });
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("termd-io")
-        .enable_all()
-        .build()
-        .unwrap_or_else(|e| die(&format!("runtime: {e}")));
-    rt.block_on(server::run(listener, reg, Duration::from_secs(args.idle_exit), socket));
-    drop(lock);
 }

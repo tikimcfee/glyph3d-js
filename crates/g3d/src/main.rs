@@ -7,6 +7,7 @@
 //!   g3d watch <id>
 //!   g3d capture <id> [--history N] [--vt]
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
+//!   g3d upgrade [--binary PATH]
 //!   g3d stop
 
 use clap::{Parser, Subcommand};
@@ -85,6 +86,13 @@ enum Cmd {
     },
     /// Kill every terminal and stop the daemon.
     Stop,
+    /// Replace the daemon's engine (its brain) without ending any terminal. With the brain
+    /// failed, retries it now (SIGHUP to the holder).
+    Upgrade {
+        /// The new g3d-termd (default: the path the daemon was started from).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
 }
 
 fn die(msg: impl std::fmt::Display) -> ! {
@@ -174,6 +182,7 @@ fn main() {
             let mut c = connect(&target);
             let _: Empty = c.request(Op::Stop).unwrap_or_else(|e| die(e));
         }
+        Cmd::Upgrade { binary } => upgrade(&target, binary),
         Cmd::Attach { id, take, detach_key } => {
             let role = if take { Role::Own } else { Role::Attach };
             attach(&target, &id, role, parse_key(&detach_key));
@@ -357,4 +366,81 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8) {
             let _ = writer.lock().unwrap().write_all(&frame::encode(ty::INPUT, handle, &send));
         }
     }
+}
+
+/// Waits up to 15 s for a brain of `instance` newer than `generation` to answer.
+fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Client {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match start::connect(target, "g3d") {
+            Ok(c) if c.welcome.generation.unwrap_or(0) > generation => {
+                if instance.is_some() && c.welcome.instance.as_deref() != instance {
+                    die("a different namespace answered: the old one ended during the upgrade");
+                }
+                return c;
+            }
+            Ok(_) => {}
+            Err(e) if std::time::Instant::now() >= until => die(format!("no new brain answered: {e}")),
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// `g3d upgrade`: the brain hands every terminal to a new one at an exact cut (DESIGN.md,
+/// "Screens after an upgrade"). A failed brain is retried instead: SIGHUP to the holder.
+fn upgrade(target: &Target, binary: Option<PathBuf>) {
+    let binary = binary.map(|b| std::fs::canonicalize(&b).unwrap_or_else(|e| die(format!("{}: {e}", b.display()))));
+    let mut c = match start::connect(target, "g3d") {
+        Ok(c) => c,
+        Err(e) if e.code() == Some(code::BRAIN_FAILED) => {
+            let lock = format!("{}.lock", target.socket().display());
+            let pid: i32 = std::fs::read_to_string(&lock)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or_else(|| die(format!("the brain is failed and {lock} names no holder pid")));
+            eprintln!("g3d: the brain is failed ({e}); retrying it now (SIGHUP to holder pid {pid})");
+            let _ = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(pid).unwrap_or_else(|| die("bad pid")),
+                rustix::process::Signal::HUP,
+            );
+            let c = wait_brain(target, None, 0);
+            println!(
+                "brain generation {} (pid {}) serves",
+                c.welcome.generation.unwrap_or(0),
+                c.welcome.pid.unwrap_or(0)
+            );
+            return;
+        }
+        Err(e) => die(format!("{}: {e}", target.socket().display())),
+    };
+    if !c.welcome.features.iter().any(|f| f == "upgrade") {
+        die(format!(
+            "{} cannot upgrade itself (no feature `upgrade`); stop it and start the new one",
+            c.welcome.daemon
+        ));
+    }
+    let instance = c.welcome.instance.clone();
+    let r: UpgradeReply = c
+        .request(Op::Upgrade(Upgrade { binary: binary.map(|b| b.display().to_string()), holder: None }))
+        .unwrap_or_else(|e| die(e));
+    loop {
+        match c.next_frame() {
+            Ok(f) if f.ty == ty::EVENT && f.stream == 0 => {
+                if let Ok(Event::UpgradeFailed { message }) = serde_json::from_slice(&f.payload) {
+                    die(format!("upgrade failed; the running brain carries on: {message}"));
+                }
+            }
+            Ok(_) => {}
+            Err(e) if e.code() == Some(code::RESTART) => break,
+            Err(e) => die(format!("the daemon went away during the upgrade: {e}")),
+        }
+    }
+    let c = wait_brain(target, instance.as_deref(), r.generation);
+    println!(
+        "upgraded: {} brain generation {} (pid {}); every terminal carried over",
+        c.welcome.daemon,
+        c.welcome.generation.unwrap_or(0),
+        c.welcome.pid.unwrap_or(0)
+    );
 }

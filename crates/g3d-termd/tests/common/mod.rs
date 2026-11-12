@@ -28,6 +28,19 @@ impl Daemon {
     }
 
     pub fn start_with(args: &[&str]) -> Self {
+        let dir = Self::fresh_dir();
+        Self::spawn_in(dir, args, &[])
+    }
+
+    /// A daemon with extra environment: test hooks that name a file in its scratch directory
+    /// (`(variable, file name)`).
+    pub fn start_env(args: &[&str], files: &[(&str, &str)]) -> Self {
+        let dir = Self::fresh_dir();
+        let env: Vec<(&str, PathBuf)> = files.iter().map(|(k, f)| (*k, dir.join(f))).collect();
+        Self::spawn_in(dir, args, &env)
+    }
+
+    fn fresh_dir() -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "t{}-{}",
             std::process::id(),
@@ -35,16 +48,31 @@ impl Daemon {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn spawn_in(dir: PathBuf, args: &[&str], env: &[(&str, PathBuf)]) -> Self {
+        use std::os::unix::process::CommandExt;
         let socket = dir.join("termd-test.sock");
-        let child = Command::new(bin())
-            .arg("--socket")
+        let mut cmd = Command::new(bin());
+        cmd.arg("--socket")
             .arg(&socket)
             .args(args)
             .env("G3D_TERMD_TEST_HOOKS", "1")
             .stdin(Stdio::null())
-            .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap())
-            .spawn()
-            .unwrap();
+            .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        // SAFETY: setrlimit between fork and exec. A brain the watchdog aborts leaves no core.
+        unsafe {
+            cmd.pre_exec(|| {
+                let rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                libc::setrlimit(libc::RLIMIT_CORE, &rl);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
         let d = Daemon { dir, socket, child: Some(child) };
         let until = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(&d.socket).is_err() {
@@ -64,8 +92,33 @@ impl Daemon {
         std::fs::read_to_string(self.dir.join("daemon.log")).unwrap_or_default()
     }
 
+    /// The holder's pid (the process the test started).
     pub fn pid(&self) -> u32 {
         self.child.as_ref().unwrap().id()
+    }
+
+    /// Connects again after a brain restart (the holder's backlog holds the connection until the
+    /// next brain accepts it), checking it is the same namespace.
+    pub fn reconnect(&self, instance: &str) -> Client {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            match Client::connect(&self.socket, "test") {
+                Ok(c) => {
+                    assert_eq!(c.welcome.instance.as_deref(), Some(instance), "a different namespace answered");
+                    c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+                    return c;
+                }
+                Err(e) => {
+                    assert!(Instant::now() < until, "no brain came back: {e}\n{}", self.log());
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    }
+
+    /// The brain's pid, from a fresh connection's WELCOME.
+    pub fn brain_pid(&self) -> u32 {
+        self.client().welcome.pid.unwrap()
     }
 
     /// Stops with SIGTERM (a clean shutdown), SIGKILL after 5 s.
@@ -180,8 +233,9 @@ pub fn read_until(c: &mut Client, seen: &mut Seen, secs: u64, mut done: impl FnM
     while !done(seen) {
         assert!(
             Instant::now() < until,
-            "timed out; output so far: {:?}",
-            String::from_utf8_lossy(&seen.output[seen.output.len().saturating_sub(400)..])
+            "timed out; output so far: {:?}; frames end {:?}",
+            String::from_utf8_lossy(&seen.output[seen.output.len().saturating_sub(400)..]),
+            &seen.trace[seen.trace.len().saturating_sub(12)..]
         );
         let f = c.next_frame().unwrap_or_else(|e| {
             panic!("{e}; frames so far end {:?}", &seen.trace[seen.trace.len().saturating_sub(12)..])
@@ -222,6 +276,12 @@ pub fn sub_req(id: &str, mode: Mode, role: Role, flow: Option<Flow>, size: Optio
 
 pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `contains` over the last 8 KiB only: a check run on every frame of a flood must not scan
+/// megabytes each time (a slow reader of a blocking owner slows the program down).
+pub fn tail_contains(hay: &[u8], needle: &[u8]) -> bool {
+    contains(&hay[hay.len().saturating_sub(8192)..], needle)
 }
 
 /// The plain text of a terminal's active area, rows trimmed.

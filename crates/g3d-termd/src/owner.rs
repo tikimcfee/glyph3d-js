@@ -1,9 +1,11 @@
 //! One terminal: its PTY, its program and its libghostty `Terminal`, all on one owner
 //! thread (DESIGN.md, "Threading"). The socket side talks to it only through `Cmd`s.
 
+use crate::blob;
+use crate::hold::{Exit, Held, Hold, Marks};
 use crate::out::{ConnOut, Kind, LOSSY_MAX, SubShared, Wake};
 use crate::repaint;
-use crate::spawn::{self, SpawnArgs};
+use crate::spawn;
 use g3d_wire::frame::{self, REPAINT_FLAG_VIEW, RepaintHead, ty};
 use g3d_wire::msg::*;
 use libghostty_vt::Terminal;
@@ -16,16 +18,17 @@ use libghostty_vt::terminal::CompressionMode;
 use libghostty_vt::terminal::CompressionResult;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fd::OwnedFd;
-use rustix::process::{Pid, Signal};
-use serde::Serialize;
+use rustix::process::Signal;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 
@@ -35,10 +38,11 @@ const READ_CHUNK: usize = 64 * 1024;
 const INPUT_MAX: usize = 1 << 20;
 const CONTINUATION_MAX: usize = 64 * 1024;
 const COMPRESS_IDLE: Duration = Duration::from_secs(30);
-const KILL_GRACE: Duration = Duration::from_secs(2);
 /// An `INPUT` of exactly these bytes panics the owner thread, when the daemon runs with
 /// `G3D_TERMD_TEST_HOOKS=1`. It exists for the panic-boundary test.
 pub const TEST_PANIC_INPUT: &[u8] = b"\x00g3d-termd-test-panic\x00";
+/// With test hooks on, an `INPUT` of these bytes stops the brain's heartbeat (the watchdog test).
+pub const TEST_WEDGE_INPUT: &[u8] = b"\x00g3d-termd-test-wedge\x00";
 
 /// Daemon-wide settings every terminal reads.
 pub struct Config {
@@ -48,26 +52,61 @@ pub struct Config {
     pub default_scrollback: u64,
     pub max_scrollback: u64,
     pub test_hooks: bool,
+    /// Zero: no crash snapshots.
+    pub snapshot_interval: Duration,
+    pub kill_grace: Duration,
+    /// The engine a snapshot restores into: libghostty's version and its snapshot format.
+    pub engine: String,
 }
 
 /// Every live terminal, by id and by handle.
 pub struct Registry {
     inner: Mutex<RegInner>,
     pub cfg: Config,
+    pub hold: Arc<Hold>,
+    pub marks: Arc<Marks>,
+    /// Owner threads restored at start wait on this until the holder says `go`.
+    go: Arc<(Mutex<bool>, Condvar)>,
+    /// An upgrade is cutting: `create` waits it out (`busy`).
+    pub upgrading: AtomicBool,
 }
 
 struct RegInner {
     by_id: HashMap<String, Arc<TermRef>>,
     by_handle: HashMap<u32, Arc<TermRef>>,
-    next_handle: u32,
 }
 
 impl Registry {
-    pub fn new(cfg: Config) -> Arc<Self> {
+    pub fn new(cfg: Config, hold: Arc<Hold>, marks: Arc<Marks>) -> Arc<Self> {
         Arc::new(Registry {
-            inner: Mutex::new(RegInner { by_id: HashMap::new(), by_handle: HashMap::new(), next_handle: 1 }),
+            inner: Mutex::new(RegInner { by_id: HashMap::new(), by_handle: HashMap::new() }),
             cfg,
+            hold,
+            marks,
+            go: Arc::new((Mutex::new(false), Condvar::new())),
+            upgrading: AtomicBool::new(false),
         })
+    }
+
+    /// Lets every restored owner thread start reading its PTY.
+    pub fn go(&self) {
+        let (m, cv) = &*self.go;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    fn wait_go(&self) {
+        let (m, cv) = &*self.go;
+        let mut g = m.lock().unwrap();
+        while !*g {
+            g = cv.wait(g).unwrap();
+        }
+    }
+
+    fn insert(&self, t: Arc<TermRef>) {
+        let mut g = self.inner.lock().unwrap();
+        g.by_id.insert(t.id.clone(), t.clone());
+        g.by_handle.insert(t.handle, t);
     }
 
     pub fn by_id(&self, id: &str) -> Option<Arc<TermRef>> {
@@ -153,6 +192,15 @@ pub enum TermOp {
     },
     /// The connection closed: drop its subscription.
     Detach,
+    /// The holder reaped the program.
+    Exited(Exit),
+    /// An upgrade's cut: stop reading the PTY and hand the terminal over in a blob, made a
+    /// libghostty snapshot when the candidate's engine is ours, else a VT repaint.
+    Cut {
+        snapshot: bool,
+    },
+    /// The upgrade failed: read again.
+    Resume,
 }
 
 pub fn reply_ok<T: Serialize>(out: &ConnOut, req: u64, body: &T) {
@@ -228,63 +276,165 @@ impl CreateSpec {
     }
 }
 
-/// Starts a terminal: registers it, forks its program from a new owner thread, and
-/// returns once the program runs (or failed to start).
+/// What a terminal was created with, kept by the holder for the next brain (opaque to it).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Meta {
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub created_at: u64,
+    pub scrollback: u64,
+    pub colors: Colors,
+    pub cell_px: [u32; 2],
+}
+
+/// How an owner thread gets its terminal.
+enum Init {
+    /// `create`: the holder has just started the program.
+    New { cols: u16, rows: u16 },
+    /// A brain start: the holder's terminal and its stored blobs (newest first).
+    Restore { blobs: Vec<OwnedFd>, exit: Option<Exit> },
+}
+
+/// How a terminal came back at this brain's start (DESIGN.md "Screens after a crash").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// Its newest blob is at the high-water mark: nothing was lost (an upgrade's handoff, or a
+    /// crash while the terminal was quiet since its last snapshot).
+    Exact,
+    /// From a snapshot, with `unseen` bytes the crashed brain read and never saved.
+    Snapshot,
+    /// No usable blob: the program's own redraw is all there is.
+    Blank,
+}
+
+/// Starts a terminal: the holder starts the program, then a new owner thread adopts its PTY.
 pub async fn create(reg: &Arc<Registry>, spec: CreateSpec) -> Result<(Arc<TermRef>, u32), WireError> {
+    let cwd = spec
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default());
+    let meta = Meta {
+        argv: spec.argv.clone(),
+        cwd,
+        created_at: ms_since_epoch(),
+        scrollback: spec.scrollback,
+        colors: spec.colors.clone(),
+        cell_px: spec.cell_px,
+    };
+    let env = spawn::child_env(&spec.id, &reg.cfg.socket.display().to_string(), spec.env.as_ref());
+    let req = json!({"id": spec.id, "argv": spec.argv, "env": env, "cwd": spec.cwd, "cols": spec.cols,
+        "rows": spec.rows, "meta": meta});
+    let (handle, slot, pid, master) = reg
+        .hold
+        .spawn(req)
+        .await
+        .map_err(|e| WireError::new(code::SPAWN_FAILED, format!("start {:?}: {e}", spec.argv)))?;
+    reg.marks.set(slot, 0);
+    let held = Held {
+        handle,
+        slot,
+        id: spec.id.clone(),
+        pid,
+        meta: serde_json::Value::Null,
+        exit: None,
+        master,
+        blobs: vec![],
+    };
+    let init = Init::New { cols: spec.cols, rows: spec.rows };
+    let (tref, started) = start_owner(reg, held, meta, init, false)?;
+    match started.await {
+        Ok(Ok(_)) => Ok((tref, pid)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(WireError::new(code::SPAWN_FAILED, "owner thread died while starting")),
+    }
+}
+
+/// A brain start: an owner thread per terminal the holder keeps, each restoring its screen from
+/// its newest usable blob. They wait for [`Registry::go`] before reading. Returns each
+/// terminal's id, how it came back and its unseen byte count.
+pub fn restore(reg: &Arc<Registry>, held: Vec<Held>) -> Vec<(String, RestoreResult)> {
+    let mut waits = Vec::new();
+    for h in held {
+        let id = h.id.clone();
+        let meta: Meta = match serde_json::from_value(h.meta.clone()) {
+            Ok(m) => m,
+            Err(e) => {
+                crate::log(&format!("terminal {id}: the holder's record is unreadable ({e}); hanging it up"));
+                reg.hold.send(&json!({"m": "kill", "handle": h.handle, "signal": libc::SIGHUP}), &[]);
+                reg.hold.send(&json!({"m": "release", "handle": h.handle}), &[]);
+                continue;
+            }
+        };
+        let exit = h.exit;
+        let blobs = h.blobs.iter().map(|b| b.try_clone().expect("dup")).collect();
+        let init = Init::Restore { blobs, exit };
+        let held = Held { blobs: vec![], ..h };
+        match start_owner(reg, held, meta, init, true) {
+            Ok((_, rx)) => waits.push((id, rx)),
+            Err(e) => waits.push((id, {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Err(e));
+                rx
+            })),
+        }
+    }
+    waits
+        .into_iter()
+        .map(|(id, rx)| {
+            let r = rx
+                .blocking_recv()
+                .unwrap_or_else(|_| Err(WireError::new(code::PANIC, "owner thread died while restoring")));
+            (id, r)
+        })
+        .collect()
+}
+
+/// How a terminal came back and its unseen byte count, or why it could not.
+pub type RestoreResult = Result<(Restored, u64), WireError>;
+
+type Started = oneshot::Receiver<RestoreResult>;
+
+fn start_owner(
+    reg: &Arc<Registry>,
+    held: Held,
+    meta: Meta,
+    init: Init,
+    wait_go: bool,
+) -> Result<(Arc<TermRef>, Started), WireError> {
     let wake = Arc::new(Wake::new().map_err(|e| WireError::new(code::SPAWN_FAILED, format!("wake fd: {e}")))?);
     let (tx, rx) = mpsc::channel();
-    let tref = {
-        let mut g = reg.inner.lock().unwrap();
-        let handle = g.next_handle;
-        g.next_handle += 1;
-        let tref = Arc::new(TermRef {
-            id: spec.id.clone(),
-            handle,
-            tx,
-            wake: wake.clone(),
-            info: Mutex::new(TermInfo {
-                id: spec.id.clone(),
-                handle,
-                pid: 0,
-                argv: spec.argv.clone(),
-                cwd: spec
-                    .cwd
-                    .clone()
-                    .unwrap_or_else(|| std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default()),
-                cols: spec.cols,
-                rows: spec.rows,
-                title: String::new(),
-                alt: false,
-                seq: 0,
-                created_at: ms_since_epoch(),
-                subscribers: SubscriberCounts::default(),
-            }),
-        });
-        g.by_id.insert(spec.id.clone(), tref.clone());
-        g.by_handle.insert(handle, tref.clone());
-        tref
-    };
+    let tref = Arc::new(TermRef {
+        id: held.id.clone(),
+        handle: held.handle,
+        tx,
+        wake: wake.clone(),
+        info: Mutex::new(TermInfo {
+            id: held.id.clone(),
+            handle: held.handle,
+            pid: held.pid,
+            argv: meta.argv.clone(),
+            cwd: meta.cwd.clone(),
+            cols: 0,
+            rows: 0,
+            title: String::new(),
+            alt: false,
+            seq: 0,
+            created_at: meta.created_at,
+            subscribers: SubscriberCounts::default(),
+        }),
+    });
+    reg.insert(tref.clone());
     let (started_tx, started_rx) = oneshot::channel();
     let reg2 = reg.clone();
     let tref2 = tref.clone();
     let spawned = std::thread::Builder::new()
-        .name(format!("term:{}", spec.id))
-        .spawn(move || owner_thread(reg2, tref2, rx, wake, spec, started_tx));
+        .name(format!("term:{}", held.id))
+        .spawn(move || owner_thread(reg2, tref2, rx, wake, held, meta, init, wait_go, started_tx));
     if let Err(e) = spawned {
         reg.remove(&tref);
         return Err(WireError::new(code::SPAWN_FAILED, format!("owner thread: {e}")));
     }
-    match started_rx.await {
-        Ok(Ok(pid)) => Ok((tref, pid)),
-        Ok(Err(e)) => {
-            reg.remove(&tref);
-            Err(e)
-        }
-        Err(_) => {
-            reg.remove(&tref);
-            Err(WireError::new(code::SPAWN_FAILED, "owner thread died while starting"))
-        }
-    }
+    Ok((tref, started_rx))
 }
 
 /// What libghostty's effect callbacks leave for the owner thread to act on after a write.
@@ -326,8 +476,9 @@ struct Owner {
     term: Terminal<'static, 'static>,
     fx: Rc<Fx>,
     master: Option<OwnedFd>,
-    child: Child,
-    pgid: Pid,
+    slot: u32,
+    /// The program's end, once the holder has reaped it.
+    exit: Option<Exit>,
     seq: u64,
     subs: Vec<Sub>,
     input: Vec<u8>,
@@ -337,35 +488,173 @@ struct Owner {
     eof: bool,
     last_output: Instant,
     compress_pending: bool,
-    last_wait_check: Instant,
+    /// The `seq` of the newest snapshot handed to the holder, and when.
+    snap_seq: u64,
+    last_snap: Instant,
+    /// An upgrade's cut: the PTY is not read and nothing changes until `Resume`.
+    cut: bool,
+    /// `kill` was asked at this time; `finish` follows the holder's `exited`.
+    killing: Option<Instant>,
+    kill_replies: Vec<(Arc<ConnOut>, u64)>,
+    pending_done: Vec<oneshot::Sender<bool>>,
     /// Set when the terminal is finished: the thread exits after this iteration.
     done: bool,
 }
 
+/// Builds a terminal's emulator settings and effect callbacks (new and restored alike).
+fn configure(
+    term: &mut Terminal<'static, 'static>,
+    fx: &Rc<Fx>,
+    meta: &Meta,
+    cols: u16,
+    rows: u16,
+    fresh: bool,
+) -> Result<(), String> {
+    let e = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
+    fx.size.set((cols, rows, meta.cell_px[0], meta.cell_px[1]));
+    let c = &meta.colors;
+    let fg = c.fg.as_deref().and_then(parse_hex).unwrap_or(Rgb { r: 0xcc, g: 0xcc, b: 0xcc });
+    let bg = c.bg.as_deref().and_then(parse_hex).unwrap_or(Rgb { r: 0x10, g: 0x12, b: 0x14 });
+    let cursor = c.cursor.as_deref().and_then(parse_hex).unwrap_or(fg);
+    if fresh {
+        term.set_continuation_max_bytes(CONTINUATION_MAX).map_err(|x| e("continuation", &x))?;
+    }
+    term.set_scrollback_max_bytes(Some(meta.scrollback as usize))
+        .and_then(|t| t.set_default_fg_color(Some(fg)))
+        .and_then(|t| t.set_default_bg_color(Some(bg)))
+        .and_then(|t| t.set_default_cursor_color(Some(cursor)))
+        .and_then(|t| t.set_terminfo_name("xterm-256color"))
+        .and_then(|t| t.set_title_report_enabled(false))
+        .and_then(|t| t.set_kitty_image_storage_limit(0))
+        .map_err(|x| e("terminal options", &x))?;
+    term.resize(cols, rows, meta.cell_px[0], meta.cell_px[1]).map_err(|x| e("terminal size", &x))?;
+    let f = fx.clone();
+    term.on_pty_write(move |_, d| f.replies.borrow_mut().extend_from_slice(d)).map_err(|x| e("callback", &x))?;
+    let f = fx.clone();
+    term.on_title_changed(move |_| f.title.set(true)).map_err(|x| e("callback", &x))?;
+    let f = fx.clone();
+    term.on_bell(move |_| f.bells.set(f.bells.get() + 1)).map_err(|x| e("callback", &x))?;
+    let f = fx.clone();
+    term.on_pwd_changed(move |_| f.pwd.set(true)).map_err(|x| e("callback", &x))?;
+    let f = fx.clone();
+    term.on_size(move |_| {
+        let (c, r, w, h) = f.size.get();
+        Some(libghostty_vt::report::SizeReportSize { rows: r, columns: c, cell_width: w, cell_height: h })
+    })
+    .map_err(|x| e("callback", &x))?;
+    term.on_xtversion(|_| Some(concat!("g3d-termd ", env!("CARGO_PKG_VERSION")))).map_err(|x| e("callback", &x))?;
+    Ok(())
+}
+
+/// The newest usable blob as an emulator: a snapshot of our own engine decoded, or a VT repaint
+/// replayed into a fresh terminal. Returns the terminal, the blob's seq, and its pending input
+/// when it is an upgrade's handoff.
+fn from_blobs(
+    reg: &Registry,
+    id: &str,
+    fx: &Rc<Fx>,
+    meta: &Meta,
+    blobs: &[OwnedFd],
+    cols: u16,
+    rows: u16,
+) -> Option<(Terminal<'static, 'static>, u64, bool, Vec<u8>)> {
+    for (i, fd) in blobs.iter().enumerate() {
+        let b = match blob::read(fd) {
+            Ok(b) => b,
+            Err(e) => {
+                crate::log(&format!("terminal {id}: blob {i} unusable: {e}"));
+                continue;
+            }
+        };
+        if b.id != id {
+            crate::log(&format!("terminal {id}: blob {i} is {:?}'s; skipped", b.id));
+            continue;
+        }
+        let term = match b.kind {
+            blob::KIND_SNAPSHOT if b.engine == reg.cfg.engine => {
+                let decoded = libghostty_vt::snapshot::Decoder::new_buf(&b.payload).and_then(|mut d| {
+                    d.set_retain_continuation(true)?.set_max_continuation_bytes(CONTINUATION_MAX)?;
+                    d.decode()
+                });
+                match decoded {
+                    Ok(mut t) => match configure(&mut t, fx, meta, cols, rows, false) {
+                        Ok(()) => t,
+                        Err(e) => {
+                            crate::log(&format!("terminal {id}: restored snapshot: {e}"));
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        crate::log(&format!("terminal {id}: snapshot {i} did not decode: {e}"));
+                        continue;
+                    }
+                }
+            }
+            blob::KIND_SNAPSHOT => {
+                crate::log(&format!(
+                    "terminal {id}: snapshot {i} is from {:?}, not {:?}; skipped",
+                    b.engine, reg.cfg.engine
+                ));
+                continue;
+            }
+            _ => {
+                let Ok(mut t) = Terminal::new(cols, rows) else { continue };
+                if configure(&mut t, fx, meta, cols, rows, true).is_err() {
+                    continue;
+                }
+                t.vt_write(&b.payload);
+                // The repaint's own answers to queries are not the program's.
+                fx.replies.borrow_mut().clear();
+                t
+            }
+        };
+        return Some((term, b.seq, b.handoff, b.input));
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn owner_thread(
     reg: Arc<Registry>,
     tref: Arc<TermRef>,
     rx: mpsc::Receiver<Cmd>,
     wake: Arc<Wake>,
-    spec: CreateSpec,
-    started: oneshot::Sender<Result<u32, WireError>>,
+    held: Held,
+    meta: Meta,
+    init: Init,
+    wait_go: bool,
+    started: oneshot::Sender<Result<(Restored, u64), WireError>>,
 ) {
-    let setup = catch_unwind(AssertUnwindSafe(|| Owner::new(reg.clone(), tref.clone(), rx, wake, &spec)));
-    let mut owner = match setup {
+    let (handle, pid) = (held.handle, held.pid);
+    let setup = catch_unwind(AssertUnwindSafe(|| Owner::new(reg.clone(), tref.clone(), rx, wake, held, &meta, init)));
+    let (mut owner, restored, unseen) = match setup {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
+            crate::log(&format!("terminal {}: {e}; hanging up its program", tref.id));
+            reg.hold.send(&json!({"m": "kill", "handle": handle, "signal": libc::SIGHUP}), &[]);
+            reg.hold.send(&json!({"m": "release", "handle": handle}), &[]);
+            reg.remove(&tref);
             let _ = started.send(Err(e));
             return;
         }
         Err(_) => {
+            reg.hold.send(&json!({"m": "kill", "handle": handle, "signal": libc::SIGHUP}), &[]);
+            reg.hold.send(&json!({"m": "release", "handle": handle}), &[]);
+            reg.remove(&tref);
             let _ = started.send(Err(WireError::new(code::SPAWN_FAILED, "panic while starting the terminal")));
             return;
         }
     };
-    let pid = owner.child.id();
-    tref.info.lock().unwrap().pid = pid;
-    crate::log(&format!("terminal {} (handle {}) started: pid {pid}, {:?}", tref.id, tref.handle, spec.argv));
-    let _ = started.send(Ok(pid));
+    if wait_go {
+        let _ = started.send(Ok((restored, unseen)));
+        reg.wait_go();
+        if restored != Restored::Exact {
+            owner.nudge();
+        }
+    } else {
+        crate::log(&format!("terminal {} (handle {handle}) started: pid {pid}, {:?}", tref.id, meta.argv));
+        let _ = started.send(Ok((restored, unseen)));
+    }
     let run = catch_unwind(AssertUnwindSafe(|| owner.run()));
     if let Err(p) = run {
         let msg = p
@@ -384,76 +673,119 @@ impl Owner {
         tref: Arc<TermRef>,
         rx: mpsc::Receiver<Cmd>,
         wake: Arc<Wake>,
-        spec: &CreateSpec,
-    ) -> Result<Self, WireError> {
+        held: Held,
+        meta: &Meta,
+        init: Init,
+    ) -> Result<(Self, Restored, u64), WireError> {
         let fail = |what: &str, e: &dyn std::fmt::Display| WireError::new(code::SPAWN_FAILED, format!("{what}: {e}"));
-        let mut term = Terminal::new(spec.cols, spec.rows).map_err(|e| fail("terminal", &e))?;
+        rustix::fs::fcntl_setfl(&held.master, rustix::fs::OFlags::NONBLOCK).map_err(|e| fail("master fd", &e))?;
         let fx = Rc::new(Fx::default());
-        fx.size.set((spec.cols, spec.rows, spec.cell_px[0], spec.cell_px[1]));
-        let fg = spec.colors.fg.as_deref().and_then(parse_hex).unwrap_or(Rgb { r: 0xcc, g: 0xcc, b: 0xcc });
-        let bg = spec.colors.bg.as_deref().and_then(parse_hex).unwrap_or(Rgb { r: 0x10, g: 0x12, b: 0x14 });
-        let cursor = spec.colors.cursor.as_deref().and_then(parse_hex).unwrap_or(fg);
-        term.set_scrollback_max_bytes(Some(spec.scrollback as usize))
-            .and_then(|t| t.set_continuation_max_bytes(CONTINUATION_MAX))
-            .and_then(|t| t.set_default_fg_color(Some(fg)))
-            .and_then(|t| t.set_default_bg_color(Some(bg)))
-            .and_then(|t| t.set_default_cursor_color(Some(cursor)))
-            .and_then(|t| t.set_terminfo_name("xterm-256color"))
-            .and_then(|t| t.set_title_report_enabled(false))
-            .and_then(|t| t.set_kitty_image_storage_limit(0))
-            .map_err(|e| fail("terminal options", &e))?;
-        term.resize(spec.cols, spec.rows, spec.cell_px[0], spec.cell_px[1]).map_err(|e| fail("terminal size", &e))?;
-        {
-            let f = fx.clone();
-            term.on_pty_write(move |_, d| f.replies.borrow_mut().extend_from_slice(d))
-                .map_err(|e| fail("callback", &e))?;
-            let f = fx.clone();
-            term.on_title_changed(move |_| f.title.set(true)).map_err(|e| fail("callback", &e))?;
-            let f = fx.clone();
-            term.on_bell(move |_| f.bells.set(f.bells.get() + 1)).map_err(|e| fail("callback", &e))?;
-            let f = fx.clone();
-            term.on_pwd_changed(move |_| f.pwd.set(true)).map_err(|e| fail("callback", &e))?;
-            let f = fx.clone();
-            term.on_size(move |_| {
-                let (c, r, w, h) = f.size.get();
-                Some(libghostty_vt::report::SizeReportSize { rows: r, columns: c, cell_width: w, cell_height: h })
-            })
-            .map_err(|e| fail("callback", &e))?;
-            term.on_xtversion(|_| Some(concat!("g3d-termd ", env!("CARGO_PKG_VERSION"))))
-                .map_err(|e| fail("callback", &e))?;
-        }
-        let env = spawn::child_env(&spec.id, &reg.cfg.socket.display().to_string(), spec.env.as_ref());
-        let sp = spawn::spawn(&SpawnArgs {
-            argv: &spec.argv,
-            cwd: spec.cwd.as_deref(),
-            env,
-            cols: spec.cols,
-            rows: spec.rows,
-        })
-        .map_err(|e| fail(&format!("start {:?}", spec.argv), &e))?;
-        let pgid = Pid::from_child(&sp.child);
-        Ok(Owner {
+        let hw = reg.marks.get(held.slot);
+        let (term, seq, restored, unseen, input, exit) = match init {
+            Init::New { cols, rows } => {
+                let mut t = Terminal::new(cols, rows).map_err(|e| fail("terminal", &e))?;
+                configure(&mut t, &fx, meta, cols, rows, true).map_err(|e| fail("terminal", &e))?;
+                (t, 0, Restored::Blank, 0, Vec::new(), None)
+            }
+            Init::Restore { blobs, exit } => {
+                // The kernel's size is the truth: the last brain may have died mid-resize.
+                let ws = rustix::termios::tcgetwinsize(&held.master).map_err(|e| fail("window size", &e))?;
+                let (cols, rows) = (ws.ws_col.max(1), ws.ws_row.max(1));
+                match from_blobs(&reg, &held.id, &fx, meta, &blobs, cols, rows) {
+                    Some((t, bseq, handoff, input)) => {
+                        let unseen = hw.saturating_sub(bseq);
+                        let exact = unseen == 0;
+                        // Input is at most once: only an exact handoff's pending input is the
+                        // program's still.
+                        let input = if exact && handoff { input } else { Vec::new() };
+                        if !exact {
+                            crate::log(&format!(
+                                "terminal {}: restored from a snapshot at seq {bseq}; the last brain read to seq {hw}: {unseen} B unseen",
+                                held.id
+                            ));
+                        }
+                        (t, hw.max(bseq), if exact { Restored::Exact } else { Restored::Snapshot }, unseen, input, exit)
+                    }
+                    None => {
+                        crate::log(&format!("terminal {}: no usable snapshot; blank from seq {hw}", held.id));
+                        let mut t = Terminal::new(cols, rows).map_err(|e| fail("terminal", &e))?;
+                        configure(&mut t, &fx, meta, cols, rows, true).map_err(|e| fail("terminal", &e))?;
+                        (t, hw, Restored::Blank, hw, Vec::new(), exit)
+                    }
+                }
+            }
+        };
+        reg.marks.set(held.slot, seq);
+        let title = repaint::clean_title(term.title().unwrap_or(b""));
+        let pwd = String::from_utf8_lossy(term.pwd().unwrap_or(b"")).into_owned();
+        let mut o = Owner {
             reg,
             tref,
             wake,
             rx,
             term,
             fx,
-            master: Some(sp.master),
-            child: sp.child,
-            pgid,
-            seq: 0,
+            master: Some(held.master),
+            slot: held.slot,
+            exit,
+            seq,
             subs: Vec::new(),
-            input: Vec::new(),
+            input,
             modes: Modes::default(),
-            title: String::new(),
-            pwd: String::new(),
+            title,
+            pwd,
             eof: false,
             last_output: Instant::now(),
-            compress_pending: false,
-            last_wait_check: Instant::now(),
+            compress_pending: restored != Restored::Blank,
+            snap_seq: seq,
+            last_snap: Instant::now(),
+            cut: false,
+            killing: None,
+            kill_replies: Vec::new(),
+            pending_done: Vec::new(),
             done: false,
-        })
+        };
+        o.modes = o.current_modes();
+        let (cols, rows) = o.cols_rows();
+        {
+            let mut info = o.tref.info.lock().unwrap();
+            info.cols = cols;
+            info.rows = rows;
+            info.seq = o.seq;
+            info.alt = o.modes.alt;
+            info.title.clone_from(&o.title);
+        }
+        Ok((o, restored, unseen))
+    }
+
+    /// After a crash restore: `SIGWINCH` to the PTY's foreground group, so a full-screen program
+    /// redraws everything and a shell its prompt (dtach's `winch`, shpool's `simple`).
+    fn nudge(&self) {
+        if let Some(fg) = self.master.as_ref().and_then(|m| rustix::termios::tcgetpgrp(m).ok()) {
+            let _ = rustix::process::kill_process_group(fg, Signal::WINCH);
+        }
+    }
+
+    /// Hands the holder a crash snapshot (or, `handoff`, an upgrade's blob) at the current seq.
+    fn save(&mut self, kind: u8, handoff: bool) -> Result<(), String> {
+        let raw = match kind {
+            blob::KIND_SNAPSHOT => self
+                .term
+                .encode_snapshot_alloc(None)
+                .map_err(|e| format!("snapshot: {e}"))?
+                .map(|b| b.to_vec())
+                .unwrap_or_default(),
+            _ => repaint::live(&mut self.term, u32::MAX),
+        };
+        let input = if handoff { self.input.as_slice() } else { &[] };
+        let fd = blob::write(kind, handoff, self.seq, &self.reg.cfg.engine, &self.tref.id, &raw, input)
+            .map_err(|e| format!("blob: {e}"))?;
+        self.reg
+            .hold
+            .send(&json!({"m": "snapshot", "handle": self.tref.handle, "seq": self.seq, "handoff": handoff}), &[fd]);
+        self.snap_seq = self.seq;
+        self.last_snap = Instant::now();
+        Ok(())
     }
 
     fn cols_rows(&self) -> (u16, u16) {
@@ -462,7 +794,18 @@ impl Owner {
     }
 
     fn reading(&self) -> bool {
-        !self.eof && !self.subs.iter().any(|s| s.flow == Flow::Block && s.shared.paused.load(SeqCst))
+        !self.eof
+            && !self.cut
+            && self.master.is_some()
+            && !self.subs.iter().any(|s| s.flow == Flow::Block && s.shared.paused.load(SeqCst))
+    }
+
+    fn snapshot_due(&self) -> Option<Duration> {
+        let every = self.reg.cfg.snapshot_interval;
+        if every.is_zero() || self.cut || self.seq == self.snap_seq || self.master.is_none() {
+            return None;
+        }
+        Some(every.saturating_sub(self.last_snap.elapsed()))
     }
 
     fn run(&mut self) {
@@ -475,8 +818,26 @@ impl Owner {
                 }
             }
             self.resync_drained();
+            if let Some(e) = self.exit
+                && !self.cut
+            {
+                // The program exited. Take what it left in the PTY, then close.
+                while !self.eof && self.read_once(&mut buf) == Some(true) {}
+                self.finish(Some(e));
+                return;
+            }
+            if let Some(at) = self.killing
+                && at.elapsed() > self.reg.cfg.kill_grace + Duration::from_secs(3)
+            {
+                crate::log(&format!(
+                    "terminal {}: the holder never reported the program's end; closing it",
+                    self.tref.id
+                ));
+                self.finish(None);
+                return;
+            }
             let reading = self.reading();
-            let want_write = !self.input.is_empty() && !self.eof;
+            let want_write = !self.input.is_empty() && !self.eof && self.master.is_some();
             let mut timeout = Duration::from_millis(500);
             if self.eof {
                 timeout = Duration::from_millis(50);
@@ -485,9 +846,11 @@ impl Owner {
                 let idle = self.last_output.elapsed();
                 timeout = timeout.min(COMPRESS_IDLE.saturating_sub(idle).max(Duration::from_millis(10)));
             }
+            if let Some(d) = self.snapshot_due() {
+                timeout = timeout.min(d.max(Duration::from_millis(1)));
+            }
             let ts = Timespec { tv_sec: timeout.as_secs() as _, tv_nsec: timeout.subsec_nanos() as _ };
             let (wake_ready, pty_flags) = {
-                let master = self.master.as_ref().expect("master open while running");
                 let mut pf = PollFlags::empty();
                 if reading {
                     pf |= PollFlags::IN;
@@ -495,14 +858,17 @@ impl Owner {
                 if want_write {
                     pf |= PollFlags::OUT;
                 }
-                let mut fds = [PollFd::new(self.wake.fd(), PollFlags::IN), PollFd::new(master, pf)];
-                let n = if pf.is_empty() { 1 } else { 2 };
-                match poll(&mut fds[..n], Some(&ts)) {
+                let wake = PollFd::new(self.wake.fd(), PollFlags::IN);
+                let mut fds = match self.master.as_ref() {
+                    Some(m) if !pf.is_empty() => vec![wake, PollFd::new(m, pf)],
+                    _ => vec![wake],
+                };
+                match poll(&mut fds, Some(&ts)) {
                     Ok(_) => {}
                     Err(rustix::io::Errno::INTR) => continue,
                     Err(e) => panic!("poll: {e}"),
                 }
-                (fds[0].revents().contains(PollFlags::IN), if n == 2 { fds[1].revents() } else { PollFlags::empty() })
+                (fds[0].revents().contains(PollFlags::IN), fds.get(1).map_or(PollFlags::empty(), |f| f.revents()))
             };
             if wake_ready {
                 self.wake.drain();
@@ -527,22 +893,11 @@ impl Owner {
             if self.compress_pending && self.last_output.elapsed() >= COMPRESS_IDLE {
                 self.compress_step();
             }
-            if self.eof || self.last_wait_check.elapsed() >= Duration::from_millis(500) {
-                self.last_wait_check = Instant::now();
-                match self.child.try_wait() {
-                    Ok(Some(status)) => {
-                        // The program exited. Take what it left in the PTY, then close.
-                        while !self.eof && self.read_once(&mut buf) == Some(true) {}
-                        self.finish(Some(status));
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        crate::log(&format!("terminal {}: wait: {e}", self.tref.id));
-                        self.finish(None);
-                        return;
-                    }
-                }
+            if self.snapshot_due() == Some(Duration::ZERO)
+                && let Err(e) = self.save(blob::KIND_SNAPSHOT, false)
+            {
+                crate::log(&format!("terminal {}: {e}", self.tref.id));
+                self.last_snap = Instant::now();
             }
         }
     }
@@ -550,20 +905,44 @@ impl Owner {
     /// One read from the PTY. `Some(true)` = got bytes, `Some(false)` = nothing ready,
     /// `None` = EOF (every slave closed).
     fn read_once(&mut self, buf: &mut [u8]) -> Option<bool> {
+        use std::os::fd::AsRawFd;
         let master = self.master.as_ref()?;
-        match rustix::io::read(master, &mut *buf) {
+        // The high-water mark covers what this read can take BEFORE it runs: a SIGKILL that
+        // lands inside the read syscall (the kernel has dequeued the bytes; this thread never
+        // runs again) must not lose them uncounted. The read takes at most what FIONREAD said,
+        // so the mark is exact unless the kill falls between the store and the syscall; then it
+        // overstates by bytes the next brain still reads (seq skips ahead; nothing is lost).
+        // Measured: without this, a SIGKILL mid-flood lost ~100 uncounted bytes in 1 run of 4.
+        let mut avail: libc::c_int = 0;
+        // SAFETY: FIONREAD into a c_int we own, on an fd we hold.
+        let ok = unsafe { libc::ioctl(master.as_raw_fd(), libc::FIONREAD as _, &mut avail) } == 0;
+        // Nothing queued: a one-byte read still tells EOF from EAGAIN, and a byte that races in
+        // between the ioctl and the read stays covered.
+        let want = match (ok, avail) {
+            (true, n) if n > 0 => (n as usize).min(buf.len()),
+            (true, _) => 1,
+            (false, _) => buf.len(),
+        };
+        self.reg.marks.set(self.slot, self.seq + want as u64);
+        match rustix::io::read(master, &mut buf[..want]) {
             Ok(0) => {
+                self.reg.marks.set(self.slot, self.seq);
                 self.eof = true;
                 None
             }
             Ok(n) => {
+                self.reg.marks.set(self.slot, self.seq + n as u64);
                 let chunk: Arc<[u8]> = Arc::from(&buf[..n]);
                 self.process(chunk);
                 Some(true)
             }
-            Err(rustix::io::Errno::AGAIN) | Err(rustix::io::Errno::INTR) => Some(false),
+            Err(rustix::io::Errno::AGAIN) | Err(rustix::io::Errno::INTR) => {
+                self.reg.marks.set(self.slot, self.seq);
+                Some(false)
+            }
             Err(_) => {
                 // EIO: the slave side is gone.
+                self.reg.marks.set(self.slot, self.seq);
                 self.eof = true;
                 None
             }
@@ -823,14 +1202,21 @@ impl Owner {
     }
 
     fn handle(&mut self, cmd: Cmd) {
-        let Cmd { conn, out, req, op, done } = cmd;
-        let ok = self.handle_op(conn, &out, req, op);
+        let Cmd { conn, out, req, op, mut done } = cmd;
+        let ok = self.handle_op(conn, &out, req, op, &mut done);
         if let Some(d) = done {
             let _ = d.send(ok);
         }
     }
 
-    fn handle_op(&mut self, conn: ConnId, out: &Arc<ConnOut>, req: u64, op: TermOp) -> bool {
+    fn handle_op(
+        &mut self,
+        conn: ConnId,
+        out: &Arc<ConnOut>,
+        req: u64,
+        op: TermOp,
+        done: &mut Option<oneshot::Sender<bool>>,
+    ) -> bool {
         let handle = self.tref.handle;
         match op {
             TermOp::Subscribe(s) => {
@@ -953,6 +1339,10 @@ impl Owner {
                     reply_err(out, req, code::BAD_REQUEST, "cols and rows must be 1 to 4096");
                     return false;
                 }
+                if self.cut {
+                    reply_err(out, req, code::BUSY, "termd is upgrading; resize after it");
+                    return false;
+                }
                 self.resize(cols, rows);
                 reply_ok(out, req, &Empty {});
                 true
@@ -1009,6 +1399,19 @@ impl Owner {
                 if self.reg.cfg.test_hooks && bytes == TEST_PANIC_INPUT {
                     panic!("test hook: panic requested by INPUT");
                 }
+                if self.reg.cfg.test_hooks && bytes == TEST_WEDGE_INPUT {
+                    crate::server::WEDGED.store(true, SeqCst);
+                    crate::log("test hook: the heartbeat stops");
+                    return true;
+                }
+                if self.cut {
+                    // At most once: input the handoff didn't carry is dropped, and said so.
+                    err(
+                        code::BUSY,
+                        format!("termd is upgrading; {} B of input to {} dropped", bytes.len(), self.tref.id),
+                    );
+                    return false;
+                }
                 if self.subs[i].view.take().is_some() {
                     self.push_live_repaint(i, 0);
                 }
@@ -1029,11 +1432,40 @@ impl Owner {
                 true
             }
             TermOp::Kill { signal, reply } => {
-                let status = self.kill(signal);
-                self.finish(status);
-                if reply {
-                    reply_ok(out, req, &Empty {});
+                if self.cut && reply {
+                    reply_err(out, req, code::BUSY, "termd is upgrading; kill after it");
+                    return false;
                 }
+                if reply {
+                    self.kill_replies.push((out.clone(), req));
+                }
+                if self.killing.is_none() {
+                    self.kill(signal);
+                }
+                // Answered (and `done` completed) once the holder reports the program's end.
+                self.pending_done.extend(done.take());
+                true
+            }
+            TermOp::Exited(e) => {
+                if self.exit.is_none() {
+                    self.exit = Some(e);
+                }
+                true
+            }
+            TermOp::Cut { snapshot } => {
+                self.flush_input();
+                self.cut = true;
+                let kind = if snapshot { blob::KIND_SNAPSHOT } else { blob::KIND_VT };
+                match self.save(kind, true) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        crate::log(&format!("terminal {}: handoff: {e}", self.tref.id));
+                        false
+                    }
+                }
+            }
+            TermOp::Resume => {
+                self.cut = false;
                 true
             }
         }
@@ -1120,20 +1552,22 @@ impl Owner {
         }
     }
 
-    /// Signals the program's process groups, closes the PTY, and waits for the program,
-    /// killing it if it outlives the grace period.
-    fn kill(&mut self, signal: Signal) -> Option<ExitStatus> {
-        let fg = self.master.as_ref().and_then(|m| rustix::termios::tcgetpgrp(m).ok());
-        let groups: Vec<Pid> = std::iter::once(self.pgid).chain(fg.filter(|g| *g != self.pgid)).collect();
-        for g in &groups {
-            let _ = rustix::process::kill_process_group(*g, signal);
-        }
-        // Take what the program prints on its way out.
+    /// Asks the holder to signal the program's process groups (it sends `SIGKILL` after the
+    /// grace), takes what the program prints on its way out, and closes our copy of the PTY;
+    /// with the holder's closed too, the kernel hangs the session up. `finish` follows the
+    /// holder's `exited`.
+    fn kill(&mut self, signal: Signal) {
+        self.killing = Some(Instant::now());
+        self.reg.hold.send(&json!({"m": "kill", "handle": self.tref.handle, "signal": signal.as_raw()}), &[]);
         let mut buf = vec![0u8; READ_CHUNK];
         let until = Instant::now() + Duration::from_millis(100);
-        while Instant::now() < until {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                break;
+        while Instant::now() < until && self.exit.is_none() {
+            while let Ok(cmd) = self.rx.try_recv() {
+                if let TermOp::Exited(e) = cmd.op {
+                    self.exit = Some(e);
+                } else {
+                    self.handle(cmd);
+                }
             }
             match self.read_once(&mut buf) {
                 Some(true) => {}
@@ -1142,37 +1576,22 @@ impl Owner {
             }
         }
         while self.read_once(&mut buf) == Some(true) {}
-        self.master = None; // the kernel hangs up the session
-        self.reap(&groups)
-    }
-
-    fn reap(&mut self, groups: &[Pid]) -> Option<ExitStatus> {
-        let deadline = Instant::now() + KILL_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(s)) => return Some(s),
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-                Ok(None) => {
-                    crate::log(&format!("terminal {}: program outlived its hangup; killing it", self.tref.id));
-                    for g in groups {
-                        let _ = rustix::process::kill_process_group(*g, Signal::KILL);
-                    }
-                    return self.child.wait().ok();
-                }
-                Err(_) => return None,
-            }
-        }
-    }
-
-    /// The terminal is over: tell every subscriber, leave the registry, end the thread.
-    fn finish(&mut self, status: Option<ExitStatus>) {
-        use std::os::unix::process::ExitStatusExt;
         self.master = None;
-        let (code, signal) = match status {
-            Some(s) => (s.code(), s.signal().map(spawn::signal_name)),
-            None => (None, None),
+    }
+
+    /// The terminal is over: tell every subscriber, leave the registry, release it to the
+    /// holder, end the thread.
+    fn finish(&mut self, exit: Option<Exit>) {
+        self.master = None;
+        let code = exit.and_then(|e| e.code);
+        let signal = exit.and_then(|e| e.signal).map(spawn::signal_name);
+        let mut how = match (code, &signal) {
+            (Some(c), _) => format!("code {c}"),
+            (None, Some(s)) => format!("signal {s}"),
+            (None, None) => "unknown status".to_owned(),
         };
-        crate::log(&format!("terminal {} ended: code {code:?} signal {signal:?} at seq {}", self.tref.id, self.seq));
+        how.push_str(&format!(" at seq {}", self.seq));
+        crate::log(&format!("terminal {} ended: {how}", self.tref.id));
         for i in 0..self.subs.len() {
             if let Some(from) = self.subs[i].lag.take() {
                 let dropped = self.lag_dropped(i, from);
@@ -1183,6 +1602,13 @@ impl Owner {
         self.event_all(true, &Event::Closed);
         self.subs.clear();
         self.reg.remove(&self.tref);
+        self.reg.hold.send(&json!({"m": "release", "handle": self.tref.handle}), &[]);
+        for (out, req) in self.kill_replies.drain(..) {
+            reply_ok(&out, req, &Empty {});
+        }
+        for d in self.pending_done.drain(..) {
+            let _ = d.send(true);
+        }
         self.done = true;
         // Commands that raced the end get a no_terminal answer.
         while let Ok(cmd) = self.rx.try_recv() {
@@ -1191,7 +1617,10 @@ impl Owner {
     }
 
     fn refuse(&self, cmd: Cmd) {
-        if !matches!(cmd.op, TermOp::Detach | TermOp::Input(_)) && !matches!(cmd.op, TermOp::Kill { reply: false, .. })
+        if !matches!(
+            cmd.op,
+            TermOp::Detach | TermOp::Input(_) | TermOp::Exited(_) | TermOp::Resume | TermOp::Cut { .. }
+        ) && !matches!(cmd.op, TermOp::Kill { reply: false, .. })
         {
             reply_err(&cmd.out, cmd.req, code::NO_TERMINAL, format!("terminal {} is gone", self.tref.id));
         }
@@ -1200,15 +1629,27 @@ impl Owner {
         }
     }
 
-    /// After a panic: hang up the program, tell subscribers, leave the registry. The
-    /// libghostty terminal is not touched again.
+    /// After a panic: hang up the program, wait for the holder to reap it, tell subscribers,
+    /// leave the registry. The libghostty terminal is not touched again.
     fn abandon(&mut self) {
-        let _ = rustix::process::kill_process_group(self.pgid, Signal::HUP);
+        self.reg.hold.send(&json!({"m": "kill", "handle": self.tref.handle, "signal": libc::SIGHUP}), &[]);
         self.master = None;
-        let status = self.reap(&[self.pgid]);
+        let until = Instant::now() + self.reg.cfg.kill_grace + Duration::from_secs(3);
+        while self.exit.is_none() {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.rx.recv_timeout(left) {
+                Ok(Cmd { op: TermOp::Exited(e), .. }) => self.exit = Some(e),
+                Ok(cmd) => self.refuse(cmd),
+                Err(_) => break,
+            }
+        }
         let message = format!("termd's owner thread for {} failed; the terminal is closed", self.tref.id);
         self.event_all(true, &Event::Error { code: code::PANIC.into(), message });
-        self.finish(status);
+        let exit = self.exit;
+        self.finish(exit);
     }
 }
 

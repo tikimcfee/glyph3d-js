@@ -78,6 +78,9 @@ impl Client {
                 pid: None,
                 features: Vec::new(),
                 max_frame: 0,
+                instance: None,
+                generation: None,
+                holder: None,
             },
         };
         let f = c.read_frame()?;

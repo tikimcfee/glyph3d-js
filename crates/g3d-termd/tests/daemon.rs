@@ -44,7 +44,13 @@ fn handshake_refuses_another_major() {
 
     let c = d.client();
     assert_eq!(c.welcome.proto, PROTO);
-    assert_eq!(c.welcome.features, vec!["raw", "view", "capture"]);
+    assert_eq!(c.welcome.features, vec!["raw", "view", "capture", "upgrade"]);
+    // 1.1: the namespace's identity, the brain's generation, the holder.
+    assert_eq!(c.welcome.instance.as_ref().map(String::len), Some(16));
+    assert_eq!(c.welcome.generation, Some(1));
+    let holder = c.welcome.holder.clone().unwrap();
+    assert_eq!(holder.pid, d.pid());
+    assert_ne!(c.welcome.pid, Some(d.pid()), "WELCOME.pid is the brain's");
     assert_eq!(c.welcome.engine, "libghostty-vt/1.0.1");
     // Started on an explicit --socket: there is no namespace to name.
     assert_eq!(c.welcome.ns, None);
@@ -687,7 +693,8 @@ fn flood_in_several_terminals_stays_bounded() {
     for (c, h, _) in &mut clients {
         c.input(*h, b"\r").unwrap();
     }
-    let pid = d.pid();
+    // The brain holds the emulators; the holder holds only fds.
+    let pid = d.brain_pid();
     let mut peak_rss_kb = 0u64;
     let handles: Vec<_> = clients
         .into_iter()
@@ -745,7 +752,7 @@ fn stalled_subscribers_do_not_hoard_events() {
     let mut seen = Seen::default();
     read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
     c.input(s.handle, b"\r").unwrap();
-    let pid = d.pid();
+    let pid = d.brain_pid();
     // Reads for at least `secs` and `min_bytes` of output, sampling the daemon's memory:
     // (output bytes per second, peak RSS KiB).
     let read_for = |c: &mut Client, secs: f64, min_bytes: u64| {

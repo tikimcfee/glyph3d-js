@@ -15,6 +15,7 @@ publish = false
 [workspace.dependencies]
 g3d-wire = { path = "crates/g3d-wire" }
 g3d = { path = "crates/g3d" }
+g3d-hold = { path = "crates/g3d-hold" }
 
 # Pinned to the libghostty-rs commit that tracks libghostty-vt 1.0.1 (Ghostty tag
 # vt-1.0.1). The Ghostty source itself comes from the verified release tarballs via
@@ -27,6 +28,9 @@ serde_json = "1.0.154"
 rustix = { version = "1.1.6", features = ["pty", "termios", "process", "fs", "net", "event", "pipe", "stdio"] }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time", "signal"] }
 clap = { version = "4.6.7", features = ["derive"] }
+# Crash-restore snapshots: LZ4 (the safe Rust implementation) and a CRC-32 per blob.
+lz4_flex = { version = "0.14.0", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+crc32fast = "1.5.0"
 
 [profile.release]
 # The daemon holds every shell; keep panics catchable per owner thread.

@@ -7,8 +7,10 @@ use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
 pub const PROTO: [u32; 2] = [1, 0];
-/// The features a 1.0 daemon announces.
+/// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
+/// The features this daemon announces: the core plus `upgrade` (1.1).
+pub const DAEMON_FEATURES: [&str; 4] = ["raw", "view", "capture", "upgrade"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +32,23 @@ pub struct Welcome {
     pub pid: Option<u32>,
     pub features: Vec<String>,
     pub max_frame: u64,
+    /// (1.1) The namespace's identity: random, fixed for the holder's life. The same instance
+    /// after a reconnect means the same terminals may still be there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// (1.1) Which brain this is in the holder's life: 1 for the first, +1 per restart or upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// (1.1) The holder: its pid and version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<HolderInfo>,
+}
+
+/// `WELCOME.holder`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderInfo {
+    pub pid: u32,
+    pub version: String,
 }
 
 /// An `ERROR` frame's payload, and a failed `REPLY`'s `error`.
@@ -67,10 +86,16 @@ pub mod code {
     pub const ALT_SCREEN: &str = "alt_screen";
     pub const SPAWN_FAILED: &str = "spawn_failed";
     pub const TOO_LARGE: &str = "too_large";
+    /// (1.1) Another op of its kind is running (`upgrade`).
+    pub const BUSY: &str = "busy";
     // Connection-level (ERROR frames).
     pub const BAD_FRAME: &str = "bad_frame";
     pub const VERSION: &str = "version";
     pub const AUTH: &str = "auth";
+    /// (1.1) The engine is being replaced on purpose: reconnect now.
+    pub const RESTART: &str = "restart";
+    /// (1.1) The holder answered: no brain is running. The message says why.
+    pub const BRAIN_FAILED: &str = "brain_failed";
     // `error` events.
     /// An `INPUT` the program's unread-input buffer had no room for.
     pub const INPUT_FULL: &str = "input_full";
@@ -102,10 +127,11 @@ pub enum Op {
     Capture(Capture),
     Ping,
     Stop,
+    Upgrade(Upgrade),
 }
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
-pub const KNOWN_OPS: [&str; 12] = [
+pub const KNOWN_OPS: [&str; 13] = [
     "create",
     "list",
     "kill",
@@ -118,7 +144,25 @@ pub const KNOWN_OPS: [&str; 12] = [
     "capture",
     "ping",
     "stop",
+    "upgrade",
 ];
+
+/// (1.1) `upgrade`: replace the daemon's engine without ending a terminal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Upgrade {
+    /// The new binary (default: the path the daemon was started from).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// Replace the holder too (`g3d upgrade --holder`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeReply {
+    /// The generation of the brain that accepted the upgrade.
+    pub generation: u64,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Create {
@@ -411,6 +455,10 @@ pub enum Event {
     Closed,
     Error {
         code: String,
+        message: String,
+    },
+    /// (1.1) On stream 0, to the connection that asked for an `upgrade` that did not happen.
+    UpgradeFailed {
         message: String,
     },
     #[serde(other)]
