@@ -44,8 +44,9 @@ build: prep termd
 
 # --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
 # The relay finds g3d-termd next to its own executable. libghostty-vt builds from vendor/
-# (tools/termd-vendor.sh: the verified release tarballs and Zig). Linux hosts only for now;
-# macOS and the cross targets are TODO (docs/termd/DESIGN.md, "Build and vendoring").
+# (tools/termd-vendor.sh: the verified release tarballs and Zig). Linux hosts only for now
+# (linux-arm64 cross-builds in `make linux-arm64`); macOS is TODO (docs/termd/DESIGN.md,
+# "Build and vendoring").
 CARGO_OUT := $(or $(CARGO_TARGET_DIR),target)
 HOST_OS   := $(shell go env GOOS)
 
@@ -161,6 +162,16 @@ linux-arm64: prep
 		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=linux-arm64' \
 		-o ../$(OUT_DIR)/$(BINARY)-linux-arm64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-linux-arm64"
+ifeq ($(HOST_OS),linux)
+	@# g3d-termd + g3d for arm64: a static musl build through cargo-zigbuild and the vendored Zig.
+	@if command -v cargo-zigbuild >/dev/null 2>&1; then \
+		PATH="$(CURDIR)/vendor/zig:$$PATH" CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} \
+			cargo zigbuild --release -p g3d-termd -p g3d --target aarch64-unknown-linux-musl && \
+		cp $(CARGO_OUT)/aarch64-unknown-linux-musl/release/g3d-termd $(OUT_DIR)/g3d-termd-linux-arm64 && \
+		cp $(CARGO_OUT)/aarch64-unknown-linux-musl/release/g3d $(OUT_DIR)/g3d-linux-arm64 && \
+		echo "  → $(OUT_DIR)/g3d-termd-linux-arm64 $(OUT_DIR)/g3d-linux-arm64"; \
+	else echo "  g3d-termd-linux-arm64: skipped (needs cargo-zigbuild and the aarch64-unknown-linux-musl rustup target)"; fi
+endif
 
 darwin-amd64: prep
 	@mkdir -p $(OUT_DIR)

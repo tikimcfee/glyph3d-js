@@ -394,10 +394,12 @@ ours.
   Debug mode parses a flood slowly enough to stall the daemon's own tests.
 - **What `make` builds today (S1):** `make termd` (part of `make build`) builds `g3d-termd`
   and `g3d` natively on a Linux host and copies them beside `glyph3d-cli`; on linux-amd64,
-  `make linux-amd64` also puts them in `dist/`. TODO, in order:
-  1. linux-arm64: cargo-zigbuild with the vendored Zig (proven for a C dependency, not yet
-     for libghostty itself; hedge: `zig build -Dtarget=aarch64-linux` of `libghostty-vt.a`
-     and point the crate at it);
+  `make linux-amd64` also puts them in `dist/`. `make linux-arm64` builds them as static
+  `aarch64-unknown-linux-musl` binaries through cargo-zigbuild and the vendored Zig, when
+  cargo-zigbuild is installed. Proven on 2026-11-12: libghostty itself cross-built in about
+  90 s, and the arm64 daemon, run under qemu-aarch64, created a terminal, answered `list` and
+  `capture` (styles intact) and stopped cleanly. Not yet run on arm64 hardware. TODO, in order:
+  1. linux-arm64 on real hardware (and a glibc build if a target needs one);
   2. macOS (darwin-arm64, then darwin-amd64): a native build on the Mac (the vendor script
      fetches the macOS Zig);
   3. `make release` shipping `g3d-termd`/`g3d` beside each `glyph3d-cli`;

@@ -548,6 +548,6 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 `make build` produces the self-contained binary (and `g3d-termd` + `g3d` beside it, which it
 needs for terminals); `make all` cross-compiles
 linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub;
-`g3d-termd` is built for linux-amd64 only so far — the other targets are TODO in `docs/termd/DESIGN.md`); `make release VERSION=vX.Y.Z` cuts a GitHub release
+`g3d-termd` is built for Linux so far — amd64 natively, arm64 through cargo-zigbuild; macOS is TODO in `docs/termd/DESIGN.md`); `make release VERSION=vX.Y.Z` cuts a GitHub release
 (`RELEASE_NOTES.md`). The single binary is a single-operator tool — shared relay state,
 no auth, trusts the operator. The product/demo web page is a separate repo.
