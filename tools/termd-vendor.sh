@@ -7,7 +7,7 @@
 #                                    out of the tree); DIR may already hold verified downloads
 #
 # Every download is checked against its minisign signature (Ghostty's and Zig's published keys)
-# and the Ghostty tarballs also against pinned SHA-256s. It needs `minisign` or `rsign` on PATH
+# and against a pinned SHA-256 (Zig's from ziglang.org/download/index.json). It needs `minisign` or `rsign` on PATH
 # (or MINISIGN=/path/to/either). A failed check stops the script and leaves nothing unpacked.
 # .cargo/config.toml points GHOSTTY_SOURCE_DIR, GHOSTTY_ZIG_SYSTEM_DIR and ZIG at vendor/.
 set -eu
@@ -46,7 +46,12 @@ fetch() { # url file
     curl -fsSL --retry 3 -o "$2.part" "$1" || die "download failed: $1"
     mv "$2.part" "$2"
 }
-sha256() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
+# sha256sum (Linux, macOS 15+), else shasum (Perl, every macOS). A pipeline's status is its
+# last command's, so the tool is picked up front rather than by `||`.
+if command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
+else die "need sha256sum or shasum on PATH to verify the downloads"; fi
+sha256() { $SHA256 "$1" | cut -d' ' -f1; }
 
 # libghostty-vt: source + deps tarballs.
 for f in "libghostty-vt-$GHOSTTY_VERSION.tar.gz" "libghostty-vt-$GHOSTTY_VERSION-deps.tar.gz"; do
@@ -67,16 +72,17 @@ ln -sfn "libghostty-vt-$GHOSTTY_VERSION-deps" "$DIR/ghostty-deps"
 
 # Zig, for this host.
 case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) ZIG_HOST=x86_64-linux ;;
-    Linux-aarch64|Linux-arm64) ZIG_HOST=aarch64-linux ;;
-    Darwin-arm64) ZIG_HOST=aarch64-macos ;;
-    Darwin-x86_64) ZIG_HOST=x86_64-macos ;;
+    Linux-x86_64) ZIG_HOST=x86_64-linux ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
+    Linux-aarch64|Linux-arm64) ZIG_HOST=aarch64-linux ZIG_SHA256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+    Darwin-arm64) ZIG_HOST=aarch64-macos ZIG_SHA256=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a ;;
+    Darwin-x86_64) ZIG_HOST=x86_64-macos ZIG_SHA256=4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6 ;;
     *) die "no Zig build known for $(uname -s)-$(uname -m); set it up by hand at $DIR/zig/zig" ;;
 esac
 ZIG_TAR="zig-$ZIG_HOST-$ZIG_VERSION.tar.xz"
 fetch "$ZIG_URL/$ZIG_TAR" "$DIR/dl/$ZIG_TAR"
 fetch "$ZIG_URL/$ZIG_TAR.minisig" "$DIR/dl/$ZIG_TAR.minisig"
 verify_sig "$ZIG_KEY" "$DIR/dl/$ZIG_TAR"
+[ "$(sha256 "$DIR/dl/$ZIG_TAR")" = "$ZIG_SHA256" ] || die "$ZIG_TAR SHA-256 mismatch"
 if [ ! -x "$DIR/zig-$ZIG_HOST-$ZIG_VERSION/zig" ]; then
     tar -xJf "$DIR/dl/$ZIG_TAR" -C "$DIR"
 fi
