@@ -92,7 +92,7 @@ function Chrome({ wall }) {
       </div>
       <div style={{ ...styles.hint, left: sb.open && sb.side === 'left' ? 248 + 12 : 12, right: sb.open && sb.side === 'right' ? 248 + 12 : 12 }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · wheel to zoom (over the focused terminal: its scrollback) · drag empty canvas to pan
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
       </div>
       <Sidebar wall={wall} state={state} />
