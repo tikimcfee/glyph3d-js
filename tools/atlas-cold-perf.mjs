@@ -86,7 +86,7 @@ function installProbe() {
     const G = Object.getPrototypeOf(w.terminal(w.order[0]));
     const origApply = G.applyScreen;
     G.applyScreen = function (...a) { const t = now(); try { return origApply.apply(this, a); } finally { st.apply.push([t, now() - t]); } };
-    const tick = (ts) => { st.frames.push(now()); requestAnimationFrame(tick); };
+    const tick = () => { st.frames.push(now()); requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
     new PerformanceObserver((l) => { for (const e of l.getEntries()) st.long.push([e.startTime, e.duration]); }).observe({ type: 'longtask' });
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
