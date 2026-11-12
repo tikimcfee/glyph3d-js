@@ -2,7 +2,7 @@
 // and border-drag resize. Run: bun test tools/wall-layout.test.mjs
 import { test, expect } from 'bun:test';
 import {
-    freeFlowSlot, fitRect, unionRect, edgesAt, cycle, resizeFromDrag, overlaps, FLOW_GAP, FLOW_COLUMNS,
+    freeFlowSlot, fitRect, unionRect, edgesAt, hitTest, cycle, resizeFromDrag, overlaps, FLOW_GAP, FLOW_COLUMNS,
 } from '../wall/wallLayout.js';
 
 const rect = (x, y, w, h) => ({ minX: x, maxX: x + w, maxY: y, minY: y - h });
@@ -49,6 +49,21 @@ test('edgesAt grabs the border band from both sides, corners grab two edges', ()
     expect(edgesAt(r, 200, -25, 2)).toBeNull();          // far outside
     const corner = edgesAt(r, 100, -50, 2);
     expect(corner.right && corner.bottom).toBe(true);
+});
+
+test('hitTest: the terminal on top keeps its body where another\'s border band reaches under it', () => {
+    // b (focused, on top) overlaps a's right edge: a's band at x=100 lies inside b's body.
+    const a = { id: 'a', body: rect(0, 0, 100, 50), window: rect(0, 4, 100, 54) };
+    const b = { id: 'b', body: rect(80, -10, 100, 30), window: rect(80, -6, 100, 34) };
+    expect(hitTest([b, a], 100, -20, 2)).toEqual({ id: 'b', part: 'body' });
+    // Beneath order, a's edge wins the same point — stacking order is the whole rule.
+    expect(hitTest([a, b], 100, -20, 2)).toMatchObject({ id: 'a', part: 'edge' });
+    // Off b, a's edge is a's.
+    expect(hitTest([b, a], 100, -45, 2)).toMatchObject({ id: 'a', part: 'edge', edges: { right: true } });
+    // The window above the body is the title bar; the top of the window is an edge.
+    expect(hitTest([b, a], 40, 2, 1)).toEqual({ id: 'a', part: 'title' });
+    expect(hitTest([b, a], 40, 4, 1)).toMatchObject({ id: 'a', part: 'edge', edges: { top: true } });
+    expect(hitTest([b, a], 500, 500, 2)).toBeNull();
 });
 
 test('cycle wraps both ways and starts sensibly with no focus', () => {

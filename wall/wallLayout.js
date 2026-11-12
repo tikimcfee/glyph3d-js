@@ -83,6 +83,26 @@ export function edgesAt(rect, x, y, tol) {
     return { left, right: right && !left, top, bottom: bottom && !top };
 }
 
+/**
+ * What's under the world point (x, y), given the terminals in STACKING order (topmost first): the
+ * first terminal that claims the point wins, and a terminal claims it by its border band (edges,
+ * up to `tol` outside), its title bar (the window above the body), or its body. Each terminal is
+ * tested whole before the one beneath it — so a terminal on top keeps its body even where another
+ * terminal's border band reaches under it.
+ * @param {{ id: string, window: Rect, body: Rect }[]} stack - topmost first; `window` = body + title bar
+ * @param {number} x @param {number} y @param {number} tol - border band half-width, world units
+ * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: { left: boolean, right: boolean, top: boolean, bottom: boolean } }|null}
+ */
+export function hitTest(stack, x, y, tol) {
+    for (const { id, window: w, body } of stack) {
+        const edges = edgesAt(w, x, y, tol);
+        if (edges) return { id, part: 'edge', edges };
+        if (x < w.minX || x > w.maxX || y < w.minY || y > w.maxY) continue;
+        return { id, part: y > body.maxY ? 'title' : 'body' };
+    }
+    return null;
+}
+
 /** The CSS cursor for a set of grabbed edges. @param {{left,right,top,bottom}} e @returns {string} */
 export function edgeCursor(e) {
     if ((e.left && e.top) || (e.right && e.bottom)) return 'nwse-resize';
