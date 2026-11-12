@@ -311,14 +311,14 @@ export const CHECKS = [
     g('pick-flat-root-check.mjs', 'pick results list vs full scene over pointer sweeps — identical; removing a hit mesh changes them', 'pointer positions not swept'),
     g('panel-batch-check.mjs', 'the batched frame vs every panel drawing itself, per pose', 'poses not sampled'),
     // Labels (book tabs, nameplates) and far files appear in the library layout.
+    g('glyph-batch-check.mjs', 'the batched frame vs every label drawing itself (3×3-blurred, past 24/255), per pose, in the library layout', 'sub-threshold edge differences, by design', { args: ['--cmd', 'layout.scheme library'] }),
     {
-        ...g('glyph-batch-check.mjs', 'the batched frame vs every label drawing itself (3×3-blurred, past 24/255), per pose, in the library layout', 'sub-threshold edge differences, by design', { args: ['--cmd', 'layout.scheme library'] }),
+        ...g('far-lod-check.mjs', 'far files show as their backdrop (≥5% light lift) and nothing outside the far rects moves, in the library layout', 'how the transition band looks (reported, not judged)', { args: ['--cmd', 'layout.scheme library'] }),
         known: {
-            reason: 'red at a169ed1 and 5774779 (before the render port) as on wall today: at the ×0.5 and ×0.05 poses the batched-vs-shifted diff of small labels edges past the 1% limit (1.01% / 1.44% on a 44-file fixture) — the threshold against tiny labels, not a batching regression; open',
-            signature: [/✗ fit-all × 0\.(5|05) distance/],
+            reason: 'red at a64def3, before the text-path and atlas merges, as after them: no backdrop shows over bare panels and nothing differs inside the far rects (0.0% lift, every diff 0) — the check sees nothing drawn in the far rects under the runner, not a measured regression; open',
+            signature: [/✗ the backdrops lift the far rects 0\.0% over bare panels/],
         },
     },
-    g('far-lod-check.mjs', 'far files show as their backdrop (≥5% light lift) and nothing outside the far rects moves, in the library layout', 'how the transition band looks (reported, not judged)', { args: ['--cmd', 'layout.scheme library'] }),
     g('glyph-cull-truth.mjs', "every live quad lies inside its mesh's stated bounding box across a dir load, the presets, an arranged grid and a terminal", 'fields moved through the group table (labels) — they opt out of culling'),
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],

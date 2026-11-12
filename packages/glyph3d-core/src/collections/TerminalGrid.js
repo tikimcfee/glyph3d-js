@@ -599,7 +599,7 @@ export default class TerminalGrid extends FramedGlyphField {
      *
      * Each string becomes one history line (one codepoint per column, padded/truncated
      * to cols) at the default foreground color; normal depth fade + placement apply.
-     * Glyphs not yet in the live atlas are encoded first. Lines past _depthMax are
+     * Glyphs not yet in the live atlas are requested first. Lines past _depthMax are
      * dropped (only that many slots render). Replaces the current history; later
      * forward-captures push in front of the seed seamlessly.
      * @param {string[]} lines  scrollback rows, newest first
@@ -1235,12 +1235,13 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Have the live Slug atlas encode glyphs this terminal is about to draw for the first time,
+     * Ask the live Slug atlas for glyphs this terminal is about to draw for the first time,
      * before their slots are written.
      *
-     * Each new codepoint is routed through the font chain and encoded on first sighting; the live
-     * atlas re-encodes + hot-swaps the curve/glyph-map textures into every field (including this
-     * terminal's) synchronously, so by the time the slot is written the glyph is renderable.
+     * Each new codepoint is routed through the font chain and gets its slot synchronously (the
+     * slot never moves); its outline is encoded in a worker and lands in the shared textures a
+     * frame or two later. Until then the glyph-map texel is zero and the cell draws its background
+     * with no ink; when it lands only the textures change, so the cell needs no rewrite.
      * Callers pass only codepoints this terminal has never drawn (its `_liveEnsured` set, which
      * they add them to): a cell whose codepoint didn't change was ensured when it first did, so a
      * screen update hands over nothing at all in steady state.
