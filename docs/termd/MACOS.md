@@ -214,6 +214,41 @@ The common practice:
    `gui/<uid>` (shpool's Homebrew service is one). For now, start it from a Terminal shell or
    from the relay, which is how the dev loop runs.
 
+### Sketch: the explicit environment (agreed in direction with Ivan, 2026-11-12; not built)
+
+- **Built-in allowlist** (in code, listed in PROTOCOL.md):
+  - `HOME USER LOGNAME SHELL PATH TMPDIR TZ LANG LC_* SSH_AUTH_SOCK`;
+  - plus the Linux desktop session: `XDG_* DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY`.
+    Clipboard tools and GUI launches need these.
+
+  With the login shell building the rest, most users never need a config file.
+- **Optional exceptions**, `$XDG_CONFIG_HOME/g3d/termd.toml` (else `~/.config/g3d/termd.toml`):
+
+  ```toml
+  [env]
+  pass = ["AWS_PROFILE", "NIX_*"]       # add to the built-in list (patterns)
+  drop = ["SSH_AUTH_SOCK"]              # take out of it
+  [env.set]
+  EDITOR = "nvim"
+  PATH   = "${HOME}/.local/bin:${PATH}" # ${VAR} only, from the daemon's own environment
+  ```
+
+  Expansion is `${VAR}` and nothing else: no `~`, no `$(…)`, no shell.
+- **Order:** the built-in list, then the file's `pass`/`drop`, then termd's own variables
+  (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `G3D_*`), then the file's `set`, then `create.env`.
+  The caller's explicit request wins.
+- **When it's read:** on every `create`, re-parsed only when the file's modification time
+  changes, so an edit needs no daemon restart. A file that doesn't parse fails that `create`
+  with an error naming the line. It never falls back to passing everything.
+- **Observability:**
+  - The daemon logs its policy once at start: the file used, and the names of the variables it
+    dropped.
+  - A `g3d env [<id>]` command (a protocol op) prints a terminal's effective environment, each
+    variable tagged with its source: built-in, file, termd, `set`, or request.
+- **Left out:** per-terminal sections (that is `create.env`), and re-reading the daemon's own
+  environment, which stays fixed at start, as tmux's does. `SSH_AUTH_SOCK` changing on an ssh
+  reconnect gets a stable symlink later, if it's ever needed.
+
 ## Found along the way: a daemon that wouldn't stop
 
 `log()` used `eprintln!`, which panics when stderr can't be written: a full disk under the log
