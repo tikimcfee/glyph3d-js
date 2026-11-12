@@ -47,9 +47,18 @@ export default function registerSceneCommands(router) {
     // every world matrix against a recompute from scratch. A stale node is a change the walk never
     // saw — matrixAutoUpdate switched off, a pivot set or Object3D.copy onto a node already in the
     // scene, or a quaternion write that skips three's hook (SceneTransforms' header lists them).
-    router.register('scene.transforms', (args, ctx) => {
+    router.register('scene.transforms', async (args, ctx) => {
         const st = ctx.sceneTransforms;
         if (!st) throw new Error('scene.transforms: no SceneTransforms on this scene');
+        if (args[0] === 'who') {
+            const ms = Math.max(50, Number(args[1]) || 500);
+            const t = await st.tallyFor(ms);
+            const total = t.reduce((n, x) => n + x.nodes, 0);
+            return {
+                text: `OK: over ${ms} ms the walks recomputed ${total} world matrices, started by ${t.length} moving node(s):\n` + t.slice(0, 25).map((x) => `  ${String(x.nodes).padStart(6)}  ${x.origin}`).join('\n'),
+                data: { total, origins: t },
+            };
+        }
         const last = st.stats;
         st.update();
         const { checked, stale } = verifyTransforms(ctx.scene);
@@ -63,7 +72,7 @@ export default function registerSceneCommands(router) {
             text: box('TRANSFORMS', lines, 60) + (stale.length ? `\n${list}\nFAIL: ${stale.length} stale world matrices` : '\nOK: every world matrix current'),
             data: { last, checked, stale },
         };
-    }, { description: 'World-matrix walk stats, and a check of every world matrix against a fresh recompute' });
+    }, { description: "World-matrix walk stats, and a check of every world matrix against a fresh recompute; 'who [ms]' names the moving nodes that started the recomputes over the next ms (500)", usage: '[who [ms]]' });
 
     // Clear all CONTENT grids (the open code files). Leaves terminals alone — those
     // are live/owned and torn down explicitly (terminal.kill). Reuses ctx.removeGrid

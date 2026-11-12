@@ -254,9 +254,21 @@ export default class SceneTransforms {
      */
     update(force = false) {
         const s = { visited: 0, recomputed: 0, three: 0 };
-        walk(this.scene, force, s);
+        if (this._tally) s.origins = this._tally;   // every walk while a tally is open adds to it
+        walk(this.scene, force, s, null);
         this.stats = s;
         return s;
+    }
+
+    /** Tally every walk's recomputes over the next `ms` by the moving node that started each subtree
+     *  — the "who keeps moving" probe (scene.transforms who). @param {number} [ms]
+     *  @returns {Promise<Array<{origin:string, nodes:number}>>} */
+    async tallyFor(ms = 500) {
+        this._tally = new Map();
+        await new Promise((r) => setTimeout(r, ms));
+        const o = this._tally;
+        this._tally = null;
+        return [...o].map(([origin, nodes]) => ({ origin, nodes })).sort((a, b) => b.nodes - a.nodes);
     }
 
     /** Hand the scene's matrix update back to three. Tracked nodes stay tracked (a mark is harmless). */
@@ -269,7 +281,7 @@ export default class SceneTransforms {
  * three's updateMatrixWorld, entering only flagged subtrees.
  * @param {any} o  @param {boolean} force  @param {{ visited: number, recomputed: number, three: number }} s
  */
-function walk(o, force, s) {
+function walk(o, force, s, origin) {
     s.visited++;
     if (o[ALWAYS]) {
         s.three++;
@@ -280,6 +292,10 @@ function walk(o, force, s) {
         return;
     }
     if (force || o[DIRTY]) {
+        if (s.origins) {
+            if (!force) origin = nameOf(o);
+            s.origins.set(origin, (s.origins.get(origin) || 0) + 1);
+        }
         if (o.matrixAutoUpdate) o.updateMatrix();
         if (o.matrixWorldAutoUpdate === true) {
             if (o.parent === null) o.matrixWorld.copy(o.matrix);
@@ -293,8 +309,15 @@ function walk(o, force, s) {
     if (force || o[SUB]) {
         o[SUB] = false;
         const ch = o.children;
-        for (let i = 0; i < ch.length; i++) walk(ch[i], force, s);
+        for (let i = 0; i < ch.length; i++) walk(ch[i], force, s, origin);
     }
+}
+
+/** A readable origin: the node's name, else its nearest named ancestor's, with its type. */
+function nameOf(o) {
+    let n = o, hops = 0;
+    while (n && !n.name && hops < 6) { n = n.parent; hops++; }
+    return `${n?.name || '(unnamed)'}${hops ? ` ›${hops}` : ''} [${o.type}]`;
 }
 
 const _local = new THREE.Matrix4();
