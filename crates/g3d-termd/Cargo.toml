@@ -1,0 +1,21 @@
+# The terminal daemon: PTYs, one libghostty-vt Terminal per terminal on its own owner
+# thread, and the Unix-socket server. Unix only.
+[package]
+name = "g3d-termd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "g3d-termd"
+path = "src/main.rs"
+
+[dependencies]
+g3d-wire.workspace = true
+libghostty-vt.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+clap.workspace = true

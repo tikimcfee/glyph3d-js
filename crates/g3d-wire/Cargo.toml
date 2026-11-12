@@ -1,0 +1,13 @@
+# The termd protocol: frame codec, op and event types, the terminal-query filter.
+# No I/O and no libghostty, so any client (and wasm) can use it. TCEL types join at S3.
+[package]
+name = "g3d-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

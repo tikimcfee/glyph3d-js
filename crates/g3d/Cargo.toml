@@ -1,0 +1,19 @@
+# The client: attach, watch, ls, new, kill, stop. Speaks only the protocol (g3d-wire);
+# it never links libghostty.
+[package]
+name = "g3d"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "g3d"
+path = "src/main.rs"
+
+[dependencies]
+g3d-wire.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+clap.workspace = true

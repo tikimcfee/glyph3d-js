@@ -61,3 +61,7 @@ console.log
 
 # Perf ledger rows (tools/perf-ledger.mjs): this machine's measurements, never committed
 /perf/
+
+# Rust workspace build output and vendored libghostty/zig (tools/termd-vendor.sh)
+/target/
+/vendor/
