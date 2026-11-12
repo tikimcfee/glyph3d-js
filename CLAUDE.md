@@ -15,9 +15,15 @@ terminals in 3D space. The repo is organized as **packages, two apps, and a cli*
   (CommandProvider, CanvasInteraction, HudPanel, CommandBar, SessionStore,
   WorkspaceModel); `app/commands/` holds the command spine (handlers).
 - **`wall/`** — the wall: an infinite flat (orthographic) canvas of terminals on the same
-  core and relay (Vite :5180). Pan, pinch-zoom, type, cycle, resize by the border; title bars
-  and map labels name each terminal. `TerminalWall` is its composition root; gate
-  `bun tools/wall-e2e.mjs` (its own relay, tmux socket and terminals).
+  core and relay (Vite :5180, `?relay=PORT`, default 8080 — a relay takes ONE display, so beside
+  the IDE the wall needs its own relay; a refused display's chip says why). Pan, pinch-zoom,
+  type, cycle, resize by the border; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`).
+  Title bars hold each terminal's whole name, shrunk to fit; past the bar's text floor
+  (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. Names and spots
+  (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
+  a kill forgets at once. `TerminalWall` is its composition root (start/stop symmetric); gate
+  `bun tools/wall-e2e.mjs` — its own relay (`tools/wall-relay.mjs`, which the wall's perf tools
+  share), tmux socket and terminals; `--reuse-relay` to run on one you started.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.
 
@@ -109,7 +115,13 @@ truth). The `terminal.*` verbs live in core (`services/terminal/terminalCommands
 app runs the same ones: what differs per app — where a terminal lands, what a finished spawn
 shows, what focus means, what holds it, what persists its view — is the app's `TerminalHost`
 (`ctx.terminalHost`; every member required, `assertTerminalHost` names a missing one at boot).
-The IDE's is `app/client/terminalHost.js`, the wall's `TerminalWall._terminalHost`. The relay forwards CLI commands to the browser display over WebSocket, and
+The IDE's is `app/client/terminalHost.js`, the wall's `TerminalWall._terminalHost`. A
+`terminal.create` for a grid the display already shows re-adopts it: the sender becomes its owner
+(registry meta, input route) and repaints it — a display that outlives a relay restart keeps
+working (`tools/terminal-readopt.test.mjs`). The relay seeds its spawn ids past every live
+`glyph-*` session at start and on `terminal.recover`, whose `terminal.recovered` reply lists them
+all (`live`); an adapter answers `terminal.refresh` with the pane's title (OSC 2) and a repaint.
+The relay forwards CLI commands to the browser display over WebSocket, and
 keeps a structured in-memory SQLite store of every browser log record — `log.query` /
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
 with live follow via `./glyph3d-cli log.follow` (the CLI renders log replies as records). Page-side, `emitLogRecord` runs a storm
