@@ -830,11 +830,14 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
 - **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
-  the wheel, pinch zoom, map labels, the core terminal verbs. Starts its own relay
-  (`--relay-only`, termd namespace `glyph-wall-e2e` in a scratch dir, no gomuxai) if nothing
-  listens on `--relay`, and stops it and its termd daemon at the end.
+  the wheel, pinch zoom, map labels, the core terminal verbs, and termd's status (the chip, the
+  window by chord listing the wall's terminals, a brain restart held by stopping the holder: the
+  amber restarting notice, then unreachable, both clearing, the shell typing after; docking and
+  closing by verb). Starts its own relay (`--relay-only`, termd namespace `glyph-wall-e2e` in a
+  scratch dir, no gomuxai) if nothing listens on `--relay`, and stops it and its termd daemon at
+  the end. `--shots DIR` saves the status window normal, restarting and unreachable.
   ```
-  bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099
+  bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099 [--shots DIR]
   ```
 - **`wall-gpu-attribution.mjs`** — where the wall's GPU frame goes: one layer toggled at a
   time (glyph fields, panels, scrollback depth) at OVERVIEW and FRAMED, timing the main pass
@@ -878,6 +881,12 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   limits match the policy: the passwd shell as `-<name>`, home, the locale filled only when none is
   set, reserved names and bad cwds refused, the session source re-read per create (a file standing
   in for the user manager), and the real user manager beating a stale starter when one answers);
+  the status document (`tests/status.rs`: its keys and types against
+  `tests/fixtures/status-shape.json`, and PROTOCOL.md's example parsed field for field in
+  `g3d-wire`; `status_follow`'s throttling — at once, then on change no sooner than the interval,
+  quiet between keepalives, every interval while output flows, a rate crossing zero; a status-only
+  follower doesn't hold an idle daemon and gets its `exiting` document; `stop`'s last document; a
+  crash and an upgrade counted in the next brain's document);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
   the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
@@ -894,14 +903,22 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   a `g3d upgrade` (every adapter rides them: no grid closes, no `LOST termd`, the repaint brings the
   screen back, `terminal.recover` mid-restart never answers empty), a SIGKILLed termd holder
   (adapters close their grids, the relay log says `LOST termd`, the next spawn starts a fresh
-  daemon).
+  daemon); and termd's status reaching the simulated display with no per-terminal query (a
+  `termd/status` push for each state the run passes through: absent, ok with the document,
+  one at registration after the relay restart, restarting then ok on generation 2 across the brain
+  crash, lost when the holder dies; the display's `termd/status` request; the CLI's
+  `termd.status`).
 - **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
   (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
   parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty
   keeps U+FFFD where xterm drops the bytes).
 - Go: `cd cli && go test ./...` runs the relay's termd client against a private daemon (it needs
   `cargo build -p g3d-termd`, or `G3D_TERMD_BIN`; `G3D_TEST_RUN_DIR` keeps its sockets out of the
-  system temp dir): the holder's death is loud, a brain restart is ridden.
+  system temp dir): the holder's death is loud, a brain restart is ridden, and the relay's status
+  connection (`TestTermdStatus*`) reads every state from its side of the socket (absent, ok,
+  restarting across a crash, unreachable past the grace with the holder stopped, ok again with the
+  orphans re-adopted, absent after `stop`, lost when the holder dies) and its display plane keeps
+  only the latest notification.
 
 ## Build / serve
 

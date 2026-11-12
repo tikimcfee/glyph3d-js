@@ -21,7 +21,11 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   Title bars hold each terminal's whole name, shrunk to fit; past the bar's text floor
   (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. Names and spots
   (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
-  a kill forgets at once. `TerminalWall` is its composition root (start/stop symmetric); gate
+  a kill forgets at once. termd's status rides along with no query of its own: the topbar's termd
+  chip, a status window (the daemon and its terminals; the chord + S or `wall.status`, floating or
+  docked, placement per relay — `wall/StatusWindow.jsx`, `wall/statusCommands.js`) and a notice
+  under the topbar when its brain restarts (amber, once it lingers) or is unreachable, failed or
+  lost (red). `TerminalWall` is its composition root (start/stop symmetric); gate
   `bun tools/wall-e2e.mjs` — its own relay (`tools/lib/wall-relay.mjs`, which the wall's perf tools
   share), termd namespace and terminals; `--reuse-relay` to run on one you started.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
@@ -29,8 +33,8 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
 - **`crates/`** — the Rust workspace: `g3d-termd`, the terminal daemon (PTYs + one libghostty-vt
   emulator per terminal; outlives the relay) in two processes, the holder (`g3d-hold`: the shells'
   parent and their PTY fds) and the brain (everything else, restartable), `g3d` (attach to / watch /
-  list / start / upgrade terminals from any real terminal) and `g3d-wire` (the public protocol,
-  `docs/termd/PROTOCOL.md`).
+  list / start / upgrade terminals and read termd's status from any real terminal) and `g3d-wire`
+  (the public protocol, `docs/termd/PROTOCOL.md`).
 
 ## Tech stack
 
@@ -447,14 +451,24 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   every shell (screens come back from 2 s snapshots, the unseen bytes are logged) and each adapter
   rides it (reconnect, re-subscribe, repaint; `serve --termd-reconnect`); `./g3d upgrade` replaces
   the brain losing no byte. The holder's death kills every shell in the namespace (adapters log
-  `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
+  `LOST termd` and close their grids). termd publishes ONE status document (protocol 1.1:
+  `status`, `status_follow` — the daemon, holder and brain, every terminal and its subscribers,
+  recent errors; pushed on change, no sooner than the follower's interval, a 30 s keepalive):
+  `./g3d status [--json] [--follow]` renders it in a terminal; the relay follows it on one
+  connection of its own (`cli/termdstatus.go`: ok · absent · restarting · unreachable · failed ·
+  lost, from its side of the socket) and pushes `termd/status` to the display on its own plane
+  (one slot, latest wins), answers the display's `termd/status` request and the CLI's page-less
+  `./glyph3d-cli termd.status`, and re-adopts orphaned terminals when a brain answers again after
+  being unreachable or failed; the core model `services/terminal/TermdStatus.js` holds it for any
+  app. A status-only connection never keeps an idle daemon up. `terminal.spawn [cols] [rows]
   [-- cmd…]` starts any program; with none, termd starts the account's shell (passwd) as a login
   shell in the served root (else home). A terminal's environment is termd's, built per create
   (DESIGN.md "Environment"): the systemd user manager's (else the daemon's own;
   `--env-source daemon`, or `G3D_TERMD_ENV_SOURCE=daemon` as tests and tools set it), minus other
   terminals'/multiplexers'/editors' identity and the parent shell's state, plus `TERM_PROGRAM=g3d-termd`.
   Gates: `cargo test --workspace --features g3d-termd/test-hooks` (the test hooks exist only in that
-  build), `tools/termd-relay-check.mjs`,
+  build; `tests/status.rs` holds the document's shape and throttling), `cd cli && go test ./...`,
+  `tools/termd-relay-check.mjs`,
   `tools/termd-fidelity-check.mjs`, `tools/wall-e2e.mjs`. Terminals render as `TerminalGrid`s and
   re-adopt across reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is
   pulled by the frame: a parse only queues its grid on the scene's `TerminalScreenQueue`, and

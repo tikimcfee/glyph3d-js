@@ -13,8 +13,9 @@ browser) build on it and are only sketched here.
 
 It is also the design termd is built to before S2 ("termd ready"): the [holder and
 brain](#holder-and-brain) split, the [environment](#environment) a terminal gets, the
-[defaults](#defaults) and the [status](#status) stream. "S1 as built" and "Holder and brain as
-built" below say what the branch has today; the sections after them are the design.
+[defaults](#defaults) and the [status](#status) stream. "S1 as built", "Holder and brain as
+built", "Environment and defaults as built" and "Status as built" below say what the branch has
+today; the sections after them are the design.
 
 ## S1 as built (2026-11-12)
 
@@ -61,9 +62,9 @@ What exists on branch `termd`, and where it departs from the plan below:
   packed cells and the Rust relay are later stages.
 - **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)),
   and so are the environment policy and the defaults audit's decisions
-  ([below](#environment-and-defaults-as-built-2026-11-12)). Not built yet: the socket fallback
-  change (the macOS branch's), the config file and `g3d config`, the cgroup scopes, and protocol
-  1.1's status stream.
+  ([below](#environment-and-defaults-as-built-2026-11-12)), and so is protocol 1.1's status stream
+  with everything that renders it ([below](#status-as-built-2026-11-12)). Not built yet: the socket
+  fallback change (the macOS branch's), the config file and `g3d config`, the cgroup scopes.
 - **On branch `termd-macos`, to be merged:** darwin-arm64 builds and passes every gate; close-on-exec
   set after creation where macOS has no atomic form; the slave opened before `TIOCSWINSZ`; tests
   measure processes with `ps` instead of `/proc`; the socket fallback `/tmp/g3d-<uid>` with its
@@ -165,9 +166,9 @@ no change: a listing that can't get a `WELCOME` (a brain restarting, `brain_fail
 
 **Not built yet:** the cgroup scopes (programs, the brain and the holder stay in their starter's
 cgroup; the brain's `oom_score_adj` +300 is set), the holder's re-exec (`--holder`, the holder
-record and `--check-holder-record`), the status stream and everything that renders it, the
-relay's status connection (and with it re-adopting terminals whose adapters gave up), a fuzzed
-hold-link decoder.
+record and `--check-holder-record`), a fuzzed hold-link decoder. (The status stream, the relay's
+status connection and its re-adopting of terminals whose adapters gave up are built: [Status as
+built](#status-as-built-2026-11-12).)
 
 **Gates** (`crates/g3d-termd/tests/restart.rs`, each on a private socket):
 
@@ -235,8 +236,9 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
   `/bin`. Measured here: `env -i busctl --user …` fails with "$DBUS_SESSION_BUS_ADDRESS and
   $XDG_RUNTIME_DIR not defined"; with `XDG_RUNTIME_DIR=/run/user/<uid>` it answers.
 - **Which source a `create` used is logged when it changes** (`terminal environment: the systemd
-  user manager's` / `the daemon's own: <why>`), the status stream's job until it exists. A manager
-  that stops answering costs each `create` up to the timeout, then falls back.
+  user manager's` / `the daemon's own: <why>`), and the status document's `daemon.env` names it
+  (with a warning while the user manager is unreachable). A manager that stops answering costs each
+  `create` up to the timeout, then falls back.
 - **`SHELL`.** The shell is chosen as designed (`--shell`, else the passwd entry's when it is an
   executable, else `$SHELL` when it is an absolute path to an executable, else `/bin/sh`); the
   `$SHELL` it considers is the request's `env` value when it gives one, else the base's. The chosen
@@ -267,10 +269,10 @@ lossy queue 4 MiB and the blocking owner's 1 MiB / 256 KiB marks, now settings (
 10 MiB keeping `.log.1` (`--log-max-bytes`, 0 = never): the holder renames it from its timer, the
 brain, which shares the file, sees the path name another file before its next line and reopens it;
 RFC 3339 lines with the role and pid, values printed as values (`ended: code 0`); the default
-program, cwd, `TERM_PROGRAM`, locale fill and scrub as above. **Idle exit stays 300 s** ("keep");
-the "status followers don't count" half waits for the status stream, since nothing follows status
-yet. Not applied: the socket fallback (`/tmp/g3d-<uid>`, ignoring `$TMPDIR`), which the macOS
-branch carries with its directory checks; the cgroup scopes; the status interval and recent errors.
+program, cwd, `TERM_PROGRAM`, locale fill and scrub as above. **Idle exit stays 300 s** ("keep"),
+and status followers don't count toward it ([Status as built](#status-as-built-2026-11-12), with
+the status interval and recent errors). Not applied: the socket fallback (`/tmp/g3d-<uid>`,
+ignoring `$TMPDIR`), which the macOS branch carries with its directory checks; the cgroup scopes.
 
 **The test hooks are compiled out** of every build but the tests': the cargo feature `test-hooks`
 gates the magic `INPUT`s, the failing brain, the named engine and the user-manager stand-in, and
@@ -303,6 +305,120 @@ beating the starter's `DISPLAY=:99` (read-only, into a terminal running `sleep`)
 identity: `-bash` (the passwd shell) in the served root with `TERM_PROGRAM=g3d-termd`, none of the
 relay's identity; `tests/daemon.rs`, a daemonized namespace's log rotated at 4 KiB, with the brain's
 next line in the new file.
+
+## Status as built (2026-11-12)
+
+What the branch has of [Status](#status), and where it departs from it. Protocol 1.1 is whole: the
+daemon announces `proto` `[1, 1]` and the feature `status`.
+
+**The daemon** (`crates/g3d-termd/src/status.rs`, the types in `g3d-wire`'s `Status`):
+
+- Owner threads publish into each terminal's `TermStats` as things change: input bytes, the last
+  output time, queued input, the snapshot store's two blob sizes (read from the restored blobs'
+  `fstat` at a brain start), the `pwd`, the flow (`live`/`blocked`/`paused`), how it was restored,
+  and every subscription's role, mode, flow and view offset after each command. Queue depth, lag
+  and the resync count (`SubShared.lags`) are atomics the tick reads live. History rows and
+  `memory_usage` (primary + alternate resident and compressed bytes) are sampled on the owner's own
+  loop once a second; that loop wakes at least every 500 ms anyway, so no owner thread is woken for
+  status.
+- One tokio task ticks: it samples every terminal's `seq` and input count into a window of
+  `--status-rate-window-ms` (5,000), and when anyone follows, builds the document once, serializes
+  it once (`Arc<[u8]>`) and queues it to each follower that is due. A follower is due at once after
+  `status_follow`; then when the change key moved (the document hashed with `at`, RSS, memory,
+  `snapshots.bytes`, subscribers' `queued` zeroed and each rate reduced to zero-or-not) or any rate
+  was non-zero since its last push, no sooner than its interval; and at the keepalive regardless.
+  A follower whose previous document is still queued is skipped (dropped, not queued). With no
+  followers the tick only samples, once per `--status-interval-ms`. A terminal created under this
+  brain gets a zero sample at its `created_at`, so a burst before the first tick counts in its rate.
+- The holder tells each brain, in `welcome` (hold protocol 2.1, an additive minor), `restarts`
+  (brains replaced by crash, watchdog, upgrade) and `last_start` (`first`/`crash`/`watchdog`/
+  `upgrade`, when, and the dead brain's exit). The brain adds what came back how and the unseen
+  bytes. A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
+- RSS: `/proc/<pid>/statm` on Linux, `proc_pidinfo(PROC_PIDTASKINFO)` on macOS (`status::rss`, the
+  cfg seam; the macOS branch verifies it); absent where it can't be measured.
+- Recent errors: the last `--status-errors` (32) distinct `(code, terminal)`, newest first, from
+  `spawn_failed`, `input_full`, `panic`, `lagged`, `restore`, `upgrade_failed`. **Departure:** the
+  ring is the current brain's: a restart starts it over (with the reason for the restart). Keeping
+  it across a crash would mean the holder storing it; nothing yet needs that. **Departure:**
+  environment warnings ride `daemon.env.warnings` only (no UTF-8 locale; the user manager
+  unreachable, while it is), not the errors; the source is probed once at brain start, off the
+  async threads, so the document names it before the first terminal.
+- Idle exit counts connections that do anything but `status`, `status_follow`,
+  `status_unfollow` and `ping`; a status-only follower is passive. Leaving (idle exit, `stop`,
+  `SIGTERM`) first **stops accepting** (a connection made then waits in the backlog and sees the
+  end, never a terminal created in a namespace about to go; `stop` did not do this before), then
+  sends each follower a last document with `exiting: true` and no terminals, closes it, and waits
+  up to 1 s for them to drain.
+- Settings (flags, passed to every brain): `--status-interval-ms` 1000, `--status-min-interval-ms`
+  250, `--status-max-interval-ms` 60000, `--status-keepalive-ms` 30000,
+  `--status-rate-window-ms` 5000, `--status-errors` 32.
+
+**`g3d status [--json] [--follow [--interval MS]]`** (`crates/g3d/src/render.rs`): a header
+(daemon, engine, namespace, uptime; holder and brain with RSS and restarts; environment, snapshot
+store, connections, log), one row per terminal (id, program, size, subscribers, rate or idle time,
+then what needs a look in yellow and the rest faint), the errors. Colour only on a tty and never
+with `NO_COLOR` set (the no-color.org convention). `--follow` redraws in place on a tty (home,
+draw, clear to end: no flash), appends when piped, rides an engine restart by the client rule and
+ends when the namespace leaves; `--json --follow` is one document per line.
+
+**The relay** (`cli/termdstatus.go`): one status connection per relay, as designed (absent,
+restarting, unreachable, failed, lost, ok), with these specifics:
+
+- **Its own plane.** The display gets `termd/status` on a status plane: a one-slot queue the
+  writer drains after control, where a newer notification replaces one not yet written (each
+  carries the whole state). Never blocks, never queues history.
+- **Departure: the document stays through a restart.** `status` is the last document while its
+  terminals may still be there (`restarting`, `unreachable`, `failed`), so a window can keep its
+  rows (dimmed); it is `null` only for `absent` and `lost`.
+- A dial that lands in a leaving namespace's backlog after its `exiting` document stays `absent`
+  (it is going, not restarting).
+- When a spawn starts the namespace's daemon, the status connection is kicked to dial at once.
+- A brain answering again after `unreachable` or `failed` (same instance) runs `terminal.recover`'s
+  re-adoption, which skips terminals whose adapters are alive and riding.
+- The notification is pushed when a display registers, answers the display's `termd/status`
+  request, and the relay-resident `termd.status` answers the CLI page-less. `relay.bundled` is
+  `g3d-termd --version` of the binary the relay would start.
+- Settings: `serve --termd-status-interval` 1s, `--termd-status-redial` 5s,
+  `--termd-status-grace` 5s.
+
+**The app.** The core model `services/terminal/TermdStatus.js` (state, document, per-terminal
+lookup, the lost latch, `upgradeAvailable`) follows the bridge's `termd/status` pushes and asks
+once per registration; a dropped relay link makes it `unknown`, never empty. The wall renders it
+(`wall/StatusWindow.jsx`, verbs in `wall/statusCommands.js`):
+
+- the chip after the relay chip (`● termd 4`, `○ termd idle`, amber restarting, red otherwise);
+- the window: chord + S, the chip, or `wall.status [toggle|open|close|left|right|float [x y]]`;
+  floats (default: under the topbar at the right; drag its head) or docks to an edge (440 px),
+  the placement persisted per relay in `WallStore` like the sidebar's on branch `wall`. Rows use the
+  wall's names; a click frames the terminal; hovering shows the whole row (argv, cwd and `pwd`,
+  pid, title, every subscriber). While the brain is away the rows stay, dimmed;
+- the notice, centred under the topbar on the panel colour: **departure:** a brain restart says so
+  in amber (`termd's engine is restarting · the shells are alive`) once it has lasted
+  `restartNoticeMs` (400 ms; a blink shows only the chip), as the operator asked for a restart
+  notice; `unreachable` counts the time since the brain went away; `failed` and `lost` as
+  designed; `lost` until `wall.status.dismiss` (its ×) or a spawn;
+- knobs `restartNoticeMs` 400 and `errorsShown` 3 (`wall.status.config`).
+
+On branch `termd` the wall predates branch `wall`'s sidebar, `wallCommands.js` and `wallConfig.js`
+(not merged here): the status verbs are their own file and the knobs their own object, built to
+their patterns; merging the branches folds `registerStatusCommands` beside `registerWallCommands`,
+`STATUS_CONFIG` into `WALL_CONFIG` (and `wall.status.config` into `wall.config`), and `run()` into
+the one both branches added.
+
+**Gates:** `crates/g3d-termd/tests/status.rs` (the shape against `tests/fixtures/status-shape.json`,
+keys and types; throttling: the first push at once, a clamped interval, quiet between keepalives, a
+change within the interval, every interval and never sooner while output flows, a rate crossing
+zero, then quiet; a status-only follower doesn't hold an idle daemon and hears it leave; `stop`'s
+last document; a crash and an upgrade counted in the next brain's document); `g3d-wire`'s test that
+PROTOCOL.md's example document is a `Status` field for field; `g3d`'s render unit test;
+`cli/termdstatus_test.go` (every relay state from its side of the socket, re-adoption after
+unreachable, the plane keeping only the latest); `tools/termd-relay-check.mjs` (the pushes a
+simulated display gets through a run: absent, ok with the document, one at registration after a
+relay restart, restarting and ok across a brain crash, lost; the request; `termd.status`);
+`tools/wall-e2e.mjs` (the chip, the window by chord listing the wall's terminals, a brain restart
+held by stopping the holder: the amber notice, then unreachable, both clearing; the shell typing
+after; docking and closing by verb; `--shots DIR` saves the window normal, restarting and
+unreachable).
 
 ## Measured ground (2026-11-12)
 
@@ -1108,8 +1224,11 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, launcher and parent-shell variables; `--env-scrub` / `--env-keep` | **new** | [The policy](#the-policy) |
 | `TERM_PROGRAM` | `g3d-termd` + `TERM_PROGRAM_VERSION` | **new** (S1 left the starter's) | tmux, WezTerm, Ghostty each name themselves; [TERM and friends](#term-and-friends) |
 | default cwd | the account's home | **change** (S1: the daemon's, `/`) | [Environment](#environment) |
-| status interval | 1 s (a follower may ask for 250 ms to 60 s); keepalive 30 s | **new** | [Status](#status) |
-| recent errors | the last 32 distinct, with counts | **new** | the page-side log storm brake's coalescing, applied to the daemon |
+| status interval | 1 s (a follower may ask for 250 ms to 60 s: `--status-interval-ms`, `--status-min-interval-ms`, `--status-max-interval-ms`); keepalive 30 s (`--status-keepalive-ms`) | **new** | one push a second is what `top` and `htop` refresh at by default and what a person reads; 250 ms bounds a follower's cost at four documents a second; a 30 s keepalive is the relay's adapters' ride window and keeps gauges from going stale. [Status](#status) |
+| status rate window | bytes over the last 5 s (`--status-rate-window-ms`) | **new** | the load-average idea at a human scale: long enough that a prompt's echo doesn't flicker the rate, short enough that a finished flood reads idle within seconds |
+| recent errors | the last 32 distinct, with counts (`--status-errors`) | **new** | the page-side log storm brake's coalescing, applied to the daemon |
+| relay status connection | ask termd for 1 s; look again every 5 s while nothing listens or the brain is failed; `restarting` reads `unreachable` after 5 s (`serve --termd-status-interval`, `--termd-status-redial`, `--termd-status-grace`) | **new** | a failed `connect` costs a syscall; 5 s is the holder's own failed-retry scale and long past a crash restart (100 ms) and an upgrade's handoff, so `unreachable` means something |
+| wall restart notice | after 400 ms of restarting (`restartNoticeMs`); 3 errors shown (`errorsShown`); `wall.status.config` | **new** | a crash restart that returns in a blink shows only the chip (no flash); one that lingers is said in words. 400 ms is four times the crash restart measured here (about 100 ms from `SIGKILL` to a `WELCOME`, the 100 ms restart delay included, two terminals restored) and under the half second a person reads as "something is happening" |
 
 ## Status
 
@@ -1181,8 +1300,8 @@ quiet, with every number from the document.
 - **The chip.** Beside the topbar's `● relay`: `● termd 4` (the terminal count). The dot is the
   relay chip's green when `ok`, a dim ring with `termd idle` when `absent`, amber when
   `restarting`, red otherwise.
-- **The window.** Clicking the chip, or the verb `wall.status [show|hide|toggle]` (the chord is the
-  operator's to choose), opens a small panel under the topbar in the topbar's own style (`#141821`
+- **The window.** Clicking the chip, the chord + S, or the verb `wall.status [toggle|open|close|left|right|float]`
+  opens a small panel under the topbar in the topbar's own style (`#141821`
   panel, `#2a303c` border, `#c8ced8` text, `#6b7383` for anything secondary), monospace, about
   12 px, sized to its content:
 

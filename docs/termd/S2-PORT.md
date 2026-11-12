@@ -431,9 +431,11 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
   - **termd ready.** S2 ports whichever relay is current when it starts. If termd ready (DESIGN.md:
     holder and brain, protocol 1.1) has landed in the Go relay by then, the port carries it too: the
     reconnect rule of "Riding a restart" in each virtual adapter (`LOST termd` only when the
-    window ends or `instance` changed), the per-namespace status connection, the `termd/status`
-    notification and request, and the `termd.status` verb. The tape gains a `termd/status`
-    scenario (with `at`, pids and the gauges masked).
+    window ends or `instance` changed), the per-namespace status connection (`cli/termdstatus.go`:
+    its six states, the grace, the redial, re-adoption when a brain answers again), the
+    `termd/status` notification on its one-slot latest-wins display plane and request, and the
+    `termd.status` verb. The tape gains a `termd/status` scenario (with `at`, pids and the gauges
+    masked).
 - **Rewritten checks:**
   - `tools/termd-relay-check.mjs`'s "adapter killed" step finds no process to `ps`; it uses the
     hook instead;
