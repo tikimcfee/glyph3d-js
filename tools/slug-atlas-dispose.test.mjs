@@ -7,9 +7,12 @@
 // field already holds — no new object, no rebinding, nothing to dispose. Only when an array
 // doubles is its texture REBORN: every registered field gets the new pair, and the retired
 // texture is disposed exactly once (its GPUTexture only dies on dispose(); each growth used to
-// leak a pair until page unload). The texture whose array didn't grow is kept, never disposed.
+// leak a pair until page unload) — at once when it never reached the GPU, after the renderer
+// seam's flush has copied its rows into the new one when it did. The texture whose array didn't
+// grow is kept, never disposed.
 
 import LiveSlugAtlas from '../packages/glyph3d-core/src/shaping/LiveSlugAtlas.js';
+import TextureUploads from '../packages/glyph3d-core/src/core/TextureUploads.js';
 import { encodeGlyphBatch } from '../packages/glyph3d-core/src/shaping/slugData.js';
 import { TEXTURE_WIDTH, MAP_INITIAL_ROWS, CURVE_INITIAL_ROWS } from '../packages/glyph3d-core/src/shaping/slug-constants.js';
 
@@ -35,11 +38,12 @@ const shaper = {
 const encoder = { encode: async (items) => ({ batch: encodeGlyphBatch(items, () => outline), ms: 0 }) };
 
 const glyphAtlas = {};
-const atlas = new LiveSlugAtlas({ atlas: glyphAtlas, shaper, encoder });
+const uploads = new TextureUploads();
+const atlas = new LiveSlugAtlas({ atlas: glyphAtlas, shaper, encoder, uploads });
 const field = { sd: null, swaps: 0, setSlugData(sd) { this.sd = sd; this.swaps++; }, setEmojiTexture() {} };
 atlas.registerField(field);
 
-const spy = (t) => { t.disposedN = 0; const d = t.dispose.bind(t); t.dispose = () => { t.disposedN++; d(); }; return t; };
+const spy = (t) => { if ('disposedN' in t) { t.disposedN = 0; return t; } t.disposedN = 0; const d = t.dispose.bind(t); t.dispose = () => { t.disposedN++; d(); }; return t; };
 const boot = { curve: spy(atlas.slugData.curveTexture), map: spy(atlas.slugData.glyphMapTexture) };
 
 // ── growth within capacity: same objects, no rebinding, nothing disposed ──
@@ -75,13 +79,30 @@ const boot = { curve: spy(atlas.slugData.curveTexture), map: spy(atlas.slugData.
     ok(field.swaps === 2 && field.sd.curveTexture === atlas.slugData.curveTexture, 'field tracks the newest pair');
 }
 
+// ── a texture on the GPU: the retired one lives until its rows are copied, then is disposed once ──
+{
+    const onGpu = spy(atlas.slugData.glyphMapTexture);
+    onGpu.onUpdate(onGpu);   // three's first upload of it landed
+    const far = 4 * MAP_INITIAL_ROWS * TEXTURE_WIDTH + 3;
+    atlas.ensureGlyphsEncoded([far]);
+    ok(atlas.slugData.glyphMapTexture !== onGpu && onGpu.disposedN === 0, 'a reborn map whose old one is on the GPU keeps the old one until the copy');
+    const copies = [];
+    uploads.flush({
+        copyTextureToTexture: (src, dst) => copies.push([src, dst]),
+        getRenderTarget: () => null, getActiveCubeFace: () => 0, getActiveMipmapLevel: () => 0, setRenderTarget() {},
+    });
+    ok(copies.length === 1 && copies[0][0] === onGpu && copies[0][1] === atlas.slugData.glyphMapTexture, 'the flush copies its rows into the new map');
+    ok(onGpu.disposedN === 1, `then disposes it once (${onGpu.disposedN})`);
+    await atlas.whenIdle();
+}
+
 // ── nothing new: nothing swapped, nothing disposed ──
 {
     const live = { curve: spy(atlas.slugData.curveTexture), map: atlas.slugData.glyphMapTexture };
     const r = atlas.ensureGlyphsEncoded([5, FAT]);
     await atlas.whenIdle();
     ok(r.queued === 0, 'already-encoded glyphs queue nothing');
-    ok(live.curve.disposedN === 0 && field.swaps === 2, 'no-growth disposes and swaps nothing');
+    ok(live.curve.disposedN === 0 && field.swaps === 3, 'no-growth disposes and swaps nothing');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

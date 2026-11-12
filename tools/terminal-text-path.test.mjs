@@ -35,6 +35,7 @@ const atlas = {
     _shaper: null, _slugData: null,
     _shapeCache: { lookup: (cp) => ({ g: cp + GID, ax: 8 }) },
     _live: { ensureCodepoints(cps) { ensured.push(...cps); }, registerField() {}, unregisterField() {} },
+    _textureUploads: { flush() {} },   // SceneSystems flushes it at the renderer seam; nothing queued here
 };
 
 // ── the renderer's side of an upload ─────────────────────────────────────────────────────────

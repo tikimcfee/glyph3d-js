@@ -20,6 +20,11 @@ import TerminalScreenQueue from './TerminalScreenQueue.js';
  *   panelBatch   flat panels, box fills and outlines draw as instances (scene.onBeforeRender)
  *   glyphBatch   labels draw from one arena field; its onBeforeRender hook chains after the panel
  *                batch's, so it unhooks first
+ *   uploads      the glyph atlas's texture bytes (TextureUploads): flushed at the same seam, before
+ *                every top-level render — what landed since the last frame (as rectangles; a grown
+ *                texture's old rows as a GPU copy) is on the GPU in the frame that draws it. A render
+ *                nested inside another (an onAfterRender hook's) never flushes: mid-pass, a copy
+ *                would unbind the pass's framebuffer and textures
  *   screens      terminals whose output was parsed since the last frame apply their screens (only
  *                what changed) — first in update(), so this frame's render draws them and far-LOD
  *                decides on what they now hold. update() runs once a frame and never for a pick
@@ -31,7 +36,8 @@ import TerminalScreenQueue from './TerminalScreenQueue.js';
 export default class SceneSystems {
     /**
      * @param {import('three').Scene} scene
-     * @param {Object} atlas - the GlyphAtlas the label arena renders from
+     * @param {Object} atlas - the GlyphAtlas the label arena renders from (its `_textureUploads`
+     *   is flushed at the renderer seam)
      * @param {import('three').WebGLRenderer} renderer - the renderer this scene draws through (the
      *   flat root's seam: its render() is wrapped until dispose)
      */
@@ -39,13 +45,20 @@ export default class SceneSystems {
         if (!scene?.isScene) throw new Error(`[SceneSystems] needs a THREE.Scene, got ${scene?.type ?? scene}`);
         if (!atlas) throw new Error('[SceneSystems] needs the glyph atlas (the label batch renders from it)');
         if (typeof renderer?.render !== 'function') throw new Error('[SceneSystems] needs the renderer (the flat root wraps its render())');
+        if (typeof atlas._textureUploads?.flush !== 'function') throw new Error('[SceneSystems] needs the atlas\'s TextureUploads (bootGlyphEngine makes it) — its glyph textures upload at this seam');
         this.transforms = new SceneTransforms(scene);
         this.flatRoot = new FlatRenderRoot(scene);
         const flatRoot = this.flatRoot;
         this._renderer = renderer;
         this._baseRender = renderer.render;
         const baseRender = this._baseRender;
-        renderer.render = function (s, c) { return baseRender.call(this, s === scene ? flatRoot.target(c) : s, c); };
+        const uploads = atlas._textureUploads;
+        let depth = 0;
+        renderer.render = function (s, c) {
+            if (depth === 0) uploads.flush(this);
+            depth++;
+            try { return baseRender.call(this, s === scene ? flatRoot.target(c) : s, c); } finally { depth--; }
+        };
         this.farLod = new GlyphFarLod(scene);
         this.panelBatch = new PanelBatch(scene);
         this.glyphBatch = new GlyphBatch(scene, atlas);

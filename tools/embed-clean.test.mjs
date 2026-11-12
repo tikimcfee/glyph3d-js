@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import * as Glyph3D from '../packages/glyph3d-core/src/index.js';
 import * as CoreExports from '../packages/glyph3d-core/src/core/index.js';
 import EmojiAtlas from '../packages/glyph3d-core/src/EmojiAtlas.js';
+import TextureUploads from '../packages/glyph3d-core/src/core/TextureUploads.js';
 import FontChain from '../packages/glyph3d-core/src/shaping/FontChain.js';
 import HarfBuzzShaper from '../packages/glyph3d-core/src/shaping/HarfBuzzShaper.js';
 import CodeGrid from '../packages/glyph3d-core/src/collections/CodeGrid.js';
@@ -87,6 +88,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
         cellPx: 8,
         cols: 16,
         rows: 16,
+        uploads: new TextureUploads(),
         rasterizer: {
             raster: async ({ cps, cellPx }) => {
                 rasters++;
