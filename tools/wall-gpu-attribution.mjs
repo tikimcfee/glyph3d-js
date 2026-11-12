@@ -203,7 +203,6 @@ try {
             await app.evalPage(() => { window.__motionStop = false; const w = window.__wall; w.focus(null); w.fitAll(); });
             await app.waitFor(1000);
         };
-        const zoomMid = (f) => f.zoom * 2.5;
         await run('MOTION none (control)', () => {});
         await run('MOTION pan only', (f) => {
             const w = window.__wall; const c = w.viewport.camera; w.viewport.target = null; c.zoom = f.zoom * 2.5; c.updateProjectionMatrix();
