@@ -337,6 +337,12 @@ export const CHECKS = [
         compare: 'INSTRUMENT: the terminal text path timed stage by stage (direct and tmux floods); green = it measured',
         blind: 'judges no number',
     },
+    {
+        name: 'atlas-cold-perf', cmd: ['bun', 'tools/atlas-cold-perf.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'render'],
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 600_000,
+        compare: 'INSTRUMENT: a cold glyph from bytes to on screen — visible ms, applyScreen ms, worst frame gap, long tasks, texture bytes per burst; green = it measured',
+        blind: 'judges no number; the emoji worker\'s first raster after boot is not in a burst',
+    },
 
     // ── parked: hand tracking (not being worked on; kept so they aren't lost) ───────────────────
     ...[
