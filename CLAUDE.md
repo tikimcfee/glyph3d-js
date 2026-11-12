@@ -519,6 +519,6 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 ## Deployment
 
 `make build` produces the self-contained binary; `make all` cross-compiles
-linux/macOS/windows × amd64/arm64; `make release VERSION=vX.Y.Z` cuts a GitHub release
+linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub); `make release VERSION=vX.Y.Z` cuts a GitHub release
 (`RELEASE_NOTES.md`). The single binary is a single-operator tool — shared relay state,
 no auth, trusts the operator. The product/demo web page is a separate repo.
