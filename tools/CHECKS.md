@@ -4,9 +4,65 @@ Repeatable verification tools. The rule: **when a debug probe proves useful, it
 graduates into a saved tool here** rather than being retyped next time. They don't
 need rigorous shape — just be runnable and documented. Build the set up over time.
 
-All run under Bun (the repo runtime). The dev loop must be up for browser tools:
-`tools/dev.sh` (Vite :5173 + relay :8080), `tools/dev.sh vite` to restart + clear cache
-after editing core, `make dev-status` to check.
+All run under Bun (the repo runtime). Run them through the runner below; by hand, the
+browser tools want the dev loop up: `tools/dev.sh` (Vite :5173 + relay :8080),
+`tools/dev.sh vite` to restart + clear cache after editing core, `make dev-status` to check.
+
+## The runner — `check.mjs`
+
+One manifest (`tools/check-manifest.mjs`) declares every check: its command, tier, scopes,
+what it needs, which checks it can't run beside, what it compares and what it is blind to.
+`check.mjs` runs a selection of it in parallel and ends on ONE verdict line.
+
+```
+bun tools/check.mjs --tier inner           after each change: fast headless (~4 s at -j32)
+bun tools/check.mjs                        all headless (tier full = inner + full)
+bun tools/check.mjs books render           only checks scoped to books or render
+bun tools/check.mjs flat-root layering     checks by name (any tier)
+bun tools/check.mjs --tier browser         needs a browser on the app's Vite (+ a private relay)
+bun tools/check.mjs --tier gpu             real-GPU pixel compares, the wall end to end, GPU timing
+bun tools/check.mjs --tier all             full + browser + gpu
+bun tools/check.mjs --tier parked          the parked hand tests (no other tier includes them)
+bun tools/check.mjs --list [--tier T]      each check: command, needs, compares, blind to
+```
+
+- **Tiers.** `inner` = every fast headless check; `full` adds code form and vendored
+  inputs (type imports, saved ast-grep rules, knip, the tree-sitter grammars); `browser` and
+  `gpu` need Vite + a browser (+ a private relay, + a real GPU); `parked` holds the hand
+  tests (hand tracking is parked — `hand-cloud` alone was 53 s of a 65 s headless run).
+- **Scopes** answer "I changed X, what should I run": render, layout, books, agents, desk,
+  camera, persist, terminal, shell, relay, wall, form, corpus, hand. A positional argument is
+  a scope or a check name; anything else is refused.
+- **Output.** `PASS` / `FAIL` / `KNOWN` / `SKIP` per check as it finishes, `NOTE` lines
+  (report-only checks, what was skipped and why), a `TIME` line (wall, summed, slowest), then
+  the verdict: `ALL GREEN — n of m ran (tier, scope)`, `RED — k failed: …`, or
+  `NOTHING RAN — not a pass` (a selection that ran nothing is never green). A failed check
+  keeps its whole output (and its relay's log) in `out/check/kept/<ts>-<name>/`; every run
+  writes `out/check/last-run.json`. `out/` is gitignored.
+- **Known reds** are declared, not skipped: an entry's `known` names the reason and the
+  failure's signature. The run stays green only while the failure matches it; a different
+  failure is RED, and so is an unexpected pass (remove the entry). Today:
+  `agent-events` (one corpus prompt event has no sheet, 31/33 — red on the-backport too) and
+  `itests` (semantic.itest probes every package.json the repo load brought in; only the one
+  it opened builds structure).
+- **Floors.** `tools/check-floors.json` holds, per tier, how many checks an unscoped run must
+  RUN; fewer is RED ("checks went missing"). `--ratchet` raises a floor to what a green run
+  ran and never lowers it.
+- **Coverage.** Every `tools/*.test.mjs`, `*-check.mjs`, `*.itest.mjs` and `wall-*.mjs` must
+  appear in the manifest, or the run is RED before anything starts. Instruments that judge
+  nothing (`frame-profile`, `gpu-traffic`, the profilers) stay out of it.
+- **What it starts.** For browser/gpu checks the runner starts its own Vite on a free port
+  (config wrapped so its cache is `out/check/vite-cache/`, never the dev server's), warms it
+  once, and gives each relay-needing check a fresh PRIVATE relay —
+  `glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --tmux-socket glyph-check-<pid>-<n> --no-gomuxai <scratch root>`
+  — serving a copy of the fixture (the core's sources as `src/`, plus a generated
+  `mixed/emoji_tabs_wide.txt`), killed with its tmux server when the check ends. It never
+  takes 5173/5174/5180/8080/8099, the `glyphd` socket, or gomuxai. What it can't start
+  (no `./glyph3d-cli` — `make build` or `--cli PATH`; no tmux; no chromium; no GPU render
+  node; no network for the GitHub-loading itests) is a `NOTE` and those checks `SKIP`.
+- **Concurrency.** `-j N` (default: every core). Checks sharing an `apart` token never
+  overlap (`display`: the browser/gpu checks run one at a time); `*` runs alone, after the
+  rest (the GPU timing instruments).
 
 ## Browser drive-loop
 
@@ -469,6 +525,39 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
 
 ## Headless checks (no browser)
 
+- **Layering — dependency-cruiser** (`.dependency-cruiser.cjs`; the runner's `layering`, tier
+  inner). CLAUDE.md's layering as rules over the static import graph: the core imports
+  neither `app/` nor `wall/` nor the r3f binding nor react/@react-three; `workers/` imports no
+  three; `wall/` imports nothing from `app/`; no import cycle inside the core. ~0.6 s, 372
+  modules / 990 edges, zero violations today, so every rule is an error.
+  ```
+  bunx depcruise --config .dependency-cruiser.cjs packages app wall
+  ```
+  node_modules is `doNotFollow`, not `exclude`: an excluded path drops the edge INTO it too,
+  and core-no-react could never fire. Teeth, verified on a scratch copy: a planted core → app
+  import, core → react, core → r3f, a workers → three import, wall → app, and a two-file core
+  cycle each fail it (46 errors: the core → app plant also closes cycles through the app).
+  Blind to dynamic `import()` of computed strings, workers spawned by URL, DOM globals, JSDoc
+  `import()` types — and to any edge resolved through a path under `.claude/` (the excluded
+  agent worktrees), so run it from the checkout it checks.
+
+- **Dead code — knip** (`knip.jsonc`; the runner's `knip`, tier full, REPORT-ONLY: a `NOTE`
+  with counts, never a failure). Entries: `tools/**/*.mjs`, `app/*.html` (+
+  `app/glyph-bench.jsx`, whose root-absolute `src` knip doesn't follow), `wall/index.html`.
+  `bunx knip` lists the findings: unused exports in app/ and wall/, the core's named +
+  default double exports, devDependencies nothing imports. Blind to the core's own unused
+  exports: its `exports` map publishes `./*`, so every core file is public API to knip.
+
+- **`ast-grep` rules** (`tools/sg/`; the runner's `sg-rules`, tier full). Saved structural
+  rules, one per file in `tools/sg/rules/`. Hints print for review; a rule raised to
+  `severity: error` fails the run. Today: `group-table-alias-write` (a write through a local
+  alias of `_groupData`, which a table grow strands on the old array — 3 hits, all in
+  GlyphBatch, whose arena is allocated at its full row count and replaced, never grown, and
+  which marks the rows it uploads itself).
+  ```
+  bunx ast-grep scan -c tools/sg/sgconfig.yml packages app wall
+  ```
+
 - **`type-imports-check.mjs`** — the JSDoc seam guard. tsc over `jsconfig.json` with
   checkJs on, reporting ONLY the codes where a type silently degrades to `any`: a dead
   `import('…')` path (TS2307), a typedef-only script that isn't a module (TS2306), a
@@ -499,6 +588,35 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
   before that are partial: refs from only the open file, and `any` for types that
   cross modules. `refs` follow types, so a call through an untyped receiver is
   invisible; keep rg as the completeness check for dynamic call sites.
+
+- **Code navigation: four lanes, each with a blind spot.** Ask the one built for the
+  question, and say which you used:
+  - **lsp.mjs — types.** hover, def, typed refs/impl. Sees a call only through a receiver
+    whose type it knows (an untyped `ctx.x.getBounds()` is invisible to it).
+  - **srcwalk — callers and access by NAME** (tree-sitter, no types; `bunx srcwalk …`).
+    `trace callers <name>`, `trace callees`, `deps <file>`, `discover <text>`, `context
+    <symbol|file:line>`. Fast (~40 ms) and receiver-blind: callers of `execute` are every
+    method called `execute` (135 sites), and it walks `tools/` too. Its output is budgeted —
+    a `+N more` line means pass `--no-budget` or `--offset N` before counting.
+  - **ast-grep — structural match and saved rules** (`bunx ast-grep run -p '<pattern>' -l js`,
+    rules in `tools/sg/`). Matches syntax, never strings or comments; a pattern says exactly
+    what it means and nothing more (`$R.register($NAME, $$$)` also matches
+    `registry.register(id, grid)` — constrain `NAME` to a string literal for verbs). Byte
+    offsets in its JSON are UTF-8 bytes, not JS string indices.
+  - **rg — raw text, the completeness check.** Every occurrence, including strings, comments,
+    computed names and table rows the structural lanes can't see.
+- **`verb.mjs`** — where a command-bus verb is handled and what it touches, structurally
+  (ast-grep under the hood):
+  ```
+  bun tools/verb.mjs grid.move        # handler file:line, its ctx.* / host.* surface, helpers handed ctx
+  bun tools/verb.mjs 'carrel.*'       # every verb under a prefix
+  bun tools/verb.mjs --list           # every verb registered by a literal name (294 today)
+  ```
+  The surface is the handler's own span: `ctx.holding.lift`, `const { registry } = ctx`,
+  one member past the receiver. Blind to verbs registered under a computed name
+  (`panelCommands`' `verb(name, …)`, the layout overlay table — it then shows where the
+  string appears, by rg, and says so), to what a helper does with `ctx` (named, not
+  followed), and to aliases (`const c = ctx`).
 
 - **`hand-source-check.mjs`** — the SENSOR PLANE end to end: a real relay binary, a
   real `SOURCE hand` handshake, real ARKit-shaped frames on the wire, feeding the
@@ -661,6 +779,39 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
   bun tools/layout-fuzz.test.mjs                    # 200 seeds
   bun tools/layout-fuzz.test.mjs --seeds 300 --seed 77000
   ```
+
+## The wall (`wall/`)
+
+The wall's own Vite serves on :5180 (`cd wall && bunx vite`); its browser tools want a
+PRIVATE relay (`--relay`), never the one a person's display is on.
+
+- **`wall-layout.test.mjs`** / **`wall-labels.test.mjs`** (headless, `bun test`) — the wall's
+  pure geometry (flow placement, framing, border grabs, cycling, border-drag resize) and its
+  map-style label placement (no overlaps, preferred side, sticky, strict-then-relaxed, leader
+  lines only when detached).
+  ```
+  bun test tools/wall-layout.test.mjs tools/wall-labels.test.mjs
+  ```
+- **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, ⌘[ ⌘]
+  cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
+  the wheel, pinch zoom, map labels, the core terminal verbs. Starts its own relay
+  (`--relay-only`, socket `glyph-wall-e2e`, no gomuxai) if nothing listens on `--relay`.
+  ```
+  bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099
+  ```
+- **`wall-gpu-attribution.mjs`** — where the wall's GPU frame goes: one layer toggled at a
+  time (glyph fields, panels, scrollback depth) at OVERVIEW and FRAMED, timing the main pass
+  with `EXT_disjoint_timer_query_webgl2`. Needs a relay already holding terminals.
+- **`wall-text-perf.mjs`** — the terminal text path timed stage by stage (OUTPUT frame →
+  parse → readScreen → applyScreen → GL uploads → GPU fence) in four passes: IDLE, FLOOD
+  (direct and tmux sources, 1/4/14 terminals), COLD (atlas misses), PROFILE. Needs a relay
+  already holding max(--scale) terminals.
+  ```
+  bun tools/wall-gpu-attribution.mjs --url http://localhost:5180/ --relay 8099
+  bun tools/wall-text-perf.mjs --url http://localhost:5180/ --relay 8099 --mode idle,flood
+  ```
+  The runner (tier gpu) gives both a fresh private relay, which holds no terminals, so both
+  are recorded as known reds until they start their own.
 
 ## Build / serve
 

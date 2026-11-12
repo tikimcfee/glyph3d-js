@@ -1,7 +1,7 @@
 // loadstorm-check.mjs — the LOAD STORM harness: measure a launch-shaped burst of
 // sequential directory loads and hold the batching invariants.
 //
-//   bun tools/loadstorm-check.mjs                        (relay on :8099 — the scratch fixture)
+//   bun tools/loadstorm-check.mjs [--url URL]            (relay on :8099 — the scratch fixture)
 //   STORM_RELAY=8080 bun tools/loadstorm-check.mjs       (point it elsewhere; NEVER the live display's autosave)
 //
 // What it does: boots headless, clears the field, picks the fixture's N largest
@@ -19,6 +19,8 @@
 
 import { launchBrowser, openApp } from './itest/driver.mjs';
 
+const arg = (k, d = null) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
+const URL = arg('--url', 'http://localhost:5173/');
 const RELAY = Number(process.env.STORM_RELAY || 8099);
 const SOURCES = Number(process.env.STORM_SOURCES || 3);
 
@@ -27,7 +29,7 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ 
 
 const browser = await launchBrowser({});
 try {
-    const app = await openApp(browser, { relayPort: RELAY, wait: 8000 });
+    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 8000 });
     if (!app.booted) { console.log('✗ app did not boot'); process.exit(1); }
 
     // The storm sources: real, meaty directories of THIS repo, reached absolutely
