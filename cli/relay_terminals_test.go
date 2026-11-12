@@ -50,8 +50,8 @@ func TestLiveTerminalIDsSeedsAFreshRelay(t *testing.T) {
 		tmuxSocket = saved
 	})
 
-	if ids := liveTerminalIDs(); len(ids) != 0 {
-		t.Fatalf("no server on the socket yet → %v, want none", ids)
+	if ids, err := liveTerminalIDs(); err != nil || ids == nil || len(ids) != 0 {
+		t.Fatalf("no server on the socket yet → %v (%v), want an empty list and no error", ids, err)
 	}
 	for _, s := range []string{"glyph-term-5", "glyph-term-41", "other"} {
 		if out, err := exec.Command("tmux", "-L", tmuxSocket, "new-session", "-d", "-s", s, "sleep", "60").CombinedOutput(); err != nil {
@@ -61,12 +61,12 @@ func TestLiveTerminalIDsSeedsAFreshRelay(t *testing.T) {
 	if out, err := exec.Command("tmux", "-L", tmuxSocket, "display-message", "-p", "#{socket_path}").Output(); err == nil {
 		socketPath = strings.TrimSpace(string(out))
 	}
-	ids := liveTerminalIDs()
-	if len(ids) != 2 {
-		t.Fatalf("live ids = %v, want term-5 and term-41", ids)
+	ids, err := liveTerminalIDs()
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("live ids = %v (%v), want term-5 and term-41", ids, err)
 	}
 	r := NewRelay()
-	r.seedTermSeq(ids)
+	r.seedTermSeqFromSocket()
 	if next := fmt.Sprintf("term-%d", r.termSeq.Add(1)); next != "term-42" {
 		t.Fatalf("first spawn after start mints %s, want term-42", next)
 	}

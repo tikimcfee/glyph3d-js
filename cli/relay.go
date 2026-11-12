@@ -1124,14 +1124,37 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
 }
 
 // liveTerminalIDs lists the terminal id of every live `glyph-*` tmux session on the relay's
-// socket — adopted or orphaned. Empty when no tmux server runs there (or tmux is absent / the
-// platform has none): then no terminal is live.
-func liveTerminalIDs() []string {
-	out, err := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}").Output()
-	if err != nil {
-		return []string{}
+// socket — adopted or orphaned. Empty when no tmux server runs there, or there is no tmux at all:
+// then no terminal is live. Any other failure is an error — the list is unknown, which is not the
+// same as empty (a display prunes what it remembers against this list).
+func liveTerminalIDs() ([]string, error) {
+	var stderr strings.Builder
+	cmd := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if errors.Is(err, exec.ErrNotFound) {
+		return []string{}, nil
 	}
-	return terminalIDsFromSessions(string(out))
+	if err != nil {
+		if msg := stderr.String(); strings.Contains(msg, "no server running") || strings.Contains(msg, "error connecting to") {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("tmux -L %s ls: %v: %s", tmuxSocket, err, strings.TrimSpace(stderr.String()))
+	}
+	return terminalIDsFromSessions(string(out)), nil
+}
+
+// seedTermSeqFromSocket seeds the spawn counter from the socket's live sessions at relay start.
+func (r *Relay) seedTermSeqFromSocket() {
+	ids, err := liveTerminalIDs()
+	if err != nil {
+		log.Printf("[relay] can't list live terminals to seed spawn ids: %v", err)
+		return
+	}
+	r.seedTermSeq(ids)
+	if n := r.termSeq.Load(); n > 0 {
+		log.Printf("[relay] %d live terminal(s) on tmux socket %q; spawns start at term-%d", len(ids), tmuxSocket, n+1)
+	}
 }
 
 // terminalIDsFromSessions picks the terminal ids out of `tmux ls -F '#{session_name}'` output: a
@@ -1147,7 +1170,7 @@ func terminalIDsFromSessions(out string) []string {
 }
 
 // seedTermSeq moves the spawn counter past every `term-N` among ids — the ONE place it is seeded,
-// at relay start (RunServer / RunRelay) and on every terminal.recover. A live session outlives the
+// at relay start (seedTermSeqFromSocket) and on every terminal.recover. A live session outlives the
 // relay that spawned it; a restarted relay whose counter started at zero would mint `term-1` again
 // and attach a second client to someone's live shell. It never moves the counter back.
 func (r *Relay) seedTermSeq(ids []string) {
@@ -1179,9 +1202,15 @@ func (r *Relay) seedTermSeq(ids []string) {
 //
 // The reply, `terminal.recovered`, carries the ids re-adopted (`ids`, `count`) and every live
 // terminal id on the socket (`live`) — what a display prunes its per-terminal memory against, since
-// an id is free to be minted again once its session is gone.
+// an id is free to be minted again once its session is gone. When the socket can't be listed the
+// reply says so (`error`) and carries no `live`: unknown is not empty.
 func (r *Relay) recoverTerminals(reply func(any)) {
-	live := liveTerminalIDs()
+	live, err := liveTerminalIDs()
+	if err != nil {
+		log.Printf("[relay] terminal.recover: %v", err)
+		reply(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0, "error": err.Error()})
+		return
+	}
 	r.seedTermSeq(live)
 	exePath, err := os.Executable()
 	if err != nil {
@@ -1281,7 +1310,7 @@ func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
-	relay.seedTermSeq(liveTerminalIDs()) // spawns start past every terminal this socket already has
+	relay.seedTermSeqFromSocket() // spawns start past every terminal this socket already has
 
 	// Wire the fs/writeFile notify hook so successful writes echo an
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
@@ -1389,7 +1418,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
 	relay.fs = fsHandler
 	relay.port = port
-	relay.seedTermSeq(liveTerminalIDs()) // spawns start past every terminal this socket already has
+	relay.seedTermSeqFromSocket() // spawns start past every terminal this socket already has
 	if fsHandler != nil {
 		relay.wireFS(fsHandler)
 	}
