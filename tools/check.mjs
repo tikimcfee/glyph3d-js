@@ -183,6 +183,8 @@ const probes = {
         if (!existsSync(CLI)) return `no relay binary at ${relative(ROOT, CLI) || CLI} (make build, or --cli PATH)`;
         return spawnSync('tmux', ['-V']).status === 0 ? null : 'the relay needs tmux on PATH';
     },
+    // A check that starts its own relay (tools/lib/wall-relay.mjs) needs the same binary and tmux.
+    'own-relay': async () => probes.relay(),
     vite: async () => (existsSync(join(ROOT, 'node_modules/.bin/vite')) ? null : 'no vite in node_modules (bun install)'),
     'wall-vite': async () => (existsSync(join(ROOT, 'node_modules/.bin/vite')) ? null : 'no vite in node_modules (bun install)'),
 };
@@ -261,7 +263,7 @@ async function startRelay(fixture, name) {
 }
 
 // ── running one check ────────────────────────────────────────────────────────────────────────
-const fill = (s, vars) => s.replace(/\{(url|wallUrl|relay|root|dir)\}/g, (_, k) => {
+const fill = (s, vars) => s.replace(/\{(url|wallUrl|relay|port|root|dir)\}/g, (_, k) => {
     if (vars[k] == null) throw new Error(`placeholder {${k}} has no value`);
     return String(vars[k]);
 });
