@@ -20,6 +20,8 @@ const MIN_SIZE = { minCols: 20, minRows: 5 };
  * Wheel: two-finger scroll over the FOCUSED terminal drives its scrollback; pinch (ctrl+wheel)
  * zooms about the pointer; anywhere else the wheel pans. Double-click a terminal: focus + frame;
  * double-click empty canvas: fit all. Hover lights the border and sets the cursor (⌥ shows move).
+ * A pointercancel or a lost pointer capture ends the gesture where it stands (no click), and so
+ * does the gesture's terminal going away; either way the capture is given back.
  */
 export default class WallPointer {
     /**
@@ -37,6 +39,7 @@ export default class WallPointer {
             down: (e) => this._onDown(e),
             move: (e) => this._onMove(e),
             up: (e) => this._onUp(e),
+            cancel: (e) => this._onCancel(e),
             dbl: (e) => this._onDouble(e),
             key: (e) => { if (e.key === 'Alt' && !this._drag && this._last) this._hover({ ...this._last, altKey: e.type === 'keydown' }); },
         };
@@ -49,6 +52,8 @@ export default class WallPointer {
         c.addEventListener('dblclick', h.dbl);
         window.addEventListener('pointermove', h.move);
         window.addEventListener('pointerup', h.up);
+        window.addEventListener('pointercancel', h.cancel);
+        c.addEventListener('lostpointercapture', h.cancel);
         window.addEventListener('keydown', h.key);
         window.addEventListener('keyup', h.key);
     }
@@ -60,6 +65,8 @@ export default class WallPointer {
         c.removeEventListener('dblclick', h.dbl);
         window.removeEventListener('pointermove', h.move);
         window.removeEventListener('pointerup', h.up);
+        window.removeEventListener('pointercancel', h.cancel);
+        c.removeEventListener('lostpointercapture', h.cancel);
         window.removeEventListener('keydown', h.key);
         window.removeEventListener('keyup', h.key);
     }
@@ -76,6 +83,7 @@ export default class WallPointer {
         const p = this.camera.toWorld(e.clientX, e.clientY);
         const grid = gesture.id ? this.wall.terminal(gesture.id) : null;
         this._drag = {
+            pointerId: e.pointerId, captured: false,
             startX: e.clientX, startY: e.clientY, startWorld: p,
             camStart: { x: this.camera.camera.position.x, y: this.camera.camera.position.y },
             startPos: grid ? { x: grid.position.x, y: grid.position.y } : null,
@@ -98,7 +106,28 @@ export default class WallPointer {
             });
             this.wall.focus(hit.id);
         } else this._start(e, { kind: 'focus', id: hit.id });
-        this.canvas.setPointerCapture?.(e.pointerId);
+        this.canvas.setPointerCapture(e.pointerId);
+        this._drag.captured = true;
+    }
+
+    /** End the gesture in hand: drop it and give back the pointer capture it took. */
+    _end() {
+        const d = this._drag;
+        this._drag = null;
+        if (d?.captured && this.canvas.hasPointerCapture(d.pointerId)) this.canvas.releasePointerCapture(d.pointerId);
+        return d;
+    }
+
+    /**
+     * The browser took the pointer away (pointercancel — a touch turned into a scroll, the window lost
+     * it) or its capture went (lostpointercapture). The gesture ends where it is: no click, and a
+     * terminal it already moved keeps — and remembers — its new spot.
+     */
+    _onCancel(e) {
+        const d = this._drag;
+        if (!d || d.pointerId !== e.pointerId) return;
+        this._end();
+        if ((d.kind === 'press' || d.kind === 'resize') && d.moved && this.wall.terminal(d.id)) this.wall.rememberPosition(d.id);
     }
 
     _onMove(e) {
@@ -112,7 +141,7 @@ export default class WallPointer {
             return;
         }
         const grid = this.wall.terminal(d.id);
-        if (!grid) { this._drag = null; return; }
+        if (!grid) { this._end(); return; }   // its terminal went away mid-drag
         const p = this.camera.toWorld(e.clientX, e.clientY);
         const dx = p.x - d.startWorld.x, dy = p.y - d.startWorld.y;
         if (d.kind === 'press' && d.moved) {
@@ -131,9 +160,9 @@ export default class WallPointer {
 
     _onUp(e) {
         const d = this._drag;
-        if (!d) return;
-        this._drag = null;
-        this.canvas.releasePointerCapture?.(e.pointerId);
+        if (!d || d.pointerId !== e.pointerId) return;
+        this._end();
+        if (d.kind !== 'pan' && !this.wall.terminal(d.id)) return;   // its terminal went away
         if (d.kind === 'pan') { if (!d.moved) this.wall.focus(null); return; }
         if (d.kind === 'focus') { this.wall.focus(d.id); return; }   // a body press focuses, however it wobbled
         if (d.kind === 'press' && !d.moved) { this.wall.focus(d.id, { frame: !!d.clickFrames }); return; }
