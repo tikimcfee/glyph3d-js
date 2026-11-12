@@ -8,6 +8,7 @@ import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import TerminalWall from './TerminalWall.js';
 import Palette from './Palette.jsx';
+import { isChord, chordLabel, ALT_LABEL } from './chord.js';
 
 const FONT_CHAIN = [
   { url: fontUrl, name: 'Cousine' },
@@ -15,7 +16,9 @@ const FONT_CHAIN = [
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];
 
-// ?relay=PORT — where the Go relay is (it forks the terminals). Defaults to the dev relay's 8080.
+// ?relay=PORT — where the Go relay is (it forks the terminals). Defaults to the dev relay's 8080,
+// which the IDE dials too — and a relay takes ONE display, so the second to connect is refused
+// (the chip says so). Run the wall beside the IDE on its own relay (serve --port N --tmux-socket …).
 const RELAY_PORT = Number(new URLSearchParams(location.search).get('relay')) || 8080;
 
 /** In-canvas bridge: builds the TerminalWall once and hands it up to the DOM chrome. */
@@ -30,9 +33,14 @@ function Wall({ atlas, onReady }) {
     window.__wall = wall;   // devtools / test handle
     // The repo's harness handle (tools/itest/driver.mjs, tools/frame-profile.mjs read
     // __glyphClient.{ctx.renderer, ctx.camera, ctx.scene, router}) — same shape as the IDE's.
-    window.__glyphClient = { ctx: wall.ctx, router: wall.router };
+    const client = { ctx: wall.ctx, router: wall.router };
+    window.__glyphClient = client;
     onReady(wall);
-    return () => wall.stop();
+    return () => {
+      wall.stop();
+      if (window.__wall === wall) delete window.__wall;
+      if (window.__glyphClient === client) delete window.__glyphClient;
+    };
   }, []);
   useFrame((state, dt) => ref.current.tick(dt, state.size));
   return null;
@@ -55,29 +63,32 @@ function Chrome({ wall }) {
   const state = useWallState(wall);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  // Cmd+K opens the palette (the wall's own chords live in TerminalWall._onKeyDown).
+  // The chord + K opens the palette (the wall's other chords live in WallKeys; chord.js decides the
+  // modifier: ⌘ on macOS, Ctrl+Alt elsewhere).
   useEffect(() => {
     const onKey = (e) => {
-      if (e.metaKey && e.code === 'KeyK') { e.preventDefault(); e.stopPropagation(); setPaletteOpen((o) => !o); }
+      if (isChord(e) && e.code === 'KeyK') { e.preventDefault(); e.stopPropagation(); setPaletteOpen((o) => !o); }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
   if (!wall || !state) return null;
+  const relay = state.relay;
   return (
     <>
       <div style={styles.topbar}>
-        <button style={styles.button} onClick={() => wall.spawn()} title="New terminal (⌘⇧↵)">+ terminal</button>
-        <button style={styles.button} onClick={() => wall.fitAll()} title="Fit all (⌘0)">fit all</button>
-        <button style={styles.button} onClick={() => setPaletteOpen(true)} title="Find by name (⌘K)">find ⌘K</button>
-        <span style={{ ...styles.chip, color: state.connected ? '#6ee7a0' : '#e5534b' }}>
-          {state.connected ? '● relay' : '○ relay offline'}
+        <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
+        <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
+        <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
+        <span data-relay={relay.state} title={relay.state === 'refused' ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves` : ''}
+          style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
+          {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
         </span>
       </div>
       <div style={styles.hint}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}⌘[ ⌘] cycle · ⌘↵ frame/overview · ⌘K find · drag border to resize · drag to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}
       </div>
       {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}

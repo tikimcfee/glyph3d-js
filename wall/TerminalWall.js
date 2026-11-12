@@ -10,13 +10,15 @@ import WallStore from './WallStore.js';
 import WallNames from './WallNames.js';
 import WallPointer from './WallPointer.js';
 import WallKeys from './WallKeys.js';
-import { freeFlowSlot, unionRect, edgesAt, cycle } from './wallLayout.js';
+import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
 const EDGE_GRAB_PX = 7;
 /** Framing a terminal never magnifies its rows past this line height (CSS px): fit, but capped. */
 const FRAME_MAX_LINE_PX = 28;
 const BORDER_STYLE = { color: 0x3b4352, width: 1.5, intensity: 1 };
+/** How long the wall waits for the relay's terminal.recovered reply before giving up on pruning. */
+const RECOVER_REPLY_MS = 15000;
 
 /**
  * A terminal's world rect, from its own pose — position + local bounds × scale. Wall terminals sit
@@ -41,9 +43,17 @@ function rectOf(grid) {
 
 /**
  * The wall's context: what the terminal verbs run in (TerminalContext), plus the camera, renderer and
- * scene systems the repo's harness tools read through window.__glyphClient.ctx.
+ * scene systems the repo's harness tools read through window.__glyphClient.ctx. `sceneSystems` is
+ * null while the wall is stopped.
  * @typedef {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalContext & {
- *   camera: import('three').OrthographicCamera, renderer: any, sceneSystems: SceneSystems }} WallContext
+ *   camera: import('three').OrthographicCamera, renderer: any, sceneSystems: SceneSystems|null }} WallContext
+ */
+
+/**
+ * Where the wall stands with its relay: `offline` (no socket, or it dropped), `up` (registered as
+ * the relay's display), `refused` (the relay answered DISPLAY with an error — it takes one display,
+ * and another holds it; the bridge keeps retrying, so this clears when that display leaves).
+ * @typedef {{ state: 'offline'|'up'|'refused', reason: string }} RelayState
  */
 
 /** A shell title, shortened for naming: drop the `user@host:` prefix prompts put in front. */
@@ -60,11 +70,15 @@ function shortTitle(title) {
  *                (_terminalHost: where terminals land, what focus means, what persists), and one
  *                WebSocketBridge (this page is the relay's DISPLAY)
  *   scene        the renderer's scene systems (core SceneSystems — the set the IDE installs)
- *   terminals    arrival order, focus, hover, placement, names (WallStore persists positions + names)
+ *   terminals    arrival order, focus, hover, placement, names (WallStore persists positions + names,
+ *                per relay, pruned against the relay's live terminals on every connect)
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
  *                map labels), WallPointer (gestures), WallKeys (keyboard)
  *
- * DOM chrome subscribes with onChange() and calls the public methods.
+ * The constructor builds what lives as long as the wall (store, camera mapping, router, bridge);
+ * start() installs everything that touches the scene, the registry, the DOM or the socket, and stop()
+ * removes exactly that — so stop() then start() is a clean restart. DOM chrome subscribes with
+ * onChange() and calls the public methods.
  */
 export default class TerminalWall {
     /**
@@ -78,65 +92,78 @@ export default class TerminalWall {
         this.focusedId = null;
         /** @type {string|null} */
         this.hoveredId = null;
+        /** @type {RelayState} */
+        this.relay = { state: 'offline', reason: '' };
         this._listeners = new Set();
-        this.store = new WallStore();
+        this.store = new WallStore(relayPort);
         this.viewport = new WallCamera(camera, gl.domElement);
 
         /** @type {WallContext} */
         this.ctx = {
             scene, atlas, registry, camera, renderer: gl,
-            sceneSystems: new SceneSystems(scene, atlas, gl),
+            sceneSystems: null,
             terminals: new Map(),
             wsbridge: null,
             terminalHost: assertTerminalHost(this._terminalHost(), 'wall'),
         };
         this.router = new CommandRouter(this.ctx);
         registerTerminalCommands(this.router);
-
-        this.bridge = new WebSocketBridge(this.router, {
-            url: `ws://${location.hostname}:${relayPort}`, port: relayPort, autoConnect: false, showStatus: false,
-        });
-        this.ctx.wsbridge = this.bridge;
-        routeTerminalOutput(this.bridge, this.ctx);
-        this.bridge.onConnectionChange((up) => {
-            // Re-adopt glyphd sessions whose adapters died with a relay restart.
-            if (up) this.bridge.send(JSON.stringify({ relay: 'terminal.recover' }));
-            this._emit();
-        });
-
+        this._relayPort = relayPort;
+        /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
+        this.bridge = null;
         this._onRegistry = () => this._syncTerminals();
-        registry.addChangeListener(this._onRegistry);
+        this._running = false;
     }
 
     // ── lifecycle ───────────────────────────────────────────────────────────
 
     start() {
+        const { scene, atlas, renderer, registry } = this.ctx;
+        this.ctx.sceneSystems = new SceneSystems(scene, atlas, renderer);
         this.pointer = new WallPointer(this, this.viewport);
         this.keys = new WallKeys(this);
         this.names = new WallNames({
-            atlas: this.ctx.atlas, host: this.viewport.canvas.parentElement, camera: this.viewport,
+            atlas, host: this.viewport.canvas.parentElement, camera: this.viewport,
             onLabelPress: (id, e) => this.pointer.pressLabel(id, e),
         });
-        for (const [id, grid] of this.ctx.terminals) this.names.attach(id, grid);
+        for (const id of this.order) this.names.attach(id, this.ctx.terminals.get(id));
+        registry.addChangeListener(this._onRegistry);
+        this._syncTerminals();
         this.pointer.install();
         this.keys.install();
+
+        const port = this._relayPort;
+        this.bridge = new WebSocketBridge(this.router, {
+            url: `ws://${location.hostname}:${port}`, port, autoConnect: false, showStatus: false,
+        });
+        this.ctx.wsbridge = this.bridge;
+        routeTerminalOutput(this.bridge, this.ctx);
+        this.bridge.onConnectionChange((up) => this._onConnection(up));
+        this._running = true;
         this.bridge.connect();
     }
 
     stop() {
-        this.pointer.uninstall();
+        this._running = false;
+        this.bridge.dispose();
+        this.bridge = null;
+        this.ctx.wsbridge = null;
+        this.relay = { state: 'offline', reason: '' };
         this.keys.uninstall();
+        this.pointer.uninstall();
         this.ctx.registry.removeChangeListener(this._onRegistry);
-        this.bridge.disconnect();
         this.names.dispose();
+        this.names = null;
         this.ctx.sceneSystems.dispose();  // hands the scene's hooks back to three
+        this.ctx.sceneSystems = null;
     }
 
     /** Per frame: track the viewport, ease the camera, lay out names, far-LOD. */
     tick(dt, size) {
+        if (!this._running) return;
         this.viewport.setView(size.width, size.height);
         this.viewport.step(dt);
-        this.names?.update({
+        this.names.update({
             order: this.order, terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
             nameOf: (id) => this.nameOf(id), windowRect: (id) => this.windowRect(id),
         });
@@ -147,6 +174,63 @@ export default class TerminalWall {
     onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
 
     _emit() { for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } } }
+
+    // ── the relay ───────────────────────────────────────────────────────────
+
+    /**
+     * The socket opened or closed. Open isn't registered: the relay answers DISPLAY with `{ok: true}`
+     * or — when another display holds it — `{error}` and a close. The bridge consumes that answer
+     * without surfacing it, so the wall reads it off the socket the bridge just opened.
+     */
+    _onConnection(up) {
+        if (up) this._awaitRegistration(this.bridge.ws);
+        else if (this.relay.state === 'up') this._setRelay('offline', '');
+        // A refusal stands through the bridge's retries, until a retry registers.
+    }
+
+    /** @param {WebSocket} socket - the socket the bridge just opened */
+    _awaitRegistration(socket) {
+        const onMessage = (ev) => {
+            if (typeof ev.data !== 'string') return;
+            let m;
+            try { m = JSON.parse(ev.data); } catch { return; }
+            // The registration answer is the one frame with `ok` or `error` and no event / JSON-RPC.
+            if (!m || typeof m !== 'object' || m.jsonrpc || m.event || !('ok' in m || 'error' in m)) return;
+            socket.removeEventListener('message', onMessage);
+            if (m.ok) {
+                this._setRelay('up', '');
+                this._recover();
+            } else {
+                const why = String(m.error || 'refused');
+                console.warn(`[wall] the relay on :${this._relayPort} refused this display: ${why}`);
+                this._setRelay('refused', /already connected/.test(why) ? 'another display holds this relay' : why);
+            }
+        };
+        socket.addEventListener('message', onMessage);
+    }
+
+    /** @param {RelayState['state']} state @param {string} reason */
+    _setRelay(state, reason) {
+        if (this.relay.state === state && this.relay.reason === reason) return;
+        this.relay = { state, reason };
+        this._emit();
+    }
+
+    /**
+     * Registered: re-adopt the relay's orphaned sessions (their adapters died with a relay restart),
+     * then forget the names and spots of terminals whose sessions are gone — the reply lists every
+     * live terminal (`live`), and an id whose session is gone will be minted again for a stranger.
+     */
+    async _recover() {
+        const bridge = this.bridge;
+        const reply = bridge.waitForEvent('terminal.recovered', RECOVER_REPLY_MS);
+        bridge.send(JSON.stringify({ relay: 'terminal.recover' }));
+        const r = await reply;
+        if (!r) { console.warn(`[wall] no terminal.recovered reply in ${RECOVER_REPLY_MS} ms — names and spots kept as they were`); return; }
+        if (!Array.isArray(r.live)) { console.warn(`[wall] the relay couldn't list its terminals (${r.error ?? 'no live list'}) — names and spots kept as they were`); return; }
+        const gone = this.store.prune(new Set([...r.live, ...this.ctx.terminals.keys()]));
+        if (gone.length) { console.info(`[wall] forgot ${gone.length} terminal(s) whose sessions are gone: ${gone.join(', ')}`); this._emit(); }
+    }
 
     // ── terminals ───────────────────────────────────────────────────────────
 
@@ -164,23 +248,16 @@ export default class TerminalWall {
     }
 
     /**
-     * What's under a world point: a border grab (of the whole window — bar included, so the top
-     * edge is the bar's top) beats the rest; then the title bar, then the body. The focused
-     * terminal is on top. @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|null}
+     * What's under a world point: each terminal in stacking order (the focused one on top, then the
+     * latest arrivals), tested whole — its border band (of the whole window, so the top edge is the
+     * bar's top), then its title bar, then its body — before the one beneath it.
+     * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|null}
      */
     hit(p) {
-        const tol = EDGE_GRAB_PX / this.viewport.zoom;
-        const ids = this.focusedId ? [this.focusedId, ...[...this.order].reverse().filter((i) => i !== this.focusedId)] : [...this.order].reverse();
-        for (const id of ids) {
-            const edges = edgesAt(this.windowRect(id), p.x, p.y, tol);
-            if (edges) return { id, part: 'edge', edges };
-        }
-        for (const id of ids) {
-            const w = this.windowRect(id);
-            if (p.x < w.minX || p.x > w.maxX || p.y < w.minY || p.y > w.maxY) continue;
-            return { id, part: p.y > this.terminalRect(id).maxY ? 'title' : 'body' };
-        }
-        return null;
+        const ids = [...this.order].reverse();
+        if (this.focusedId) ids.sort((a, b) => (b === this.focusedId) - (a === this.focusedId));
+        const stack = ids.map((id) => ({ id, window: this.windowRect(id), body: this.terminalRect(id) }));
+        return hitTest(stack, p.x, p.y, EDGE_GRAB_PX / this.viewport.zoom);
     }
 
     /** Light the hovered terminal's border. */
@@ -210,17 +287,21 @@ export default class TerminalWall {
         return true;
     }
 
-    /** @returns {{ connected: boolean, focusedId: string|null, terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string}[] }} */
+    /**
+     * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null,
+     *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string}[] }}
+     */
     snapshot() {
         return {
-            connected: !!this.bridge.connected,
+            connected: this.relay.state === 'up',
+            relay: this.relay,
             focusedId: this.focusedId,
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
-                const lines = g?.readText?.() ?? [];
+                const lines = g.readText();
                 let preview = '';
                 for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { preview = lines[i].trim(); break; } }
-                return { id, name: this.nameOf(id), named: !!this.store.name(id), cols: g?.cols ?? 0, rows: g?.rows ?? 0, preview };
+                return { id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview };
             }),
         };
     }
@@ -233,14 +314,14 @@ export default class TerminalWall {
         const prev = this.focusedId ? this.ctx.terminals.get(this.focusedId) : null;
         if (prev && this.focusedId !== id) {
             prev.setBorderFlag(BORDER_FLAGS.FOCUSED, false);
-            prev.setCursorFocused?.(false);
+            prev.setCursorFocused(false);
             prev.position.z = 0;
         }
         this.focusedId = id;
         const grid = id ? this.ctx.terminals.get(id) : null;
         if (grid) {
             grid.setBorderFlag(BORDER_FLAGS.FOCUSED, true);
-            grid.setCursorFocused?.(true);
+            grid.setCursorFocused(true);
             grid.position.z = 1;   // the focused terminal draws over any it overlaps
             if (frame) this.frame(id);
         }
@@ -294,8 +375,11 @@ export default class TerminalWall {
         return { ok: false, id: r.data?.id, reason: r.text };
     }
 
-    /** Fully close a terminal (its shell and tmux session too). */
-    kill(id) { return this.router.execute(['terminal.kill', id]); }
+    /** Fully close a terminal — its shell and tmux session too — and forget its name and spot now. */
+    kill(id) {
+        this.store.forget(id);
+        return this.router.execute(['terminal.kill', id]);
+    }
 
     _syncTerminals() {
         const live = this.ctx.terminals;
@@ -308,10 +392,10 @@ export default class TerminalWall {
             for (const { role } of TerminalGrid.CONTROL_SPEC) grid.setControlVisible(role, false);
             grid.onResize(() => this._emit());
             grid.onWindowTitle(() => this._emit());
-            this.names?.attach(id, grid);
+            this.names.attach(id, grid);
             changed = true;
         }
-        this.names?.prune((id) => live.has(id));
+        this.names.prune((id) => live.has(id));
         const before = this.order.length;
         this.order = this.order.filter((id) => live.has(id));
         if (this.order.length !== before) changed = true;
@@ -322,7 +406,10 @@ export default class TerminalWall {
 
     /**
      * The wall's TerminalHost: what the core terminal verbs defer to this app for. Nothing holds a
-     * terminal here and tmux owns its size, so release and resizing have nothing to do.
+     * terminal here and tmux owns its size, so release and resizing have nothing to do. A closed
+     * grid keeps its name and spot (surfaces.remove does nothing): an adapter that detaches closes
+     * its grid while its session runs on, to be re-adopted under the same id. What's forgotten is
+     * what the relay no longer has (pruned on connect, _recover) and what the wall kills (kill).
      * @returns {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalHost}
      */
     _terminalHost() {
@@ -336,7 +423,7 @@ export default class TerminalWall {
             surfaces: {
                 get: (id) => { const p = this.store.position(id); return p ? { position: p } : null; },
                 set: (id, view) => { if (view.position) this.store.setPosition(id, view.position); },
-                remove: (id) => this.store.forget(id),
+                remove: () => {},
             },
         };
     }
