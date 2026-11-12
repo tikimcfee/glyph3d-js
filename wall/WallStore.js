@@ -1,6 +1,6 @@
 /**
  * WallStore — the wall's durable per-browser state: where each terminal sits and the names the
- * person gave them, keyed by terminal id, in localStorage. Storage can be unavailable (private
+ * person gave them, keyed by terminal id, and how the termd status window stands, in localStorage. Storage can be unavailable (private
  * windows, blocked site data); then nothing persists and the wall still works.
  *
  * Ids are the relay's, and they recycle: another relay (port) mints its own `term-1`, and a relay
@@ -9,6 +9,15 @@
  * the relay's live terminals on every (re)connect: an entry outlives a detach (a closed grid whose
  * session runs on is re-adopted under the same id) but not its session.
  */
+
+/**
+ * The termd status window: open or not, floating or stuck to an edge, and where it floats (null:
+ * its default spot, under the topbar at the right).
+ * @typedef {{ open: boolean, side: 'left'|'right'|'float', float: { x: number, y: number }|null }} StatusWindowState
+ */
+
+/** @type {StatusWindowState} */
+const STATUS_WINDOW_DEFAULT = Object.freeze({ open: false, side: 'float', float: null });
 
 /** @param {string} key */
 function read(key) {
@@ -27,9 +36,21 @@ export default class WallStore {
         this.keys = {
             positions: `glyph3d.wall.relay-${relayPort}.positions`,
             names: `glyph3d.wall.relay-${relayPort}.names`,
+            status: `glyph3d.wall.relay-${relayPort}.status`,
         };
         this._positions = read(this.keys.positions);
         this._names = read(this.keys.names);
+        /** @type {StatusWindowState} */
+        this._status = { ...STATUS_WINDOW_DEFAULT, ...read(this.keys.status) };
+    }
+
+    /** @returns {StatusWindowState} */
+    statusWindow() { return this._status; }
+
+    /** @param {Partial<StatusWindowState>} patch */
+    setStatusWindow(patch) {
+        this._status = { ...this._status, ...patch };
+        write(this.keys.status, this._status);
     }
 
     /** @param {string} id @returns {{x:number, y:number}|null} */

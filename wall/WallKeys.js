@@ -5,8 +5,9 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * WallKeys — the keyboard. Wall chords take the platform's chord modifier (chord.js: ⌘ on macOS,
  * Ctrl+Alt elsewhere) and are matched on e.code (the physical key) so layouts never rewrite them:
  * [ ] cycle focus, ↵ frames the focused terminal or returns to the overview, Shift+↵ opens a new
- * terminal, 0 fits all (K belongs to the DOM palette). Everything else goes to the focused terminal
- * as terminal bytes — Esc included (vim and readline need it), Ctrl alone too (it's the shell's);
+ * terminal, 0 fits all, S opens or closes the termd status window (K belongs to the DOM palette).
+ * Everything else goes to the focused terminal as terminal bytes — Esc included (vim and readline
+ * need it), Ctrl alone too (it's the shell's);
  * click empty canvas to drop focus. On macOS any other ⌘ key stays with the browser (⌘C, ⌘V);
  * elsewhere any other Ctrl+Alt key is the shell's. A focused DOM input (the palette) keeps its own
  * keys. Paste goes to the focused terminal as one bracketed burst.
@@ -42,6 +43,7 @@ export default class WallKeys {
                 case 'BracketLeft': claim(); wall.cycleFocus(-1); return;
                 case 'Enter': claim(); if (e.shiftKey) wall.spawn(); else wall.toggleFrame(); return;
                 case 'Digit0': claim(); wall.fitAll(); return;
+                case 'KeyS': claim(); wall.run(['wall.status', 'toggle']); return;
                 case 'KeyK': return;   // the palette's (main.jsx)
                 default: if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
             }

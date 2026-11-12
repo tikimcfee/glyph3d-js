@@ -1,7 +1,7 @@
 /**
  * wall-e2e.mjs — the wall, end to end, in a real-GPU browser against a PRIVATE relay.
  *
- *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
+ *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay] [--shots DIR]
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
  * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` in the termd namespace `glyph-wall-e2e`, no
@@ -20,16 +20,24 @@
  * name at once, a relay restart (the re-adopted terminal takes typing again with no reload; the next
  * spawn mints a fresh id), wheel over the focused terminal → scrollback while the camera holds, pinch
  * → zoom, map labels (no overlaps, bar names hidden, trace lines when crowded, click frames exactly
- * like frame(), drag moves the terminal), the shared scene systems serving frames, and the core
- * terminal verbs run against the wall (terminal.move, terminal.focus). Exit 1 on any FAIL.
+ * like frame(), drag moves the terminal), the shared scene systems serving frames, the core
+ * terminal verbs run against the wall (terminal.move, terminal.focus), and termd's status: the chip,
+ * the status window (the chord opens it, it lists the wall's terminals from termd's own document, it
+ * docks and closes by verb) and a brain restart held long enough to read — the amber restarting notice,
+ * then the red unreachable one, both clearing when the brain answers, the shells alive and typing.
+ * --shots DIR saves the status window as it reads normally, restarting and unreachable. Exit 1 on any FAIL.
  */
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 import { privateRelay } from './lib/wall-relay.mjs';
 import { dialRelay } from './lib/relay.mjs';
+import { brainPid, termdPid } from './lib/termd.mjs';
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL_ = arg('--url', 'http://localhost:5180/');
 const RELAY = Number(arg('--relay', 8099));
+const SHOTS = arg('--shots', null);
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) failures++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); };
@@ -90,6 +98,72 @@ try {
     await page.keyboard.press('Enter');
     await settle(900);
     ok(await screenHas(A, 'wall-e2e-typed'), 'typing reaches the focused shell');
+
+    // ── termd's status: the chip, the window, a brain restart ─────────────
+    {
+        const chip = () => W(() => document.querySelector('[data-termd]')?.dataset.termd ?? null);
+        const notice = () => W(() => document.querySelector('[data-termd-notice]')?.dataset.termdNotice ?? null);
+        const rows = () => W(() => [...document.querySelectorAll('[data-status-row]')].map((r) => r.dataset.statusRow));
+        const shot = async (name) => {
+            if (!SHOTS) return;
+            mkdirSync(SHOTS, { recursive: true });
+            await page.screenshot({ path: path.join(SHOTS, name) });
+            info(`saved ${path.join(SHOTS, name)}`);
+        };
+        ok(await until(() => document.querySelector('[data-termd]')?.dataset.termd === 'ok', null, 10000), `the termd chip reads ok (${await chip()})`);
+        await W(() => window.__wall.focus(null));
+        await page.keyboard.press(`${CHORD}+KeyS`);
+        const listed = await until((ids) => {
+            const got = [...document.querySelectorAll('[data-status-row]')].map((r) => r.dataset.statusRow);
+            return ids.every((i) => got.includes(i)) ? got : null;
+        }, spawned, 10000);
+        ok(!!listed && !!(await W(() => document.querySelector('[data-status-window]'))), `${CHORD}+S opens the status window, and it lists the wall's terminals from termd's document (${listed?.join(', ')})`);
+        const head = await W(() => document.querySelector('[data-status-window]').innerText);
+        ok(/g3d-termd \S+ · libghostty-vt/.test(head) && /holder \d+/.test(head) && /brain \d+ · gen \d+/.test(head), 'the window names the daemon, its engine, holder and brain');
+        await settle(600);
+        await shot('status-window.png');
+
+        if (relay.started) {
+            const holder = termdPid(relay.termdDir, relay.ns), brain = brainPid(relay.termdDir, relay.ns);
+            ok(!!holder && !!brain, `found termd's holder (${holder}) and brain (${brain})`);
+            const gen0 = await W(() => window.__wall.termd.doc.daemon.brain.generation);
+            // Hold the restart long enough to read: the holder stopped can't start the next brain.
+            process.kill(holder, 'SIGSTOP');
+            try {
+                process.kill(brain, 'SIGKILL');
+                const restarting = await until(() => document.querySelector('[data-termd-notice]')?.dataset.termdNotice === 'restarting', null, 4000);
+                ok(!!restarting && (await chip()) === 'restarting', `a brain restart that lingers shows the amber notice (chip ${await chip()})`);
+                ok((await rows()).length === spawned.length, 'while it restarts the window keeps the last document (its terminals are still there)');
+                await shot('status-restarting.png');
+                const unreachable = await until(() => document.querySelector('[data-termd-notice]')?.dataset.termdNotice === 'unreachable', null, 9000);
+                ok(!!unreachable, `past the relay's grace it reads unreachable (${await notice()})`);
+                await shot('status-unreachable.png');
+            } finally {
+                process.kill(holder, 'SIGCONT');
+            }
+            const back = await until((g) => {
+                const t = window.__wall.termd;
+                return t.state === 'ok' && t.doc?.daemon.brain.generation > g && !document.querySelector('[data-termd-notice]');
+            }, gen0, 15000);
+            ok(!!back && (await chip()) === 'ok', `when the brain answers the notice clears and the chip reads ok (generation ${gen0} → ${await W(() => window.__wall.termd.doc?.daemon.brain.generation)})`);
+            const r = await W(() => window.__wall.termd.doc.daemon.brain);
+            ok(r.restarts.crash === 1 && r.last_start.reason === 'crash', `termd's own document counts the crash (restarts ${JSON.stringify(r.restarts)}, last ${r.last_start.reason})`);
+            await W((i) => window.__wall.focus(i), A);
+            await page.keyboard.type('echo after-brain-restart');
+            await page.keyboard.press('Enter');
+            const typed = await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'after-brain-restart'), A, 8000);
+            ok(!!typed, 'the shell rode the brain restart: typing reaches it');
+            await W(() => window.__wall.focus(null));
+        } else info('reused relay: skipped the brain restart (its termd is not this tool\'s to stop)');
+
+        const docked = await W(() => window.__wall.run(['wall.status', 'right']).then((x) => x.text));
+        ok(docked.startsWith('OK') && (await W(() => document.querySelector('[data-status-window]')?.dataset.side)) === 'right', `wall.status right docks it (${docked})`);
+        const closed = await W(() => window.__wall.run(['wall.status', 'close']).then((x) => x.text));
+        await settle(200);
+        ok(closed.startsWith('OK') && !(await W(() => document.querySelector('[data-status-window]'))), `wall.status close closes it (${closed})`);
+        await W(() => window.__wall.run(['wall.status', 'float']).then(() => window.__wall.run(['wall.status', 'close'])));
+        await W((i) => window.__wall.focus(i), A);   // as the steps below expect
+    }
 
     // ── a second display is refused, and says why ──────────────────────────
     {

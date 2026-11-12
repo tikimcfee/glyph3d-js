@@ -5,12 +5,14 @@ import SceneSystems from '@glyph3d/core/collections/SceneSystems.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
 import registerTerminalCommands, { routeTerminalOutput } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { assertTerminalHost } from '@glyph3d/core/services/terminal/TerminalHost.js';
+import TermdStatus from '@glyph3d/core/services/terminal/TermdStatus.js';
 import WallCamera from './WallCamera.js';
 import WallStore from './WallStore.js';
 import WallNames from './WallNames.js';
 import WallPointer from './WallPointer.js';
 import WallKeys from './WallKeys.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
+import registerStatusCommands, { STATUS_CONFIG } from './statusCommands.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
 const EDGE_GRAB_PX = 7;
@@ -74,6 +76,9 @@ function shortTitle(title) {
  *                per relay, pruned against the relay's live terminals on every connect)
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
  *                map labels), WallPointer (gestures), WallKeys (keyboard)
+ *   termd        TermdStatus (core): the relay's termd/status pushes — the daemon, its terminals,
+ *                restarts and losses — for the status window and the topbar's chip; the wall.status
+ *                verbs (statusCommands) open and place the window
  *
  * The constructor builds what lives as long as the wall (store, camera mapping, router, bridge);
  * start() installs everything that touches the scene, the registry, the DOM or the socket, and stop()
@@ -83,9 +88,11 @@ function shortTitle(title) {
 export default class TerminalWall {
     /**
      * @param {{ scene: import('three').Scene, camera: import('three').OrthographicCamera, gl: any,
-     *           atlas: any, registry: any, relayPort: number }} deps
+     *           atlas: any, registry: any, relayPort: number,
+     *           statusConfig?: Partial<import('./statusCommands.js').StatusConfig> }} deps
+     *   statusConfig: knobs over STATUS_CONFIG (also dialable live: wall.status.config)
      */
-    constructor({ scene, camera, gl, atlas, registry, relayPort }) {
+    constructor({ scene, camera, gl, atlas, registry, relayPort, statusConfig = {} }) {
         /** Terminal ids in arrival order — the order cycling walks. @type {string[]} */
         this.order = [];
         /** @type {string|null} */
@@ -108,6 +115,11 @@ export default class TerminalWall {
         };
         this.router = new CommandRouter(this.ctx);
         registerTerminalCommands(this.router);
+        /** termd's state as the relay pushes it (termd/status). */
+        this.termd = new TermdStatus();
+        /** @type {import('./statusCommands.js').StatusConfig} */
+        this.statusConfig = { ...STATUS_CONFIG, ...statusConfig };
+        registerStatusCommands(this.router, this);
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
         this.bridge = null;
@@ -138,6 +150,7 @@ export default class TerminalWall {
         });
         this.ctx.wsbridge = this.bridge;
         routeTerminalOutput(this.bridge, this.ctx);
+        this._offTermd = this.termd.attach(this.bridge);
         this.bridge.onConnectionChange((up) => this._onConnection(up));
         this._running = true;
         this.bridge.connect();
@@ -145,6 +158,8 @@ export default class TerminalWall {
 
     stop() {
         this._running = false;
+        this._offTermd();
+        this.termd.clear();
         this.bridge.dispose();
         this.bridge = null;
         this.ctx.wsbridge = null;
@@ -175,6 +190,23 @@ export default class TerminalWall {
 
     _emit() { for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } } }
 
+    /**
+     * Run a verb on the wall's router — what the buttons, the window and the chords call. A refusal
+     * is logged with the request, loud, and returned.
+     * @param {string|string[]} cmd @returns {Promise<{text: string, data: any}>}
+     */
+    async run(cmd) {
+        const r = await this.router.execute(cmd);
+        if (r.text.startsWith('ERR')) console.warn(`[wall] ${Array.isArray(cmd) ? cmd.join(' ') : cmd} → ${r.text}`);
+        return r;
+    }
+
+    /** @param {Partial<import('./WallStore.js').StatusWindowState>} patch */
+    setStatusWindow(patch) {
+        this.store.setStatusWindow(patch);
+        this._emit();
+    }
+
     // ── the relay ───────────────────────────────────────────────────────────
 
     /**
@@ -184,7 +216,10 @@ export default class TerminalWall {
      */
     _onConnection(up) {
         if (up) this._awaitRegistration(this.bridge.ws);
-        else if (this.relay.state === 'up') this._setRelay('offline', '');
+        else {
+            this.termd.clear();   // no relay, no word from termd: unknown, not gone
+            if (this.relay.state === 'up') this._setRelay('offline', '');
+        }
         // A refusal stands through the bridge's retries, until a retry registers.
     }
 
@@ -199,6 +234,7 @@ export default class TerminalWall {
             socket.removeEventListener('message', onMessage);
             if (m.ok) {
                 this._setRelay('up', '');
+                this.termd.request(this.bridge);
                 this._recover();
             } else {
                 const why = String(m.error || 'refused');
@@ -289,6 +325,7 @@ export default class TerminalWall {
 
     /**
      * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null,
+     *   statusWindow: import('./WallStore.js').StatusWindowState,
      *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string}[] }}
      */
     snapshot() {
@@ -296,6 +333,7 @@ export default class TerminalWall {
             connected: this.relay.state === 'up',
             relay: this.relay,
             focusedId: this.focusedId,
+            statusWindow: this.store.statusWindow(),
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
                 const lines = g.readText();
@@ -371,7 +409,7 @@ export default class TerminalWall {
      */
     async spawn() {
         const r = await this.router.execute('terminal.spawn');
-        if (r.data?.landed) return { ok: true, id: r.data.id };
+        if (r.data?.landed) { this.termd.dismissLost(); return { ok: true, id: r.data.id }; }
         return { ok: false, id: r.data?.id, reason: r.text };
     }
 

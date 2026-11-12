@@ -8,6 +8,7 @@ import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import TerminalWall from './TerminalWall.js';
 import Palette from './Palette.jsx';
+import StatusWindow, { TermdChip, TermdNotice, DOCK_WIDTH } from './StatusWindow.jsx';
 import { isChord, chordLabel, ALT_LABEL } from './chord.js';
 
 const FONT_CHAIN = [
@@ -75,9 +76,11 @@ function Chrome({ wall }) {
 
   if (!wall || !state) return null;
   const relay = state.relay;
+  const sw = state.statusWindow;
+  const docked = (side) => (sw.open && sw.side === side ? DOCK_WIDTH + 12 : 12);
   return (
     <>
-      <div style={styles.topbar}>
+      <div style={{ ...styles.topbar, right: docked('right') }}>
         <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
         <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
         <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
@@ -85,12 +88,15 @@ function Chrome({ wall }) {
           style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
           {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
         </span>
+        <TermdChip wall={wall} />
       </div>
-      <div style={styles.hint}>
+      <TermdNotice wall={wall} />
+      <div style={{ ...styles.hint, left: docked('left'), right: docked('right') }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback) · {chordLabel(['S'])} termd
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}
       </div>
+      <StatusWindow wall={wall} state={state} />
       {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}
     </>
   );

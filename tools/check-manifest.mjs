@@ -233,7 +233,7 @@ export const CHECKS = [
     {
         name: 'termd-relay-check', cmd: ['bun', 'tools/termd-relay-check.mjs', '--relay', '{port}'], tier: 'full', scope: ['terminal', 'relay'],
         needs: ['own-relay', 'termd'], apart: ['*'], timeoutMs: 180_000,
-        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd brain crash and a `g3d upgrade` ridden by every adapter (no grid closes, the repaint brings the screen back, recover mid-restart never answers empty), the holder dying (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon)',
+        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd brain crash and a `g3d upgrade` ridden by every adapter (no grid closes, the repaint brings the screen back, recover mid-restart never answers empty), the holder dying (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon), and termd/status reaching the display through each state (absent, ok, restarting, lost) with the request and the CLI\'s termd.status',
         blind: 'the browser (wall-e2e drives the same paths with pixels)',
     },
     h('bridge-binary.test.mjs', ['relay'], 'the RPC binary result plane: frame parse, header + payload, pending resolution', 'the Go encoder'),
@@ -334,7 +334,7 @@ export const CHECKS = [
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
-        compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs',
+        compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
     },
     {
