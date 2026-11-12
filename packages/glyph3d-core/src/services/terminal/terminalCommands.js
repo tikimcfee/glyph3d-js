@@ -104,6 +104,35 @@ function getTerminals(ctx) {
 }
 
 /**
+ * Route a grid's INPUT to its owning adapter: raw ANSI bytes (from the keyboard) → the adapter's
+ * PTY, base64 in a JSON push (keystrokes are sparse; the binary lane is the high-volume OUTPUT
+ * direction's). No owner, or no relay, leaves the grid with no input route.
+ * @param {TerminalContext} ctx
+ * @param {TerminalGrid} grid
+ * @param {string|null} owner - the adapter's controller id
+ */
+function bindOwner(ctx, grid, owner) {
+    const bridge = ctx.wsbridge;
+    grid.onInput = owner && bridge?.connected
+        ? (bytes, termId) => bridge.push(owner, { event: 'terminal.bytes', data: { terminalId: termId, b64: encodeBase64(bytes) } })
+        : null;
+}
+
+/**
+ * The repaint HANDSHAKE: the grid + its parser are ready NOW (synchronous build), so tell the
+ * owning adapter to repaint the full screen into it — and re-send the pane's title, which tmux
+ * only sends when it changes. The adapter's timed refresh-client retries race grid creation under
+ * reload contention (late-built grids miss them and stay BLANK until a resize tickles SIGWINCH);
+ * this fires exactly when the grid exists. Idempotent: an extra repaint is harmless.
+ * @param {TerminalContext} ctx @param {string} id @param {string|null} owner
+ */
+function requestRepaint(ctx, id, owner) {
+    if (owner && ctx.wsbridge?.connected) {
+        ctx.wsbridge.push(owner, { event: 'terminal.refresh', data: { terminalId: id } });
+    }
+}
+
+/**
  * @param {CommandRouter} router - its context is a TerminalContext
  */
 export default function registerTerminalCommands(router) {
@@ -132,14 +161,14 @@ export default function registerTerminalCommands(router) {
         if (!isNaN(cols) && cols > 0) msg.cols = cols;
         if (!isNaN(rows) && rows > 0) msg.rows = rows;
 
-        // Full spawn flow: await the ack (the id), await the terminal, dock + focus.
+        // Full spawn flow: await the ack (the id), await the terminal, hand it to the host (landed).
         if (typeof bridge.waitForEvent === 'function' && ctx.registry) {
             const ackPromise = bridge.waitForEvent('terminal.spawning', 5000);
             bridge.send(JSON.stringify(msg));
             const ack = await ackPromise;
             if (!ack?.id) {
                 return {
-                    text: 'OK: requested terminal spawn (no ack from the relay — it will appear undocked)',
+                    text: 'OK: requested terminal spawn (no ack from the relay — it will appear where new terminals land, unannounced)',
                     data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
                 };
             }
@@ -163,7 +192,7 @@ export default function registerTerminalCommands(router) {
             text: 'OK: requested terminal spawn (relay is forking an adapter)',
             data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
         };
-    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas, pinned in the dock + focused when it lands', usage: '[cols] [rows]' });
+    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas, shown and given the keys when it lands (the host decides how)', usage: '[cols] [rows]' });
 
     // ------------------------------------------------------------------
     // terminal.recover
@@ -213,11 +242,20 @@ export default function registerTerminalCommands(router) {
         }
 
         const terminals = getTerminals(ctx);
-        if (terminals.has(id)) {
-            // Idempotent: re-adoption re-sends terminal.create (an adapter whose
-            // display reloaded and forgot it). The live grid is already here, so
-            // treat this as success rather than erroring the adapter's retry.
-            return { text: `OK: terminal '${id}' already present`, data: { id, existed: true } };
+        const owner = ctx.sender || null;
+        const existing = terminals.get(id);
+        if (existing) {
+            // A create for a grid this display already shows is a RE-ADOPTION: the display outlived
+            // the adapter that made it (a relay restart forks fresh adapters, whose controller ids
+            // start over). The grid stays; whoever sent this create owns it now, so input, resize,
+            // scroll and kill reach the live adapter instead of a dead (or recycled) controller id,
+            // and that adapter repaints into the grid. A create from no controller (a local call)
+            // has no adapter to hand the terminal to, so the owner stays.
+            if (!owner) return { text: `OK: terminal '${id}' already present`, data: { id, existed: true } };
+            ctx.registry.replace(id, existing, { meta: { owner } });
+            bindOwner(ctx, existing, owner);
+            requestRepaint(ctx, id, owner);
+            return { text: `OK: terminal '${id}' re-adopted by '${owner}'`, data: { id, existed: true, owner } };
         }
 
         try {
@@ -237,41 +275,20 @@ export default function registerTerminalCommands(router) {
 
             terminals.set(id, grid);
 
-            // Wire onInput callback for remote owners (agent controllers).
-            // If a sender (controller ID) exists and the bridge is available,
-            // route input back to the owning controller via push().
-            const owner = ctx.sender || null;
-            if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
-                // INPUT data plane: raw ANSI bytes (from the keyboard router) → the
-                // owning adapter's PTY. base64 in a JSON push — keystrokes are sparse,
-                // so the binary lane is reserved for the high-volume OUTPUT direction.
-                grid.onInput = (bytes, termId) => {
-                    ctx.wsbridge.push(owner, {
-                        event: 'terminal.bytes',
-                        data: { terminalId: termId, b64: encodeBase64(bytes) },
-                    });
-                };
-            }
+            bindOwner(ctx, grid, owner);
 
             // Register in the scene registry so spatial commands, highlight, etc. work.
-            // Size is NOT stored here — the WorkspaceModel surface record is the one decider of a
-            // terminal's cols/rows; the registry entry, the live grid, the emulator and the PTY are
-            // caches told by it. (The grid carries the live dimensions for anything that needs them.)
+            // Size is NOT stored here — the host's persisted view (terminalHost.surfaces) is the one
+            // decider of a terminal's cols/rows; the registry entry, the live grid, the emulator and
+            // the PTY are caches told by it. (The grid carries the live dimensions for anything that
+            // needs them.)
             ctx.registry.register(id, grid, {
                 type: 'terminal',
                 terminalId: id,
                 owner,
             });
 
-            // Re-adoption repaint HANDSHAKE: the grid + its parser are ready NOW (synchronous
-            // build), so tell the owning adapter to repaint into it. The adapter's timed
-            // refresh-client retries race grid creation under reload contention — late-built grids
-            // miss all the retries and stay BLANK until a resize tickles SIGWINCH. This fires the
-            // repaint exactly when the grid exists, not on a timer guess. Idempotent (an extra
-            // repaint is harmless), so it's safe for the initial create too.
-            if (owner && ctx.wsbridge && ctx.wsbridge.connected) {
-                ctx.wsbridge.push(owner, { event: 'terminal.refresh', data: { terminalId: id } });
-            }
+            requestRepaint(ctx, id, owner);
 
             const pos = grid.position;
             // Seed the persisted view — but DON'T clobber an existing/restored one. On re-adopt the
@@ -336,7 +353,7 @@ export default function registerTerminalCommands(router) {
 
         // Resize the REAL PTY (pty.Setsize → SIGWINCH → tmux) and let tmux's redraw drive the rest.
         // The redraw streams back tagged with the new size (attach_unix.go), and THAT resizes the grid +
-        // emulator (CommandProvider's OUTPUT handler) — in lockstep with the content it's about to
+        // emulator (routeTerminalOutput) — in lockstep with the content it's about to
         // parse, never ahead of it. The tagged frame is the SINGLE writer of terminal size; we do NOT
         // resize the grid locally here. (No adapter = no stream to drive it, so fall back to a direct
         // resize rather than dropping the request — a terminal without an owner has no live PTY anyway.)
