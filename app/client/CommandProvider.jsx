@@ -422,6 +422,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // World matrices: a pose write marks its node, and the per-frame walk enters only what was
     // marked — not every node of the tree, every frame (scene.transforms reports and verifies it).
     state.ctx.sceneTransforms = new SceneTransforms(scene);
+    pickingSystem.flatLists = getSetting('pick.flatRoot');   // each pick channel renders its flat list (needs the SceneTransforms)
 
     // The view renders a flat list of the drawables it sees, not the scene tree: three's walk visits
     // what draws, not every container (render.flatRoot toggles it). The seam is the renderer — every

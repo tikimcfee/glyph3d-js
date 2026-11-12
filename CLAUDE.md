@@ -166,7 +166,11 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   camera, scene, x, y)` draws each channel into one pixel through a camera narrowed to the
   cursor's pixel (`setViewOffset`, so culling drops all but what's under it) and reads them
   back together with three's fenced `readRenderTargetPixelsAsync` — the main thread never
-  waits on the GPU. Hover picks run as fast as they land unless `pick.hoverHz` caps them.
+  waits on the GPU. Each channel's pass draws its own flat list of the shown meshes on its layer
+  (a FlatRenderRoot per channel, rebuilt only when visibility, membership or that layer move;
+  `pick.flatRoot`, on, is the A/B) — not three's walk of the whole scene per channel. Hover picks run
+  as fast as they land unless `pick.hoverHz` caps them. Gates: `tools/pick-flat-root.test.mjs`,
+  `tools/pick-flat-root-check.mjs`.
 - **Frustum culling** is three's built-in per-object cull, on by default for glyph fields
   and panels. three can't compute an instanced field's bounds (it sees only the base quad),
   so each field STATES them: `InstancedField.setLayoutExtent` takes the laid-out extent and
@@ -176,7 +180,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   group table — the content-tree labels — opt out. Culling covers draws, not GPU memory.)
 - **Flat render root** (`collections/FlatRenderRoot.js`): the view camera renders a flat list of the
   drawables it can see — rebuilt only when visibility, scene membership or layers move (layer writes are
-  watched; go through the `Layers` methods) — not the scene tree: three's walk visits what draws, not
+  watched per layer bit; go through the `Layers` methods) — not the scene tree: three's walk visits what draws, not
   every container (~6.5k visits a frame → ~1k on the hub). The seam is the renderer's `render` (r3f's
   frame, the minimap's main pass, a screenshot); a camera off layer 0 (the pick passes) gets the
   scene itself. What three must walk itself (a Group with renderOrder, lights, LODs) goes in whole; a

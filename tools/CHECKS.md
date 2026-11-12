@@ -122,6 +122,18 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   bun tools/flat-root-check.mjs
   ```
 
+- **`pick-flat-root.test.mjs`** (headless) and **`pick-flat-root-check.mjs`** (GPU) — each pick
+  channel draws its own short list of the meshes on its layer (`pick.flatRoot`, on) instead of three
+  walking the whole scene per channel: the test locks each list against a fresh walk, rebuilds per
+  layer bit (registering a glyph field rebuilds only the glyph list; the pick camera's own per-pass
+  layer change rebuilds nothing); the check compares pick results list vs full scene over pointer
+  sweeps of glyphs, batched panels, resize handles, volumes and the library layout — identical, while
+  removing a hit mesh always changes them.
+  ```
+  bun tools/pick-flat-root.test.mjs
+  bun tools/pick-flat-root-check.mjs
+  ```
+
 - **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
   `device.queue.writeBuffer`/`writeTexture`, counts display frames, reports a
   per-label bytes/frame histogram plus a greppable verdict line. The law it enforces:

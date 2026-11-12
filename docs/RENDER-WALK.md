@@ -42,7 +42,7 @@ Why the obvious levers don't work:
 `collections/FlatRenderRoot.js`, installed in `CommandProvider` at the renderer: every
 `renderer.render(scene, camera)` — r3f's frame, the minimap's main pass, a screenshot — renders the
 root instead when the camera sees layer 0 (`render.flatRoot`, Settings ▸ Performance, on by default).
-Cameras off layer 0 (the pick passes) render the scene itself.
+Cameras off layer 0 render the scene itself; the pick channels have their own lists (below).
 
 The root is a stand-in `Scene` whose `children` is the list of SHOWN drawables the view camera sees.
 The logical tree stays as it is — nothing is reparented: three's walk never consults `parent`, so
@@ -53,9 +53,9 @@ the scene's `onBeforeRender` / `onAfterRender`; the list is collected after them
 layers there).
 
 - **The key.** The list is rebuilt when SceneTransforms' show generation (visibility, membership), the
-  module's layer generation, or the camera's mask moves. The layer generation hooks `THREE.Layers`'
-  write methods and moves only when a bit the view camera sees changes — the batches' idempotent
-  per-frame `disable` and the pick passes' own layers move nothing. A direct `layers.mask =` write is
+  layer generation of the bits its camera sees, or the camera's mask moves. The module hooks
+  `THREE.Layers`' write methods and counts changes per layer bit — the batches' idempotent per-frame
+  `disable` moves nothing, and a pick registration moves only its channel's bit. A direct `layers.mask =` write is
   invisible to it: write layers through their methods (`tools/flat-root.test.mjs` scans the source
   for any).
 - **Walked whole.** What three's walk does beyond pushing a drawable is kept by handing three that
@@ -84,6 +84,33 @@ Measured on the hub shape (three A/B pairs of 240 frames):
 | main render CPU p50, ms | 2.9 · 2.4 · 1.7 | 3.2 · 3.5 · 3.9 |
 
 The list holds ~1,300 drawables there and is not rebuilt at rest.
+
+## The pick channels' lists
+
+A pick renders each asked channel through a camera that sees only that channel's layer — through
+the full tree, a walk of every shown node once per channel. `PickingSystem.flatLists`
+(`pick.flatRoot`, Settings ▸ Performance, on by default) gives each channel its own FlatRenderRoot on
+its layer, built the first time it is picked and rebuilt only when a pick finds its key moved.
+
+- **Per-bit layer generations.** A list reads only the bits its camera sees: registering a field on
+  the glyph channel rebuilds the glyph list and nothing else, a batch taking a panel off layer 0
+  rebuilds the view's list and no pick list.
+- **The pick camera is unwatched** (`unwatchLayers`): it sets its layer per pass, and no list depends
+  on a camera's layers (each list keys on its camera's mask directly). Watched, every pass would
+  rebuild every list.
+- **`scene.render`** lists and verifies each pick channel's list too; `scene.render time [n]` times a
+  center pick each way.
+
+Gates: `tools/pick-flat-root.test.mjs` (each channel's pass draws the same items flat as full, after
+registrations, unregistrations, view-only layer flips, visibility flips; 0 rebuilds over many picks at
+rest; teeth: a watched pick camera, one global generation, no ordered-group carry each fail it) and
+`tools/pick-flat-root-check.mjs` (GPU: a pointer sweep plus every registered mesh's center, every
+channel picked both ways, 0 hits differing — glyphs, batched panels, handles, volumes, the library
+layout — teeth: the meshes the sweep hit dropped from the lists must change hits; 0 rebuilds over
+each sweep).
+
+Measured on the hub shape: a 4-channel pick's passes, 1.6–1.8 → 0.3–0.4 ms. The hover pick runs as
+fast as picks land, so while the pointer moves that is up to ~1.3 ms a frame.
 
 ## Not covered
 

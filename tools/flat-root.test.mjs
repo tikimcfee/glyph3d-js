@@ -238,11 +238,11 @@ const same = (w, what) => {
     ok(hits.length === 0, `no direct layers.mask write in the source (${hits.join(' | ')})`);
     const w = world();
     frame(w.flat, w.camera);
-    const g = layerGeneration();
+    const g = layerGeneration(1);
     w.m1.layers.mask = 0;   // the write the scan forbids
     frame(w.flat, w.camera);
     const v = w.flat.verify(w.camera);
-    ok(layerGeneration() === g && v.extra.includes(w.m1), 'teeth: a direct mask write moves no generation, and verify names the stale entry');
+    ok(layerGeneration(1) === g && v.extra.includes(w.m1), 'teeth: a direct mask write moves no generation, and verify names the stale entry');
 }
 
 // Sanity: the module header names its gates.
