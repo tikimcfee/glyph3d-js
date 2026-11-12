@@ -1,8 +1,8 @@
 /**
  * terminalDepthHistory — pure, GPU-free helpers for terminal scrollback-into-depth.
  *
- * tmux owns true scrollback and repaints only the visible pane (no "line scrolled
- * off" event), so TerminalGrid recovers history by diffing consecutive frames. That
+ * termd owns true scrollback and the emulator mirrors only the visible screen (no "line
+ * scrolled off" event), so TerminalGrid recovers history by diffing consecutive frames. That
  * heuristic — vertical-scroll detection — is exactly the kind of index logic that
  * goes subtly wrong (off-by-one shift, blank-region false positives, capture order),
  * so it lives here as testable functions instead of inline in the renderer.

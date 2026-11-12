@@ -108,7 +108,7 @@ const SURFACE_PROJECTORS = {
       grid.setZoom(z);
     }
     // The relay PTY is the one external child the grid can't reach. If applyView resized the local
-    // grid/emulator, tell the owning adapter to match (pty.Setsize → SIGWINCH → tmux), exactly as
+    // grid/emulator, tell the owning adapter to match (termd resize → SIGWINCH), exactly as
     // terminal.resize does — the bridge lives at THIS layer, not on the grid.
     if (changed.resized) {
       const owner = store.ctx.registry.get(s.id)?.meta?.owner;

@@ -131,8 +131,8 @@ export default class TerminalGrid extends FramedGlyphField {
         // like `git log` that fills a screenful lands as ONE readable page that recedes
         // as a block — lines within a page never smear across depth. Pages may also
         // optionally rise (_depthYFactor>0); 0 keeps them a clean straight-back deck.
-        // (tmux owns true scrollback + repaints the visible pane only, so there is no
-        // free "line scrolled off" event — we recover it by diffing frames; see
+        // (termd owns true scrollback and the emulator mirrors the visible screen only, so
+        // there is no free "line scrolled off" event — we recover it by diffing frames; see
         // terminalDepthHistory.detectVerticalScroll.) Full-screen TUIs (alt-screen)
         // are excluded.
         this._depthEnabled = options.depthHistory ?? true;
@@ -266,8 +266,8 @@ export default class TerminalGrid extends FramedGlyphField {
         this._emulator = new TerminalEmulator(this.cols, this.rows, () => this._screenChanged());
 
         /**
-         * The window title the terminal's program last set (OSC 0/2 — behind tmux, the pane title:
-         * the shell's prompt path or the running command). Empty until one arrives.
+         * The window title the terminal's program last set (OSC 0/2: the shell's prompt path or the
+         * running command; termd repeats it in every repaint). Empty until one arrives.
          * @type {string}
          */
         this.windowTitle = '';
@@ -591,11 +591,11 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Seed the depth history from EXTERNAL scrollback (e.g. tmux capture-pane),
+     * Seed the depth history from EXTERNAL scrollback (termd's capture),
      * NEWEST-FIRST. Forward-capture (the frame diff) only sees lines that scroll off
      * from now on; this back-fills the history that already exists — so the session's
      * accumulated scrollback shows receding in depth immediately, and a re-seed after
-     * a reload restores it (tmux is the durable source; the ring is in-memory).
+     * a reload restores it (termd is the durable source; the ring is in-memory).
      *
      * Each string becomes one history line (one codepoint per column, padded/truncated
      * to cols) at the default foreground color; normal depth fade + placement apply.
@@ -678,15 +678,15 @@ export default class TerminalGrid extends FramedGlyphField {
      * Paste text as a single bracketed-paste burst. Terminal semantics live HERE, not in the
      * app shell: callers pass plain clipboard text and the grid frames it.
      *
-     * Framing is UNCONDITIONAL because tmux — which owns the far side of every terminal here
-     * (cli/attach_unix.go writes into a `tmux attach-client` PTY) — normalizes it: it strips
-     * the brackets when the inner application has NOT enabled DECSET 2004, and re-emits them
-     * when it has. Verified both ways against a live tmux. tmux also converts LF inside the
-     * burst, so newlines need no rewriting. If a NON-tmux adapter ever writes straight to a
-     * bare PTY, gate the framing on this._emulator's bracketedPasteMode here — inside this
-     * method, where the mode already is; no caller would change.
+     * Input goes to the program's PTY unchanged (g3d-termd writes it as typed), so the grid does
+     * what a terminal does: when the program has asked for bracketed paste (DECSET 2004, read
+     * from this terminal's own emulator, which parses the same bytes the program wrote) the text
+     * is framed in `ESC [ 200 ~` … `ESC [ 201 ~` with its newlines intact; when it hasn't, the
+     * text goes bare with each newline sent as CR, the Enter key, as xterm does. No emulator yet
+     * (nothing parsed) frames, the safe side: a shell that never asked shows the markers once
+     * rather than running each line.
      *
-     * The one payload transform is stripping the end-marker: clipboard text containing
+     * Either way the end-marker is stripped from the text: clipboard text containing
      * `ESC [ 201 ~` would otherwise close the bracket early and let its remainder run as
      * keystrokes (paste injection).
      *
@@ -695,7 +695,9 @@ export default class TerminalGrid extends FramedGlyphField {
      */
     paste(text) {
         if (typeof text !== 'string' || text === '') return false;
-        return this.sendInput(PASTE_START + text.replaceAll(PASTE_END, '') + PASTE_END);
+        const clean = text.replaceAll(PASTE_END, '');
+        if (this._emulator && !this._emulator.bracketedPaste) return this.sendInput(clean.replace(/\r?\n/g, '\r'));
+        return this.sendInput(PASTE_START + clean + PASTE_END);
     }
 
     /**
@@ -730,8 +732,8 @@ export default class TerminalGrid extends FramedGlyphField {
      *
      * It deliberately touches only what this grid OWNS (grid buffers + emulator, via resize/
      * this.position). The relay-backed PTY is an external child this grid has no handle to —
-     * applyView reports `resized` so the caller that DOES hold the bridge can match it (SIGWINCH →
-     * tmux), exactly as terminal.resize does.
+     * applyView reports `resized` so the caller that DOES hold the bridge can match it (termd
+     * resize → SIGWINCH), exactly as terminal.resize does.
      *
      * @param {{position?:{x:number,y:number,z:number}, cols?:number, rows?:number}} view
      * @param {{skipPosition?:boolean}} [opts]
@@ -911,7 +913,7 @@ export default class TerminalGrid extends FramedGlyphField {
     /**
      * Resize the terminal. Reallocates the cell ring at the new size and pushes every slot; the
      * live screen and the captured history are kept (clipped if narrower, blank-padded if wider —
-     * terminals clip scrollback on resize, and tmux holds the durable copy that
+     * terminals clip scrollback on resize, and termd holds the durable copy that
      * terminal.depth.seed re-fills), so the panel doesn't flash blank before the emulator's
      * repaint — that matters under a live grip-drag firing resize every cell step.
      *

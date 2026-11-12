@@ -4,10 +4,8 @@ package main
 
 import "log"
 
-// runTerminal is unix-only — it needs a PTY (creack/pty) and tmux. Stubbed on Windows
-// so the CGO_ENABLED=0 windows cross-compile stays green; terminals are a non-Windows
-// feature. Keeping the stub here (not an import guard) keeps creack/pty out of the
-// windows build entirely.
+// runTerminal is unix-only: terminals live in g3d-termd, which owns PTYs and runs on unix.
+// Windows relays have no terminals.
 func runTerminal(cfg terminalConfig) {
-	log.Fatalf("attach: terminals require a unix PTY (not supported on this platform)")
+	log.Fatalf("attach: terminals need g3d-termd, which runs on unix only (not on this platform)")
 }

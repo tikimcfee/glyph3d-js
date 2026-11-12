@@ -18,7 +18,7 @@ const FONT_CHAIN = [
 
 // ?relay=PORT — where the Go relay is (it forks the terminals). Defaults to the dev relay's 8080,
 // which the IDE dials too — and a relay takes ONE display, so the second to connect is refused
-// (the chip says so). Run the wall beside the IDE on its own relay (serve --port N --tmux-socket …).
+// (the chip says so). Run the wall beside the IDE on its own relay (serve --port N --termd-ns …).
 const RELAY_PORT = Number(new URLSearchParams(location.search).get('relay')) || 8080;
 
 /** In-canvas bridge: builds the TerminalWall once and hands it up to the DOM chrome. */

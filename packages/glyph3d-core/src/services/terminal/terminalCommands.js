@@ -6,13 +6,14 @@
  * These verbs manage lifecycle + layout.
  *
  * Control verbs:
- *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter; once it lands the
- *                                             host shows it and gives it the keys)
+ *   terminal.spawn  [cols] [rows] [-- cmd…]  (ask relay to fork an adapter running cmd, default
+ *                                             a shell; once it lands the host shows it and gives
+ *                                             it the keys)
  *   terminal.create <id> [cols] [rows] [--scale N]
  *   terminal.resize <id> <cols> <rows>       (grid + emulator + adapter PTY in lockstep)
  *   terminal.ping   <id>                     (liveness probe → re-adopt trigger)
  *   terminal.close  <id>                     (dispose display grid only)
- *   terminal.kill   <id>                     (full teardown: shell + tmux + grid)
+ *   terminal.kill   <id>                     (full teardown: the program in termd + the grid)
  *   terminal.focus  <id>                     (the keyboard target, as the host defines it)
  *   terminal.list · terminal.move <id> <x> <y> <z> · terminal.scale <id> <factor>
  *
@@ -34,11 +35,11 @@ import { createLogger } from '../../utils/Logger.js';
 
 const log = createLogger('terminal');
 
-/** Wheel travel (CSS px) per line of tmux scrollback. */
+/** Wheel travel (CSS px) per line of termd scrollback. */
 const WHEEL_PX_PER_LINE = 30;
 
 /**
- * Lines of tmux scrollback a wheel delta asks for: wheel up (dy < 0) → + lines, back into
+ * Lines of termd scrollback a wheel delta asks for: wheel up (dy < 0) → + lines, back into
  * history; ~30 px a line, at least one line in the wheel's direction. The argument to
  * `terminal.scroll <id> <lines>`.
  * @param {number} dy - wheel deltaY, CSS px
@@ -50,8 +51,8 @@ export function terminalWheelLines(dy) {
 }
 
 /**
- * Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes plus the size tmux drew
- * them at → the terminal's emulator (grid.writeBytes). Aligns the grid to the size THIS content was
+ * Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes plus the size they were
+ * written at → the terminal's emulator (grid.writeBytes). Aligns the grid to the size THIS content was
  * drawn at BEFORE parsing it: size and redraw ride one ordered channel (cli/attach_unix.go), so a
  * resize can never race ahead of its redraw and address a row that doesn't exist.
  * @param {WebSocketBridge} bridge
@@ -120,10 +121,9 @@ function bindOwner(ctx, grid, owner) {
 
 /**
  * The repaint HANDSHAKE: the grid + its parser are ready NOW (synchronous build), so tell the
- * owning adapter to repaint the full screen into it — and re-send the pane's title, which tmux
- * only sends when it changes. The adapter's timed refresh-client retries race grid creation under
- * reload contention (late-built grids miss them and stay BLANK until a resize tickles SIGWINCH);
- * this fires exactly when the grid exists. Idempotent: an extra repaint is harmless.
+ * owning adapter to have termd repaint the full screen into it (title included). The adapter's
+ * own timed repaints race grid creation under reload contention (late-built grids miss them and
+ * stay BLANK); this fires exactly when the grid exists. Idempotent: an extra repaint is harmless.
  * @param {TerminalContext} ctx @param {string} id @param {string|null} owner
  */
 function requestRepaint(ctx, id, owner) {
@@ -138,9 +138,10 @@ function requestRepaint(ctx, id, owner) {
 export default function registerTerminalCommands(router) {
 
     // ------------------------------------------------------------------
-    // terminal.spawn [cols] [rows]
+    // terminal.spawn [cols] [rows] [-- cmd…]
     //   Ask the relay (Go server) to fork a `glyph3d-cli attach` adapter — a REAL
-    //   shell (tmux) wired into a fresh TerminalGrid. The browser can't spawn a
+    //   program (cmd, default a shell) in a g3d-termd terminal, wired into a fresh
+    //   TerminalGrid. The browser can't spawn a
     //   host process, so this sends a {relay:"terminal.spawn"} message the relay
     //   handles server-side; the terminal appears once the forked adapter connects
     //   and runs terminal.create + frames. (This is the "+ terminal" button's verb.)
@@ -156,10 +157,17 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: not connected to the relay — terminal.spawn needs the Go server to fork an adapter', data: null };
         }
         const msg = { relay: 'terminal.spawn' };
-        const cols = parseInt(args[0], 10);
-        const rows = parseInt(args[1], 10);
+        const dash = args.indexOf('--');
+        const sizeArgs = dash >= 0 ? args.slice(0, dash) : args;
+        const cols = parseInt(sizeArgs[0], 10);
+        const rows = parseInt(sizeArgs[1], 10);
         if (!isNaN(cols) && cols > 0) msg.cols = cols;
         if (!isNaN(rows) && rows > 0) msg.rows = rows;
+        if (dash >= 0) {
+            const argv = args.slice(dash + 1);
+            if (!argv.length) return { text: 'ERR: usage: terminal.spawn [cols] [rows] [-- cmd…] (nothing after --)', data: null };
+            msg.argv = argv;
+        }
 
         // Full spawn flow: await the ack (the id), await the terminal, hand it to the host (landed).
         if (typeof bridge.waitForEvent === 'function' && ctx.registry) {
@@ -192,14 +200,14 @@ export default function registerTerminalCommands(router) {
             text: 'OK: requested terminal spawn (relay is forking an adapter)',
             data: { requested: true, cols: msg.cols ?? null, rows: msg.rows ?? null },
         };
-    }, { description: 'Ask the relay to fork a terminal adapter — a real shell in the canvas, shown and given the keys when it lands (the host decides how)', usage: '[cols] [rows]' });
+    }, { description: 'Ask the relay to fork a terminal adapter — a real program (default a shell) in the canvas, shown and given the keys when it lands (the host decides how)', usage: '[cols] [rows] [-- cmd…]' });
 
     // ------------------------------------------------------------------
     // terminal.recover
-    //   Re-adopt orphaned tmux sessions — live `glyph-*` sessions whose adapter died (e.g. a relay
-    //   restart severed it; detach-not-kill kept the session + its work alive). The relay lists
-    //   them, skips any with a live client, and forks a fresh `attach <id>` at each orphan; the
-    //   re-adoption handshake repaints them. One-command recovery after any relay restart.
+    //   Re-adopt orphaned terminals — live termd terminals whose adapter died (e.g. a relay
+    //   restart severed it; detach-not-kill kept the terminal + its work alive). The relay lists
+    //   them, skips any that has an owner, and forks a fresh `attach <id>` at each orphan, whose
+    //   subscribe repaints it. One-command recovery after any relay restart.
     // ------------------------------------------------------------------
     router.register('terminal.recover', (args, ctx) => {
         const bridge = ctx.wsbridge;
@@ -211,7 +219,7 @@ export default function registerTerminalCommands(router) {
             text: 'OK: requested terminal recovery (relay is re-adopting orphaned glyphd sessions)',
             data: { requested: true },
         };
-    }, { description: 'Re-adopt orphaned tmux terminal sessions (after a relay restart) — one-command recovery', usage: '' });
+    }, { description: 'Re-adopt orphaned termd terminals (after a relay restart) — one-command recovery', usage: '' });
 
     // ------------------------------------------------------------------
     // terminal.create <id> [cols] [rows] [--scale N]
@@ -351,8 +359,9 @@ export default function registerTerminalCommands(router) {
         const note = ctx.terminalHost.resizing(id, cols, rows);
         const where = note ? ` ${note}` : '';
 
-        // Resize the REAL PTY (pty.Setsize → SIGWINCH → tmux) and let tmux's redraw drive the rest.
-        // The redraw streams back tagged with the new size (attach_unix.go), and THAT resizes the grid +
+        // Resize the REAL PTY (termd's resize → SIGWINCH → the program) and let the program's redraw
+        // drive the rest. Its output streams back tagged with the new size (attach_unix.go: termd
+        // places the resize at an exact byte), and THAT resizes the grid +
         // emulator (routeTerminalOutput) — in lockstep with the content it's about to
         // parse, never ahead of it. The tagged frame is the SINGLE writer of terminal size; we do NOT
         // resize the grid locally here. (No adapter = no stream to drive it, so fall back to a direct
@@ -403,7 +412,7 @@ export default function registerTerminalCommands(router) {
 
     // terminal.read <id> — the visible screen as plain text, straight from the
     // headless emulator (the same buffer the glyphs render from). For history
-    // beyond the screen, terminal.scroll pages tmux scrollback first.
+    // beyond the screen, terminal.scroll pages termd's scrollback first.
     router.register('terminal.read', (args, ctx) => {
         const id = args[0];
         if (!id) return { text: 'ERR: usage: terminal.read <id>', data: null };
@@ -433,16 +442,16 @@ export default function registerTerminalCommands(router) {
         const info = ctx.registry.get(id);
         if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
 
-        // Scrollback is tmux-owned: the adapter drives copy-mode (copy-mode + scroll-up /
-        // scroll-down) and the resulting repaint streams back through the byte lane — the
-        // grid/emulator just mirror it (no client-side scroll state). A pure control push,
-        // like terminal.resize.
+        // Scrollback is termd's: the adapter moves its view (termd `view`) and the viewed rows
+        // stream back as a repaint through the byte lane — the grid/emulator just mirror it (no
+        // client-side scroll state). An alternate-screen app gets the wheel itself. A pure
+        // control push, like terminal.resize.
         const owner = info?.meta?.owner;
         if (owner && ctx.wsbridge?.connected) {
             ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, lines } });
         }
         return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines } };
-    }, { description: "Scroll a terminal's tmux scrollback (+ back / - forward)", usage: '<id> <lines>' });
+    }, { description: "Scroll a terminal's termd scrollback (+ back / - forward)", usage: '<id> <lines>' });
 
     // ------------------------------------------------------------------
     // terminal.depth <id> [on|off]
@@ -496,12 +505,12 @@ export default function registerTerminalCommands(router) {
 
     // ------------------------------------------------------------------
     // terminal.depth.seed <id> <scrollback>
-    //   Back-fill a terminal's depth-history from external scrollback (tmux
-    //   capture-pane), so the history that ALREADY exists shows receding in space —
+    //   Back-fill a terminal's depth-history from external scrollback (termd
+    //   capture), so the history that ALREADY exists shows receding in space —
     //   forward-capture only sees lines that scroll off from now on. Payload is the
     //   raw scrollback text (multi-line: it rides the `call` bundle), oldest→newest
-    //   (capture-pane order); the ring wants newest-first, so we reverse here. Re-run
-    //   after a reload to restore (the ring is in-memory; tmux is the durable source).
+    //   (capture order); the ring wants newest-first, so we reverse here. Re-run
+    //   after a reload to restore (the ring is in-memory; termd is the durable source).
     //   `glyph3d-cli seed-history` drives it for every live terminal.
     // ------------------------------------------------------------------
     router.register('terminal.depth.seed', (args, ctx) => {
@@ -633,10 +642,10 @@ export default function registerTerminalCommands(router) {
     // ------------------------------------------------------------------
     // terminal.kill <id>
     //   FULL teardown — the panel × button's verb. terminal.close only disposes
-    //   the display grid; on its own it orphans the adapter process AND its tmux
-    //   session (they become zombies). terminal.kill instead signals the owning
-    //   adapter (recorded at create time) to shut down: the adapter kills its tmux
-    //   session, exits, and sends its OWN terminal.close — the single dispose path.
+    //   the display grid; on its own it orphans the adapter process AND its termd
+    //   terminal. terminal.kill instead signals the owning adapter (recorded at
+    //   create time) to shut down: the adapter kills its termd terminal, exits, and
+    //   sends its OWN terminal.close — the single dispose path.
     //   If there's no live owner to signal (drift: the adapter already died), we
     //   dispose locally so the canvas still clears.
     // ------------------------------------------------------------------
@@ -655,7 +664,7 @@ export default function registerTerminalCommands(router) {
         const canSignal = owner && bridge && bridge.connected && typeof bridge.push === 'function';
 
         if (canSignal) {
-            // Adapter is alive — let it tear down tmux + itself, then dispose the
+            // Adapter is alive — let it end the termd terminal + itself, then dispose the
             // grid via its trailing terminal.close. One dispose path, no leaks.
             bridge.push(owner, { event: 'terminal.shutdown', data: { terminalId: id } });
             return {
@@ -672,7 +681,7 @@ export default function registerTerminalCommands(router) {
             text: `OK: terminal '${id}' closed locally (no live adapter to signal)`,
             data: { id, signaled: false },
         };
-    }, { description: 'Fully tear down a terminal: signal its adapter to kill the shell + tmux session', usage: '<id>' });
+    }, { description: 'Fully tear down a terminal: signal its adapter to kill its program in termd', usage: '<id>' });
 
     // ------------------------------------------------------------------
     // terminal.focus <id>

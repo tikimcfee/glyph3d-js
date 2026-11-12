@@ -13,7 +13,7 @@
  *              entry as the entity so the keyboard router (keyed on entity.type) can route to it
  *   release    a held terminal (docked tile, carrel seat) lifts out where it hangs
  *   resizing   an agent's screen shows the agent's OWN pane: a resize writes back — the relay
- *              resizes the agent's tmux window (no client), its CLI reflows, the redraw streams in at
+ *              resizes the agent's tmux window (gomuxai's, no client), its CLI reflows, the redraw streams in at
  *              the new size. The note is where the terminal sits in the dock.
  *   surfaces   the WorkspaceModel's surface records — the one decider of a terminal's size and
  *              position across reloads (SessionStore re-pushes them as grids re-adopt)

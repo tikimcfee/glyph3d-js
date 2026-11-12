@@ -592,7 +592,7 @@ export function ResizeDragger() {
         client.session?.scheduleSave?.();          // keep the live size, persist it
         // Settle: one authoritative full repaint at the final size. The live steps coalesced their
         // emulator resizes (TerminalEmulator), so the drag never crashes/flickers — but the very
-        // last frame can be a partial tmux diff. A single refresh redraws it clean, so a drag can
+        // last frame can be a partial redraw. A single refresh (termd's repaint) redraws it clean, so a drag can
         // never leave the terminal in a stuck/blank state (no reload to recover).
         router.execute(`terminal.refresh ${id}`);
       } else {

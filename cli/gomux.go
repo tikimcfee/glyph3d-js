@@ -459,7 +459,7 @@ func (w *GomuxWatcher) notePaneSize(name string, cols, rows int) {
 
 // watchPaneSizes reads each SCREENED agent's pane size every 2s and pushes
 // `gomux/paneSize` when it moved — a screen follows its agent's pane wherever the size
-// was changed. Only agents with a screen session on our socket are asked.
+// was changed. Only agents with a screen terminal in our termd namespace are asked.
 func (w *GomuxWatcher) watchPaneSizes(ctx context.Context) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
@@ -469,11 +469,14 @@ func (w *GomuxWatcher) watchPaneSizes(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, a := range w.Snapshot().Agents {
-			if !a.Attached {
-				continue
+		screens := map[string]bool{}
+		if terms, err := termdList(termdNS); err == nil {
+			for _, t := range terms {
+				screens[t.ID] = true
 			}
-			if exec.Command("tmux", "-L", tmuxSocket, "has-session", "-t", "glyph-"+sanitizeSession(gomuxTerminalID(a.Name))).Run() != nil {
+		}
+		for _, a := range w.Snapshot().Agents {
+			if !a.Attached || !screens[gomuxTerminalID(a.Name)] {
 				continue
 			}
 			out, err := w.tmux("display-message", "-p", "-t", a.Session, "#{pane_width} #{pane_height}")
@@ -535,9 +538,9 @@ printf '\033[%d;%dH' $(( $4 + 1 )) $(( $5 + 1 ))
 exec tail -c 0 -F "$3"
 `
 
-// gomuxTerminalID is the terminal an agent's screen shows in: `gx-<name>`, so its
-// glyphd-side session is `glyph-gx-<name>` and never collides with a spawned term-N.
-func gomuxTerminalID(name string) string { return "gx-" + sanitizeSession(name) }
+// gomuxTerminalID is the terminal an agent's screen shows in: `gx-<name>` (a termd id: at most
+// 64 bytes of [A-Za-z0-9._-]), so it never collides with a spawned term-N.
+func gomuxTerminalID(name string) string { return "gx-" + terminalIDPart(name, 61) }
 
 // attachGomuxAgent forks a terminal adapter that shows the agent's screen WITHOUT a tmux
 // client on gomuxai's server. Any client there — even a read-only one — becomes tmux's
@@ -545,10 +548,10 @@ func gomuxTerminalID(name string) string { return "gx-" + sanitizeSession(name) 
 // read-only one makes gomuxai's own send-keys fail host-wide. So the screen is built
 // from what gomuxai already records: a capture-pane snapshot (each row positioned, then
 // the cursor), followed by `tail -F` of the pane's pipe-pane log (logs/<name>.log, the
-// raw byte stream the agent's terminal emits). The adapter's session lives on our socket
-// as always; its shell ignores input (echo off, tail reads no stdin), so keys typed at it
-// go nowhere, and nothing here can resize or touch the agent's window. The terminal
-// opens at the agent pane's own size. Killing it kills only our session.
+// raw byte stream the agent's terminal emits). That script runs in an ordinary terminal in our
+// termd namespace; it ignores input (echo off, tail reads no stdin), so keys typed at it go
+// nowhere, and nothing here can resize or touch the agent's window. The terminal opens at
+// the agent pane's own size. Killing it kills only our terminal.
 func (r *Relay) attachGomuxAgent(send func(any), name string) {
 	reply := func(err string) { send(map[string]any{"event": "gomux.attaching", "name": name, "error": err}) }
 	if r.fs == nil || r.fs.gomux == nil {
@@ -594,18 +597,16 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 	}
 	id := gomuxTerminalID(name)
 	// ONE adapter per screen. A display reload asks for every screen again before the
-	// adapters it already has re-adopt their terminals; a second adapter would attach a
-	// second client to the same session, and with window-size latest the two clients'
-	// sizes fight (the screen ping-pongs). If the session has a client, its adapter is
-	// alive and will re-create the terminal itself — answer with its id. A request
-	// already in flight (no client yet) is answered the same way.
+	// adapters it already has re-adopt their terminals; a second adapter would take the
+	// terminal's size from the first and the two would trade it back and forth. If the
+	// terminal has an owner, its adapter is alive and will re-create the grid itself —
+	// answer with its id. A request already in flight (no owner yet) is answered the same way.
 	if r.gomuxScreenLive(id) {
 		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "existing": true})
 		return
 	}
-	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket,
-		"--cols", strconv.Itoa(cols), "--rows", strconv.Itoa(rows),
-		"--", "sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath}
+	args := append(r.adapterArgs(id, cols, rows),
+		"--", "sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath)
 	cmd := exec.Command(exePath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -651,13 +652,16 @@ func (r *Relay) resizeGomuxAgent(send func(any), name string, cols, rows int) {
 	reply("")
 }
 
-// gomuxScreenLive reports whether a screen's adapter exists — its session (on our socket)
-// has a client, or one was forked moments ago and hasn't attached yet — and otherwise
-// claims the slot for the caller about to fork one.
+// gomuxScreenLive reports whether a screen's adapter exists — its termd terminal has an
+// owner, or one was forked moments ago and hasn't subscribed yet — and otherwise claims the
+// slot for the caller about to fork one.
 func (r *Relay) gomuxScreenLive(id string) bool {
-	session := "glyph-" + sanitizeSession(id)
-	if out, err := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-		return true
+	if terms, err := termdList(termdNS); err == nil {
+		for _, t := range terms {
+			if t.ID == id && t.Subscribers.Own > 0 {
+				return true
+			}
+		}
 	}
 	r.gxMu.Lock()
 	defer r.gxMu.Unlock()

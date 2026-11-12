@@ -4,7 +4,7 @@
  * windows, blocked site data); then nothing persists and the wall still works.
  *
  * Ids are the relay's, and they recycle: another relay (port) mints its own `term-1`, and a relay
- * whose sessions are all gone (a reboot, a tmux kill-server) mints `term-1` again. So the store is
+ * whose terminals are all gone (a reboot, a stopped termd) mints `term-1` again. So the store is
  * scoped per relay — its keys carry the relay port the page dials — and the wall prunes it against
  * the relay's live terminals on every (re)connect: an entry outlives a detach (a closed grid whose
  * session runs on is re-adopted under the same id) but not its session.

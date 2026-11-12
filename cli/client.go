@@ -5,7 +5,7 @@ package main
 // (call.go) when an argument needs one (oneShotLine); REPL and pipe lines are already
 // bus syntax and go as typed.
 // Client-side composites live beside it: screenshot (verb chain → capture → PNG),
-// log.follow (the relay's live log feed), seed-history (tmux scrollback → depth
+// log.follow (the relay's live log feed), seed-history (termd scrollback → depth
 // history).
 
 import (
@@ -16,7 +16,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -601,16 +600,16 @@ func logFollowCmd(url string, args []string) int {
 
 // --- seed-history ---
 
-// seedHistoryCmd pulls each terminal's tmux scrollback and pushes it into the 3D
-// terminal's depth-history ring (terminal.depth.seed), so history that already
-// exists shows receding in space. The ring is in-memory — re-run after a reload;
-// tmux is the durable source.
+// seedHistoryCmd pulls each terminal's scrollback from termd (`capture`) and pushes it into
+// the 3D terminal's depth-history ring (terminal.depth.seed), so history that already exists
+// shows receding in space. The ring is in-memory — re-run after a reload; termd is the durable
+// source.
 func seedHistoryCmd(url string, args []string) int {
 	fs := flag.NewFlagSet("seed-history", flag.ExitOnError)
 	lines := fs.Int("lines", 300, "Scrollback rows to capture per terminal")
-	socket := fs.String("tmux-socket", tmuxSocket, "tmux socket (-L name) the relay's terminals live on")
+	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the relay's terminals live in")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli [--port N] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]")
+		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli [--port N] seed-history [--lines 300] [--termd-ns default] [id ...]")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -639,20 +638,46 @@ func seedHistoryCmd(url string, args []string) int {
 		fmt.Println("seed-history: no terminals to seed")
 		return 0
 	}
+	tc, err := dialTermd(termdNS)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seed-history: %v\n", err)
+		return 1
+	}
+	defer tc.Close()
+	terms, err := termdList(termdNS)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seed-history: %v\n", err)
+		return 1
+	}
+	screenRows := map[string]int{}
+	for _, t := range terms {
+		screenRows[t.ID] = t.Rows
+	}
 
 	failed := 0
 	for _, id := range ids {
-		session := "glyph-" + id
-		// -S -<lines>: start that many rows into scrollback; -E -1: end one row ABOVE
-		// the visible screen (pure scrollback — no duplicate of the live grid).
-		text, err := exec.Command("tmux", "-L", *socket, "capture-pane", "-p", "-t", session,
-			"-S", fmt.Sprint(-*lines), "-E", "-1").Output()
-		if err != nil {
-			fmt.Printf("  ✗ %s: capture-pane failed (no session '%s' on -L %s?)\n", id, session, *socket)
+		rows, ok := screenRows[id]
+		if !ok {
+			fmt.Printf("  ✗ %s: no terminal %q in termd namespace %q\n", id, id, termdNS)
 			failed++
 			continue
 		}
-		resp, err := s.sendArgv([]string{"terminal.depth.seed", id, string(text)}, *timeout)
+		var c struct {
+			Text string `json:"text"`
+			Rows int    `json:"rows"`
+		}
+		if err := tc.Request("capture", map[string]any{"id": id, "format": "plain", "history_rows": *lines}, &c); err != nil {
+			fmt.Printf("  ✗ %s: termd capture: %v\n", id, err)
+			failed++
+			continue
+		}
+		// The capture is the history rows, oldest first, then the screen: keep only the history
+		// (pure scrollback — no duplicate of the live grid).
+		history := strings.Split(c.Text, "\n")
+		if n := c.Rows - rows; n >= 0 && n < len(history) {
+			history = history[:n]
+		}
+		resp, err := s.sendArgv([]string{"terminal.depth.seed", id, strings.Join(history, "\n")}, *timeout)
 		if err != nil || resp.failed() {
 			fmt.Printf("  ✗ %s: %v %s\n", id, err, respText(resp))
 			failed++

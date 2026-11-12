@@ -16,7 +16,7 @@
  *            gpu     needs a real GPU: pixel compares, the wall end to end, GPU timing
  *            parked  run only when asked (`--tier parked`): kept so they aren't lost
  *   scope    what a change has to touch for this check to matter (SCOPES below)
- *   needs    vite | wall-vite | relay | browser | gpu | tmux | network — the runner provides
+ *   needs    vite | wall-vite | relay | browser | gpu | termd | network — the runner provides
  *            vite / wall-vite / relay itself, and SKIPS a check (with a NOTE naming what is
  *            missing) when it can't
  *   apart    tokens; two checks sharing one never run at once. '*' runs alone, after the rest
@@ -218,13 +218,19 @@ export const CHECKS = [
     h('term-geom-persist-check.mjs', ['persist', 'terminal'], 'terminal geometry round trips through the surface table, applied in any order', 'the PTY'),
 
     // ── terminal / relay wires ───────────────────────────────────────────────────────────────
-    h('terminal-depth.test.mjs', ['terminal'], 'scrollback-into-depth: scroll detection, row capture, fade, synced into a real slot buffer', 'tmux\'s real repaint stream'),
+    h('terminal-depth.test.mjs', ['terminal'], 'scrollback-into-depth: scroll detection, row capture, fade, synced into a real slot buffer', 'a real program\'s byte stream through termd'),
     h('terminal-text-path.test.mjs', ['terminal'], 'only changes: a random walk of screens against a reference model, exact written slots + upload ranges, zero allocation per update, parse → update → render order', 'xterm\'s internals moving (the emulator throws at construction)'),
     h('terminal-paste.test.mjs', ['terminal'], 'keyEncoding declines the paste chord; TerminalGrid.paste frames one bracketed burst', 'the browser clipboard'),
     h('terminal-emulator-resize-check.mjs', ['terminal'], 'TerminalEmulator under a write+resize storm: coalesced, uncorrupted, correct final screen', 'a real PTY'),
     h('terminal-dock-sync-check.mjs', ['terminal', 'desk'], 'the Terminals-panel activation guard is timing-proof', 'dockview\'s real event timing'),
     h('terminal-spawn-dock-check.mjs', ['terminal', 'desk'], 'terminal.spawn awaits its own terminal, then docks + focuses it', 'the relay'),
     h('terminal-frame-format-check.mjs', ['terminal', 'relay'], 'the OUTPUT frame wire format the Go adapter and the JS bridge share, byte for byte', 'the Go side (it is mirrored, not run)'),
+    {
+        name: 'termd-relay-check', cmd: ['bun', 'tools/termd-relay-check.mjs', '--relay', '{port}'], tier: 'full', scope: ['terminal', 'relay'],
+        needs: ['own-relay', 'termd'], apart: ['*'], timeoutMs: 180_000,
+        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd crash (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon)',
+        blind: 'the browser (wall-e2e drives the same paths with pixels)',
+    },
     h('bridge-binary.test.mjs', ['relay'], 'the RPC binary result plane: frame parse, header + payload, pending resolution', 'the Go encoder'),
     h('source-stream.test.mjs', ['relay'], 'the sensor plane\'s browser half: frame decoders, presence, multi-device isolation, liveness', 'a real device'),
 
@@ -322,25 +328,25 @@ export const CHECKS = [
     g('glyph-cull-truth.mjs', "every live quad lies inside its mesh's stated bounding box across a dir load, the presets, an arranged grid and a terminal", 'fields moved through the group table (labels) — they opt out of culling'),
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
-        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['display'],
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
         compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
     },
     {
         name: 'wall-gpu-attribution', cmd: ['bun', 'tools/wall-gpu-attribution.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'render'],
-        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 900_000,
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['*'], timeoutMs: 900_000,
         compare: 'INSTRUMENT: times the wall\'s main pass per layer with GPU timer queries; green = it measured',
         blind: 'judges no number',
     },
     {
         name: 'wall-text-perf', cmd: ['bun', 'tools/wall-text-perf.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
-        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 900_000,
-        compare: 'INSTRUMENT: the terminal text path timed stage by stage (direct and tmux floods); green = it measured',
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['*'], timeoutMs: 900_000,
+        compare: 'INSTRUMENT: the terminal text path timed stage by stage (direct and shell floods); green = it measured',
         blind: 'judges no number',
     },
     {
         name: 'atlas-cold-perf', cmd: ['bun', 'tools/atlas-cold-perf.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'render'],
-        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 600_000,
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['*'], timeoutMs: 600_000,
         compare: 'INSTRUMENT: a cold glyph from bytes to on screen — visible ms, applyScreen ms, worst frame gap, long tasks, texture bytes per burst; green = it measured',
         blind: 'judges no number; the emoji worker\'s first raster after boot is not in a burst',
     },

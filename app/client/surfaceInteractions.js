@@ -46,8 +46,8 @@ function volumeOf(grid) {
 /** @type {Record<string, SurfaceRecord>} */
 const RECORDS = {
   terminal: {
-    // Fixed screen → the wheel always drives tmux scrollback (terminalWheelLines: wheel up →
-    // back into history); the adapter runs copy-mode and the repaint streams back.
+    // Fixed screen → the wheel always drives termd scrollback (terminalWheelLines: wheel up →
+    // back into history); the adapter moves its termd view and the viewed rows stream back.
     wheelScroll(entry, dy) {
       return ['terminal.scroll', entry.id, String(terminalWheelLines(dy))];
     },

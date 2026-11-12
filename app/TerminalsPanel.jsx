@@ -113,7 +113,7 @@ export default function TerminalsPanel({ client }) {
             onMouseLeave={(e) => { e.currentTarget.style.color = '#7c8596'; }}
           >⌖</span>
           <span
-            title={`kill ${id} (shell + tmux session)`}
+            title={`kill ${id} (its program in termd)`}
             onClick={(e) => { e.stopPropagation(); clientRef.current?.router.execute(`terminal.kill ${id}`); }}
             style={styles.kill}
             onMouseEnter={(e) => { e.currentTarget.style.color = '#e0888f'; }}

@@ -8,13 +8,13 @@
  *   bun tools/wall-text-perf.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *                                [--width 3024 --height 1964] [--json OUT]
  *                                [--mode idle,flood,cold,profile]   (default: all four)
- *                                [--source direct,tmux]        (flood sources; default both)
+ *                                [--source direct,shell]       (flood sources; default both)
  *                                [--payload seq,source]        (flood payloads; default both)
  *                                [--scale 1,4,14]              (terminals flooded at once)
  *                                [--seq 300000] [--source-bytes 2000000] [--top 25]
  *
  * Needs the wall's Vite (:5180) and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
- * (tools/lib/wall-relay.mjs: tmux socket `glyph-wall-text-perf`, no gomuxai; killed with its tmux server
+ * (tools/lib/wall-relay.mjs: termd namespace `glyph-wall-text-perf`, no gomuxai; stopped with its termd
  * at the end) and refuses a port something already listens on, unless --reuse-relay names a relay
  * you started. Spawns max(--scale) terminals of its own and writes only to those (a reused relay's
  * other terminals are drawn, never typed into); kills them at the end. Launches a real-GPU browser
@@ -26,12 +26,12 @@
  *            renderer do per frame at rest (applyScreens, GL upload bytes, main-thread ms, GPU ms).
  *   FLOOD    the same payload into 1, 4, 14 terminals at once, camera at the overview. Two sources:
  *            · direct — the payload's bytes handed straight to grid.writeBytes in 16 KB chunks, all
- *              queued at once: no shell, no tmux, no relay. This is the display's own digest
+ *              queued at once: no shell, no termd, no relay. This is the display's own digest
  *              ceiling (bytes/s), and the cleanest per-stage split.
- *            · tmux   — the real pipeline: the command typed into the shell (`seq 1 N`, `cat FILE`),
- *              tmux redrawing its client, the adapter's 16 ms coalescer, the relay, the socket.
- *              tmux sends SCREEN UPDATES, not the program's bytes — a flood arrives as far fewer
- *              bytes than the program wrote, so both are reported.
+ *            · shell  — the real pipeline: the command typed into the shell (`seq 1 N`, `cat FILE`),
+ *              termd passing the program's bytes on, the adapter's 16 ms coalescer, the relay, the
+ *              socket. termd sends the program's own bytes (raw mode), every one, so the bytes the
+ *              display parsed and the bytes the program wrote are both reported and should match.
  *            Per scenario: throughput, main-thread ms per stage (total · per OUTPUT frame · per
  *            display frame p50/p95/max · per applyScreen), GL upload bytes, frame gaps, long tasks
  *            (>50 ms), GPU ms, and the per-terminal split.
@@ -46,7 +46,7 @@
  *            refreshes a sync's status about once a frame, so "GPU finish" is quantized to roughly a
  *            frame; the timer-query GPU time of that same render pass is reported beside it.
  *   PROFILE  a CDP sampling CPU profile (200 µs) with NO probes installed, over: direct flood ×1,
- *            direct flood ×14, tmux flood ×14, and the cold bursts. Self time by bucket, the top
+ *            direct flood ×14, shell flood ×14, and the cold bursts. Self time by bucket, the top
  *            self functions with file:line and their dominant caller, and inclusive time for our
  *            own functions.
  *
@@ -69,7 +69,7 @@ const RELAY = Number(arg('--relay', 8099));
 const W = Number(arg('--width', 3024)), H = Number(arg('--height', 1964));
 const OUT = arg('--json');
 const MODES = list('--mode', 'idle,flood,cold,profile');
-const SOURCES = list('--source', 'direct,tmux');
+const SOURCES = list('--source', 'direct,shell');
 const PAYLOADS = list('--payload', 'seq,source');
 const SCALE = list('--scale', '1,4,14').map(Number);
 const SEQ = Number(arg('--seq', 300000));
@@ -259,7 +259,7 @@ function installProbe({ S, light, own }) {
             terminals: grids.map((g) => ({ id: g.terminalId, cols: g.cols, rows: g.rows, instances: g._totalCount, instanceBufferBytes: g._renderer._interleavedBuffer?.array?.byteLength ?? null })),
             atlas: { glyphs: c.ctx.atlas._live.size, version: c.ctx.atlas._live.version, fields: c.ctx.atlas._live._fields.size },
         }),
-        // Clear every shell through tmux (resyncs a grid that was fed directly) and pose the camera.
+        // Clear every shell through termd (resyncs a grid that was fed directly) and pose the camera.
         async reset(pose, i = 0) {
             for (const g of grids) g.sendInput('clear\r');
             await sleep(900);
@@ -283,15 +283,15 @@ function installProbe({ S, light, own }) {
             await frames(3);
             return { t0, tIdle, t1: now(), bytesPerTerminal: bytes.length, chunks: chunks.length };
         },
-        // tmux flood: type the command into each shell; done when each prints its sentinel.
-        async floodTmux(n, cmd, base) {
+        // shell flood: type the command into each shell; done when each prints its sentinel.
+        async floodShell(n, cmd, base) {
             const targets = all.slice(0, n);
             await idle(targets); await frames(3);
             const t0 = now();
             for (const i of targets) grids[i].sendInput(`clear; ${cmd}; echo __WTP_$((${base}+${i}))__\r`);
             const dl = now() + 240000;
             const done = () => targets.every((i) => grids[i].readText().some((l) => l.includes(`__WTP_${base + i}__`)));
-            while (!done()) { if (now() > dl) throw new Error('[wtp] tmux flood never finished'); await sleep(50); }
+            while (!done()) { if (now() > dl) throw new Error('[wtp] shell flood never finished'); await sleep(50); }
             const tSeen = now();
             await sleep(250); await idle(targets); await frames(3);
             return { t0, tSeen, t1: now() };
@@ -563,7 +563,7 @@ async function analyzeProfile(profile, glMethods) {
 
 // ── run ─────────────────────────────────────────────────────────────────────────────────────────
 const result = { argv: process.argv.slice(2), when: new Date().toISOString(), viewport: [W, H], seq: SEQ, payloadBytes: Object.fromEntries(Object.entries(payloads).map(([k, v]) => [k, { asWritten: v.text.length, crlf: crlf(v.text).length }])) };
-const relay = await privateRelay({ port: RELAY, socket: 'glyph-wall-text-perf', reuse: process.argv.includes('--reuse-relay') });
+const relay = await privateRelay({ port: RELAY, ns: 'glyph-wall-text-perf', reuse: process.argv.includes('--reuse-relay') });
 /** The terminals this tool spawned (on the first page; later pages re-adopt them) — the only ones it writes to. */
 const OWN = [];
 let browser = null;
@@ -633,7 +633,7 @@ try {
             const pose = await app.evalPage(() => window.__wtp.reset('overview'));
             const run = source === 'direct'
                 ? await app.evalPage(({ n, text }) => window.__wtp.floodDirect(n, text), { n, text: '\x1b[2J\x1b[H' + crlf(p.text) })
-                : await app.evalPage(({ n, cmd, base }) => window.__wtp.floodTmux(n, cmd, base), { n, cmd: p.cmd, base: (base += 100) });
+                : await app.evalPage(({ n, cmd, base }) => window.__wtp.floodShell(n, cmd, base), { n, cmd: p.cmd, base: (base += 100) });
             const E = await app.evalPage(() => window.__wtp.drain());
             const s = summarize(E, run.t0, run.t1, result.info.terminals.length);
             const digestMs = (s.lastApplyEnd ?? run.t1) - (s.firstWrite ?? run.t0);
@@ -713,7 +713,7 @@ try {
         await app.evalPage(() => window.__wtp.reset('overview'));
         await profiled(`direct flood ×${nMax}`, () => app.evalPage(({ n, text }) => window.__wtp.floodDirect(n, text), { n: nMax, text: '\x1b[2J\x1b[H' + crlf(seq.text) }));
         await app.evalPage(() => window.__wtp.reset('overview'));
-        await profiled(`tmux flood ×${nMax}`, () => app.evalPage(({ n, cmd }) => window.__wtp.floodTmux(n, cmd, 9000), { n: nMax, cmd: seq.cmd }));
+        await profiled(`shell flood ×${nMax}`, () => app.evalPage(({ n, cmd }) => window.__wtp.floodShell(n, cmd, 9000), { n: nMax, cmd: seq.cmd }));
         await app.evalPage(() => window.__wtp.reset('framed', 0));
         await profiled(`cold bursts (${COLD_ORDER.join(', ')}, 8 singles)`, async () => {
             for (const cls of COLD_ORDER) await app.evalPage(({ text }) => window.__wtp.burstLight(0, text), { text: rowsOf(BURSTS[cls].cps, BURSTS[cls].perRow) });

@@ -15,7 +15,7 @@
  *   bun tools/pick-flat-root-check.mjs --url http://localhost:5173/ --relay 8099 --dir /abs/dir
  *                                      [--cols 16 --rows 10]
  *
- * --dir: a private relay (--no-gomuxai, its own --tmux-socket) serving a scratch root holding it — a
+ * --dir: a private relay (--no-gomuxai, its own --termd-ns) serving a scratch root holding it — a
  * terminal (spawned on the relay's socket), fit-all, close up, the library layout.
  * Exits 1 on any differing hit, a vacuous sweep, teeth that don't bite, a rebuild at rest, page errors.
  */

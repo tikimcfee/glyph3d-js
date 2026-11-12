@@ -4,12 +4,12 @@
  *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
- * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` on the tmux socket `glyph-wall-e2e`, no
+ * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` in the termd namespace `glyph-wall-e2e`, no
  * gomuxai), so it can neither adopt nor kill a person's terminals, and refuses a port something
  * already listens on — the relay takes one display, and a person's may be on it — unless
  * --reuse-relay names one you started (then it says so, and skips the relay-restart steps). Spawns
  * its own terminals and types only into those; on exit (SIGINT included) it kills the relay it
- * started and that socket's tmux server.
+ * started and that namespace's termd daemon.
  * On macOS the browser launches headed (headless is a software renderer there) — a window opens.
  *
  * Covers: spawn, typing, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
@@ -35,7 +35,7 @@ let failures = 0;
 const ok = (cond, msg) => { if (!cond) failures++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); };
 const info = (msg) => console.log(`info  ${msg}`);
 
-const relay = await privateRelay({ port: RELAY, socket: 'glyph-wall-e2e', reuse: process.argv.includes('--reuse-relay') });
+const relay = await privateRelay({ port: RELAY, ns: 'glyph-wall-e2e', reuse: process.argv.includes('--reuse-relay') });
 let browser = null;
 let app = null;
 const spawned = [];
@@ -225,7 +225,7 @@ try {
         await settle(800);
         const names = await W((ids) => ids.map((i) => window.__wall.nameOf(i)), spawned);
         const now = await W((ids) => ids.map((i) => { const p = window.__wall.terminal(i).position; return { x: p.x, y: p.y }; }), spawned);
-        ok(names[1] === '/tmp', `the shell's title comes back with its grid (${B}: "${names[1]}") — tmux only sends it on a change`);
+        ok(names[1] === '/tmp', `the shell's title comes back with its grid (${B}: "${names[1]}") — termd puts it in every repaint`);
         ok(names[2] === 'keep me', `a given name survives the reload (${C}: "${names[2]}")`);
         ok(now.every((p, k) => p.x === before[k].x && p.y === before[k].y), 'every terminal is back at its spot');
         ok((await W(() => window.__wall.store.name('term-9999'))) === null, 'a remembered terminal the relay no longer has is forgotten on connect');

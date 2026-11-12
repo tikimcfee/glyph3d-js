@@ -375,7 +375,7 @@ export default class TerminalWall {
         return { ok: false, id: r.data?.id, reason: r.text };
     }
 
-    /** Fully close a terminal — its shell and tmux session too — and forget its name and spot now. */
+    /** Fully close a terminal — its program in termd too — and forget its name and spot now. */
     kill(id) {
         this.store.forget(id);
         return this.router.execute(['terminal.kill', id]);
@@ -406,9 +406,9 @@ export default class TerminalWall {
 
     /**
      * The wall's TerminalHost: what the core terminal verbs defer to this app for. Nothing holds a
-     * terminal here and tmux owns its size, so release and resizing have nothing to do. A closed
+     * terminal here and the display owns its size, so release and resizing have nothing to do. A closed
      * grid keeps its name and spot (surfaces.remove does nothing): an adapter that detaches closes
-     * its grid while its session runs on, to be re-adopted under the same id. What's forgotten is
+     * its grid while its terminal runs on in termd, to be re-adopted under the same id. What's forgotten is
      * what the relay no longer has (pruned on connect, _recover) and what the wall kills (kill).
      * @returns {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalHost}
      */

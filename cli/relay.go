@@ -134,7 +134,7 @@ func (r *Relay) sendBinToDisplay(data []byte) {
 // sendToDisplay this is a BLOCKING send — the byte stream must be lossless (a dropped
 // mid-stream chunk desyncs the parser and corrupts the screen). When the queue is
 // full the calling controller's read goroutine blocks here, which TCP-backpressures
-// that adapter → its PTY read pauses → the kernel buffer backpressures tmux. The
+// that adapter → its termd reads pause → termd stops reading the program's PTY. The
 // `done` select makes the block cancellable so display teardown can't deadlock a
 // controller (and so we never close displayBytes out from under a blocked sender).
 func (r *Relay) sendBytesToDisplay(data []byte) {
@@ -739,6 +739,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 		Cols       int             `json:"cols"`
 		Rows       int             `json:"rows"`
 		Name       string          `json:"name"`
+		Argv       []string        `json:"argv"`
 	}
 	// Replies to the DISPLAY go through its writer queue: the display's socket has a
 	// dedicated writer goroutine, and a direct write from this read loop races it
@@ -816,7 +817,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 		})
 
 	case "terminal.spawn":
-		r.spawnTerminalAdapter(reply, m.Cols, m.Rows)
+		r.spawnTerminalAdapter(reply, m.Cols, m.Rows, m.Argv)
 
 	case "terminal.recover":
 		r.recoverTerminals(reply)
@@ -1083,24 +1084,30 @@ func parseSinceDuration(s string) (time.Duration, error) {
 	return 0, fmt.Errorf("invalid duration unit in %q (want s|m|h|d)", s)
 }
 
-// spawnTerminalAdapter forks `glyph3d-cli attach <id> --port <port>` as a child
-// process. The adapter connects back to this relay as a controller, creates a
-// TerminalGrid in the display, and pumps a real shell (tmux) into it. The browser
-// can't spawn a host process itself, so the relay does it on request (this is the
-// "+ terminal" button's backend). Single-user tool: as trusted as the command bus.
-func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
+// spawnTerminalAdapter forks `glyph3d-cli attach <id> --port <port>` as a child process. The
+// adapter connects back to this relay as a controller, creates a TerminalGrid in the display,
+// and starts the terminal's program in termd (argv; empty = the adapter's $SHELL). The browser
+// can't spawn a host process itself, so the relay does it on request (this is the "+ terminal"
+// button's backend). The namespace's termd is reached (or started) here first, so a missing
+// daemon fails this request loudly instead of an adapter dying quietly. Single-user tool: as
+// trusted as the command bus.
+func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []string) {
 	exePath, err := os.Executable()
 	if err != nil {
 		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
 		return
 	}
-	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
-	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket}
-	if cols > 0 {
-		args = append(args, "--cols", strconv.Itoa(cols))
+	tc, err := ensureTermd(termdNS)
+	if err != nil {
+		log.Printf("[relay] terminal.spawn: %v", err)
+		reply(map[string]any{"error": err.Error()})
+		return
 	}
-	if rows > 0 {
-		args = append(args, "--rows", strconv.Itoa(rows))
+	tc.Close()
+	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
+	args := r.adapterArgs(id, cols, rows)
+	if len(argv) > 0 {
+		args = append(append(args, "--"), argv...)
 	}
 	cmd := exec.Command(exePath, args...)
 	cmd.Stdout = os.Stdout
@@ -1113,7 +1120,7 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
 	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, pid, r.port)
 	reply(map[string]any{"event": "terminal.spawning", "id": id})
 
-	// Reap the child when it exits. The adapter's lifecycle is owned by tmux + the
+	// Reap the child when it exits. The adapter's lifecycle is owned by termd + the
 	// display (terminal.kill → terminal.shutdown → graceful exit), not the relay —
 	// we only Wait() to clear the process-table entry so closed terminals don't
 	// pile up as <defunct> zombies, and to log the exit.
@@ -1123,29 +1130,39 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
 	}()
 }
 
-// liveTerminalIDs lists the terminal id of every live `glyph-*` tmux session on the relay's
-// socket — adopted or orphaned. Empty when no tmux server runs there, or there is no tmux at all:
-// then no terminal is live. Any other failure is an error — the list is unknown, which is not the
-// same as empty (a display prunes what it remembers against this list).
-func liveTerminalIDs() ([]string, error) {
-	var stderr strings.Builder
-	cmd := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}")
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if errors.Is(err, exec.ErrNotFound) {
-		return []string{}, nil
+// adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
+func (r *Relay) adapterArgs(id string, cols, rows int) []string {
+	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--termd-ns", termdNS}
+	if termdBin != "" {
+		args = append(args, "--termd", termdBin)
 	}
-	if err != nil {
-		if msg := stderr.String(); strings.Contains(msg, "no server running") || strings.Contains(msg, "error connecting to") {
-			return []string{}, nil
-		}
-		return nil, fmt.Errorf("tmux -L %s ls: %v: %s", tmuxSocket, err, strings.TrimSpace(stderr.String()))
+	if cols > 0 {
+		args = append(args, "--cols", strconv.Itoa(cols))
 	}
-	return terminalIDsFromSessions(string(out)), nil
+	if rows > 0 {
+		args = append(args, "--rows", strconv.Itoa(rows))
+	}
+	return args
 }
 
-// seedTermSeqFromSocket seeds the spawn counter from the socket's live sessions at relay start.
-func (r *Relay) seedTermSeqFromSocket() {
+// liveTerminalIDs lists the id of every live terminal in the relay's termd namespace — adopted or
+// orphaned. Empty when no daemon runs there: then no terminal is live. Any other failure is an
+// error — the list is unknown, which is not the same as empty (a display prunes what it remembers
+// against this list).
+func liveTerminalIDs() ([]string, error) {
+	terms, err := termdList(termdNS)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(terms))
+	for _, t := range terms {
+		ids = append(ids, t.ID)
+	}
+	return ids, nil
+}
+
+// seedTermSeqFromTermd seeds the spawn counter from the namespace's live terminals at relay start.
+func (r *Relay) seedTermSeqFromTermd() {
 	ids, err := liveTerminalIDs()
 	if err != nil {
 		log.Printf("[relay] can't list live terminals to seed spawn ids: %v", err)
@@ -1153,26 +1170,14 @@ func (r *Relay) seedTermSeqFromSocket() {
 	}
 	r.seedTermSeq(ids)
 	if n := r.termSeq.Load(); n > 0 {
-		log.Printf("[relay] %d live terminal(s) on tmux socket %q; spawns start at term-%d", len(ids), tmuxSocket, n+1)
+		log.Printf("[relay] %d live terminal(s) in termd namespace %q; spawns start at term-%d", len(ids), termdNS, n+1)
 	}
-}
-
-// terminalIDsFromSessions picks the terminal ids out of `tmux ls -F '#{session_name}'` output: a
-// `glyph-<id>` session is terminal <id>; any other session on the socket isn't a terminal.
-func terminalIDsFromSessions(out string) []string {
-	ids := []string{}
-	for _, session := range strings.Split(out, "\n") {
-		if id, ok := strings.CutPrefix(strings.TrimSpace(session), "glyph-"); ok && id != "" {
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 // seedTermSeq moves the spawn counter past every `term-N` among ids — the ONE place it is seeded,
-// at relay start (seedTermSeqFromSocket) and on every terminal.recover. A live session outlives the
+// at relay start (seedTermSeqFromTermd) and on every terminal.recover. A live terminal outlives the
 // relay that spawned it; a restarted relay whose counter started at zero would mint `term-1` again
-// and attach a second client to someone's live shell. It never moves the counter back.
+// and adopt someone's live shell. It never moves the counter back.
 func (r *Relay) seedTermSeq(ids []string) {
 	var maxSeq int64
 	for _, id := range ids {
@@ -1192,24 +1197,28 @@ func (r *Relay) seedTermSeq(ids []string) {
 	}
 }
 
-// recoverTerminals re-adopts every live `glyph-*` tmux session that has NO attached client —
-// orphaned sessions whose adapter died (e.g. a relay restart severed it, but detach-not-kill kept
-// the session and its work alive). For each, fork a fresh `attach <id>` adapter so the display
-// rebuilds the grid (or, when the display outlived the relay, hands its grid to the new adapter)
-// and the re-adoption handshake repaints it. Sessions that still have a client are skipped
-// (already adopted). Dedup is via tmux's own client list — the relay keeps no adapter map — so
-// this is idempotent, one-command recovery after any relay restart.
+// recoverTerminals re-adopts every live termd terminal that has NO owner — orphans whose adapter
+// died (a relay restart severed it, but detach-not-kill kept the terminal and its work alive). For
+// each, fork a fresh `attach <id>` adapter at the terminal's own size so the display rebuilds the
+// grid (or, when the display outlived the relay, hands its grid to the new adapter) and the
+// adapter's subscribe repaints it. Terminals with an owner are skipped (already adopted: an
+// adapter, or a `g3d attach --take`). termd's own subscriber counts are the dedup — the relay
+// keeps no adapter map — so this is idempotent, one-command recovery after any relay restart.
 //
 // The reply, `terminal.recovered`, carries the ids re-adopted (`ids`, `count`) and every live
-// terminal id on the socket (`live`) — what a display prunes its per-terminal memory against, since
-// an id is free to be minted again once its session is gone. When the socket can't be listed the
+// terminal id in the namespace (`live`) — what a display prunes its per-terminal memory against,
+// since an id is free to be minted again once its terminal is gone. When termd can't be listed the
 // reply says so (`error`) and carries no `live`: unknown is not empty.
 func (r *Relay) recoverTerminals(reply func(any)) {
-	live, err := liveTerminalIDs()
+	terms, err := termdList(termdNS)
 	if err != nil {
 		log.Printf("[relay] terminal.recover: %v", err)
 		reply(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0, "error": err.Error()})
 		return
+	}
+	live := make([]string, 0, len(terms))
+	for _, t := range terms {
+		live = append(live, t.ID)
 	}
 	r.seedTermSeq(live)
 	exePath, err := os.Executable()
@@ -1218,31 +1227,22 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		return
 	}
 	recovered := []string{}
-	for _, id := range live {
-		session := "glyph-" + id
-		// Already adopted? A session with an attached client has a live adapter — skip it.
-		clients, _ := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output()
-		if strings.TrimSpace(string(clients)) != "" {
+	for _, t := range terms {
+		if t.Subscribers.Own > 0 {
 			continue
 		}
-		args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--tmux-socket", tmuxSocket}
-		if sz, e := exec.Command("tmux", "-L", tmuxSocket, "display-message", "-t", session, "-p", "#{pane_width} #{pane_height}").Output(); e == nil {
-			if f := strings.Fields(strings.TrimSpace(string(sz))); len(f) == 2 {
-				args = append(args, "--cols", f[0], "--rows", f[1])
-			}
-		}
-		cmd := exec.Command(exePath, args...)
+		cmd := exec.Command(exePath, r.adapterArgs(t.ID, t.Cols, t.Rows)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if e := cmd.Start(); e != nil {
-			log.Printf("[relay] recover: spawn %s failed: %v", id, e)
+			log.Printf("[relay] recover: spawn %s failed: %v", t.ID, e)
 			continue
 		}
-		log.Printf("[relay] recovered terminal '%s' (pid %d)", id, cmd.Process.Pid)
+		log.Printf("[relay] recovered terminal '%s' (pid %d)", t.ID, cmd.Process.Pid)
 		go func(c *exec.Cmd) { c.Wait() }(cmd)
-		recovered = append(recovered, id)
+		recovered = append(recovered, t.ID)
 	}
-	log.Printf("[relay] terminal.recover: %d session(s) re-adopted, %d live", len(recovered), len(live))
+	log.Printf("[relay] terminal.recover: %d terminal(s) re-adopted, %d live", len(recovered), len(live))
 	reply(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered), "live": live})
 }
 
@@ -1310,7 +1310,7 @@ func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
-	relay.seedTermSeqFromSocket() // spawns start past every terminal this socket already has
+	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
 
 	// Wire the fs/writeFile notify hook so successful writes echo an
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
@@ -1418,7 +1418,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
 	relay.fs = fsHandler
 	relay.port = port
-	relay.seedTermSeqFromSocket() // spawns start past every terminal this socket already has
+	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
 	if fsHandler != nil {
 		relay.wireFS(fsHandler)
 	}

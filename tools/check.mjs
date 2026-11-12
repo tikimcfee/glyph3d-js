@@ -24,27 +24,28 @@
  *
  * What a browser / gpu check needs, the runner starts and stops itself — its own Vite on a free
  * port (cache in out/check/vite-cache, never the dev server's), and per check a PRIVATE relay:
- *   glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --tmux-socket glyph-check-… \
- *                     --no-gomuxai <scratch root>
+ *   glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --termd-ns c<n> \
+ *                     --no-gomuxai <scratch root>         (G3D_TERMD_DIR = a scratch dir of its own)
  * serving a fresh copy of the fixture (the core's sources + a mixed emoji/tab/wide file). Never
- * ports 5173 / 5180 / 8080 / 8099, never the `glyphd` tmux socket, never gomuxai. Anything it
+ * ports 5173 / 5180 / 8080 / 8099, never a person's termd namespace, never gomuxai. Anything it
  * can't start, it names in a NOTE and SKIPS the checks that needed it.
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECKS, SCOPES, TIERS } from './check-manifest.mjs';
+import { privateTermd, stopTermd, termdBeside } from './lib/termd.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'out/check');
 const FLOORS_PATH = join(ROOT, 'tools/check-floors.json');
 // `relay`: the runner starts a private relay and fills {relay}/{root}/{dir}. `own-relay`: the check starts
 // its own private relay (tools/lib/wall-relay.mjs) — the runner only hands it a free port as {port}.
-const NEEDS = ['vite', 'wall-vite', 'relay', 'own-relay', 'browser', 'gpu', 'tmux', 'network'];
+const NEEDS = ['vite', 'wall-vite', 'relay', 'own-relay', 'browser', 'gpu', 'termd', 'network'];
 /** Ports a person's live loop uses: the runner never takes them, even if the OS offers one. */
 const RESERVED_PORTS = new Set([5173, 5174, 5180, 8080, 8099]);
 const DEFAULT_TIMEOUT = { inner: 120_000, full: 120_000, parked: 300_000, browser: 300_000, gpu: 600_000 };
@@ -172,7 +173,7 @@ const probes = {
         }
         return `no GPU probe for ${process.platform}`;
     },
-    tmux: async () => (spawnSync('tmux', ['-V']).status === 0 ? null : 'no tmux on PATH'),
+    termd: async () => (existsSync(termdBeside(CLI)) ? null : `no g3d-termd beside ${relative(ROOT, CLI) || CLI} (make build)`),
     network: async () => {
         try {
             const r = await fetch('https://api.github.com/', { method: 'HEAD', signal: AbortSignal.timeout(4000) });
@@ -181,9 +182,9 @@ const probes = {
     },
     relay: async () => {
         if (!existsSync(CLI)) return `no relay binary at ${relative(ROOT, CLI) || CLI} (make build, or --cli PATH)`;
-        return spawnSync('tmux', ['-V']).status === 0 ? null : 'the relay needs tmux on PATH';
+        return probes.termd();
     },
-    // A check that starts its own relay (tools/lib/wall-relay.mjs) needs the same binary and tmux.
+    // A check that starts its own relay (tools/lib/wall-relay.mjs) needs the same binary and termd.
     'own-relay': async () => probes.relay(),
     vite: async () => (existsSync(join(ROOT, 'node_modules/.bin/vite')) ? null : 'no vite in node_modules (bun install)'),
     'wall-vite': async () => (existsSync(join(ROOT, 'node_modules/.bin/vite')) ? null : 'no vite in node_modules (bun install)'),
@@ -236,23 +237,24 @@ function buildFixture() {
 }
 
 let relaySeq = 0;
-/** A private relay for one check: fresh root, its own port and tmux socket, no gomuxai. */
+/** A private relay for one check: fresh root, its own port and termd namespace, no gomuxai. */
 async function startRelay(fixture, name) {
     const port = await freePort();
     const tag = `${++relaySeq}`;
     const root = join(RUN_DIR, `root-${tag}-${name}`);
     cpSync(fixture, root, { recursive: true });
-    const sock = `glyph-check-${process.pid}-${tag}`;
+    // Short: the namespace's socket path must fit a sockaddr.
+    const ns = `c${tag}`;
+    const termd = privateTermd(`ck-${process.pid}`);
     const log = [];
     const p = spawn(CLI, ['serve', '--listen', '127.0.0.1', '--port', String(port), '--relay-only',
-        '--tmux-socket', sock, '--no-gomuxai', root], { cwd: RUN_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+        '--termd-ns', ns, '--no-gomuxai', root], { cwd: RUN_DIR, env: termd.env, stdio: ['ignore', 'pipe', 'pipe'] });
     p.stdout.on('data', (d) => log.push(String(d)));
     p.stderr.on('data', (d) => log.push(String(d)));
     const stop = async () => {
         await stopProc(p);
-        spawnSync('tmux', ['-L', sock, 'kill-server'], { stdio: 'ignore' });
-        // A server that died with the relay leaves its socket file behind; take it too.
-        rmSync(join(process.env.TMUX_TMPDIR || '/tmp', `tmux-${process.getuid()}`, sock), { force: true });
+        // The daemon outlives its relay by design; this one goes with the check.
+        await stopTermd(termd.dir, ns);
     };
     cleanups.push(stop);
     await waitFor(async () => {

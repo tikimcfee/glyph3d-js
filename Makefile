@@ -1,7 +1,8 @@
 # glyph3d-cli — single-binary build
 #
 # Build:
-#   make              Build for current platform
+#   make              Build for current platform (+ g3d-termd and g3d beside it, on Linux)
+#   make termd        Build only the terminal daemon and its client (crates/, Rust)
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
 #   make release      Publish dist/ as a GitHub release (build first: make all)
@@ -33,13 +34,31 @@ LDFLAGS := -s -w \
 	-X main.Platform=$(HOST_PLATFORM)
 GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 
-.PHONY: all build clean prep bake-core strip-runtime-wasm prep-wasm prep-tree-sitter deploy deploy-ide release publish publish-core publish-r3f linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
+.PHONY: all build termd clean prep bake-core strip-runtime-wasm prep-wasm prep-tree-sitter deploy deploy-ide release publish publish-core publish-r3f linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 dev dev-vite dev-relay dev-status dev-stop
 
 # --- Default: build for current platform ---
 
-build: prep
+build: prep termd
 	cd $(CLI_DIR) && go build $(GOFLAGS) -o ../$(BINARY) .
 	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
+
+# --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
+# The relay finds g3d-termd next to its own executable. libghostty-vt builds from vendor/
+# (tools/termd-vendor.sh: the verified release tarballs and Zig). Linux hosts only for now;
+# macOS and the cross targets are TODO (docs/termd/DESIGN.md, "Build and vendoring").
+CARGO_OUT := $(or $(CARGO_TARGET_DIR),target)
+HOST_OS   := $(shell go env GOOS)
+
+termd:
+ifeq ($(HOST_OS),linux)
+	@test -e vendor/ghostty/build.zig || { echo "no vendor/ghostty — run tools/termd-vendor.sh first"; exit 1; }
+	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
+	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd
+	cp $(CARGO_OUT)/release/g3d ./g3d
+	@echo "Built ./g3d-termd ./g3d"
+else
+	@echo "g3d-termd: not built on $(HOST_OS) yet (Linux only; see docs/termd/DESIGN.md) — this relay will have no terminals"
+endif
 
 # --- Prep: build the app (Vite) and stage it into cli/web/ for go:embed ---
 # The app is a self-contained production build — it bundles @glyph3d/core + the
@@ -129,6 +148,12 @@ linux-amd64: prep
 		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=linux-amd64' \
 		-o ../$(OUT_DIR)/$(BINARY)-linux-amd64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-linux-amd64"
+ifeq ($(HOST_PLATFORM),linux-amd64)
+	$(MAKE) termd
+	cp ./g3d-termd $(OUT_DIR)/g3d-termd-linux-amd64
+	cp ./g3d $(OUT_DIR)/g3d-linux-amd64
+	@echo "  → $(OUT_DIR)/g3d-termd-linux-amd64 $(OUT_DIR)/g3d-linux-amd64"
+endif
 
 linux-arm64: prep
 	@mkdir -p $(OUT_DIR)
@@ -228,6 +253,7 @@ deploy-ide: bake-core strip-runtime-wasm
 
 clean:
 	rm -rf $(WEB_DIR) $(OUT_DIR) $(BINARY)
+	rm -f ./g3d-termd ./g3d
 	@echo "Cleaned build artifacts"
 
 # --- Dev loop: thin aliases over tools/dev.sh (manages Vite :5173 + relay :8080) ---

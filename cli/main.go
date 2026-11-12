@@ -2,7 +2,7 @@
 //
 // Server side:
 //
-//	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--tmux-socket glyphd]
+//	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--termd-ns default] [--termd path]
 //	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
 //	glyph3d-cli version
 //
@@ -11,7 +11,7 @@
 //	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot (oneShotLine)
 //	glyph3d-cli [...] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
 //	glyph3d-cli [...] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
-//	glyph3d-cli [...] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
+//	glyph3d-cli [...] seed-history [--lines 300] [--termd-ns default] [id ...]
 //	glyph3d-cli [...]                       REPL (interactive stdin)
 //	echo "grid.list" | glyph3d-cli          pipe: one command line per input line
 //
@@ -127,7 +127,7 @@ func clientUsage() {
 	fmt.Fprint(os.Stderr, `usage: glyph3d-cli [flags] <verb args...>      run one verb (try: help)
        glyph3d-cli [flags] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
        glyph3d-cli [flags] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
-       glyph3d-cli [flags] seed-history [--lines 300] [--tmux-socket glyphd] [id ...]
+       glyph3d-cli [flags] seed-history [--lines 300] [--termd-ns default] [id ...]
        glyph3d-cli [flags]                          REPL, or one line per stdin line
        glyph3d-cli serve | attach | fullsnapshot | version
 
@@ -201,7 +201,8 @@ func serveCmd() {
 	noGomux := flagSet.Bool("no-gomuxai", false, "Don't use gomuxai: no agent hub tree, no agent sessions or events")
 	sessionsInterval := flagSet.Duration("sessions-interval", 10*time.Second, "How often 'agent sessions --json' re-runs while a display is connected (agentSessions/changed)")
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
-	flagSet.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) terminals live on — a second relay on its own socket can't adopt or kill the first's terminals")
+	flagSet.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace terminals live in — a second relay in its own namespace can't adopt or kill the first's terminals")
+	flagSet.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when the namespace has no daemon (default: beside this binary, then PATH)")
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])

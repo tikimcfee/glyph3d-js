@@ -753,7 +753,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // into a terminal would also fly the camera. Analog of the vanilla
     // initCommandCenter wiring (viewer.sceneContext.attentionManager = ...).
     //
-    // Wheel routing: the wheel scrolls the framed surface UNDER THE CURSOR (a terminal's tmux
+    // Wheel routing: the wheel scrolls the framed surface UNDER THE CURSOR (a terminal's termd
     // scrollback, or a framed code grid's conveyor) and otherwise yields to the camera dolly.
     // HOVER, not focus — so pointing at open space (or an unframed whole-file grid) always flies,
     // and the dynamic-speed braking is available near a terminal exactly as it is near a file:

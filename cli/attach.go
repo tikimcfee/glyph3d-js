@@ -1,18 +1,18 @@
 package main
 
-// attach — live terminal adapter. Drives a tmux session over a PTY and streams its
-// raw byte output into a glyph3d display as a 3D TerminalGrid (rendered browser-side
-// by a headless VT emulator). Input flows back as raw bytes to the PTY master.
+// attach — live terminal adapter. Connects a g3d-termd terminal to a glyph3d display: the
+// terminal's raw output streams into the display as a 3D TerminalGrid (rendered browser-side
+// by a headless VT emulator), and the display's input, resizes, scrolls and repaints go back
+// to termd.
 //
 //	glyph3d-cli attach [flags] <id> [-- <cmd...>]
 //
-// The adapter connects to the relay as a controller (standard ping/OK/pong
-// handshake), issues `terminal.create <id> <cols> <rows>` so the browser spawns a
-// TerminalGrid (recording THIS controller as the terminal's owner), then attaches a
-// PTY to a tmux session and pumps its byte stream both ways. OUTPUT rides a binary
-// data-plane frame; INPUT rides the existing JSON push. The PTY + tmux work is
-// unix-only (attach_unix.go); attach_windows.go stubs it so the CGO_ENABLED=0
-// windows cross-compile stays green (terminals are a non-Windows feature).
+// The adapter connects to the relay as a controller (standard ping/OK/pong handshake),
+// issues `terminal.create <id> <cols> <rows>` so the browser spawns a TerminalGrid (recording
+// THIS controller as the terminal's owner), then creates-or-adopts terminal <id> in termd and
+// subscribes to it as its size's owner (the display owns the size). OUTPUT rides a binary
+// data-plane frame; INPUT rides the existing JSON push. termd is unix-only, so the adapter
+// is too (attach_windows.go says so on Windows).
 
 import (
 	"encoding/json"
@@ -22,20 +22,11 @@ import (
 	"strings"
 )
 
-// tmuxSocket is the dedicated tmux socket terminals live on (`tmux -L glyphd` by
-// default). Isolating our sessions lets the adapter neutralize the client keymap
-// without touching the operator's own tmux, and namespaces persistence/adoption.
-// `serve --tmux-socket` sets it for the relay (recovery) and passes it to every
-// adapter it forks (`attach --tmux-socket`) — a second relay on its own socket
-// can't adopt or kill the first relay's terminals.
-var tmuxSocket = "glyphd"
-
-// terminalConfig is the parsed invocation, handed to the platform-specific
-// runTerminal (attach_unix.go / attach_windows.go).
+// terminalConfig is the parsed invocation, handed to the platform-specific runTerminal
+// (attach_unix.go / attach_windows.go).
 type terminalConfig struct {
 	url     string
 	id      string
-	session string
 	cols    int
 	rows    int
 	scale   float64
@@ -50,11 +41,12 @@ func attachCmd() {
 	cols := fs.Int("cols", 80, "Terminal columns")
 	rows := fs.Int("rows", 24, "Terminal rows")
 	scale := fs.Float64("scale", 2.0, "TerminalGrid size multiplier")
-	fs.StringVar(&tmuxSocket, "tmux-socket", tmuxSocket, "tmux socket (-L name) the session lives on")
+	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the terminal lives in")
+	fs.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
 
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --tmux-socket")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --termd-ns --termd")
 		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
 	}
 
@@ -96,6 +88,10 @@ func attachCmd() {
 		fmt.Fprintln(os.Stderr, "attach: cols and rows must be positive")
 		os.Exit(2)
 	}
+	if !validTerminalID(id) {
+		fmt.Fprintf(os.Stderr, "attach: terminal id %q must be 1 to 64 bytes of [A-Za-z0-9._-]\n", id)
+		os.Exit(2)
+	}
 
 	url := *wsURL
 	if *p > 0 {
@@ -105,7 +101,6 @@ func attachCmd() {
 	runTerminal(terminalConfig{
 		url:     url,
 		id:      id,
-		session: "glyph-" + sanitizeSession(id),
 		cols:    *cols,
 		rows:    *rows,
 		scale:   *scale,
@@ -125,18 +120,36 @@ func decodeRelayText(msg []byte) string {
 	return string(msg)
 }
 
-// sanitizeSession makes a tmux-safe session suffix from a terminal id.
-func sanitizeSession(id string) string {
-	var b strings.Builder
+// validTerminalID reports whether id is a termd terminal id: 1 to 64 bytes of [A-Za-z0-9._-].
+func validTerminalID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
 	for _, r := range id {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// terminalIDPart makes a name safe inside a termd terminal id: every byte outside
+// [A-Za-z0-9._-] becomes '_', and it is cut to max bytes.
+func terminalIDPart(name string, max int) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
 			b.WriteRune(r)
 		} else {
 			b.WriteRune('_')
 		}
 	}
-	if b.Len() == 0 {
-		return "default"
+	out := b.String()
+	if out == "" {
+		out = "default"
 	}
-	return b.String()
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
 }

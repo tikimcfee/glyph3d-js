@@ -20,7 +20,7 @@
  *
  * It reads the atlas through whichever growth API the page has (whenIdle when growth is async,
  * else the synchronous return), so the same tool measures before and after the change. One
- * browser, one terminal; it stops its relay and tmux server at the end. --shot writes a mixed screen
+ * browser, one terminal; it stops its relay and termd daemon at the end. --shot writes a mixed screen
  * of cold glyphs (new emoji, Nerd icons, syllabics, Armenian) after it lands and screenshots it.
  */
 
@@ -96,7 +96,7 @@ function installProbe() {
     return { glyphs: c.ctx.atlas._live.size, async: !!c.ctx.atlas._live.whenIdle };
 }
 
-const relay = await privateRelay({ port: RELAY, socket: 'glyph-atlas-cold', reuse: process.argv.includes('--reuse-relay') });
+const relay = await privateRelay({ port: RELAY, ns: 'glyph-atlas-cold', reuse: process.argv.includes('--reuse-relay') });
 let browser = null;
 const result = { when: new Date().toISOString(), viewport: [W, H], bursts: [] };
 try {

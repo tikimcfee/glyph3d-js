@@ -5,7 +5,7 @@
  * This is the byte→screen SOURCE for a terminal viewport. TerminalGrid stays a pure
  * cell renderer (applyScreen is its input); the emulator is one source feeding it
  * (file-slice and graphics surfaces are other sources, later). We do NOT write a VT
- * parser — xterm interprets tmux's streaming redraw protocol (cursor addressing,
+ * parser — xterm interprets the program's own byte stream, relayed by termd (cursor addressing,
  * scroll regions, erase, SGR) into a cell grid; we read that grid.
  *
  * Pull, not push: term.write() parses asynchronously; its callback only marks the screen
@@ -105,8 +105,8 @@ export default class TerminalEmulator {
         this._screen = null;
         this._cell = undefined; // reusable CellData, filled by the line's loadCell
 
-        // scrollback 0: behind a tmux client we mirror the visible pane only (tmux owns
-        // scrollback and repaints the full screen), so the active buffer == the viewport.
+        // scrollback 0: we mirror the visible screen only (termd owns scrollback and sends a
+        // scrolled-back view as a repaint), so the active buffer == the viewport.
         // allowProposedApi: the buffer API (buffer.active, its cursor and type) is gated behind it.
         this._term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
 
@@ -128,9 +128,14 @@ export default class TerminalEmulator {
         this._cell = view.getLine(0).getCell(0);   // a CellData; loadCell refills it
     }
 
+    /** Whether the program asked for bracketed paste (DECSET 2004) in the bytes parsed so far. */
+    get bracketedPaste() {
+        return this._term.modes.bracketedPasteMode;
+    }
+
     /**
-     * Subscribe to window-title changes (OSC 0/2) in the byte stream — behind tmux these are the
-     * pane titles tmux forwards with `set-titles` (cli/attach_unix.go). Returns an unsubscribe.
+     * Subscribe to window-title changes (OSC 0/2) in the byte stream — the titles the program
+     * sets (termd also puts the current one in every repaint). Returns an unsubscribe.
      * @param {(title: string) => void} cb
      * @returns {() => void}
      */
@@ -171,7 +176,7 @@ export default class TerminalEmulator {
             this.rows = rows;
             this._term.resize(cols, rows);
             // Not marked dirty: resize leaves the buffer blank/reflowed until the source repaints
-            // (tmux fully redraws on SIGWINCH); reading it now would flash that empty frame — the
+            // (the adapter asks termd for a repaint on every resize); reading it now would flash that frame — the
             // resize flicker. The repaint bytes that follow mark it dirty via write().
         });
     }

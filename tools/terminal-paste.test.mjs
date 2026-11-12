@@ -73,7 +73,8 @@ const gridStub = (id) => {
 }
 
 // Multi-line text stays one burst with newlines intact: bracketing is what tells the shell not
-// to execute the lines, and tmux converts LF on the way in, so no rewriting here.
+// to execute the lines, and a bracketed paste reaches the shell as typed (termd writes it to the PTY
+// unchanged), so no rewriting here.
 {
     const { g, sent } = gridStub('t');
     g.paste('one\ntwo\n');
@@ -87,6 +88,19 @@ const gridStub = (id) => {
     g.paste('safe\x1b[201~rm -rf /\r');
     ok(!sent[0].bytes.slice(6, -6).includes('\x1b[201~'), 'embedded end-marker is stripped from the payload');
     ok(sent[0].bytes === '\x1b[200~saferm -rf /\r\x1b[201~', 'exactly one closing bracket, at the end');
+}
+
+// A program that has NOT asked for bracketed paste (its own emulator says so) gets the text bare,
+// each newline as CR (the Enter key), as xterm sends it — termd writes input to the PTY as is, so
+// markers it never asked for would arrive as junk keystrokes. The end-marker still goes.
+{
+    const { g, sent } = gridStub('t');
+    g._emulator = { bracketedPaste: false };
+    g.paste('one\ntwo\r\nthree\x1b[201~');
+    ok(sent[0].bytes === 'one\rtwo\rthree', `unbracketed paste: bare text, newlines as CR (${JSON.stringify(sent[0].bytes)})`);
+    g._emulator = { bracketedPaste: true };
+    g.paste('one\ntwo');
+    ok(sent[1].bytes === '\x1b[200~one\ntwo\x1b[201~', 'bracketed paste once the program asks for it');
 }
 
 // Degenerate input is a no-op, not an empty burst (an empty bracket pair still makes some apps flash).

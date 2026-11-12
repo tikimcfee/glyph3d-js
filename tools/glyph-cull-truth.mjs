@@ -11,7 +11,7 @@
  *
  * Scenes: the --dir load (FileRows in the content tree), one opened CodeGrid per layout
  * preset, an arranged grid (structure.grid), and a TerminalGrid fed bytes in-page (no relay
- * terminal — nothing touches tmux).
+ * terminal — nothing touches termd).
  *
  * Needs Vite + a PRIVATE relay serving a scratch root (see tools/frame-profile.mjs).
  * Exit 1 if any quad escapes its mesh's bounds.
@@ -44,7 +44,7 @@ try {
         // An opened CodeGrid on the emoji/tab/wide file (the preset stages re-fold it).
         const open = await c.router.execute(['file.open', file]);
         notes.push(`open: ${(open?.text ?? open?.error ?? '').slice(0, 70)}`);
-        // A terminal, fed bytes directly (no relay adapter, no tmux). Workspace sources are
+        // A terminal, fed bytes directly (no relay adapter, no termd). Workspace sources are
         // served un-bundled, so this /@fs URL is the module instance the app itself uses.
         const mod = await import(`/@fs${core}/collections/TerminalGrid.js`).catch((e) => ({ err: String(e) }));
         if (mod?.default) {

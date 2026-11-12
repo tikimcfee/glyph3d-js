@@ -16,7 +16,9 @@
 #
 # Usage:
 #   tools/dev.sh vite      clear .vite cache + (re)start Vite     [after editing JS/JSX]
-#   tools/dev.sh relay     rebuild Go (make) + (re)start relay    [after editing cli/*.go]  (kills live terminals!)
+#   tools/dev.sh relay     rebuild Go + termd (make) + (re)start relay    [after editing cli/*.go]
+#                          (terminals live in g3d-termd and survive; a NEW g3d-termd binary takes
+#                          effect only once the running daemon stops: `./g3d stop` kills every shell)
 #   tools/dev.sh refresh   relay then vite (the whole loop)
 #   tools/dev.sh status    what's listening, with pids
 #   tools/dev.sh stop      stop both
@@ -81,7 +83,7 @@ start_vite() {
 }
 
 start_relay() {
-  echo "→ relay: rebuild Go + (re)start on :$RELAY_PORT   (note: this kills live terminals)"
+  echo "→ relay: rebuild Go + termd, (re)start on :$RELAY_PORT   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
   ( cd "$ROOT" && nohup ./glyph3d-cli serve "$ROOT" --port "$RELAY_PORT" >"$RELAY_LOG" 2>&1 & disown )
