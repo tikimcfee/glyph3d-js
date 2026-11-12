@@ -1092,7 +1092,8 @@ func parseSinceDuration(s string) (time.Duration, error) {
 
 // spawnTerminalAdapter forks `glyph3d-cli attach <id> --port <port>` as a child process. The
 // adapter connects back to this relay as a controller, creates a TerminalGrid in the display,
-// and starts the terminal's program in termd (argv; empty = the adapter's $SHELL). The browser
+// and starts the terminal's program in termd (argv; empty = the account's login shell, in the
+// served root when the relay has one, else home). The browser
 // can't spawn a host process itself, so the relay does it on request (this is the "+ terminal"
 // button's backend). The namespace's termd is reached (or started) here first, so a missing
 // daemon fails this request loudly instead of an adapter dying quietly. Single-user tool: as
@@ -1116,7 +1117,7 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []str
 }
 
 // startAdapter forks `attach <id>` against this relay (argv: the program for a new terminal;
-// empty adopts or starts the adapter's $SHELL) and watches it. The adapter's lifecycle is termd's
+// empty adopts, or starts the account's shell) and watches it. The adapter's lifecycle is termd's
 // and the display's (terminal.kill → terminal.shutdown → a clean exit), not the relay's: the relay
 // waits on it to reap it and to notice one that DIED — killed by a signal or crashed (any exit but
 // its own 0, or 1 for a failure it reported). That leaves its terminal running in termd with no
@@ -1215,6 +1216,10 @@ func (r *Relay) readoptOrphan(id string) {
 // adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
 func (r *Relay) adapterArgs(id string, cols, rows int) []string {
 	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--termd-ns", termdNS}
+	if r.fs != nil {
+		root, _ := r.fs.Roots()
+		args = append(args, "--cwd", root)
+	}
 	if termdBin != "" {
 		args = append(args, "--termd", termdBin)
 	}

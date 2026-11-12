@@ -7,6 +7,9 @@
  * tools/lib/termd.mjs) on PORT, plays the display (DISPLAY handshake, answers terminal.create and
  * terminal.ping, decodes the 0x01 OUTPUT frames), and checks:
  *   - spawn: the relay starts termd, an adapter creates and owns the terminal, typing echoes back;
+ *   - a spawn with no argv, from a relay whose environment carries another terminal's identity and
+ *     a parent shell's state: termd starts the account's shell as a login shell in the relay's
+ *     served root, with termd's own TERM_PROGRAM and none of the relay's identity (Linux: /proc);
  *   - flood: `seq 1 300000` through termd → adapter → relay → display arrives whole, in order;
  *   - relay restart: the terminal survives, terminal.recover re-adopts it, the adoption repaint
  *     carries the old screen, typing works again, the next spawn mints a fresh id; stopping the
@@ -24,7 +27,7 @@
  * Everything it started (relay, daemons, shells) is stopped on exit. Exit 1 on any FAIL.
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,9 +55,12 @@ mkdirSync(root, { recursive: true });
 // ── the relay ───────────────────────────────────────────────────────────────────────────────
 let relay = null;
 let relayLog = '';
+// The relay starts from an environment that is not a desktop session's: another terminal's
+// identity and a parent shell's state, none of which may reach a terminal (DESIGN.md, "Environment").
+const relayEnv = { ...termd.env, TERM_PROGRAM: 'Apple_Terminal', TERM_SESSION_ID: 'w0t0p0:check', SHLVL: '7', COLUMNS: '33', TMUX: '/nonexistent/tmux,1,0' };
 async function startRelay() {
     relay = spawn(BIN, ['serve', '--listen', '127.0.0.1', '--port', String(PORT), '--relay-only', '--termd-ns', NS, '--no-gomuxai', root],
-        { env: termd.env, stdio: ['ignore', 'pipe', 'pipe'] });
+        { env: relayEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     relay.stdout.on('data', (b) => { relayLog += b; });
     relay.stderr.on('data', (b) => { relayLog += b; });
     for (let i = 0; i < 100; i++) {
@@ -155,6 +161,30 @@ try {
     ok(await screenHas(A, 'hello-42'), 'typing reaches the shell and its echo reaches the display');
     ok(term(A).sizes[0]?.join('x') === '80x24', `OUTPUT frames carry the display's size (${term(A).sizes[0]?.join('x')})`);
 
+    // ── a spawn with no argv: the account's login shell, in the served root, termd's environment ──
+    const sd = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24 }, 'terminal.spawning');
+    await waitFor(() => term(sd.id).owner, 8000, 'the default-shell terminal');
+    const ls = execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' });
+    const line = ls.split('\n').find((l) => l.startsWith(`${sd.id} `)) ?? '';
+    const shellPid = Number(/ pid (\d+)/.exec(line)?.[1]);
+    const passwdShell = execFileSync('getent', ['passwd', String(process.getuid())], { encoding: 'utf8' }).trim().split(':')[6];
+    ok(line.includes(` ${passwdShell}`), `with no argv the relay's terminal runs the account's shell (${line.trim()})`);
+    if (existsSync(`/proc/${shellPid}`)) {
+        const argv0 = readFileSync(`/proc/${shellPid}/cmdline`, 'utf8').split('\0')[0];
+        ok(argv0 === `-${path.basename(passwdShell)}`, `...as a login shell (argv[0] ${JSON.stringify(argv0)})`);
+        ok(readlinkSync(`/proc/${shellPid}/cwd`) === root, `...in the relay's served root (${readlinkSync(`/proc/${shellPid}/cwd`)})`);
+        const env = Object.fromEntries(readFileSync(`/proc/${shellPid}/environ`, 'utf8').split('\0').filter(Boolean)
+            .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+        ok(env.TERM_PROGRAM === 'g3d-termd' && env.TERM === 'xterm-256color' && env.PWD === root && env.G3D_TERMD_ID === sd.id,
+            `...with termd's own variables (TERM_PROGRAM ${env.TERM_PROGRAM}, TERM ${env.TERM}, PWD ${env.PWD})`);
+        const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE'].filter((k) => k in env);
+        ok(leaked.length === 0, `...and none of the relay's identity or shell state (leaked: ${leaked.join(' ') || 'none'})`);
+    } else info(`no /proc/${shellPid}: the environment checks are Linux-only here`);
+    // Ended as the display ends one (terminal.kill → terminal.shutdown), so later counts hold.
+    display.send(JSON.stringify({ to: term(sd.id).owner, event: 'terminal.shutdown', data: { terminalId: sd.id } }));
+    await waitFor(() => !execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' }).includes(`${sd.id} `),
+        8000, `${sd.id} to end`);
+
     // ── a flood through the whole pipeline ──
     const before = term(A).text.length;
     type(A, 'seq 1 300000; echo FLOOD-$((1+1))-DONE\r');
@@ -193,8 +223,8 @@ try {
     ok(rec.ids?.includes(A) && rec.live?.includes(A), `terminal.recover re-adopts ${A} (ids ${JSON.stringify(rec.ids)}, live ${JSON.stringify(rec.live)})`);
     await waitFor(() => term(A).owner, 8000, 'the new adapter to re-create the grid');
     ok(await screenHas(A, 'before-restart'), "the adoption repaint carries the terminal's screen from before the restart");
-    ok(new RegExp(`\\[attach\\] ${A} adopted in termd namespace "${NS}" \\([^)]*\\): sh\\n`).test(relayLog),
-        "the re-adopting adapter names the terminal's own program (sh), not its default shell");
+    ok(new RegExp(`\\[attach\\] ${A} adopted in termd namespace "${NS}" \\([^)]*\\): /\\S*/sh in /`).test(relayLog),
+        "the re-adopting adapter names the terminal's own program (sh, resolved), not its default shell");
     await waitFor(() => term(W).owner, 8000, 'the alt-screen terminal re-adopted');
     await sleep(500);
     // Down this time (button 65): the repaint carries the up reports already on the screen.
@@ -203,7 +233,7 @@ try {
     type(A, 'echo after-$((2+3))\r');
     ok(await screenHas(A, 'after-5'), 'typing reaches the re-adopted shell');
     const s2 = await relayEvent({ relay: 'terminal.spawn', cols: 60, rows: 10, argv: ['sh'] }, 'terminal.spawning');
-    ok(s2.id === 'term-3', `a spawn after the restart mints a fresh id (${s2.id})`);
+    ok(s2.id === 'term-4', `a spawn after the restart mints a fresh id (${s2.id})`);
     await waitFor(() => term(s2.id).owner, 8000, 'the second terminal');
 
     // ── an adapter dies under a live relay: the relay re-adopts its terminal ──

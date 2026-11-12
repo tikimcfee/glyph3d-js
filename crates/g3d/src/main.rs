@@ -2,7 +2,7 @@
 //! one, list, create, kill, stop (docs/termd/DESIGN.md, "`g3d`: attach from any terminal").
 //!
 //!   g3d [--ns NS | --socket PATH] ls
-//!   g3d new <id> [--cols N --rows N] [--cwd DIR] [-- cmd...]
+//!   g3d new <id> [--cols N --rows N] [--cwd DIR] [--forward-env LIST] [-- cmd...]
 //!   g3d attach <id> [--take] [--detach-key ^\]
 //!   g3d watch <id>
 //!   g3d capture <id> [--history N] [--vt]
@@ -25,11 +25,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Parser)]
 #[command(name = "g3d", version, about = "Attach to, watch and manage g3d-termd terminals")]
 struct Cli {
-    /// The daemon's namespace.
-    #[arg(long, global = true, default_value = g3d::paths::DEFAULT_NS)]
-    ns: String,
-    /// An explicit daemon socket instead of a namespace's.
+    /// The daemon's namespace (default: the daemon of the terminal this runs in, by
+    /// $G3D_TERMD_SOCKET, else "default").
     #[arg(long, global = true)]
+    ns: Option<String>,
+    /// An explicit daemon socket instead of a namespace's.
+    #[arg(long, global = true, conflicts_with = "ns")]
     socket: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
@@ -46,9 +47,15 @@ enum Cmd {
         cols: u16,
         #[arg(long, default_value_t = 24)]
         rows: u16,
+        /// Where it starts (default: this directory, as `tmux new` does).
         #[arg(long)]
         cwd: Option<String>,
-        /// The program and its arguments (default: $SHELL).
+        /// Run inside an SSH session: the variables of this shell the terminal gets, comma-separated,
+        /// when set here (default: the SSH agent's, the display's and Kerberos', tmux's
+        /// update-environment). '' sends none. Outside SSH nothing is sent: the session's are fresh.
+        #[arg(long, default_value = FORWARD_ENV)]
+        forward_env: String,
+        /// The program and its arguments (default: the account's shell, as a login shell).
         #[arg(last = true)]
         argv: Vec<String>,
     },
@@ -59,14 +66,14 @@ enum Cmd {
         /// Ends when another client takes the terminal (attach again to take it back).
         #[arg(long)]
         take: bool,
-        /// The key pressed twice to detach, as ^X.
-        #[arg(long, default_value = "^\\")]
+        /// The key pressed twice to detach, as ^X (some keyboard layouts need another).
+        #[arg(long, default_value = "^\\", env = "G3D_DETACH_KEY")]
         detach_key: String,
     },
     /// Watch a terminal without typing into it.
     Watch {
         id: String,
-        #[arg(long, default_value = "^\\")]
+        #[arg(long, default_value = "^\\", env = "G3D_DETACH_KEY")]
         detach_key: String,
     },
     /// Print the screen (and some scrollback) as text.
@@ -95,6 +102,12 @@ enum Cmd {
     },
 }
 
+/// What `g3d new` forwards from the shell it runs in (DESIGN.md, "SSH agent, display and bus
+/// variables"): tmux's `update-environment` default, less `MSYSTEM` (Windows'), `WINDOWID` (the
+/// outer terminal's own window) and the `XDG_*` desktop names (the session has them).
+const FORWARD_ENV: &str =
+    "SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,SSH_ASKPASS,KRB5CCNAME,DISPLAY,WAYLAND_DISPLAY,XAUTHORITY";
+
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("g3d: {msg}");
     std::process::exit(1);
@@ -113,12 +126,16 @@ fn connect(target: &Target) -> Client {
 
 fn main() {
     let cli = Cli::parse();
-    let target = match cli.socket {
-        Some(p) => Target::Socket(p),
-        None => {
-            g3d::paths::validate_name("namespace", &cli.ns).unwrap_or_else(|m| die(m));
-            Target::Ns(cli.ns)
+    // Inside a termd terminal, its own daemon, as tmux's client finds its server through $TMUX.
+    let inside = std::env::var_os("G3D_TERMD_SOCKET").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let target = match (cli.socket, cli.ns, inside) {
+        (Some(p), _, _) => Target::Socket(p),
+        (None, Some(ns), _) => {
+            g3d::paths::validate_name("namespace", &ns).unwrap_or_else(|m| die(m));
+            Target::Ns(ns)
         }
+        (None, None, Some(p)) => Target::Socket(p),
+        (None, None, None) => Target::Ns(g3d::paths::DEFAULT_NS.to_owned()),
     };
     match cli.cmd {
         Cmd::Ls => {
@@ -144,9 +161,17 @@ fn main() {
                 );
             }
         }
-        Cmd::New { id, cols, rows, cwd, argv } => {
+        Cmd::New { id, cols, rows, cwd, forward_env, argv } => {
             let mut c = start::connect_or_start(&target, "g3d", None).unwrap_or_else(|e| die(e));
             let cwd = cwd.or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string()));
+            let in_ssh = std::env::var_os("SSH_CONNECTION").is_some_and(|v| !v.is_empty());
+            let env: std::collections::BTreeMap<String, Option<String>> = forward_env
+                .split(',')
+                .filter(|_| in_ssh)
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .filter_map(|k| Some((k.to_owned(), Some(std::env::var(k).ok().filter(|v| !v.is_empty())?))))
+                .collect();
             let r: CreateReply = c
                 .request(Op::Create(Create {
                     id,
@@ -154,10 +179,21 @@ fn main() {
                     cols,
                     rows,
                     cwd,
+                    env: if env.is_empty() { None } else { Some(env) },
                     ..Default::default()
                 }))
                 .unwrap_or_else(|e| die(e));
-            println!("{} handle {} pid {} {}x{}", r.id, r.handle, r.pid, r.cols, r.rows);
+            println!(
+                "{} handle {} pid {} {}x{}: {}{} in {}",
+                r.id,
+                r.handle,
+                r.pid,
+                r.cols,
+                r.rows,
+                r.argv.join(" "),
+                if r.login { " (login shell)" } else { "" },
+                r.cwd
+            );
         }
         Cmd::Capture { id, history, vt } => {
             let mut c = connect(&target);

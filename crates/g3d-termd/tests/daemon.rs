@@ -92,7 +92,10 @@ fn create_list_kill_and_if_exists() {
     assert_eq!(l.terminals.len(), 1);
     let t = &l.terminals[0];
     assert_eq!((t.id.as_str(), t.handle, t.cols, t.rows), ("t1", r.handle, 80, 24));
-    assert_eq!(t.argv, vec!["sh", "-c", "echo hi; exec sleep 100"]);
+    // What runs: `sh` resolved in the program's own PATH, then its arguments.
+    assert!(t.argv[0].starts_with('/') && t.argv[0].ends_with("/sh"), "{:?}", t.argv);
+    assert_eq!(t.argv[1..], ["-c", "echo hi; exec sleep 100"]);
+    assert_eq!(t.argv, r.argv);
 
     // Unknown ops keep the connection.
     let raw = c.send_request(Op::Ping).unwrap();
@@ -581,6 +584,7 @@ fn kill_outlasts_a_program_that_ignores_hangup() {
     assert!(wait_dead(r.pid, 3), "the HUP-ignoring program survived kill");
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_panicking_owner_thread_closes_only_its_terminal() {
     let d = Daemon::start();
@@ -894,5 +898,70 @@ fn a_new_subscriber_learns_the_terminals_state() {
         assert_eq!(&rest[..2], ["modes", "title"], "{mode:?}: {:?}", seen.trace);
         assert_eq!(seen.events[0], Event::Modes(want), "{mode:?}");
         assert_eq!(seen.events[1], Event::Title { title: "state title".into() });
+    }
+}
+
+/// A daemonized namespace's log rotates at --log-max-bytes: the holder moves it to `.1`, and the
+/// brain, which shares the file, follows it to the new one.
+#[test]
+fn a_daemonized_log_rotates_and_the_brain_follows() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (socket, log) = (dir.join("termd-rot.sock"), dir.join("termd-rot.log"));
+    // Stops the namespace however the test ends: `stop`, else SIGKILL to the holder by its lock.
+    struct Guard(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Ok(mut c) = Client::connect(&self.0, "test") {
+                let _ = c.request::<Empty>(Op::Stop);
+            }
+            let lock = std::fs::read_to_string(format!("{}.lock", self.0.display())).unwrap_or_default();
+            if let Ok(pid) = lock.trim().parse::<i32>() {
+                std::thread::sleep(Duration::from_millis(500));
+                if std::fs::read_to_string(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.contains("g3d-termd")) {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            if !std::thread::panicking() {
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+    }
+    let st = std::process::Command::new(bin())
+        .args(["--ns", "rot", "--daemon", "--idle-exit", "0", "--env-source", "daemon", "--log-max-bytes", "4096"])
+        .args(["--brain-watchdog", "1"])
+        .env("G3D_TERMD_DIR", &dir)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let _g = Guard(socket.clone(), dir.clone());
+    let until = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < until, "the daemon did not come up");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut c = Client::connect(&socket, "test").unwrap();
+    let old = dir.join("termd-rot.log.1");
+    let until = Instant::now() + Duration::from_secs(20);
+    let mut n = 0;
+    while !old.exists() {
+        assert!(Instant::now() < until, "the log never rotated: {}", std::fs::read_to_string(&log).unwrap_or_default());
+        create(&mut c, &format!("t{n}"), &["true"], 20, 5);
+        n += 1;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The brain's next line lands in the new file, after the holder's note.
+    create(&mut c, "after", &["true"], 20, 5);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = std::fs::read_to_string(&log).unwrap_or_default();
+        if now.contains("terminal after (handle") {
+            assert!(now.contains("log rotated at 4096 bytes"), "{now}");
+            assert!(std::fs::metadata(&old).unwrap().len() >= 4096);
+            break;
+        }
+        assert!(Instant::now() < until, "the brain did not follow the rotated log: {now}");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

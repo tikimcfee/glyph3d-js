@@ -5,7 +5,7 @@ use rustix::fd::{AsRawFd, OwnedFd};
 use std::ffi::CString;
 use std::io;
 
-/// What the brain asked to run, resolved: the path to exec, argv, the full environment.
+/// What the brain asked to run: the path to exec, argv, the full environment, the directory.
 pub struct Plan {
     pub path: CString,
     pub argv: Vec<CString>,
@@ -19,38 +19,22 @@ fn cstr(s: &str, what: &str) -> io::Result<CString> {
     CString::new(s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("{what} contains NUL")))
 }
 
-fn is_executable(p: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
 impl Plan {
-    /// `argv[0]` without a slash is looked up in the environment's own `PATH` (`execvpe`
-    /// semantics), not the holder's.
-    pub fn new(argv: &[String], env: &[(String, String)], cwd: Option<&str>, cols: u16, rows: u16) -> io::Result<Self> {
-        let Some(prog) = argv.first() else {
+    /// What the brain resolved (DESIGN.md, "Environment"): `path` is exec'd as given, with
+    /// `argv` (its `argv[0]` may differ, as a login shell's `-bash` does).
+    pub fn new(
+        path: &str,
+        argv: &[String],
+        env: &[(String, String)],
+        cwd: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<Self> {
+        if argv.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
-        };
-        let path = if prog.contains('/') {
-            prog.clone()
-        } else {
-            let search = env
-                .iter()
-                .find(|(k, _)| k == "PATH")
-                .map(|(_, v)| v.as_str())
-                .unwrap_or("/usr/local/bin:/usr/bin:/bin");
-            search
-                .split(':')
-                .filter(|d| !d.is_empty())
-                .map(|d| std::path::Path::new(d).join(prog))
-                .find(|p| is_executable(p))
-                .map(|p| p.display().to_string())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, format!("{prog}: not found in PATH {search:?}"))
-                })?
-        };
+        }
         Ok(Plan {
-            path: cstr(&path, "program path")?,
+            path: cstr(path, "program path")?,
             argv: argv.iter().map(|a| cstr(a, "argv")).collect::<io::Result<_>>()?,
             env: env.iter().map(|(k, v)| cstr(&format!("{k}={v}"), "env")).collect::<io::Result<_>>()?,
             cwd: cwd.map(|c| cstr(c, "cwd")).transpose()?,

@@ -349,6 +349,7 @@ fn a_failed_upgrade_leaves_the_running_brain_serving() {
     assert_eq!(e.code(), Some(code::BAD_REQUEST));
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn an_upgrade_to_another_engine_hands_over_by_repaint() {
     let d = Daemon::start_env(&["--idle-exit", "0"], &[("G3D_TERMD_TEST_ENGINE_FILE", "engine")]);
@@ -378,6 +379,7 @@ fn an_upgrade_to_another_engine_hands_over_by_repaint() {
     read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"again-4"));
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_brain_that_never_returns_leaves_the_shells_frozen_and_says_so() {
     let d = Daemon::start_env(
@@ -426,6 +428,7 @@ fn a_brain_that_never_returns_leaves_the_shells_frozen_and_says_so() {
     read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"back-25"));
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn the_watchdog_aborts_a_silent_brain() {
     let d = Daemon::start_with(&["--idle-exit", "0", "--brain-watchdog", "2"]);
@@ -447,6 +450,7 @@ fn the_watchdog_aborts_a_silent_brain() {
     read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"after\r\nafter"));
 }
 
+#[cfg(feature = "test-hooks")]
 fn owner_hook(name: &[u8]) -> &'static [u8] {
     match name {
         b"wedge" => b"\x00g3d-termd-test-wedge\x00",

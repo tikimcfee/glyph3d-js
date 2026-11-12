@@ -142,14 +142,24 @@ func runTerminal(cfg terminalConfig) {
 	if err != nil {
 		fail("attach: %v", err)
 	}
-	cwd, _ := os.Getwd()
+	// No argv: termd starts the account's shell as a login shell. No cwd: the account's home.
+	// The adapter's own $SHELL and working directory say nothing about what a person wants
+	// (DESIGN.md, "Environment").
 	var created struct {
-		PID     int  `json:"pid"`
-		Created bool `json:"created"`
+		PID     int      `json:"pid"`
+		Created bool     `json:"created"`
+		Argv    []string `json:"argv"`
+		Login   bool     `json:"login"`
+		Cwd     string   `json:"cwd"`
 	}
-	if err := tc.Request("create", map[string]any{
-		"id": cfg.id, "argv": cfg.cmdArgs, "cols": cfg.cols, "rows": cfg.rows, "cwd": cwd, "if_exists": "adopt",
-	}, &created); err != nil {
+	create := map[string]any{"id": cfg.id, "cols": cfg.cols, "rows": cfg.rows, "if_exists": "adopt"}
+	if len(cfg.cmdArgs) > 0 {
+		create["argv"] = cfg.cmdArgs
+	}
+	if cfg.cwd != "" {
+		create["cwd"] = cfg.cwd
+	}
+	if err := tc.Request("create", create, &created); err != nil {
 		fail("attach: termd create %s: %v", cfg.id, err)
 	}
 	// The display owns the size (DESIGN.md D11): subscribe as the owner, at its size.
@@ -167,24 +177,16 @@ func runTerminal(cfg terminalConfig) {
 	// upgrade) replaces both; everything below reads the current one.
 	var sess atomic.Pointer[termdSession]
 	sess.Store(&termdSession{tc: tc, handle: sub.Handle})
-	verb, argv := "created", cfg.cmdArgs
+	verb := "created"
 	if !created.Created {
-		// Adopted: the program is whatever the terminal was started with, not our argv.
-		verb, argv = "adopted", []string{"?"}
-		var l struct {
-			Terminals []termdTerminal `json:"terminals"`
-		}
-		if err := tc.Request("list", nil, &l); err != nil {
-			log.Printf("[attach] termd list: %v", err)
-		}
-		for _, t := range l.Terminals {
-			if t.ID == cfg.id {
-				argv = t.Argv
-			}
-		}
+		verb = "adopted" // the program is whatever the terminal was started with
 	}
-	fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s\n",
-		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(argv, " "))
+	login := ""
+	if created.Login {
+		login = " (login shell)"
+	}
+	fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s%s in %s\n",
+		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(created.Argv, " "), login, created.Cwd)
 	defer func() { sess.Load().tc.Close() }()
 
 	// Lifecycle: signals, termd, the relay, liveness and the output pump all converge on `done`.

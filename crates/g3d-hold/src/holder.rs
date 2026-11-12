@@ -48,6 +48,8 @@ pub struct Config {
     pub upgrade_deadline: Duration,
     pub kill_grace: Duration,
     pub max_terminals: usize,
+    /// Rotate the namespace's log past this many bytes (0 = never).
+    pub log_max_bytes: u64,
 }
 
 fn die(msg: &str) -> ! {
@@ -368,6 +370,7 @@ pub fn run(cfg: Config) -> ! {
     rustix::fs::fcntl_setfl(&listener, rustix::fs::OFlags::NONBLOCK).unwrap_or_else(|e| die(&format!("listener: {e}")));
     if cfg.daemon {
         daemonize(&cfg.log, &[listener.as_raw_fd(), lock.as_raw_fd()]);
+        crate::log::set_file(&cfg.log, cfg.log_max_bytes);
     }
     let _ = lock.set_len(0);
     let _ = lock.rewind();
@@ -497,6 +500,7 @@ impl Holder {
 
     /// Timers: brain (re)starts, watchdog, kill grace, upgrade deadline, re-stamp, idle exit.
     fn tick(&mut self) {
+        crate::log::rotate_if_due();
         let now = Instant::now();
         if self.restart_at.is_some_and(|t| now >= t) && self.brain.is_none() {
             self.restart_at = None;
@@ -852,14 +856,23 @@ impl Holder {
                 let engine = m.get("engine").and_then(Value::as_str).unwrap_or("").to_owned();
                 let Some(p) = self.peer(w) else { return };
                 if major != Some(HOLD[0]) {
+                    let pid = p.pid;
+                    let theirs = m.get("hold").map_or_else(|| "none".to_owned(), Value::to_string);
                     log(&format!(
-                        "brain pid {} speaks hold protocol {:?}; this holder speaks {}.x; stopping it",
-                        p.pid,
-                        m.get("hold"),
+                        "brain pid {pid} speaks hold protocol {theirs}; this holder speaks {}.x; stopping it",
                         HOLD[0]
                     ));
+                    if w == Who::Candidate {
+                        // The asker learns why: only a new holder runs this brain, and the
+                        // holder's re-exec (`g3d upgrade --holder`) is not built.
+                        self.abort_upgrade(&format!(
+                            "the candidate speaks hold protocol {theirs} and this holder {}.x; a new holder \
+                             takes a namespace restart (g3d stop ends its shells)",
+                            HOLD[0]
+                        ));
+                    }
                     // SAFETY: our own child.
-                    unsafe { libc::kill(p.pid, libc::SIGKILL) };
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
                     return;
                 }
                 p.hello = true;
@@ -1005,7 +1018,8 @@ impl Holder {
             .free_slots
             .last()
             .ok_or_else(|| format!("{} terminals is the most this daemon holds", self.cfg.max_terminals))?;
-        let plan = spawn::Plan::new(&argv, &env, s("cwd"), cols, rows).map_err(|e| e.to_string())?;
+        let path = s("path").ok_or("spawn without a path")?;
+        let plan = spawn::Plan::new(path, &argv, &env, s("cwd"), cols, rows).map_err(|e| e.to_string())?;
         let (master, pid) = spawn::spawn(&plan, self.nofile).map_err(|e| e.to_string())?;
         self.free_slots.pop();
         let handle = self.next_handle;

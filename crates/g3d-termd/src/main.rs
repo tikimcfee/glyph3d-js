@@ -9,6 +9,7 @@
 //! Every holder flag is passed on to the brain it starts, so both read one set of settings.
 
 mod blob;
+mod env;
 mod hold;
 mod out;
 mod owner;
@@ -37,12 +38,53 @@ pub struct Args {
     /// Exit after this many seconds with no terminals and no connections (0 = never).
     #[arg(long, default_value_t = 300)]
     pub idle_exit: u64,
-    /// Default primary-screen scrollback per terminal, in bytes.
-    #[arg(long, default_value_t = 2 << 20)]
+    /// Default primary-screen scrollback per terminal, in bytes (Ghostty's scrollback-limit).
+    #[arg(long, default_value_t = 10_000_000)]
     pub scrollback: u64,
     /// The most scrollback a create may ask for, in bytes.
-    #[arg(long, default_value_t = 16 << 20)]
+    #[arg(long, default_value_t = 64 << 20)]
     pub max_scrollback: u64,
+    /// Input a terminal's program hasn't read yet, per terminal, in bytes; a whole INPUT frame
+    /// past it is refused.
+    #[arg(long, default_value_t = 16 << 20)]
+    pub input_buffer: usize,
+    /// A lossy subscriber's queue past this many bytes is dropped and resynced.
+    #[arg(long, default_value_t = 4 << 20)]
+    pub lossy_queue: usize,
+    /// A blocking owner's queue past this many bytes pauses the terminal's output...
+    #[arg(long, default_value_t = 1 << 20)]
+    pub block_high: usize,
+    /// ...until it drains below this many.
+    #[arg(long, default_value_t = 256 << 10)]
+    pub block_low: usize,
+    /// Where a terminal's environment starts: the systemd user manager's when one answers
+    /// (auto), or always the daemon's own (daemon: hermetic, for tests).
+    #[arg(long, value_enum, default_value_t = env::EnvSource::Auto, env = "G3D_TERMD_ENV_SOURCE")]
+    pub env_source: env::EnvSource,
+    /// How long to wait for the user manager's environment, in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    pub env_manager_timeout_ms: u64,
+    /// Also remove these variables (NAME, or PREFIX*) from the base environment. Repeatable.
+    #[arg(long, value_name = "NAME")]
+    pub env_scrub: Vec<String>,
+    /// Keep these variables (NAME, or PREFIX*) though the scrub names them. Repeatable.
+    #[arg(long, value_name = "NAME")]
+    pub env_keep: Vec<String>,
+    /// The shell a terminal with no argv runs, for every terminal (default: the passwd entry's).
+    #[arg(long)]
+    pub shell: Option<String>,
+    /// Start that shell as a login shell (argv[0] "-<name>").
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub login_shell: bool,
+    /// Set LANG to a UTF-8 locale the system has when a terminal's environment sets no locale.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub fill_locale: bool,
+    /// TERM for every terminal, and the terminfo name its emulator answers with.
+    #[arg(long, default_value = "xterm-256color")]
+    pub term: String,
+    /// Rotate the daemon's log past this many bytes, keeping one previous file (.1); 0 = never.
+    #[arg(long, default_value_t = 10 << 20)]
+    pub log_max_bytes: u64,
     /// How often a terminal with new output saves a crash snapshot, in milliseconds (0 = never).
     #[arg(long, default_value_t = 2000)]
     pub snapshot_interval_ms: u64,
@@ -86,6 +128,18 @@ pub struct Args {
     pub candidate: bool,
 }
 
+/// The test hooks (owner.rs, server.rs, env.rs) exist only in a build with the `test-hooks`
+/// feature, which only the tests turn on, and are armed only with `G3D_TERMD_TEST_HOOKS=1`.
+#[cfg(feature = "test-hooks")]
+pub fn test_hooks_armed() -> bool {
+    std::env::var("G3D_TERMD_TEST_HOOKS").as_deref() == Ok("1")
+}
+
+#[cfg(not(feature = "test-hooks"))]
+pub const fn test_hooks_armed() -> bool {
+    false
+}
+
 /// One log line (the namespace's log once daemonized).
 pub fn log(msg: &str) {
     g3d_hold::log::log(msg);
@@ -117,8 +171,27 @@ fn paths(args: &Args) -> (Option<String>, PathBuf, PathBuf) {
     (ns, socket, log)
 }
 
+/// Settings that are wrong whatever the moment: refused before anything starts.
+fn check(args: &Args) {
+    if let Some(sh) = &args.shell {
+        use std::os::unix::fs::PermissionsExt;
+        let ok = sh.starts_with('/')
+            && std::fs::metadata(sh).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+        if !ok {
+            die(&format!("--shell {sh:?} is not an absolute path to an executable"));
+        }
+    }
+    if args.term.is_empty() || !args.term.bytes().all(|b| b.is_ascii_graphic()) {
+        die(&format!("--term {:?} is not a terminal name", args.term));
+    }
+    if args.block_low >= args.block_high {
+        die("--block-low must be below --block-high");
+    }
+}
+
 fn main() {
     let args = Args::parse();
+    check(&args);
     let (ns, socket, log_path) = paths(&args);
     if args.brain {
         let fd = args.hold_fd.unwrap_or_else(|| die("--brain needs --hold-fd"));
@@ -160,5 +233,6 @@ fn main() {
         upgrade_deadline: s(args.upgrade_deadline.max(1)),
         kill_grace: s(args.kill_grace),
         max_terminals: args.max_terminals.max(1),
+        log_max_bytes: args.log_max_bytes,
     });
 }

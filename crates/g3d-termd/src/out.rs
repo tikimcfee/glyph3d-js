@@ -9,12 +9,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// A lossy subscriber whose queue would pass this is dropped and, once drained, resynced.
-pub const LOSSY_MAX: usize = 4 << 20;
-/// A blocking owner whose queue passes this pauses the PTY...
-pub const BLOCK_HIGH: usize = 1 << 20;
-/// ...until it drains below this.
-pub const BLOCK_LOW: usize = 256 << 10;
+/// A lossy subscriber whose queue would pass this is dropped and, once drained, resynced
+/// (`--lossy-queue`).
+static LOSSY_MAX: AtomicUsize = AtomicUsize::new(4 << 20);
+/// A blocking owner whose queue passes this pauses the PTY (`--block-high`)...
+static BLOCK_HIGH: AtomicUsize = AtomicUsize::new(1 << 20);
+/// ...until it drains below this (`--block-low`).
+static BLOCK_LOW: AtomicUsize = AtomicUsize::new(256 << 10);
+
+/// Sets the flow limits, once, at the brain's start.
+pub fn set_limits(lossy: usize, high: usize, low: usize) {
+    LOSSY_MAX.store(lossy, SeqCst);
+    BLOCK_HIGH.store(high, SeqCst);
+    BLOCK_LOW.store(low, SeqCst);
+}
+
+pub fn lossy_max() -> usize {
+    LOSSY_MAX.load(SeqCst)
+}
 
 /// Wakes an owner thread out of `poll`: an eventfd (Linux) or a pipe.
 pub struct Wake {
@@ -75,11 +87,11 @@ impl SubShared {
     /// The owner thread pauses reads when over the high mark. Rechecks after setting the
     /// flag so a writer that drained in between can't leave it paused forever.
     pub fn maybe_pause(&self) -> bool {
-        if self.queued.load(SeqCst) <= BLOCK_HIGH {
+        if self.queued.load(SeqCst) <= BLOCK_HIGH.load(SeqCst) {
             return false;
         }
         self.paused.store(true, SeqCst);
-        if self.queued.load(SeqCst) < BLOCK_LOW {
+        if self.queued.load(SeqCst) < BLOCK_LOW.load(SeqCst) {
             self.paused.store(false, SeqCst);
             return false;
         }
@@ -88,7 +100,7 @@ impl SubShared {
 
     fn written(&self, n: usize) {
         let left = self.queued.fetch_sub(n, SeqCst) - n;
-        if left < BLOCK_LOW && self.paused.swap(false, SeqCst) {
+        if left < BLOCK_LOW.load(SeqCst) && self.paused.swap(false, SeqCst) {
             self.wake.wake();
         }
         if left == 0 && self.lagging.load(SeqCst) {

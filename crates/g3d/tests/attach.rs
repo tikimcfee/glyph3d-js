@@ -30,7 +30,7 @@ impl Daemon {
         let child = Command::new(termd)
             .arg("--socket")
             .arg(&socket)
-            .args(["--idle-exit", "0"])
+            .args(["--idle-exit", "0", "--env-source", "daemon"])
             .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap())
             .spawn()
             .unwrap();

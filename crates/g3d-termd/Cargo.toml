@@ -9,6 +9,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The test hooks (a magic INPUT that panics an owner thread or stops the heartbeat, a brain that
+# exits at start, a named engine, a file standing in for the user manager). Only the tests turn it
+# on (`cargo test --features g3d-termd/test-hooks`; tests/restart.rs fails loud without it), so a
+# release binary has none of them.
+test-hooks = []
+
 [[bin]]
 name = "g3d-termd"
 path = "src/main.rs"

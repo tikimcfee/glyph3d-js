@@ -176,6 +176,9 @@ pub struct Create {
     /// Added to the environment; a `null` value removes the variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, Option<String>>>,
+    /// (1.1) What the environment starts from: the session's (the default) or nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_base: Option<EnvBase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_exists: Option<IfExists>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +187,17 @@ pub struct Create {
     pub colors: Option<Colors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_px: Option<[u32; 2]>,
+}
+
+/// `create.env_base` (1.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvBase {
+    /// The user's session environment, scrubbed (PROTOCOL.md, "The program's environment").
+    #[default]
+    Session,
+    /// Nothing but the account variables, the request's `env` and termd's own.
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +367,12 @@ pub struct CreateReply {
     pub created: bool,
     pub cols: u16,
     pub rows: u16,
+    /// (1.1) What runs: the resolved program path first, then its arguments.
+    pub argv: Vec<String>,
+    /// (1.1) Whether it was started as a login shell (`argv[0]` is `-<name>`).
+    pub login: bool,
+    /// (1.1) Where it started.
+    pub cwd: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

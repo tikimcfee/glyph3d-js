@@ -2,6 +2,7 @@
 //! (accepting connections, the handshake, routing requests and input to owner threads), and
 //! the upgrade handoff. No terminal state lives here (DESIGN.md, "Threading").
 
+use crate::env;
 use crate::hold::{self, Exit, Hold};
 use crate::out::ConnOut;
 use crate::owner::{self, Cmd, CreateSpec, Registry, Restored, TermOp, TermRef, reply_err, reply_ok};
@@ -52,7 +53,7 @@ fn end_namespace(hold: &Hold, why: &str) -> ! {
 /// `g3d-termd --brain`: take what the holder hands over, restore every terminal, serve.
 pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, log_path: PathBuf) -> ! {
     g3d_hold::log::set_role("brain");
-    let _ = log_path;
+    g3d_hold::log::set_file(&log_path, args.log_max_bytes);
     // SAFETY: plain signal dispositions, set before any other thread exists.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -70,7 +71,9 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             crate::log(&format!("oom_score_adj {want}: {e}"));
         }
     }
-    let test_hooks = std::env::var("G3D_TERMD_TEST_HOOKS").as_deref() == Ok("1");
+    #[cfg(feature = "test-hooks")]
+    let test_hooks = crate::test_hooks_armed();
+    #[cfg(feature = "test-hooks")]
     if test_hooks
         && let Ok(p) = std::env::var("G3D_TERMD_TEST_BRAIN_FAIL_FILE")
         && std::path::Path::new(&p).exists()
@@ -78,12 +81,15 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         crate::log(&format!("test hook: {p} exists; this brain exits at start"));
         std::process::exit(3);
     }
+    #[cfg(feature = "test-hooks")]
     let engine = match std::env::var("G3D_TERMD_TEST_ENGINE_FILE") {
         Ok(p) if test_hooks => {
             std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into())
         }
         _ => SNAPSHOT_ENGINE.into(),
     };
+    #[cfg(not(feature = "test-hooks"))]
+    let engine: String = SNAPSHOT_ENGINE.into();
     let mut start = hold::start(fd, &engine);
     let w = &start.hold.welcome;
     crate::log(&format!(
@@ -95,16 +101,33 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         start.terms.len()
     ));
     let candidate = w.candidate;
+    crate::out::set_limits(args.lossy_queue, args.block_high, args.block_low);
+    let env_policy = env::Policy::new(
+        args.env_source,
+        env::Settings {
+            scrub: env::SCRUB.iter().map(|s| s.to_string()).chain(args.env_scrub.iter().cloned()).collect(),
+            keep: args.env_keep.clone(),
+            shell: args.shell.clone(),
+            login_shell: args.login_shell,
+            locale_fill: env::locale_fill(args.fill_locale),
+            term: args.term.clone(),
+            socket: socket.display().to_string(),
+            version: crate::VERSION.to_owned(),
+        },
+        Duration::from_millis(args.env_manager_timeout_ms),
+    );
     let reg = Registry::new(
         owner::Config {
             ns,
-            socket: socket.clone(),
             default_scrollback: args.scrollback.min(args.max_scrollback),
             max_scrollback: args.max_scrollback,
+            #[cfg(feature = "test-hooks")]
             test_hooks,
             snapshot_interval: Duration::from_millis(args.snapshot_interval_ms),
             kill_grace: Duration::from_secs(args.kill_grace),
             engine,
+            input_max: args.input_buffer,
+            env: Arc::new(env_policy),
         },
         start.hold.clone(),
         start.marks.clone(),
@@ -534,6 +557,9 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                             created: false,
                             cols: i.cols,
                             rows: i.rows,
+                            argv: i.argv,
+                            login: t.login,
+                            cwd: i.cwd,
                         },
                     );
                 } else {
@@ -544,7 +570,22 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             let (id, cols, rows) = (spec.id.clone(), spec.cols, spec.rows);
             match owner::create(&srv.reg, spec).await {
                 Ok((t, pid)) => {
-                    reply_ok(&c.out, req, &CreateReply { id, handle: t.handle, pid, created: true, cols, rows })
+                    let i = t.info.lock().unwrap().clone();
+                    reply_ok(
+                        &c.out,
+                        req,
+                        &CreateReply {
+                            id,
+                            handle: t.handle,
+                            pid,
+                            created: true,
+                            cols,
+                            rows,
+                            argv: i.argv,
+                            login: t.login,
+                            cwd: i.cwd,
+                        },
+                    )
                 }
                 Err(e) => {
                     crate::log(&format!("create {id}: {e}"));

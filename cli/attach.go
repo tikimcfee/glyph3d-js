@@ -30,7 +30,8 @@ type terminalConfig struct {
 	cols    int
 	rows    int
 	scale   float64
-	cmdArgs []string
+	cmdArgs []string // empty: termd starts the account's shell (DESIGN.md, "The shell, and login or not")
+	cwd     string   // empty: termd starts it in the account's home
 }
 
 // attachCmd is the entry point for `glyph3d-cli attach`.
@@ -44,10 +45,12 @@ func attachCmd() {
 	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the terminal lives in")
 	fs.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
 	fs.DurationVar(&termdReconnectWindow, "termd-reconnect", termdReconnectWindow, "how long to ride out a termd brain restart before giving the terminal up as lost")
+	cwd := fs.String("cwd", "", "Where a new terminal's program starts (default: the account's home)")
 
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --termd-ns --termd --termd-reconnect")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --cwd --termd-ns --termd --termd-reconnect")
+		fmt.Fprintln(os.Stderr, "  with no command, termd starts the account's shell as a login shell")
 		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
 	}
 
@@ -77,13 +80,6 @@ func attachCmd() {
 	if len(cmdArgs) == 0 {
 		cmdArgs = fs.Args() // trailing positionals, e.g. `attach t1 bash -l`
 	}
-	if len(cmdArgs) == 0 {
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "bash"
-		}
-		cmdArgs = []string{shell}
-	}
 
 	if *cols < 1 || *rows < 1 {
 		fmt.Fprintln(os.Stderr, "attach: cols and rows must be positive")
@@ -106,6 +102,7 @@ func attachCmd() {
 		rows:    *rows,
 		scale:   *scale,
 		cmdArgs: cmdArgs,
+		cwd:     *cwd,
 	})
 }
 

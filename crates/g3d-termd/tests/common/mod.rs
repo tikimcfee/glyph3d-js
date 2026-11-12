@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 
 static N: AtomicU32 = AtomicU32::new(0);
 
+/// The daemon's tests need its test hooks, which only a `test-hooks` build has.
+#[cfg(not(feature = "test-hooks"))]
+#[test]
+fn the_test_hooks_feature_is_on() {
+    panic!(
+        "g3d-termd's tests need its test hooks: run `cargo test --workspace --features g3d-termd/test-hooks` \
+         (tools/CHECKS.md, \"The terminal daemon\")"
+    );
+}
+
 pub struct Daemon {
     pub dir: PathBuf,
     pub socket: PathBuf,
@@ -52,18 +62,34 @@ impl Daemon {
     }
 
     fn spawn_in(dir: PathBuf, args: &[&str], env: &[(&str, PathBuf)]) -> Self {
+        let env: Vec<(String, PathBuf)> = env.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        Self::spawn_cmd(dir, args, move |cmd, _| {
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+        })
+    }
+
+    /// A daemon whose command `setup` shapes first (its environment, its start state), given
+    /// the scratch directory. `--env-source daemon` unless `args` names a source.
+    pub fn start_cmd(args: &[&str], setup: impl FnOnce(&mut Command, &std::path::Path)) -> Self {
+        Self::spawn_cmd(Self::fresh_dir(), args, setup)
+    }
+
+    fn spawn_cmd(dir: PathBuf, args: &[&str], setup: impl FnOnce(&mut Command, &std::path::Path)) -> Self {
         use std::os::unix::process::CommandExt;
         let socket = dir.join("termd-test.sock");
         let mut cmd = Command::new(bin());
-        cmd.arg("--socket")
-            .arg(&socket)
-            .args(args)
+        setup(&mut cmd, &dir);
+        cmd.arg("--socket").arg(&socket);
+        // The daemon's own environment, never the desktop session's (DESIGN.md, "Environment").
+        if !args.contains(&"--env-source") {
+            cmd.args(["--env-source", "daemon"]);
+        }
+        cmd.args(args)
             .env("G3D_TERMD_TEST_HOOKS", "1")
             .stdin(Stdio::null())
             .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap());
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
         // SAFETY: setrlimit between fork and exec. A brain the watchdog aborts leaves no core.
         unsafe {
             cmd.pre_exec(|| {

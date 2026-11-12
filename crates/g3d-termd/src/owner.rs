@@ -2,8 +2,9 @@
 //! thread (DESIGN.md, "Threading"). The socket side talks to it only through `Cmd`s.
 
 use crate::blob;
+use crate::env;
 use crate::hold::{Exit, Held, Hold, Marks};
-use crate::out::{ConnOut, Kind, LOSSY_MAX, SubShared, Wake};
+use crate::out::{self, ConnOut, Kind, SubShared, Wake};
 use crate::repaint;
 use crate::spawn;
 use g3d_wire::frame::{self, REPAINT_FLAG_VIEW, RepaintHead, ty};
@@ -24,7 +25,6 @@ use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
@@ -35,28 +35,35 @@ use tokio::sync::oneshot;
 pub type ConnId = u64;
 
 const READ_CHUNK: usize = 64 * 1024;
-const INPUT_MAX: usize = 1 << 20;
 const CONTINUATION_MAX: usize = 64 * 1024;
 const COMPRESS_IDLE: Duration = Duration::from_secs(30);
-/// An `INPUT` of exactly these bytes panics the owner thread, when the daemon runs with
-/// `G3D_TERMD_TEST_HOOKS=1`. It exists for the panic-boundary test.
+/// An `INPUT` of exactly these bytes panics the owner thread, in a build with the `test-hooks`
+/// feature (only the tests turn it on) run with `G3D_TERMD_TEST_HOOKS=1`. It exists for the
+/// panic-boundary test.
+#[cfg(feature = "test-hooks")]
 pub const TEST_PANIC_INPUT: &[u8] = b"\x00g3d-termd-test-panic\x00";
 /// With test hooks on, an `INPUT` of these bytes stops the brain's heartbeat (the watchdog test).
+#[cfg(feature = "test-hooks")]
 pub const TEST_WEDGE_INPUT: &[u8] = b"\x00g3d-termd-test-wedge\x00";
 
 /// Daemon-wide settings every terminal reads.
 pub struct Config {
     /// `None` when the daemon was started on an explicit `--socket`.
     pub ns: Option<String>,
-    pub socket: PathBuf,
     pub default_scrollback: u64,
     pub max_scrollback: u64,
+    /// The test hooks are armed: a `test-hooks` build run with `G3D_TERMD_TEST_HOOKS=1`.
+    #[cfg(feature = "test-hooks")]
     pub test_hooks: bool,
     /// Zero: no crash snapshots.
     pub snapshot_interval: Duration,
     pub kill_grace: Duration,
     /// The engine a snapshot restores into: libghostty's version and its snapshot format.
     pub engine: String,
+    /// Input a program hasn't read yet, per terminal (`--input-buffer`).
+    pub input_max: usize,
+    /// What each terminal's program is started as (env.rs).
+    pub env: Arc<env::Policy>,
 }
 
 /// Every live terminal, by id and by handle.
@@ -141,6 +148,8 @@ impl Registry {
 pub struct TermRef {
     pub id: String,
     pub handle: u32,
+    /// Started as a login shell (the `create` reply's `login`).
+    pub login: bool,
     tx: mpsc::Sender<Cmd>,
     wake: Arc<Wake>,
     pub info: Mutex<TermInfo>,
@@ -228,12 +237,14 @@ pub fn valid_size(cols: u16, rows: u16) -> bool {
     (1..=4096).contains(&cols) && (1..=4096).contains(&rows)
 }
 
-/// What `create` asked for, validated.
+/// What `create` asked for, its sizes and colours validated. The program, its environment and
+/// its directory are composed by env.rs when the terminal starts.
 pub struct CreateSpec {
     pub id: String,
-    pub argv: Vec<String>,
+    pub argv: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub env: Option<BTreeMap<String, Option<String>>>,
+    pub env_base: EnvBase,
     pub cols: u16,
     pub rows: u16,
     pub scrollback: u64,
@@ -247,11 +258,12 @@ impl CreateSpec {
         if !valid_size(c.cols, c.rows) {
             return Err(WireError::new(code::BAD_REQUEST, "cols and rows must be 1 to 4096"));
         }
-        let argv = match c.argv {
-            Some(a) if a.is_empty() => return Err(WireError::new(code::BAD_REQUEST, "argv is empty")),
-            Some(a) => a,
-            None => vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())],
-        };
+        if c.argv.as_ref().is_some_and(Vec::is_empty) {
+            return Err(WireError::new(code::BAD_REQUEST, "argv is empty"));
+        }
+        if let Some(e) = &c.env {
+            env::check_request_env(e)?;
+        }
         let colors = c.colors.unwrap_or_default();
         for v in [&colors.fg, &colors.bg, &colors.cursor].into_iter().flatten() {
             if parse_hex(v).is_none() {
@@ -264,9 +276,10 @@ impl CreateSpec {
         }
         Ok(CreateSpec {
             id: c.id,
-            argv,
+            argv: c.argv,
             cwd: c.cwd,
             env: c.env,
+            env_base: c.env_base.unwrap_or_default(),
             cols: c.cols,
             rows: c.rows,
             scrollback: c.scrollback_bytes.unwrap_or(cfg.default_scrollback).min(cfg.max_scrollback),
@@ -279,12 +292,23 @@ impl CreateSpec {
 /// What a terminal was created with, kept by the holder for the next brain (opaque to it).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Meta {
+    /// What runs: the resolved path, then the arguments.
     pub argv: Vec<String>,
     pub cwd: String,
+    /// Started as a login shell.
+    #[serde(default)]
+    pub login: bool,
+    /// Its `TERM`, which its emulator's terminfo answers match.
+    #[serde(default = "default_term")]
+    pub term: String,
     pub created_at: u64,
     pub scrollback: u64,
     pub colors: Colors,
     pub cell_px: [u32; 2],
+}
+
+fn default_term() -> String {
+    "xterm-256color".into()
 }
 
 /// How an owner thread gets its terminal.
@@ -307,28 +331,34 @@ pub enum Restored {
     Blank,
 }
 
-/// Starts a terminal: the holder starts the program, then a new owner thread adopts its PTY.
+/// Starts a terminal: env.rs composes what runs (reading the session's environment now), the
+/// holder starts the program, then a new owner thread adopts its PTY.
 pub async fn create(reg: &Arc<Registry>, spec: CreateSpec) -> Result<(Arc<TermRef>, u32), WireError> {
-    let cwd = spec
-        .cwd
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default());
+    let policy = reg.cfg.env.clone();
+    let (id, argv, cwd, envs, base) =
+        (spec.id.clone(), spec.argv.clone(), spec.cwd.clone(), spec.env.clone(), spec.env_base);
+    let plan = tokio::task::spawn_blocking(move || {
+        policy.plan(base, &env::Request { id: &id, argv: argv.as_deref(), cwd: cwd.as_deref(), env: envs.as_ref() })
+    })
+    .await
+    .map_err(|e| WireError::new(code::SPAWN_FAILED, format!("composing the environment: {e}")))??;
     let meta = Meta {
-        argv: spec.argv.clone(),
-        cwd,
+        argv: plan.shown.clone(),
+        cwd: plan.cwd.clone(),
+        login: plan.login,
+        term: reg.cfg.env.settings.term.clone(),
         created_at: ms_since_epoch(),
         scrollback: spec.scrollback,
         colors: spec.colors.clone(),
         cell_px: spec.cell_px,
     };
-    let env = spawn::child_env(&spec.id, &reg.cfg.socket.display().to_string(), spec.env.as_ref());
-    let req = json!({"id": spec.id, "argv": spec.argv, "env": env, "cwd": spec.cwd, "cols": spec.cols,
-        "rows": spec.rows, "meta": meta});
+    let req = json!({"id": spec.id, "path": plan.path, "argv": plan.argv, "env": plan.env, "cwd": plan.cwd,
+        "cols": spec.cols, "rows": spec.rows, "meta": meta});
     let (handle, slot, pid, master) = reg
         .hold
         .spawn(req)
         .await
-        .map_err(|e| WireError::new(code::SPAWN_FAILED, format!("start {:?}: {e}", spec.argv)))?;
+        .map_err(|e| WireError::new(code::SPAWN_FAILED, format!("start {:?}: {e}", plan.shown)))?;
     reg.marks.set(slot, 0);
     let held = Held {
         handle,
@@ -406,6 +436,7 @@ fn start_owner(
     let tref = Arc::new(TermRef {
         id: held.id.clone(),
         handle: held.handle,
+        login: meta.login,
         tx,
         wake: wake.clone(),
         info: Mutex::new(TermInfo {
@@ -523,7 +554,7 @@ fn configure(
         .and_then(|t| t.set_default_fg_color(Some(fg)))
         .and_then(|t| t.set_default_bg_color(Some(bg)))
         .and_then(|t| t.set_default_cursor_color(Some(cursor)))
-        .and_then(|t| t.set_terminfo_name("xterm-256color"))
+        .and_then(|t| t.set_terminfo_name(&meta.term))
         .and_then(|t| t.set_title_report_enabled(false))
         .and_then(|t| t.set_kitty_image_storage_limit(0))
         .map_err(|x| e("terminal options", &x))?;
@@ -652,7 +683,13 @@ fn owner_thread(
             owner.nudge();
         }
     } else {
-        crate::log(&format!("terminal {} (handle {handle}) started: pid {pid}, {:?}", tref.id, meta.argv));
+        crate::log(&format!(
+            "terminal {} (handle {handle}) started: pid {pid}, {}{} in {}",
+            tref.id,
+            meta.argv.join(" "),
+            if meta.login { " (login shell)" } else { "" },
+            meta.cwd
+        ));
         let _ = started.send(Ok((restored, unseen)));
     }
     let run = catch_unwind(AssertUnwindSafe(|| owner.run()));
@@ -1032,7 +1069,7 @@ impl Owner {
     /// `end` is where a data frame leaves the subscriber's stream (an `OUTPUT`'s end, a
     /// `REPAINT`'s `seq`), `None` for an event. `keep` frames (`role`, `lagged`, `exit`,
     /// `closed`, `error`) are never dropped. A lossy subscriber whose queue would pass
-    /// `LOSSY_MAX` starts lagging: its queued frames go, nothing but `keep` frames is
+    /// the lossy limit (`--lossy-queue`) starts lagging: its queued frames go, nothing but `keep` frames is
     /// queued for it, and `resync_drained` catches it up once it has read what was left.
     /// An empty queue always takes the frame, so one large repaint can't start a lag.
     fn send(&mut self, i: usize, keep: bool, head: Vec<u8>, body: Option<Arc<[u8]>>, end: Option<u64>) {
@@ -1042,7 +1079,7 @@ impl Owner {
         }
         let len = head.len() + body.as_ref().map_or(0, |b| b.len());
         let queued = s.shared.queued.load(SeqCst);
-        if s.flow == Flow::Lossy && !keep && queued > 0 && queued + len > LOSSY_MAX {
+        if s.flow == Flow::Lossy && !keep && queued > 0 && queued + len > out::lossy_max() {
             let stop = s.out.drop_sub_frames(&s.shared);
             s.lag = Some(stop.unwrap_or(s.sent_end));
             s.shared.lagging.store(true, SeqCst);
@@ -1396,13 +1433,16 @@ impl Owner {
                     err(code::READ_ONLY, format!("INPUT on a watch subscription to {}", self.tref.id));
                     return false;
                 }
-                if self.reg.cfg.test_hooks && bytes == TEST_PANIC_INPUT {
-                    panic!("test hook: panic requested by INPUT");
-                }
-                if self.reg.cfg.test_hooks && bytes == TEST_WEDGE_INPUT {
-                    crate::server::WEDGED.store(true, SeqCst);
-                    crate::log("test hook: the heartbeat stops");
-                    return true;
+                #[cfg(feature = "test-hooks")]
+                {
+                    if self.reg.cfg.test_hooks && bytes == TEST_PANIC_INPUT {
+                        panic!("test hook: panic requested by INPUT");
+                    }
+                    if self.reg.cfg.test_hooks && bytes == TEST_WEDGE_INPUT {
+                        crate::server::WEDGED.store(true, SeqCst);
+                        crate::log("test hook: the heartbeat stops");
+                        return true;
+                    }
                 }
                 if self.cut {
                     // At most once: input the handoff didn't carry is dropped, and said so.
@@ -1415,7 +1455,7 @@ impl Owner {
                 if self.subs[i].view.take().is_some() {
                     self.push_live_repaint(i, 0);
                 }
-                if self.input.len() + bytes.len() > INPUT_MAX {
+                if self.input.len() + bytes.len() > self.reg.cfg.input_max {
                     err(
                         code::INPUT_FULL,
                         format!(
