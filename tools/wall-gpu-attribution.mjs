@@ -2,11 +2,15 @@
  * wall-gpu-attribution.mjs — where the wall's GPU frame goes, by toggling one layer at a time at a
  * fixed camera state and timing the main render pass with EXT_disjoint_timer_query_webgl2.
  *
- *   bun tools/wall-gpu-attribution.mjs [--url http://localhost:5180/] [--relay 8099]
- *                                      [--width 3024 --height 1964] [--frames 120]
+ *   bun tools/wall-gpu-attribution.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
+ *                                      [--terminals 14] [--width 3024 --height 1964] [--frames 120]
  *
- * Needs the wall's Vite + a relay with terminals (the wall re-adopts glyphd sessions). Launches a
- * real-GPU browser (headed on macOS — a window opens) and refuses a software GL renderer.
+ * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
+ * (tools/wall-relay.mjs: tmux socket `glyph-wall-gpu`, no gomuxai; killed with its tmux server at the
+ * end) and refuses a port something already listens on, unless --reuse-relay names a relay you
+ * started. Spawns --terminals of its own and fills only those with text (a reused relay's other
+ * terminals are drawn, never typed into); kills them at the end. Launches a real-GPU browser
+ * (headed on macOS — a window opens) and refuses a software GL renderer.
  *
  * States: OVERVIEW (fit all) and FRAMED (one text-filled terminal fills the view). Variants per
  * state: all layers · glyph fields hidden · panels hidden · scrollback depth-history off. The
@@ -14,19 +18,33 @@
  * GPU time is per main render pass, one pass per frame here (the wall has no second pass).
  */
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
+import { privateRelay, spawnOwnTerminals } from './wall-relay.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL = arg('--url', 'http://localhost:5180/');
 const RELAY = Number(arg('--relay', 8099));   // a PRIVATE relay — never the one a person's display is on
+const TERMINALS = Number(arg('--terminals', 14));
 const W = Number(arg('--width', 3024)), H = Number(arg('--height', 1964));
 const FRAMES = Number(arg('--frames', 120));
 const OUT = arg('--json');
 const rows = [];
 
-const browser = await launchGpuBrowser({});
+const relay = await privateRelay({ port: RELAY, socket: 'glyph-wall-gpu', reuse: process.argv.includes('--reuse-relay') });
+let browser = null;
+let app = null;
+/** The terminals this tool spawned — the only ones it types into. */
+const own = [];
 try {
-    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 4000, viewport: { width: W, height: H } });
+    browser = await launchGpuBrowser({});
+    app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 4000, viewport: { width: W, height: H } });
     if (!app.booted) throw new Error('wall did not boot');
+    const up = await app.evalPage(async () => {
+        for (let i = 0; i < 60 && !window.__wall.snapshot().connected; i++) await new Promise((r) => setTimeout(r, 250));
+        return window.__wall.snapshot().relay;
+    });
+    if (up.state !== 'up') throw new Error(`the wall isn't the relay's display on :${RELAY} (${up.state}${up.reason ? `: ${up.reason}` : ''})`);
+    own.push(...await spawnOwnTerminals(app.evalPage, TERMINALS));
+    console.log(`[wall] spawned ${own.length} terminals of its own: ${own.join(' ')}`);
     const gpu = await app.evalPage(() => {
         const gl = window.__glyphClient.ctx.renderer.getContext();
         const dbg = gl.getExtension('WEBGL_debug_renderer_info');
@@ -37,16 +55,15 @@ try {
     if (/swiftshader|llvmpipe|software/i.test(gpu.renderer)) throw new Error('software renderer — numbers would be fiction');
     if (!gpu.timer) throw new Error('no EXT_disjoint_timer_query_webgl2 — cannot time the GPU');
 
-    // Fill every terminal with text so glyph cost is real, then settle.
-    const n = await app.evalPage(async () => {
+    // Fill this tool's terminals with text so glyph cost is real, then settle.
+    const n = await app.evalPage(async (ids) => {
         const w = window.__wall;
-        for (let i = 0; i < 40 && !w.bridge.connected; i++) await new Promise((r) => setTimeout(r, 250));
-        await new Promise((r) => setTimeout(r, 2000));
-        for (const id of w.order) w.ctx.terminals.get(id).sendInput('clear; ls -la /usr/bin | head -60\r');
+        window.__gpuOwn = ids;
+        for (const id of ids) w.terminal(id).sendInput('clear; ls -la /usr/bin | head -60\r');
         await new Promise((r) => setTimeout(r, 2500));
         return w.order.length;
-    });
-    if (!n) throw new Error('no terminals on the wall — spawn some first');
+    }, own);
+    console.log(`[wall] ${n} terminals on the wall (${own.length} of them this tool's)`);
 
     // Install the timer + layer toggles once.
     await app.evalPage(() => {
@@ -130,7 +147,7 @@ try {
 
     if (!process.argv.includes('--motion') && !process.argv.includes('--laps')) for (const [where, place] of [
         ['OVERVIEW', () => { window.__wall.focus(null); window.__wall.fitAll(); }],
-        ['FRAMED', () => { const w = window.__wall; const id = w.order[0]; w.focus(id); w.frame(id); }],
+        ['FRAMED', () => { const w = window.__wall; const id = window.__gpuOwn[0]; w.focus(id); w.frame(id); }],
     ]) {
         await app.evalPage(place);
         await app.waitFor(1200);
@@ -206,5 +223,10 @@ try {
     if (app.errors.length) console.log('[page errors]', app.errors.slice(0, 5));
     if (OUT) (await import('node:fs')).writeFileSync(OUT, JSON.stringify({ gpu, terminals: n, argv: process.argv.slice(2), rows, errors: app.errors.slice(0, 5) }, null, 2));
 } finally {
-    await browser.close();
+    if (app && own.length) {
+        for (const id of own) await app.evalPage((i) => window.__wall.kill(i), id).catch(() => {});
+        await app.waitFor(1000).catch(() => {});
+    }
+    await browser?.close();
+    await relay.stop();
 }

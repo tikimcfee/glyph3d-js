@@ -5,7 +5,7 @@
  *   (TerminalEmulator._readScreen) → TerminalGrid.applyScreen (atlas ensure · cell writes ·
  *   history · slot sync) → GL uploads inside renderer.render → drawn (GPU fence).
  *
- *   bun tools/wall-text-perf.mjs [--url http://localhost:5180/] [--relay 8099]
+ *   bun tools/wall-text-perf.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *                                [--width 3024 --height 1964] [--json OUT]
  *                                [--mode idle,flood,cold,profile]   (default: all four)
  *                                [--source direct,tmux]        (flood sources; default both)
@@ -13,9 +13,12 @@
  *                                [--scale 1,4,14]              (terminals flooded at once)
  *                                [--seq 300000] [--source-bytes 2000000] [--top 25]
  *
- * Needs the wall's Vite (:5180) and a PRIVATE relay (never the one a person's display is on —
- * the relay takes one display) already holding at least max(--scale) terminals. Launches a
- * real-GPU browser (headed on macOS) and refuses a software GL renderer.
+ * Needs the wall's Vite (:5180) and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
+ * (tools/wall-relay.mjs: tmux socket `glyph-wall-text-perf`, no gomuxai; killed with its tmux server
+ * at the end) and refuses a port something already listens on, unless --reuse-relay names a relay
+ * you started. Spawns max(--scale) terminals of its own and writes only to those (a reused relay's
+ * other terminals are drawn, never typed into); kills them at the end. Launches a real-GPU browser
+ * (headed on macOS) and refuses a software GL renderer.
  *
  * Four passes, each on its own fresh page so one can't warm or skew the next:
  *
@@ -53,6 +56,7 @@
  */
 
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
+import { privateRelay, spawnOwnTerminals } from './wall-relay.mjs';
 import { writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -121,12 +125,12 @@ const SINGLES = range(0x0531, 0x0538);   // Armenian capitals (DejaVu Sans), out
 // ── the page probe ──────────────────────────────────────────────────────────────────────────────
 // Installed once per page as window.__wtp. `light` installs only the scenario drivers (no wrappers)
 // so a CPU profile sees the code as it ships.
-function installProbe({ S, light }) {
+function installProbe({ S, light, own }) {
     const w = window.__wall, c = window.__glyphClient;
     const r = c.ctx.renderer, gl = r.getContext();
     const E = [];   // flat events: t, dur, stage, terminal index, n
     const undo = [];
-    const ids = [...w.order];
+    const ids = [...own];   // the terminals this tool spawned — the only ones it writes to
     const grids = ids.map((id) => w.terminal(id));
     const idx = new Map(ids.map((id, i) => [id, i]));
     const emuIdx = new WeakMap(); grids.forEach((g, i) => emuIdx.set(g._emulator, i));
@@ -559,10 +563,30 @@ async function analyzeProfile(profile, glMethods) {
 
 // ── run ─────────────────────────────────────────────────────────────────────────────────────────
 const result = { argv: process.argv.slice(2), when: new Date().toISOString(), viewport: [W, H], seq: SEQ, payloadBytes: Object.fromEntries(Object.entries(payloads).map(([k, v]) => [k, { asWritten: v.text.length, crlf: crlf(v.text).length }])) };
-const browser = await launchGpuBrowser({});
+const relay = await privateRelay({ port: RELAY, socket: 'glyph-wall-text-perf', reuse: process.argv.includes('--reuse-relay') });
+/** The terminals this tool spawned (on the first page; later pages re-adopt them) — the only ones it writes to. */
+const OWN = [];
+let browser = null;
+/** A fresh wall page holding every terminal in OWN (the first one spawns them). */
 const openWall = async () => {
     const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 4000, viewport: { width: W, height: H } });
     if (!app.booted) throw new Error('wall did not boot');
+    const up = await app.evalPage(async () => {
+        for (let i = 0; i < 60 && !window.__wall.snapshot().connected; i++) await new Promise((r) => setTimeout(r, 250));
+        return window.__wall.snapshot().relay;
+    });
+    if (up.state !== 'up') throw new Error(`the wall isn't the relay's display on :${RELAY} (${up.state}${up.reason ? `: ${up.reason}` : ''})`);
+    const need = Math.max(...SCALE, 1);
+    if (!OWN.length) {
+        OWN.push(...await spawnOwnTerminals(app.evalPage, need));
+        console.log(`[wtp] spawned ${OWN.length} terminals of its own: ${OWN.join(' ')}`);
+    }
+    // A fresh page re-adopts them as their adapters notice it (a ping, then a re-create).
+    const present = await app.evalPage(async (ids) => {
+        for (let i = 0; i < 80 && !ids.every((id) => window.__wall.terminal(id)); i++) await new Promise((r) => setTimeout(r, 250));
+        return ids.filter((id) => window.__wall.terminal(id)).length;
+    }, OWN);
+    if (present < OWN.length) throw new Error(`only ${present} of this tool's ${OWN.length} terminals came back on the fresh page`);
     const gpu = await app.evalPage(() => {
         const gl = window.__glyphClient.ctx.renderer.getContext();
         const dbg = gl.getExtension('WEBGL_debug_renderer_info');
@@ -570,14 +594,6 @@ const openWall = async () => {
                  timer: !!gl.getExtension('EXT_disjoint_timer_query_webgl2'), glMethods: Object.getOwnPropertyNames(WebGL2RenderingContext.prototype) };
     });
     if (/swiftshader|llvmpipe|software/i.test(gpu.renderer)) throw new Error(`software GL renderer (${gpu.renderer}) — numbers would be fiction`);
-    const n = await app.evalPage(async () => {
-        const w = window.__wall;
-        for (let i = 0; i < 40 && !w.bridge.connected; i++) await new Promise((r) => setTimeout(r, 250));
-        await new Promise((r) => setTimeout(r, 2500));   // terminal.recover re-adopts the relay's terminals
-        return w.order.length;
-    });
-    const need = Math.max(...SCALE, 1);
-    if (n < need) throw new Error(`the relay holds ${n} terminals; --scale needs ${need} (spawn them first)`);
     app.glMethods = new Set(gpu.glMethods);
     delete gpu.glMethods;
     result.gpu ??= gpu;
@@ -587,10 +603,11 @@ const closeWall = async (app) => { await app.evalPage(() => window.__wtp?.uninst
 const mb = (b) => (b / 1e6).toFixed(2);
 
 try {
+    browser = await launchGpuBrowser({});
     // ── IDLE ────────────────────────────────────────────────────────────────────────────────────
     if (MODES.includes('idle')) {
         const app = await openWall();
-        result.info = await app.evalPage(installProbe, { S, light: false });
+        result.info = await app.evalPage(installProbe, { S, light: false, own: OWN });
         result.idle = [];
         for (const poseName of ['overview', 'framed']) {
             const pose = await app.evalPage((p) => window.__wtp.reset(p), poseName);
@@ -606,7 +623,7 @@ try {
     // ── FLOOD ───────────────────────────────────────────────────────────────────────────────────
     if (MODES.includes('flood')) {
         const app = await openWall();
-        const floodInfo = await app.evalPage(installProbe, { S, light: false });
+        const floodInfo = await app.evalPage(installProbe, { S, light: false, own: OWN });
         result.info ??= floodInfo;
         console.log(`[gpu] ${result.gpu.renderer} · canvas ${result.gpu.canvas.join('×')} · ${result.info.terminals.length} terminals, ${result.info.terminals[0].cols}×${result.info.terminals[0].rows}, ${result.info.terminals[0].instances} instances each (${result.info.terminals[0].instanceBufferBytes} B instance buffer) · atlas ${result.info.atlas.glyphs} glyphs, ${result.info.atlas.fields} fields`);
         if (result.info.missing.length) console.log(`[probe] could not wrap: ${result.info.missing.join(', ')}`);
@@ -643,7 +660,7 @@ try {
     // ── COLD ────────────────────────────────────────────────────────────────────────────────────
     if (MODES.includes('cold')) {
         const app = await openWall();
-        const info = await app.evalPage(installProbe, { S, light: false });
+        const info = await app.evalPage(installProbe, { S, light: false, own: OWN });
         result.info ??= info;
         const pose = await app.evalPage(() => window.__wtp.reset('framed', 0));
         result.cold = { pose, atlasAtStart: info.atlas, classes: Object.fromEntries(Object.entries(BURSTS).map(([k, v]) => [k, { distinct: v.cps.length, note: v.note }])), bursts: [] };
@@ -673,7 +690,7 @@ try {
     // ── PROFILE ─────────────────────────────────────────────────────────────────────────────────
     if (MODES.includes('profile')) {
         const app = await openWall();
-        await app.evalPage(installProbe, { S, light: true });
+        await app.evalPage(installProbe, { S, light: true, own: OWN });
         const cdp = await app.page.context().newCDPSession(app.page);
         await cdp.send('Profiler.enable');
         await cdp.send('Profiler.setSamplingInterval', { interval: 200 });
@@ -708,5 +725,15 @@ try {
     if (result.errors?.length) console.log('[page errors]', result.errors);
     if (OUT) { writeFileSync(OUT, JSON.stringify(result, null, 2)); console.log(`[json] ${OUT}`); }
 } finally {
-    await browser.close();
+    // Kill this tool's own terminals (a reused relay keeps everyone else's), then the relay it started.
+    if (browser && OWN.length) {
+        try {
+            for (const p of browser.contexts().flatMap((c) => c.pages())) await p.close();   // the relay takes one display
+            const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 1500, viewport: { width: 800, height: 600 } });
+            await app.evalPage(async (ids) => { for (let i = 0; i < 40 && !ids.every((id) => window.__wall.terminal(id)); i++) await new Promise((r) => setTimeout(r, 250)); for (const id of ids) await window.__wall.kill(id); }, OWN);
+            await app.waitFor(1000);
+        } catch (e) { console.log(`[wtp] couldn't kill its terminals (${e.message}) — ${relay.started ? 'the relay stop takes them' : 'kill them by hand: ' + OWN.join(' ')}`); }
+    }
+    await browser?.close();
+    await relay.stop();
 }
