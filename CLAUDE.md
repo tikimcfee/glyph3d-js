@@ -192,7 +192,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (this frame's matrices; never on pick passes) into one draw per kind × render state, taking each
   object off the view camera's layer 0. Buckets cull per instance, sort translucent instances as
   three sorts objects, and draw just before their render-order band (panels, then fills, then
-  outlines). Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-check.mjs`.
+  outlines). A still panel costs it nothing: its cull outcome stands while its world matrix and the
+  camera hold, its instance matrix while it and the eye hold, and a flat panel's colours and flags
+  are re-read only when its material's `panelVersion` moves — every restyle goes through the
+  `createPanelMaterial` handle, which bumps it (a hand-written uniform goes unseen); box fills and
+  edges are read and compared every frame. Each bucket uploads only the span that changed.
+  Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-skip.test.mjs`, `tools/panel-batch-check.mjs`.
 - **Glyph batching** (`collections/GlyphBatch.js`): labels (every FieldLabel — book tabs,
   nameplates, dock titles) stay real InstancedFields their owners write and pose, but draw from
   ONE arena field: `enrollGlyphField(field)` marks one; a `GlyphBatch` refreshes from
