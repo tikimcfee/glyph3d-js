@@ -27,8 +27,10 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.
 - **`crates/`** — the Rust workspace: `g3d-termd`, the terminal daemon (PTYs + one libghostty-vt
-  emulator per terminal; outlives the relay), `g3d` (attach to / watch / list / start terminals
-  from any real terminal) and `g3d-wire` (the public protocol, `docs/termd/PROTOCOL.md`).
+  emulator per terminal; outlives the relay) in two processes, the holder (`g3d-hold`: the shells'
+  parent and their PTY fds) and the brain (everything else, restartable), `g3d` (attach to / watch /
+  list / start / upgrade terminals from any real terminal) and `g3d-wire` (the public protocol,
+  `docs/termd/PROTOCOL.md`).
 
 ## Tech stack
 
@@ -74,7 +76,7 @@ cli/
   termd.go                                          the relay's g3d-termd client (start, list, …)
   gomux.go agentevents.go                           gomuxai: hub tree, agent sessions + events
 crates/
-  g3d-wire/  g3d-termd/  g3d/                       protocol · the terminal daemon · its client
+  g3d-wire/  g3d-hold/  g3d-termd/  g3d/            protocol · termd's holder · the daemon · its client
 docs/termd/  PROTOCOL.md DESIGN.md                  the termd wire (public) and its design
 Makefile  tools/dev.sh  tools/termd-vendor.sh
 ```
@@ -90,8 +92,8 @@ NVIDIA-pinned `tools/dev-firefox.sh`; plain Firefox on Linux crashes on WebGPU.
   core/handlers — the watcher can serve stale transforms; verify with
   `curl http://localhost:5173/@fs/<abspath> | rg <token>`).
 - `tools/dev.sh relay` rebuilds (Go + termd) + restarts the Go relay. Terminals live in
-  `g3d-termd` and survive it; a rebuilt `g3d-termd` takes over only once the running daemon
-  stops (`./g3d stop` — every shell in the namespace dies).
+  `g3d-termd` and survive it; `./g3d upgrade` hands every terminal to the rebuilt `g3d-termd`
+  without ending a shell (`./g3d stop` ends the namespace: every shell in it dies).
 
 **Build / serve**: `make build` runs the app's Vite production build, stages
 `app/dist/` into `cli/web/`, and bakes it into the binary; `make termd` (part of it) builds
@@ -440,8 +442,12 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   Scrollback is termd's per-subscriber `view` (`terminal.scroll`); the wheel goes to an
   alternate-screen app. A relay restart leaves terminals running: `terminal.recover` re-adopts
   every one with no owner and the adoption repaint redraws it; an adapter that dies under a live
-  relay (a signal, a crash) is replaced by the relay on its own. A termd crash kills every shell in
-  the namespace (adapters log `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
+  relay (a signal, a crash) is replaced by the relay on its own. termd is a holder (`g3d-hold`: the
+  shells' parent, their PTY fds, the snapshot store) and a brain it restarts: a brain crash keeps
+  every shell (screens come back from 2 s snapshots, the unseen bytes are logged) and each adapter
+  rides it (reconnect, re-subscribe, repaint; `serve --termd-reconnect`); `./g3d upgrade` replaces
+  the brain losing no byte. The holder's death kills every shell in the namespace (adapters log
+  `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
   [-- cmd…]` starts any program. Gates: `cargo test --workspace`, `tools/termd-relay-check.mjs`,
   `tools/termd-fidelity-check.mjs`, `tools/wall-e2e.mjs`. Terminals render as `TerminalGrid`s and
   re-adopt across reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is

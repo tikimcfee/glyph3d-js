@@ -13,8 +13,8 @@ browser) build on it and are only sketched here.
 
 It is also the design termd is built to before S2 ("termd ready"): the [holder and
 brain](#holder-and-brain) split, the [environment](#environment) a terminal gets, the
-[defaults](#defaults) and the [status](#status) stream. "S1 as built" below says what the branch
-has today; the sections after it are the design.
+[defaults](#defaults) and the [status](#status) stream. "S1 as built" and "Holder and brain as
+built" below say what the branch has today; the sections after them are the design.
 
 ## S1 as built (2026-11-12)
 
@@ -25,8 +25,11 @@ What exists on branch `termd`, and where it departs from the plan below:
   `G3D_TERMD_DIR` overrides both (tests and the check runner keep their daemons in scratch
   directories with it). A socket path over 100 bytes is refused at start. `kill` signals the
   program's group and the PTY's foreground group, closes the PTY, and sends `SIGKILL` to both
-  if the program outlives a 2 s grace. `G3D_TERMD_TEST_HOOKS=1` arms one test hook (an
-  `INPUT` of a magic string panics that terminal's owner thread) for the panic-boundary test.
+  if the program outlives a 2 s grace. `G3D_TERMD_TEST_HOOKS=1` arms the test hooks: an `INPUT`
+  of one magic string panics that terminal's owner thread (the panic-boundary test), another stops
+  the brain's heartbeat (the watchdog test); `G3D_TERMD_TEST_BRAIN_FAIL_FILE` makes a brain exit at
+  start while that file exists (the crash-loop test); `G3D_TERMD_TEST_ENGINE_FILE` names the engine
+  a brain reports (the cross-engine handoff test). The scrub removes these from programs' environments.
   `exit` carries a signal by name. `on_xtversion` answers `g3d-termd <version>`.
 - **Client** (`crates/g3d`): `attach` (raw tty, query filter, `Ctrl-\` twice to detach,
   `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
@@ -53,15 +56,137 @@ What exists on branch `termd`, and where it departs from the plan below:
   (the "resize clearing prompt lines" risk below), and `g3d attach` under vim and Claude Code
   by hand (the query-filter coverage risk) — both are for the operator to try. Hot upgrade,
   packed cells and the Rust relay are later stages.
-- **Designed after S1, not built yet:** the holder/brain split (S1 is one process: a crash or a
-  `stop` ends every shell), the environment policy (S1's programs inherit the starting process's
-  environment, start in `/` when no `cwd` is given, and get no `IUTF8`), the defaults marked
-  "change" or "new", RFC 3339 log lines, and protocol 1.1's status stream.
+- **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)).
+  Not built yet: the environment policy (programs inherit the starting process's environment and
+  start in the holder's working directory, `/` once daemonized, when no `cwd` is given; `IUTF8` is
+  now set), the defaults marked "change" (scrollback, input buffer, socket fallback, default
+  program and cwd), the config file, and protocol 1.1's status stream.
 - **On branch `termd-macos`, to be merged:** darwin-arm64 builds and passes every gate; close-on-exec
   set after creation where macOS has no atomic form; the slave opened before `TIOCSWINSZ`; tests
   measure processes with `ps` instead of `/proc`; the socket fallback `/tmp/g3d-<uid>` with its
   directory checks and hourly re-stamp. Its findings are folded into this design (environment,
   platform seams, defaults); the code lands with the merge.
+
+## Holder and brain as built (2026-11-12)
+
+What the branch has of [Holder and brain](#holder-and-brain), and where it departs from it.
+
+**The holder** is `crates/g3d-hold`: 1,762 lines in six files (1,501 without comments and blank
+lines): `holder.rs` (the loop, 1,087), `spawn.rs` (the PTY and the fork, 182), `link.rs` (the hold
+link's framing and fd passing, 137), `shm.rs` (memfd / `shm_open`, 57), `log.rs` (30) and `lib.rs`.
+It depends on `rustix`, `libc`, `g3d-wire` (the frame codec) and `serde_json`; Cargo keeps
+libghostty and tokio out. That is more than "tiny": most of it is the brain's supervision and
+the upgrade handshake, which have to live in the process that outlives the brain. Its whole job,
+and nothing else:
+
+1. the namespace: the lock (holding its pid), the listening socket, daemonizing, the hourly
+   `utimes` re-stamp of both, `PR_SET_NAME` `g3d-termd`;
+2. the shells: spawning on a PTY when the brain asks (`IUTF8`, the slave opened before
+   `TIOCSWINSZ`, every signal disposition and the mask reset, the soft `RLIMIT_NOFILE` put back,
+   `close_range`, `execve` with the brain's environment and `PATH` lookup in it, the exec error back
+   through a close-on-exec pipe), reaping, keeping each master fd and exit status until the brain
+   releases the terminal, `kill` (the program's group and the PTY's foreground group, `SIGKILL`
+   after `--kill-grace`);
+3. the store: each terminal's newest two blobs, and the `seq_marks` page, handed to every brain;
+4. the brain: start, restart after a crash (`--brain-restart-delay-ms` 100, `--brain-start-burst`
+   5 in `--brain-start-interval` 10 s), failed (retried after `--brain-failed-backoff` 30 s doubling
+   to `--brain-failed-backoff-max` 600 s, at once on `SIGHUP`; while failed it answers every
+   connection with `ERROR brain_failed` naming the last exit, the log and its pid), the watchdog
+   (`--brain-watchdog` 30 s: `SIGABRT`, `SIGKILL` 5 s later), and the upgrade handshake
+   (`--upgrade-deadline` 10 s);
+5. the end: `SIGTERM` (the brain is asked to `shutdown`, so subscribers get `exit` + `closed`; the
+   holder hangs every program up itself if the brain hasn't ended in `--kill-grace` + 2 s), a
+   brain's `exit_namespace` (`stop`, idle exit), or idle with no brain and no terminals.
+
+It ignores `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGPIPE`. Its panic hook logs, then aborts.
+
+**The hold link** is a `socketpair(AF_UNIX, SOCK_STREAM)`; the brain gets its end as an inherited
+fd (`g3d-termd --brain --hold-fd N`, plus every flag the holder was started with). Each message is
+one frame in the public header with `flags` = the number of fds it carries and one JSON object
+(`{"m": …}`); fds ride `SCM_RIGHTS` on the `sendmsg` that carries the frame's first byte, and the
+reader queues them in order. The holder's side is non-blocking with an outgoing queue (a wedged
+brain cannot block it); the brain's is blocking. Messages, holder → brain: `welcome` (instance,
+generation, holder pid and version, `candidate`; fds: the listener, `seq_marks`), `term` (handle,
+slot, id, pid, the brain's opaque `meta`, the exit status if reaped; fds: the master, then the
+stored blobs newest first), `terms_done`, `go`, `spawned`, `exited`, `candidate`, `commit`,
+`upgrade_abort`, `shutdown`. Brain → holder: `hello` (hold `[1, 0]`, engine, version), `spawn`,
+`kill`, `release`, `snapshot` (fd: the blob), `alive`, `upgrade`, `upgrade_cancel`, `handoff_done`,
+`ready`, `upgrade_abort`, `exit_namespace`.
+
+**Saving and restoring screens.**
+
+- Each owner thread saves a blob (`crates/g3d-termd/src/blob.rs`) every `--snapshot-interval-ms`
+  (2,000) while its `seq` has moved: a libghostty snapshot, LZ4-compressed (`lz4_flex`), in a new
+  memfd sealed against writes, growth and shrinking (macOS: `shm_open` + `shm_unlink`). The header
+  carries a magic, kind (snapshot, or VT repaint), the handoff flag, `seq`, the engine
+  (`libghostty-vt/1.0.1 snapshot/1`), the terminal's id, the lengths and a CRC-32 (IEEE, from
+  `crc32fast`; the design said CRC32C, and any CRC that catches a torn or wrong blob does). The
+  format is frozen; `tests/fixtures/blob-v1-vt.bin` is its first fixture.
+- **Departure: the holder creates `seq_marks` once**, at its start (8 bytes × `--max-terminals`
+  8,192 = 64 KiB), and hands the same page to every brain, so a new brain reads the dead one's
+  marks without a handoff. Slots are the holder's (a terminal keeps its slot for its life).
+- **Finding: the mark goes before the read.** A brain `SIGKILL`ed while its owner thread is inside
+  `read(2)` dies after the kernel has dequeued the bytes; a mark stored after the read would miss
+  them, and they were lost uncounted (about 100 B in one run of four under a flood). Each read is
+  now bounded by `FIONREAD` and the mark set to cover it first, then set exactly after. The count is
+  exact unless the kill lands between the store and the syscall; then it overstates by bytes the
+  next brain still reads (`seq` skips ahead, nothing is lost). The report never understates a loss.
+- A starting brain restores each terminal from its newest blob that parses, passes the CRC, names
+  the terminal and (for a snapshot) names its own engine; a VT repaint replays into a fresh
+  emulator under any engine. `seq` resumes at `max(high-water, blob seq)`. A terminal is **exact**
+  when its blob is at the high-water mark: an upgrade's handoff, and also a crash while the
+  terminal had been quiet since its last snapshot. Only a terminal that is not exact gets the
+  `SIGWINCH` nudge. Pending input rides only an exact handoff blob (at most once). The brain logs,
+  per terminal, the snapshot's seq, the high-water mark and the unseen bytes, then a summary
+  (`restored 3 terminal(s): 1 exact, 2 from snapshots, 0 blank; 512 B unseen`).
+
+**Upgrade** works as designed, with these specifics: the old brain makes `create` answer `busy`
+and stops accepting (connections wait in the backlog); an owner thread at its cut answers
+`resize` and `kill` with `busy` and drops `INPUT` with an `error` event `busy` (at most once: input
+the handoff did not carry is not kept). The candidate checks that every live terminal came back
+exact and says `ready`, or `upgrade_abort` with the reason. After `commit` the old brain queues
+`ERROR restart` behind everything already queued to each connection (so a subscriber's stream
+ends exactly at the cut), gives the writers up to 1 s, and exits; the holder sends the candidate
+`go` once it has reaped the old one. On failure the asker gets an `upgrade_failed` event on stream
+0. `g3d upgrade [--binary PATH]` prints the new generation, or the failure; with the brain failed
+it sends the holder `SIGHUP` instead and waits for a brain. The holder records for
+`g3d upgrade --holder` are not built (`holder: true` answers `unsupported`).
+
+**The relay** (`cli/attach_unix.go`, `cli/termd.go`): an adapter whose connection drops rides the
+restart by [the rule](#riding-a-restart-relay-and-clients) (`serve --termd-reconnect`, 30 s,
+passed to every adapter): it checks `instance`, re-subscribes by id as the owner, and the repaint
+redraws the grid; nothing listening is `LOST termd` at once. `terminal.recover` skips a terminal
+whose adapter this relay started is still alive: during a restart termd lists every terminal with
+no owner for a moment, and a second adapter would fight the first. "Unknown is not empty" needed
+no change: a listing that can't get a `WELCOME` (a brain restarting, `brain_failed`) is an error.
+
+**Not built yet:** the cgroup scopes (programs, the brain and the holder stay in their starter's
+cgroup; the brain's `oom_score_adj` +300 is set), the holder's re-exec (`--holder`, the holder
+record and `--check-holder-record`), the status stream and everything that renders it, the
+relay's status connection (and with it re-adopting terminals whose adapters gave up), a fuzzed
+hold-link decoder.
+
+**Gates** (`crates/g3d-termd/tests/restart.rs`, each on a private socket):
+
+- a brain `SIGKILL`ed during `seq 1 300000`: both shells alive with their handles and pids; a quiet
+  terminal's screen back exactly; the flood's history holds every line up to the snapshot's `seq`
+  and every line from the high-water mark on, so the gap is exactly the reported unseen bytes
+  (positions computed from the subscriber's own stream); output after the restart has no gaps;
+- `g3d upgrade` to a copy of the binary during the same flood: each connection ends with
+  `ERROR restart` exactly at the cut, the new generation restores both terminals exact, all
+  300,000 lines are in the terminal's history, and the quiet screen is identical;
+- upgrades that fail (a candidate that exits, one never ready, a path that isn't a binary) leave the
+  same brain serving the same connections; an upgrade to another engine hands over by VT repaint
+  and reproduces the screen;
+- a brain that exits at every start: `ERROR brain_failed` naming the holder's pid, the shell alive,
+  then `SIGHUP` brings a brain back with the terminal; the watchdog aborts a brain that stops
+  sending `alive`; the holder's death hangs every shell up, the brain leaves saying why, and
+  nothing listens;
+- Go (`cli/relay_terminals_test.go`): the holder's death is loud; a brain restart is ridden (same
+  instance, generation 2) and a listing in between is never an empty answer;
+- `tools/termd-relay-check.mjs`: a brain crash and a `g3d upgrade` through the relay with a
+  simulated display (no grid closes, no `LOST termd`, the screen comes back, typing works,
+  `terminal.recover` mid-restart lists the terminals), then the holder's death.
 
 ## Measured ground (2026-11-12)
 
@@ -218,7 +343,7 @@ ended every shell. termd is now two processes per namespace:
 
 Both run from the one `g3d-termd` binary: `g3d-termd --ns <ns>` is the holder, which starts
 `g3d-termd --brain` itself (the brain is never started by hand). The holder's code is its own crate,
-`g3d-hold`, which depends on `rustix`, `libc` and `g3d-wire` (the frame codec and its JSON) and
+`g3d-hold`, which depends on `rustix`, `libc`, `g3d-wire` (the frame codec) and `serde_json` and
 nothing else, so Cargo itself keeps libghostty and tokio out of the holder. On Linux
 the processes name themselves `g3d-termd` and `g3d-termd-brain` (`PR_SET_NAME`), so `ps` and the
 status window tell them apart.
@@ -272,15 +397,17 @@ The brain saves each terminal while it runs, so a restarted brain can bring the 
   closes the older. The object is complete before it is sent, so a crash mid-encode leaves the
   previous one whole; there are no slots to tear. Its header carries a magic, the engine
   (`libghostty-vt/1.0.1` plus the snapshot format version), the terminal's id, the `seq` the
-  snapshot is at, the length and a CRC32C. Shared memory, not a file: screens can hold what was
+  snapshot is at, the length and a CRC-32. Shared memory, not a file: screens can hold what was
   typed at a prompt, and RAM-backed objects never reach a disk (beyond swap). Measured: a 120×40 terminal with a full 2 MiB history snapshots to 489 KB in
   0.3 ms; with a 10 MB history, 2.6 MB in 1.4 ms (decode 5 ms). LZ4 shrinks those to 37 KB and
   205 KB on build-log text. An idle prompt is 1.2 KB in 8 µs. The cost to the owner thread is
   well under 0.1% at a 2 s interval.
-- **The seq high-water mark.** One fixed-size shared page per brain (`seq_marks`, 64 KiB: 8,192
-  terminals × 8 bytes, created at brain start and handed to the holder) holds each terminal's
-  `seq` after each read, as one relaxed atomic store at the terminal's handle-assigned index. A restarted brain knows exactly how many bytes
-  the dead brain read after its last snapshot: `unseen = high-water − snapshot seq`.
+- **The seq high-water mark.** One fixed-size shared page (`seq_marks`, 64 KiB: `max_terminals`
+  8,192 × 8 bytes), created by the holder at its start and handed to every brain, holds each
+  terminal's `seq` as one relaxed atomic store at the terminal's slot, set to cover each read
+  before it runs (FIONREAD-bounded; [as built](#holder-and-brain-as-built-2026-11-12)). A restarted
+  brain knows how many bytes the dead brain read after its last snapshot:
+  `unseen = high-water − snapshot seq`.
 - **Restore.** The new brain decodes the newest valid slot if its engine string matches its own
   exactly (the snapshot format is outside libghostty's ABI promise), resizes it to the PTY's
   current size (`TIOCGWINSZ`, the kernel's truth), and resumes `seq` at the high-water mark, so
@@ -847,11 +974,12 @@ terminal are fixed when the terminal is created.
 | start wait | a client that starts the daemon retries for 3 s, 20 ms doubling to 250 ms | keep | |
 | brain restart | 100 ms; at most 5 starts in 10 s; then 30 s doubling to 10 min | **new** | systemd's `RestartSec`, `DefaultStartLimitBurst` and `DefaultStartLimitIntervalSec` |
 | brain watchdog | 30 s; `SIGABRT`, then `SIGKILL` 5 s later | **new** | systemd's `WatchdogSec` / `WatchdogSignal` practice; generous so a loaded machine doesn't trip it |
-| brain OOM preference | `oom_score_adj` +300 over the holder (Linux) | **new** | the restartable process should be the one the kernel picks |
+| brain OOM preference | `oom_score_adj` +300 over the holder (Linux); `--brain-oom-score-adj` | **new** | the restartable process should be the one the kernel picks |
+| most terminals | 8,192 per namespace (`--max-terminals`; the `seq_marks` page is 8 B each, 64 KiB) | **new** | far above any wall or desk; the page stays one small fixed allocation the holder never grows |
 | cgroup scopes | `auto` (Linux, soft failure) | **new** | Ghostty, VTE and tmux put each child in its own scope |
-| snapshot interval | 2 s, terminals with new output only, LZ4 | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
+| snapshot interval | 2 s, terminals with new output only, LZ4 (`--snapshot-interval-ms`, 0 = never) | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
 | upgrade deadline | 10 s for the candidate to report ready | **new** | |
-| client reconnect | 100 ms doubling to 2 s, for 30 s | **new** | covers a crash restart plus the first crash-loop retries |
+| client reconnect | 100 ms doubling to 2 s, for 30 s (the relay: `serve --termd-reconnect`) | **new** | covers a crash restart plus the first crash-loop retries |
 | environment source | `auto` (the user manager on Linux, the holder's own otherwise) | **new** | [Environment](#environment) |
 | default program | the passwd shell, as a login shell (argv0 `-<basename>`); `shell`, `login_shell = true` | **change** (S1: the daemon's `$SHELL`, non-login; the relay sent its own `$SHELL`) | tmux, WezTerm's mux and shpool; [The shell, and login or not](#the-shell-and-login-or-not) |
 | locale fill | `LANG=C.UTF-8` (macOS: the user's locale) only when no locale is set and it loads; `fill_locale = true` | **new** | Ghostty, iTerm2, Terminal.app, and this macOS's own `/etc/zprofile`; [Locale](#locale) |
@@ -1120,7 +1248,7 @@ crates/
   g3d-wire/             the protocol: frame codec, op/event types, the query filter.
                         No I/O, no libghostty. TCEL types join it at S3.
   g3d-hold/             the holder: PTY fds, spawning, reaping, the fd store, brain
-                        supervision. rustix, libc and g3d-wire's frame codec only.
+                        supervision. rustix, libc, g3d-wire's frame codec, serde_json.
   g3d-termd/            the binary: holder entry (g3d-hold), and the brain (owner
                         threads, libghostty, the socket server, status)
   g3d/                  the client binary: attach, watch, ls, new, kill, stop

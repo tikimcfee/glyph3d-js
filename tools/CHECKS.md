@@ -861,10 +861,16 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   repaint, the state), two stalled clients beside a BEL+title flood (daemon RSS bounded, the
   terminal keeps its pace), `take` freeing a wedged blocking owner (and the frame order of `take`
   and subscribe-as-own), a late subscriber told `modes` and the title, a blocking owner and
-  a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling, a HUP-ignoring child,
-  a panicking owner thread, the namespace lock, idle exit, stop, a SIGKILLed daemon taking its
-  shells down; and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no
-  query reaching the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
+  a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling (the brain's), a
+  HUP-ignoring child, a panicking owner thread, the namespace lock, idle exit, stop; the holder and
+  brain (`tests/restart.rs`): a brain SIGKILLed under a flood (shells and handles kept, a quiet
+  screen back exactly, the flood's history whole up to the snapshot and from the high-water mark,
+  the gap exactly the reported unseen bytes), `upgrade` under a flood (all 300000 lines in the
+  history across it, screens identical, ERROR restart at the exact cut), failed upgrades leaving
+  the brain serving, a VT handoff across engines, a crash loop to `brain_failed` and back on
+  SIGHUP, the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
+  and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
+  the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
   tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
   cargo test --workspace
@@ -874,14 +880,18 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
   screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
   the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a
-  SIGKILLed adapter (the relay re-adopts its terminal, typing works), a SIGKILLed termd (adapters
-  close their grids, the relay log says `LOST termd`, the next spawn starts a fresh daemon).
+  SIGKILLed adapter (the relay re-adopts its terminal, typing works), a SIGKILLed termd brain and
+  a `g3d upgrade` (every adapter rides them: no grid closes, no `LOST termd`, the repaint brings the
+  screen back, `terminal.recover` mid-restart never answers empty), a SIGKILLed termd holder
+  (adapters close their grids, the relay log says `LOST termd`, the next spawn starts a fresh
+  daemon).
 - **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
   (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
   parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty
   keeps U+FFFD where xterm drops the bytes).
 - Go: `cd cli && go test ./...` runs the relay's termd client against a private daemon (it needs
-  `cargo build -p g3d-termd`, or `G3D_TERMD_BIN`).
+  `cargo build -p g3d-termd`, or `G3D_TERMD_BIN`; `G3D_TEST_RUN_DIR` keeps its sockets out of the
+  system temp dir): the holder's death is loud, a brain restart is ridden.
 
 ## Build / serve
 

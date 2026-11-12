@@ -9,9 +9,12 @@ disagree, the daemon has a bug.
 
 The protocol is public and versioned. Nothing in it is specific to glyph3d.
 
-Version 1.1 is the first release. What is marked **(1.1)** is designed and not yet built: the
-daemon on branch `termd` speaks 1.0, which is 1.1 without those parts (and with the 1.0 defaults
-listed in [Versions](#versions)).
+Version 1.1 is the first release. What is marked **(1.1)** is new in it. The daemon on branch
+`termd` has 1.1's restarts: `WELCOME.instance`, `generation` and `holder`, `ERROR` `restart` and
+`brain_failed`, the `busy` code, and `upgrade` (feature `upgrade`, with the `upgrade_failed`
+event). It does not have `status`, `status_follow` and the `status` event yet, nor 1.1's
+environment and `create` defaults, so it still announces `proto` `[1, 0]` (see
+[Versions](#versions)).
 
 ## At a glance
 
@@ -215,7 +218,7 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
-| `busy` | (1.1) the op can't run now because another one of its kind is running (`upgrade`) |
+| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill` during the handoff) |
 
 ### `create`
 
@@ -567,8 +570,15 @@ installed). The reply `{"req": 16, "ok": true, "generation": 2}` means the upgra
 `ERROR` `restart` and closes, and a reconnect's `WELCOME` shows a higher `generation`. If it
 doesn't, connections stay open and the status document's `errors` carries `upgrade_failed`.
 `bad_request` when `binary` isn't an executable file; `busy` while another upgrade runs.
-Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it uses the same op with
-`"holder": true`.
+
+While the daemon hands its terminals over (a fraction of a second), `create`, `resize` and `kill`
+answer `busy`, and `INPUT` is dropped with an `error` event `busy`: input is at most once, so what
+the handoff didn't carry is not kept. New connections wait in the socket's backlog. When the
+upgrade doesn't happen, the connection that asked gets an `EVENT` on stream 0:
+`{"ev": "upgrade_failed", "message": "…"}`, and everything carries on.
+
+Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it will use the same op with
+`"holder": true`, which the daemon on branch `termd` answers `unsupported`.
 
 ## Data frames
 
@@ -652,8 +662,10 @@ every subscriber of the terminal, including `mode: "none"`, in order with its
 | `closed` | | the terminal is gone; the handle is dead. Always last |
 | `error` | `code`, `message` | something with no reply went wrong: an `INPUT` refused (`not_subscribed`, `read_only`, `no_terminal`, or `input_full` when the program's input buffer is full), or the terminal failed inside termd (`panic`; `exit` and `closed` follow) |
 | `status` | the status document | (1.1) on stream 0, to a connection that asked with `status_follow` |
+| `upgrade_failed` | `message` | (1.1) on stream 0, to the connection that asked for an `upgrade` that did not happen |
 
-The `error` event's codes are the request codes above plus two of its own:
+The `error` event's codes are the request codes above (`busy`: an `INPUT` dropped during an
+upgrade's handoff) plus two of its own:
 
 | code | meaning |
 |---|---|
@@ -946,4 +958,5 @@ writes, and send keystrokes as `INPUT`.
   2 MiB, the socket fallback `$TMPDIR/g3d-<uid>`, and the environment the daemon's own
   plus termd's variables (without `TERM_PROGRAM`), with only `TMUX`/`TMUX_PANE` removed and no
   reserved names. No released client depends on those.
-- **1.0**: the branch-only first cut.
+- **1.0**: the branch-only first cut. The daemon on branch `termd` announces `[1, 0]` with the
+  1.1 restart parts listed at the top of this page, until `status` exists.

@@ -233,7 +233,7 @@ export const CHECKS = [
     {
         name: 'termd-relay-check', cmd: ['bun', 'tools/termd-relay-check.mjs', '--relay', '{port}'], tier: 'full', scope: ['terminal', 'relay'],
         needs: ['own-relay', 'termd'], apart: ['*'], timeoutMs: 180_000,
-        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd crash (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon)',
+        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd brain crash and a `g3d upgrade` ridden by every adapter (no grid closes, the repaint brings the screen back, recover mid-restart never answers empty), the holder dying (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon)',
         blind: 'the browser (wall-e2e drives the same paths with pixels)',
     },
     h('bridge-binary.test.mjs', ['relay'], 'the RPC binary result plane: frame parse, header + payload, pending resolution', 'the Go encoder'),
