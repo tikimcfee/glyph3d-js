@@ -1123,38 +1123,74 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int) {
 	}()
 }
 
+// liveTerminalIDs lists the terminal id of every live `glyph-*` tmux session on the relay's
+// socket — adopted or orphaned. Empty when no tmux server runs there (or tmux is absent / the
+// platform has none): then no terminal is live.
+func liveTerminalIDs() []string {
+	out, err := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}").Output()
+	if err != nil {
+		return []string{}
+	}
+	return terminalIDsFromSessions(string(out))
+}
+
+// terminalIDsFromSessions picks the terminal ids out of `tmux ls -F '#{session_name}'` output: a
+// `glyph-<id>` session is terminal <id>; any other session on the socket isn't a terminal.
+func terminalIDsFromSessions(out string) []string {
+	ids := []string{}
+	for _, session := range strings.Split(out, "\n") {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(session), "glyph-"); ok && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// seedTermSeq moves the spawn counter past every `term-N` among ids — the ONE place it is seeded,
+// at relay start (RunServer / RunRelay) and on every terminal.recover. A live session outlives the
+// relay that spawned it; a restarted relay whose counter started at zero would mint `term-1` again
+// and attach a second client to someone's live shell. It never moves the counter back.
+func (r *Relay) seedTermSeq(ids []string) {
+	var maxSeq int64
+	for _, id := range ids {
+		num, ok := strings.CutPrefix(id, "term-")
+		if !ok {
+			continue
+		}
+		if n, err := strconv.ParseInt(num, 10, 64); err == nil && n > maxSeq {
+			maxSeq = n
+		}
+	}
+	for {
+		cur := r.termSeq.Load()
+		if cur >= maxSeq || r.termSeq.CompareAndSwap(cur, maxSeq) {
+			return
+		}
+	}
+}
+
 // recoverTerminals re-adopts every live `glyph-*` tmux session that has NO attached client —
 // orphaned sessions whose adapter died (e.g. a relay restart severed it, but detach-not-kill kept
 // the session and its work alive). For each, fork a fresh `attach <id>` adapter so the display
-// rebuilds the grid and the re-adoption handshake repaints it. Sessions that still have a client
-// are skipped (already adopted). Dedup is via tmux's own client list — the relay keeps no adapter
-// map — so this is idempotent, one-command recovery after any relay restart. (tmux-absent / non-unix:
-// `ls` errors → nothing to recover, returned gracefully.)
+// rebuilds the grid (or, when the display outlived the relay, hands its grid to the new adapter)
+// and the re-adoption handshake repaints it. Sessions that still have a client are skipped
+// (already adopted). Dedup is via tmux's own client list — the relay keeps no adapter map — so
+// this is idempotent, one-command recovery after any relay restart.
+//
+// The reply, `terminal.recovered`, carries the ids re-adopted (`ids`, `count`) and every live
+// terminal id on the socket (`live`) — what a display prunes its per-terminal memory against, since
+// an id is free to be minted again once its session is gone.
 func (r *Relay) recoverTerminals(reply func(any)) {
-	out, err := exec.Command("tmux", "-L", tmuxSocket, "ls", "-F", "#{session_name}").Output()
-	if err != nil {
-		reply(map[string]any{"event": "terminal.recovered", "ids": []string{}, "count": 0})
-		return
-	}
+	live := liveTerminalIDs()
+	r.seedTermSeq(live)
 	exePath, err := os.Executable()
 	if err != nil {
 		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
 		return
 	}
 	recovered := []string{}
-	var maxSeq int64
-	for _, session := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		session = strings.TrimSpace(session)
-		if !strings.HasPrefix(session, "glyph-") {
-			continue
-		}
-		id := strings.TrimPrefix(session, "glyph-")
-		// Seed past EVERY existing session, adopted or not: a live adapter survives a relay
-		// restart, and a post-restart counter that only skipped re-adopted ids would mint
-		// `term-1` again — attaching a second client to someone's live session.
-		if n, e := strconv.ParseInt(strings.TrimPrefix(id, "term-"), 10, 64); e == nil && n > maxSeq {
-			maxSeq = n
-		}
+	for _, id := range live {
+		session := "glyph-" + id
 		// Already adopted? A session with an attached client has a live adapter — skip it.
 		clients, _ := exec.Command("tmux", "-L", tmuxSocket, "list-clients", "-t", session, "-F", "#{client_name}").Output()
 		if strings.TrimSpace(string(clients)) != "" {
@@ -1177,15 +1213,8 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		go func(c *exec.Cmd) { c.Wait() }(cmd)
 		recovered = append(recovered, id)
 	}
-	// Don't let a post-restart seq reset later mint an id that collides with an existing session.
-	for {
-		cur := r.termSeq.Load()
-		if cur >= maxSeq || r.termSeq.CompareAndSwap(cur, maxSeq) {
-			break
-		}
-	}
-	log.Printf("[relay] terminal.recover: %d session(s) re-adopted", len(recovered))
-	reply(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered)})
+	log.Printf("[relay] terminal.recover: %d session(s) re-adopted, %d live", len(recovered), len(live))
+	reply(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered), "live": live})
 }
 
 func (r *Relay) notifyDisplay(event, clientID string) {
@@ -1252,6 +1281,7 @@ func RunServer(cfg ServerConfig) error {
 	relay := NewRelay()
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
+	relay.seedTermSeq(liveTerminalIDs()) // spawns start past every terminal this socket already has
 
 	// Wire the fs/writeFile notify hook so successful writes echo an
 	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
@@ -1359,6 +1389,7 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 	relay := NewRelay()
 	relay.fs = fsHandler
 	relay.port = port
+	relay.seedTermSeq(liveTerminalIDs()) // spawns start past every terminal this socket already has
 	if fsHandler != nil {
 		relay.wireFS(fsHandler)
 	}
