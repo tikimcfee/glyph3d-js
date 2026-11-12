@@ -50,6 +50,8 @@ type Relay struct {
 	port          int             // port this relay serves on (spawned adapters connect back here)
 	logs          *LogStore       // relay-resident browser-log store (SQLite :memory: + FTS5)
 	logSubs       map[string]bool // controller ids subscribed via log.follow (guarded by mu)
+	readoptMu     sync.Mutex
+	readopted     map[string][]time.Time // when each terminal's dead adapter was replaced (readoptOrphan)
 }
 
 // displayMsg is one queued write to the display WebSocket. binary marks RPC binary
@@ -1092,11 +1094,6 @@ func parseSinceDuration(s string) (time.Duration, error) {
 // daemon fails this request loudly instead of an adapter dying quietly. Single-user tool: as
 // trusted as the command bus.
 func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []string) {
-	exePath, err := os.Executable()
-	if err != nil {
-		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
-		return
-	}
 	tc, err := ensureTermd(termdNS)
 	if err != nil {
 		log.Printf("[relay] terminal.spawn: %v", err)
@@ -1105,6 +1102,26 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []str
 	}
 	tc.Close()
 	id := fmt.Sprintf("term-%d", r.termSeq.Add(1))
+	pid, err := r.startAdapter(id, cols, rows, argv)
+	if err != nil {
+		reply(map[string]any{"error": "spawn failed: " + err.Error()})
+		return
+	}
+	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, pid, r.port)
+	reply(map[string]any{"event": "terminal.spawning", "id": id})
+}
+
+// startAdapter forks `attach <id>` against this relay (argv: the program for a new terminal;
+// empty adopts or starts the adapter's $SHELL) and watches it. The adapter's lifecycle is termd's
+// and the display's (terminal.kill → terminal.shutdown → a clean exit), not the relay's: the relay
+// waits on it to reap it and to notice one that DIED — killed by a signal or crashed (any exit but
+// its own 0, or 1 for a failure it reported). That leaves its terminal running in termd with no
+// owner and its grid frozen on the display, so the relay re-adopts it (readoptOrphan).
+func (r *Relay) startAdapter(id string, cols, rows int, argv []string) (int, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("cannot locate glyph3d-cli binary: %w", err)
+	}
 	args := r.adapterArgs(id, cols, rows)
 	if len(argv) > 0 {
 		args = append(append(args, "--"), argv...)
@@ -1113,21 +1130,71 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []str
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		reply(map[string]any{"error": "spawn failed: " + err.Error()})
-		return
+		return 0, err
 	}
 	pid := cmd.Process.Pid
-	log.Printf("[relay] spawned terminal adapter '%s' (pid %d) → ws://localhost:%d", id, pid, r.port)
-	reply(map[string]any{"event": "terminal.spawning", "id": id})
-
-	// Reap the child when it exits. The adapter's lifecycle is owned by termd + the
-	// display (terminal.kill → terminal.shutdown → graceful exit), not the relay —
-	// we only Wait() to clear the process-table entry so closed terminals don't
-	// pile up as <defunct> zombies, and to log the exit.
 	go func() {
 		err := cmd.Wait()
 		log.Printf("[relay] terminal adapter '%s' (pid %d) exited: %v", id, pid, err)
+		if code := cmd.ProcessState.ExitCode(); code == -1 || code >= 2 {
+			r.readoptOrphan(id)
+		}
 	}()
+	return pid, nil
+}
+
+// readoptOrphan gives a terminal whose adapter died a new adapter, once termd lists it with no
+// owner (termd drops a dead connection's subscription a moment after the process goes). A
+// terminal that ended with its adapter, or that someone else owns by then, is left alone. An
+// adapter that keeps dying is replaced at most 3 times a minute; then the relay says so and
+// stops (terminal.recover still re-adopts by hand).
+func (r *Relay) readoptOrphan(id string) {
+	r.readoptMu.Lock()
+	if r.readopted == nil {
+		r.readopted = map[string][]time.Time{}
+	}
+	recent := []time.Time{}
+	for _, t := range r.readopted[id] {
+		if time.Since(t) < time.Minute {
+			recent = append(recent, t)
+		}
+	}
+	if len(recent) >= 3 {
+		r.readopted[id] = recent
+		r.readoptMu.Unlock()
+		log.Printf("[relay] terminal '%s': its adapter died %d times within a minute; not replacing it again (terminal.recover re-adopts it)", id, len(recent))
+		return
+	}
+	r.readopted[id] = append(recent, time.Now())
+	r.readoptMu.Unlock()
+
+	for range 30 {
+		terms, err := termdList(termdNS)
+		if err != nil {
+			log.Printf("[relay] terminal '%s': its adapter died and termd can't be listed: %v", id, err)
+			return
+		}
+		var t *termdTerminal
+		for i := range terms {
+			if terms[i].ID == id {
+				t = &terms[i]
+			}
+		}
+		if t == nil {
+			return // the terminal ended with its adapter
+		}
+		if t.Subscribers.Own == 0 {
+			pid, err := r.startAdapter(id, t.Cols, t.Rows, nil)
+			if err != nil {
+				log.Printf("[relay] terminal '%s': re-adopting after its adapter died: %v", id, err)
+				return
+			}
+			log.Printf("[relay] terminal '%s': its adapter died; re-adopted by a new one (pid %d)", id, pid)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Printf("[relay] terminal '%s': its adapter died but another client owns the terminal; leaving it", id)
 }
 
 // adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
@@ -1221,25 +1288,17 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		live = append(live, t.ID)
 	}
 	r.seedTermSeq(live)
-	exePath, err := os.Executable()
-	if err != nil {
-		reply(map[string]any{"error": "cannot locate glyph3d-cli binary: " + err.Error()})
-		return
-	}
 	recovered := []string{}
 	for _, t := range terms {
 		if t.Subscribers.Own > 0 {
 			continue
 		}
-		cmd := exec.Command(exePath, r.adapterArgs(t.ID, t.Cols, t.Rows)...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if e := cmd.Start(); e != nil {
+		pid, e := r.startAdapter(t.ID, t.Cols, t.Rows, nil)
+		if e != nil {
 			log.Printf("[relay] recover: spawn %s failed: %v", t.ID, e)
 			continue
 		}
-		log.Printf("[relay] recovered terminal '%s' (pid %d)", t.ID, cmd.Process.Pid)
-		go func(c *exec.Cmd) { c.Wait() }(cmd)
+		log.Printf("[relay] recovered terminal '%s' (pid %d)", t.ID, pid)
 		recovered = append(recovered, t.ID)
 	}
 	log.Printf("[relay] terminal.recover: %d terminal(s) re-adopted, %d live", len(recovered), len(live))

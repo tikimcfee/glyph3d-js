@@ -854,10 +854,13 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
 
 - **`cargo test --workspace`** — the Rust side: `g3d-wire` decodes and re-encodes
   PROTOCOL.md's hex examples byte for byte (read straight out of the spec) and filters terminal
-  queries split at every byte; 21 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
+  queries split at every byte; 24 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
   repaints replayed into a fresh libghostty equal the live screen (primary and alternate, modes,
   cursor, title), a subscribe cut mid-escape-sequence, the resize event's exact seq, queries
-  answered once, `view` anchoring, history rows, a lossy subscriber resynced, a blocking owner and
+  answered once, `view` anchoring, history rows, a lossy subscriber resynced (one `lagged`, its
+  repaint, the state), two stalled clients beside a BEL+title flood (daemon RSS bounded, the
+  terminal keeps its pace), `take` freeing a wedged blocking owner (and the frame order of `take`
+  and subscribe-as-own), a late subscriber told `modes` and the title, a blocking owner and
   a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling, a HUP-ignoring child,
   a panicking owner thread, the namespace lock, idle exit, stop, a SIGKILLed daemon taking its
   shells down; and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no
@@ -869,8 +872,10 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
 - **`termd-relay-check.mjs`** (tier full) — the relay on termd with a simulated display: spawn +
   typing, `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
-  screen), a SIGKILLed termd (adapters close their grids, the relay log says `LOST termd`, the next
-  spawn starts a fresh daemon).
+  screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
+  the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a
+  SIGKILLed adapter (the relay re-adopts its terminal, typing works), a SIGKILLed termd (adapters
+  close their grids, the relay log says `LOST termd`, the next spawn starts a fresh daemon).
 - **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
   (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
   parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty

@@ -27,9 +27,18 @@ What exists on branch `termd`, and where it departs from the plan below:
   `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
   quits), `ls`, `new` (starts the daemon if needed), `capture`, `kill`, `stop`. Attach
   subscribes `flow: "lossy"` even with `--take`, so a slow tty never stalls the program.
+  When another client takes the terminal, `attach --take` ends (`[another client took
+  <id>; attach again]`): its window no longer sets the size, so its raw view would wrap
+  wrong. A plain `attach` stays through ownership changes.
 - **Relay** (`cli/termd.go`, `cli/attach_unix.go`): as in "The Go adapter moves to termd"
   below, plus a repaint on every `size` event (below). There is no tmux code left in
-  `cli/` except gomuxai's own tmux (the agents' screens and `gomux.resize`).
+  `cli/` except gomuxai's own tmux (the agents' screens and `gomux.resize`). Every adapter
+  (spawned, recovered, gomux screen) starts through `startAdapter`, which watches it: an
+  adapter killed by a signal or crashed (any exit but 0, or 1 for a failure it reported)
+  leaves a live terminal with no owner, and the relay re-adopts it with a new adapter, at
+  most 3 times a minute per terminal. An adapter logs `LOST termd` only when termd's
+  connection drops under it, never when it is closing (the relay went, a signal). A
+  re-adopting adapter logs the terminal's own argv from `list`.
 - **Gates**: see `tools/CHECKS.md`, "The terminal daemon". The fidelity gate feeds the 29
   conformance snippets through termd and compares a late subscriber's repaint, parsed by
   xterm, to xterm fed the snippet (28/29 equal; invalid UTF-8 differs by design). The spike's
@@ -200,7 +209,8 @@ the terminal's **owner thread**, and it does everything that touches the termina
   Linux). The socket side posts a command on a channel, then writes the wake fd.
 - On readable PTY: read up to 64 KiB, `vt_write` it, hand the chunk (shared, not
   copied) with its `seq` to every raw subscriber's queue, then compare the few modes
-  `modes` reports and emit an event if any changed. `vt_write` runs the effect
+  `modes` reports and emit an event if any changed. A new subscriber, and one that
+  resyncs after a lag, gets the current `modes`, title and pwd as events. `vt_write` runs the effect
   callbacks synchronously on this thread. `on_pty_write` appends query answers to the
   thread's PTY write buffer, which goes to the PTY after the read is handled (callbacks
   can't re-enter the terminal).
@@ -230,7 +240,7 @@ the terminal's **owner thread**, and it does everything that touches the termina
 | Idle history | After 30 s with no output, `compress(Incremental)` in steps until complete, restarted when `compression_activity` changes. Resident memory drops; contents don't change. |
 | Unfinished input | `set_continuation_max_bytes(64 KiB)`. Needed for mid-sequence repaints. |
 | Kitty images | `kitty_image_storage_limit` 0 in S1 (termd draws no images, and the browser can't either yet). |
-| Per subscription | Lossy queue 4 MiB, then drop + `lagged` + repaint. Blocking owner: pause PTY reads at 1 MiB, resume at 256 KiB. |
+| Per subscription | Every frame counts: output, repaints and events. Lossy queue 4 MiB, then drop everything droppable, queue nothing until the subscriber has read what is left, then one `lagged` + repaint (or `size`) + state. Blocking owner: pause PTY reads at 1 MiB, resume at 256 KiB; a `take` demotes it to lossy. BELs coalesce to one `bell` per read. |
 | PTY input buffer | 1 MiB per terminal. |
 | Frames | 16 MiB payload. |
 
@@ -301,7 +311,9 @@ Relay changes in the same commit (no dual path, no flag):
 
 - `liveTerminalIDs` → `list` (termd's ids); `seedTermSeq` is unchanged.
 - `recoverTerminals`' "already adopted?" check (`list-clients`) → `subscribers.own > 0`
-  in `list`. Recovered adapters take the size from `list`.
+  in `list`. Recovered adapters take the size from `list`. A terminal someone holds with
+  `g3d attach --take` has an owner, so `terminal.recover` skips it until that attach ends;
+  the display sees the terminal again on the next recover after that.
 - `spawnTerminalAdapter` forks the same `attach <id>` with `--termd-ns`.
   `terminal.spawn` gains an optional argv (`-- cmd...`), so an agent or any program can
   be started in a new terminal.
@@ -436,7 +448,10 @@ available, `flock` on the shared heavy lock, one at a time).
   - resize ordering (no byte after the `size` event's `seq` was produced at the old size);
   - each query answered exactly once;
   - `view` across new output;
-  - lossy lag → `lagged` + repaint;
+  - lossy lag → one `lagged` + repaint + state; stalled subscribers under an event flood
+    (BEL and title) keep the daemon small and the terminal's pace;
+  - `take` from a wedged blocking owner frees the program;
+  - a late subscriber gets `modes` and the title;
   - blocking owner → no gap in `seq`;
   - a child that ignores `SIGHUP`;
   - a panic in one owner thread leaves the others running.
@@ -445,7 +460,10 @@ available, `flock` on the shared heavy lock, one at a time).
 - **Flood:** `seq 1 300000` in N terminals: every line arrives at the owner (no `seq`
   gaps), and daemon RSS stays under a stated ceiling.
 - **Lifecycle:**
-  - relay restart: terminals survive, `terminal.recover` re-adopts them;
+  - relay restart: terminals survive, `terminal.recover` re-adopts them, and stopping the
+    relay logs no termd loss;
+  - an adapter killed under a live relay: the relay re-adopts its terminal;
+  - the wheel over a mouse-reporting alt-screen program reaches it after re-adoption;
   - display reload: re-adoption repaints the grid;
   - termd killed: adapters exit cleanly and the next spawn starts a fresh daemon;
   - idle exit;

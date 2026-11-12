@@ -439,7 +439,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   queries once; clients never forward their own replies (`g3d` filters them out of what it prints).
   Scrollback is termd's per-subscriber `view` (`terminal.scroll`); the wheel goes to an
   alternate-screen app. A relay restart leaves terminals running: `terminal.recover` re-adopts
-  every one with no owner and the adoption repaint redraws it. A termd crash kills every shell in
+  every one with no owner and the adoption repaint redraws it; an adapter that dies under a live
+  relay (a signal, a crash) is replaced by the relay on its own. A termd crash kills every shell in
   the namespace (adapters log `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
   [-- cmd…]` starts any program. Gates: `cargo test --workspace`, `tools/termd-relay-check.mjs`,
   `tools/termd-fidelity-check.mjs`, `tools/wall-e2e.mjs`. Terminals render as `TerminalGrid`s and

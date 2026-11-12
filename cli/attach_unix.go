@@ -165,12 +165,24 @@ func runTerminal(cfg terminalConfig) {
 		fail("attach: termd subscribe %s: %v", cfg.id, err)
 	}
 	handle := sub.Handle
-	verb := "adopted"
-	if created.Created {
-		verb = "created"
+	verb, argv := "created", cfg.cmdArgs
+	if !created.Created {
+		// Adopted: the program is whatever the terminal was started with, not our argv.
+		verb, argv = "adopted", []string{"?"}
+		var l struct {
+			Terminals []termdTerminal `json:"terminals"`
+		}
+		if err := tc.Request("list", nil, &l); err != nil {
+			log.Printf("[attach] termd list: %v", err)
+		}
+		for _, t := range l.Terminals {
+			if t.ID == cfg.id {
+				argv = t.Argv
+			}
+		}
 	}
 	fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s\n",
-		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(cfg.cmdArgs, " "))
+		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(argv, " "))
 
 	// Lifecycle: signals, termd, the relay, liveness and the output pump all converge on `done`.
 	done := make(chan struct{})
@@ -392,9 +404,15 @@ func runTerminal(cfg terminalConfig) {
 				}
 			}
 		}
-		// The termd connection dropped (the daemon stopped or crashed): say so, loud, and detach.
-		if !programEnded.Load() {
-			log.Printf("[attach] %s: LOST termd (namespace %q): %v — closing the grid", cfg.id, termdNS, tc.Err())
+		// The termd connection dropped under us (the daemon stopped or crashed): say so, loud,
+		// and detach. When we are the ones closing it (shutdown: the relay went, a signal), the
+		// daemon is fine and nothing is said.
+		select {
+		case <-done:
+		default:
+			if !programEnded.Load() {
+				log.Printf("[attach] %s: LOST termd (namespace %q): %v — closing the grid", cfg.id, termdNS, tc.Err())
+			}
 		}
 	}()
 

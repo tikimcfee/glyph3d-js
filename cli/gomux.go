@@ -590,11 +590,6 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 			}
 		}
 	}
-	exePath, err := os.Executable()
-	if err != nil {
-		reply("cannot locate glyph3d-cli binary: " + err.Error())
-		return
-	}
 	id := gomuxTerminalID(name)
 	// ONE adapter per screen. A display reload asks for every screen again before the
 	// adapters it already has re-adopt their terminals; a second adapter would take the
@@ -605,22 +600,14 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "existing": true})
 		return
 	}
-	args := append(r.adapterArgs(id, cols, rows),
-		"--", "sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath)
-	cmd := exec.Command(exePath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	pid, err := r.startAdapter(id, cols, rows,
+		[]string{"sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath})
+	if err != nil {
 		reply("spawn failed: " + err.Error())
 		return
 	}
-	pid := cmd.Process.Pid
 	log.Printf("[gomux] %s: screen as terminal '%s' (pid %d, %dx%d, from its pane log)", name, id, pid, cols, rows)
 	send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows})
-	go func() {
-		err := cmd.Wait()
-		log.Printf("[gomux] %s: screen adapter '%s' (pid %d) exited: %v", name, id, pid, err)
-	}()
 }
 
 // resizeGomuxAgent resizes an agent's own tmux window (its pane) — a screen's resize
