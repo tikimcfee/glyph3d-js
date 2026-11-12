@@ -21,7 +21,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
 // frameOutput is the type byte of an OUTPUT data-plane frame (adapter → display):
 //
 //	[frameOutput:u8][idLen:u8][id:utf8][cols:u16 BE][rows:u16 BE][raw VT bytes]
@@ -212,6 +211,27 @@ func runTerminal(cfg terminalConfig) {
 		tmuxCmd("refresh-client", "-t", client).Run()
 	}
 
+	// chunks carries OUTPUT to the coalescer below: the PTY reader's bytes, and the title a refresh
+	// re-sends. One channel, so the title lands in the stream in order with what tmux draws.
+	chunks := make(chan []byte, 64)
+
+	// The display rebuilt (or re-adopted) our grid and is ready: the terminal.refresh handshake.
+	// tmux sends a title only when it CHANGES, so a grid built after the last change would stay
+	// untitled — hand it the pane's current title (as the OSC 2 tmux would have sent) ahead of the
+	// repaint, then repaint.
+	refresh := func() {
+		if title, err := tmuxCmd("display-message", "-p", "-t", cfg.session, "#{pane_title}").Output(); err == nil {
+			select {
+			case chunks <- oscTitle(strings.TrimRight(string(title), "\r\n")):
+			case <-done:
+				return
+			}
+		} else {
+			log.Printf("[attach] pane title: %v", err)
+		}
+		repaint()
+	}
+
 	// Re-adoption: a display reload wipes its terminal registry, so terminal.ping
 	// starts bouncing "ERR: no terminal <id>". Re-issue terminal.create so the fresh
 	// display rebuilds the grid (owner = us → input still routes), then force tmux to
@@ -326,7 +346,7 @@ func runTerminal(cfg terminalConfig) {
 				shutdown()
 				return
 			}
-			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, repaint, scroll, exitScroll, onResize)
+			handleInbound(msg, cfg.id, ptmx, requestKill, recreate, refresh, scroll, exitScroll, onResize)
 		}
 	}()
 
@@ -349,8 +369,7 @@ func runTerminal(cfg terminalConfig) {
 		}
 	}()
 
-	// OUTPUT pump: PTY reader → coalescer → binary OUTPUT frame.
-	chunks := make(chan []byte, 64)
+	// OUTPUT pump: PTY reader → coalescer (chunks, above) → binary OUTPUT frame.
 	go func() {
 		defer shutdown() // PTY EOF (tmux client gone / session killed) ends the adapter
 		buf := make([]byte, 32*1024)
@@ -512,11 +531,25 @@ func encodeOutputFrame(id string, cols, rows int, payload []byte) []byte {
 	return frame
 }
 
+// oscTitle is `title` as the OSC 2 (set window title) sequence a terminal's own title change
+// arrives as. Control characters are dropped: a BEL or ESC inside the title would end the sequence
+// early and leak the rest into the screen.
+func oscTitle(title string) []byte {
+	clean := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, title)
+	return []byte("\x1b]2;" + clean + "\x07")
+}
+
 // handleInbound dispatches a relay message to this adapter. Events (display →
 // controller push): terminal.bytes (input → PTY), terminal.resize (→ SIGWINCH),
-// terminal.shutdown (graceful teardown). Command responses also land here; an
-// "ERR: no terminal" reply (to our liveness ping) means the display reloaded → re-adopt.
-func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), repaint func(), scroll func(int), exitScroll func(), onResize func(int, int)) {
+// terminal.refresh (re-send the title, repaint), terminal.shutdown (graceful teardown).
+// Command responses also land here; an "ERR: no terminal" reply (to our liveness ping)
+// means the display reloaded → re-adopt.
+func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(), recreate func(), refresh func(), scroll func(int), exitScroll func(), onResize func(int, int)) {
 	var ev struct {
 		Event string `json:"event"`
 		Data  struct {
@@ -552,9 +585,9 @@ func handleInbound(msg []byte, termID string, ptmx *os.File, requestKill func(),
 			if scroll != nil {
 				scroll(ev.Data.Lines)
 			}
-		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — repaint into it NOW
-			if repaint != nil {
-				repaint()
+		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — title + repaint into it NOW
+			if refresh != nil {
+				refresh()
 			}
 		case "terminal.shutdown":
 			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — destroying session")
