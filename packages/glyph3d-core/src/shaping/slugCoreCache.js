@@ -16,20 +16,40 @@
  * any envelope/gzip/version problem returns null (or skips the save) — the renderer
  * always has the live encode to fall back to, so a bad cache never breaks boot.
  *
- * Envelope layout (one Uint32 array, then gzipped — all targets are little-endian):
+ * Core envelope layout (one Uint32 array, then gzipped — all targets are little-endian):
  *   [0] MAGIC 'SLGC'  [1] envelopeVersion  [2] payloadFormat (SLUG_BUFFER_FORMAT)
  *   [3] curveCount    [4] entryCount (=maxGlyphId+1, 0 ⇒ empty)
  *   [5] encodedLen    [6] curveLen  [7] mapLen
  *   [ encodedIds … ][ curve … ][ map … ]
+ *
+ * RUNTIME GROWTH — the glyphs encoded after boot, beyond the core — persists beside it, so a
+ * glyph learned once is warm on every later boot with the same font chain:
+ *   key = slugGrowthKey({ fonts })      per font chain (names + version + format), NOT per
+ *                                       encode ranges: growth is whatever the user's text needed
+ *   saveSlugGrowth(key, growth)         debounced by LiveSlugAtlas after each growth
+ *   loadSlugGrowth(key, { fontCount })  at boot, after the core hydrates
+ * Growth is keyed by FONT GLYPH, not slot: slots are allocation order (the core's prime fixes
+ * the core's, but a runtime glyph's slot depends on what was seen first), so each record names
+ * (fontIdx, gid) and the boot re-allocates its slot through the chain. Same gzip, same store
+ * namespace, same fail-safe contract as the core.
+ *
+ * Growth envelope layout (one Uint32 array, then gzipped):
+ *   [0] MAGIC 'SLGR'  [1] growthEnvelopeVersion  [2] payloadFormat (SLUG_BUFFER_FORMAT)
+ *   [3] glyphCount N  [4] curveCount C           [5] fontCount (the chain it was learned on)
+ *   [ N × (fontIdx, gid, curves) ][ C × CURVE_U32_PER_CURVE packed texels, glyph order ]
  */
 
 import { SlugBuffer, SLUG_BUFFER_FORMAT } from './slugData.js';
+import { CURVE_U32_PER_CURVE } from './slug-constants.js';
 import { blobStore } from '../services/state/index.js';
 
 const NS = 'slug-core';
 const ENVELOPE_VERSION = 1;
 const MAGIC = 0x43474c53;   // 'SLGC' as a little-endian uint32
 const HEADER_U32 = 8;
+const GROWTH_ENVELOPE_VERSION = 1;
+const GROWTH_MAGIC = 0x52474c53;   // 'SLGR'
+const GROWTH_HEADER_U32 = 6;
 
 // Bump when the FONT FILES change (a new .ttf, a different fallback) without a name change —
 // the key is identity-based (font NAMES, not urls), so it can't otherwise notice new bytes.
@@ -43,6 +63,8 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 // hit/miss logs fire before the relay WebSocket connects, so they never reach the log
 // store — a pull-based verb reading this is the reliable way to observe what happened.
 let _lastEvent = null;
+// …and the runtime growth's last load/save outcome.
+let _lastGrowthEvent = null;
 
 // ── key ──────────────────────────────────────────────────────────────────────
 
@@ -64,6 +86,24 @@ export function slugCoreKey({ fonts, encodeRanges }) {
         fontVer: FONT_CHAIN_VERSION,
     });
     return `${NS}.${cyrb53(canonical).toString(36)}`;
+}
+
+/**
+ * The runtime-growth key for a font chain: the same identity as the core key (font names,
+ * FONT_CHAIN_VERSION, SLUG_BUFFER_FORMAT) without the encode ranges — what a chain learned at
+ * runtime is valid whatever its core holds (a grown glyph the core later bakes is skipped on
+ * hydrate). Pure + synchronous.
+ * @param {{ fonts?: Array<{url?:string,name?:string}> }} cfg
+ * @returns {string} e.g. 'slug-core.grown-x7k2p9'
+ */
+export function slugGrowthKey({ fonts }) {
+    const canonical = JSON.stringify({
+        fonts: (fonts || []).map((f) => f.name || f.url),
+        fmt: SLUG_BUFFER_FORMAT,
+        fontVer: FONT_CHAIN_VERSION,
+        growthEnv: GROWTH_ENVELOPE_VERSION,
+    });
+    return `${NS}.grown-${cyrb53(canonical).toString(36)}`;
 }
 
 /** cyrb53 — a small, well-distributed 53-bit string hash (sync, no crypto dependency). */
@@ -114,6 +154,56 @@ function unpackDescriptor(u8) {
     const curve = u32.slice(o, o + curveLen); o += curveLen;
     const map = u32.slice(o, o + mapLen);
     return { v, curveCount, maxGlyphId: entryCount - 1, encodedIds, curve, map };
+}
+
+/**
+ * Runtime growth: N glyphs keyed by font glyph, each with its packed curve texels.
+ * @typedef {Object} SlugGrowth
+ * @property {Uint32Array} fontIdx  per glyph: its font's index in the chain
+ * @property {Uint32Array} gid      per glyph: its glyph id in that font
+ * @property {Uint32Array} counts   per glyph: its curve count
+ * @property {Uint32Array} texels   every glyph's texels, concatenated in glyph order
+ */
+
+/** Pack runtime growth into one Uint32Array. */
+function packGrowth(g, fontCount) {
+    const n = g.gid.length, texLen = g.texels.length;
+    const out = new Uint32Array(GROWTH_HEADER_U32 + n * 3 + texLen);
+    out[0] = GROWTH_MAGIC;
+    out[1] = GROWTH_ENVELOPE_VERSION;
+    out[2] = SLUG_BUFFER_FORMAT;
+    out[3] = n;
+    out[4] = texLen / CURVE_U32_PER_CURVE;
+    out[5] = fontCount;
+    for (let i = 0, o = GROWTH_HEADER_U32; i < n; i++, o += 3) {
+        out[o] = g.fontIdx[i]; out[o + 1] = g.gid[i]; out[o + 2] = g.counts[i];
+    }
+    out.set(g.texels, GROWTH_HEADER_U32 + n * 3);
+    return out;
+}
+
+/** Parse growth bytes. Throws on magic/version/format/length/font drift. */
+function unpackGrowth(u8, fontCount) {
+    if (u8.byteLength < GROWTH_HEADER_U32 * 4 || u8.byteLength % 4) throw new Error('growth envelope malformed');
+    const u32 = new Uint32Array(u8.slice().buffer);
+    if (u32[0] !== GROWTH_MAGIC) throw new Error('bad growth magic');
+    if (u32[1] !== GROWTH_ENVELOPE_VERSION) throw new Error(`growth envelope v${u32[1]} != ${GROWTH_ENVELOPE_VERSION}`);
+    if (u32[2] !== SLUG_BUFFER_FORMAT) throw new Error(`growth format ${u32[2]} != ${SLUG_BUFFER_FORMAT}`);
+    if (u32[5] !== fontCount) throw new Error(`growth learned on ${u32[5]} fonts, chain has ${fontCount}`);
+    const n = u32[3], curves = u32[4];
+    if (u32.length !== GROWTH_HEADER_U32 + n * 3 + curves * CURVE_U32_PER_CURVE) {
+        throw new Error(`growth length ${u32.length} != header's ${n} glyphs / ${curves} curves`);
+    }
+    const fontIdx = new Uint32Array(n), gid = new Uint32Array(n), counts = new Uint32Array(n);
+    let sum = 0;
+    for (let i = 0, o = GROWTH_HEADER_U32; i < n; i++, o += 3) {
+        fontIdx[i] = u32[o]; gid[i] = u32[o + 1]; counts[i] = u32[o + 2];
+        if (fontIdx[i] >= fontCount) throw new Error(`growth glyph ${i} names font ${fontIdx[i]} of ${fontCount}`);
+        sum += counts[i];
+    }
+    if (sum !== curves) throw new Error(`growth curve counts sum ${sum} != ${curves}`);
+    const texels = u32.slice(GROWTH_HEADER_U32 + n * 3);
+    return { fontIdx, gid, counts, texels };
 }
 
 // ── gzip (CompressionStream — browser + bun + node ≥18) ──────────────────────
@@ -267,14 +357,74 @@ export async function discardSlugCore(key) {
 }
 
 /**
- * Current cache state for introspection — the last boot/runtime outcome plus the
- * stored entries. Backs the `atlas.cache` verb (and the Local Data panel later).
- * @returns {Promise<{ last: object|null, entries: Array }>}
+ * Load + validate the persisted runtime growth for `key`. Returns null on a miss or any
+ * corruption (and discards a bad entry) — boot then simply starts from the core.
+ * @param {string} key - from slugGrowthKey
+ * @param {{ fontCount: number }} chain - the chain it must have been learned on
+ * @returns {Promise<SlugGrowth|null>}
+ */
+export async function loadSlugGrowth(key, { fontCount }) {
+    const t0 = now();
+    let bytes;
+    try { bytes = await blobStore.getBytes(key); } catch { return null; }
+    if (!bytes) {
+        _lastGrowthEvent = { op: 'miss', key, ms: now() - t0 };
+        return null;
+    }
+    try {
+        const growth = unpackGrowth(await gunzip(bytes), fontCount);
+        _lastGrowthEvent = {
+            op: 'loaded', key, glyphs: growth.gid.length, curves: growth.texels.length / CURVE_U32_PER_CURVE,
+            gzBytes: bytes.byteLength, ms: now() - t0,
+        };
+        console.log(
+            `[slugCoreCache] growth loaded ${key}: ${growth.gid.length} glyphs · ` +
+            `${(bytes.byteLength / 1024).toFixed(1)}KB gz in ${(now() - t0).toFixed(1)}ms`
+        );
+        return growth;
+    } catch (e) {
+        _lastGrowthEvent = { op: 'corrupt', key, error: e.message, ms: now() - t0 };
+        console.warn(`[slugCoreCache] growth ${key} unreadable (${e.message}) → discard, boot from the core`);
+        await discardSlugCore(key);
+        return null;
+    }
+}
+
+/**
+ * Pack + gzip + store the runtime growth under `key`. Never throws — a failed save just means
+ * those glyphs are encoded again next boot. Returns the gzipped byte length (0 on failure).
+ * @param {string} key
+ * @param {SlugGrowth} growth
+ * @param {{ fontCount: number }} chain
+ * @returns {Promise<number>}
+ */
+export async function saveSlugGrowth(key, growth, { fontCount }) {
+    const t0 = now();
+    try {
+        const raw = packGrowth(growth, fontCount);
+        const gz = await gzip(new Uint8Array(raw.buffer));
+        await blobStore.put(key, gz, {
+            env: GROWTH_ENVELOPE_VERSION, fmt: SLUG_BUFFER_FORMAT, glyphs: growth.gid.length,
+            curves: growth.texels.length / CURVE_U32_PER_CURVE, rawBytes: raw.byteLength, source: 'growth',
+        });
+        _lastGrowthEvent = { op: 'saved', key, glyphs: growth.gid.length, gzBytes: gz.byteLength, rawBytes: raw.byteLength, ms: now() - t0 };
+        return gz.byteLength;
+    } catch (e) {
+        _lastGrowthEvent = { op: 'save-failed', key, error: e.message };
+        console.warn(`[slugCoreCache] growth save failed (${e.message}) — those glyphs re-encode next boot`);
+        return 0;
+    }
+}
+
+/**
+ * Current cache state for introspection — the last core outcome, the last growth outcome,
+ * and the stored entries. Backs the `atlas.cache` verb (and the Local Data panel later).
+ * @returns {Promise<{ last: object|null, growth: object|null, entries: Array }>}
  */
 export async function getSlugCacheState() {
     let entries = [];
     try { entries = await blobStore.statNamespace(NS); } catch { /* ignore */ }
-    return { last: _lastEvent, entries };
+    return { last: _lastEvent, growth: _lastGrowthEvent, entries };
 }
 
 /** Wipe every slug-core cache entry — the dev clear-cache control. @returns {Promise<number>} */

@@ -84,7 +84,7 @@ export {
     MonospaceShapeCache,
     shapeText,
     collectUniqueGlyphIds,
-    SlugEncoder,
+    SlugTextures,
     LiveSlugAtlas,
     SlugBuffer,
     encodeGlyph,
@@ -94,6 +94,7 @@ export {
 // Engine bootstrapping & core character ranges
 export {
     bootGlyphEngine,
+    disposeGlyphEngine,
     DEFAULT_ENGINE_OPTIONS,
     LARGE_CORE_RANGES,
 } from './glyphEngine.js';

@@ -6,9 +6,9 @@
  * encoded on demand; these commands inspect and force-grow that encoded set so a
  * codepoint range renders without waiting for a grid to first encounter it.
  *
- * `atlas.encode` is the manual lever used to verify the live re-encode + GPU
- * texture growth + field hot-swap pipeline end to end; grids also call the same
- * LiveSlugAtlas path automatically as content arrives.
+ * `atlas.encode` is the manual lever used to verify growth end to end (the off-thread encode,
+ * the in-place texture upload); grids call the same LiveSlugAtlas path automatically as
+ * content arrives.
  */
 
 import { box, kvLines } from '../formatResponse.js';
@@ -48,6 +48,11 @@ export default function registerAtlasCommands(router) {
             glyphMapTexture: sd?.glyphMapTexture
                 ? `${sd.glyphMapTexture.image.width}x${sd.glyphMapTexture.image.height}`
                 : '(none)',
+            pending: live.pending,
+            grownSinceBoot: live.grownCount,
+            // what growth has asked the GPU for: in-place ranges vs whole reborn textures
+            slugUploads: (() => { const u = live.uploadStats.slug; return `${u.rangeBytes} B in ${u.ranges} ranges · ${u.reborn} reborn (${u.rebornBytes} B)`; })(),
+            emojiUploads: (() => { const u = live.uploadStats.emoji; return u ? `${u.rangeBytes} B in ${u.ranges} ranges · ${u.reborn} reborn · ${u.rasterCells} cells rastered` : '(no emoji atlas)'; })(),
         };
         // Per-font coverage detail (reaches into chain internals — diagnostic only).
         const lines = kvLines(info);
@@ -71,7 +76,7 @@ export default function registerAtlasCommands(router) {
     //  Codepoints are hex ("2500"), "U+2500", or "0x2500". With one arg,
     //  encodes a single codepoint; with two, the inclusive range [lo, hi].
     // ================================================================
-    router.register('atlas.encode', (args, ctx) => {
+    router.register('atlas.encode', async (args, ctx) => {
         const atlas = ctx.atlas;
         const live = atlas && atlas._live;
         const shapeCache = atlas && atlas._shapeCache;
@@ -90,23 +95,27 @@ export default function registerAtlasCommands(router) {
 
         const cps = [];
         for (let cp = lo; cp <= hi; cp++) cps.push(cp);
+        const t0 = performance.now();
+        const before = live.size;
         const result = live.ensureCodepoints(cps, shapeCache);
+        await live.whenIdle();   // growth lands off the main thread; report what landed
 
         const summary = {
             requested: cps.length,
             range: `U+${lo.toString(16).toUpperCase()}..U+${hi.toString(16).toUpperCase()}`,
-            added: result.added,
-            grew: result.grew,
-            totalEncoded: result.total,
+            queued: result.queued,
+            added: live.size - before,
+            totalEncoded: live.size,
+            landedMs: +(performance.now() - t0).toFixed(1),
             version: live.version,
         };
         return {
             text: box('ATLAS.ENCODE', kvLines(summary), 50) +
-                `\nOK: +${result.added} glyphs (${result.total} total, v${live.version})`,
+                `\nOK: +${summary.added} glyphs (${live.size} total, v${live.version})`,
             data: summary,
         };
     }, {
-        description: 'Encode a codepoint range into the live Slug atlas and hot-swap all fields',
+        description: 'Encode a codepoint range into the live Slug atlas (off the main thread) and wait for it to land',
         usage: '<lo-hex> [hi-hex]',
     });
 
@@ -166,6 +175,11 @@ export default function registerAtlasCommands(router) {
         const kb = (b) => (b == null ? '—' : `${(b / 1024).toFixed(1)}KB`);
         const last = s.last;
         const lines = [];
+        const g = s.growth;
+        if (g) {
+            lines.push(`growth:  ${g.op}${g.glyphs != null ? ` · ${g.glyphs} glyphs` : ''}` +
+                `${g.gzBytes != null ? ` · ${kb(g.gzBytes)} gz` : ''}${g.error ? ` · ${g.error}` : ''}`);
+        }
         if (last) {
             lines.push(`last:    ${last.op}`);
             if (last.glyphs != null) lines.push(`glyphs:  ${last.glyphs}   curves: ${last.curves}`);

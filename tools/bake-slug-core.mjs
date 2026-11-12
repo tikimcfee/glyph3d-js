@@ -11,9 +11,10 @@
  * both the web app and the CLI. At runtime the boot ladder fetches `/slug-core/<key>.bin`,
  * so even a fresh device (empty IndexedDB) hydrates instead of encoding.
  *
- * It reuses the PRODUCTION path: SlugEncoder → descriptor → saveSlugCore (into bun's
- * in-memory blobStore) → drain to disk. So the bytes are byte-identical to what the runtime
- * would encode+cache, and the key is the same name-based key the runtime computes.
+ * It reuses the PRODUCTION path: the encode worker → LiveSlugAtlas.encodeCore → descriptor →
+ * saveSlugCore (into bun's in-memory blobStore) → drain to disk. So the bytes are
+ * byte-identical to what the runtime would encode+cache, and the key is the same name-based
+ * key the runtime computes.
  *
  * Re-run this when the font files, LARGE_CORE_RANGES, or SLUG_BUFFER_FORMAT change (the key
  * changes too; the old asset is simply never requested). If the names in headlessFontChain
@@ -27,9 +28,10 @@ import { ROOT, bootHeadlessFontChain } from './headlessFontChain.mjs';
 
 const { chain, fonts } = await bootHeadlessFontChain();
 
-const { MonospaceShapeCache, shapeText, collectUniqueGlyphIds, SlugEncoder,
+const { MonospaceShapeCache, shapeText, collectUniqueGlyphIds, LiveSlugAtlas,
         slugCoreKey, saveSlugCore } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
 const { blobStore } = await import(`${ROOT}/packages/glyph3d-core/src/services/state/index.js`);
+const { default: SlugEncodeClient } = await import(`${ROOT}/packages/glyph3d-core/src/workers/SlugEncodeClient.js`);
 const { LARGE_CORE_RANGES } = await import(`${ROOT}/packages/glyph3d-core/src/core/coreRanges.js`);
 
 const codepointsFromRanges = (ranges) => {
@@ -43,9 +45,11 @@ const shapeCache = new MonospaceShapeCache(chain);
 shapeCache.prime(text);
 const glyphIds = collectUniqueGlyphIds(shapeText(shapeCache, text).lines);
 
-const enc = new SlugEncoder(chain);
-enc.encode(glyphIds);
-const descriptor = enc.serialize();
+const encoder = new SlugEncodeClient({ fonts: chain.fontSources() });
+const live = new LiveSlugAtlas({ atlas: null, shaper: chain, encoder });
+await live.encodeCore(glyphIds);
+const descriptor = live.serialize();
+live.dispose();
 
 const key = slugCoreKey({ fonts, encodeRanges: LARGE_CORE_RANGES });
 await saveSlugCore(key, descriptor);                 // production envelope+gzip → bun MemoryBackend

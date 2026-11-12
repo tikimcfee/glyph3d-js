@@ -123,8 +123,11 @@ export const CHECKS = [
     h('emoji-render.test.mjs', ['render'],
         'the emoji path: shader uniforms/varyings, InstancedField with the emoji + slug atlases, LayoutGenerator mapping, CodeGrid with an emoji fixture',
         'the rendered emoji (no GPU)'),
-    h('slug-atlas-dispose.test.mjs', ['render'], 'a growth disposes the previous curve/map texture pair exactly once, never the live one', 'GPU memory itself (webgl-memory in frame-profile sees bytes)'),
-    h('slug-atlas-emoji.test.mjs', ['render'], 'emoji slots skip curve-atlas growth but get their glyph-map entry; outline slots grow both', 'the slug shader'),
+    h('slug-atlas-dispose.test.mjs', ['render'], 'a growth within capacity keeps both Slug textures; a reborn texture rebinds every field and the retired one is disposed exactly once, never the live one', 'GPU memory itself (webgl-memory in frame-profile sees bytes)'),
+    h('slug-atlas-emoji.test.mjs', ['render'], 'emoji slots never reach the outline encoder and get their glyph-map entry at once; outline slots go to the encoder as one batch per task; landed emoji pixels relay as glyphs-ready', 'the slug shader'),
+    h('atlas-growth.test.mjs', ['render'],
+        "atlas growth: bytes queued per new glyph vs the whole texture, the async contract (blank in flight, one ready event), the encode worker's texels vs the main-thread encode bit for bit, persisted growth hydrated through a chain with a different slot order, bootGlyphEngine with a corrupt growth blob, emoji raster landing + row growth",
+        "three's actual GL upload (ranges are checked as queued, not as sent) and the emoji worker's OffscreenCanvas (an in-process rasterizer stands in)"),
     h('codegrid-instanced.test.mjs', ['render', 'layout'],
         'CodeGrid on InstancedField: load, coordinate queries both ways, label, highlight, edits, windowing, picking wiring',
         'pixels'),
@@ -334,6 +337,12 @@ export const CHECKS = [
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 900_000,
         compare: 'INSTRUMENT: the terminal text path timed stage by stage (direct and tmux floods); green = it measured',
         blind: 'judges no number',
+    },
+    {
+        name: 'atlas-cold-perf', cmd: ['bun', 'tools/atlas-cold-perf.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'render'],
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['*'], timeoutMs: 600_000,
+        compare: 'INSTRUMENT: a cold glyph from bytes to on screen — visible ms, applyScreen ms, worst frame gap, long tasks, texture bytes per burst; green = it measured',
+        blind: 'judges no number; the emoji worker\'s first raster after boot is not in a burst',
     },
 
     // ── parked: hand tracking (not being worked on; kept so they aren't lost) ───────────────────

@@ -1,18 +1,23 @@
 /**
  * slugData.js — GPU-agnostic slug buffer packing
  *
- * Pure computation layer for the Slug vector text rendering algorithm.
- * NO Three.js dependency — SlugBuffer holds raw typed arrays; SlugEncoder wraps them in
- * THREE.DataTextures.
+ * Pure computation layer for the Slug vector text rendering algorithm. NO Three.js, no DOM:
+ * the encode half runs in the encode worker (workers/SlugEncodeWorker.js), the buffer half on
+ * the main thread under SlugTextures.
  *
- * Entry point: SlugBuffer — a GROWABLE accumulator. Append glyphs incrementally (each
- * extracted EXACTLY ONCE); the curve + glyph-map arrays grow like dynamic arrays. This
- * replaced the old full-rebuild `buildSlugBuffers`, which re-encoded the entire glyph set
- * on every atlas growth (the hot path that also re-spammed the overhang warnings).
+ *   encodeGlyphBatch(items, shaperOf) — outline extraction + packing for a batch of glyphs:
+ *       each glyph's quadratic curves, normalized to its advance cell and packed as curve-
+ *       texture texels. The worker runs it; its result crosses as transferable arrays.
+ *   SlugBuffer — the two textures' backing arrays, allocated at a CAPACITY. `appendEncoded`
+ *       copies a batch in at the write cursor and records the touched texel span, so the GPU
+ *       side uploads only that span; an array doubles (a new generation) only when full.
  */
 
 import {
     CURVE_TEXELS_PER_CURVE,
+    CURVE_U32_PER_CURVE,
+    CURVE_INITIAL_ROWS,
+    MAP_INITIAL_ROWS,
     TEXTURE_WIDTH,
     packUint16,
 } from './slug-constants.js';
@@ -31,84 +36,107 @@ import {
 export const SLUG_BUFFER_FORMAT = 2;
 
 /**
+ * An encoded batch — what {@link encodeGlyphBatch} returns and {@link SlugBuffer#appendEncoded}
+ * consumes. Glyph i owns `counts[i]` curves; their texels are consecutive in `texels`
+ * (CURVE_U32_PER_CURVE values each), in batch order.
+ * @typedef {Object} EncodedBatch
+ * @property {Uint32Array} slots   the glyph slots, batch order
+ * @property {Uint32Array} counts  curves per glyph
+ * @property {Uint32Array} texels  every glyph's packed curve texels, concatenated
+ * @property {{count:number, worstSlot:number, worstFrac:number, worstName:string}} overhang
+ *   glyphs whose ink overhangs the advance cell (benign; logged once per batch)
+ */
+
+/** Rows a texture needs for `texels` texels (at least one). */
+const rowsFor = (texels) => Math.max(1, Math.ceil(texels / TEXTURE_WIDTH));
+
+/** The capacity (rows) a buffer holding `usedRows` has: the initial rows, doubled to fit. */
+const capacityFor = (usedRows, initialRows) => {
+    let rows = initialRows;
+    while (rows < usedRows) rows *= 2;
+    return rows;
+};
+
+/**
  * SlugBuffer — growable backing for the two Slug textures (RGBA32Uint, 4 channels/texel).
  *
  *   curve texture    — 2 texels per curve: [P0.x,P0.y,P1.x,P1.y] [P2.x,P2.y,_,_]
  *   glyph-map texture — 1 texel per glyph slot: [curveStart, curveCount, mode, emojiCell]
  *
- * Append-only within a generation: `addGlyphs` extracts + packs each NEW glyph once and
- * advances a write cursor; the arrays double on overflow. `reset` starts a fresh generation
- * (the from-scratch encode path). `curveTexture()` / `glyphMapTexture()` hand SlugEncoder
- * exact-size views to wrap as DataTextures.
+ * Both arrays are allocated at a capacity (rows of TEXTURE_WIDTH texels) and the textures wrap
+ * the WHOLE array, spare rows included — so an append writes into a texture that already
+ * exists, and the span it touched (`takeDirty`) is all that has to reach the GPU. When an
+ * append would overrun the capacity the array doubles: a new GENERATION (`curveGeneration` /
+ * `mapGeneration`), which the GPU side answers with a new texture.
  */
 export class SlugBuffer {
     constructor() {
-        // Start with headroom so the boot set rarely reallocates; double on overflow.
-        this._curve = new Uint32Array(TEXTURE_WIDTH * 64 * 4); // ~64 rows of curve texels
+        this._curve = new Uint32Array(TEXTURE_WIDTH * CURVE_INITIAL_ROWS * 4);
         this._curveTexels = 0;   // texels written so far (the write cursor)
         this._curveCount = 0;    // curves written (= _curveTexels / CURVE_TEXELS_PER_CURVE)
-        this._map = new Uint32Array(TEXTURE_WIDTH * 4 * 4);    // ~4 rows of glyph slots
+        this._map = new Uint32Array(TEXTURE_WIDTH * MAP_INITIAL_ROWS * 4);
         this._maxGlyphId = -1;
         this._encoded = new Set();
+        /** @private bumped when an array is reallocated (its texture must be reborn) */
+        this._curveGen = 0;
+        this._mapGen = 0;
+        /** @private texel spans written since the last takeDirty(): [lo, hi) */
+        this._curveLo = Infinity; this._curveHi = -Infinity;
+        this._mapLo = Infinity; this._mapHi = -Infinity;
     }
 
     get size() { return this._encoded.size; }
     get totalCurves() { return this._curveCount; }
+    get curveGeneration() { return this._curveGen; }
+    get mapGeneration() { return this._mapGen; }
     has(glyphId) { return this._encoded.has(glyphId); }
 
-    /** Start a fresh generation (the from-scratch encode path resets, then re-adds). */
-    reset() {
-        this._curveTexels = 0;
-        this._curveCount = 0;
-        // Zero the used glyph-map region so a re-used glyphId can't point at stale curves.
-        if (this._maxGlyphId >= 0) this._map.fill(0, 0, (this._maxGlyphId + 1) * 4);
-        this._maxGlyphId = -1;
-        this._encoded.clear();
-    }
-
     /**
-     * Append glyphs not already encoded (skips glyph 0/.notdef + dupes). Each survivor is
-     * extracted + packed EXACTLY ONCE. Logs ONE aggregated note for any new overhangers.
-     * @param {import('./HarfBuzzShaper.js').default} shaper
-     * @param {Iterable<number>} glyphIds
-     * @returns {{ added: number }}
+     * Append an encoded batch (from {@link encodeGlyphBatch}). Slots already encoded (and
+     * slot 0, the blank) are skipped; each survivor's curves are copied in at the write
+     * cursor and its glyph-map entry written. The touched spans are recorded for takeDirty().
+     * @param {EncodedBatch} batch
+     * @returns {{ added: number, addedIds: number[] }}
      */
-    addGlyphs(shaper, glyphIds) {
-        let overhangCount = 0, worstFrac = 0, worstId = -1, worstName = '';
+    appendEncoded(batch) {
+        const { slots, counts, texels } = batch;
         const addedIds = [];
-        for (const glyphId of glyphIds) {
-            if (glyphId <= 0 || this._encoded.has(glyphId)) continue; // .notdef has no curves; dupes are done
-            const data = encodeGlyph(shaper, glyphId);
-            this._append(shaper, glyphId, data);
-            this._encoded.add(glyphId);
-            addedIds.push(glyphId);
-            if (data.overhang) {
-                overhangCount++;
-                if (data.overhang.frac > worstFrac) {
-                    worstFrac = data.overhang.frac; worstId = glyphId; worstName = data.overhang.name;
+        let off = 0;
+        for (let i = 0; i < slots.length; i++) {
+            const slot = slots[i], count = counts[i];
+            const len = count * CURVE_U32_PER_CURVE;
+            if (slot > 0 && !this._encoded.has(slot)) {
+                const curveStart = this._curveCount;
+                if (count > 0) {
+                    const at = this._curveTexels;
+                    const end = at + count * CURVE_TEXELS_PER_CURVE;
+                    this._growCurves(end);
+                    this._curve.set(texels.subarray(off, off + len), at * 4);
+                    if (at < this._curveLo) this._curveLo = at;
+                    if (end > this._curveHi) this._curveHi = end;
+                    this._curveTexels = end;
+                    this._curveCount += count;
                 }
+                // mode 0 = Slug bezier (curveStart/count valid). An empty glyph keeps its
+                // [curveStart, 0, 0, 0] entry — the same bytes an unencoded slot reads, which
+                // is why `_encoded` is serialized explicitly.
+                this._writeMap(slot, curveStart, count, 0, 0);
+                this._encoded.add(slot);
+                addedIds.push(slot);
             }
+            off += len;
         }
-        const added = addedIds.length;
-        // One aggregated note for the NEW overhangers (ink clipped at the cell edge — benign for a
-        // clean monospace). Replaces the per-glyph console.warn that re-fired on every re-encode.
-        if (overhangCount > 0) {
-            console.log(
-                `[SlugEncoder] ${overhangCount}/${added} new glyph(s) overhang the advance cell ` +
-                `(ink clipped at the edge; benign for monospace) — worst: ${worstId} ("${worstName}") +${(worstFrac * 100).toFixed(1)}%`
-            );
-        }
-        return { added, addedIds };
+        return { added: addedIds.length, addedIds };
     }
 
     /**
      * Write glyph-MAP entries for BITMAP (color-emoji) slots: [0, 0, mode 1, emojiCell].
      * No curves exist — the bitmap branch samples the emoji atlas instead — so this is
-     * a map-only append. The outline append path never receives these slots
-     * (LiveSlugAtlas partitions them out), and without an entry a runtime-sighted emoji
-     * has an all-zero texel: mode 0, curveCount 0 → the slug branch discards it as an
-     * empty glyph and the emoji is INVISIBLE. Skips non-bitmap slots (the outline path
-     * owns them) and anything already encoded.
+     * a map-only append. The outline path never receives these slots (LiveSlugAtlas
+     * partitions them out), and without an entry a runtime-sighted emoji has an all-zero
+     * texel: mode 0, curveCount 0 → the slug branch discards it as an empty glyph and the
+     * emoji is INVISIBLE. Skips non-bitmap slots (the outline path owns them) and anything
+     * already encoded.
      * @param {Object} shaper - FontChain-compatible (isBitmapSlot, emojiCellOf)
      * @param {Iterable<number>} slots
      * @returns {{ added: number, addedIds: number[] }}
@@ -118,56 +146,61 @@ export class SlugBuffer {
         for (const slot of slots) {
             if (slot <= 0 || this._encoded.has(slot)) continue;
             if (typeof shaper.isBitmapSlot !== 'function' || !shaper.isBitmapSlot(slot)) continue;
-            this._growMap(slot);
-            const gm = slot * 4;
-            this._map[gm + 0] = 0;
-            this._map[gm + 1] = 0;
-            this._map[gm + 2] = 1;   // mode 1 = color-emoji bitmap
-            this._map[gm + 3] = shaper.emojiCellOf(slot);
-            if (slot > this._maxGlyphId) this._maxGlyphId = slot;
+            this._writeMap(slot, 0, 0, 1, shaper.emojiCellOf(slot));   // mode 1 = color-emoji bitmap
             this._encoded.add(slot);
             addedIds.push(slot);
         }
         return { added: addedIds.length, addedIds };
     }
 
-    /** @private Pack one glyph's curves at the cursor + write its glyph-map entry. */
-    _append(shaper, glyphId, data) {
-        const isBitmap = typeof shaper.isBitmapSlot === 'function' && shaper.isBitmapSlot(glyphId);
-        const curveStart = this._curveCount;
-
-        if (!isBitmap && data.curves.length > 0) {
-            this._growCurves(this._curveTexels + data.curves.length * CURVE_TEXELS_PER_CURVE);
-            const buf = this._curve;
-            for (const curve of data.curves) {
-                const t0 = this._curveTexels * 4;       // texel 0: [P0.x, P0.y, P1.x, P1.y]
-                buf[t0 + 0] = packUint16(curve.p0x);
-                buf[t0 + 1] = packUint16(curve.p0y);
-                buf[t0 + 2] = packUint16(curve.p1x);
-                buf[t0 + 3] = packUint16(curve.p1y);
-                const t1 = (this._curveTexels + 1) * 4; // texel 1: [P2.x, P2.y, _, _]
-                buf[t1 + 0] = packUint16(curve.p2x);
-                buf[t1 + 1] = packUint16(curve.p2y);
-                buf[t1 + 2] = 0;
-                buf[t1 + 3] = 0;
-                this._curveTexels += CURVE_TEXELS_PER_CURVE;
-                this._curveCount += 1;
-            }
-        }
-
-        // Glyph-map entry at glyphId*4. mode 0 = Slug bezier (curveStart/count valid); mode 1 =
-        // color-emoji bitmap (count 0; emojiCell indexes the emoji atlas — the shader samples it
-        // instead of the coverage loop; it branches on mode BEFORE the count==0 discard).
-        this._growMap(glyphId);
-        const gm = glyphId * 4;
-        this._map[gm + 0] = isBitmap ? 0 : curveStart;
-        this._map[gm + 1] = isBitmap ? 0 : data.curves.length;
-        this._map[gm + 2] = isBitmap ? 1 : 0;
-        this._map[gm + 3] = isBitmap ? shaper.emojiCellOf(glyphId) : 0;
-        if (glyphId > this._maxGlyphId) this._maxGlyphId = glyphId;
+    /**
+     * Make the glyph map hold `slot` before its glyph is encoded: a slot whose encode is in
+     * flight is already in instance buffers, and must read an all-zero (blank) entry, not a
+     * texel past the texture's edge.
+     * @param {number} slot
+     */
+    reserveSlot(slot) {
+        if (slot > 0) this._growMap(slot);
     }
 
-    /** @private Grow the curve array (doubling) to hold at least `texels`. */
+    /**
+     * A slot's packed curve texels (a view into the live array — copy before keeping).
+     * @param {number} slot
+     * @returns {Uint32Array}
+     */
+    slotTexels(slot) {
+        const gm = slot * 4;
+        const start = this._map[gm], count = this._map[gm + 1];
+        return this._curve.subarray(start * CURVE_U32_PER_CURVE, (start + count) * CURVE_U32_PER_CURVE);
+    }
+
+    /**
+     * The texel spans written since the last call (and reset them): `null` for an untouched
+     * array. Spans are [lo, hi) in texels of that texture.
+     * @returns {{ curve: {lo:number, hi:number}|null, map: {lo:number, hi:number}|null }}
+     */
+    takeDirty() {
+        const curve = this._curveHi > this._curveLo ? { lo: this._curveLo, hi: this._curveHi } : null;
+        const map = this._mapHi > this._mapLo ? { lo: this._mapLo, hi: this._mapHi } : null;
+        this._curveLo = this._mapLo = Infinity;
+        this._curveHi = this._mapHi = -Infinity;
+        return { curve, map };
+    }
+
+    /** @private one glyph-map texel, its span marked dirty */
+    _writeMap(slot, a, b, c, d) {
+        this._growMap(slot);
+        const gm = slot * 4;
+        this._map[gm + 0] = a;
+        this._map[gm + 1] = b;
+        this._map[gm + 2] = c;
+        this._map[gm + 3] = d;
+        if (slot < this._mapLo) this._mapLo = slot;
+        if (slot + 1 > this._mapHi) this._mapHi = slot + 1;
+        if (slot > this._maxGlyphId) this._maxGlyphId = slot;
+    }
+
+    /** @private Grow the curve array (doubling its rows) to hold at least `texels`. */
     _growCurves(texels) {
         const need = texels * 4;
         if (need <= this._curve.length) return;
@@ -176,9 +209,10 @@ export class SlugBuffer {
         const grown = new Uint32Array(cap);
         grown.set(this._curve);
         this._curve = grown;
+        this._curveGen++;
     }
 
-    /** @private Grow the glyph-map array (doubling) to hold `glyphId`. */
+    /** @private Grow the glyph-map array (doubling its rows) to hold `glyphId`. */
     _growMap(glyphId) {
         const need = (glyphId + 1) * 4;
         if (need <= this._map.length) return;
@@ -187,19 +221,17 @@ export class SlugBuffer {
         const grown = new Uint32Array(cap);
         grown.set(this._map);
         this._map = grown;
+        this._mapGen++;
     }
 
-    /** Exact-size view of the curve texture data + its dims (a view, not a copy). */
+    /** The curve texture's backing: the whole array at its capacity, and its dims. */
     curveTexture() {
-        const height = Math.max(1, Math.ceil(this._curveTexels / TEXTURE_WIDTH));
-        return { data: this._curve.subarray(0, TEXTURE_WIDTH * height * 4), width: TEXTURE_WIDTH, height };
+        return { data: this._curve, width: TEXTURE_WIDTH, height: this._curve.length / (TEXTURE_WIDTH * 4) };
     }
 
-    /** Exact-size view of the glyph-map texture data + its dims. */
+    /** The glyph-map texture's backing: the whole array at its capacity, and its dims. */
     glyphMapTexture() {
-        const entries = Math.max(1, this._maxGlyphId + 1);
-        const height = Math.max(1, Math.ceil(entries / TEXTURE_WIDTH));
-        return { data: this._map.subarray(0, TEXTURE_WIDTH * height * 4), width: TEXTURE_WIDTH, height };
+        return { data: this._map, width: TEXTURE_WIDTH, height: this._map.length / (TEXTURE_WIDTH * 4) };
     }
 
     /**
@@ -207,13 +239,13 @@ export class SlugBuffer {
      * a prebaked blob ships and boot hydrates instead of re-encoding. Pairs with the
      * static {@link SlugBuffer.deserialize}.
      *
-     * The arrays are COPIES, row-aligned exactly as the textures want them (so the
-     * descriptor is independent of this buffer's future growth, and a hydrate yields
-     * byte-identical textures). `encodedIds` is stored explicitly — it is NOT
-     * reconstructable from the sparse glyph-map, because an encoded-but-empty glyph
-     * writes a `[start,0,0,0]` entry indistinguishable from an unencoded slot — and
-     * sorted ascending so the snapshot is order-stable (serialize twice → identical
-     * bytes) regardless of insertion order.
+     * The arrays are COPIES of the USED rows (the spare capacity is not shipped), row-aligned
+     * exactly as the textures lay them out, so the descriptor is independent of this buffer's
+     * future growth and a hydrate yields byte-identical texture contents. `encodedIds` is
+     * stored explicitly — it is NOT reconstructable from the sparse glyph-map, because an
+     * encoded-but-empty glyph writes a `[start,0,0,0]` entry indistinguishable from an
+     * unencoded slot — and sorted ascending so the snapshot is order-stable (serialize twice
+     * → identical bytes) regardless of insertion order.
      *
      * Stays pure: no hashing, no compression, no font identity. The cache/serving
      * layer wraps this descriptor in a versioned, hashed, gzipped envelope.
@@ -222,24 +254,22 @@ export class SlugBuffer {
      *             encodedIds:Uint32Array, curve:Uint32Array, map:Uint32Array }}
      */
     serialize() {
-        const c = this.curveTexture();    // row-aligned views
-        const g = this.glyphMapTexture();
         const encodedIds = Uint32Array.from(this._encoded).sort((a, b) => a - b);
         return {
             v: SLUG_BUFFER_FORMAT,
             curveCount: this._curveCount,
             maxGlyphId: this._maxGlyphId,
             encodedIds,
-            curve: c.data.slice(),        // slice() a view → owns its buffer
-            map: g.data.slice(),
+            curve: this._curve.slice(0, TEXTURE_WIDTH * rowsFor(this._curveTexels) * 4),
+            map: this._map.slice(0, TEXTURE_WIDTH * rowsFor(this._maxGlyphId + 1) * 4),
         };
     }
 
     /**
-     * Rebuild a live SlugBuffer from a {@link SlugBuffer#serialize} descriptor. The
-     * result is FULLY LIVE — it continues to grow via addGlyphs (capacity = the
-     * row-aligned used size; _growCurves/_growMap double from there). Throws on any
-     * structural mismatch so the cache layer can catch → fall back to live encode.
+     * Rebuild a live SlugBuffer from a {@link SlugBuffer#serialize} descriptor. The result is
+     * FULLY LIVE — it keeps growing via appendEncoded, at the capacity a buffer that grew to
+     * this size has (the initial rows, doubled to fit). Throws on any structural mismatch so
+     * the cache layer can catch → fall back to live encode.
      *
      * @param {{ v:number, curveCount:number, maxGlyphId:number,
      *           encodedIds:Uint32Array, curve:Uint32Array, map:Uint32Array }} d
@@ -248,10 +278,14 @@ export class SlugBuffer {
     static deserialize(d) {
         _validateDescriptor(d);
         const buf = new SlugBuffer();
-        buf._curve = Uint32Array.from(d.curve);
+        const curveRows = capacityFor(d.curve.length / (TEXTURE_WIDTH * 4), CURVE_INITIAL_ROWS);
+        const mapRows = capacityFor(d.map.length / (TEXTURE_WIDTH * 4), MAP_INITIAL_ROWS);
+        buf._curve = new Uint32Array(TEXTURE_WIDTH * curveRows * 4);
+        buf._curve.set(d.curve);
         buf._curveCount = d.curveCount;
         buf._curveTexels = d.curveCount * CURVE_TEXELS_PER_CURVE;
-        buf._map = Uint32Array.from(d.map);
+        buf._map = new Uint32Array(TEXTURE_WIDTH * mapRows * 4);
+        buf._map.set(d.map);
         buf._maxGlyphId = d.maxGlyphId;
         buf._encoded = new Set(d.encodedIds);
         return buf;
@@ -274,17 +308,64 @@ function _validateDescriptor(d) {
     if (!Number.isInteger(d.curveCount) || d.curveCount < 0 || !Number.isInteger(d.maxGlyphId) || d.maxGlyphId < -1) {
         throw new Error(`SlugBuffer.deserialize: bad counts (curveCount=${d.curveCount}, maxGlyphId=${d.maxGlyphId})`);
     }
-    const curveTexels = d.curveCount * CURVE_TEXELS_PER_CURVE;
-    const curveRows = Math.max(1, Math.ceil(curveTexels / TEXTURE_WIDTH));
-    const wantCurve = TEXTURE_WIDTH * curveRows * 4;
+    const wantCurve = TEXTURE_WIDTH * rowsFor(d.curveCount * CURVE_TEXELS_PER_CURVE) * 4;
     if (d.curve.length !== wantCurve) {
         throw new Error(`SlugBuffer.deserialize: curve length ${d.curve.length} != ${wantCurve} (for ${d.curveCount} curves)`);
     }
-    const mapRows = Math.max(1, Math.ceil((d.maxGlyphId + 1) / TEXTURE_WIDTH));
-    const wantMap = TEXTURE_WIDTH * mapRows * 4;
+    const wantMap = TEXTURE_WIDTH * rowsFor(d.maxGlyphId + 1) * 4;
     if (d.map.length !== wantMap) {
         throw new Error(`SlugBuffer.deserialize: map length ${d.map.length} != ${wantMap} (for maxGlyphId ${d.maxGlyphId})`);
     }
+}
+
+/**
+ * Encode a batch of glyphs: extract each outline, normalize it to its advance cell, and pack
+ * its curves as curve-texture texels. Pure (no DOM, no Three.js) — the encode worker runs it
+ * against its own HarfBuzz faces; a test runs it against a fake shaper.
+ *
+ * @param {Uint32Array|number[]} items - triplets [slot, fontIdx, gid]
+ * @param {(fontIdx:number) => {glyphOutline:Function, glyphAdvance:Function, fontExtents:Function, glyphName:Function}} shaperOf
+ *   the shaper that owns `gid` in font `fontIdx`
+ * @returns {EncodedBatch}
+ */
+export function encodeGlyphBatch(items, shaperOf) {
+    const n = (items.length / 3) | 0;
+    const slots = new Uint32Array(n);
+    const counts = new Uint32Array(n);
+    const glyphs = new Array(n);
+    let total = 0;
+    const overhang = { count: 0, worstSlot: -1, worstFrac: 0, worstName: '' };
+    for (let i = 0; i < n; i++) {
+        const slot = items[i * 3], fontIdx = items[i * 3 + 1], gid = items[i * 3 + 2];
+        const data = encodeGlyph(shaperOf(fontIdx), gid);
+        slots[i] = slot;
+        counts[i] = data.curves.length;
+        glyphs[i] = data.curves;
+        total += data.curves.length;
+        if (data.overhang) {
+            overhang.count++;
+            if (data.overhang.frac > overhang.worstFrac) {
+                overhang.worstFrac = data.overhang.frac;
+                overhang.worstSlot = slot;
+                overhang.worstName = data.overhang.name;
+            }
+        }
+    }
+    const texels = new Uint32Array(total * CURVE_U32_PER_CURVE);
+    let o = 0;
+    for (let i = 0; i < n; i++) {
+        for (const c of glyphs[i]) {
+            // texel 0: [P0.x, P0.y, P1.x, P1.y]   texel 1: [P2.x, P2.y, _, _]
+            texels[o + 0] = packUint16(c.p0x);
+            texels[o + 1] = packUint16(c.p0y);
+            texels[o + 2] = packUint16(c.p1x);
+            texels[o + 3] = packUint16(c.p1y);
+            texels[o + 4] = packUint16(c.p2x);
+            texels[o + 5] = packUint16(c.p2y);
+            o += CURVE_U32_PER_CURVE;
+        }
+    }
+    return { slots, counts, texels, overhang };
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +412,8 @@ export function encodeGlyph(shaper, glyphId) {
     // Overhang check: ink past the advance cell ([0, advance]) clips at the advance-wide quad
     // edge (curves normalize [0,advance]→[0,1]). Common + mostly benign — the hull over-estimates
     // (control points sit outside the curve) AND fonts legitimately overhang (negative side
-    // bearings, overshoots). Return the magnitude instead of warning per-glyph; SlugBuffer.addGlyphs
-    // aggregates one summary so it doesn't re-spam on every atlas re-encode.
+    // bearings, overshoots). Return the magnitude instead of warning per-glyph; encodeGlyphBatch
+    // aggregates them into one summary per batch.
     let overhang = null;
     const over = Math.max(bbox.xMax - advance, -bbox.xMin); // worst of right-overhang / left-of-origin
     if (advance > 0 && over > advance * 0.01) {             // 1% tolerance for rounding
@@ -410,7 +491,7 @@ function _parseSegments(glyphId, segments) {
 
             case 'C':
                 throw new Error(
-                    `[SlugEncoder] Cubic bezier in glyph ${glyphId} — CFF fonts not yet supported`
+                    `[slugData] Cubic bezier in glyph ${glyphId} — CFF fonts not yet supported`
                 );
 
             case 'Z':

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { bootGlyphEngine } from '@glyph3d/core';
+import { bootGlyphEngine, disposeGlyphEngine } from '@glyph3d/core';
 
 /**
  * Boot the glyph engine (atlas + shaper + slug) once and expose its state.
@@ -20,7 +20,8 @@ export function useGlyphEngine(options) {
     let cancelled = false;
     setStage('booting');
     bootGlyphEngine({ ...options, onStage: (s) => !cancelled && setStage(s) })
-      .then((a) => { if (!cancelled) setAtlas(a); })
+      // A cancelled boot's atlas is never used: release its workers (encode + emoji raster).
+      .then((a) => { if (cancelled) disposeGlyphEngine(a); else setAtlas(a); })
       .catch((e) => { if (!cancelled) { setError(e); setStage('error'); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps

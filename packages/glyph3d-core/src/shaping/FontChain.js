@@ -15,7 +15,7 @@
  * uniquely identifies a (fontIndex, fontGlyphId) pair. Slot 0 is reserved for
  * the blank/.notdef cell (a codepoint no font covers). Because the chain mimics
  * the shaper interface with slots as IDs, MonospaceShapeCache, slugData,
- * SlugEncoder, LiveSlugAtlas and GlyphField all consume it unchanged — the only
+ * SlugTextures, LiveSlugAtlas and GlyphField all consume it unchanged — the only
  * difference is that `instanceGlyphId` now carries a slot, and the glyph-map
  * texture is keyed by slot. Slots stay dense, so the texture stays compact.
  *
@@ -57,7 +57,7 @@ function isEmojiCodepoint(cp) {
 
 export default class FontChain {
     constructor() {
-        /** @private @type {Array<{shaper: HarfBuzzShaper, coverage: Set<number>, name: string}>} */
+        /** @private @type {Array<{shaper: HarfBuzzShaper, coverage: Set<number>, name: string, bytes: ArrayBuffer}>} */
         this._fonts = [];
         /** @private slot → {fontIdx, gid}. Index 0 is the blank cell. */
         this._slotMeta = [{ fontIdx: -1, gid: 0 }];
@@ -135,7 +135,7 @@ export default class FontChain {
             if (!sharedHb) sharedHb = shaper.hb;
 
             const coverage = new Set(shaper.collectUnicodes());
-            this._fonts.push({ shaper, coverage, name });
+            this._fonts.push({ shaper, coverage, name, bytes: buffer });
             console.log(`[FontChain] [${this._fonts.length - 1}] ${name}: ${coverage.size} codepoints`);
         }
         if (this._fonts.length === 0) {
@@ -185,6 +185,36 @@ export default class FontChain {
     /** @private @returns {{fontIdx:number, gid:number, cell?:number}} */
     _resolve(slot) {
         return this._slotMeta[slot] || this._slotMeta[BLANK_SLOT];
+    }
+
+    /**
+     * The font glyph behind an OUTLINE slot — what the encode worker extracts, and what a
+     * persisted glyph is keyed by (slots are allocation order, so they differ between boots;
+     * (fontIdx, gid) does not). Null for the blank slot and for bitmap slots.
+     * @param {number} slot
+     * @returns {{fontIdx:number, gid:number}|null}
+     */
+    slotSource(slot) {
+        const m = this._slotMeta[slot];
+        return (m && m.fontIdx >= 0) ? { fontIdx: m.fontIdx, gid: m.gid } : null;
+    }
+
+    /**
+     * Each font's name and file bytes, in chain order — what the encode worker loads.
+     * @returns {Array<{name:string, bytes:ArrayBuffer}>}
+     */
+    fontSources() {
+        return this._fonts.map((f) => ({ name: f.name, bytes: f.bytes }));
+    }
+
+    /**
+     * The bitmap slot already allocated for an emoji codepoint, or -1 (a lookup — it never
+     * allocates or draws).
+     * @param {number} cp
+     * @returns {number}
+     */
+    bitmapSlotOf(cp) {
+        return this._slotByKey.get(BITMAP_KEY_BASE + cp) ?? -1;
     }
 
     /**

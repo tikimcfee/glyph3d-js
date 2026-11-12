@@ -1,79 +1,87 @@
-// slug-atlas-dispose.test.mjs — headless behavior lock for the LiveSlugAtlas
-// texture-pair disposal on hot-swap (VRAM hygiene on the bulk-load growth path).
+// slug-atlas-dispose.test.mjs — headless behavior lock for LiveSlugAtlas texture lifetime
+// (VRAM hygiene on the growth path).
 //
 //   bun tools/slug-atlas-dispose.test.mjs
 //
-// Every atlas growth mints a NEW curve/glyph-map texture pair and hot-swaps it into
-// every live field. The orphaned pair's GPUTextures only die on texture.dispose() —
-// before the fix, each growth leaked a pair until page unload. The lock: after the
-// swap lands, the previous pair is disposed exactly once, the live pair never is,
-// and a no-growth ensure disposes nothing.
+// The Slug textures live at a CAPACITY: a growth that fits writes into the textures every
+// field already holds — no new object, no rebinding, nothing to dispose. Only when an array
+// doubles is its texture REBORN: every registered field gets the new pair, and the retired
+// texture is disposed exactly once (its GPUTexture only dies on dispose(); each growth used to
+// leak a pair until page unload). The texture whose array didn't grow is kept, never disposed.
 
 import LiveSlugAtlas from '../packages/glyph3d-core/src/shaping/LiveSlugAtlas.js';
+import { encodeGlyphBatch } from '../packages/glyph3d-core/src/shaping/slugData.js';
+import { TEXTURE_WIDTH, MAP_INITIAL_ROWS, CURVE_INITIAL_ROWS } from '../packages/glyph3d-core/src/shaping/slug-constants.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
 
-// A stand-in texture: THREE.DataTexture without the import cost, with a dispose tally.
-const mkTex = () => {
-    const t = { disposed: 0 };
-    t.dispose = () => { t.disposed++; };
-    return t;
-};
-const mkPair = () => ({ curveTexture: mkTex(), glyphMapTexture: mkTex(), stats: {} });
-
-// Boot with an empty encode (real SlugEncoder, no glyphs — cheap), then replace the
-// internals with controllable fakes: the disposal logic lives in ensureGlyphsEncoded
-// and only touches _slugData / _encoder / _fields.
-const glyphAtlas = {};
-const atlas = new LiveSlugAtlas({ atlas: glyphAtlas, shaper: {}, initialGlyphIds: [] });
-
-const boot = mkPair();
-atlas._slugData = boot;
-glyphAtlas._slugData = boot;
-
-let current = null;
-atlas._encoder = {
-    size: 0,
-    appendGlyphs() {
-        this.size++;
-        current = mkPair();
-        return { ...current, added: 1, addedIds: [999], grew: true };
+const FAT = 777;   // a glyph with more curves than the initial curve capacity holds
+const fatCurves = (CURVE_INITIAL_ROWS * TEXTURE_WIDTH) / 2 + 10;
+const outline = {
+    glyphAdvance: () => 1024, fontExtents: () => ({ ascender: 1638, descender: -410 }), glyphName: (g) => `g${g}`,
+    glyphOutline: (g) => {
+        const n = g === FAT ? fatCurves : 3;
+        const segs = [{ type: 'M', values: [0, 0] }];
+        for (let k = 0; k < n; k++) segs.push({ type: 'Q', values: [k % 900, 10, (k * 7) % 900, 800] });
+        return segs;
     },
 };
+const shaper = {
+    isBitmapSlot: () => false,
+    slotSource: (id) => ({ fontIdx: 0, gid: id }),
+    describeSlot: (id) => ({ font: 'F', gid: id, name: `g${id}` }),
+};
+const encoder = { encode: async (items) => ({ batch: encodeGlyphBatch(items, () => outline), ms: 0 }) };
 
-const field = { sd: null, setSlugData(sd) { this.sd = sd; }, setEmojiTexture() {} };
+const glyphAtlas = {};
+const atlas = new LiveSlugAtlas({ atlas: glyphAtlas, shaper, encoder });
+const field = { sd: null, swaps: 0, setSlugData(sd) { this.sd = sd; this.swaps++; }, setEmojiTexture() {} };
 atlas.registerField(field);
 
-// ── growth #1: boot pair disposed after the swap, new pair live ──
+const spy = (t) => { t.disposedN = 0; const d = t.dispose.bind(t); t.dispose = () => { t.disposedN++; d(); }; return t; };
+const boot = { curve: spy(atlas.slugData.curveTexture), map: spy(atlas.slugData.glyphMapTexture) };
+
+// ── growth within capacity: same objects, no rebinding, nothing disposed ──
 {
-    const r = atlas.ensureGlyphsEncoded([999]);
-    ok(r.grew === true && r.added === 1, 'growth reported');
-    ok(field.sd !== boot && field.sd.curveTexture === current.curveTexture, 'field swapped to the new pair');
-    ok(glyphAtlas._slugData.curveTexture === current.curveTexture, 'atlas points at the new pair');
-    ok(boot.curveTexture.disposed === 1 && boot.glyphMapTexture.disposed === 1,
-        `boot pair disposed once (curve=${boot.curveTexture.disposed}, map=${boot.glyphMapTexture.disposed})`);
-    ok(current.curveTexture.disposed === 0 && current.glyphMapTexture.disposed === 0, 'live pair NOT disposed');
+    atlas.ensureGlyphsEncoded([5, 6, 7]);
+    await atlas.whenIdle();
+    ok(atlas.slugData.curveTexture === boot.curve && atlas.slugData.glyphMapTexture === boot.map, 'textures kept across a growth that fits');
+    ok(field.swaps === 0, 'no field rebound');
+    ok(boot.curve.disposedN === 0 && boot.map.disposedN === 0, 'nothing disposed');
 }
 
-// ── growth #2: the previous live pair is disposed, the newest stays live ──
+// ── a slot past the map's capacity: the MAP is reborn, the curve texture kept ──
 {
-    const prevLive = current;
-    atlas.ensureGlyphsEncoded([999]);
-    ok(prevLive.curveTexture.disposed === 1 && prevLive.glyphMapTexture.disposed === 1,
-        'previous live pair disposed on the next growth');
-    ok(current.curveTexture.disposed === 0, 'newest pair still live');
-    ok(field.sd.curveTexture === current.curveTexture, 'field tracking the newest pair');
+    const far = MAP_INITIAL_ROWS * TEXTURE_WIDTH + 3;
+    atlas.ensureGlyphsEncoded([far]);
+    ok(atlas.slugData.glyphMapTexture !== boot.map, 'map reborn as soon as the far slot is reserved (no out-of-texture read in flight)');
+    ok(field.swaps === 1 && field.sd.glyphMapTexture === atlas.slugData.glyphMapTexture, 'field rebound to the new pair once');
+    ok(glyphAtlas._slugData === atlas.slugData, 'atlas points at the new pair');
+    ok(boot.map.disposedN === 1, `retired map disposed once (${boot.map.disposedN})`);
+    ok(atlas.slugData.curveTexture === boot.curve && boot.curve.disposedN === 0, 'curve texture kept, not disposed');
+    await atlas.whenIdle();
+    ok(field.swaps === 1, 'its landing (within capacity) rebinds nothing more');
 }
 
-// ── no growth: nothing disposed, nothing swapped ──
+// ── a glyph past the curve capacity: the CURVE texture is reborn ──
 {
-    const liveNow = current;
-    atlas._encoder.appendGlyphs = () => ({ ...current, added: 0, addedIds: [], grew: false });
-    const r = atlas.ensureGlyphsEncoded([999]);
-    ok(r.grew === false, 'no-growth reported');
-    ok(liveNow.curveTexture.disposed === 0, 'no-growth disposes nothing');
-    ok(field.sd.curveTexture === liveNow.curveTexture, 'no-growth swaps nothing');
+    const liveMap = spy(atlas.slugData.glyphMapTexture);
+    atlas.ensureGlyphsEncoded([FAT]);
+    await atlas.whenIdle();
+    ok(atlas.slugData.curveTexture !== boot.curve, 'curve reborn when the fat glyph overruns it');
+    ok(boot.curve.disposedN === 1, 'retired curve texture disposed once');
+    ok(atlas.slugData.glyphMapTexture === liveMap && liveMap.disposedN === 0, 'live map kept, not disposed');
+    ok(field.swaps === 2 && field.sd.curveTexture === atlas.slugData.curveTexture, 'field tracks the newest pair');
+}
+
+// ── nothing new: nothing swapped, nothing disposed ──
+{
+    const live = { curve: spy(atlas.slugData.curveTexture), map: atlas.slugData.glyphMapTexture };
+    const r = atlas.ensureGlyphsEncoded([5, FAT]);
+    await atlas.whenIdle();
+    ok(r.queued === 0, 'already-encoded glyphs queue nothing');
+    ok(live.curve.disposedN === 0 && field.swaps === 2, 'no-growth disposes and swaps nothing');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

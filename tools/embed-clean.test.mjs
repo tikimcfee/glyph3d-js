@@ -80,36 +80,30 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
     grid.dispose();
 }
 
-// 3. EmojiAtlas Headless / Injected Canvas Support
+// 3. EmojiAtlas Headless / Injected Rasterizer Support
 {
-    let created = 0;
-    const mockCanvas = {
-        width: 1024,
-        height: 1024,
-        getContext: () => ({
-            fillStyle: '',
-            font: '',
-            fillRect: () => {},
-            clearRect: () => {},
-            fillText: () => {},
-            measureText: () => ({ width: 16 }),
-        }),
-    };
-
+    let rasters = 0;
     const atlas = new EmojiAtlas({
-        cellSize: 64,
+        cellPx: 8,
         cols: 16,
         rows: 16,
-        createCanvas: () => {
-            created++;
-            return mockCanvas;
+        rasterizer: {
+            raster: async ({ cps, cellPx }) => {
+                rasters++;
+                return { row0: 0, rows: 1, col0: 0, wCells: cps.length, band: new Uint8Array(cps.length * cellPx * cellPx * 4) };
+            },
+            dispose: () => {},
         },
     });
 
-    assert(created === 1, 'EmojiAtlas invoked injected createCanvas without DOM document');
     const slot = atlas.ensure(0x1F680);
-    assert(slot >= 0, 'Allocated emoji cell in headless canvas');
+    assert(slot >= 0, 'Allocated emoji cell with an injected rasterizer (no DOM, no worker)');
+    await atlas.whenIdle();
+    assert(rasters === 1, 'EmojiAtlas drew through the injected rasterizer');
     atlas.dispose();
+
+    const none = new EmojiAtlas({ rasterizer: null });
+    assert(none.ensure(0x1F680) === -1, 'no rasterizer → no cell (emoji fall back to outlines)');
 }
 
 // 4. FontChain In-Memory Buffer Support

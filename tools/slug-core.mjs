@@ -6,8 +6,9 @@
  *
  * This is the FOUNDATION test for the prebaked slug-core (serialize → ship → boot
  * hydrates instead of re-encoding). It is deliberately PURE and HEADLESS: a fake
- * deterministic shaper drives the real `addGlyphs` path, so there's no HarfBuzz
- * WASM, no canvas, no font fetch — it runs anywhere and is safe to gate CI on.
+ * deterministic shaper drives the real encode (`encodeGlyphBatch`, what the worker runs) and
+ * append (`appendEncoded`) path, so there's no HarfBuzz WASM, no canvas, no font fetch — it
+ * runs anywhere and is safe to gate CI on.
  *
  * What it proves (the teeth — a serialization test is vacuous without byte-equality):
  *   1. Round-trip       deserialize(serialize(buf)) reproduces the exact textures.
@@ -16,7 +17,7 @@
  *   4. Idempotency      serialize ∘ deserialize ∘ serialize is a fixed point.
  *   5. Empty-glyph      an encoded-but-EMPTY glyph survives (the reason `_encoded`
  *                       is stored explicitly, not reconstructed from the sparse map).
- *   6. Live after load  a hydrated buffer keeps growing via addGlyphs.
+ *   6. Live after load  a hydrated buffer keeps growing via appendEncoded.
  *   7. Validation       a tampered / wrong-version descriptor is REJECTED (throws),
  *                       so the cache layer can catch → fall back to live encode.
  *   8. Empty buffer     the zero-glyph edge round-trips.
@@ -26,7 +27,7 @@
  * algebra, not the font.
  */
 
-import { SlugBuffer, SLUG_BUFFER_FORMAT } from '../packages/glyph3d-core/src/shaping/slugData.js';
+import { SlugBuffer, SLUG_BUFFER_FORMAT, encodeGlyphBatch } from '../packages/glyph3d-core/src/shaping/slugData.js';
 import { TEXTURE_WIDTH } from '../packages/glyph3d-core/src/shaping/slug-constants.js';
 
 // ── fake shaper ────────────────────────────────────────────────────────────
@@ -76,7 +77,8 @@ const eqU32 = (a, b) => {
 const eqSet = (s, arr) => s.size === arr.length && arr.every((x) => s.has(x));
 const throws = (fn) => { try { fn(); return false; } catch { return true; } };
 
-const build = (ids) => { const b = new SlugBuffer(); b.addGlyphs(fakeShaper, ids); return b; };
+const encode = (ids) => encodeGlyphBatch(ids.flatMap((id) => [id, 0, id]), () => fakeShaper);
+const build = (ids) => { const b = new SlugBuffer(); b.appendEncoded(encode(ids)); return b; };
 
 // ── 1+2. round-trip + texture-byte equality ──────────────────────────────────
 console.log('\n[1/2] round-trip + texture-byte equality');
@@ -90,9 +92,11 @@ ok(buf2._maxGlyphId === buf1._maxGlyphId, `maxGlyphId preserved (${buf1._maxGlyp
 ok(eqSet(buf2._encoded, [...buf1._encoded]), `encoded set preserved (${buf1.size} glyphs)`);
 ok(eqU32(buf1.curveTexture().data, buf2.curveTexture().data), 'curve texture bytes identical');
 ok(eqU32(buf1.glyphMapTexture().data, buf2.glyphMapTexture().data), 'glyph-map texture bytes identical');
-const cT = buf1.curveTexture(), gT = buf1.glyphMapTexture();
-ok(cT.height >= 2, `curve texture spans multiple rows (${cT.height} rows — fat glyph exercised)`);
-ok(gT.height >= 2, `glyph-map spans multiple rows (${gT.height} rows — high id exercised)`);
+const curveRows = d.curve.length / (TEXTURE_WIDTH * 4), mapRows = d.map.length / (TEXTURE_WIDTH * 4);
+ok(curveRows >= 2, `curve data spans multiple rows (${curveRows} used rows — fat glyph exercised)`);
+ok(mapRows >= 2, `glyph-map spans multiple rows (${mapRows} used rows — high id exercised)`);
+ok(buf2.curveTexture().height === buf1.curveTexture().height && buf2.glyphMapTexture().height === buf1.glyphMapTexture().height,
+   `a hydrated buffer has the capacity the grown one has (${buf1.curveTexture().height} curve rows, ${buf1.glyphMapTexture().height} map rows)`);
 
 // ── 3. determinism ───────────────────────────────────────────────────────────
 console.log('\n[3] determinism — same glyphs encode byte-identically');
@@ -119,8 +123,8 @@ ok(buf2.glyphMapTexture().data[emptyId * 4 + 1] === 0, 'empty glyph map entry ha
 // ── 6. live after load ───────────────────────────────────────────────────────
 console.log('\n[6] hydrated buffer stays live');
 const before = buf2.size;
-const grow = buf2.addGlyphs(fakeShaper, [9991, 9992]);
-ok(grow.added === 2 && buf2.size === before + 2, `addGlyphs grows a hydrated buffer (+${grow.added})`);
+const grow = buf2.appendEncoded(encode([9991, 9992]));
+ok(grow.added === 2 && buf2.size === before + 2, `appendEncoded grows a hydrated buffer (+${grow.added})`);
 ok(buf2.has(9991) && buf2.has(9992), 'newly grown glyphs are present');
 ok(!throws(() => buf2.serialize()), 're-serializes cleanly after growth');
 
