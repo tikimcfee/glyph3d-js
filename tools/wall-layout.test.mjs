@@ -1,8 +1,9 @@
 // wall-layout.test.mjs — the wall's pure geometry: flow placement, framing, border grabs, cycling,
-// and border-drag resize. Run: bun test tools/wall-layout.test.mjs
+// border-drag resize, group tiling, tile drops and lasso hit-testing. Run: bun test tools/wall-layout.test.mjs
 import { test, expect } from 'bun:test';
 import {
     freeFlowSlot, fitRect, unionRect, edgesAt, hitTest, cycle, resizeFromDrag, overlaps, FLOW_GAP, FLOW_COLUMNS,
+    tileLayout, nearestPlace, lassoTouches, pointInPolygon, padRect, BAR_ROOM,
 } from '../wall/wallLayout.js';
 
 const rect = (x, y, w, h) => ({ minX: x, maxX: x + w, maxY: y, minY: y - h });
@@ -88,4 +89,59 @@ test('right/bottom drags grow away from the origin; left/top drags shift to keep
     const top = resizeFromDrag({ top: true }, start, stride, 0, 4, min);
     expect(top).toEqual({ cols: 80, rows: 26, shiftX: 0, shiftY: 4 });
     expect(resizeFromDrag({ right: true }, start, stride, -500, 0, min).cols).toBe(20);   // clamped
+});
+
+test('a tiling packs members row-major in N columns, edge to edge, a bar of room above each row', () => {
+    const sizes = [{ w: 100, h: 50 }, { w: 100, h: 50 }, { w: 100, h: 50 }];
+    const { places, extent } = tileLayout(sizes, { origin: { x: 10, y: 20 }, columns: 2, gap: 2, barRoom: 8 });
+    expect(places).toEqual([
+        { x: 10, y: 12 },                 // first body: under its bar's room
+        { x: 112, y: 12 },                // + width + gap
+        { x: 10, y: 20 - 58 - 2 - 8 },    // next row: down a window (body + bar) and a gap
+    ]);
+    expect(extent).toEqual({ minX: 10, maxX: 212, maxY: 20, minY: 20 - 2 * 58 - 2 });
+    // Every window (body + bar room) is disjoint from the others: nothing overlaps.
+    const wins = places.map((p, i) => ({ minX: p.x, maxX: p.x + sizes[i].w, maxY: p.y + 8, minY: p.y - sizes[i].h }));
+    for (let i = 0; i < wins.length; i++) for (let j = i + 1; j < wins.length; j++) expect(overlaps(wins[i], wins[j])).toBe(false);
+});
+
+test('a tiling of mixed sizes lines up as a table: columns as wide as their widest, rows as tall as their tallest', () => {
+    const sizes = [{ w: 80, h: 40 }, { w: 120, h: 60 }, { w: 100, h: 30 }, { w: 60, h: 20 }];
+    const { places } = tileLayout(sizes, { origin: { x: 0, y: 0 }, columns: 2, gap: 0, barRoom: 10 });
+    expect(places[1].x).toBe(100);                 // column 0 is 100 wide (its widest member, the third)
+    expect(places[3].x).toBe(100);
+    expect(places[2].y).toBe(-(60 + 10) - 10);     // row 0 is 70 tall (the second member's window)
+    expect(places[0].y).toBe(places[1].y);
+});
+
+test('a tiling defaults its bar room to BAR_ROOM, clamps columns to its size, and refuses nonsense', () => {
+    const { places } = tileLayout([{ w: 10, h: 10 }], { origin: { x: 0, y: 0 }, columns: 4, gap: 1 });
+    expect(places).toEqual([{ x: 0, y: -BAR_ROOM }]);
+    expect(tileLayout([], { origin: { x: 0, y: 0 }, columns: 2, gap: 0 })).toEqual({ places: [], extent: null });
+    expect(() => tileLayout([{ w: 1, h: 1 }], { origin: { x: 0, y: 0 }, columns: 0, gap: 0 })).toThrow(/columns/);
+    expect(() => tileLayout([{ w: 1, h: 1 }], { origin: { x: 0, y: 0 }, columns: 1.5, gap: 0 })).toThrow(/columns/);
+    expect(() => tileLayout([{ w: 1, h: 1 }], { origin: { x: 0, y: 0 }, columns: 1, gap: -1 })).toThrow(/gap/);
+});
+
+test('a dropped tile goes to the nearest place', () => {
+    const centres = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 0, y: -100 }];
+    expect(nearestPlace(centres, { x: 90, y: -20 })).toBe(1);
+    expect(nearestPlace(centres, { x: -5, y: -80 })).toBe(2);
+    expect(nearestPlace([], { x: 0, y: 0 })).toBe(-1);
+});
+
+test('a lasso touches a rect it crosses, encloses, or reaches into — and nothing it only passes by', () => {
+    const r = rect(0, 0, 10, 10);   // x 0..10, y -10..0
+    const around = [{ x: -5, y: 5 }, { x: 15, y: 5 }, { x: 15, y: -15 }, { x: -5, y: -15 }];
+    expect(lassoTouches(around, r)).toBe(true);                                                  // encloses it
+    expect(lassoTouches([{ x: 5, y: 20 }, { x: 5, y: -20 }, { x: 6, y: -20 }], r)).toBe(true);   // a sliver across it
+    expect(lassoTouches([{ x: 2, y: -2 }, { x: 30, y: -2 }, { x: 30, y: -8 }], r)).toBe(true);   // starts inside
+    expect(lassoTouches([{ x: 20, y: 5 }, { x: 40, y: 5 }, { x: 40, y: -15 }, { x: 20, y: -15 }], r)).toBe(false);
+    // A concave lasso whose notch holds the rect, its outline passing it by on three sides: untouched.
+    const u = [{ x: -10, y: 10 }, { x: -2, y: 10 }, { x: -2, y: -12 }, { x: 12, y: -12 }, { x: 12, y: 10 }, { x: 20, y: 10 }, { x: 20, y: -20 }, { x: -10, y: -20 }];
+    expect(lassoTouches(u, r)).toBe(false);
+    expect(lassoTouches([], r)).toBe(false);
+    expect(lassoTouches([{ x: 1, y: -1 }], r)).toBe(true);
+    expect(pointInPolygon(around, 0, 0)).toBe(true);
+    expect(padRect(r, 2)).toEqual({ minX: -2, maxX: 12, minY: -12, maxY: 2 });
 });

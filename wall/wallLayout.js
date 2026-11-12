@@ -1,6 +1,7 @@
 /**
  * wallLayout — the pure geometry of the wall: where a new terminal lands, how the camera frames a
- * rect, which edge of a terminal a pointer is grabbing, and focus cycling. No THREE, no DOM: rects
+ * rect, which edge of a terminal a pointer is grabbing, focus cycling, how a group tiles its members,
+ * which terminals a lasso touches, and where a dropped tile goes. No THREE, no DOM: rects
  * are plain `{ minX, minY, maxX, maxY }` in world units (y up), so this is testable headless.
  */
 
@@ -8,6 +9,9 @@
 export const FLOW_GAP = 12;
 /** Terminals per row before the flow wraps. */
 export const FLOW_COLUMNS = 3;
+/** The most world height a title bar takes above its terminal (TitleBar caps there) — the room a tiled
+ *  row leaves above each body. */
+export const BAR_ROOM = FLOW_GAP * 0.8;
 
 /**
  * @typedef {{ minX: number, minY: number, maxX: number, maxY: number }} Rect
@@ -150,4 +154,99 @@ export function resizeFromDrag(edges, start, stride, dx, dy, min) {
         shiftX: edges.left ? -(cols - start.cols) * stride.x : 0,
         shiftY: edges.top ? (rows - start.rows) * stride.y : 0,
     };
+}
+
+/**
+ * A tiled group's places: `columns` columns, row-major, packed edge to edge `gap` apart. A column is
+ * as wide as its widest member, a row as tall as its tallest window (body + `barRoom` for its title
+ * bar), so members of any size line up in a table. `origin` is the top-left of the first window
+ * (its bar's top). Returns each member's BODY top-left, in member order, and the tiling's extent
+ * (windows, bars included).
+ * @param {{ w: number, h: number }[]} sizes - each member's body size, world units
+ * @param {{ origin: { x: number, y: number }, columns: number, gap: number, barRoom?: number }} o
+ * @returns {{ places: { x: number, y: number }[], extent: Rect|null }}
+ */
+export function tileLayout(sizes, { origin, columns, gap, barRoom = BAR_ROOM }) {
+    if (!Number.isInteger(columns) || columns < 1) throw new Error(`[wall] tileLayout: columns must be a positive integer, got ${columns}`);
+    if (!(gap >= 0)) throw new Error(`[wall] tileLayout: gap must be ≥ 0, got ${gap}`);
+    if (!sizes.length) return { places: [], extent: null };
+    const cols = Math.min(columns, sizes.length);
+    const rows = Math.ceil(sizes.length / cols);
+    const colW = new Array(cols).fill(0);
+    const rowH = new Array(rows).fill(0);
+    sizes.forEach(({ w, h }, i) => {
+        const c = i % cols, r = Math.floor(i / cols);
+        colW[c] = Math.max(colW[c], w);
+        rowH[r] = Math.max(rowH[r], h + barRoom);
+    });
+    const xs = [origin.x], ys = [origin.y];
+    for (let c = 1; c < cols; c++) xs.push(xs[c - 1] + colW[c - 1] + gap);
+    for (let r = 1; r < rows; r++) ys.push(ys[r - 1] - rowH[r - 1] - gap);
+    const places = sizes.map((_, i) => ({ x: xs[i % cols], y: ys[Math.floor(i / cols)] - barRoom }));
+    return {
+        places,
+        extent: { minX: origin.x, maxX: xs[cols - 1] + colW[cols - 1], maxY: origin.y, minY: ys[rows - 1] - rowH[rows - 1] },
+    };
+}
+
+/**
+ * Which tile a dropped member belongs in: the index of the place whose centre is nearest the drop
+ * point (the member's window centre where it was let go).
+ * @param {{ x: number, y: number }[]} centres - each tile's centre, member order
+ * @param {{ x: number, y: number }} p
+ * @returns {number} -1 when there are no tiles
+ */
+export function nearestPlace(centres, p) {
+    let best = -1, bd = Infinity;
+    centres.forEach((c, i) => {
+        const d = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+        if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+}
+
+/** Point in polygon (even-odd). @param {{x:number,y:number}[]} poly @param {number} x @param {number} y */
+export function pointInPolygon(poly, x, y) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i], b = poly[j];
+        if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+}
+
+/** Do segments ab and cd cross (touching counts)? */
+function segmentsCross(a, b, c, d) {
+    const o = (p, q, r) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+    const on = (p, q, r) => Math.min(p.x, q.x) <= r.x && r.x <= Math.max(p.x, q.x) && Math.min(p.y, q.y) <= r.y && r.y <= Math.max(p.y, q.y);
+    const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
+    if (o1 !== o2 && o3 !== o4) return true;
+    return (o1 === 0 && on(a, b, c)) || (o2 === 0 && on(a, b, d)) || (o3 === 0 && on(c, d, a)) || (o4 === 0 && on(c, d, b));
+}
+
+/**
+ * Does a freeform lasso touch a rect? The lasso is the closed polygon through its points: it
+ * touches a rect when its outline crosses the rect, a lasso point lies inside the rect, or the rect
+ * lies inside the lasso. A lasso of one point touches what it's in; of none, nothing.
+ * @param {{x:number,y:number}[]} poly - world points, in drawing order
+ * @param {Rect} r
+ * @returns {boolean}
+ */
+export function lassoTouches(poly, r) {
+    if (!poly.length) return false;
+    const inRect = (p) => p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY;
+    if (poly.some(inRect)) return true;
+    if (poly.length < 2) return false;
+    const corners = [{ x: r.minX, y: r.minY }, { x: r.maxX, y: r.minY }, { x: r.maxX, y: r.maxY }, { x: r.minX, y: r.maxY }];
+    if (poly.length >= 3 && corners.some((c) => pointInPolygon(poly, c.x, c.y))) return true;
+    for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        for (let k = 0; k < 4; k++) if (segmentsCross(a, b, corners[k], corners[(k + 1) % 4])) return true;
+    }
+    return false;
+}
+
+/** Grow a rect by `pad` on every side. @param {Rect} r @param {number} pad @returns {Rect} */
+export function padRect(r, pad) {
+    return { minX: r.minX - pad, minY: r.minY - pad, maxX: r.maxX + pad, maxY: r.maxY + pad };
 }
