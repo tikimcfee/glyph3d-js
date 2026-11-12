@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod paths;
+pub mod render;
 pub mod start;
 
 pub use client::{Client, ClientError};

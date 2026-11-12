@@ -6,6 +6,7 @@ use crate::env;
 use crate::hold::{self, Exit, Hold};
 use crate::out::ConnOut;
 use crate::owner::{self, Cmd, CreateSpec, Registry, Restored, TermOp, TermRef, reply_err, reply_ok};
+use crate::status::{self, Hub};
 use g3d_wire::frame::{self, Frame, FrameDecoder, FrameError, ty};
 use g3d_wire::msg::*;
 use rustix::process::Signal;
@@ -41,12 +42,39 @@ pub struct Server {
     /// The running upgrade's inbox for the holder's `candidate`, `commit`, `upgrade_abort`.
     upgrade_tx: Mutex<Option<mpsc::UnboundedSender<Value>>>,
     upgrade_deadline: Duration,
+    /// The status document: followers, rates, errors.
+    pub hub: Arc<Hub>,
+    /// Connections that only follow status (and ping): they don't keep an empty daemon alive.
+    passive: AtomicUsize,
+    env: Arc<env::Policy>,
 }
 
-/// Leaves: the holder ends the namespace (removing the socket) once this brain has gone.
-fn end_namespace(hold: &Hold, why: &str) -> ! {
+impl Server {
+    /// Client connections that keep the namespace alive: all but the status-only ones.
+    fn active_conns(&self) -> usize {
+        self.conns.load(SeqCst).saturating_sub(self.passive.load(SeqCst))
+    }
+
+    fn status_doc(&self) -> Status {
+        self.hub.build(&self.reg, self.conns.load(SeqCst) as u64, self.env.status(), false)
+    }
+}
+
+/// Leaves: status followers get their last document (`exiting`), then the holder ends the
+/// namespace (removing the socket) once this brain has gone.
+async fn end_namespace(srv: &Server, why: &str) -> ! {
     crate::log(&format!("exiting: {why}"));
-    hold.send(&json!({"m": "exit_namespace", "why": why}), &[]);
+    // Nothing new is served by a namespace that is leaving: a connection made now waits in the
+    // backlog and sees the end, never a terminal created in a namespace about to go.
+    let _ = srv.accepting.send(false);
+    if srv.hub.has_followers() {
+        srv.hub.farewell(&srv.reg, srv.conns.load(SeqCst) as u64, srv.env.status());
+        let until = Instant::now() + Duration::from_secs(1);
+        while srv.hub.has_followers() && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    srv.hold.send(&json!({"m": "exit_namespace", "why": why}), &[]);
     std::process::exit(0);
 }
 
@@ -102,6 +130,11 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
     ));
     let candidate = w.candidate;
     crate::out::set_limits(args.lossy_queue, args.block_high, args.block_low);
+    let locale_fill = env::locale_fill(args.fill_locale);
+    let mut warnings = Vec::new();
+    if args.fill_locale && locale_fill.is_none() {
+        warnings.push("no UTF-8 locale loads here: terminals that set none get none".to_owned());
+    }
     let env_policy = env::Policy::new(
         args.env_source,
         env::Settings {
@@ -109,13 +142,16 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             keep: args.env_keep.clone(),
             shell: args.shell.clone(),
             login_shell: args.login_shell,
-            locale_fill: env::locale_fill(args.fill_locale),
+            locale_fill,
             term: args.term.clone(),
             socket: socket.display().to_string(),
             version: crate::VERSION.to_owned(),
         },
         Duration::from_millis(args.env_manager_timeout_ms),
+        warnings,
     );
+    let env_policy = Arc::new(env_policy);
+    let errors = Arc::new(status::Errors::new(args.status_errors));
     let reg = Registry::new(
         owner::Config {
             ns,
@@ -127,10 +163,11 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             kill_grace: Duration::from_secs(args.kill_grace),
             engine,
             input_max: args.input_buffer,
-            env: Arc::new(env_policy),
+            env: env_policy.clone(),
         },
         start.hold.clone(),
         start.marks.clone(),
+        errors.clone(),
     );
     let terms = std::mem::take(&mut start.terms);
     let exited: Vec<String> = terms.iter().filter(|t| t.exit.is_some()).map(|t| t.id.clone()).collect();
@@ -149,6 +186,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             }
             Err(e) => {
                 crate::log(&format!("terminal {id}: could not be restored: {e}"));
+                errors.record("restore", Some(id), format!("could not be restored: {e}"));
                 not_exact.push(id.clone());
             }
         }
@@ -162,6 +200,61 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             counts[Restored::Blank as usize]
         ));
     }
+    let restored_counts = RestoredCounts {
+        exact: counts[Restored::Exact as usize] as u64,
+        snapshot: counts[Restored::Snapshot as usize] as u64,
+        blank: counts[Restored::Blank as usize] as u64,
+    };
+    let last_start = BrainStart {
+        reason: w.reason.clone(),
+        at: w.at,
+        exit: w.exit.clone(),
+        restored: restored_counts,
+        unseen: unseen_total,
+    };
+    if matches!(w.reason.as_str(), "crash" | "watchdog") {
+        let how = match &w.exit {
+            Some(ExitStatus { signal: Some(s), .. }) => format!(" (SIG{s})"),
+            Some(ExitStatus { code: Some(c), .. }) => format!(" (code {c})"),
+            _ => String::new(),
+        };
+        let what = if w.reason == "watchdog" { "was killed by the watchdog" } else { "crashed" };
+        errors.record_at(
+            &format!("brain_{}", w.reason),
+            None,
+            format!(
+                "termd's engine {what}{how}; screens restored: {} exact, {} from snapshots, {} blank; {unseen_total} B unseen",
+                restored_counts.exact, restored_counts.snapshot, restored_counts.blank
+            ),
+            w.at,
+        );
+    }
+    let info = status::BrainInfo {
+        ns: reg.cfg.ns.clone(),
+        socket: socket.display().to_string(),
+        log: log_path.display().to_string(),
+        instance: w.instance.clone(),
+        holder_started_at: w.started_at,
+        holder_pid: w.holder_pid,
+        holder_version: w.holder_version.clone(),
+        hold: w.hold,
+        generation: w.generation,
+        started_at: status::ms_now(),
+        restarts: w.restarts,
+        last_start,
+        snapshot_interval_ms: args.snapshot_interval_ms,
+    };
+    let hub = Hub::new(
+        info,
+        status::Settings {
+            interval: Duration::from_millis(args.status_interval_ms),
+            min: Duration::from_millis(args.status_min_interval_ms),
+            max: Duration::from_millis(args.status_max_interval_ms.max(args.status_min_interval_ms)),
+            keepalive: Duration::from_millis(args.status_keepalive_ms),
+            rate_window: Duration::from_millis(args.status_rate_window_ms.max(1)),
+        },
+        errors,
+    );
     if candidate {
         if !not_exact.is_empty() {
             let why = format!("terminals not handed over exactly: {}", not_exact.join(", "));
@@ -205,6 +298,8 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         Duration::from_secs(args.idle_exit),
         heartbeat,
         Duration::from_secs(args.upgrade_deadline),
+        hub,
+        env_policy,
     ));
     std::process::exit(0);
 }
@@ -223,6 +318,8 @@ async fn run(
     idle_exit: Duration,
     heartbeat: Duration,
     upgrade_deadline: Duration,
+    hub: Arc<Hub>,
+    env: Arc<env::Policy>,
 ) {
     listener.set_nonblocking(true).expect("nonblocking listener");
     let listener = tokio::net::UnixListener::from_std(listener).expect("tokio listener");
@@ -238,7 +335,30 @@ async fn run(
         accepting,
         upgrade_tx: Mutex::new(None),
         upgrade_deadline,
+        hub,
+        passive: AtomicUsize::new(0),
+        env,
     });
+
+    // The status tick: rate samples always; with followers, one document per tick to each one due.
+    {
+        let srv = srv.clone();
+        tokio::spawn(async move {
+            loop {
+                let next = srv.hub.tick(&srv.reg, srv.conns.load(SeqCst) as u64, || srv.env.status());
+                tokio::select! {
+                    _ = tokio::time::sleep(next) => {}
+                    _ = srv.hub.joined() => {}
+                }
+            }
+        });
+    }
+    // The session environment's source, found before the first terminal asks for it (so the
+    // status document names it, and an unreachable user manager shows up at once).
+    {
+        let env = srv.env.clone();
+        tokio::task::spawn_blocking(move || env.probe());
+    }
 
     // The heartbeat: the holder's watchdog aborts a brain that goes quiet.
     {
@@ -265,7 +385,7 @@ async fn run(
                             srv.reg.len()
                         ));
                         owner::kill_all(&srv.reg).await;
-                        end_namespace(&srv.hold, "SIGTERM");
+                        end_namespace(&srv, "SIGTERM").await;
                     }
                     "candidate" | "commit" | "upgrade_abort" => {
                         if let Some(tx) = srv.upgrade_tx.lock().unwrap().as_ref() {
@@ -284,10 +404,14 @@ async fn run(
             let mut idle_since: Option<Instant> = None;
             loop {
                 tokio::time::sleep(Duration::from_millis(500).min(idle_exit)).await;
-                if srv.reg.len() == 0 && srv.conns.load(SeqCst) == 0 {
+                if srv.reg.len() == 0 && srv.active_conns() == 0 {
                     let since = *idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= idle_exit {
-                        end_namespace(&srv.hold, &format!("no terminals and no connections for {idle_exit:?}"));
+                        end_namespace(
+                            &srv,
+                            &format!("no terminals and no connections but status followers for {idle_exit:?}"),
+                        )
+                        .await;
                     }
                 } else {
                     idle_since = None;
@@ -327,6 +451,12 @@ struct Conn {
     out: Arc<ConnOut>,
     hello: bool,
     subs: HashMap<u32, Arc<TermRef>>,
+    /// The peer's pid, from its credentials.
+    pid: Option<u32>,
+    /// Counted in `Server::passive`: it follows status and has done nothing but status and ping.
+    passive: bool,
+    /// It has asked for something other than status or ping.
+    active: bool,
 }
 
 enum Flow {
@@ -342,8 +472,8 @@ fn fatal(out: &ConnOut, code: &str, message: impl Into<String>) -> Flow {
 
 async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
     let out = ConnOut::new();
-    match stream.peer_cred() {
-        Ok(c) if c.uid() == srv.uid => {}
+    let pid = match stream.peer_cred() {
+        Ok(c) if c.uid() == srv.uid => c.pid().and_then(|p| u32::try_from(p).ok()),
         Ok(c) => {
             crate::log(&format!("refused a connection from uid {}", c.uid()));
             fatal(&out, code::AUTH, "this daemon serves its own user only");
@@ -355,13 +485,21 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
             crate::log(&format!("peer credentials: {e}"));
             return;
         }
-    }
+    };
     let (mut rd, wr) = stream.into_split();
     let writer = {
         let out = out.clone();
         tokio::spawn(async move { out.run_writer(wr).await })
     };
-    let mut c = Conn { id: srv.next_conn.fetch_add(1, SeqCst), out: out.clone(), hello: false, subs: HashMap::new() };
+    let mut c = Conn {
+        id: srv.next_conn.fetch_add(1, SeqCst),
+        out: out.clone(),
+        hello: false,
+        subs: HashMap::new(),
+        pid,
+        passive: false,
+        active: false,
+    };
     srv.outs.lock().unwrap().insert(c.id, out.clone());
     let mut dec = FrameDecoder::default();
     let mut buf = vec![0u8; 64 * 1024];
@@ -394,6 +532,10 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
         }
     }
     srv.outs.lock().unwrap().remove(&c.id);
+    srv.hub.conn_closed(c.id);
+    if c.passive {
+        srv.passive.fetch_sub(1, SeqCst);
+    }
     for t in c.subs.values() {
         owner::detach(t, c.id);
     }
@@ -418,6 +560,7 @@ async fn handle_frame(srv: &Arc<Server>, c: &mut Conn, f: Frame) -> Flow {
             );
         }
         c.hello = true;
+        srv.hub.conn_open(c.id, &hello.client, c.pid);
         let hw = &srv.hold.welcome;
         let w = Welcome {
             proto: PROTO,
@@ -524,8 +667,33 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             return Flow::Continue;
         }
     };
+    if !matches!(r.op, Op::Ping | Op::Status | Op::StatusFollow(_) | Op::StatusUnfollow) && !c.active {
+        c.active = true;
+        if c.passive {
+            c.passive = false;
+            srv.passive.fetch_sub(1, SeqCst);
+        }
+    }
     match r.op {
         Op::Ping => reply_ok(&c.out, req, &Empty {}),
+        Op::Status => reply_ok(&c.out, req, &StatusReply { status: srv.status_doc() }),
+        Op::StatusFollow(f) => {
+            let interval = srv.hub.clamp(f.interval_ms);
+            reply_ok(&c.out, req, &StatusFollowReply { interval_ms: interval.as_millis() as u64 });
+            srv.hub.follow(c.id, c.out.clone(), interval);
+            if !c.active && !c.passive {
+                c.passive = true;
+                srv.passive.fetch_add(1, SeqCst);
+            }
+        }
+        Op::StatusUnfollow => {
+            srv.hub.unfollow(c.id);
+            if c.passive {
+                c.passive = false;
+                srv.passive.fetch_sub(1, SeqCst);
+            }
+            reply_ok(&c.out, req, &Empty {});
+        }
         Op::List => {
             let terminals = srv.reg.all().iter().map(|t| t.info.lock().unwrap().clone()).collect();
             reply_ok(&c.out, req, &ListReply { terminals });
@@ -589,6 +757,7 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 }
                 Err(e) => {
                     crate::log(&format!("create {id}: {e}"));
+                    srv.hub.errors.record(&e.code, Some(&id), e.message.clone());
                     reply_err(&c.out, req, &e.code, e.message);
                 }
             }
@@ -654,13 +823,14 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
         }
         Op::Stop => {
             crate::log(&format!("stop requested: killing {} terminal(s)", srv.reg.len()));
+            let _ = srv.accepting.send(false);
             owner::kill_all(&srv.reg).await;
             reply_ok(&c.out, req, &Empty {});
             c.out.close_after_drain();
             let srv = srv.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                end_namespace(&srv.hold, "stop");
+                end_namespace(&srv, "stop").await;
             });
             return Flow::Close;
         }
@@ -788,5 +958,10 @@ async fn upgrade_failed(srv: &Arc<Server>, asker: &Arc<ConnOut>, why: String) {
     let _ = srv.accepting.send(true);
     srv.reg.upgrading.store(false, SeqCst);
     crate::log(&format!("upgrade failed: {why}; carrying on"));
+    srv.hub.errors.record(
+        "upgrade_failed",
+        None,
+        format!("an upgrade did not happen: {why}; the running engine carries on"),
+    );
     asker.frame(frame::encode_json(ty::EVENT, 0, &Event::UpgradeFailed { message: why }));
 }

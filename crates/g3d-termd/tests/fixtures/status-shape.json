@@ -1,0 +1,105 @@
+{
+  "at": "int",
+  "daemon": {
+    "version": "string",
+    "engine": "string",
+    "proto": [
+      "int"
+    ],
+    "socket": "string",
+    "log": "string",
+    "exiting": "bool",
+    "instance": "string",
+    "started_at": "int",
+    "connections": "int",
+    "holder": {
+      "pid": "int",
+      "version": "string",
+      "hold": [
+        "int"
+      ],
+      "rss": "int"
+    },
+    "brain": {
+      "pid": "int",
+      "generation": "int",
+      "started_at": "int",
+      "rss": "int",
+      "restarts": {
+        "crash": "int",
+        "watchdog": "int",
+        "upgrade": "int"
+      },
+      "last_start": {
+        "reason": "string",
+        "at": "int",
+        "restored": {
+          "exact": "int",
+          "snapshot": "int",
+          "blank": "int"
+        },
+        "unseen": "int"
+      }
+    },
+    "snapshots": {
+      "interval_ms": "int",
+      "bytes": "int"
+    },
+    "env": {
+      "source": "string",
+      "warnings": []
+    }
+  },
+  "terminals": [
+    {
+      "id": "string",
+      "handle": "int",
+      "pid": "int",
+      "argv": [
+        "string"
+      ],
+      "login": "bool",
+      "cwd": "string",
+      "title": "string",
+      "cols": "int",
+      "rows": "int",
+      "alt": "bool",
+      "created_at": "int",
+      "seq": "int",
+      "out_bps": "int",
+      "in_bps": "int",
+      "last_output_at": "int",
+      "flow": "string",
+      "input_queued": "int",
+      "scrollback_rows": "int",
+      "memory": {
+        "resident": "int",
+        "compressed": "int"
+      },
+      "subscribers": [
+        {
+          "conn": "int",
+          "client": "string",
+          "pid": "int",
+          "role": "string",
+          "mode": "string",
+          "flow": "string",
+          "queued": "int",
+          "lagging": "bool",
+          "lags": "int",
+          "view": "int"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": "string",
+      "message": "string",
+      "first_at": "int",
+      "at": "int",
+      "count": "int",
+      "id": "string"
+    }
+  ]
+}

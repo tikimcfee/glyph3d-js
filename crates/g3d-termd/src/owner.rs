@@ -7,6 +7,7 @@ use crate::hold::{Exit, Held, Hold, Marks};
 use crate::out::{self, ConnOut, Kind, SubShared, Wake};
 use crate::repaint;
 use crate::spawn;
+use crate::status::{self, Errors, SubStat, TermStats};
 use g3d_wire::frame::{self, REPAINT_FLAG_VIEW, RepaintHead, ty};
 use g3d_wire::msg::*;
 use libghostty_vt::Terminal;
@@ -76,6 +77,8 @@ pub struct Registry {
     go: Arc<(Mutex<bool>, Condvar)>,
     /// An upgrade is cutting: `create` waits it out (`busy`).
     pub upgrading: AtomicBool,
+    /// The status document's recent errors.
+    pub errors: Arc<Errors>,
 }
 
 struct RegInner {
@@ -84,8 +87,9 @@ struct RegInner {
 }
 
 impl Registry {
-    pub fn new(cfg: Config, hold: Arc<Hold>, marks: Arc<Marks>) -> Arc<Self> {
+    pub fn new(cfg: Config, hold: Arc<Hold>, marks: Arc<Marks>, errors: Arc<Errors>) -> Arc<Self> {
         Arc::new(Registry {
+            errors,
             inner: Mutex::new(RegInner { by_id: HashMap::new(), by_handle: HashMap::new() }),
             cfg,
             hold,
@@ -153,6 +157,8 @@ pub struct TermRef {
     tx: mpsc::Sender<Cmd>,
     wake: Arc<Wake>,
     pub info: Mutex<TermInfo>,
+    /// What its owner thread publishes for the status document.
+    pub stats: TermStats,
 }
 
 impl TermRef {
@@ -453,6 +459,7 @@ fn start_owner(
             created_at: meta.created_at,
             subscribers: SubscriberCounts::default(),
         }),
+        stats: TermStats::default(),
     });
     reg.insert(tref.clone());
     let (started_tx, started_rx) = oneshot::channel();
@@ -530,6 +537,19 @@ struct Owner {
     pending_done: Vec<oneshot::Sender<bool>>,
     /// Set when the terminal is finished: the thread exits after this iteration.
     done: bool,
+    /// The flow last published for the status document, and when its gauges were last sampled.
+    flow_shown: &'static str,
+    sampled: Option<Instant>,
+    /// The sizes of the newest two blobs the holder keeps for it, newest first.
+    snap_sizes: [u64; 2],
+}
+
+/// How often an owner thread samples its terminal's gauges (scrollback rows, memory) for the
+/// status document: on its own loop, which wakes at least this often anyway.
+const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+
+fn fd_len(fd: &OwnedFd) -> u64 {
+    rustix::fs::fstat(fd).map_or(0, |st| st.st_size as u64)
 }
 
 /// Builds a terminal's emulator settings and effect callbacks (new and restored alike).
@@ -700,6 +720,7 @@ fn owner_thread(
             .or_else(|| p.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "?".into());
         crate::log(&format!("terminal {} owner thread panicked: {msg}; closing it, other terminals carry on", tref.id));
+        reg.errors.record(code::PANIC, Some(&tref.id), format!("termd's thread for it failed ({msg}); it was closed"));
         owner.abandon();
     }
 }
@@ -718,6 +739,13 @@ impl Owner {
         rustix::fs::fcntl_setfl(&held.master, rustix::fs::OFlags::NONBLOCK).map_err(|e| fail("master fd", &e))?;
         let fx = Rc::new(Fx::default());
         let hw = reg.marks.get(held.slot);
+        let mut snap_sizes = [0u64; 2];
+        if let Init::Restore { blobs, .. } = &init {
+            for (k, b) in blobs.iter().take(2).enumerate() {
+                snap_sizes[k] = fd_len(b);
+            }
+        }
+        let fresh = matches!(init, Init::New { .. });
         let (term, seq, restored, unseen, input, exit) = match init {
             Init::New { cols, rows } => {
                 let mut t = Terminal::new(cols, rows).map_err(|e| fail("terminal", &e))?;
@@ -781,8 +809,24 @@ impl Owner {
             kill_replies: Vec::new(),
             pending_done: Vec::new(),
             done: false,
+            flow_shown: "",
+            sampled: None,
+            snap_sizes,
         };
         o.modes = o.current_modes();
+        {
+            let st = &o.tref.stats;
+            st.snapshot_bytes.store(snap_sizes.iter().sum(), SeqCst);
+            let mut slow = st.slow.lock().unwrap();
+            slow.pwd.clone_from(&o.pwd);
+            slow.restored = (!fresh).then_some(match restored {
+                Restored::Exact => "exact",
+                Restored::Snapshot => "snapshot",
+                Restored::Blank => "blank",
+            });
+        }
+        o.publish_flow();
+        o.sample();
         let (cols, rows) = o.cols_rows();
         {
             let mut info = o.tref.info.lock().unwrap();
@@ -817,6 +861,8 @@ impl Owner {
         let input = if handoff { self.input.as_slice() } else { &[] };
         let fd = blob::write(kind, handoff, self.seq, &self.reg.cfg.engine, &self.tref.id, &raw, input)
             .map_err(|e| format!("blob: {e}"))?;
+        self.snap_sizes = [fd_len(&fd), self.snap_sizes[0]];
+        self.tref.stats.snapshot_bytes.store(self.snap_sizes.iter().sum(), SeqCst);
         self.reg
             .hold
             .send(&json!({"m": "snapshot", "handle": self.tref.handle, "seq": self.seq, "handoff": handoff}), &[fd]);
@@ -936,7 +982,56 @@ impl Owner {
                 crate::log(&format!("terminal {}: {e}", self.tref.id));
                 self.last_snap = Instant::now();
             }
+            self.publish_flow();
+            if self.sampled.is_none_or(|t| t.elapsed() >= SAMPLE_EVERY) {
+                self.sample();
+            }
         }
+    }
+
+    /// `live`, `blocked` (a blocking owner is behind: termd has stopped reading the program's
+    /// output) or `paused` (an upgrade's cut), published when it changes.
+    fn publish_flow(&mut self) {
+        let flow = if self.cut {
+            "paused"
+        } else if self.subs.iter().any(|s| s.flow == Flow::Block && s.shared.paused.load(SeqCst)) {
+            "blocked"
+        } else {
+            "live"
+        };
+        if flow != self.flow_shown {
+            self.flow_shown = flow;
+            self.tref.stats.slow.lock().unwrap().flow = flow;
+        }
+    }
+
+    /// The gauges only this thread can read: history rows and the emulator's memory.
+    fn sample(&mut self) {
+        self.sampled = Some(Instant::now());
+        let rows = self.term.scrollback_rows().unwrap_or(0) as u64;
+        let memory = self.term.memory_usage().map_or_else(
+            |_| g3d_wire::TermMemory::default(),
+            |m| g3d_wire::TermMemory {
+                resident: m.primary_resident_bytes + m.alternate_resident_bytes,
+                compressed: m.primary_compressed_bytes + m.alternate_compressed_bytes,
+            },
+        );
+        let mut slow = self.tref.stats.slow.lock().unwrap();
+        slow.scrollback_rows = rows;
+        slow.memory = memory;
+    }
+
+    /// Every subscription's role, mode, flow and view, as the status document shows them.
+    fn publish_subs(&self) {
+        let (rows, max) = (u64::from(self.cols_rows().1), self.term.total_rows().unwrap_or(0) as u64);
+        let subs = (0..self.subs.len())
+            .map(|i| {
+                let s = &self.subs[i];
+                let view = self.view_top(i).map_or(0, |top| max.saturating_sub(rows).saturating_sub(u64::from(top)));
+                SubStat { conn: s.conn, role: s.role, mode: s.mode, flow: s.flow, view, shared: s.shared.clone() }
+            })
+            .collect();
+        self.tref.stats.slow.lock().unwrap().subs = subs;
     }
 
     /// One read from the PTY. `Some(true)` = got bytes, `Some(false)` = nothing ready,
@@ -991,6 +1086,7 @@ impl Owner {
         let start = self.seq;
         self.seq += chunk.len() as u64;
         self.last_output = Instant::now();
+        self.tref.stats.last_output_at.store(status::ms_now(), SeqCst);
         self.compress_pending = true;
         for i in 0..self.subs.len() {
             let s = &self.subs[i];
@@ -1024,6 +1120,7 @@ impl Owner {
                 Err(_) => break, // AGAIN: wait for POLLOUT; EIO: the program is gone
             }
         }
+        self.tref.stats.input_queued.store(self.input.len() as u64, SeqCst);
     }
 
     fn current_modes(&self) -> Modes {
@@ -1052,6 +1149,7 @@ impl Owner {
         }
         if self.fx.pwd.take() {
             self.pwd = String::from_utf8_lossy(self.term.pwd().unwrap_or(b"")).into_owned();
+            self.tref.stats.slow.lock().unwrap().pwd.clone_from(&self.pwd);
             self.event_all(false, &Event::Pwd { pwd: self.pwd.clone() });
         }
         let m = self.current_modes();
@@ -1111,7 +1209,17 @@ impl Owner {
             }
             self.subs[i].lag = None;
             self.subs[i].shared.lagging.store(false, SeqCst);
+            self.subs[i].shared.lags.fetch_add(1, SeqCst);
             let dropped = self.lag_dropped(i, from);
+            self.reg.errors.record(
+                "lagged",
+                Some(&self.tref.id),
+                format!(
+                    "a lossy subscriber (connection {}) fell {} behind; {dropped} B skipped, then resynced",
+                    self.subs[i].conn,
+                    status_size(out::lossy_max() as u64)
+                ),
+            );
             self.event_to(i, true, &Event::Lagged { dropped, seq: self.seq });
             if self.subs[i].mode == Mode::Raw {
                 match self.view_top(i) {
@@ -1241,6 +1349,9 @@ impl Owner {
     fn handle(&mut self, cmd: Cmd) {
         let Cmd { conn, out, req, op, mut done } = cmd;
         let ok = self.handle_op(conn, &out, req, op, &mut done);
+        if !self.done {
+            self.publish_subs();
+        }
         if let Some(d) = done {
             let _ = d.send(ok);
         }
@@ -1455,16 +1566,16 @@ impl Owner {
                 if self.subs[i].view.take().is_some() {
                     self.push_live_repaint(i, 0);
                 }
+                self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
                 if self.input.len() + bytes.len() > self.reg.cfg.input_max {
-                    err(
-                        code::INPUT_FULL,
-                        format!(
-                            "{} has {} B of unread input; {} B refused",
-                            self.tref.id,
-                            self.input.len(),
-                            bytes.len()
-                        ),
+                    let msg = format!(
+                        "{} has {} B of unread input; {} B refused",
+                        self.tref.id,
+                        self.input.len(),
+                        bytes.len()
                     );
+                    self.reg.errors.record(code::INPUT_FULL, Some(&self.tref.id), msg.clone());
+                    err(code::INPUT_FULL, msg);
                     return false;
                 }
                 self.input.extend_from_slice(&bytes);
@@ -1716,5 +1827,14 @@ pub async fn kill_all(reg: &Registry) {
     }
     for w in waits {
         let _ = w.await;
+    }
+}
+
+/// A byte count for people: `512 B`, `4 MiB`.
+fn status_size(n: u64) -> String {
+    match n {
+        n if n >= 1 << 20 && n % (1 << 20) == 0 => format!("{} MiB", n >> 20),
+        n if n >= 1 << 10 && n % (1 << 10) == 0 => format!("{} KiB", n >> 10),
+        n => format!("{n} B"),
     }
 }

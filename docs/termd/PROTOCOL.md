@@ -10,11 +10,10 @@ disagree, the daemon has a bug.
 The protocol is public and versioned. Nothing in it is specific to glyph3d.
 
 Version 1.1 is the first release. What is marked **(1.1)** is new in it. The daemon on branch
-`termd` has 1.1's restarts: `WELCOME.instance`, `generation` and `holder`, `ERROR` `restart` and
-`brain_failed`, the `busy` code, and `upgrade` (feature `upgrade`, with the `upgrade_failed`
-event); and 1.1's `create`: the program's environment, `env_base`, the defaults below and the
-reply's `argv`, `login` and `cwd`. It does not have `status`, `status_follow` and the `status`
-event yet, so it still announces `proto` `[1, 0]` (see [Versions](#versions)).
+`termd` speaks all of 1.1 and announces `proto` `[1, 1]`: the restarts (`WELCOME.instance`,
+`generation` and `holder`, `ERROR` `restart` and `brain_failed`, the `busy` code, `upgrade` with
+its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and reply fields, and the
+status document (`status`, `status_follow`, `status_unfollow`, the `status` event).
 
 ## At a glance
 
@@ -481,13 +480,18 @@ Reply: `{"req": 13, "ok": true, "status": {…}}`, the document below.
 ```
 
 `status_follow` replies `{"req": 14, "ok": true, "interval_ms": 1000}` (the interval in effect:
-`interval_ms` is clamped to 250–60000; default 1000), then sends an `EVENT` `status` on stream 0
-at once, and again whenever the document has changed, no sooner than the interval after the
-previous one. Changes are any field except the sampled gauges (`rss`, `memory`, the `*_bps`
-rates), or a rate crossing zero; while any terminal produces output, every interval counts as a
-change, so its rate stays current. With nothing changing, a keepalive arrives every 30 s with
+`interval_ms` is clamped to 250–60000; default 1000; the daemon's settings may move all three),
+then sends an `EVENT` `status` on stream 0 at once, and again whenever the document has changed,
+no sooner than the interval after the previous one. Changes are any field except the sampled
+gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates), or
+a rate crossing zero; while any terminal produces output or takes input, every interval counts as
+a change, so its rate stays current. With nothing changing, a keepalive arrives every 30 s with
 fresh gauges. A status event is dropped, not queued, when the connection is behind on its earlier
-ones: the next one replaces it. `status_unfollow` stops them; closing the connection does too.
+ones: the next one replaces it. `status_follow` again changes the interval; `status_unfollow`
+stops them; closing the connection does too. A connection that only follows status (and pings)
+doesn't keep an empty daemon alive ([Transport](#transport)): when the namespace leaves (idle
+exit, `stop`), each follower gets a last document with `daemon.exiting: true` and no terminals,
+then the connection closes.
 
 The document (the `EVENT` carries it with `"ev": "status"` added; numbers are integers, times are
 Unix epoch milliseconds, sizes are bytes):
@@ -499,7 +503,7 @@ Unix epoch milliseconds, sizes are bytes):
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
-   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [1, 0], "rss": 3145728},
+   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [2, 1], "rss": 3145728},
    "brain": {"pid": 41200, "generation": 2, "started_at": 1794519100000, "rss": 41943040,
              "restarts": {"crash": 1, "watchdog": 0, "upgrade": 0},
              "last_start": {"reason": "crash", "at": 1794519100000, "exit": {"signal": "SEGV"},
@@ -529,11 +533,11 @@ Unix epoch milliseconds, sizes are bytes):
 | `socket`, `log` | where the daemon listens and logs (absolute paths) |
 | `exiting` | `true` only in the last document a follower gets before an idle daemon exits; the connection then closes and nothing listens. An empty namespace leaving, not a failure |
 | `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
-| `connections` | client connections open now |
-| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` |
+| `connections` | client connections open now, status followers included |
+| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade) |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
-| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale, the user manager unreachable, a cgroup scope that couldn't be made) |
+| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale, the user manager unreachable while it is) |
 
 Each of `terminals` (one per live terminal; the count is the array's length):
 
@@ -548,13 +552,16 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `flow` | `"live"` (termd reads the program's output as it comes), `"blocked"` (a `block` owner is behind and termd has stopped reading; the program waits), `"paused"` (an upgrade's cut) |
 | `input_queued` | input bytes waiting for the program to read them |
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
-| `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain) |
+| `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain) |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
-`errors`: the last 32 distinct errors, newest first, each `code`, `message`, `first_at`, `at` (the
-latest), `count`, and `id` when it concerns one terminal. Codes are the request and event codes
-above plus `brain_crash`, `brain_watchdog`, `upgrade_failed`, `spawn_failed`, `env` and `cgroup`.
-They are for people; nothing depends on reading them.
+`errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,
+`message`, `first_at`, `at` (the latest), `count`, and `id` when it concerns one terminal. Codes are
+the request and event codes above (`spawn_failed`, `input_full`, `panic`) plus `lagged` (a lossy
+subscriber fell behind and was resynced), `restore` (a terminal that could not come back),
+`upgrade_failed`, `brain_crash` and `brain_watchdog` (why this brain started). The list is the
+current brain's: a restart starts it over with the reason for the restart. They are for people;
+nothing depends on reading them.
 
 Like every payload, the document only grows: a client renders the fields it knows and ignores
 the rest.
@@ -961,5 +968,4 @@ writes, and send keystrokes as `INPUT`.
   2 MiB, the socket fallback `$TMPDIR/g3d-<uid>`, and the environment the daemon's own
   plus termd's variables (without `TERM_PROGRAM`), with only `TMUX`/`TMUX_PANE` removed and no
   reserved names. No released client depends on those.
-- **1.0**: the branch-only first cut. The daemon on branch `termd` announces `[1, 0]` with the
-  1.1 restart parts listed at the top of this page, until `status` exists.
+- **1.0**: the branch-only first cut: the core above, without what is marked (1.1).

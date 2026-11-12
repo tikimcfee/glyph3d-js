@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
@@ -76,12 +76,20 @@ pub struct SubShared {
     /// A lossy subscriber whose frames were dropped: the owner thread queues nothing more
     /// for it but `Keep` frames, and resyncs it once `queued` reaches 0.
     pub lagging: AtomicBool,
+    /// Resyncs so far (the status document's `lags`).
+    pub lags: AtomicU64,
     pub wake: Arc<Wake>,
 }
 
 impl SubShared {
     pub fn new(wake: Arc<Wake>) -> Self {
-        Self { queued: AtomicUsize::new(0), paused: AtomicBool::new(false), lagging: AtomicBool::new(false), wake }
+        Self {
+            queued: AtomicUsize::new(0),
+            paused: AtomicBool::new(false),
+            lagging: AtomicBool::new(false),
+            lags: AtomicU64::new(0),
+            wake,
+        }
     }
 
     /// The owner thread pauses reads when over the high mark. Rechecks after setting the

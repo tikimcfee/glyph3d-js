@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 0];
+pub const PROTO: [u32; 2] = [1, 1];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
-/// The features this daemon announces: the core plus `upgrade` (1.1).
-pub const DAEMON_FEATURES: [&str; 4] = ["raw", "view", "capture", "upgrade"];
+/// The features this daemon announces: the core plus `status` and `upgrade` (1.1).
+pub const DAEMON_FEATURES: [&str; 5] = ["raw", "view", "capture", "status", "upgrade"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,10 +128,16 @@ pub enum Op {
     Ping,
     Stop,
     Upgrade(Upgrade),
+    /// (1.1) The daemon's state as one document.
+    Status,
+    /// (1.1) Follow the status document: pushed on change, no sooner than the interval.
+    StatusFollow(StatusFollow),
+    /// (1.1) Stop following it.
+    StatusUnfollow,
 }
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
-pub const KNOWN_OPS: [&str; 13] = [
+pub const KNOWN_OPS: [&str; 16] = [
     "create",
     "list",
     "kill",
@@ -145,7 +151,203 @@ pub const KNOWN_OPS: [&str; 13] = [
     "ping",
     "stop",
     "upgrade",
+    "status",
+    "status_follow",
+    "status_unfollow",
 ];
+
+/// (1.1) `status_follow`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusFollow {
+    /// The least time between two pushes, in milliseconds (clamped to the daemon's range).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+}
+
+/// (1.1) The `status_follow` reply: the interval in effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusFollowReply {
+    pub interval_ms: u64,
+}
+
+/// (1.1) The `status` reply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusReply {
+    pub status: Status,
+}
+
+/// (1.1) The status document (PROTOCOL.md, "`status_follow`"): the daemon, every terminal and
+/// its subscribers, and recent errors. Times are Unix epoch milliseconds, sizes bytes. A client
+/// renders what it knows and ignores the rest; the document only grows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Status {
+    pub at: u64,
+    pub daemon: StatusDaemon,
+    pub terminals: Vec<StatusTerminal>,
+    pub errors: Vec<StatusError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusDaemon {
+    pub version: String,
+    pub engine: String,
+    pub proto: [u32; 2],
+    /// Absent when the daemon serves an explicit `--socket`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ns: Option<String>,
+    pub socket: String,
+    pub log: String,
+    /// Only in the last document before an empty namespace leaves (idle exit, `stop`).
+    pub exiting: bool,
+    pub instance: String,
+    /// When the holder started: the namespace's age.
+    pub started_at: u64,
+    pub connections: u64,
+    pub holder: StatusHolder,
+    pub brain: StatusBrain,
+    pub snapshots: StatusSnapshots,
+    pub env: StatusEnv,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusHolder {
+    pub pid: u32,
+    pub version: String,
+    /// The holder/brain protocol version.
+    pub hold: [u64; 2],
+    /// Resident memory, when it could be measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBrain {
+    pub pid: u32,
+    pub generation: u64,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss: Option<u64>,
+    pub restarts: BrainRestarts,
+    pub last_start: BrainStart,
+}
+
+/// Brain starts after the first, by cause.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainRestarts {
+    pub crash: u64,
+    pub watchdog: u64,
+    pub upgrade: u64,
+}
+
+/// Why the current brain started, and how the terminals came back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainStart {
+    /// `"first"`, `"crash"`, `"watchdog"` or `"upgrade"`.
+    pub reason: String,
+    pub at: u64,
+    /// How the previous brain ended (absent for the first, and after an upgrade's handoff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<ExitStatus>,
+    pub restored: RestoredCounts,
+    /// Output the previous brain read and never saved.
+    pub unseen: u64,
+}
+
+/// A process's end, as in the `exit` event: a code, or a signal by name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoredCounts {
+    pub exact: u64,
+    pub snapshot: u64,
+    pub blank: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusSnapshots {
+    pub interval_ms: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEnv {
+    /// Where new terminals' environments start: `"systemd-user"` or `"daemon"`.
+    pub source: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusTerminal {
+    pub id: String,
+    pub handle: u32,
+    pub pid: u32,
+    pub argv: Vec<String>,
+    pub login: bool,
+    pub cwd: String,
+    /// The directory the program last reported (OSC 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pwd: Option<String>,
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub alt: bool,
+    pub created_at: u64,
+    pub seq: u64,
+    /// Output and input bytes per second over the last 5 s.
+    pub out_bps: u64,
+    pub in_bps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<u64>,
+    /// `"live"`, `"blocked"` (a blocking owner is behind; the program waits) or `"paused"` (an
+    /// upgrade's cut).
+    pub flow: String,
+    pub input_queued: u64,
+    pub scrollback_rows: u64,
+    pub memory: TermMemory,
+    /// How it came back at this brain's start: `"exact"`, `"snapshot"`, `"blank"`; absent when
+    /// it started under this brain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<String>,
+    pub subscribers: Vec<StatusSubscriber>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermMemory {
+    pub resident: u64,
+    pub compressed: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusSubscriber {
+    pub conn: u64,
+    pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub role: Role,
+    pub mode: Mode,
+    pub flow: Flow,
+    pub queued: u64,
+    pub lagging: bool,
+    pub lags: u64,
+    pub view: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusError {
+    pub code: String,
+    pub message: String,
+    pub first_at: u64,
+    pub at: u64,
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
 
 /// (1.1) `upgrade`: replace the daemon's engine without ending a terminal.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +683,8 @@ pub enum Event {
     UpgradeFailed {
         message: String,
     },
+    /// (1.1) On stream 0, to a `status_follow`er: the status document.
+    Status(Box<Status>),
     #[serde(other)]
     Unknown,
 }

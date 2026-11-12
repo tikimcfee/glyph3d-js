@@ -400,11 +400,24 @@ pub struct Policy {
     pub manager_file: Option<std::path::PathBuf>,
     /// What the last `create` used, logged when it changes.
     last: Mutex<String>,
+    /// The status document's `env`: the source the last base came from, and the warnings (fixed
+    /// ones from the start, plus the user manager being unreachable while it is).
+    shown: Mutex<g3d_wire::StatusEnv>,
+    fixed_warnings: Vec<String>,
 }
 
 impl Policy {
-    pub fn new(source: EnvSource, settings: Settings, manager_timeout: Duration) -> Self {
+    /// `warnings`: what is wrong for every terminal from the start (no UTF-8 locale loads).
+    pub fn new(source: EnvSource, settings: Settings, manager_timeout: Duration, warnings: Vec<String>) -> Self {
+        let first = match source {
+            EnvSource::Daemon => "daemon",
+            // Until the first base is read (probe): what this platform would use.
+            EnvSource::Auto if cfg!(target_os = "linux") => "systemd-user",
+            EnvSource::Auto => "daemon",
+        };
         Policy {
+            shown: Mutex::new(g3d_wire::StatusEnv { source: first.into(), warnings: warnings.clone() }),
+            fixed_warnings: warnings,
             source,
             settings,
             daemon_env: std::env::vars_os()
@@ -427,14 +440,41 @@ impl Policy {
         }
     }
 
+    /// The status document's `env` as it stands.
+    pub fn status(&self) -> g3d_wire::StatusEnv {
+        self.shown.lock().unwrap().clone()
+    }
+
+    /// Reads the session base once without starting anything, so the status document names its
+    /// source (and an unreachable user manager) before the first terminal. Blocking.
+    pub fn probe(&self) {
+        let _ = self.session_base();
+    }
+
     fn session_base(&self) -> Vec<(String, String)> {
-        let (env, note) = match self.source {
-            EnvSource::Daemon => (self.daemon_env.clone(), "the daemon's own (--env-source daemon)".to_owned()),
+        let mut warning = None;
+        let (env, note, source) = match self.source {
+            EnvSource::Daemon => {
+                (self.daemon_env.clone(), "the daemon's own (--env-source daemon)".to_owned(), "daemon")
+            }
             EnvSource::Auto => match self.manager_env() {
-                Ok(env) => (env, "the systemd user manager's".to_owned()),
-                Err(why) => (self.daemon_env.clone(), format!("the daemon's own: {why}")),
+                Ok(env) => (env, "the systemd user manager's".to_owned(), "systemd-user"),
+                Err(why) => {
+                    // Off Linux there is no user manager to miss: the daemon's own is the session's.
+                    if cfg!(target_os = "linux") {
+                        warning = Some(format!(
+                            "the systemd user manager is unreachable ({why}): new terminals start from the daemon's own environment"
+                        ));
+                    }
+                    (self.daemon_env.clone(), format!("the daemon's own: {why}"), "daemon")
+                }
             },
         };
+        {
+            let mut shown = self.shown.lock().unwrap();
+            shown.source = source.into();
+            shown.warnings = self.fixed_warnings.iter().cloned().chain(warning).collect();
+        }
         let mut last = self.last.lock().unwrap();
         if *last != note {
             crate::log(&format!("terminal environment: {note}"));

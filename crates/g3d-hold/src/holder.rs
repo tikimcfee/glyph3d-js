@@ -305,6 +305,19 @@ struct Upgrade {
     stage: Stage,
 }
 
+#[derive(Clone, Copy, Default)]
+struct Restarts {
+    crash: u64,
+    watchdog: u64,
+    upgrade: u64,
+}
+
+impl Restarts {
+    fn json(self) -> Value {
+        json!({"crash": self.crash, "watchdog": self.watchdog, "upgrade": self.upgrade})
+    }
+}
+
 struct Holder {
     cfg: Config,
     exe: PathBuf,
@@ -323,6 +336,11 @@ struct Holder {
     upgrade: Option<Upgrade>,
     /// Brains started (1 for the first); the running brain's generation.
     generation: u64,
+    /// Brains replaced, by cause: crashed (exited without a handoff), killed by the watchdog, or
+    /// handed over by an upgrade. The status document's `brain.restarts`.
+    restarts: Restarts,
+    /// Why the next brain starts, and how the last one ended: its welcome's `last_start`.
+    next_start: Value,
     starts: VecDeque<Instant>,
     restart_at: Option<Instant>,
     /// The brain is failed: why, and when the next try is.
@@ -403,6 +421,8 @@ pub fn run(cfg: Config) -> ! {
         candidate: None,
         upgrade: None,
         generation: 0,
+        restarts: Restarts::default(),
+        next_start: json!({"reason": "first"}),
         starts: VecDeque::new(),
         restart_at: Some(Instant::now()),
         failed: None,
@@ -805,12 +825,20 @@ impl Holder {
 
     fn welcome(&self, candidate: bool) -> (Value, Vec<OwnedFd>) {
         let dup = |fd: &OwnedFd| rustix::io::fcntl_dupfd_cloexec(fd, 3).expect("dup");
+        // A candidate becomes the brain only by an upgrade's handoff, which it is counted as.
+        let (restarts, mut last_start) = if candidate {
+            (Restarts { upgrade: self.restarts.upgrade + 1, ..self.restarts }, json!({"reason": "upgrade"}))
+        } else {
+            (self.restarts, self.next_start.clone())
+        };
+        last_start["at"] = json!(ms_now());
         let msg = json!({
             "m": "welcome", "hold": HOLD, "instance": self.instance,
             "generation": self.generation + 1, "holder_pid": std::process::id(),
             "holder_version": self.cfg.version, "started_at": self.started_at,
             "candidate": candidate, "max_terminals": self.cfg.max_terminals,
             "log": self.cfg.log.display().to_string(),
+            "restarts": restarts.json(), "last_start": last_start,
         });
         (msg, vec![dup(&self.listener), dup(&self.marks)])
     }
@@ -1151,6 +1179,8 @@ impl Holder {
             self.upgrade = None;
             let mut c = self.candidate.take().expect("a candidate");
             self.generation += 1;
+            self.restarts.upgrade += 1;
+            self.next_start = json!({"reason": "upgrade"});
             c.queue(json!({"m": "go"}), vec![]);
             log(&format!(
                 "upgrade: brain pid {} (generation {}) serves; pid {} handed over",
@@ -1169,7 +1199,13 @@ impl Holder {
             if watchdog { "killed by the watchdog: " } else { "exited without a handoff: " }
         );
         log(&format!("brain CRASHED: {}; the shells keep running", self.last_exit));
-        let _ = status;
+        if watchdog {
+            self.restarts.watchdog += 1;
+        } else {
+            self.restarts.crash += 1;
+        }
+        self.next_start =
+            json!({"reason": if watchdog { "watchdog" } else { "crash" }, "exit": describe_status(status).0});
         if self.upgrade.is_some() {
             self.upgrade = None;
             if let Some(c) = self.candidate.take() {

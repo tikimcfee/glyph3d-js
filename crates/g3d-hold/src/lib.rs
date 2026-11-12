@@ -20,7 +20,9 @@ pub use holder::{Config, run};
 /// The hold protocol's `[major, minor]` (holder ↔ brain). A brain speaks exactly one major; a
 /// minor only adds messages and fields. 2: `spawn` names the program's `path` apart from its
 /// `argv` (a login shell execs `/bin/bash` as `-bash`), and the holder no longer searches `PATH`.
-pub const HOLD: [u64; 2] = [2, 0];
+/// 2.1: `welcome` carries `restarts` (brains replaced, by cause) and `last_start` (why this brain
+/// starts, and how the last one ended), for the status document.
+pub const HOLD: [u64; 2] = [2, 1];
 
 /// Bytes per terminal in the `seq_marks` page: one little-endian `u64`, the terminal's `seq`
 /// after the brain's latest read.

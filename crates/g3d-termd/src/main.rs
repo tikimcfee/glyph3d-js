@@ -16,6 +16,7 @@ mod owner;
 mod repaint;
 mod server;
 mod spawn;
+mod status;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -118,6 +119,24 @@ pub struct Args {
     /// The brain's oom_score_adj above the holder's (Linux).
     #[arg(long, default_value_t = 300)]
     pub brain_oom_score_adj: i32,
+    /// A status follower that names no interval gets a document at most this often, in ms.
+    #[arg(long, default_value_t = 1000)]
+    pub status_interval_ms: u64,
+    /// The shortest interval a status follower may ask for, in ms.
+    #[arg(long, default_value_t = 250)]
+    pub status_min_interval_ms: u64,
+    /// The longest interval a status follower may ask for, in ms.
+    #[arg(long, default_value_t = 60_000)]
+    pub status_max_interval_ms: u64,
+    /// With nothing changing, a status follower still gets a document this often, in ms.
+    #[arg(long, default_value_t = 30_000)]
+    pub status_keepalive_ms: u64,
+    /// A terminal's output and input rates are bytes over this window, in ms.
+    #[arg(long, default_value_t = 5_000)]
+    pub status_rate_window_ms: u64,
+    /// The status document keeps this many distinct recent errors.
+    #[arg(long, default_value_t = 32)]
+    pub status_errors: usize,
     /// Internal: run as the brain on this hold-link fd.
     #[arg(long, hide = true)]
     brain: bool,

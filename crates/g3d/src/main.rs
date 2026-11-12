@@ -8,6 +8,7 @@
 //!   g3d capture <id> [--history N] [--vt]
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
 //!   g3d upgrade [--binary PATH]
+//!   g3d status [--json] [--follow [--interval MS]]
 //!   g3d stop
 
 use clap::{Parser, Subcommand};
@@ -93,6 +94,18 @@ enum Cmd {
     },
     /// Kill every terminal and stop the daemon.
     Stop,
+    /// The daemon, its terminals and recent errors: one document from the daemon, rendered.
+    Status {
+        /// The document as JSON (with --follow: one per line).
+        #[arg(long)]
+        json: bool,
+        /// Keep rendering it as the daemon pushes changes; rides a restart of its engine.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow: the least time between two documents, in ms (the daemon clamps it).
+        #[arg(long)]
+        interval: Option<u64>,
+    },
     /// Replace the daemon's engine (its brain) without ending any terminal. With the brain
     /// failed, retries it now (SIGHUP to the holder).
     Upgrade {
@@ -219,6 +232,7 @@ fn main() {
             let _: Empty = c.request(Op::Stop).unwrap_or_else(|e| die(e));
         }
         Cmd::Upgrade { binary } => upgrade(&target, binary),
+        Cmd::Status { json, follow, interval } => status(&target, json, follow, interval),
         Cmd::Attach { id, take, detach_key } => {
             let role = if take { Role::Own } else { Role::Attach };
             attach(&target, &id, role, parse_key(&detach_key));
@@ -479,4 +493,90 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
         c.welcome.generation.unwrap_or(0),
         c.welcome.pid.unwrap_or(0)
     );
+}
+
+/// `g3d status`: the daemon's status document, rendered (or as JSON). With `--follow`, each
+/// document the daemon pushes replaces the last on a terminal (appended when piped); a restart of
+/// termd's engine is ridden (PROTOCOL.md "Restarts"), and the namespace leaving ends it.
+fn status(target: &Target, json: bool, follow: bool, interval: Option<u64>) {
+    let tty = termios::isatty(std::io::stdout());
+    let color = tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    let style = if color { g3d::render::Style::SGR } else { g3d::render::Style::PLAIN };
+    let show = |doc: &Status| {
+        let mut o = std::io::stdout().lock();
+        let text = if json {
+            let mut s = serde_json::to_string(doc).expect("status serializes");
+            s.push('\n');
+            s
+        } else if follow && tty {
+            // Home, draw, then clear what the last one left below (no flash between documents).
+            format!("\x1b[H{}\x1b[J", g3d::render::status(doc, style).replace('\n', "\x1b[K\n"))
+        } else if follow {
+            format!("{}\n", g3d::render::status(doc, style))
+        } else {
+            g3d::render::status(doc, style)
+        };
+        if o.write_all(text.as_bytes()).and_then(|_| o.flush()).is_err() {
+            std::process::exit(0);
+        }
+    };
+    let mut c = connect(target);
+    if !c.welcome.features.iter().any(|f| f == "status") {
+        die(format!("{} has no status document (no feature `status`); g3d ls lists its terminals", c.welcome.daemon));
+    }
+    if !follow {
+        let r: StatusReply = c.request(Op::Status).unwrap_or_else(|e| die(e));
+        show(&r.status);
+        return;
+    }
+    if tty && !json {
+        print!("\x1b[H\x1b[2J");
+    }
+    let mut instance = c.welcome.instance.clone();
+    loop {
+        let _: StatusFollowReply =
+            c.request(Op::StatusFollow(StatusFollow { interval_ms: interval })).unwrap_or_else(|e| die(e));
+        let why = loop {
+            match c.next_frame() {
+                Ok(f) if f.ty == ty::EVENT && f.stream == 0 => {
+                    if let Ok(Event::Status(doc)) = serde_json::from_slice::<Event>(&f.payload) {
+                        show(&doc);
+                        if doc.daemon.exiting {
+                            if !json {
+                                eprintln!("g3d: the namespace left (empty)");
+                            }
+                            return;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => break e,
+            }
+        };
+        // The engine restarted (or the connection dropped): ride it, as every client does.
+        let planned = why.code() == Some(code::RESTART);
+        if !json {
+            eprintln!("g3d: {why}; reconnecting");
+        }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut wait = std::time::Duration::from_millis(if planned { 0 } else { 100 });
+        c = loop {
+            std::thread::sleep(wait);
+            match start::connect(target, "g3d") {
+                Ok(n) if instance.is_some() && n.welcome.instance != instance => {
+                    die("a different namespace answers: the terminals this followed are gone")
+                }
+                Ok(n) => break n,
+                Err(ClientError::Io(e))
+                    if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) =>
+                {
+                    die("nothing listens any more: the namespace and its terminals are gone")
+                }
+                Err(e) if std::time::Instant::now() >= until => die(format!("no termd engine answered for 30s: {e}")),
+                Err(_) => {}
+            }
+            wait = (wait * 2).clamp(std::time::Duration::from_millis(100), std::time::Duration::from_secs(2));
+        };
+        instance = c.welcome.instance.clone();
+    }
 }

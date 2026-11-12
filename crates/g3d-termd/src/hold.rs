@@ -21,6 +21,17 @@ pub struct Welcome {
     pub holder_version: String,
     pub candidate: bool,
     pub max_terminals: usize,
+    /// The holder's hold protocol version.
+    pub hold: [u64; 2],
+    /// When the holder started (ms since the epoch): the namespace's age.
+    pub started_at: u64,
+    /// (hold 2.1) Brains replaced so far, by cause; zero from an older holder.
+    pub restarts: g3d_wire::BrainRestarts,
+    /// (hold 2.1) Why this brain starts (`first`, `crash`, `watchdog`, `upgrade`), when, and how
+    /// the last one ended; `unknown` from an older holder.
+    pub reason: String,
+    pub at: u64,
+    pub exit: Option<g3d_wire::ExitStatus>,
 }
 
 /// One terminal the holder keeps, as it handed it to this brain.
@@ -149,6 +160,15 @@ pub fn start(fd: i32, engine: &str) -> Start {
         holder_version: s("holder_version"),
         candidate: w.get("candidate").and_then(Value::as_bool).unwrap_or(false),
         max_terminals: n("max_terminals") as usize,
+        hold: w.get("hold").and_then(|h| serde_json::from_value(h.clone()).ok()).unwrap_or([0, 0]),
+        started_at: n("started_at"),
+        restarts: w.get("restarts").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default(),
+        reason: w.pointer("/last_start/reason").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
+        at: w.pointer("/last_start/at").and_then(Value::as_u64).unwrap_or(0),
+        exit: w.pointer("/last_start/exit").map(|e| {
+            let e = Exit::from_msg(e);
+            g3d_wire::ExitStatus { code: e.code, signal: e.signal.map(crate::spawn::signal_name) }
+        }),
     };
     let mut fds = fds.into_iter();
     let listener = fds.next().expect("listener");

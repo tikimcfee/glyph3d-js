@@ -23,6 +23,4 @@ serde_json.workspace = true
 rustix.workspace = true
 clap.workspace = true
 signal-hook = "0.3.18"
-
-[dev-dependencies]
 libc = "0.2.177"

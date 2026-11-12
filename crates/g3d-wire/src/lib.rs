@@ -173,6 +173,10 @@ mod tests {
                 history_rows: Some(9),
                 unwrap: Some(true),
             }),
+            Op::Status,
+            Op::StatusFollow(StatusFollow { interval_ms: Some(250) }),
+            Op::StatusFollow(StatusFollow::default()),
+            Op::StatusUnfollow,
         ];
         for op in ops {
             let r = Request { req: 9, op };
@@ -207,6 +211,29 @@ mod tests {
         }
         let unknown: Event = serde_json::from_str(r#"{"ev":"from_the_future","x":1}"#).unwrap();
         assert_eq!(unknown, Event::Unknown);
+    }
+
+    /// PROTOCOL.md's example status document is a `Status`, field for field: the spec and the
+    /// types can't drift apart.
+    #[test]
+    fn protocol_md_status_example_is_a_status() {
+        let spec = include_str!("../../../docs/termd/PROTOCOL.md");
+        let start = spec.find("```json\n{\"at\":").expect("the status example") + "```json\n".len();
+        let end = start + spec[start..].find("\n```").unwrap();
+        let example: serde_json::Value = serde_json::from_str(&spec[start..end]).unwrap();
+        let doc: Status = serde_json::from_value(example.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&doc).unwrap(),
+            example,
+            "a field in the example the type doesn't carry, or the reverse"
+        );
+        let ev: Event = serde_json::from_str(&{
+            let mut v = example.clone();
+            v["ev"] = "status".into();
+            v.to_string()
+        })
+        .unwrap();
+        assert_eq!(ev, Event::Status(Box::new(doc)));
     }
 
     #[test]
