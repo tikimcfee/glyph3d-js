@@ -55,7 +55,7 @@
       "name": "@glyph3d/r3f",
       "version": "0.2.1",
       "dependencies": {
-        "@glyph3d/core": "^0.2.0",
+        "@glyph3d/core": "^0.2.1",
       },
       "peerDependencies": {
         "@react-three/fiber": ">=9",

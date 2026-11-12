@@ -5,8 +5,9 @@
  *
  * Needs the wall's Vite (`cd wall && bunx vite`). Starts its own relay on --relay if nothing is
  * listening there (./glyph3d-cli serve --relay-only, killed at the end) — never the relay a person's
- * display is on: the relay takes one display, and the shared glyphd tmux socket is safe because
- * spawned ids seed past every existing session. Spawns its own terminals and kills them after.
+ * display is on: the relay takes one display. Its terminals live on their own tmux socket
+ * (`glyph-wall-e2e`), so it can neither adopt nor kill a person's terminals, and it runs without
+ * gomuxai. Spawns its own terminals and kills them after.
  * On macOS the browser launches headed (headless is a software renderer there) — a window opens.
  *
  * Covers: spawn, typing, ⌘[ ⌘] cycling (reversible), border resize, title-bar drag vs body press,
@@ -36,7 +37,7 @@ const listening = (port) => new Promise((res) => {
 
 let relay = null;
 if (!(await listening(RELAY))) {
-    relay = spawnProcess(path.join(ROOT, 'glyph3d-cli'), ['serve', '--port', String(RELAY), '--listen', '127.0.0.1', '--relay-only', ROOT], { stdio: 'ignore' });
+    relay = spawnProcess(path.join(ROOT, 'glyph3d-cli'), ['serve', '--port', String(RELAY), '--listen', '127.0.0.1', '--relay-only', '--tmux-socket', 'glyph-wall-e2e', '--no-gomuxai', ROOT], { stdio: 'ignore' });
     for (let i = 0; i < 50 && !(await listening(RELAY)); i++) await new Promise((r) => setTimeout(r, 100));
     if (!(await listening(RELAY))) throw new Error(`could not start a relay on :${RELAY} (is ./glyph3d-cli built?)`);
     info(`started a private relay on :${RELAY}`);
