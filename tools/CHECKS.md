@@ -54,11 +54,13 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
 - **What it starts.** For browser/gpu checks the runner starts its own Vite on a free port
   (config wrapped so its cache is `out/check/vite-cache/`, never the dev server's), warms it
   once, and gives each relay-needing check a fresh PRIVATE relay —
-  `glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --tmux-socket glyph-check-<pid>-<n> --no-gomuxai <scratch root>`
-  — serving a copy of the fixture (the core's sources as `src/`, plus a generated
-  `mixed/emoji_tabs_wide.txt`), killed with its tmux server when the check ends. It never
-  takes 5173/5174/5180/8080/8099, the `glyphd` socket, or gomuxai. What it can't start
-  (no `./glyph3d-cli` — `make build` or `--cli PATH`; no tmux; no chromium; no GPU render
+  `glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --termd-ns c<n> --no-gomuxai <scratch root>`
+  with `G3D_TERMD_DIR` a scratch directory (`$G3D_TEST_RUN_DIR/ck-<pid>`, else `out/termd/ck-<pid>`;
+  `tools/lib/termd.mjs`) — serving a copy of the fixture (the core's sources as `src/`, plus a
+  generated `mixed/emoji_tabs_wide.txt`), killed with its termd daemon (and every shell in it)
+  when the check ends. It never takes 5173/5174/5180/8080/8099, a person's termd namespace, or
+  gomuxai. What it can't start
+  (no `./glyph3d-cli` — `make build` or `--cli PATH`; no `./g3d-termd` beside it; no chromium; no GPU render
   node; no network for the GitHub-loading itests) is a `NOTE` and those checks `SKIP`.
 - **Concurrency.** `-j N` (default: every core). Checks sharing an `apart` token never
   overlap (`display`: the browser/gpu checks run one at a time); `*` runs alone, after the
@@ -262,7 +264,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 - **`glyph-cull-truth.mjs`** — three culls by each field's STATED bounds; this checks every
   live quad, built the way the vertex shader builds it (emoji width), against its mesh's
   `geometry.boundingBox` — across a dir load, every layout preset, an arranged grid, and an
-  in-page terminal (fed bytes; no tmux). Run after touching `setLayoutExtent`, any extent
+  in-page terminal (fed bytes; no termd). Run after touching `setLayoutExtent`, any extent
   producer, or the glyph vertex shader.
   ```
   bun tools/glyph-cull-truth.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src
@@ -484,7 +486,7 @@ byte-identical — `./glyph3d-cli grid.create "two words" notes.txt` needs no qu
 discipline or base64. REPL and piped lines go as typed. A request that outlives
 `--timeout` costs only itself: the client redials for the next one. Client commands beside the verbs:
 `screenshot` (above), `log.follow` (below), and `seed-history [--lines 300] [id ...]` —
-each terminal's tmux scrollback into its depth-history ring via `terminal.depth.seed`
+each terminal's termd scrollback (`capture`) into its depth-history ring via `terminal.depth.seed`
 (the ring is in-memory: re-run after a reload).
 
 A JS harness that genuinely needs JS (a Playwright page, a simulated display/sensor)
@@ -519,7 +521,7 @@ follower, started as the relay starts them) SIGKILLed takes its `agent` children
 `killChildren` stops and forgets them.
 
 Live, against the real `agent`: a scratch relay (`CLAUDE_CONFIG_DIR=<scratch>/claude
-./glyph3d-cli serve --relay-only --port 8199 --tmux-socket glyphd-scratch-cutover <dir>`,
+./glyph3d-cli serve --relay-only --port 8199 --termd-ns scratch-cutover <dir>`,
 killed by PID after) with a real transcript copied under `<scratch>/claude/projects/<p>/`,
 a bun DISPLAY that follows it while the rest of the original is appended (lines split
 across writes): the pushed event lines equal `agent transcript <copy>`'s; `read {tail}` then
@@ -829,7 +831,8 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
 - **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
   the wheel, pinch zoom, map labels, the core terminal verbs. Starts its own relay
-  (`--relay-only`, socket `glyph-wall-e2e`, no gomuxai) if nothing listens on `--relay`.
+  (`--relay-only`, termd namespace `glyph-wall-e2e` in a scratch dir, no gomuxai) if nothing
+  listens on `--relay`, and stops it and its termd daemon at the end.
   ```
   bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099
   ```
@@ -838,7 +841,7 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   with `EXT_disjoint_timer_query_webgl2`. Needs a relay already holding terminals.
 - **`wall-text-perf.mjs`** — the terminal text path timed stage by stage (OUTPUT frame →
   parse → readScreen → applyScreen → GL uploads → GPU fence) in four passes: IDLE, FLOOD
-  (direct and tmux sources, 1/4/14 terminals), COLD (atlas misses), PROFILE. Needs a relay
+  (direct and shell sources, 1/4/14 terminals), COLD (atlas misses), PROFILE. Needs a relay
   already holding max(--scale) terminals.
   ```
   bun tools/wall-gpu-attribution.mjs --url http://localhost:5180/ --relay 8099
@@ -846,6 +849,34 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   The runner (tier gpu) gives both a fresh private relay, which holds no terminals, so both
   are recorded as known reds until they start their own.
+
+## The terminal daemon (`crates/`, `g3d-termd`)
+
+- **`cargo test --workspace`** — the Rust side: `g3d-wire` decodes and re-encodes
+  PROTOCOL.md's hex examples byte for byte (read straight out of the spec) and filters terminal
+  queries split at every byte; 21 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
+  repaints replayed into a fresh libghostty equal the live screen (primary and alternate, modes,
+  cursor, title), a subscribe cut mid-escape-sequence, the resize event's exact seq, queries
+  answered once, `view` anchoring, history rows, a lossy subscriber resynced, a blocking owner and
+  a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling, a HUP-ignoring child,
+  a panicking owner thread, the namespace lock, idle exit, stop, a SIGKILLed daemon taking its
+  shells down; and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no
+  query reaching the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
+  ```
+  tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
+  cargo test --workspace
+  ```
+- **`termd-relay-check.mjs`** (tier full) — the relay on termd with a simulated display: spawn +
+  typing, `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
+  restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
+  screen), a SIGKILLed termd (adapters close their grids, the relay log says `LOST termd`, the next
+  spawn starts a fresh daemon).
+- **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
+  (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
+  parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty
+  keeps U+FFFD where xterm drops the bytes).
+- Go: `cd cli && go test ./...` runs the relay's termd client against a private daemon (it needs
+  `cargo build -p g3d-termd`, or `G3D_TERMD_BIN`).
 
 ## Build / serve
 
@@ -862,7 +893,8 @@ its own filesets) runs the same tools and compares numbers.
 
 Prereqs: `bun` · `bunx playwright install chromium` (the drive-loop browser) · Go +
 `make` for the relay (or grab a released `glyph3d-cli` darwin binary — `tools/install.sh`
-detects the platform) · `tmux` (terminals; `brew install tmux`).
+detects the platform) · `g3d-termd` for terminals (built on Linux by `make termd`; macOS is TODO in
+`docs/termd/DESIGN.md`).
 
 Boot: `bun install` at the repo root, then `tools/dev.sh` (Vite :5173 + relay :8080 —
 `pid_on_port` uses `lsof` where `ss` doesn't exist). For measurement runs prefer the
@@ -891,5 +923,5 @@ Platform notes:
   ceilings on the new hardware before judging any regression, and record them in the
   comparison notes rather than assuming this box's numbers.
 - The relay is single-operator and unauthenticated — scratch relays on a laptop are
-  fine; the shared-socket terminal hazard (two relays adopting each other's tmux
-  terminals) applies per-machine exactly as documented in the repo memory.
+  fine; give each its own `--termd-ns` (two relays in one namespace adopt each other's
+  terminals).

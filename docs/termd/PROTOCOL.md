@@ -406,7 +406,9 @@ show what termd's emulator shows, so the `OUTPUT` that follows parses correctly.
 repaint:
 
 1. leaves the alternate screen (`CSI ? 1049 l`) and soft-resets (`CSI ! p`, which
-   resets modes, styles and margins but not colours or scrollback),
+   resets modes, styles and margins but not colours or scrollback), then puts back what a
+   soft reset leaves alone: autowrap on (`CSI ? 7 h`), mouse reporting, focus events and
+   bracketed paste off, Kitty keyboard flags 0 (`CSI = 0 ; 1 u`),
 2. homes the cursor and clears the screen (`CSI H`, `CSI 2 J`),
 3. with `history_rows` > 0, first prints that many scrollback rows (styled text) so
    they scroll into the client's own scrollback, then clears again,
@@ -442,9 +444,9 @@ every subscriber of the terminal, including `mode: "none"`, in order with its
 | `pwd` | `pwd` | the program reported its directory (OSC 7) |
 | `role` | `role` | your role changed (another client took ownership) |
 | `lagged` | `dropped` (bytes), `seq` | you fell behind and were resynced (see [Flow control](#flow-control)) |
-| `exit` | `code` or `signal`, `seq` | the program exited; `seq` is the end of its output |
+| `exit` | `code` or `signal`, `seq` | the program exited; `seq` is the end of its output. `signal` is the signal's name without `SIG` (`"HUP"`) |
 | `closed` | | the terminal is gone; the handle is dead. Always last |
-| `error` | `code`, `message` | a frame with no reply was refused (an `INPUT`) |
+| `error` | `code`, `message` | something with no reply went wrong: an `INPUT` refused (`not_subscribed`, `read_only`, `no_terminal`, or `input_full` when the program has 1 MiB of unread input), or the terminal failed inside termd (`panic`; `exit` and `closed` follow) |
 
 Clients must ignore events they don't know.
 

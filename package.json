@@ -23,6 +23,7 @@
   "devDependencies": {
     "@ast-grep/cli": "^0.51.2",
     "@types/three": "~0.185.0",
+    "@xterm/headless": "^6.0.0",
     "dependency-cruiser": "^18.7.2",
     "harfbuzzjs": "^0.4.8",
     "knip": "^6.45.1",

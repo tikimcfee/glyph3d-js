@@ -4,7 +4,7 @@
 
 glyph3d-js renders thousands of text glyphs in 3D at 60fps via GPU instancing on
 Three.js (WebGL2 & WebGPU) — built for navigating source code, directory trees, and live
-terminals in 3D space. The repo is organized as **packages, two apps, and a cli**:
+terminals in 3D space. The repo is organized as **packages, two apps, a cli and a terminal daemon**:
 
 - **`packages/glyph3d-core`** (`@glyph3d/core`) — the publishable rendering library:
   glyph atlas + shaping, the `InstancedField` / `InstancedSlotBuffer` renderer, `CodeGrid` / `TerminalGrid`,
@@ -23,9 +23,12 @@ terminals in 3D space. The repo is organized as **packages, two apps, and a cli*
   (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
   a kill forgets at once. `TerminalWall` is its composition root (start/stop symmetric); gate
   `bun tools/wall-e2e.mjs` — its own relay (`tools/lib/wall-relay.mjs`, which the wall's perf tools
-  share), tmux socket and terminals; `--reuse-relay` to run on one you started.
+  share), termd namespace and terminals; `--reuse-relay` to run on one you started.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.
+- **`crates/`** — the Rust workspace: `g3d-termd`, the terminal daemon (PTYs + one libghostty-vt
+  emulator per terminal; outlives the relay), `g3d` (attach to / watch / list / start terminals
+  from any real terminal) and `g3d-wire` (the public protocol, `docs/termd/PROTOCOL.md`).
 
 ## Tech stack
 
@@ -67,9 +70,13 @@ wall/
   main.jsx TerminalWall.js            the wall entry + composition root (Vite :5180)
   WallCamera WallPointer WallKeys WallNames WallStore   one job each
 cli/
-  main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
+  main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminal adapters
+  termd.go                                          the relay's g3d-termd client (start, list, …)
   gomux.go agentevents.go                           gomuxai: hub tree, agent sessions + events
-Makefile  tools/dev.sh
+crates/
+  g3d-wire/  g3d-termd/  g3d/                       protocol · the terminal daemon · its client
+docs/termd/  PROTOCOL.md DESIGN.md                  the termd wire (public) and its design
+Makefile  tools/dev.sh  tools/termd-vendor.sh
 ```
 
 ## How it runs
@@ -82,10 +89,14 @@ NVIDIA-pinned `tools/dev-firefox.sh`; plain Firefox on Linux crashes on WebGPU.
 - `tools/dev.sh vite` restarts Vite + clears its cache (do this after editing
   core/handlers — the watcher can serve stale transforms; verify with
   `curl http://localhost:5173/@fs/<abspath> | rg <token>`).
-- `tools/dev.sh relay` rebuilds + restarts the Go relay.
+- `tools/dev.sh relay` rebuilds (Go + termd) + restarts the Go relay. Terminals live in
+  `g3d-termd` and survive it; a rebuilt `g3d-termd` takes over only once the running daemon
+  stops (`./g3d stop` — every shell in the namespace dies).
 
 **Build / serve**: `make build` runs the app's Vite production build, stages
-`app/dist/` into `cli/web/`, and bakes it into the binary. `./glyph3d-cli serve
+`app/dist/` into `cli/web/`, and bakes it into the binary; `make termd` (part of it) builds
+`g3d-termd` and `g3d` beside it (Linux; first run `tools/termd-vendor.sh`, which fetches and
+verifies libghostty-vt's release tarballs and Zig into `vendor/`). `./glyph3d-cli serve
 ~/project` then serves the built IDE + relay + fs-RPC from one binary at `/`. The app
 bundles its deps at build (no importmap). `make all` cross-compiles all platforms.
 
@@ -343,7 +354,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   aside — `Book.setAside`: right of the cover, height-fit to it, in its seat box) — with NO
   tmux client on gomuxai's server (any client there, even read-only, becomes the default target of
   every tmux command and broke gomuxai's send-keys): a capture-pane snapshot, then `tail -F` of the
-  pane's pipe-pane log, inside our own terminal session; input goes nowhere (`gomux.detach`
+  pane's pipe-pane log, inside an ordinary termd terminal of ours; input goes nowhere (`gomux.detach`
   closes only ours). One adapter per screen: the relay answers a repeat ask (a reload re-asking
   before its adapters re-adopt) with the live one. A screen reads its agent's pane size (the relay
   pushes `gomux/paneSize` when it moves) and a resize writes back (`gomux.resize` → tmux
@@ -413,10 +424,26 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `+N newer`) — the book never grows or shifts under the reader.
   Gates: `tools/book-deck.test.mjs`, `tools/book-controls.test.mjs`, `tools/agent-book-history.test.mjs`,
   `tools/agent-events.test.mjs` (gomuxai's corpus).
-- **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
-  relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
-  forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
-  reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is
+- **Terminals** live in **`g3d-termd`** (`crates/g3d-termd`, `docs/termd/DESIGN.md`): it owns each
+  terminal's PTY, program and a libghostty-vt emulator (the canonical screen and scrollback, a
+  bounded 2 MiB by default) on one owner thread per terminal, and outlives the relay. One daemon
+  per namespace (`serve --termd-ns <ns>`, default `default`; socket
+  `$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`, or under `$G3D_TERMD_DIR`), so a second relay in its own
+  namespace can't adopt or kill the first's; the relay starts it on demand (`g3d-termd --daemon`,
+  found beside `glyph3d-cli`, on PATH, or `serve --termd`) and never kills it. Its socket speaks a
+  public, versioned protocol (`docs/termd/PROTOCOL.md`; `g3d-wire`) any client can use: the relay's
+  forked adapters (`glyph3d-cli attach <id>`) subscribe raw as the size's owner (the display owns
+  the size) and turn termd's OUTPUT/REPAINT/size events into the same 0x01 frames, each byte
+  stamped with the size it was written at; `./g3d attach <id> [--take]` / `./g3d watch <id>` attach
+  from a real terminal (Ghostty), Ctrl-\ twice to detach. termd answers the program's terminal
+  queries once; clients never forward their own replies (`g3d` filters them out of what it prints).
+  Scrollback is termd's per-subscriber `view` (`terminal.scroll`); the wheel goes to an
+  alternate-screen app. A relay restart leaves terminals running: `terminal.recover` re-adopts
+  every one with no owner and the adoption repaint redraws it. A termd crash kills every shell in
+  the namespace (adapters log `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
+  [-- cmd…]` starts any program. Gates: `cargo test --workspace`, `tools/termd-relay-check.mjs`,
+  `tools/termd-fidelity-check.mjs`, `tools/wall-e2e.mjs`. Terminals render as `TerminalGrid`s and
+  re-adopt across reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is
   pulled by the frame: a parse only queues its grid on the scene's `TerminalScreenQueue`, and
   `SceneSystems.update` (before the render) reads each queued screen once into a reused typed
   `TerminalScreen` and applies it — so output is drawn by the next frame, never a frame later. A
@@ -518,7 +545,9 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 
 ## Deployment
 
-`make build` produces the self-contained binary; `make all` cross-compiles
-linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub); `make release VERSION=vX.Y.Z` cuts a GitHub release
+`make build` produces the self-contained binary (and `g3d-termd` + `g3d` beside it, which it
+needs for terminals); `make all` cross-compiles
+linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub;
+`g3d-termd` is built for linux-amd64 only so far — the other targets are TODO in `docs/termd/DESIGN.md`); `make release VERSION=vX.Y.Z` cuts a GitHub release
 (`RELEASE_NOTES.md`). The single binary is a single-operator tool — shared relay state,
 no auth, trusts the operator. The product/demo web page is a separate repo.

@@ -11,6 +11,35 @@ This page is what stage S1 builds against: the daemon, the `g3d` client and the 
 adapter's move off `tmux attach`. S2 (the relay in Rust) and S3 (packed cells to the
 browser) build on it and are only sketched here.
 
+## S1 as built (2026-11-12)
+
+What exists on branch `termd`, and where it departs from the plan below:
+
+- **Daemon** (`crates/g3d-termd`): everything in PROTOCOL.md 1.0 (`raw`, `view`,
+  `capture`; `cells` answers `unsupported`). Paths: socket and log follow the namespace rule;
+  `G3D_TERMD_DIR` overrides both (tests and the check runner keep their daemons in scratch
+  directories with it). A socket path over 100 bytes is refused at start. `kill` signals the
+  program's group and the PTY's foreground group, closes the PTY, and sends `SIGKILL` to both
+  if the program outlives a 2 s grace. `G3D_TERMD_TEST_HOOKS=1` arms one test hook (an
+  `INPUT` of a magic string panics that terminal's owner thread) for the panic-boundary test.
+  `exit` carries a signal by name. `on_xtversion` answers `g3d-termd <version>`.
+- **Client** (`crates/g3d`): `attach` (raw tty, query filter, `Ctrl-\` twice to detach,
+  `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
+  quits), `ls`, `new` (starts the daemon if needed), `capture`, `kill`, `stop`. Attach
+  subscribes `flow: "lossy"` even with `--take`, so a slow tty never stalls the program.
+- **Relay** (`cli/termd.go`, `cli/attach_unix.go`): as in "The Go adapter moves to termd"
+  below, plus a repaint on every `size` event (below). There is no tmux code left in
+  `cli/` except gomuxai's own tmux (the agents' screens and `gomux.resize`).
+- **Gates**: see `tools/CHECKS.md`, "The terminal daemon". The fidelity gate feeds the 29
+  conformance snippets through termd and compares a late subscriber's repaint, parsed by
+  xterm, to xterm fed the snippet (28/29 equal; invalid UTF-8 differs by design). The spike's
+  recorded tmux client streams were not replayed: they are tmux's redraw protocol, which no
+  longer reaches the browser.
+- **Not done in S1**: the resize-at-a-live-prompt comparison against the browser's emulator
+  (the "resize clearing prompt lines" risk below), and `g3d attach` under vim and Claude Code
+  by hand (the query-filter coverage risk) — both are for the operator to try. Hot upgrade,
+  packed cells and the Rust relay are later stages.
+
 ## Measured ground (2026-11-12)
 
 Each line was checked on the build machine against libghostty-vt 1.0.1 (Ghostty tag
@@ -78,10 +107,11 @@ the same namespace fails at the lock and exits non-zero, naming the holder's pid
 
 ### Who starts it
 
-The relay. On its first terminal operation (spawn, recover, list), the relay connects to
-the namespace's socket. If that fails, it starts `g3d-termd --ns <ns> --daemon`, then
-retries the connection with backoff for up to 3 s, and fails loud with the daemon log's
-tail if the daemon still isn't up.
+The relay. To spawn a terminal (the relay before it forks an adapter, and the adapter
+itself), it connects to the namespace's socket. If nothing listens, it starts
+`g3d-termd --ns <ns> --daemon`, then retries the connection with backoff for up to 3 s, and
+fails loud with the daemon log's tail if the daemon still isn't up. Listing and
+`terminal.recover` start nothing: a namespace with no daemon has no live terminals.
 
 `--daemon` detaches properly:
 
@@ -251,9 +281,21 @@ What the browser sees differently: **pane-raw bytes** instead of tmux's redraw s
 No permanent `?1049h`, no dropped lines, a TUI's own alternate screen arriving as its
 own. The depth-history capture (gated on `!this._altActive`) starts working, and query
 answers come from termd, as they came from tmux. That is a visible change, for the
-operator to judge on the live display. `seed-history` becomes the adoption repaint's
-`history_rows` (the adapter can ask for the grid's depth worth of rows); its tmux
-`capture-pane` path is deleted.
+operator to judge on the live display. `seed-history` stays a client command and reads
+termd's `capture` (its tmux `capture-pane` path is deleted). It does not become the
+adoption repaint's `history_rows`: the browser's depth history finds scrolled-off rows by
+diffing frames, and a repaint that prints hundreds of rows in one frame would not be
+caught row by row.
+
+Two browser-visible consequences of raw bytes, handled in S1:
+
+- **An idle program doesn't redraw after a resize.** tmux always redrew on `SIGWINCH`, and
+  the browser resizes its emulator only when bytes tagged with the new size arrive. The
+  adapter asks termd for a `repaint` on every `size` event, so the grid follows even while a
+  long command runs.
+- **Paste.** tmux stripped bracketed-paste markers for programs that hadn't enabled mode
+  2004; termd writes input as is. `TerminalGrid.paste` frames only when the program asked
+  (its own emulator's `bracketedPasteMode`) and otherwise sends newlines as CR, as xterm does.
 
 Relay changes in the same commit (no dual path, no flag):
 
@@ -264,7 +306,7 @@ Relay changes in the same commit (no dual path, no flag):
   `terminal.spawn` gains an optional argv (`-- cmd...`), so an agent or any program can
   be started in a new terminal.
 - `gomuxScreenLive` and gomux's `has-session` check on glyphd → `list`.
-- `--tmux-socket` (serve, attach, seed-history) → `--termd-ns`. `tmuxCmd`,
+- `--tmux-socket` (serve, attach, seed-history) → `--termd-ns`, plus `serve --termd <path>`. `tmuxCmd`,
   `paneScrollPosition`, `paneScreenMode`, `ensureTmuxSession`, `startTmuxAttach`, the
   copy-mode logic and its tests are deleted. CLAUDE.md's terminal paragraph is rewritten
   to match.
@@ -333,9 +375,10 @@ ours.
   `vt-1.0.1`) until a 1.0-based crates.io release exists.
 - The Ghostty source and its dependencies come from the **release tarballs**
   (`libghostty-vt-1.0.1.tar.gz` and `-deps.tar.gz` from release.files.ghostty.org),
-  never a git fetch at build time. A `tools/termd-vendor.sh` (S1) downloads them,
-  verifies each against `SHA256SUMS` and its minisign signature (Ghostty's published
-  key), and unpacks them into a gitignored `vendor/` directory. `.cargo/config.toml`
+  never a git fetch at build time. `tools/termd-vendor.sh [DIR]` downloads them,
+  verifies each against its minisign signature (Ghostty's published key) and a pinned
+  SHA-256, and unpacks them into a gitignored `vendor/` directory (or into `DIR`, with
+  `vendor/` a link to it, to keep toolchains out of the tree). `.cargo/config.toml`
   points `GHOSTTY_SOURCE_DIR` and `GHOSTTY_ZIG_SYSTEM_DIR` there with
   `relative = true`, so no tracked file holds an absolute path.
 - Zig 0.17.x is required (libghostty's `minimum_zig_version` is 0.17.0; any 0.17 patch
@@ -347,6 +390,18 @@ ours.
 - macOS: built on the Mac. termd is unix-only. The Windows relay has no terminals,
   as today.
 - Builds are capped (`CARGO_BUILD_JOBS=8`) and `target/` is gitignored.
+- `libghostty-vt-sys` builds `ReleaseFast` in every profile (`[profile.dev.package]`): its
+  Debug mode parses a flood slowly enough to stall the daemon's own tests.
+- **What `make` builds today (S1):** `make termd` (part of `make build`) builds `g3d-termd`
+  and `g3d` natively on a Linux host and copies them beside `glyph3d-cli`; on linux-amd64,
+  `make linux-amd64` also puts them in `dist/`. TODO, in order:
+  1. linux-arm64: cargo-zigbuild with the vendored Zig (proven for a C dependency, not yet
+     for libghostty itself; hedge: `zig build -Dtarget=aarch64-linux` of `libghostty-vt.a`
+     and point the crate at it);
+  2. macOS (darwin-arm64, then darwin-amd64): a native build on the Mac (the vendor script
+     fetches the macOS Zig);
+  3. `make release` shipping `g3d-termd`/`g3d` beside each `glyph3d-cli`;
+  4. Windows: none (no PTYs; the relay has no terminals there).
 
 ## Workspace layout (D10)
 

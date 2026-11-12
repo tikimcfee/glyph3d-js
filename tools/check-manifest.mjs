@@ -226,6 +226,11 @@ export const CHECKS = [
     h('terminal-spawn-dock-check.mjs', ['terminal', 'desk'], 'terminal.spawn awaits its own terminal, then docks + focuses it', 'the relay'),
     h('terminal-frame-format-check.mjs', ['terminal', 'relay'], 'the OUTPUT frame wire format the Go adapter and the JS bridge share, byte for byte', 'the Go side (it is mirrored, not run)'),
     {
+        name: 'termd-fidelity-check', cmd: ['bun', 'tools/termd-fidelity-check.mjs'], tier: 'full', scope: ['terminal'], needs: ['termd'],
+        compare: "the 29 vt conformance snippets through g3d-termd: raw output byte-exact, and a late subscriber's repaint parsed by xterm equal to xterm fed the snippet (cells, cursor, screen, title)",
+        blind: 'the browser renderer (xterm is its parser; the glyphs are checked elsewhere)',
+    },
+    {
         name: 'termd-relay-check', cmd: ['bun', 'tools/termd-relay-check.mjs', '--relay', '{port}'], tier: 'full', scope: ['terminal', 'relay'],
         needs: ['own-relay', 'termd'], apart: ['*'], timeoutMs: 180_000,
         compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd crash (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon)',
