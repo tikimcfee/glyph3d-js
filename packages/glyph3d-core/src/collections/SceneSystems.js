@@ -3,6 +3,7 @@ import GlyphFarLod from './GlyphFarLod.js';
 import PanelBatch from './PanelBatch.js';
 import GlyphBatch from './GlyphBatch.js';
 import FlatRenderRoot from './FlatRenderRoot.js';
+import TerminalScreenQueue from './TerminalScreenQueue.js';
 
 /**
  * SceneSystems — the renderer's per-scene systems, installed in the order they depend on and torn
@@ -19,9 +20,13 @@ import FlatRenderRoot from './FlatRenderRoot.js';
  *   panelBatch   flat panels, box fills and outlines draw as instances (scene.onBeforeRender)
  *   glyphBatch   labels draw from one arena field; its onBeforeRender hook chains after the panel
  *                batch's, so it unhooks first
+ *   screens      terminals whose output was parsed since the last frame apply their screens (only
+ *                what changed) — first in update(), so this frame's render draws them and far-LOD
+ *                decides on what they now hold. update() runs once a frame and never for a pick
+ *                pass or a screenshot, which render the scene outside it
  *
- * Run `update(camera, viewportHeightPx)` once a frame before the render (far-LOD's decision); the
- * batches refresh themselves from the scene's onBeforeRender.
+ * Run `update(camera, viewportHeightPx)` once a frame before the render (terminal screens, then
+ * far-LOD's decision); the batches refresh themselves from the scene's onBeforeRender.
  */
 export default class SceneSystems {
     /**
@@ -44,6 +49,7 @@ export default class SceneSystems {
         this.farLod = new GlyphFarLod(scene);
         this.panelBatch = new PanelBatch(scene);
         this.glyphBatch = new GlyphBatch(scene, atlas);
+        this.screens = new TerminalScreenQueue(scene);
     }
 
     /**
@@ -52,11 +58,13 @@ export default class SceneSystems {
      * @param {number} viewportHeightPx - the canvas's CSS height
      */
     update(camera, viewportHeightPx) {
+        this.screens.flush();
         this.farLod.update(camera, viewportHeightPx);
     }
 
     /** Reverse order: hands the renderer's render(), scene.onBeforeRender and scene.updateMatrixWorld back to three. */
     dispose() {
+        this.screens.dispose();
         this.glyphBatch.dispose();
         this.panelBatch.dispose();
         this.farLod.dispose();

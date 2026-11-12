@@ -1,40 +1,37 @@
 /**
- * TerminalGrid — renders a fixed-size terminal cell grid using direct typed array
- * writes to GlyphField.
+ * TerminalGrid — a terminal's cells (its live screen plus its scrollback-into-depth) drawn as one
+ * InstancedField, one glyph slot per cell, spaces included.
  *
- * Each cell in the (cols × rows) grid maps to exactly one glyph instance via
- * row-major indexing. The grid uses a dedicated GlyphField instance and a
- * single group in the DataTexture for O(1) world-position moves.
+ * The cells are a RING of physical rows (`rows + depthMax` of them; see terminalDepthHistory):
+ * each physical row draws through its own group-table row, whose offset places it — a live row
+ * on the screen, a history line on its page behind it — and whose tint and alpha fade or hide it.
+ * Slot positions never change after a resize; what a scroll changes is the ring's head and the
+ * group rows, not the cells: the rows that scrolled off become history without a slot rewritten.
  *
- * Design principles (from cross-ref/tmux-terminal-integration convergence):
- *   - Fixed instance count: cols * rows (spaces are rendered, not skipped)
- *   - Parallel typed arrays (_codepoints, _cellR, _cellG, _cellB) are canonical
- *   - GPU attribute arrays are a projection of those canonical arrays
- *   - Full buffer rewrite per frame (correct for 1920-cell terminals at 2Hz)
- *   - Direct Float32Array writes via _writeToInstanceBuffer(), not addText()
- *   - Group DataTexture for O(1) position changes (one DataTexture write vs. N buffer writes)
+ * Per screen update (pulled once a frame, before the render — see TerminalScreenQueue):
+ *   - the emulator fills one reused TerminalScreen (typed arrays, packed colors);
+ *   - a detected scroll moves the ring's head and re-poses the group rows;
+ *   - the live rows are compared cell by cell with what their slots hold (canonical _cp/_fg/_bg
+ *     per physical cell): only the cells that differ are written, and only their per-row spans
+ *     are uploaded (InstancedField.markSlotsDirty / markHighlightDirty);
+ *   - nothing is allocated in steady state.
  *
  * Differs from CodeGrid:
  *   - No line-buffer history, no ANSI stripping
  *   - No GlyphCollection deferred queue, no _rebuildAllInstances() on update
- *   - No background plane, no filename label
- *   - update cost: O(cols*rows) float writes + two needsUpdate flags
  */
 
 import * as THREE from 'three';
 import InstancedField from './InstancedField.js';
-import TerminalEmulator from './TerminalEmulator.js';
+import TerminalEmulator, { DEFAULT_FG } from './TerminalEmulator.js';
+import TerminalScreenQueue from './TerminalScreenQueue.js';
 import {
     detectVerticalScroll,
-    captureScrolledRows,
-    reflowHistoryRows,
-    computeTerminalPositions,
-    computeTerminalSizes,
+    layoutTerminalRows,
+    ROW_LAYOUT_STRIDE,
     computeTerminalGlyphExtent,
-    snapshotLiveRegion,
-    paintHistoryRegion,
-    syncTerminalBuffers,
 } from './terminalDepthHistory.js';
+import { SLOT_FLOATS, LANE_GLYPH_ID, LANE_COLOR } from '../core/InstancedSlotBuffer.js';
 import {
     computeCellGridLayout,
     GridChrome,
@@ -143,11 +140,33 @@ export default class TerminalGrid extends FramedGlyphField {
         this._depthFadeMin = options.depthFadeMin ?? 0.4;           // oldest page's brightness
         this._depthYFactor = options.depthYStep ?? 0;               // ×lineSpacing rise per PAGE
         this._depthZFactor = options.depthZStep ?? 6;               // ×lineSpacing recede per PAGE
-        this._history  = [];      // captured rows, index 0 = newest scrolled-off
-        this._prevRows = null;    // last live-screen snapshot, for scroll detection
         this._altActive = false;  // current frame is an alt-screen (TUI) repaint
         this._depthYStep = 0;     // world rise per page (set once metrics exist)
         this._depthZStep = 0;     // world recede per page (set once metrics exist)
+
+        // ---- The cell ring ----
+        // History (oldest line first) then the live screen (top row first) is one sequence in
+        // time order; it lives in a ring of `rows + depthMax` physical rows whose head
+        // (_ringStart: the physical row of sequence index 0) a scroll moves. Canonical state per
+        // PHYSICAL cell — slot index = physical row × cols + column — in TerminalScreen's
+        // encoding: codepoint, packed fg, bg word (0 = no fill). The slot buffer and the
+        // highlight texture are its projection; every write goes through _writeSpans /
+        // _writeSeqRows / _pushAll, which upload what they wrote.
+        this._ringStart = 0;
+        this._scrollBase = false;  // the live rows hold the last screen applied (a scroll may be diffed against them)
+        /** @type {Uint32Array} */ this._cp = null;
+        /** @type {Uint32Array} */ this._fg = null;
+        /** @type {Uint32Array} */ this._bg = null;
+        /** @type {Uint8Array} per physical row: some cell has a background */ this._rowHasBg = null;
+        /** @type {Int32Array} per physical row: its group-table row */ this._rowGroups = new Int32Array(0);
+        /** @type {Float32Array} per sequence index: y, z, fade (layoutTerminalRows) */ this._rowLayout = null;
+        /** @type {Int32Array} per live row: its first cell's physical index */ this._liveRowBase = null;
+        // Per live row, this update's changed spans (first/last column; last < first = none):
+        // glyph or color, and background. Scratch, reused every update.
+        this._spanLo = this._spanHi = this._bgLo = this._bgHi = null;
+        /** @type {number[]} codepoints first seen this update (empty in steady state) */
+        this._fresh = [];
+        this._screenQueued = false;   // waiting in the scene's TerminalScreenQueue
 
         /**
          * Input callback -- set by the owning agent or process. When set, every input this
@@ -162,18 +181,17 @@ export default class TerminalGrid extends FramedGlyphField {
         const worldScale = options.worldScale ?? 0.025;
         this._gridScale = options.gridScale ?? 1.0;
 
-        // Instance budget = live cells + a depth-history block (cols × _depthMax).
-        // The live screen owns [0, _cellCount); history owns [_cellCount, _totalCount).
-        // Allocated up front so the picking glyph-channel id-block stays stable
-        // (history never grows the instance count — rows shift through fixed slots).
+        // Instance budget = live cells + a depth-history block (cols × _depthMax), allocated up
+        // front so the picking glyph-channel id-block stays stable (history never grows the
+        // instance count — the ring re-poses rows instead).
         this._cellCount  = this.cols * this.rows;
         this._depthCount = this.cols * this._depthMax;
         this._totalCount = this._cellCount + this._depthCount;
 
-        // One dedicated renderer per terminal (phase 1).
-        // Phase 2: shared renderer via segment allocation.
+        // One dedicated renderer per terminal, with a group-table row per physical row.
         this._renderer = new InstancedField(scene, atlas, {
             maxInstances: this._totalCount,
+            groupCap: Math.max(4096, this.rows + this._depthMax + 1),
             worldScale,
             defaultColor: { r: 0.0, g: 1.0, b: 0.0 },
         });
@@ -192,46 +210,6 @@ export default class TerminalGrid extends FramedGlyphField {
         this._localBounds = null;
         this._localBoundsDirty = true;
 
-
-        // Acquire a group in the DataTexture for O(1) positioning.
-        this._groupId = this._renderer.createGroup();
-
-        // ---- Canonical parallel typed arrays ----
-        // These are the source of truth. GPU attribute arrays are their projection.
-        // Invariant: _codepoints[i], _cellR[i], _cellG[i], _cellB[i] always reflect
-        // the most recently written cell state. GPU attributes are synced by
-        // _writeToInstanceBuffer() / _applyToRenderer().
-        this._codepoints = new Float32Array(this._totalCount).fill(32);     // space
-        this._cellR      = new Float32Array(this._totalCount).fill(0.8);
-        this._cellG      = new Float32Array(this._totalCount).fill(0.8);
-        this._cellB      = new Float32Array(this._totalCount).fill(0.8);
-        // Per-cell ANSI BACKGROUND (live region only — [0, _cellCount)). RGB + a per-cell opacity
-        // (0 = no fill → the terminal's bg plane shows). Projected into the fill carrier (the
-        // highlight texture) each frame by _writeToInstanceBuffer. History keeps no bg for now.
-        this._cellBgR    = new Float32Array(this._cellCount);
-        this._cellBgG    = new Float32Array(this._cellCount);
-        this._cellBgB    = new Float32Array(this._cellCount);
-        this._cellBgA    = new Float32Array(this._cellCount);   // 0 = no fill; else _bgFillOpacity
-
-        // Pre-computed positions (only change on resize). Live cells + the static
-        // depth-history slots (history CONTENT shifts through slots; slot positions
-        // are fixed, so positions never change between frames).
-        this._positions = new Float32Array(this._totalCount * 3);
-        this._computePositions();
-
-        // Constant sizes: every cell gets the same charWidth × charHeight.
-        // Written once at construction / resize; never touched during updates.
-        this._sizes = new Float32Array(this._totalCount * 2);
-        this._computeSizes();
-
-        // All cells (live + history) share this terminal's groupId.
-        this._groupIds = new Float32Array(this._totalCount).fill(this._groupId);
-
-        // Push the initial empty buffer to the renderer. After this call the non-position
-        // geometry attributes wrap our typed arrays (zero-copy in-place updates); positions
-        // are the exception — applyPrebuiltBuffers pads them into its own stride-4 array.
-        this._applyToRenderer();
-
         // Background plane — dark panel behind the terminal for readability. The _panel/
         // _background slots are declared by FramedGlyphField; _initBackground builds them.
         this._bgColor = options.backgroundColor ?? 0x0a0a1e;
@@ -241,10 +219,12 @@ export default class TerminalGrid extends FramedGlyphField {
         // default — a colored cell reads as an opaque block like a real terminal; tunable live.
         this._bgFillOpacity = options.cellBgFillOpacity ?? 1.0;
         this._visible = true; // setVisible state — folded with the fade (shared alpha slot)
+
+        // The cells, blank, and every slot pushed. The glyphs draw at the panel's opacity (the row
+        // poses carry it), so a translucent tile reads as one sheet, not opaque text over glass.
+        this._allocateCells(null);
+        this._pushAll();
         this._initBackground();
-        // Fade glyphs to match the panel from the start, so a translucent tile reads
-        // as one coherent sheet (text + bg together), not opaque text over glass.
-        this._applyGlyphAlpha();
 
         // Window chrome: a bottom-edge row of controls
         this._chrome = null;
@@ -279,10 +259,11 @@ export default class TerminalGrid extends FramedGlyphField {
             this.position.set(p.x, p.y, p.z);
         }
 
-        // Byte→screen source: a headless VT emulator parses the terminal byte stream
-        // and drives applyScreen. TerminalGrid stays a pure cell renderer; the
+        // Byte→screen source: a headless VT emulator parses the terminal byte stream; a parse
+        // queues this grid on its scene's TerminalScreenQueue, and the frame applies the screen
+        // before it renders (applyPendingScreen). TerminalGrid stays a pure cell renderer; the
         // emulator is one source feeding it (file-slice / graphics are others, later).
-        this._emulator = new TerminalEmulator(this.cols, this.rows, (screen) => this.applyScreen(screen));
+        this._emulator = new TerminalEmulator(this.cols, this.rows, () => this._screenChanged());
 
         /**
          * The window title the terminal's program last set (OSC 0/2 — behind tmux, the pane title:
@@ -303,147 +284,237 @@ export default class TerminalGrid extends FramedGlyphField {
     // ================================================================
 
     /**
-     * Accept a ScreenBuffer and update the GPU instance arrays.
+     * Apply a TerminalScreen (TerminalEmulator.readScreen, read at this grid's cols × rows): move
+     * the ring if the screen scrolled, then write only the cells that differ from what the slots
+     * hold, and upload only those spans. Allocates nothing in steady state (a first-seen glyph
+     * is the exception: it is handed to the atlas).
      *
-     * ScreenBuffer contract (produced by TerminalEmulator's cell adapter):
-     *   { cols: number, rows: number,
-     *     cells: Array<Array<{ codepoint: number, fg: {r,g,b}, bold: boolean }>> }
-     *
-     * Update cost: O(cols*rows) scalar writes + two GPU attribute uploads (~20KB each).
-     *
-     * @param {{ cols: number, rows: number, cells: Array<Array<{codepoint:number,fg:{r,g,b},bold:boolean}>> }} screen
+     * @param {ReturnType<import('./TerminalEmulator.js').createTerminalScreen>} screen
      */
     applyScreen(screen) {
-        // Ensure all incoming codepoints are present in the atlas before writing.
-        this._ensureAtlasCodepoints(screen);
+        const cols = this.cols, rows = this.rows;
+        if (screen.cols !== cols || screen.rows !== rows) {
+            throw new Error(`[TerminalGrid ${this.terminalId}] applyScreen got a ${screen.cols}×${screen.rows} screen for a ${cols}×${rows} grid — read it at the grid's size (TerminalEmulator.readScreen(cols, rows))`);
+        }
+        const alt = !!screen.alt;
+        let repose = alt !== this._altActive;   // history shows or hides with the alt screen
+        this._altActive = alt;
 
-        this._altActive = !!screen.alt;
-
-        // Capture lines that scrolled off the top SINCE the last frame, BEFORE the
-        // live loop overwrites the canonical arrays. _prevRows holds last frame's
-        // snapshot; a detected upward shift of k means its top k rows are now history.
-        if (this._depthEnabled && !this._altActive && this._prevRows) {
-            const k = detectVerticalScroll(this._prevRows, screen, this.rows, this.cols);
+        // Lines that scrolled off the top since the last screen become history: compare the
+        // incoming screen with the live rows as they stand, and move the ring's head by the
+        // shift instead of moving any cells.
+        if (this._depthEnabled && !alt && this._scrollBase) {
+            const k = detectVerticalScroll(this._cp, this._liveRowBase, screen.cp, rows, cols);
             if (k > 0) {
-                // Newest-first, so the line that was just above the new top lands at
-                // index 0 (the forefront slot). Snapshot rows are immutable, so
-                // aliasing them into the ring is safe.
-                this._history.unshift(...captureScrolledRows(this._prevRows, k));
-                if (this._history.length > this._depthMax) this._history.length = this._depthMax;
+                this._scrollRing(k);
+                repose = true;
             }
         }
 
-        const cols = this.cols;
+        this._diffLive(screen);
+        if (this._fresh.length) this._ensureAtlasCodepoints(this._fresh);
+        this._writeSpans();
+        if (repose) this._poseRows();
+        this._scrollBase = true;
+
+        // Move the cursor block to the cell the emulator reports.
+        this._cursor.x = screen.cursorX;
+        this._cursor.y = screen.cursorY;
+        this._updateCursorMesh();
+    }
+
+    /**
+     * The frame's pull (TerminalScreenQueue.flush, from SceneSystems.update, before the render):
+     * read the emulator's screen once — however many writes were parsed since the last frame —
+     * and apply it.
+     */
+    applyPendingScreen() {
+        this._screenQueued = false;
+        const emu = this._emulator;
+        if (!emu || !emu.dirty) return;
+        this.applyScreen(emu.readScreen(this.cols, this.rows));
+    }
+
+    /**
+     * The emulator parsed bytes: queue this grid for the scene's next frame (once, however many
+     * writes land before it). A scene with no TerminalScreenQueue (no SceneSystems) never applies
+     * a screen — said once, loudly.
+     * @private
+     */
+    _screenChanged() {
+        if (this._screenQueued) return;
+        const queue = TerminalScreenQueue.of(this.scene);
+        if (!queue) {
+            if (!this._noQueueNoted) {
+                this._noQueueNoted = true;
+                console.error(`[TerminalGrid ${this.terminalId}] output was parsed, but this terminal's scene has no TerminalScreenQueue (no SceneSystems runs it), so its screen never draws — install SceneSystems on the scene and call update() once a frame`);
+            }
+            return;
+        }
+        this._screenQueued = true;
+        queue.add(this);
+    }
+
+    /**
+     * Scroll by k: the top k live rows become the newest history lines, the oldest k history
+     * lines (or, with less history than k, the top live rows themselves) come round as the new
+     * bottom live rows, whose cells the diff then rewrites. Only the head moves; a row moving
+     * into history drops its background (history keeps none).
+     * @private
+     * @param {number} k  lines scrolled, 1 … rows − 1
+     */
+    _scrollRing(k) {
+        const rows = this.rows, cols = this.cols, D = this._depthMax, P = rows + D;
+        for (let y = 0; y < k; y++) {
+            if (D + y - k < 0) continue;                       // it comes round as a live row
+            const p = (this._ringStart + D + y) % P;
+            if (!this._rowHasBg[p]) continue;
+            const base = p * cols;
+            this._bg.fill(0, base, base + cols);
+            this._highlightWords().fill(0, base, base + cols);
+            this._renderer.markHighlightDirty(base, cols);
+            this._rowHasBg[p] = 0;
+        }
+        this._ringStart = (this._ringStart + k) % P;
+        this._indexLiveRows();
+    }
+
+    /** @private Each live row's first physical cell, for the ring's current head. */
+    _indexLiveRows() {
+        const rows = this.rows, cols = this.cols, D = this._depthMax, P = rows + D;
+        for (let y = 0; y < rows; y++) this._liveRowBase[y] = ((this._ringStart + D + y) % P) * cols;
+    }
+
+    /**
+     * Compare the screen with the live rows' canonical cells, copy what differs, and record each
+     * row's changed span (glyph/color, background). New codepoints go to _fresh for the atlas.
+     * @private
+     */
+    _diffLive(screen) {
+        const cols = this.cols, rows = this.rows;
+        const CP = this._cp, FG = this._fg, BG = this._bg;
+        const sCP = screen.cp, sFG = screen.fg, sBG = screen.bg;
+        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi;
+        const seen = this._liveEnsured;
+        const fresh = this._fresh;
+        fresh.length = 0;
+        const ensure = !!(this.atlas && this.atlas._live && this._shapeCache);
+        for (let y = 0; y < rows; y++) {
+            const base = this._liveRowBase[y];
+            let l = cols, h = -1, bl = cols, bh = -1, anyBg = 0;
+            for (let x = 0, si = y * cols, i = base; x < cols; x++, si++, i++) {
+                const c = sCP[si], f = sFG[si], b = sBG[si];
+                if (c !== CP[i]) {
+                    CP[i] = c; FG[i] = f;
+                    if (l === cols) l = x;
+                    h = x;
+                    if (ensure && c > 32 && !seen.has(c)) { seen.add(c); fresh.push(c); }
+                } else if (f !== FG[i]) {
+                    FG[i] = f;
+                    if (l === cols) l = x;
+                    h = x;
+                }
+                if (b !== BG[i]) {
+                    BG[i] = b;
+                    if (bl === cols) bl = x;
+                    bh = x;
+                }
+                if (b !== 0) anyBg = 1;
+            }
+            lo[y] = l; hi[y] = h; blo[y] = bl; bhi[y] = bh;
+            this._rowHasBg[base / cols] = anyBg;
+        }
+    }
+
+    /**
+     * Write the live rows' changed spans into the slot buffer (glyph id + color) and the highlight
+     * texture (the cell background as a fill), and mark exactly those spans for upload.
+     * @private
+     */
+    _writeSpans() {
         const rows = this.rows;
-        const cp = this._codepoints;
-        const cr = this._cellR;
-        const cg = this._cellG;
-        const cb = this._cellB;
-        const bgR = this._cellBgR, bgG = this._cellBgG, bgB = this._cellBgB, bgA = this._cellBgA;
-        const bgFill = this._bgFillOpacity;
-
-        for (let row = 0; row < rows; row++) {
-            const screenRow = screen.cells[row];
-            if (!screenRow) {
-                // Row not present in buffer: fill with spaces at default color, no bg fill
-                for (let col = 0; col < cols; col++) {
-                    const idx = row * cols + col;
-                    cp[idx] = 32;
-                    cr[idx] = 0.8; cg[idx] = 0.8; cb[idx] = 0.8;
-                    bgA[idx] = 0;
+        const field = this._renderer;
+        const f32 = field.slotBuffer.f32;
+        const CP = this._cp, FG = this._fg, BG = this._bg;
+        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi;
+        let words = null, fill = 0;
+        for (let y = 0; y < rows; y++) {
+            const base = this._liveRowBase[y];
+            const l = lo[y], h = hi[y];
+            if (h >= l) {
+                for (let i = base + l, end = base + h; i <= end; i++) {
+                    const o = i * SLOT_FLOATS;
+                    f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i]);
+                    f32[o + LANE_COLOR] = FG[i];
                 }
-                continue;
+                field.markSlotsDirty(base + l, h - l + 1);
             }
-
-            for (let col = 0; col < cols; col++) {
-                const idx = row * cols + col;
-                const cell = screenRow[col];
-
-                if (!cell) {
-                    cp[idx] = 32;
-                    cr[idx] = 0.8; cg[idx] = 0.8; cb[idx] = 0.8;
-                    bgA[idx] = 0;
-                    continue;
+            const bl = blo[y], bh = bhi[y];
+            if (bh >= bl) {
+                if (!words) { words = this._highlightWords(); fill = this._fillAlphaBits(); }
+                for (let i = base + bl, end = base + bh; i <= end; i++) {
+                    const b = BG[i];
+                    words[i] = b && fill ? (b & 0xffffff) | fill : 0;
                 }
-
-                // Emulator/source cells carry .codepoint (number) directly.
-                cp[idx] = cell.codepoint ?? 32;
-
-                const fg = cell.fg ?? { r: 0.8, g: 0.8, b: 0.8 };
-                if (cell.bold) {
-                    // Bold: boost brightness by 40%, clamp to 1.
-                    cr[idx] = Math.min(fg.r * 1.4, 1.0);
-                    cg[idx] = Math.min(fg.g * 1.4, 1.0);
-                    cb[idx] = Math.min(fg.b * 1.4, 1.0);
-                } else {
-                    cr[idx] = fg.r;
-                    cg[idx] = fg.g;
-                    cb[idx] = fg.b;
-                }
-
-                // Per-cell ANSI background: explicit bg → a fill at _bgFillOpacity; default bg
-                // (null) → no fill (alpha 0), so the terminal's bg plane shows through.
-                const bg = cell.bg;
-                if (bg) { bgR[idx] = bg.r; bgG[idx] = bg.g; bgB[idx] = bg.b; bgA[idx] = bgFill; }
-                else { bgA[idx] = 0; }
+                field.markHighlightDirty(base + bl, bh - bl + 1);
             }
         }
+    }
 
-        // Snapshot the freshly-written live screen for next frame's scroll diff, then
-        // paint the depth-history block from the ring. (Snapshot rows are fresh arrays
-        // each frame, so aliasing one into _history is safe — it is never mutated.)
-        this._snapshotLive();
-        this._paintHistory();
+    /** @private The highlight texels, one RGBA8 word per slot. */
+    _highlightWords() {
+        return this._renderer.highlightWords(this._totalCount);
+    }
 
-        // Project canonical arrays (live + history) → GPU attribute arrays.
-        this._writeToInstanceBuffer();
+    /**
+     * @private A cell background's fill alpha, in a highlight word's top byte (0 = the fill is off:
+     * the cell draws no fill at all).
+     */
+    _fillAlphaBits() {
+        return InstancedField.encodeHighlightAlpha(this._bgFillOpacity) << 24;
+    }
 
-        // Move the cursor block to the cell the emulator reports. (Sources without a cursor —
-        // future file-slice / graphics surfaces — simply leave it where it was.)
-        if (screen.cursor) {
-            this._cursor.x = screen.cursor.x;
-            this._cursor.y = screen.cursor.y;
-            this._updateCursorMesh();
+    /**
+     * Pose every physical row through its group-table row: where its sequence index sits
+     * (_rowLayout), its fade, and its alpha — the panel's opacity, 0 while hidden, and for
+     * history also 0 while depth history is off or an alt-screen app has the terminal.
+     * @private
+     */
+    _poseRows() {
+        const field = this._renderer, L = this._rowLayout, G = this._rowGroups;
+        const D = this._depthMax, P = this.rows + D, start = this._ringStart;
+        const shown = this._visible ? this._bgOpacity : 0;
+        const historyAlpha = this._depthEnabled && !this._altActive ? shown : 0;
+        for (let s = 0; s < P; s++) {
+            const o = s * ROW_LAYOUT_STRIDE;
+            const fade = L[o + 2];
+            field.setGroupOffsetColor(G[(start + s) % P], 0, L[o], L[o + 1], fade, fade, fade, s < D ? historyAlpha : shown);
         }
     }
 
     /**
-     * Snapshot the live screen region of the canonical arrays into _prevRows — one
-     * fresh {cp,r,g,b} per row. Used both for next frame's scroll diff (cp) and as
-     * the immutable rows handed to the depth-history ring (cp + color).
+     * Write whole rows of the sequence [s0, s0 + n) — glyph and color lanes, from the canonical
+     * cells — and mark them for upload (one range per contiguous physical run).
      * @private
      */
-    _snapshotLive() {
-        this._prevRows = snapshotLiveRegion(
-            this._codepoints,
-            this._cellR,
-            this._cellG,
-            this._cellB,
-            this.cols,
-            this.rows
-        );
-    }
-
-    /**
-     * Write the depth-history ring into the history region of the canonical arrays
-     * ([_cellCount, _totalCount)). History slot h holds ring entry h (newest at 0),
-     * dimmed by depth toward _depthFadeMin.
-     * @private
-     */
-    _paintHistory() {
-        paintHistoryRegion({
-            codepoints: this._codepoints,
-            cellR: this._cellR,
-            cellG: this._cellG,
-            cellB: this._cellB,
-            history: this._history,
-            cols: this.cols,
-            rows: this.rows,
-            depthMax: this._depthMax,
-            depthFadeMin: this._depthFadeMin,
-            depthEnabled: this._depthEnabled,
-            altActive: this._altActive,
-        });
+    _writeSeqRows(s0, n) {
+        const cols = this.cols, P = this.rows + this._depthMax;
+        const field = this._renderer, f32 = field.slotBuffer.f32;
+        const CP = this._cp, FG = this._fg;
+        let runStart = -1, runEnd = -1;
+        for (let s = s0; s < s0 + n; s++) {
+            const p = (this._ringStart + s) % P;
+            const base = p * cols;
+            for (let i = base; i < base + cols; i++) {
+                const o = i * SLOT_FLOATS;
+                f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i]);
+                f32[o + LANE_COLOR] = FG[i];
+            }
+            if (base === runEnd) { runEnd += cols; continue; }
+            if (runStart >= 0) field.markSlotsDirty(runStart, runEnd - runStart);
+            runStart = base; runEnd = base + cols;
+        }
+        if (runStart >= 0) field.markSlotsDirty(runStart, runEnd - runStart);
     }
 
     /**
@@ -455,66 +526,43 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Toggle scrollback-into-depth. Disabling clears the captured ring (off means
-     * gone) and blanks the depth block on the next paint; it refills as the live
-     * screen scrolls once re-enabled.
+     * Toggle scrollback-into-depth. Disabling clears the captured history (off means gone) and
+     * hides the depth block; it refills as the live screen scrolls once re-enabled.
      * @param {boolean} enabled
      */
     setDepthHistory(enabled) {
         this._depthEnabled = !!enabled;
-        if (!this._depthEnabled) this._history = [];
-        this._paintHistory();
-        this._writeToInstanceBuffer();
+        if (!this._depthEnabled) this._blankHistory();
+        this._poseRows();
+    }
+
+    /** @private Blank every history line (spaces, default fg) and upload them. */
+    _blankHistory() {
+        const D = this._depthMax, cols = this.cols, P = this.rows + D;
+        for (let s = 0; s < D; s++) {
+            const base = ((this._ringStart + s) % P) * cols;
+            this._cp.fill(32, base, base + cols);
+            this._fg.fill(DEFAULT_FG, base, base + cols);
+        }
+        this._writeSeqRows(0, D);
     }
 
     /**
      * Change how many depth-history lines this terminal keeps and renders, reallocating
-     * the instance budget (cols × (rows + max)). The captured ring is PRESERVED (trimmed
-     * if shrinking); the live region is restored from the last snapshot so it doesn't
-     * flash blank. Lets you crank a deeper "wall of history" than the construction
-     * default (1000 lines is still a single instanced draw call).
+     * the instance budget (cols × (rows + max)). The captured history is PRESERVED (trimmed
+     * if shrinking) and so is the live screen. Lets you crank a deeper "wall of history" than
+     * the construction default (1000 lines is still a single instanced draw call).
      * @param {number} max
      */
     setDepthMax(max) {
         max = Math.max(0, Math.floor(max) || 0);
         if (max === this._depthMax) return;
+        const keep = this._sequenceSnapshot();
         this._depthMax = max;
         this._depthCount = this.cols * max;
         this._totalCount = this._cellCount + this._depthCount;
-
-        const total = this._totalCount;
-        this._codepoints = new Float32Array(total).fill(32);
-        this._cellR = new Float32Array(total).fill(0.8);
-        this._cellG = new Float32Array(total).fill(0.8);
-        this._cellB = new Float32Array(total).fill(0.8);
-        this._positions = new Float32Array(total * 3);
-        this._sizes = new Float32Array(total * 2);
-        this._groupIds = new Float32Array(total).fill(this._groupId);
-
-        if (this._history.length > max) this._history.length = max;
-
-        this._computePositions();
-        this._computeSizes();
-
-        // Restore the live region from the last snapshot (the terminal may be idle for
-        // a frame after this) so we don't flash a blank screen.
-        if (this._prevRows) {
-            const cols = this.cols;
-            const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
-            for (let y = 0; y < this.rows && y < this._prevRows.length; y++) {
-                const row = this._prevRows[y];
-                const base = y * cols;
-                for (let x = 0; x < cols; x++) {
-                    cp[base + x] = row.cp[x]; cr[base + x] = row.r[x];
-                    cg[base + x] = row.g[x]; cb[base + x] = row.b[x];
-                }
-            }
-        }
-
-        this._applyToRenderer();   // grows the renderer's maxInstances + swaps in sized attrs
-        this._paintHistory();
-        this._writeToInstanceBuffer();
-
+        this._allocateCells(keep);
+        this._pushAll();
         if (this._pickingSystem) {
             this._pickingSystem.register('glyph', this._renderer, this._renderer);
         }
@@ -523,8 +571,8 @@ export default class TerminalGrid extends FramedGlyphField {
     /**
      * Tune the depth-history layout live: per-PAGE rise (+Y) and recession (−Z), each a
      * multiple of lineSpacing. yFactor=0 → a flat straight-back deck of pages; yFactor>0
-     * → pages also climb. zFactor sets how far each page steps back. Recomputes slot
-     * positions and re-pushes them (no reload). Pass null for either to leave it.
+     * → pages also climb. zFactor sets how far each page steps back. Re-poses the rows (their
+     * group rows carry the placement — no cell is rewritten). Pass null for either to leave it.
      * @param {number|null} yFactor  rise per page ×lineSpacing
      * @param {number|null} zFactor  recession per page ×lineSpacing
      */
@@ -537,62 +585,53 @@ export default class TerminalGrid extends FramedGlyphField {
             this._depthZFactor = zFactor;
             this._depthZStep = this._metrics.lineSpacing * zFactor;
         }
-        this._computePositions();
-        this._applyToRenderer();   // re-push positions (the GPU attr is a copy of _positions)
-        this._paintHistory();
-        this._writeToInstanceBuffer();
-        if (this._pickingSystem) {
-            this._pickingSystem.register('glyph', this._renderer, this._renderer);
-        }
+        this._layoutRows();
+        this._poseRows();
+        this._renderer.setLayoutExtent(this._glyphExtent());
     }
 
     /**
-     * Seed the depth-history ring from EXTERNAL scrollback (e.g. tmux capture-pane),
+     * Seed the depth history from EXTERNAL scrollback (e.g. tmux capture-pane),
      * NEWEST-FIRST. Forward-capture (the frame diff) only sees lines that scroll off
      * from now on; this back-fills the history that already exists — so the session's
      * accumulated scrollback shows receding in depth immediately, and a re-seed after
      * a reload restores it (tmux is the durable source; the ring is in-memory).
      *
-     * Each string becomes one history row (one codepoint per column, padded/truncated
+     * Each string becomes one history line (one codepoint per column, padded/truncated
      * to cols) at the default foreground color; normal depth fade + placement apply.
      * Glyphs not yet in the live atlas are encoded first. Lines past _depthMax are
-     * dropped (only that many slots render). Replaces the current ring; later
-     * forward-captures unshift in front of the seed seamlessly.
+     * dropped (only that many slots render). Replaces the current history; later
+     * forward-captures push in front of the seed seamlessly.
      * @param {string[]} lines  scrollback rows, newest first
      */
     seedHistory(lines) {
-        if (this._depthMax === 0) return;
-        const cols = this.cols;
-        const n = Math.min(lines.length, this._depthMax);
-        const ring = new Array(n);
+        const D = this._depthMax;
+        if (D === 0) return;
+        const cols = this.cols, P = this.rows + D;
+        const n = Math.min(lines.length, D);
         const live = this.atlas && this.atlas._live;
         const seen = this._liveEnsured;
         let fresh = null;
 
-        for (let i = 0; i < n; i++) {
-            const s = lines[i] || '';
-            const cp = new Float32Array(cols).fill(32);
-            const r = new Float32Array(cols).fill(0.8);
-            const g = new Float32Array(cols).fill(0.8);
-            const b = new Float32Array(cols).fill(0.8);
+        for (let h = 0; h < D; h++) {
+            const base = ((this._ringStart + D - 1 - h) % P) * cols;
+            this._cp.fill(32, base, base + cols);
+            this._fg.fill(DEFAULT_FG, base, base + cols);
+            if (h >= n) continue;
             let x = 0;
-            for (const ch of s) {            // iterate by code point (surrogate-safe)
+            for (const ch of lines[h] || '') {   // iterate by code point (surrogate-safe)
                 if (x >= cols) break;
                 const code = ch.codePointAt(0);
-                cp[x] = code;
+                this._cp[base + x] = code;
                 if (live && this._shapeCache && code > 32 && !seen.has(code)) {
                     seen.add(code);
                     (fresh ?? (fresh = [])).push(code);
                 }
                 x++;
             }
-            ring[i] = { cp, r, g, b };
         }
-        if (fresh && live) live.ensureCodepoints(fresh, this._shapeCache);
-
-        this._history = ring;
-        this._paintHistory();
-        this._writeToInstanceBuffer();
+        if (fresh) this._ensureAtlasCodepoints(fresh);
+        this._writeSeqRows(0, D);
     }
 
     /**
@@ -606,8 +645,8 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Feed raw VT bytes from the terminal byte stream. The internal headless VT
-     * emulator parses them (cursor motion, scroll regions, erase, SGR, …) and drives
-     * applyScreen on the next frame. Replaces the retired snapshot write(text).
+     * emulator parses them (cursor motion, scroll regions, erase, SGR, …); the next frame
+     * applies the screen before it renders (applyPendingScreen).
      *
      * @param {Uint8Array|string} payload - raw terminal output bytes
      */
@@ -717,25 +756,15 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Show or hide the terminal. O(1): sets group color alpha in DataTexture.
-     * Invisible groups trigger the fragment shader's alpha discard.
+     * Show or hide the terminal: the row poses' alpha (0 culls a row's glyphs in the vertex
+     * stage). Visibility and the panel-matched fade share that one alpha, folded in _poseRows.
      *
      * @param {boolean} visible
      */
     setVisible(visible) {
         this._visible = visible;
-        this._applyGlyphAlpha();
+        this._poseRows();
         this._updateCursorMesh();   // the cursor mesh isn't in the glyph group; hide/show it explicitly
-    }
-
-    /**
-     * Push the effective glyph alpha to the group: the panel opacity when visible,
-     * 0 when hidden. Visibility and the panel-matched fade share one DataTexture
-     * slot (gColor.a → vGroupAlpha), so they're folded here rather than fighting.
-     * @private
-     */
-    _applyGlyphAlpha() {
-        this._renderer?.setGroupAlpha(this._groupId, this._visible ? this._bgOpacity : 0);
     }
 
     // ================================================================
@@ -880,19 +909,17 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Resize the terminal. Rebuilds parallel arrays and positions.
-     * After resize, the next write() / applyScreen() provides the new content.
+     * Resize the terminal. Reallocates the cell ring at the new size and pushes every slot; the
+     * live screen and the captured history are kept (clipped if narrower, blank-padded if wider —
+     * terminals clip scrollback on resize, and tmux holds the durable copy that
+     * terminal.depth.seed re-fills), so the panel doesn't flash blank before the emulator's
+     * repaint — that matters under a live grip-drag firing resize every cell step.
      *
      * @param {number} cols
      * @param {number} rows
      */
     resize(cols, rows) {
-        const oldCols = this.cols;
-        // Snapshot the live screen BEFORE we mutate dims/buffers, to restore it below so
-        // the panel doesn't flash blank between this resize and the emulator's next
-        // repaint — matters most under a live grip-drag firing resize every cell step.
-        const prevLive = this._prevRows;
-
+        const keep = this._sequenceSnapshot();
         this.cols = cols;
         this.rows = rows;
         this._cellCount  = cols * rows;
@@ -900,73 +927,11 @@ export default class TerminalGrid extends FramedGlyphField {
         this._totalCount = this._cellCount + this._depthCount;
         this._localBoundsDirty = true;
 
-        // Captured depth-history SURVIVES a resize (a live grip-drag must not wipe the
-        // scrollback wall every step). Rows are kept as-is when only the height changes;
-        // when cols change each row is reflowed — clipped if narrower, blank-padded if
-        // wider — so every row stays exactly `cols` wide (the _paintHistory invariant).
-        // tmux holds the durable scrollback; terminal.depth.seed re-fills clipped columns.
-        if (cols !== oldCols && this._history.length) {
-            this._history = reflowHistoryRows(this._history, cols);
-        }
-        // _prevRows is scroll-detection state tied to the OLD dimensions — drop it so the
-        // next frame re-snapshots rather than diffing a phantom scroll across the resize.
-        this._prevRows = null;
-
-        const total = this._totalCount;
-        // Grow typed arrays if the new budget exceeds current capacity.
-        if (total > this._codepoints.length) {
-            this._codepoints = new Float32Array(total).fill(32);
-            this._cellR      = new Float32Array(total).fill(0.8);
-            this._cellG      = new Float32Array(total).fill(0.8);
-            this._cellB      = new Float32Array(total).fill(0.8);
-            this._positions  = new Float32Array(total * 3);
-            this._sizes      = new Float32Array(total * 2);
-            this._groupIds   = new Float32Array(total).fill(this._groupId);
-        } else {
-            // Reuse existing buffers; zero them out to avoid stale cell data.
-            this._codepoints.fill(32, 0, total);
-            this._cellR.fill(0.8, 0, total);
-            this._cellG.fill(0.8, 0, total);
-            this._cellB.fill(0.8, 0, total);
-        }
-
-        // Per-cell bg tracks the LIVE region (_cellCount), which changed; resize dropped _prevRows
-        // and bg isn't in the snapshot, so just size + clear (the next emulator frame repaints it).
-        if (this._cellBgA.length !== this._cellCount) {
-            this._cellBgR = new Float32Array(this._cellCount);
-            this._cellBgG = new Float32Array(this._cellCount);
-            this._cellBgB = new Float32Array(this._cellCount);
-            this._cellBgA = new Float32Array(this._cellCount);
-        } else {
-            this._cellBgA.fill(0);
-        }
-
-        this._computePositions();
-        this._computeSizes();
-
-        // Restore the live screen region from the pre-resize snapshot (clipped to the
-        // new width/height) so the panel doesn't flash blank before the emulator's next
-        // repaint. The buffers above were zeroed/grown, so this writes over blanks.
-        if (prevLive) {
-            const cp = this._codepoints, cr = this._cellR, cg = this._cellG, cb = this._cellB;
-            const yN = Math.min(rows, prevLive.length);
-            for (let y = 0; y < yN; y++) {
-                const row = prevLive[y];
-                const xN = Math.min(cols, row.cp.length);
-                const base = y * cols;
-                for (let x = 0; x < xN; x++) {
-                    cp[base + x] = row.cp[x]; cr[base + x] = row.r[x];
-                    cg[base + x] = row.g[x]; cb[base + x] = row.b[x];
-                }
-            }
-        }
-        // Paint the preserved depth ring into the (resized) history block so the
-        // scrollback wall renders immediately rather than blanking until the next frame.
-        this._paintHistory();
-
-        // Full re-apply: swaps in freshly-sized attribute arrays (uploads the restored
-        // live region + repainted history in one shot, since it reads the canonical arrays).
-        this._applyToRenderer();
+        this._allocateCells(keep);
+        // The held live rows are the old size's: the next screen must not be diffed for a scroll
+        // against them (a phantom scroll across the resize).
+        this._scrollBase = false;
+        this._pushAll();
         this._updateBackground();
 
         // Instance count changed (cols*rows) → re-register the glyph channel so
@@ -1000,12 +965,14 @@ export default class TerminalGrid extends FramedGlyphField {
      * Call this when the terminal is permanently closed.
      */
     dispose() {
-        // Tear down the emulator first (cancels its pending rAF read so it can't
-        // call applyScreen on a half-disposed renderer).
+        // Tear down the emulator first, and leave the frame's queue, so no screen is applied to a
+        // half-disposed renderer.
         if (this._emulator) {
             this._emulator.dispose();
             this._emulator = null;
         }
+        TerminalScreenQueue.of(this.scene)?.delete(this);
+        this._screenQueued = false;
         // Leave both picking channels cleanly before tearing down the renderer +
         // panel, or the passes would swap materials onto a disposed mesh.
         if (this._pickingSystem) {
@@ -1035,31 +1002,81 @@ export default class TerminalGrid extends FramedGlyphField {
     // ================================================================
 
     /**
-     * Pre-compute world-space XYZ positions for every cell.
-     * Stored row-major: index = row * cols + col.
-     * Origin is top-left; Y decreases downward (screen convention).
-     * X increases rightward. Z is always 0 (group offset provides Z depth).
+     * Where each sequence index's row sits and how it fades (terminalDepthHistory.layoutTerminalRows),
+     * for the current rows / depth / page steps. _poseRows writes it through the ring's head.
      * @private
      */
-    _computePositions() {
-        computeTerminalPositions(
-            this._positions,
-            this.cols,
-            this.rows,
-            this._depthMax,
-            this._metrics,
-            this._depthYStep,
-            this._depthZStep
-        );
+    _layoutRows() {
+        const P = this.rows + this._depthMax;
+        if (!this._rowLayout || this._rowLayout.length !== P * ROW_LAYOUT_STRIDE) {
+            this._rowLayout = new Float32Array(P * ROW_LAYOUT_STRIDE);
+        }
+        layoutTerminalRows(this._rowLayout, this.rows, this._depthMax, this._metrics,
+            this._depthYStep, this._depthZStep, this._depthFadeMin);
     }
 
     /**
-     * Fill the sizes array with constant charWidth × charHeight for every cell.
-     * Written once at construction / resize; never touched during content updates.
+     * The cells in SEQUENCE order (history oldest first, then the live rows), unrotated, with the
+     * shape they were held at — what a reallocation restores from.
      * @private
+     * @returns {{cols:number, rows:number, depthMax:number, cp:Uint32Array, fg:Uint32Array, bg:Uint32Array}|null}
      */
-    _computeSizes() {
-        computeTerminalSizes(this._sizes, this._totalCount, this._metrics.charWidth, this._metrics.charHeight);
+    _sequenceSnapshot() {
+        if (!this._cp) return null;
+        const cols = this.cols, rows = this.rows, D = this._depthMax, P = rows + D;
+        const cp = new Uint32Array(P * cols), fg = new Uint32Array(P * cols), bg = new Uint32Array(P * cols);
+        for (let s = 0; s < P; s++) {
+            const from = ((this._ringStart + s) % P) * cols;
+            cp.set(this._cp.subarray(from, from + cols), s * cols);
+            fg.set(this._fg.subarray(from, from + cols), s * cols);
+            bg.set(this._bg.subarray(from, from + cols), s * cols);
+        }
+        return { cols, rows, depthMax: D, cp, fg, bg };
+    }
+
+    /**
+     * (Re)allocate the cell ring for the current cols / rows / depthMax, head at 0, one group-table
+     * row per physical row, every cell blank — then restore `keep` (a _sequenceSnapshot of the old
+     * shape): history line h stays history line h, live row y stays live row y, each clipped or
+     * blank-padded to the new width; history keeps no background. Writes no slot (_pushAll does).
+     * @private
+     * @param {ReturnType<TerminalGrid['_sequenceSnapshot']>} keep
+     */
+    _allocateCells(keep) {
+        const cols = this.cols, rows = this.rows, D = this._depthMax, P = rows + D, n = P * cols;
+        this._cp = new Uint32Array(n).fill(32);
+        this._fg = new Uint32Array(n).fill(DEFAULT_FG);
+        this._bg = new Uint32Array(n);
+        this._rowHasBg = new Uint8Array(P);
+        this._ringStart = 0;
+        this._liveRowBase = new Int32Array(rows);
+        this._spanLo = new Int32Array(rows);
+        this._spanHi = new Int32Array(rows);
+        this._bgLo = new Int32Array(rows);
+        this._bgHi = new Int32Array(rows);
+        this._indexLiveRows();
+
+        // One group-table row per physical row: grow or release to match.
+        const field = this._renderer;
+        const groups = Array.from(this._rowGroups);
+        if (field.groupCap < P + 1) field.groupCap = P + 1;
+        while (groups.length < P) groups.push(field.createGroup());
+        while (groups.length > P) field.releaseGroup(groups.pop());
+        this._rowGroups = Int32Array.from(groups);
+        this._layoutRows();
+
+        if (!keep) return;
+        const w = Math.min(cols, keep.cols);
+        const copyRow = (fromSeq, toSeq, withBg) => {
+            const from = fromSeq * keep.cols, to = toSeq * cols;   // head is 0: seq index = physical row
+            this._cp.set(keep.cp.subarray(from, from + w), to);
+            this._fg.set(keep.fg.subarray(from, from + w), to);
+            if (!withBg) return;
+            this._bg.set(keep.bg.subarray(from, from + w), to);
+            for (let x = 0; x < w; x++) if (this._bg[to + x]) { this._rowHasBg[toSeq] = 1; break; }
+        };
+        for (let h = 0; h < Math.min(D, keep.depthMax); h++) copyRow(keep.depthMax - 1 - h, D - 1 - h, false);
+        for (let y = 0; y < Math.min(rows, keep.rows); y++) copyRow(keep.depthMax + y, D + y, true);
     }
 
     /**
@@ -1144,44 +1161,46 @@ export default class TerminalGrid extends FramedGlyphField {
     // ================================================================
 
     /**
-     * Initial push: swap all five attribute arrays into the renderer via
-     * applyPrebuiltBuffers(). After this call the non-position geometry attributes wrap
-     * our typed arrays, enabling zero-copy in-place updates. Positions are copied out:
-     * the CPU branch of applyPrebuiltBuffers pads them into its own stride-4 array
-     * (they only change on resize, which re-applies everything anyway).
-     *
-     * Must be called on construction and after resize (when arrays are reallocated).
+     * Push every slot from the canonical cells — positions (row-local: the row's group row places
+     * it), glyph ids, colors, group rows, extents — plus every highlight texel, the row poses and
+     * the cull box: the whole-terminal write construction, resize and setDepthMax need. Per-update
+     * writes go through _writeSpans instead.
      * @private
      */
-    _applyToRenderer() {
-        const count = this._totalCount;
-        const colors = this._buildColorArray();
+    _pushAll() {
+        const field = this._renderer;
+        const cols = this.cols, P = this.rows + this._depthMax, count = this._totalCount;
+        const m = this._metrics;
+        const strideX = m.charWidth + m.letterSpacing;
+        const sb = field.slotBuffer;
+        sb.ensureCapacity(count);
+        for (let p = 0; p < P; p++) {
+            const g = this._rowGroups[p];
+            for (let x = 0, i = p * cols; x < cols; x++, i++) {
+                sb.setSlot(i, x * strideX, 0, 0, this._glyphId(this._cp[i]), this._fg[i], g, m.charWidth, m.charHeight);
+            }
+        }
+        field.setSlots(sb, count);
+        field.maxInstances = Math.max(field.maxInstances, count);
 
-        this._renderer.applyPrebuiltBuffers({
-            positions:  this._positions.slice(0, count * 3),
-            sizes:      this._sizes.slice(0, count * 2),
-            // `codepoints` is the renderer's name for the glyphId attribute (the
-            // builder emits it as a codepoints-aliased glyphIds array); feed real
-            // glyph IDs, not raw codepoints.
-            codepoints: this._buildGlyphIdArray(),
-            colors,
-            groupIds:   this._groupIds.slice(0, count),
-            count,
-        });
+        const words = this._highlightWords();
+        const fill = this._fillAlphaBits();
+        for (let i = 0; i < count; i++) {
+            const b = this._bg[i];
+            words[i] = b && fill ? (b & 0xffffff) | fill : 0;
+        }
+        words.fill(0, count);
+        field.markHighlightDirty();
 
-        // State the cull box. A terminal is a uniform cell grid plus a page-quantized
-        // history deck, so its glyph extent is arithmetic on cols/rows/metrics — see
-        // _glyphExtent. Cell positions only change on resize, which re-enters here.
-        this._renderer.setLayoutExtent(this._glyphExtent());
-
-        // After applyPrebuiltBuffers the geometry owns new InstancedBufferAttribute objects
-        // wrapping the arrays we passed. On subsequent frames, _writeToInstanceBuffer()
-        // writes into geometry.attributes.*.array in place.
+        this._poseRows();
+        // State the cull box. A terminal is a uniform cell grid plus a page-quantized history
+        // deck, so its glyph extent is arithmetic on cols/rows/metrics — see _glyphExtent.
+        field.setLayoutExtent(this._glyphExtent());
     }
 
     /**
      * The glyph extent in local space — closed form over cols/rows/metrics, mirroring
-     * _computePositions exactly: the live screen runs right and down from the origin, and
+     * layoutTerminalRows exactly: the live screen runs right and down from the origin, and
      * the depth-history deck adds `pages` steps of rise (+Y) and recession (−Z) behind it.
      * This is the CULL box (glyphs only); getLocalBounds adds the panel padding on top.
      * @private
@@ -1196,71 +1215,6 @@ export default class TerminalGrid extends FramedGlyphField {
             this._depthYStep,
             this._depthZStep
         );
-    }
-
-    /**
-     * Per-frame GPU sync: write codepoints and colors from canonical parallel arrays
-     * into slotBuffer and highlightBuffer.
-     * @private
-     */
-    _writeToInstanceBuffer() {
-        const count = this._totalCount;   // live cells + depth-history block
-        const live  = this._cellCount;    // bg applies to the live region only
-        const sb    = this._renderer?.slotBuffer;
-
-        if (!sb || sb.capacity < count) {
-            this._applyToRenderer();
-            return;
-        }
-
-        const hl = this._renderer.highlightBuffer(count);
-        const synced = syncTerminalBuffers({
-            count,
-            liveCount: live,
-            slotBuffer: sb,
-            highlightBuffer: hl,
-            codepoints: this._codepoints,
-            cellR: this._cellR,
-            cellG: this._cellG,
-            cellB: this._cellB,
-            cellBgR: this._cellBgR,
-            cellBgG: this._cellBgG,
-            cellBgB: this._cellBgB,
-            cellBgA: this._cellBgA,
-            glyphIdLookup: (code) => this._glyphId(code),
-            encodeHighlightAlpha: InstancedField.encodeHighlightAlpha,
-        });
-
-        if (!synced) {
-            this._applyToRenderer();
-            return;
-        }
-
-        if (this._renderer._interleavedBuffer) {
-            this._renderer._interleavedBuffer.needsUpdate = true;
-        }
-        if (hl) this._renderer.markHighlightDirty();
-    }
-
-    /**
-     * Build an interleaved [r,g,b, r,g,b, ...] Float32Array from the parallel
-     * _cellR/_cellG/_cellB arrays.
-     *
-     * Used only on the _applyToRenderer() path. Subsequent frame updates write
-     * directly into the geometry's existing attribute array.
-     *
-     * @private
-     * @returns {Float32Array}
-     */
-    _buildColorArray() {
-        const count = this._totalCount;
-        const arr = new Float32Array(count * 3);
-        for (let i = 0; i < count; i++) {
-            arr[i * 3]     = this._cellR[i];
-            arr[i * 3 + 1] = this._cellG[i];
-            arr[i * 3 + 2] = this._cellB[i];
-        }
-        return arr;
     }
 
     /**
@@ -1281,58 +1235,25 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Build a Float32Array of glyph IDs (the GPU projection of _codepoints) for the
-     * full-apply path. Per-frame updates write glyph IDs in place via _glyphId().
-     * @private
-     * @returns {Float32Array}
-     */
-    _buildGlyphIdArray() {
-        const count = this._totalCount;
-        const arr = new Float32Array(count);
-        for (let i = 0; i < count; i++) {
-            arr[i] = this._glyphId(this._codepoints[i]);
-        }
-        return arr;
-    }
-
-    /**
-     * Ensure every glyph the incoming ScreenBuffer needs has its Slug curves
-     * encoded in the live atlas before we write slots into the GPU buffer.
+     * Have the live Slug atlas encode glyphs this terminal is about to draw for the first time,
+     * before their slots are written.
      *
-     * Each new codepoint is routed through the font chain and encoded on first
-     * sighting; the live atlas re-encodes + hot-swaps the curve/glyph-map
-     * textures into every field (including this terminal's) synchronously, so by
-     * the time _writeToInstanceBuffer() writes the slot the glyph is renderable.
-     *
-     * A per-terminal "seen" set keeps this O(new glyphs), not O(cols×rows), per
-     * screen update — after warm-up almost every cell is already seen.
+     * Each new codepoint is routed through the font chain and encoded on first sighting; the live
+     * atlas re-encodes + hot-swaps the curve/glyph-map textures into every field (including this
+     * terminal's) synchronously, so by the time the slot is written the glyph is renderable.
+     * Callers pass only codepoints this terminal has never drawn (its `_liveEnsured` set, which
+     * they add them to): a cell whose codepoint didn't change was ensured when it first did, so a
+     * screen update hands over nothing at all in steady state.
      *
      * @private
-     * @param {{ rows:number, cols:number, cells: Array<Array<{codepoint:number}>> }} screen
+     * @param {number[]} codepoints  first-seen codepoints (> 32)
      */
-    _ensureAtlasCodepoints(screen) {
+    _ensureAtlasCodepoints(codepoints) {
         const live = this.atlas && this.atlas._live;
         if (!live || !this._shapeCache) return; // degraded boot: nothing to encode
-
-        const seen = this._liveEnsured;
-        let fresh = null;
-
-        for (let row = 0; row < screen.rows; row++) {
-            const screenRow = screen.cells[row];
-            if (!screenRow) continue;
-            for (let col = 0; col < screen.cols; col++) {
-                const cell = screenRow[col];
-                if (!cell) continue;
-                const code = cell.codepoint ?? 32;
-                if (code > 32 && !seen.has(code)) {
-                    seen.add(code);
-                    (fresh ?? (fresh = [])).push(code);
-                }
-            }
-        }
         // ensureCodepoints dedups globally (its encoded set), so codepoints another
         // grid already encoded are a cheap no-op here.
-        if (fresh) live.ensureCodepoints(fresh, this._shapeCache);
+        live.ensureCodepoints(codepoints.slice(), this._shapeCache);
     }
 
     // ================================================================
@@ -1381,17 +1302,33 @@ export default class TerminalGrid extends FramedGlyphField {
      * Live-restyle the background panel — color (hex int or '#rrggbb' string)
      * and/or opacity (0–1). Drives the configurable color scheme; readability of
      * stacked tiles in a dock comes down to this opacity. Also tunes cellBgFillOpacity:
-     * the opacity of per-cell ANSI background fills (git-diff bars etc.) — applied on the
-     * next emulator repaint. All fields optional.
+     * the opacity of per-cell ANSI background fills (git-diff bars etc.) — rewritten into the
+     * live rows' fills at once. All fields optional.
      * @param {{ color?: number|string, opacity?: number, cellBgFillOpacity?: number }} style
      */
     setBackgroundStyle({ color, opacity, cellBgFillOpacity } = {}) {
         if (color != null) this._bgColor = color;
         if (opacity != null) this._bgOpacity = opacity;
-        if (cellBgFillOpacity != null) this._bgFillOpacity = cellBgFillOpacity;
+        if (cellBgFillOpacity != null && cellBgFillOpacity !== this._bgFillOpacity) {
+            this._bgFillOpacity = cellBgFillOpacity;
+            this._rewriteFills();
+        }
         if (!this._panel) return;
         this._panel.setFill(color, opacity);
-        if (opacity != null) this._applyGlyphAlpha();
+        if (opacity != null) this._poseRows();
+    }
+
+    /** @private Rewrite every live cell's background fill (the fill opacity changed). */
+    _rewriteFills() {
+        const words = this._highlightWords(), fill = this._fillAlphaBits(), cols = this.cols;
+        for (let y = 0; y < this.rows; y++) {
+            const base = this._liveRowBase[y];
+            for (let i = base; i < base + cols; i++) {
+                const b = this._bg[i];
+                words[i] = b && fill ? (b & 0xffffff) | fill : 0;
+            }
+            this._renderer.markHighlightDirty(base, cols);
+        }
     }
 
     /**
