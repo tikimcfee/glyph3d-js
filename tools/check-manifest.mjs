@@ -240,9 +240,10 @@ export const CHECKS = [
     h('panel-material-check.mjs', ['render'], 'the window panel material constructs and restyles without a GPU', 'border pixels (a fragment shader)'),
 
     // ── wall ─────────────────────────────────────────────────────────────────────────────────
-    bt('wall-layout.test.mjs', ['wall'], "the wall's pure geometry: flow placement, framing, border grabs, cycling, border-drag resize", 'pixels and input'),
+    bt('wall-layout.test.mjs', ['wall'], "the wall's pure geometry: flow placement, framing, border grabs, cycling, border-drag resize, group tiling, tile drops, lasso hit-testing", 'pixels and input'),
     bt('wall-labels.test.mjs', ['wall'], 'map-style label placement: no overlaps, preferred side, sticky, strict-then-relaxed, leader lines', 'pixels'),
-    bt('wall-store.test.mjs', ['wall'], "the wall's per-relay names and spots: scoped keys, pruned against the live set, kill forgets", 'localStorage in a real browser'),
+    bt('wall-store.test.mjs', ['wall'], "the wall's per-relay names, spots, hidden terminals, groups and sidebar: scoped keys, round-trip, one group per terminal, pruned against the live set (groups lose dead members, go when empty), kill forgets", 'localStorage in a real browser'),
+    bt('wall-groups.test.mjs', ['wall'], "the wall's groups on a stand-in wall: tile from where gathered, re-tile on columns/hide/show, move whole, drop into the nearest tile, freeform keeps spots, refusals say why", 'three, pixels and input (wall-e2e covers them)'),
     bt('terminal-readopt.test.mjs', ['terminal'], 'a terminal.create for a grid already shown re-adopts it: owner, input route, repaint go to the sender', 'a live relay restart (wall-e2e covers it)'),
 
     // ── form / corpus ────────────────────────────────────────────────────────────────────────
@@ -323,7 +324,7 @@ export const CHECKS = [
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'tmux'], apart: ['display'],
-        compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs',
+        compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
     },
     {

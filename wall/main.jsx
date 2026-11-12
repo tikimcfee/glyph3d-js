@@ -8,6 +8,7 @@ import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import TerminalWall from './TerminalWall.js';
 import Palette from './Palette.jsx';
+import Sidebar from './Sidebar.jsx';
 import { isChord, chordLabel, ALT_LABEL } from './chord.js';
 
 const FONT_CHAIN = [
@@ -75,22 +76,26 @@ function Chrome({ wall }) {
 
   if (!wall || !state) return null;
   const relay = state.relay;
+  const sb = state.sidebar;
+  const hidden = state.terminals.filter((t) => t.hidden).length;
   return (
     <>
-      <div style={styles.topbar}>
+      <div style={{ ...styles.topbar, right: sb.open && sb.side === 'right' ? 248 + 12 : 12 }}>
         <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
         <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
         <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
+        <button style={styles.button} data-action="sidebar" onClick={() => wall.run(['wall.sidebar', 'toggle'])} title={`Every terminal and group (${chordLabel(['B'])})`}>list {chordLabel(['B'])}</button>
         <span data-relay={relay.state} title={relay.state === 'refused' ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves` : ''}
           style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
           {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
         </span>
       </div>
-      <div style={styles.hint}>
+      <div style={{ ...styles.hint, left: sb.open && sb.side === 'left' ? 248 + 12 : 12, right: sb.open && sb.side === 'right' ? 248 + 12 : 12 }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
-        {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · pinch zoom · two-finger pan (over the focused terminal: its scrollback)
+        {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
       </div>
+      <Sidebar wall={wall} state={state} />
       {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}
     </>
   );
@@ -129,7 +134,7 @@ const styles = {
   chip: { padding: '4px 6px' },
   hint: {
     position: 'absolute', bottom: 8, left: 12, right: 12, color: '#6b7383', pointerEvents: 'none',
-    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', zIndex: 5,
+    lineHeight: 1.5, zIndex: 5,   // wraps rather than cutting the line short
   },
 };
 

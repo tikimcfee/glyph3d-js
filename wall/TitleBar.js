@@ -26,15 +26,19 @@ const FIT_HYSTERESIS = 1.1;
  * already marked linear, holding the display values, writes exactly what's meant.
  * @param {number} hex @returns {THREE.Color}
  */
-function displayColor(hex) {
+export function displayColor(hex) {
     return new THREE.Color().setRGB(((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255, THREE.LinearSRGBColorSpace);
 }
-const FILL = { idle: displayColor(0x1f2633), focused: displayColor(0x16402c) };
-const TEXT = { idle: 0xc4ccd8, focused: 0x8ef0b8 };
+/** A terminal's bar: the strip and name colours, idle and focused (hex, as displayed). */
+const TERMINAL_BAR_STYLE = Object.freeze({
+    fill: Object.freeze({ idle: 0x1f2633, focused: 0x16402c }),
+    text: Object.freeze({ idle: 0xc4ccd8, focused: 0x8ef0b8 }),
+});
 
 /**
- * TitleBar — a terminal's name strip, sitting on its top border. A child of the TerminalGrid, so it
- * rides every move; laid out in the grid's local units each time the zoom changes, at a constant
+ * TitleBar — a name strip sitting on a box's top edge: a terminal's (its title bar) or a group's
+ * (its header, GroupFrame). A child of what it names, so it rides every move; laid out in its
+ * parent's local units each time the zoom changes, at a constant
  * on-screen height (capped in world units so a far zoom-out can't stack a bar over the terminal
  * above). The strip is a batched panel and the name a batched FieldLabel — all bars together cost
  * one panel draw and one glyph draw.
@@ -45,21 +49,27 @@ const TEXT = { idle: 0xc4ccd8, focused: 0x8ef0b8 };
  */
 export default class TitleBar extends THREE.Object3D {
     /**
-     * @param {{ atlas: any, maxWorldHeight: number, minTextPx?: number }} o
+     * @param {{ atlas: any, maxWorldHeight: number, minTextPx?: number, reserveBars?: number,
+     *           style?: typeof TERMINAL_BAR_STYLE }} o
      *   maxWorldHeight: the bar never grows past this many world units (the flow gap), however far
      *   out the camera zooms. minTextPx: the smallest the name's line may shrink to, in CSS px on
-     *   screen, before the bar gives the name up (default MIN_TEXT_PX).
+     *   screen, before the bar gives the name up (default MIN_TEXT_PX). reserveBars: room kept clear
+     *   at the bar's right end, in bar heights (a terminal's hover buttons sit there), so a long name
+     *   never runs under them. style: the strip and name colours (a group's header is quieter).
      */
-    constructor({ atlas, maxWorldHeight, minTextPx = MIN_TEXT_PX }) {
+    constructor({ atlas, maxWorldHeight, minTextPx = MIN_TEXT_PX, reserveBars = 0, style = TERMINAL_BAR_STYLE }) {
         super();
         this.name = 'TitleBar';
         this._maxWorldHeight = maxWorldHeight;
         this._minTextPx = minTextPx;
-        this._panel = createPanelMaterial({ color: FILL.idle, opacity: 1, depthWrite: true });
+        this._reserve = reserveBars;
+        this._fill = { idle: displayColor(style.fill.idle), focused: displayColor(style.fill.focused) };
+        this._text = style.text;
+        this._panel = createPanelMaterial({ color: this._fill.idle, opacity: 1, depthWrite: true });
         this.strip = enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._panel.material));
         this.strip.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         this.add(this.strip);
-        this.label = new FieldLabel({ atlas, text: '', lineHeight: 1, textColor: TEXT.idle });
+        this.label = new FieldLabel({ atlas, text: '', lineHeight: 1, textColor: this._text.idle });
         this.add(this.label);
         this._name = '';
         this._focused = false;
@@ -90,38 +100,36 @@ export default class TitleBar extends THREE.Object3D {
     setFocused(on) {
         if (on === this._focused) return;
         this._focused = on;
-        this._panel.setFill(on ? FILL.focused : FILL.idle, 1);
-        this.label.setTextColor(on ? TEXT.focused : TEXT.idle);
+        this._panel.setFill(on ? this._fill.focused : this._fill.idle, 1);
+        this.label.setTextColor(on ? this._text.focused : this._text.idle);
     }
 
     /**
-     * Lay the bar along the grid's top edge for this zoom. Grid-local units: the parent grid's
-     * scale is divided out so the on-screen height stays TITLE_BAR_PX.
-     * @param {any} grid - the parent TerminalGrid
+     * Lay the bar along the top edge of a box, for this zoom. The box is in the bar's parent's local
+     * units, whose y scale is `sy` (divided out, so the on-screen height stays TITLE_BAR_PX).
+     * @param {{ minX: number, maxX: number, maxY: number, sy: number }} box
      * @param {number} zoom
      */
-    layout(grid, zoom) {
-        const lb = grid.getLocalBounds();
-        const sy = grid.scale.y;
+    layout({ minX, maxX, maxY, sy }, zoom) {
         const h = this.worldHeight(zoom) / sy;
-        const w = lb.max.x - lb.min.x;
-        const key = `${zoom.toFixed(4)}|${w}|${lb.max.y}|${sy}|${this._name}`;
+        const w = maxX - minX;
+        const key = `${zoom.toFixed(4)}|${minX}|${w}|${maxY}|${sy}|${this._name}`;
         if (key === this._key) return;
         this._key = key;
 
-        this.strip.position.set(lb.min.x + w / 2, lb.max.y + h / 2, 0);
+        this.strip.position.set(minX + w / 2, maxY + h / 2, 0);
         this.strip.scale.set(w, h, 1);
 
         // The name's natural line, shrunk to the room it has — FieldLabel's width scales with its
         // line height, so the fit is one division.
         const natural = h * TEXT_FRACTION;
-        const room = w - 2 * h * TEXT_INSET;
+        const room = w - 2 * h * TEXT_INSET - this._reserve * h;
         const full = this.label.width * natural / this.label.lineHeight;
         const line = full <= room ? natural : room > 0 ? natural * room / full : 0;
         const px = line * sy * zoom;
         this._fits = px >= this._minTextPx * (this._fits ? 1 : FIT_HYSTERESIS);
         this.label.setLineHeight(line > 0 ? line : natural);
-        this.label.position.set(lb.min.x + h * TEXT_INSET + this.label.width / 2, lb.max.y + h / 2, 0.01);
+        this.label.position.set(minX + h * TEXT_INSET + this.label.width / 2, maxY + h / 2, 0.01);
     }
 
     dispose() {

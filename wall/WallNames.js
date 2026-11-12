@@ -1,6 +1,9 @@
 import TitleBar from './TitleBar.js';
 import MapLabels from './MapLabels.js';
-import { FLOW_GAP } from './wallLayout.js';
+import { BAR_ROOM } from './wallLayout.js';
+
+/** Room a bar keeps clear at its right end for the hover buttons (hide, close), in bar heights. */
+const BAR_BUTTON_ROOM = 2.1;
 
 /** A terminal narrower than this on screen (CSS px) shows its name as a map label instead of in
  *  its bar; wider than MAP_LABEL_OFF_PX, back in the bar. The band between is hysteresis. */
@@ -33,7 +36,7 @@ export default class WallNames {
 
     /** Give a newly arrived terminal its title bar. */
     attach(id, grid) {
-        const bar = new TitleBar({ atlas: this._atlas, maxWorldHeight: FLOW_GAP * 0.8, minTextPx: this._minTextPx });
+        const bar = new TitleBar({ atlas: this._atlas, maxWorldHeight: BAR_ROOM, minTextPx: this._minTextPx, reserveBars: BAR_BUTTON_ROOM });
         grid.add(bar);
         this._bars.set(id, bar);
     }
@@ -51,18 +54,20 @@ export default class WallNames {
     }
 
     /**
-     * Per frame: lay out every bar, decide bar-vs-map-label per terminal, and place the labels.
+     * Per frame: lay out every shown terminal's bar, decide bar-vs-map-label per terminal, and place
+     * the labels. `order` is the SHOWN terminals (a hidden one's grid, bar included, isn't drawn).
      * @param {{ order: string[], terminals: Map<string, any>, focusedId: string|null, hoveredId: string|null,
      *           nameOf: (id: string) => string, windowRect: (id: string) => object }} s
      */
     update(s) {
         const zoom = this._camera.zoom;
-        for (const [id, bar] of this._bars) {
-            const grid = s.terminals.get(id);
-            if (!grid) continue;
+        for (const id of s.order) {
+            const bar = this._bars.get(id), grid = s.terminals.get(id);
+            if (!bar || !grid) continue;
             bar.setName(s.nameOf(id));
             bar.setFocused(id === s.focusedId);
-            bar.layout(grid, zoom);
+            const lb = grid.getLocalBounds();
+            bar.layout({ minX: lb.min.x, maxX: lb.max.x, maxY: lb.max.y, sy: grid.scale.y }, zoom);
         }
 
         const view = { w: this._camera.view.w, h: this._camera.view.h, margin: 4, gap: 4 };

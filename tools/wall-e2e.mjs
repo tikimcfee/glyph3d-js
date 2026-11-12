@@ -1,7 +1,11 @@
 /**
  * wall-e2e.mjs — the wall, end to end, in a real-GPU browser against a PRIVATE relay.
  *
- *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
+ *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay] [--shots DIR]
+ *
+ * --shots DIR saves screenshots of the bar buttons, a close being held, a lasso in progress, the
+ * selection, a tiled group, a freeform group and the sidebar docked left (for a person to judge the
+ * look; the checks never read them).
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
  * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` on the tmux socket `glyph-wall-e2e`, no
@@ -22,15 +26,27 @@
  * → zoom, a plain wheel elsewhere → an eased zoom that lands exactly and holds the point under the
  * pointer, map labels (no overlaps, bar names hidden, trace lines when crowded, click frames exactly
  * like frame(), drag moves the terminal), the shared scene systems serving frames, and the core
- * terminal verbs run against the wall (terminal.move, terminal.focus). Exit 1 on any FAIL.
+ * terminal verbs run against the wall (terminal.move, terminal.focus); then hiding and closing (the
+ * hovered bar's buttons show; hide hides, and the hidden terminal stays hidden across a reload until
+ * the palette finds it — marked hidden — and shows it back at its spot; a short press on close keeps
+ * the terminal, a held one kills it, and so does the held close chord), lasso groups (⇧-drag selects
+ * what it touches, ⇧-click toggles, the selection's button groups it, the tiling lands where
+ * wallLayout computes, a header drag moves every member, freeform members move alone, a killed
+ * member leaves its group) and the sidebar (lists groups and members, folds, docks, persists across
+ * a reload, toggles on its chord). Exit 1 on any FAIL.
  */
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 import { privateRelay } from './lib/wall-relay.mjs';
 import { dialRelay } from './lib/relay.mjs';
+import { tileLayout, BAR_ROOM } from '../wall/wallLayout.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL_ = arg('--url', 'http://localhost:5180/');
 const RELAY = Number(arg('--relay', 8099));
+const SHOTS = arg('--shots', null);
+if (SHOTS) mkdirSync(SHOTS, { recursive: true });
 
 let failures = 0;
 const ok = (cond, msg) => { if (!cond) failures++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); };
@@ -321,6 +337,225 @@ try {
     bn = await barName(lab.id);
     ok(!(await labels()).some((l) => l.id === lab.id) && bn.visible && bn.fits && bn.text === bn.name,
         `framed, its name is back in the bar ("${bn.text}", visible=${bn.visible})`);
+
+    // ── hide + close: the hovered bar's buttons ────────────────────────────
+    const shot = async (name) => { if (SHOTS) { await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }); info(`screenshot ${path.join(SHOTS, `${name}.png`)}`); } };
+    /** A shown element's centre (page CSS px), or null. */
+    const box = (sel) => W((s) => {
+        const el = document.querySelector(s);
+        if (!el || getComputedStyle(el).display === 'none' || getComputedStyle(el.parentElement).display === 'none') return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, sel);
+    const pos = (id) => W((i) => { const p = window.__wall.terminal(i)?.position; return p ? { x: p.x, y: p.y } : null; }, id);
+    const hoverBar = async (id) => { const b = await geo(id); await page.mouse.move((b.left + b.right) / 2 - 40, (b.top + b.barTop) / 2); await settle(250); };
+    const HOLD = await W(() => window.__wall.config.closeHoldMs);
+    /** Spawn `n` terminals of our own and park them in a row clear of every other terminal, framed. */
+    const park = async (n) => {
+        const ids = [];
+        for (let i = 0; i < n; i++) { const r = await W(() => window.__wall.spawn()); if (r.ok) { ids.push(r.id); spawned.push(r.id); } }
+        await W(async (own) => {
+            const w = window.__wall;
+            let x = Math.max(...w.order.filter((i) => !own.includes(i)).map((i) => w.terminalRect(i).maxX)) + 60;
+            for (const [k, id] of own.entries()) {
+                await w.router.execute(`terminal.move ${id} ${x} ${-k * 25} 0`);
+                x = w.terminalRect(id).maxX + 40;
+            }
+            w.focus(null);
+            const u = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+            for (const id of own) { const r = w.windowRect(id); u.minX = Math.min(u.minX, r.minX); u.minY = Math.min(u.minY, r.minY); u.maxX = Math.max(u.maxX, r.maxX); u.maxY = Math.max(u.maxY, r.maxY); }
+            w.viewport.easeTo(w.viewport.fitTarget(u, own.length > 1 ? 0.7 : 0.6));
+        }, ids);
+        await settle();
+        return ids;
+    };
+    {
+        const [H] = await park(1);
+        await W((i) => window.__wall.rename(i, 'hide me'), H);
+        await hoverBar(H);
+        const cluster = await W(() => { const el = document.querySelector('[data-bar-buttons]'); return { shown: getComputedStyle(el).display !== 'none', id: el.dataset.id }; });
+        ok(cluster.shown && cluster.id === H, `hovering ${H}'s title bar shows its buttons (${JSON.stringify(cluster)})`);
+        await shot('hover-buttons');
+        const spot = await pos(H);
+        const hb = await box('[data-bar-buttons] [data-action="hide"]');
+        await page.mouse.click(hb.x, hb.y); await settle(400);
+        const hid = await W((i) => { const w = window.__wall; return { hidden: w.store.hidden(i), visible: w.terminal(i).visible, shown: w.shownOrder().includes(i) }; }, H);
+        ok(hid.hidden && !hid.visible && !hid.shown, `a click on hide takes ${H} off the canvas (${JSON.stringify(hid)})`);
+
+        await page.reload({ waitUntil: 'load' });
+        const back = await until((ids) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)), spawned, 20000);
+        await settle(800);
+        const still = await W((i) => ({ hidden: window.__wall.store.hidden(i), visible: window.__wall.terminal(i).visible }), H);
+        ok(!!back && still.hidden && !still.visible, `after a reload ${H} is re-adopted (it kept running) and still hidden`);
+
+        await page.keyboard.press(`${CHORD}+KeyK`); await settle(200);
+        await page.keyboard.type(await W((i) => window.__wall.nameOf(i), H));
+        const row = await W((i) => { const el = document.querySelector(`[data-item="terminal:${i}"]`); return el ? { hidden: el.hasAttribute('data-hidden'), text: el.textContent } : null; }, H);
+        ok(!!row?.hidden, `the palette finds the hidden terminal, marked hidden ("${row?.text}")`);
+        await page.click(`[data-item="terminal:${H}"]`); await settle(1500);
+        const shownBack = await W((i) => ({ hidden: window.__wall.store.hidden(i), visible: window.__wall.terminal(i).visible, focus: window.__wall.focusedId }), H);
+        const spot2 = await pos(H);
+        ok(!shownBack.hidden && shownBack.visible && shownBack.focus === H && spot2.x === spot.x && spot2.y === spot.y,
+            `choosing it shows it back at its own spot, focused (${JSON.stringify(shownBack)})`);
+
+        await page.keyboard.press(`${CHORD}+Minus`); await settle(300);
+        const chordHid = await W((i) => window.__wall.store.hidden(i), H);
+        const sv = await W((i) => window.__wall.run(['wall.show', i]).then((r) => r.text), H);
+        ok(chordHid && sv.startsWith('OK') && !(await W((i) => window.__wall.store.hidden(i), H)), `${CHORD}+- hides the focused terminal; wall.show brings it back (${sv})`);
+    }
+    {
+        const [K] = await park(1);
+        await hoverBar(K);
+        const cb = await box('[data-bar-buttons] [data-action="close"]');
+        await page.mouse.move(cb.x, cb.y); await page.mouse.down(); await page.waitForTimeout(150); await page.mouse.up();
+        await settle(HOLD + 600);
+        ok(!!(await W((i) => window.__wall.terminal(i), K)), `a short press on close (150 ms of ${HOLD}) keeps ${K}`);
+        await page.mouse.move(cb.x, cb.y); await page.mouse.down(); await page.waitForTimeout(HOLD / 2);
+        const filling = await W(() => document.querySelector('[data-bar-buttons] [data-action="close"]').dataset.holding === '1');
+        await shot('close-hold');
+        await page.waitForTimeout(HOLD / 2 + 300); await page.mouse.up();
+        const gone = await until((i) => !window.__wall.terminal(i), K, 8000);
+        ok(filling && !!gone && (await W((i) => window.__wall.store.position(i), K)) === null, `a press held ${HOLD} ms fills the ring and kills ${K}, forgotten`);
+
+        const K2 = (await W(() => window.__wall.spawn())).id;
+        spawned.push(K2);
+        await W((i) => window.__wall.focus(i), K2); await settle(300);
+        const holdChord = async (ms) => {
+            for (const k of CHORD.split('+')) await page.keyboard.down(k);
+            await page.keyboard.down('KeyX'); await page.waitForTimeout(ms); await page.keyboard.up('KeyX');
+            for (const k of CHORD.split('+').reverse()) await page.keyboard.up(k);
+        };
+        await holdChord(150); await settle(HOLD + 400);
+        const kept = !!(await W((i) => window.__wall.terminal(i), K2));
+        await holdChord(HOLD + 300);
+        const gone2 = await until((i) => !window.__wall.terminal(i), K2, 8000);
+        ok(kept && !!gone2, `${CHORD}+X held closes the focused terminal; let go early, it stays`);
+    }
+
+    // ── lasso → group → tiling → header drag → freeform ───────────────────
+    {
+        const L = await park(3);
+        const boxes = await Promise.all(L.map((id) => geo(id)));
+        const m = 24;
+        const l = Math.min(...boxes.map((b) => b.left)) - m, r = Math.max(...boxes.map((b) => b.right)) + m;
+        const t = Math.min(...boxes.map((b) => b.barTop)) - m, b = Math.max(...boxes.map((x) => x.bottom)) + m;
+        await page.keyboard.down('Shift');
+        await page.mouse.move(l, t); await page.mouse.down();
+        await page.mouse.move(r, t + 10, { steps: 12 }); await page.mouse.move(r - 10, b, { steps: 12 }); await page.mouse.move(l + 15, b - 5, { steps: 12 });
+        const lassoUp = await W(() => window.__wall.selectionOverlay.lassoShown);
+        await shot('lasso');
+        await page.mouse.move(l, t + 20, { steps: 6 }); await page.mouse.up();
+        await page.keyboard.up('Shift');
+        await settle(300);
+        let sel = await W(() => [...window.__wall.selection].sort());
+        ok(lassoUp && JSON.stringify(sel) === JSON.stringify([...L].sort()), `a ⇧-drag lasso (drawn on screen: ${lassoUp}) selects exactly what it touches (${sel.join(', ')})`);
+        const marks = await W(() => ({ outlines: document.querySelectorAll('[data-selected]').length, button: getComputedStyle(document.querySelector('[data-selection-bar]')).display !== 'none' }));
+        ok(marks.outlines === 3 && marks.button, `the selection shows: ${marks.outlines} outlines and the group button`);
+        await shot('selection');
+
+        const mid = boxes[1];
+        await page.keyboard.down('Shift'); await page.mouse.click((mid.left + mid.right) / 2, (mid.top + mid.bottom) / 2); await page.keyboard.up('Shift');
+        await settle(200);
+        const without = await W(() => [...window.__wall.selection]);
+        await page.keyboard.down('Shift'); await page.mouse.click((mid.left + mid.right) / 2, (mid.top + mid.bottom) / 2); await page.keyboard.up('Shift');
+        await settle(200);
+        sel = await W(() => [...window.__wall.selection]);
+        ok(!without.includes(L[1]) && without.length === 2 && sel.includes(L[1]) && sel.length === 3, '⇧-click takes a terminal out of the selection and puts it back');
+
+        const gb = await box('[data-selection-bar] [data-action="group"]');
+        await page.mouse.click(gb.x, gb.y); await settle(600);
+        const snap = await W(() => window.__wall.snapshot());
+        const grp = snap.groups.find((x) => L.every((id) => x.members.includes(id)));
+        ok(!!grp && grp.members.length === 3 && snap.selection.length === 0, `the group button gathers the selection into ${grp?.id} ("${grp?.name}", ${grp?.layout} ${grp?.columns})`);
+        const gid = grp.id;
+
+        const tiled = await W(([g, ids]) => {
+            const w = window.__wall;
+            return {
+                group: w.groups.get(g),
+                sizes: ids.map((id) => { const r = w.terminalRect(id); return { w: r.maxX - r.minX, h: r.maxY - r.minY }; }),
+                at: ids.map((id) => { const r = w.terminalRect(id); return { x: r.minX, y: r.maxY }; }),
+            };
+        }, [gid, grp.members]);
+        const want = tileLayout(tiled.sizes, { origin: tiled.group.origin, columns: tiled.group.columns, gap: tiled.group.gap, barRoom: BAR_ROOM }).places;
+        const off = Math.max(...want.map((p, k) => Math.hypot(p.x - tiled.at[k].x, p.y - tiled.at[k].y)));
+        ok(off < 1e-6, `the tiled members sit exactly where wallLayout.tileLayout puts them (max off ${off.toExponential(1)}, ${tiled.group.columns} columns, gap ${tiled.group.gap})`);
+        await W((g) => window.__wall.run(['wall.group.frame', g]), gid); await settle();
+        await shot('group-tiled');
+
+        const hd = await W((g) => { const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(); const s = v.toScreenBox(w.groups.headerRect(g, v.zoom)); return { x: cr.left + (s.left + s.right) / 2, y: cr.top + (s.top + s.bottom) / 2, zoom: v.zoom }; }, gid);
+        const before = await Promise.all(grp.members.map(pos));
+        const o0 = await W((g) => window.__wall.groups.get(g).origin, gid);
+        await page.mouse.move(hd.x, hd.y);
+        ok((await W(() => window.__wall.viewport.canvas.style.cursor)) === 'move', 'the cursor over a group header is "move"');
+        await drag(hd.x, hd.y, hd.x + 70, hd.y + 50);
+        await settle(300);
+        const after = await Promise.all(grp.members.map(pos));
+        const o1 = await W((g) => window.__wall.groups.get(g).origin, gid);
+        const ds = after.map((p, k) => ({ x: p.x - before[k].x, y: p.y - before[k].y }));
+        const same = ds.every((d) => Math.abs(d.x - ds[0].x) < 1e-6 && Math.abs(d.y - ds[0].y) < 1e-6);
+        ok(same && ds[0].x > 0 && ds[0].y < 0 && Math.abs(o1.x - o0.x - ds[0].x) < 1e-6 && Math.abs(o1.y - o0.y - ds[0].y) < 1e-6,
+            `dragging the header moves every member and the tiling together (Δ ${ds[0].x.toFixed(2)}, ${ds[0].y.toFixed(2)})`);
+        const kept2 = await W((ids) => ids.map((id) => window.__wall.store.position(id)), grp.members);
+        ok(kept2.every((p, k) => p.x === after[k].x && p.y === after[k].y), 'and every member remembers its new spot');
+
+        const fl = await W((g) => window.__wall.run(['wall.group.layout', g, 'freeform']).then((r) => r.text), gid);
+        await settle(300);
+        const last = grp.members[2];
+        const lg = await geo(last);
+        const others0 = await Promise.all(grp.members.slice(0, 2).map(pos));
+        const last0 = await pos(last);
+        await drag((lg.left + lg.right) / 2, (lg.top + lg.barTop) / 2, (lg.left + lg.right) / 2 + 30, (lg.top + lg.barTop) / 2 + 60);
+        await settle(300);
+        const others1 = await Promise.all(grp.members.slice(0, 2).map(pos));
+        const last1 = await pos(last);
+        ok(fl.startsWith('OK') && others1.every((p, k) => p.x === others0[k].x && p.y === others0[k].y) && last1.y < last0.y,
+            `freeform (${fl}): a member's title-bar drag moves it alone, and the frame follows`);
+        await shot('group-freeform');
+
+        await W((i) => window.__wall.run(['wall.close', i]), last);
+        await until((i) => !window.__wall.terminal(i), last, 8000);
+        const pruned = await W((g) => window.__wall.groups.get(g).members, gid);
+        ok(pruned.length === 2 && !pruned.includes(last), `a killed member leaves its group (${pruned.join(', ')})`);
+        await W((g) => window.__wall.run(['wall.group.layout', g, 'tile']), gid);
+
+        // ── the sidebar ────────────────────────────────────────────────────
+        await W(() => window.__wall.focus(null));
+        await page.keyboard.press(`${CHORD}+KeyB`); await settle(300);
+        ok(!!(await W(() => document.querySelector('[data-sidebar]'))), `${CHORD}+B opens the sidebar`);
+        await page.click('[data-sidebar] [data-action="left"]'); await settle(300);
+        const lists = await W(([g, ids, loose]) => {
+            const sb = document.querySelector('[data-sidebar]');
+            const grow = sb.querySelector(`[data-row="group:${g}"]`);
+            return {
+                side: sb.dataset.side, left: sb.getBoundingClientRect().left,
+                group: !!grow, members: ids.map((id) => !!sb.querySelector(`[data-group="${g}"] [data-row="term:${id}"]`)),
+                loose: !!sb.querySelector(`[data-row="term:${loose}"]`) && !sb.querySelector(`[data-group] [data-row="term:${loose}"]`),
+            };
+        }, [gid, pruned, spawned[0]]);
+        ok(lists.side === 'left' && lists.left === 0 && lists.group && lists.members.every(Boolean) && lists.loose,
+            `the sidebar docks left and lists the group, its members under it, and the ungrouped terminals (${JSON.stringify(lists)})`);
+        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`); await settle(300);
+        const folded = await W(([g, ids]) => ({ collapsed: document.querySelector(`[data-row="group:${g}"]`).hasAttribute('data-collapsed'), rows: ids.filter((id) => document.querySelector(`[data-sidebar] [data-row="term:${id}"]`)).length }), [gid, pruned]);
+        ok(folded.collapsed && folded.rows === 0, `a group folds in the sidebar (its ${pruned.length} member rows go)`);
+        await page.reload({ waitUntil: 'load' });
+        await until((ids) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)) && document.querySelector('[data-sidebar]'), pruned, 20000);
+        await settle(800);
+        const kept3 = await W((g) => { const sb = document.querySelector('[data-sidebar]'); return { side: sb?.dataset.side, collapsed: !!sb?.querySelector(`[data-row="group:${g}"][data-collapsed]`) }; }, gid);
+        ok(kept3.side === 'left' && kept3.collapsed, `after a reload the sidebar is still open, docked left, the group still folded (${JSON.stringify(kept3)})`);
+        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`); await settle(300);
+        const rowSel = `[data-sidebar] [data-row="term:${pruned[0]}"]`;
+        await page.hover(rowSel); await page.click(`${rowSel} [data-action="hide"]`); await settle(300);
+        const rowHidden = await W(([s, i]) => ({ marked: document.querySelector(s).hasAttribute('data-hidden'), hidden: window.__wall.store.hidden(i) }), [rowSel, pruned[0]]);
+        await page.hover(rowSel); await page.click(`${rowSel} [data-action="show"]`); await settle(300);
+        const ringed = await W((s) => !!document.querySelector(`${s} [data-action="close"] svg circle`), rowSel);
+        ok(rowHidden.marked && rowHidden.hidden && !(await W((i) => window.__wall.store.hidden(i), pruned[0])) && ringed,
+            `a sidebar row hides its terminal (and marks it), shows it back, and carries the hold-to-close ring (${JSON.stringify(rowHidden)}, ring ${ringed})`);
+        await W(() => window.__wall.fitAll()); await settle();
+        await shot('sidebar-left');
+        await page.keyboard.press(`${CHORD}+KeyB`); await settle(300);
+        ok(!(await W(() => document.querySelector('[data-sidebar]'))), `${CHORD}+B closes it`);
+    }
 
     if (app.errors.length) { failures++; console.log('FAIL  page errors:', app.errors.slice(0, 3)); }
 } catch (e) {
