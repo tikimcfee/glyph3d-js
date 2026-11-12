@@ -5,6 +5,7 @@
 // so there's one source of truth for launch + capture.
 
 import { chromium } from 'playwright';
+import { createRequire } from 'node:module';
 
 const isGpuNoise = (s) =>
   /webgpu|gpuadapter|gpudevice|requestadapter|gpu process|fallback to|swiftshader/i.test(s);
@@ -138,13 +139,21 @@ export async function launchGpuBrowser({ headed = null, extraArgs = [] } = {}) {
 // (window.__glyphClient) + a settle, and return a driver. `errors` are real JS errors
 // (failure-worthy); GPU-init noise and 4xx/5xx resources are bucketed separately so
 // headless runs stay useful.
+//
+// `webglMemory: true` injects webgl-memory (greggman) before the page's first script, so every
+// WebGL context the page creates is tracked: the driver's glMemory() then answers bytes by type
+// (buffer / texture / renderbuffer / drawingbuffer) and live object counts. Its cost: it wraps
+// EVERY GL function of the context (a pre/post hook per call), so timings taken on such a page
+// carry that overhead — measure time and memory on separate pages when the time matters.
 export async function openApp(browser, {
   url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
   session = null,
   viewport = { width: 1280, height: 800 },
+  webglMemory = false,
 } = {}) {
   const errors = [], gpuErrors = [], failedResources = [], warnings = [];
   const page = await browser.newPage({ viewport });
+  if (webglMemory) await page.addInitScript({ path: createRequire(import.meta.url).resolve('webgl-memory/webgl-memory.js') });
 
   page.on('pageerror', (err) => {
     const rec = { kind: 'uncaught', text: err.message };
@@ -192,6 +201,22 @@ export async function openApp(browser, {
       }, parts);
     },
     evalPage: (expr, arg) => page.evaluate(expr, arg),
+    // GPU memory as webgl-memory counts it (needs openApp's webglMemory: true): bytes by type and
+    // live object counts for the page's WebGL context — the IDE's renderer when it has booted,
+    // else the first canvas's context (the wall, a bare page). Throws when the page wasn't
+    // opened with webglMemory (the extension is missing — a silent null would read as 0 bytes).
+    async glMemory() {
+      const r = await page.evaluate(() => {
+        const gl = window.__glyphClient?.ctx?.renderer?.getContext?.()
+          ?? document.querySelector('canvas')?.getContext('webgl2');
+        if (!gl) return { err: 'no WebGL2 context on the page' };
+        const ext = gl.getExtension('GMAN_webgl_memory');
+        if (!ext) return { err: 'GMAN_webgl_memory missing — open the page with openApp(…, { webglMemory: true })' };
+        return ext.getMemoryInfo();
+      });
+      if (r.err) throw new Error(`glMemory: ${r.err}`);
+      return r;   // { memory: { buffer, texture, renderbuffer, drawingbuffer, total }, resources: { buffer, texture, … } }
+    },
     waitFor: (ms) => page.waitForTimeout(ms),
     shot: async (path) => { await page.screenshot({ path }); return path; },
     // Structured errors from the app's own ErrorTracker (window.__errorTracker) — the

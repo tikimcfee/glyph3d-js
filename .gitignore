@@ -59,3 +59,5 @@ console.log
 # Check runner output (tools/check.mjs): last-run.json, kept failures, its Vite cache
 /out/
 
+# Perf ledger rows (tools/perf-ledger.mjs): this machine's measurements, never committed
+/perf/

@@ -223,7 +223,41 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   ```
   bun tools/frame-profile.mjs --url http://localhost:5174/ --relay 8099 --dir /scratch/root/src --uncapped
   bun tools/frame-profile.mjs … --cmd 'camera.focus /scratch/root/src/a.js' --callers updateWorldMatrix
+  bun tools/frame-profile.mjs … --vram                  # CENSUS + GPU bytes by type
+  bun tools/frame-profile.mjs … --ledger scratch-src    # + this host's perf ledger, compared
   ```
+  `--vram` loads **webgl-memory** into the page before the app (`openApp(…, { webglMemory:
+  true })` in `itest/driver.mjs`, read back by the driver's `glMemory()`): the census gains
+  buffer / texture / renderbuffer / drawingbuffer bytes and live object counts beside
+  renderer.info's (measured on the core's collections/ at fit-all: 84 MB — 23 MB textures,
+  27 MB buffers, 34.5 MB drawing buffer; 58 textures vs renderer.info's 54). It wraps EVERY
+  GL call of the context, which moved main-thread work per frame from 0.2 to 0.3 ms there,
+  so a `--vram` run's timing says `skewedBy` and its ledger rows go under `<scenario>+vram`.
+
+- **`perf-ledger.mjs`** — one append-only ledger of measurements per host, and a compare
+  against that host's own history. Rows are `{ts, commit, dirty, scenario, metric, median,
+  p95, n, adapter, load}` (load = the 1-minute load average per core when written).
+  ```
+  bun tools/perf-ledger.mjs compare [--scenario S] [--window 20]   # exit 1 on a regression past its band
+  bun tools/perf-ledger.mjs show [--scenario S] [--last 20]
+  bun tools/perf-ledger.mjs add --scenario S --metric M --median X [--p95 Y] [--n N]
+  bun tools/perf-ledger.mjs host                                    # this machine's key + file
+  ```
+  The ledger lives in the MAIN checkout's `perf/` (git's common dir, so every worktree shares
+  one history; `GLYPH_PERF_DIR` moves it) and is gitignored: rows are one machine's, appends
+  from two branches would conflict, and the repo is public. The host key is the GPU's name
+  plus 6 hex of a hash of the hostname — `nvidia-geforce-rtx-5090-3fa9c1` — so two machines
+  with one GPU model stay apart and no key spells a hostname (`GLYPH_PERF_HOST` names it
+  yourself). `compare` reads each metric's latest row against the rolling median of the rows
+  before it, with a band of `max(rel × base, abs, k × MAD)` per metric from
+  `tools/perf-bands.json` (`abs` is the resolution floor: timings print to 0.01 ms).
+  Producers: `frame-profile.mjs --ledger SCENARIO` (frame gap, main-thread work, the main
+  pass's CPU/GPU ms, draws per frame across passes, upload bytes, + VRAM with `--vram`). A
+  tool adds its own with
+  `import { appendRows } from './perf-ledger.mjs'; appendRows({ scenario, adapter, rows: [{ metric, median, p95, n }] })`
+  — `adapter` is the page's `UNMASKED_RENDERER` (the key is derived from it); the wall's
+  instruments (wall-text-perf's per-stage ms and bytes/s, wall-gpu-attribution's per-layer
+  GPU ms) are the next producers.
 
 - **`glyph-cull-truth.mjs`** — three culls by each field's STATED bounds; this checks every
   live quad, built the way the vertex shader builds it (emoji width), against its mesh's

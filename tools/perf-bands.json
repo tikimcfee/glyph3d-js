@@ -1,0 +1,9 @@
+{
+  "//": "Noise bands for tools/perf-ledger.mjs compare. A key matches a metric exactly, or as a prefix ending in '.'; the longest match wins, over 'default'. band = max(rel × baseline, abs, k × MAD of the window). abs is the measurement's resolution floor: timings print to 0.01 ms, so a sub-0.1 ms pass must not read as ±50% on rounding. better: which direction is an improvement. minBaseline: rows needed before a metric is judged.",
+  "default": { "rel": 0.1, "abs": 0, "k": 3, "better": "lower", "minBaseline": 3 },
+  "frame.": { "rel": 0.1, "abs": 0.1, "k": 3 },
+  "render.": { "rel": 0.15, "abs": 0.05, "k": 3 },
+  "draws.": { "rel": 0.02, "abs": 1, "k": 0 },
+  "upload.": { "rel": 0.1, "abs": 1024, "k": 3 },
+  "vram.": { "rel": 0.02, "abs": 1048576, "k": 0 }
+}
