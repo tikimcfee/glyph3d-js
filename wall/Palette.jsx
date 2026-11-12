@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { chordLabel } from './chord.js';
 import FitText from './FitText.jsx';
 

@@ -597,14 +597,18 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
   `import('…')` path (TS2307), a typedef-only script that isn't a module (TS2306), a
   missing export/typedef (TS2305/2614/2724/2694), a `.jsx` import without `"jsx"` in
   jsconfig (TS6142), and a JSDoc type NAME the file never imports (TS2304/2552/2503, counted
-  only inside block comments; in code those codes are runtime globals). Baseline is zero,
-  so any hit is a regression. ~4s.
+  only inside block comments; in code those codes are runtime globals). It also fails any
+  JS file of a bun workspace (root `package.json` `workspaces`) that jsconfig's `include`
+  leaves out of the program: such a file is checked by nothing here, and tsserver gives it an
+  inferred project where every `@glyph3d/core/…` import types as `any` (TS7016). Baseline is
+  zero, so any hit is a regression. ~4s.
   ```
   bun tools/type-imports-check.mjs
   ```
   Teeth, verified: a planted dead `CommandRouter.js` path, a missing typedef, a missing
   export, and an un-imported `{CodeGrid}` / `{THREE.Vector3}` each fail it, while an unknown
-  runtime global does not; dropping `"jsx"` from jsconfig fails it 124 times.
+  runtime global does not; dropping `"jsx"` from jsconfig fails it 124 times; dropping
+  `"wall"` from its `include` fails it once per wall file (23).
 
 - **`lsp.mjs`** — one-shot code intelligence from a shell: `hover`, `def`, `refs`,
   `impl`, `callers`, `callees`, `symbols <query>`, `outline <file>` via

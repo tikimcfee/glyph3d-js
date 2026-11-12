@@ -15,7 +15,7 @@
 await import('./headless-canvas.mjs');
 const THREE = await import('three');
 const { default: TerminalGrid } = await import('../packages/glyph3d-core/src/collections/TerminalGrid.js');
-const { default: TerminalEmulator, createTerminalScreen, DEFAULT_FG, BG_SET } = await import('../packages/glyph3d-core/src/collections/TerminalEmulator.js');
+const { createTerminalScreen, DEFAULT_FG, BG_SET } = await import('../packages/glyph3d-core/src/collections/TerminalEmulator.js');
 const { default: TerminalScreenQueue } = await import('../packages/glyph3d-core/src/collections/TerminalScreenQueue.js');
 const { default: SceneSystems } = await import('../packages/glyph3d-core/src/collections/SceneSystems.js');
 const { default: InstancedField } = await import('../packages/glyph3d-core/src/collections/InstancedField.js');
@@ -393,7 +393,7 @@ console.log('apply before render');
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera();
     let drawnAtRender = null;
-    const renderer = { render(s, c) { drawnAtRender = [...drawn(grid).values()].map((r) => String.fromCodePoint(...r.cp)); } };
+    const renderer = { render() { drawnAtRender = [...drawn(grid).values()].map((r) => String.fromCodePoint(...r.cp)); } };
     const systems = new SceneSystems(scene, atlas, renderer);
     const grid = new TerminalGrid(scene, atlas, { id: 'order', cols: 20, rows: 4, depthMax: 0 });
     const parsed = () => new Promise((r) => grid._emulator._term.write('', r));

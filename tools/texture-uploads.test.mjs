@@ -30,7 +30,6 @@ const ROOT = new URL('..', import.meta.url).pathname;
 const { default: TextureUploads } = await import(`${ROOT}packages/glyph3d-core/src/core/TextureUploads.js`);
 const { default: EmojiAtlas } = await import(`${ROOT}packages/glyph3d-core/src/EmojiAtlas.js`);
 const { default: SlugTextures } = await import(`${ROOT}packages/glyph3d-core/src/shaping/SlugTextures.js`);
-const { SlugBuffer } = await import(`${ROOT}packages/glyph3d-core/src/shaping/slugData.js`);
 const { TEXTURE_WIDTH, CURVE_U32_PER_CURVE, CURVE_TEXELS_PER_CURVE, CURVE_INITIAL_ROWS } = await import(`${ROOT}packages/glyph3d-core/src/shaping/slug-constants.js`);
 
 let pass = 0, fail = 0;

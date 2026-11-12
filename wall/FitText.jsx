@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 
 /**
  * A name on one line, whole: too wide for its box, its text shrinks to fit (down to `minPx`); past

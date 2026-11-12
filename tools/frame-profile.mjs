@@ -299,7 +299,7 @@ try {
     // (uncapped, the main thread never idles — a hitch isn't visible as a sample gap).
     await app.evalPage(() => {
         const st = (window.__fpStamps = []);
-        const tick = (ts) => { st.push(performance.now()); if (window.__fpStamps === st) requestAnimationFrame(tick); };
+        const tick = () => { st.push(performance.now()); if (window.__fpStamps === st) requestAnimationFrame(tick); };
         requestAnimationFrame(tick);
     });
     await cdp.send('Profiler.start');

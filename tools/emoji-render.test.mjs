@@ -59,11 +59,10 @@ console.log('Testing Emoji WebGL2 Pipeline...');
         getTexture: () => fakeEmojiTexture,
     };
 
-    let fieldRefreshed = false;
     const fakeLive = {
-        registerField: (f) => {},
-        unregisterField: (f) => {},
-        ensureCodepoints: (cps, cache) => {},
+        registerField: () => {},
+        unregisterField: () => {},
+        ensureCodepoints: () => {},
     };
 
     const atlas = {
@@ -168,7 +167,7 @@ console.log('Testing Emoji WebGL2 Pipeline...');
         _live: {
             registerField: () => {},
             unregisterField: () => {},
-            ensureCodepoints: (cps, cache) => {
+            ensureCodepoints: (cps) => {
                 ensuredCps.push(...cps);
                 return { queued: cps.length, pending: 0, total: cps.length };
             },

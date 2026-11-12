@@ -10,5 +10,5 @@
     "resolveJsonModule": true
   },
   "include": ["packages/*/src", "app", "wall"],
-  "exclude": ["node_modules", "**/node_modules", "cli", "app/dist", "packages/*/dist"]
+  "exclude": ["node_modules", "**/node_modules", "cli", "app/dist", "wall/dist", "packages/*/dist"]
 }

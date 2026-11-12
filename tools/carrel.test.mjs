@@ -24,7 +24,6 @@ import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import * as THREE from 'three';
 import Carrel from '../packages/glyph3d-core/src/services/interaction/Carrel.js';
 import CameraDock from '../packages/glyph3d-core/src/services/interaction/CameraDock.js';
-import WorldLayout from '../packages/glyph3d-core/src/collections/WorldLayout.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.log(`  ✗ ${m}`); } };
@@ -140,14 +139,13 @@ const settle = (c, n = 8) => { for (let i = 0; i < n; i++) c.update(0.05); };
     }
     settle(carrel);
 
-    const rowPitch = 9 + 9 * 0.9;   // boxH + gap — where row 1 rests
     for (const g of grids) {
         near(g.position.z, -20, 0.5, 'grid member stands on the back wall (z=−R)');
         const f = new THREE.Vector3(0, 0, 1).applyQuaternion(g.quaternion);
         ok(f.z > 0.99, 'grid member faces the doorway (+z)');
         // The mock is top-anchored (origin at top), and the Carrel positions by
         // content center. The content center for row 0 is at y≈3 (h/2), and for
-        // row 1 at y≈17.1 (rowPitch + h/2). But the mock's origin is at the top,
+        // row 1 at y≈17.1 (boxH + gap: 9 + 9 × 0.9). But the mock's origin is at the top,
         // so position.y = center_y + h/2. This gives row 0 at y≈6 and row 1 at y≈20.1.
         const h = 6;
         const centerY = h / 2;
