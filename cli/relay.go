@@ -52,6 +52,10 @@ type Relay struct {
 	logSubs       map[string]bool // controller ids subscribed via log.follow (guarded by mu)
 	readoptMu     sync.Mutex
 	readopted     map[string][]time.Time // when each terminal's dead adapter was replaced (readoptOrphan)
+	// adapters counts this relay's live adapters per terminal id. While termd's brain restarts,
+	// every adapter is disconnected and termd lists each terminal with no owner; a terminal whose
+	// adapter is alive (riding the restart) is not vacant, so terminal.recover leaves it.
+	adapters map[string]int
 }
 
 // displayMsg is one queued write to the display WebSocket. binary marks RPC binary
@@ -1133,8 +1137,19 @@ func (r *Relay) startAdapter(id string, cols, rows int, argv []string) (int, err
 		return 0, err
 	}
 	pid := cmd.Process.Pid
+	r.readoptMu.Lock()
+	if r.adapters == nil {
+		r.adapters = map[string]int{}
+	}
+	r.adapters[id]++
+	r.readoptMu.Unlock()
 	go func() {
 		err := cmd.Wait()
+		r.readoptMu.Lock()
+		if r.adapters[id]--; r.adapters[id] <= 0 {
+			delete(r.adapters, id)
+		}
+		r.readoptMu.Unlock()
 		log.Printf("[relay] terminal adapter '%s' (pid %d) exited: %v", id, pid, err)
 		if code := cmd.ProcessState.ExitCode(); code == -1 || code >= 2 {
 			r.readoptOrphan(id)
@@ -1203,6 +1218,7 @@ func (r *Relay) adapterArgs(id string, cols, rows int) []string {
 	if termdBin != "" {
 		args = append(args, "--termd", termdBin)
 	}
+	args = append(args, "--termd-reconnect", termdReconnectWindow.String())
 	if cols > 0 {
 		args = append(args, "--cols", strconv.Itoa(cols))
 	}
@@ -1269,8 +1285,10 @@ func (r *Relay) seedTermSeq(ids []string) {
 // each, fork a fresh `attach <id>` adapter at the terminal's own size so the display rebuilds the
 // grid (or, when the display outlived the relay, hands its grid to the new adapter) and the
 // adapter's subscribe repaints it. Terminals with an owner are skipped (already adopted: an
-// adapter, or a `g3d attach --take`). termd's own subscriber counts are the dedup — the relay
-// keeps no adapter map — so this is idempotent, one-command recovery after any relay restart.
+// adapter, or a `g3d attach --take`), and so are terminals whose adapter this relay started is
+// still alive (riding a termd brain restart, it has no subscription for a moment). termd's own
+// subscriber counts plus that live-adapter count are the dedup, so this is idempotent,
+// one-command recovery after any relay restart.
 //
 // The reply, `terminal.recovered`, carries the ids re-adopted (`ids`, `count`) and every live
 // terminal id in the namespace (`live`) — what a display prunes its per-terminal memory against,
@@ -1290,7 +1308,10 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 	r.seedTermSeq(live)
 	recovered := []string{}
 	for _, t := range terms {
-		if t.Subscribers.Own > 0 {
+		r.readoptMu.Lock()
+		riding := r.adapters[t.ID] > 0
+		r.readoptMu.Unlock()
+		if t.Subscribers.Own > 0 || riding {
 			continue
 		}
 		pid, e := r.startAdapter(t.ID, t.Cols, t.Rows, nil)

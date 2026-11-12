@@ -14,16 +14,21 @@
  *   - the wheel over a mouse-reporting alt-screen program reaches the program, before the restart
  *     and after re-adoption (the new adapter learns the modes when it subscribes);
  *   - an adapter killed under a live relay: the relay re-adopts its terminal with a new adapter;
- *   - termd crash (SIGKILL): the adapter says LOST termd in the relay log and closes the grid,
- *     terminal.recover lists nothing live (not an error), and the next spawn starts a fresh daemon.
+ *   - termd's brain SIGKILLed: the holder restarts it, every adapter rides the restart (no grid
+ *     closes, no LOST termd), the re-subscribe repaint brings the screen back, typing works, and
+ *     terminal.recover meanwhile answers the live terminals or an error, never an empty list;
+ *   - `g3d upgrade` to a copy of the binary: the adapters reconnect at once, grids stay, typing works;
+ *   - termd's holder SIGKILLed (every shell dies with it): the adapter says LOST termd in the relay
+ *     log and closes the grid, terminal.recover lists nothing live (not an error), and the next
+ *     spawn starts a fresh daemon.
  * Everything it started (relay, daemons, shells) is stopped on exit. Exit 1 on any FAIL.
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { privateTermd, stopTermd, stopTermdSync, termdPid } from './lib/termd.mjs';
+import { brainPid, g3dBeside, privateTermd, stopTermd, stopTermdSync, termdBeside, termdPid } from './lib/termd.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'glyph3d-cli');
@@ -211,7 +216,46 @@ try {
     type(A, 'echo poke-$((3*3))\r');
     ok(await screenHas(A, 'poke-9'), 'typing reaches the shell through the new adapter');
 
-    // ── termd crashes: loud, and the next spawn starts a fresh daemon ──
+    // ── termd's brain crashes: the holder restarts it and every grid rides it out ──
+    type(A, 'echo before-brain-$((6*6))\r');
+    ok(await screenHas(A, 'before-brain-36\r\n'), 'marker on screen before the brain crash');
+    await sleep(2500); // past one snapshot interval (2 s): the screen with the marker is saved
+    const brain1 = brainPid(termd.dir, NS);
+    ok(!!brain1 && brain1 !== daemon1, `found termd's brain (pid ${brain1}) beside its holder (pid ${daemon1})`);
+    const closesBefore = term(A).closes + term(s2.id).closes;
+    const logAtBrain = relayLog.length;
+    term(A).text = '';
+    if (brain1) process.kill(brain1, 'SIGKILL');
+    // While no brain answers, the list is unknown: recover says so, or lists A once a brain is back.
+    const recMid = await relayEvent({ relay: 'terminal.recover' }, 'terminal.recovered');
+    ok(!!recMid.error || recMid.live?.includes(A), `terminal.recover during the restart is an error or lists ${A}, never empty (${JSON.stringify(recMid)})`);
+    await waitFor(() => relayLog.slice(logAtBrain).includes(`[attach] ${A}: back on termd`), 10_000, 'the adapter to ride the restart').catch(() => {});
+    ok(relayLog.slice(logAtBrain).includes(`[attach] ${A}: back on termd (brain generation 2`), `${A}'s adapter rode the restart onto brain generation 2`);
+    ok(await screenHas(A, 'before-brain-36'), "the re-subscribe repaint brings the screen back (restored from the brain's snapshot)");
+    type(A, 'echo after-brain-$((7*6))\r');
+    ok(await screenHas(A, 'after-brain-42'), 'typing reaches the shell through the new brain');
+    ok(term(A).closes + term(s2.id).closes === closesBefore, 'no grid closed across the brain restart');
+    ok(!/LOST termd/.test(relayLog.slice(logAtBrain)), 'the relay log has no termd loss for a brain restart');
+    ok(termdPid(termd.dir, NS) === daemon1, 'the holder (and every shell) outlived its brain');
+
+    // ── g3d upgrade: a planned brain replacement, reconnected at once ──
+    const next = path.join(termd.dir, 'g3d-termd-next');
+    copyFileSync(termdBeside(BIN), next);
+    const logAtUpgrade = relayLog.length;
+    let upgradeOut = '';
+    try {
+        upgradeOut = execFileSync(g3dBeside(BIN), ['--socket', path.join(termd.dir, `termd-${NS}.sock`), 'upgrade', '--binary', next],
+            { env: termd.env, encoding: 'utf8', timeout: 30_000 });
+    } catch (e) { upgradeOut = `${e.stdout ?? ''}${e.stderr ?? ''}${e.message}`; }
+    ok(/upgraded: .* generation 3/.test(upgradeOut), `g3d upgrade replaced the brain (${upgradeOut.trim()})`);
+    await waitFor(() => relayLog.slice(logAtUpgrade).includes(`[attach] ${A}: back on termd (brain generation 3`), 10_000, 'the adapter to follow the upgrade').catch(() => {});
+    ok(/termd connection ended \(restart: /.test(relayLog.slice(logAtUpgrade)), 'the adapter saw ERROR restart (a planned restart: it reconnects at once)');
+    type(A, 'echo upgraded-$((8*8))\r');
+    ok(await screenHas(A, 'upgraded-64'), 'typing reaches the shell after the upgrade');
+    ok(term(A).closes + term(s2.id).closes === closesBefore, 'no grid closed across the upgrade');
+    ok(!/LOST termd/.test(relayLog.slice(logAtUpgrade)), 'the relay log has no termd loss for an upgrade');
+
+    // ── termd's holder dies (every shell with it): loud, and the next spawn starts a fresh daemon ──
     const logAtCrash = relayLog.length;
     process.kill(daemon1, 'SIGKILL');
     await waitFor(() => term(A).closes > 0 && term(s2.id).closes > 0, 8000, 'the adapters to close their grids').catch(() => {});

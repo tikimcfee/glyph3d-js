@@ -43,10 +43,11 @@ func attachCmd() {
 	scale := fs.Float64("scale", 2.0, "TerminalGrid size multiplier")
 	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the terminal lives in")
 	fs.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
+	fs.DurationVar(&termdReconnectWindow, "termd-reconnect", termdReconnectWindow, "how long to ride out a termd brain restart before giving the terminal up as lost")
 
 	usage := func() {
 		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --termd-ns --termd")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --termd-ns --termd --termd-reconnect")
 		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
 	}
 

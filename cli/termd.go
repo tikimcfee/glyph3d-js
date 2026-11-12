@@ -37,6 +37,12 @@ var termdNS = "default"
 // then PATH.
 var termdBin = ""
 
+// termdReconnectWindow is how long an adapter rides out a termd brain restart (a crash, an
+// upgrade) before it gives its terminal up as lost (PROTOCOL.md "Restarts"; DESIGN.md "Riding a
+// restart": 30 s covers a crash restart and the first crash-loop retries). `serve
+// --termd-reconnect`, passed to every adapter.
+var termdReconnectWindow = 30 * time.Second
+
 // Frame types (PROTOCOL.md "Frame types").
 const (
 	termdHello      = 0x01
@@ -136,6 +142,12 @@ type termdClient struct {
 		NS       string   `json:"ns"`
 		PID      int      `json:"pid"`
 		Features []string `json:"features"`
+		// The namespace's identity (fixed for the holder's life) and which brain this is.
+		Instance   string `json:"instance"`
+		Generation int    `json:"generation"`
+		Holder     struct {
+			PID int `json:"pid"`
+		} `json:"holder"`
 	}
 }
 
@@ -146,6 +158,50 @@ type termdReplyMsg struct {
 
 // errTermdNotRunning: nothing listens on the namespace's socket.
 var errTermdNotRunning = errors.New("termd is not running")
+
+// isTermdCode reports whether err is termd refusing with this code (a failed REPLY or an ERROR
+// frame: `restart`, `brain_failed`, `no_terminal`, …).
+func isTermdCode(err error, code string) bool {
+	var te *termdError
+	return errors.As(err, &te) && te.Code == code
+}
+
+// redialTermd rides a termd brain restart (PROTOCOL.md "Restarts"): reconnect at once (after up
+// to 100 ms of jitter) when the last connection ended with ERROR restart, else back off 100 ms
+// doubling to 2 s, for up to termdReconnectWindow. Nothing listening means the holder is gone
+// and every terminal with it (errTermdNotRunning, at once); a different instance is a new
+// namespace (an error). The caller re-subscribes by id: never create-or-adopt, which would start
+// a new program in a terminal that ended meanwhile.
+func redialTermd(ns, instance string, planned bool) (*termdClient, error) {
+	deadline := time.Now().Add(termdReconnectWindow)
+	wait := 100 * time.Millisecond
+	if planned {
+		time.Sleep(time.Duration(time.Now().UnixNano() % int64(100*time.Millisecond)))
+	} else {
+		time.Sleep(wait)
+	}
+	var last error
+	for {
+		c, err := dialTermd(ns)
+		switch {
+		case err == nil && instance != "" && c.Welcome.Instance != instance:
+			c.Close()
+			return nil, fmt.Errorf("termd namespace %q is a new one (instance %s, was %s): its terminals are gone", ns, c.Welcome.Instance, instance)
+		case err == nil:
+			return c, nil
+		case errors.Is(err, errTermdNotRunning):
+			return nil, err
+		}
+		last = err
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("no termd brain answered for %s: %w", termdReconnectWindow, last)
+		}
+		time.Sleep(wait)
+		if wait < 2*time.Second {
+			wait *= 2
+		}
+	}
+}
 
 // dialTermd connects to the namespace's daemon and says HELLO. It never starts one.
 func dialTermd(ns string) (*termdClient, error) {

@@ -10,6 +10,7 @@
 // The socket lives in $G3D_TEST_RUN_DIR/<tag> (or out/termd/<tag>), never in a person's
 // runtime dir, so a test can't reach a live namespace even by name.
 
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,9 +31,12 @@ export function privateTermd(tag) {
 /** The g3d-termd built beside a relay binary. @param {string} cli */
 export const termdBeside = (cli) => path.join(path.dirname(cli), 'g3d-termd');
 
+/** The g3d client built beside a relay binary. @param {string} cli */
+export const g3dBeside = (cli) => path.join(path.dirname(cli), 'g3d');
+
 /**
- * The pid of the daemon serving `ns` in `dir`, from its lock file — only if that pid is still a
- * g3d-termd (a pid is reused once its process is gone).
+ * The pid of the daemon serving `ns` in `dir` — its holder, the shells' parent — from its lock
+ * file, only if that pid is still a g3d-termd (a pid is reused once its process is gone).
  * @param {string} dir @param {string} ns @returns {number|null}
  */
 export function termdPid(dir, ns) {
@@ -48,10 +52,27 @@ export function termdPid(dir, ns) {
     return pid;
 }
 
+/**
+ * The pid of the namespace's brain: the holder's child running `g3d-termd --brain` (the holder
+ * restarts it after a crash, so ask again after one).
+ * @param {string} dir @param {string} ns @returns {number|null}
+ */
+export function brainPid(dir, ns) {
+    const holder = termdPid(dir, ns);
+    if (!holder) return null;
+    const ps = execFileSync('ps', ['-eo', 'pid=,ppid=,args='], { encoding: 'utf8' });
+    for (const line of ps.split('\n')) {
+        const [pid, ppid, ...args] = line.trim().split(/\s+/);
+        if (Number(ppid) === holder && args.includes('--brain') && !args.includes('--candidate')) return Number(pid);
+    }
+    return null;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Stops a namespace's daemon (every terminal in it dies) and waits for it to go; SIGKILL after 5 s.
+ * Stops a namespace's daemon (every terminal in it dies) and waits for its holder to go; SIGKILL
+ * after 5 s.
  * @param {string} dir @param {string} ns @returns {Promise<boolean>} whether a daemon was running
  */
 export async function stopTermd(dir, ns) {

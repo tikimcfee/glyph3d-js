@@ -149,9 +149,10 @@ func TestListReportsOwnersAndSizes(t *testing.T) {
 	}
 }
 
-// TestDroppedTermdIsLoud: when the daemon dies, a subscriber's frame stream ends with the reason
-// (the adapter logs it and closes its grid), and the namespace reads as not running.
-func TestDroppedTermdIsLoud(t *testing.T) {
+// TestHolderDeathIsLoud: when the namespace's holder dies (every shell with it), a subscriber's
+// frame stream ends with the reason (the adapter logs it and closes its grid), and the namespace
+// reads as not running.
+func TestHolderDeathIsLoud(t *testing.T) {
 	privateTermd(t)
 	c, err := ensureTermd(termdNS)
 	if err != nil {
@@ -164,7 +165,10 @@ func TestDroppedTermdIsLoud(t *testing.T) {
 	if err := c.Request("subscribe", map[string]any{"id": "t", "mode": "raw", "role": "own"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(c.Welcome.PID, syscall.SIGKILL); err != nil {
+	if c.Welcome.Holder.PID == 0 || c.Welcome.Holder.PID == c.Welcome.PID {
+		t.Fatalf("WELCOME names holder %d, brain %d", c.Welcome.Holder.PID, c.Welcome.PID)
+	}
+	if err := syscall.Kill(c.Welcome.Holder.PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -177,15 +181,62 @@ func TestDroppedTermdIsLoud(t *testing.T) {
 			if c.Err() == nil {
 				t.Fatal("frames ended without a reason")
 			}
-			if _, err := dialTermd(termdNS); !errors.Is(err, errTermdNotRunning) {
-				t.Fatalf("a dead daemon's namespace dials as %v, want not running", err)
+			if _, err := redialTermd(termdNS, c.Welcome.Instance, false); !errors.Is(err, errTermdNotRunning) {
+				t.Fatalf("a dead holder's namespace redials as %v, want not running", err)
 			}
 			if ids, err := liveTerminalIDs(); err != nil || len(ids) != 0 {
-				t.Fatalf("after the crash: live = %v (%v), want empty", ids, err)
+				t.Fatalf("after the holder died: live = %v (%v), want empty", ids, err)
 			}
 			return
 		case <-deadline:
-			t.Fatal("the frame stream outlived the daemon")
+			t.Fatal("the frame stream outlived the holder")
 		}
+	}
+}
+
+// TestBrainRestartIsRidden: a SIGKILLed brain is restarted by the holder; the adapter's redial
+// finds the same namespace (instance) on a new generation, the terminal is still there, and a
+// listing in between is never an empty answer (unknown is not empty).
+func TestBrainRestartIsRidden(t *testing.T) {
+	privateTermd(t)
+	c, err := ensureTermd(termdNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Request("create", map[string]any{"id": "t", "argv": []string{"sleep", "60"}, "cols": 80, "rows": 24}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Request("subscribe", map[string]any{"id": "t", "mode": "raw", "role": "own"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	instance := c.Welcome.Instance
+	if err := syscall.Kill(c.Welcome.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	for range c.Frames {
+	}
+	if c.Err() == nil {
+		t.Fatal("frames ended without a reason")
+	}
+	c.Close()
+	until := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(until) {
+		if terms, err := termdList(termdNS); err == nil && (len(terms) != 1 || terms[0].ID != "t") {
+			t.Fatalf("a listing during the restart answered %v: unknown must not read as empty", terms)
+		}
+	}
+	nc, err := redialTermd(termdNS, instance, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	if nc.Welcome.Instance != instance || nc.Welcome.Generation != 2 {
+		t.Fatalf("redialed instance %s generation %d, want %s and 2", nc.Welcome.Instance, nc.Welcome.Generation, instance)
+	}
+	var sub struct {
+		Handle uint32 `json:"handle"`
+	}
+	if err := nc.Request("subscribe", map[string]any{"id": "t", "mode": "raw", "role": "own"}, &sub); err != nil || sub.Handle == 0 {
+		t.Fatalf("re-subscribe by id after the restart: %v", err)
 	}
 }

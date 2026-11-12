@@ -203,6 +203,7 @@ func serveCmd() {
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
 	flagSet.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace terminals live in — a second relay in its own namespace can't adopt or kill the first's terminals")
 	flagSet.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when the namespace has no daemon (default: beside this binary, then PATH)")
+	flagSet.DurationVar(&termdReconnectWindow, "termd-reconnect", termdReconnectWindow, "how long each terminal's adapter rides out a termd brain restart (crash or upgrade) before giving it up as lost")
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])

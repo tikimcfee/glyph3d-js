@@ -142,7 +142,6 @@ func runTerminal(cfg terminalConfig) {
 	if err != nil {
 		fail("attach: %v", err)
 	}
-	defer tc.Close()
 	cwd, _ := os.Getwd()
 	var created struct {
 		PID     int  `json:"pid"`
@@ -164,7 +163,10 @@ func runTerminal(cfg terminalConfig) {
 	}, &sub); err != nil {
 		fail("attach: termd subscribe %s: %v", cfg.id, err)
 	}
-	handle := sub.Handle
+	// The session: termd's connection and our handle on it. A brain restart (a crash, an
+	// upgrade) replaces both; everything below reads the current one.
+	var sess atomic.Pointer[termdSession]
+	sess.Store(&termdSession{tc: tc, handle: sub.Handle})
 	verb, argv := "created", cfg.cmdArgs
 	if !created.Created {
 		// Adopted: the program is whatever the terminal was started with, not our argv.
@@ -183,6 +185,7 @@ func runTerminal(cfg terminalConfig) {
 	}
 	fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s\n",
 		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(argv, " "))
+	defer func() { sess.Load().tc.Close() }()
 
 	// Lifecycle: signals, termd, the relay, liveness and the output pump all converge on `done`.
 	done := make(chan struct{})
@@ -207,7 +210,7 @@ func runTerminal(cfg terminalConfig) {
 
 	// send fires a termd request and logs a refusal; nothing waits on it.
 	send := func(op string, fields map[string]any) {
-		ch, err := tc.Send(op, fields)
+		ch, err := sess.Load().tc.Send(op, fields)
 		if err != nil {
 			log.Printf("[attach] termd %s: %v", op, err)
 			return
@@ -220,7 +223,7 @@ func runTerminal(cfg terminalConfig) {
 	}
 
 	// repaint asks termd to redraw the screen into the grid (the title rides every repaint).
-	repaint := func() { send("repaint", map[string]any{"handle": handle}) }
+	repaint := func() { send("repaint", map[string]any{"handle": sess.Load().handle}) }
 
 	// Re-adoption: a display reload wipes its terminal registry, so terminal.ping starts bouncing
 	// "ERR: no terminal <id>". Re-issue terminal.create so the fresh display rebuilds the grid
@@ -269,13 +272,14 @@ func runTerminal(cfg terminalConfig) {
 		size.Lock()
 		cols, rows := size.cols, size.rows
 		size.Unlock()
+		s := sess.Load()
 		if m.Alt {
-			if err := tc.Input(handle, wheelBytes(lines, m.Mouse && m.MouseSGR, cols, rows)); err != nil {
+			if err := s.tc.Input(s.handle, wheelBytes(lines, m.Mouse && m.MouseSGR, cols, rows)); err != nil {
 				log.Printf("[attach] wheel: %v", err)
 			}
 			return
 		}
-		send("view", map[string]any{"handle": handle, "delta": lines})
+		send("view", map[string]any{"handle": s.handle, "delta": lines})
 	}
 
 	onResize := func(c, r int) {
@@ -285,7 +289,7 @@ func runTerminal(cfg terminalConfig) {
 		size.Lock()
 		size.cols, size.rows = c, r
 		size.Unlock()
-		send("resize", map[string]any{"handle": handle, "cols": c, "rows": r})
+		send("resize", map[string]any{"handle": sess.Load().handle, "cols": c, "rows": r})
 	}
 
 	// INPUT goroutine: drain the relay. Carries terminal.bytes (→ termd), resize, scroll,
@@ -299,7 +303,9 @@ func runTerminal(cfg terminalConfig) {
 			}
 			handleInbound(msg, cfg.id, inboundHandlers{
 				bytes: func(b []byte) {
-					if err := tc.Input(handle, b); err != nil {
+					// At most once: input while termd restarts is dropped, never replayed.
+					s := sess.Load()
+					if err := s.tc.Input(s.handle, b); err != nil {
 						log.Printf("[attach] input: %v", err)
 					}
 				},
@@ -344,75 +350,116 @@ func runTerminal(cfg terminalConfig) {
 				return false
 			}
 		}
-		for f := range tc.Frames {
-			if f.Stream != handle {
-				continue
-			}
-			switch f.Type {
-			case termdOutput:
-				if len(f.Payload) >= 8 && !push(f.Payload[8:], cols, rows) {
-					return
-				}
-			case termdRepaint:
-				if len(f.Payload) < 16 {
+		// pump moves one session's frames until its connection ends; true = we're finished (the
+		// program ended, or we are shutting down).
+		pump := func(s *termdSession) bool {
+			for f := range s.tc.Frames {
+				if f.Stream != s.handle {
 					continue
 				}
-				cols = int(binary.LittleEndian.Uint16(f.Payload[8:]))
-				rows = int(binary.LittleEndian.Uint16(f.Payload[10:]))
-				if !push(f.Payload[16:], cols, rows) {
-					return
-				}
-			case termdEvent:
-				var ev struct {
-					Ev      string `json:"ev"`
-					Cols    int    `json:"cols"`
-					Rows    int    `json:"rows"`
-					Code    *int   `json:"code"`
-					Signal  string `json:"signal"`
-					Message string `json:"message"`
-					paneModes
-				}
-				if json.Unmarshal(f.Payload, &ev) != nil {
-					continue
-				}
-				switch ev.Ev {
-				case "size":
-					cols, rows = ev.Cols, ev.Rows
-					// The display resizes its emulator only when bytes tagged with the new size
-					// arrive, and a program may write nothing after SIGWINCH (a shell running a
-					// long command). A repaint is such bytes: termd's screen, reflowed.
-					repaint()
-				case "modes":
-					modes.Lock()
-					modes.m = ev.paneModes
-					modes.Unlock()
-				case "role":
-					log.Printf("[attach] %s: another client took the size (g3d attach --take); the display follows it", cfg.id)
-				case "lagged":
-					log.Printf("[attach] %s: fell behind termd and was resynced", cfg.id)
-				case "exit":
-					if ev.Code != nil {
-						fmt.Fprintf(os.Stderr, "[attach] %s: program exited %d\n", cfg.id, *ev.Code)
-					} else {
-						fmt.Fprintf(os.Stderr, "[attach] %s: program ended by SIG%s\n", cfg.id, ev.Signal)
+				switch f.Type {
+				case termdOutput:
+					if len(f.Payload) >= 8 && !push(f.Payload[8:], cols, rows) {
+						return true
 					}
-				case "error":
-					log.Printf("[attach] %s: termd: %s", cfg.id, ev.Message)
-				case "closed":
-					programEnded.Store(true)
-					return
+				case termdRepaint:
+					if len(f.Payload) < 16 {
+						continue
+					}
+					cols = int(binary.LittleEndian.Uint16(f.Payload[8:]))
+					rows = int(binary.LittleEndian.Uint16(f.Payload[10:]))
+					if !push(f.Payload[16:], cols, rows) {
+						return true
+					}
+				case termdEvent:
+					var ev struct {
+						Ev      string `json:"ev"`
+						Cols    int    `json:"cols"`
+						Rows    int    `json:"rows"`
+						Code    *int   `json:"code"`
+						Signal  string `json:"signal"`
+						Message string `json:"message"`
+						paneModes
+					}
+					if json.Unmarshal(f.Payload, &ev) != nil {
+						continue
+					}
+					switch ev.Ev {
+					case "size":
+						cols, rows = ev.Cols, ev.Rows
+						// The display resizes its emulator only when bytes tagged with the new size
+						// arrive, and a program may write nothing after SIGWINCH (a shell running a
+						// long command). A repaint is such bytes: termd's screen, reflowed.
+						repaint()
+					case "modes":
+						modes.Lock()
+						modes.m = ev.paneModes
+						modes.Unlock()
+					case "role":
+						log.Printf("[attach] %s: another client took the size (g3d attach --take); the display follows it", cfg.id)
+					case "lagged":
+						log.Printf("[attach] %s: fell behind termd and was resynced", cfg.id)
+					case "exit":
+						if ev.Code != nil {
+							fmt.Fprintf(os.Stderr, "[attach] %s: program exited %d\n", cfg.id, *ev.Code)
+						} else {
+							fmt.Fprintf(os.Stderr, "[attach] %s: program ended by SIG%s\n", cfg.id, ev.Signal)
+						}
+					case "error":
+						log.Printf("[attach] %s: termd: %s", cfg.id, ev.Message)
+					case "closed":
+						programEnded.Store(true)
+						return true
+					}
 				}
+			}
+			select {
+			case <-done:
+				return true // we closed it ourselves (the relay went, a signal): termd is fine
+			default:
+				return false
 			}
 		}
-		// The termd connection dropped under us (the daemon stopped or crashed): say so, loud,
-		// and detach. When we are the ones closing it (shutdown: the relay went, a signal), the
-		// daemon is fine and nothing is said.
-		select {
-		case <-done:
-		default:
-			if !programEnded.Load() {
-				log.Printf("[attach] %s: LOST termd (namespace %q): %v — closing the grid", cfg.id, termdNS, tc.Err())
+		for {
+			s := sess.Load()
+			if pump(s) {
+				return
 			}
+			// The termd connection dropped under us: its brain restarted (crashed, or upgraded),
+			// or the whole namespace went. Keep the grid, ride the restart, re-subscribe by id.
+			why := s.tc.Err()
+			planned := isTermdCode(why, "restart")
+			s.tc.Close()
+			log.Printf("[attach] %s: termd connection ended (%v); reconnecting for up to %s", cfg.id, why, termdReconnectWindow)
+			nc, err := redialTermd(termdNS, s.tc.Welcome.Instance, planned)
+			if err != nil {
+				log.Printf("[attach] %s: LOST termd (namespace %q): %v — closing the grid", cfg.id, termdNS, err)
+				return
+			}
+			size.Lock()
+			c, r := size.cols, size.rows
+			size.Unlock()
+			var sub2 struct {
+				Handle uint32 `json:"handle"`
+				Cols   int    `json:"cols"`
+				Rows   int    `json:"rows"`
+			}
+			if err := nc.Request("subscribe", map[string]any{
+				"id": cfg.id, "mode": "raw", "role": "own", "cols": c, "rows": r,
+			}, &sub2); err != nil {
+				nc.Close()
+				if isTermdCode(err, "no_terminal") {
+					fmt.Fprintf(os.Stderr, "[attach] %s: the program ended while termd restarted\n", cfg.id)
+					programEnded.Store(true)
+				} else {
+					log.Printf("[attach] %s: LOST termd (namespace %q): re-subscribe: %v — closing the grid", cfg.id, termdNS, err)
+				}
+				return
+			}
+			cols, rows = sub2.Cols, sub2.Rows
+			sess.Store(&termdSession{tc: nc, handle: sub2.Handle})
+			fmt.Fprintf(os.Stderr, "[attach] %s: back on termd (brain generation %d, pid %d); the repaint brings the screen back\n",
+				cfg.id, nc.Welcome.Generation, nc.Welcome.PID)
 		}
 	}()
 
@@ -462,12 +509,18 @@ func runTerminal(cfg terminalConfig) {
 	// Teardown. DETACH by default: drop the display grid and our subscription, leave the termd
 	// terminal RUNNING. ONLY an explicit terminal.kill ends it.
 	if killRequested.Load() && !programEnded.Load() {
-		if err := tc.Request("kill", map[string]any{"id": cfg.id}, nil); err != nil {
+		if err := sess.Load().tc.Request("kill", map[string]any{"id": cfg.id}, nil); err != nil {
 			log.Printf("[attach] termd kill %s: %v", cfg.id, err)
 		}
 	}
 	conn.SetWriteDeadline(time.Now().Add(time.Second))
 	sendText("terminal.close " + cfg.id)
+}
+
+// termdSession is the adapter's current termd connection and its subscription's handle.
+type termdSession struct {
+	tc     *termdClient
+	handle uint32
 }
 
 // encodeOutputFrame builds an OUTPUT data-plane frame:
