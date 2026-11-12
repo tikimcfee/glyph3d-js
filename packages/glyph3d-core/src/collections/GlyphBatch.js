@@ -102,6 +102,8 @@ const _zero = new THREE.Vector3();
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
+/** One group row as it will be stored (f32: compared at the table's own precision). */
+const _row = new Float32Array(ROW);
 
 /** Whether `a` and `b` agree to f32 precision, element by element. */
 function sameMatrix(a, b) {
@@ -114,13 +116,16 @@ export default class GlyphBatch {
     /**
      * @param {THREE.Scene} scene - the scene whose enrolled fields this batch draws
      * @param {Object} atlas - the GlyphAtlas the labels shape with (the arena shares its textures)
+     * @param {{rangeRows?: number}} [opts] rangeRows: up to this many changed group rows upload as
+     *   per-row ranges (one texSubImage2D each); more upload the table whole. At rest none do.
      */
-    constructor(scene, atlas) {
+    constructor(scene, atlas, { rangeRows = 8 } = {}) {
         if (!scene?.isScene) throw new Error('GlyphBatch: needs a THREE.Scene (it hooks scene.onBeforeRender)');
         if (!atlas) throw new Error('GlyphBatch: needs the GlyphAtlas its labels shape with');
         if (!isTracked(scene)) throw new Error('GlyphBatch: the scene needs a SceneTransforms first (rootOf / isShown read its marks)');
         this.scene = scene;
         this.atlas = atlas;
+        this.rangeRows = rangeRows;
         /** @type {InstancedField|null} */
         this.arena = null;
         /** @type {{ mesh: THREE.Mesh, field: InstancedField, version: number, count: number, depth: number }[]} in slot order; member i is group i + 1 */
@@ -130,7 +135,7 @@ export default class GlyphBatch {
         this._generation = -1;
         /** Last refresh: fields drawn from the arena, hidden, outside the view frustum, drawing
          *  themselves (refused), under another root, and the arena's glyph count. */
-        this.stats = { enrolled: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, glyphs: 0 };
+        this.stats = { enrolled: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, glyphs: 0, uploadRows: 0 };
         const prev = scene.onBeforeRender;
         this._prevHook = prev;
         scene.onBeforeRender = (renderer, sc, camera, target) => {
@@ -233,39 +238,63 @@ export default class GlyphBatch {
         if (!this.arena) return this.stats;
 
         // poses + visibility, camera-relative: the arena mesh sits at the eye
+        // Only rows whose stored value changes are uploaded: at rest none, a moving camera all of
+        // them (positions are eye-relative), one label fading just its own.
         const arena = this.arena, G = arena._groupData;
         let drawn = 0, hidden = 0, culled = 0, glyphs = 0;
+        const dirty = [];
+        const dark = (r) => { if (G[r + 11] !== 0) { G[r + 11] = 0; dirty.push(r / ROW); } };
         _back.makeTranslation(-eye.x, -eye.y, -eye.z);
         next.forEach((m, i) => {
             const { mesh, field } = m;
             if (mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.disable(VIEW_LAYER);
             const r = (i + 1) * ROW;
-            if (m.count === 0 || !isShown(mesh)) { G[r + 11] = 0; hidden++; return; }
+            if (m.count === 0 || !isShown(mesh)) { dark(r); hidden++; return; }
             const bs = field.geometry.boundingSphere;
             if (bs) {
                 _sphere.copy(bs).applyMatrix4(mesh.matrixWorld);
-                if (!_frustum.intersectsSphere(_sphere)) { G[r + 11] = 0; culled++; return; }
+                if (!_frustum.intersectsSphere(_sphere)) { dark(r); culled++; return; }
             }
             _m.multiplyMatrices(_back, mesh.matrixWorld).decompose(_pos, _quat, _scale);
             if (!sameMatrix(_m, _check.compose(_pos, _quat, _scale))) {
                 // sheared (a non-uniform scale above a rotation): a group row can't hold it
-                G[r + 11] = 0;
+                dark(r);
                 mesh.layers.enable(VIEW_LAYER);
                 own++;
                 return;
             }
             const S = field._groupData;
-            G[r] = _pos.x; G[r + 1] = _pos.y; G[r + 2] = _pos.z;
-            G[r + 4] = _quat.x; G[r + 5] = _quat.y; G[r + 6] = _quat.z; G[r + 7] = _quat.w;
-            for (let k = 8; k < 12; k++) G[r + k] = S[k];          // colour + alpha
-            G[r + 12] = _scale.x; G[r + 13] = _scale.y; G[r + 14] = _scale.z; G[r + 15] = S[15];   // scale + colour blend
-            for (let k = 16; k < ROW; k++) G[r + k] = S[k];        // clip, background
+            _row[0] = _pos.x; _row[1] = _pos.y; _row[2] = _pos.z; _row[3] = G[r + 3];
+            _row[4] = _quat.x; _row[5] = _quat.y; _row[6] = _quat.z; _row[7] = _quat.w;
+            for (let k = 8; k < 12; k++) _row[k] = S[k];            // colour + alpha
+            _row[12] = _scale.x; _row[13] = _scale.y; _row[14] = _scale.z; _row[15] = S[15];   // scale + colour blend
+            for (let k = 16; k < ROW; k++) _row[k] = S[k];          // clip, background
+            for (let k = 0; k < ROW; k++) {
+                if (G[r + k] !== _row[k]) { G.set(_row, r); dirty.push(i + 1); break; }
+            }
             drawn++;
             glyphs += m.count;
         });
-        arena.groupTexture.needsUpdate = true;
+        // The upload: a repack (rows re-assigned) or many changed rows → the whole table; a few →
+        // one range per row (three merges only within a texel row, and each group row is one);
+        // none → nothing. three clears the ranges once it has uploaded them.
+        // A whole-table upload still pending (two refreshes before a render) must not be narrowed
+        // to ranges: three reports each upload through onUpdate.
+        const tex = arena.groupTexture;
+        if (tex.onUpdate !== this._onUpload) { this._onUpload = () => { this._fullPending = false; }; tex.onUpdate = this._onUpload; this._fullPending = true; }
+        if (changed || dirty.length > this.rangeRows || (dirty.length && this._fullPending)) {
+            // Ranges already queued would narrow this upload to them: queue every row instead.
+            if (tex.updateRanges.length) for (let g = 0; g < arena.maxGroups; g++) tex.addUpdateRange(g * ROW, ROW);
+            tex.needsUpdate = true;
+            this._fullPending = true;
+            this._uploadRows = arena.maxGroups;
+        } else if (dirty.length) {
+            for (const row of dirty) tex.addUpdateRange(row * ROW, ROW);
+            tex.needsUpdate = true;
+            this._uploadRows = dirty.length;
+        } else this._uploadRows = 0;
         arena.instanceMesh.matrixWorld.makeTranslation(eye.x, eye.y, eye.z);
-        this.stats = { enrolled: _meshes.size, drawn, hidden, culled, own, elsewhere, glyphs };
+        this.stats = { enrolled: _meshes.size, drawn, hidden, culled, own, elsewhere, glyphs, uploadRows: this._uploadRows };
         return this.stats;
     }
 
