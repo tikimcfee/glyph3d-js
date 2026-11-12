@@ -250,7 +250,7 @@ futures. S2-0 picks one and uses it everywhere.)
 
 Sizes are Rust lines excluding tests. Every item's gate also includes:
 - `cargo fmt --check` and `cargo clippy -p glyph3d-cli -- -D warnings`;
-- `cargo test --workspace`;
+- `cargo test --workspace --features g3d-termd/test-hooks`;
 - every tape scenario already merged still at zero diffs.
 
 Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow the machine rule:
@@ -501,7 +501,7 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
     `crates/glyph3d-cli/web/`).
 - **Gate:**
   - the whole tape suite at zero diffs, with `PENDING` empty;
-  - `cargo test --workspace`;
+  - `cargo test --workspace --features g3d-termd/test-hooks`;
   - `bun tools/check.mjs --tier full`, then `--tier browser`, then `--tier gpu` (memory rule,
     flock, one at a time), all on `./glyph3d-cli`;
   - `make all` artifacts build;

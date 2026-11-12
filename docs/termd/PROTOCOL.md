@@ -12,9 +12,9 @@ The protocol is public and versioned. Nothing in it is specific to glyph3d.
 Version 1.1 is the first release. What is marked **(1.1)** is new in it. The daemon on branch
 `termd` has 1.1's restarts: `WELCOME.instance`, `generation` and `holder`, `ERROR` `restart` and
 `brain_failed`, the `busy` code, and `upgrade` (feature `upgrade`, with the `upgrade_failed`
-event). It does not have `status`, `status_follow` and the `status` event yet, nor 1.1's
-environment and `create` defaults, so it still announces `proto` `[1, 0]` (see
-[Versions](#versions)).
+event); and 1.1's `create`: the program's environment, `env_base`, the defaults below and the
+reply's `argv`, `login` and `cwd`. It does not have `status`, `status_follow` and the `status`
+event yet, so it still announces `proto` `[1, 0]` (see [Versions](#versions)).
 
 ## At a glance
 
@@ -234,9 +234,9 @@ Starts a program on a new PTY.
 | field | default | meaning |
 |---|---|---|
 | `id` | required | the terminal's name |
-| `argv` | the user's shell, started as below | program and arguments, run directly (no shell). `argv[0]` without a `/` is looked up in the program's `PATH` |
+| `argv` | the user's shell, started as below | program and arguments, run directly (no shell). `argv[0]` without a `/` is looked up in the program's own `PATH` (the system's default search path when it has none), not the daemon's; not found is `spawn_failed` |
 | `cols`, `rows` | required | initial size, 1 to 4096 each |
-| `cwd` | the user's home directory | an absolute path to an existing directory; anything else is `bad_request` |
+| `cwd` | the user's home directory (`/` if it doesn't exist, as `login(1)` does) | an absolute path to an existing directory the user can search; anything else is `bad_request`, naming why. It is used as given (`PWD` keeps a symlink's name) |
 | `env` | `{}` | added to the environment (below); a `null` value removes a variable |
 | `env_base` | `"session"` | (1.1) `"session"`: start from the user's session environment (below). `"none"`: start from nothing but the account variables and termd's own |
 | `if_exists` | `"error"` | `"adopt"` returns the live terminal with this id instead of failing |
@@ -262,7 +262,8 @@ Starts a program on a new PTY.
 `env` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL and are at most
 128 KiB each, and `argv` plus the environment total at most 1 MiB (`bad_request` or
 `too_large`, naming the variable). The names in layer 5 are reserved: setting or removing one is
-`bad_request`.
+`bad_request`. Any other name may be set, including one layer 2 removes: the request knows what
+its terminal is for.
 
 With no `argv`, the program is the user's shell: the account's shell from the user database
 (passwd), else the environment's `SHELL` when it names an executable, else `/bin/sh`, and `SHELL`
@@ -271,9 +272,10 @@ as `login(1)` and tmux start shells), on every platform, so the system's and the
 run. Daemon settings can change the shell and turn login off. An explicit `argv` runs exactly as
 given, never as a login shell.
 
-When the environment sets none of `LC_ALL`, `LC_CTYPE` and `LANG`, the daemon sets `LANG` to a
-UTF-8 locale the system has (`C.UTF-8`; on macOS the user's own locale when installed). A locale
-that is set is left alone.
+When the environment sets none of `LC_ALL`, `LC_CTYPE` and `LANG` (an empty value is unset), the
+daemon sets `LANG` to a UTF-8 locale the system has (`C.UTF-8`; on macOS the user's own locale
+when installed). A locale that is set is left alone, and so is a request whose `env` names any of
+the three, even to remove it.
 
 Reply:
 
@@ -295,12 +297,13 @@ where. `create` does not subscribe.
 
 ```json
 {"req": 2, "ok": true, "terminals": [
-  {"id": "t1", "handle": 7, "pid": 41234, "argv": ["bash", "-l"], "cwd": "/some/dir",
+  {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/usr/bin/bash", "-l"], "cwd": "/some/dir",
    "cols": 80, "rows": 24, "title": "~/src", "alt": false, "seq": 18211,
    "created_at": 1794480000123, "subscribers": {"own": 1, "attach": 0, "watch": 2}}]}
 ```
 
-`created_at` is Unix epoch milliseconds. `title` is the last OSC 0/2 title. Only live
+`argv` is what runs, as `create` answered it (the resolved path first). `created_at` is Unix epoch
+milliseconds. `title` is the last OSC 0/2 title. Only live
 terminals are listed: a terminal leaves the list when its program exits.
 
 ### `kill`

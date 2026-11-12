@@ -428,7 +428,7 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `tools/agent-events.test.mjs` (gomuxai's corpus).
 - **Terminals** live in **`g3d-termd`** (`crates/g3d-termd`, `docs/termd/DESIGN.md`): it owns each
   terminal's PTY, program and a libghostty-vt emulator (the canonical screen and scrollback, a
-  bounded 2 MiB by default) on one owner thread per terminal, and outlives the relay. One daemon
+  bounded 10 MB by default) on one owner thread per terminal, and outlives the relay. One daemon
   per namespace (`serve --termd-ns <ns>`, default `default`; socket
   `$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`, or under `$G3D_TERMD_DIR`), so a second relay in its own
   namespace can't adopt or kill the first's; the relay starts it on demand (`g3d-termd --daemon`,
@@ -448,7 +448,13 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   rides it (reconnect, re-subscribe, repaint; `serve --termd-reconnect`); `./g3d upgrade` replaces
   the brain losing no byte. The holder's death kills every shell in the namespace (adapters log
   `LOST termd` and close their grids). `terminal.spawn [cols] [rows]
-  [-- cmd…]` starts any program. Gates: `cargo test --workspace`, `tools/termd-relay-check.mjs`,
+  [-- cmd…]` starts any program; with none, termd starts the account's shell (passwd) as a login
+  shell in the served root (else home). A terminal's environment is termd's, built per create
+  (DESIGN.md "Environment"): the systemd user manager's (else the daemon's own;
+  `--env-source daemon`, or `G3D_TERMD_ENV_SOURCE=daemon` as tests and tools set it), minus other
+  terminals'/multiplexers'/editors' identity and the parent shell's state, plus `TERM_PROGRAM=g3d-termd`.
+  Gates: `cargo test --workspace --features g3d-termd/test-hooks` (the test hooks exist only in that
+  build), `tools/termd-relay-check.mjs`,
   `tools/termd-fidelity-check.mjs`, `tools/wall-e2e.mjs`. Terminals render as `TerminalGrid`s and
   re-adopt across reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is
   pulled by the frame: a parse only queues its grid on the scene's `TerminalScreenQueue`, and

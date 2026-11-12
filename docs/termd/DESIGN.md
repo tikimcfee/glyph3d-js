@@ -25,11 +25,14 @@ What exists on branch `termd`, and where it departs from the plan below:
   `G3D_TERMD_DIR` overrides both (tests and the check runner keep their daemons in scratch
   directories with it). A socket path over 100 bytes is refused at start. `kill` signals the
   program's group and the PTY's foreground group, closes the PTY, and sends `SIGKILL` to both
-  if the program outlives a 2 s grace. `G3D_TERMD_TEST_HOOKS=1` arms the test hooks: an `INPUT`
+  if the program outlives a 2 s grace. The test hooks exist only in a build with the cargo feature
+  `test-hooks` (the tests' alone: `cargo test --features g3d-termd/test-hooks`; `make` and release
+  builds have none), armed by `G3D_TERMD_TEST_HOOKS=1`: an `INPUT`
   of one magic string panics that terminal's owner thread (the panic-boundary test), another stops
   the brain's heartbeat (the watchdog test); `G3D_TERMD_TEST_BRAIN_FAIL_FILE` makes a brain exit at
   start while that file exists (the crash-loop test); `G3D_TERMD_TEST_ENGINE_FILE` names the engine
-  a brain reports (the cross-engine handoff test). The scrub removes these from programs' environments.
+  a brain reports (the cross-engine handoff test); `G3D_TERMD_TEST_SESSION_ENV_FILE` stands in for
+  the user manager (the environment test). The scrub removes these from programs' environments.
   `exit` carries a signal by name. `on_xtversion` answers `g3d-termd <version>`.
 - **Client** (`crates/g3d`): `attach` (raw tty, query filter, `Ctrl-\` twice to detach,
   `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
@@ -56,11 +59,11 @@ What exists on branch `termd`, and where it departs from the plan below:
   (the "resize clearing prompt lines" risk below), and `g3d attach` under vim and Claude Code
   by hand (the query-filter coverage risk) — both are for the operator to try. Hot upgrade,
   packed cells and the Rust relay are later stages.
-- **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)).
-  Not built yet: the environment policy (programs inherit the starting process's environment and
-  start in the holder's working directory, `/` once daemonized, when no `cwd` is given; `IUTF8` is
-  now set), the defaults marked "change" (scrollback, input buffer, socket fallback, default
-  program and cwd), the config file, and protocol 1.1's status stream.
+- **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)),
+  and so are the environment policy and the defaults audit's decisions
+  ([below](#environment-and-defaults-as-built-2026-11-12)). Not built yet: the socket fallback
+  change (the macOS branch's), the config file and `g3d config`, the cgroup scopes, and protocol
+  1.1's status stream.
 - **On branch `termd-macos`, to be merged:** darwin-arm64 builds and passes every gate; close-on-exec
   set after creation where macOS has no atomic form; the slave opened before `TIOCSWINSZ`; tests
   measure processes with `ps` instead of `/proc`; the socket fallback `/tmp/g3d-<uid>` with its
@@ -109,7 +112,7 @@ brain cannot block it); the brain's is blocking. Messages, holder → brain: `we
 generation, holder pid and version, `candidate`; fds: the listener, `seq_marks`), `term` (handle,
 slot, id, pid, the brain's opaque `meta`, the exit status if reaped; fds: the master, then the
 stored blobs newest first), `terms_done`, `go`, `spawned`, `exited`, `candidate`, `commit`,
-`upgrade_abort`, `shutdown`. Brain → holder: `hello` (hold `[1, 0]`, engine, version), `spawn`,
+`upgrade_abort`, `shutdown`. Brain → holder: `hello` (hold `[2, 0]`, engine, version), `spawn` (the path to exec, argv, the whole environment, the cwd),
 `kill`, `release`, `snapshot` (fd: the blob), `alive`, `upgrade`, `upgrade_cancel`, `handoff_done`,
 `ready`, `upgrade_abort`, `exit_namespace`.
 
@@ -187,6 +190,119 @@ hold-link decoder.
 - `tools/termd-relay-check.mjs`: a brain crash and a `g3d upgrade` through the relay with a
   simulated display (no grid closes, no `LOST termd`, the screen comes back, typing works,
   `terminal.recover` mid-restart lists the terminals), then the holder's death.
+
+## Environment and defaults as built (2026-11-12)
+
+What the branch has of [Environment](#environment) and [Defaults](#defaults), and where it departs
+from them.
+
+**Who decides what.** The brain composes everything a program starts with (`crates/g3d-termd/src/env.rs`):
+the base, the scrub, the account, the request, termd's own, the program's path and argv, the
+working directory. The holder execs exactly that: it no longer looks anything up in `PATH`, which
+took a branch out of it. `argv[0]` without a slash is found in the composed environment's `PATH`,
+or `confstr(_CS_PATH)` when it has none (what `execvp` does); not found is `spawn_failed` before
+anything forks. The `create` reply and `list` show the resolved path first (`/usr/bin/sh`, not
+`sh`), and the reply says `login` and `cwd`; a restored terminal keeps them in the holder's record
+(`login` and `term` are new fields there, read with defaults from an older brain's record).
+
+**Hold protocol 2.** `spawn` now carries the `path` to exec apart from `argv` (a login shell execs
+`/bin/bash` as `-bash`), which a hold-1 holder would ignore and exec `-bash` from `PATH`: a changed
+meaning, so a new major. A hold-1 holder stops a hold-2 candidate at its hello, and `g3d upgrade`
+answers "upgrade failed; the running brain carries on" (tried: a namespace started by the previous
+build, upgraded to this one; its shell kept running under the old brain). So a namespace started
+before this change takes a restart (`g3d stop`, which ends its shells) to get the new environment,
+until the holder's re-exec (`g3d upgrade --holder`) exists. A hold-2 holder now names the reason
+in the `upgrade_failed` it sends.
+
+**Settings** (flags on `g3d-termd`, passed to every brain; the config file is not built):
+`--env-source auto|daemon` (also `G3D_TERMD_ENV_SOURCE`, so a relay's tests and the check tools set
+it through the environment the relay hands the daemon), `--env-manager-timeout-ms` 1000,
+`--env-scrub NAME|PREFIX*` and `--env-keep NAME|PREFIX*` (repeatable), `--shell PATH` (refused at
+start unless an absolute path to an executable), `--login-shell true`, `--fill-locale true`,
+`--term xterm-256color` (also the terminfo name the emulator answers with, stored per terminal).
+
+**Departures and details the design left open:**
+
+- **The scrub's last group is `G3D_TERMD_*`**, a prefix, rather than `G3D_TERMD_DIR` and
+  `G3D_TERMD_TEST_HOOKS` by name: it also covers `G3D_TERMD_ENV_SOURCE` and every test hook's file
+  variable. `G3D_TERMD_ID` and `G3D_TERMD_SOCKET` are layer 5's and set again after it.
+- **Reaching the user manager from a stripped environment.** `busctl --user` needs
+  `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`; a daemon started without either (a relay run
+  from `env -i`, cron) would never reach the manager and fall back to its own thin environment,
+  which is the case the policy exists for. So when both are missing termd gives `busctl`
+  `XDG_RUNTIME_DIR=/run/user/<uid>` (where `pam_systemd` puts the user bus), only when that
+  directory exists and is the user's. `busctl` is found in the daemon's `PATH`, then `/usr/bin`,
+  `/bin`. Measured here: `env -i busctl --user …` fails with "$DBUS_SESSION_BUS_ADDRESS and
+  $XDG_RUNTIME_DIR not defined"; with `XDG_RUNTIME_DIR=/run/user/<uid>` it answers.
+- **Which source a `create` used is logged when it changes** (`terminal environment: the systemd
+  user manager's` / `the daemon's own: <why>`), the status stream's job until it exists. A manager
+  that stops answering costs each `create` up to the timeout, then falls back.
+- **`SHELL`.** The shell is chosen as designed (`--shell`, else the passwd entry's when it is an
+  executable, else `$SHELL` when it is an absolute path to an executable, else `/bin/sh`); the
+  `$SHELL` it considers is the request's `env` value when it gives one, else the base's. The chosen
+  shell becomes `SHELL` for every terminal, an explicit `argv` included (`login(1)` sets it
+  regardless of what runs, and `vim`'s `:sh` reads it). A request's own `SHELL` still wins, as any
+  layer-4 value does.
+- **Locale.** "Set" means non-empty (POSIX treats an empty value as unset). A request whose `env`
+  names `LANG`, `LC_ALL` or `LC_CTYPE`, even to remove it (`null`), gets no fill: it chose. The fill
+  is checked once at brain start with `newlocale(LC_CTYPE_MASK, …)`; macOS asks
+  `defaults read -g AppleLocale` (unverified here; the macOS branch owns it), falling back to
+  `C.UTF-8` when the user's locale doesn't load.
+- **A missing home** starts the program in `/`, as `login(1)` does ("No home directory, logging in
+  with HOME=/"), rather than failing the `create`.
+- **`g3d new`** sends its own working directory unless `--cwd` (tmux's `new-session` starts in the
+  client's directory too); it forwards the `--forward-env` list only when run inside an SSH session
+  (`SSH_CONNECTION` set): outside one, the session base already has fresh values and forwarding a
+  long-lived shell's `DISPLAY` would bring back the staleness the base removes. `g3d` inside a
+  termd terminal reaches that terminal's daemon through `G3D_TERMD_SOCKET` when given neither
+  `--ns` nor `--socket`. The detach key also reads `G3D_DETACH_KEY`.
+- **The relay** sends no `argv` for a plain new terminal and passes its served root as `cwd`
+  (`attach --cwd`, which the relay sets when `serve` has a root); a hand-run `glyph3d-cli attach`
+  with no `--cwd` starts at home.
+
+**Defaults applied** (the table's "change" and "new" rows): scrollback 10,000,000 bytes, clamp
+64 MiB (`--scrollback`, `--max-scrollback`); the PTY input buffer 16 MiB (`--input-buffer`); the
+lossy queue 4 MiB and the blocking owner's 1 MiB / 256 KiB marks, now settings (`--lossy-queue`,
+`--block-high`, `--block-low`; `--block-low` must be below `--block-high`); the log rotated at
+10 MiB keeping `.log.1` (`--log-max-bytes`, 0 = never): the holder renames it from its timer, the
+brain, which shares the file, sees the path name another file before its next line and reopens it;
+RFC 3339 lines with the role and pid, values printed as values (`ended: code 0`); the default
+program, cwd, `TERM_PROGRAM`, locale fill and scrub as above. **Idle exit stays 300 s** ("keep");
+the "status followers don't count" half waits for the status stream, since nothing follows status
+yet. Not applied: the socket fallback (`/tmp/g3d-<uid>`, ignoring `$TMPDIR`), which the macOS
+branch carries with its directory checks; the cgroup scopes; the status interval and recent errors.
+
+**The test hooks are compiled out** of every build but the tests': the cargo feature `test-hooks`
+gates the magic `INPUT`s, the failing brain, the named engine and the user-manager stand-in, and
+`cargo test` needs `--features g3d-termd/test-hooks` (each daemon test binary has a test that fails
+saying so when it is missing, and the hook-driven tests are gated on it). `make termd`'s release
+binary was checked to hold none of the hooks' strings.
+
+**`make`.** `make build` (and `make termd`) builds `g3d-termd` and `g3d` and puts them beside
+`glyph3d-cli`; `make linux-amd64` also puts them in `dist/`; `make linux-arm64` cross-builds them
+with cargo-zigbuild when installed (it isn't on the build machine today, so the 2026-11-12 arm64
+proof under qemu stands as the last one). A missing `vendor/` stops the build with what the vendor
+step is and the command (`tools/termd-vendor.sh [DIR]`). `make release` ships the linux-amd64 pair
+and requires it, and the linux-arm64 pair when it was built. Darwin is a `TODO(macOS)` in the
+Makefile for the macOS branch, not a target that pretends. A bare `cargo build` with no `vendor/`
+still fails inside libghostty-vt-sys's build script ("GHOSTTY_SOURCE_DIR does not contain
+build.zig"), whose message we don't control; `.cargo/config.toml` says where that comes from.
+
+**Gates** (all on private sockets, `--env-source daemon` unless the test is about the source):
+`src/env.rs`'s unit tests (scrub and keep, the account layer, the shell choice and login argv0,
+`PATH` resolution, the locale rule, the request's checks and limits, cwd checks, busctl's JSON);
+`tests/env.rs`, a daemon started with `env_clear` plus a stale `DISPLAY`, Terminal.app's and tmux's
+identity, a parent shell's `SHLVL`/`PWD`/`COLUMNS`, `SIGINT` ignored and a soft fd limit of 1000:
+each program's `/proc` environ, argv[0], cwd, `SigIgn`/`SigBlk` and limits against the policy,
+`env_base: "none"` composing exactly the account, `LANG=C.UTF-8` and termd's own, reserved and
+malformed names refused, `IUTF8` on (`stty -a` inside), the session source re-read at every create
+through the stand-in (a changed `DISPLAY` reaches the next terminal, not the running one; a
+missing one falls back to the daemon's, logged), and, when a user manager answers, the real one
+beating the starter's `DISPLAY=:99` (read-only, into a terminal running `sleep`);
+`tools/termd-relay-check.mjs`, a spawn with no `argv` from a relay carrying Terminal.app's and tmux's
+identity: `-bash` (the passwd shell) in the served root with `TERM_PROGRAM=g3d-termd`, none of the
+relay's identity; `tests/daemon.rs`, a daemonized namespace's log rotated at 4 KiB, with the brain's
+next line in the new file.
 
 ## Measured ground (2026-11-12)
 
@@ -693,7 +809,7 @@ A terminal's environment is built per `create`, in this order (later wins):
 | Layer | What | Why |
 |---|---|---|
 | 1. Session base | **Linux with a user manager:** the systemd user manager's environment, read at each `create` (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, 1 s timeout). **Otherwise** (no user manager: macOS, containers, hosts without logind): the holder's own environment as it started | What a terminal launched from the desktop gets. On a host reached only by SSH, logind still starts a user manager, but nothing imports a profile into it, so its environment is thin (`PATH` is systemd's default); the login shell ([below](#the-shell-and-login-or-not)) supplies the profile there. Reading it at every create means a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK`: the desktop re-imports them at each login. The fallback is the starter's environment, scrubbed (layer 2); the status stream names the source |
-| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (`INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`); termd's own controls (`G3D_TERMD_DIR`, `G3D_TERMD_TEST_HOOKS`) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code with `env_scrub` / `env_keep` to extend or exempt |
+| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (`INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`); termd's own controls (`G3D_TERMD_*`: `G3D_TERMD_DIR`, `G3D_TERMD_ENV_SOURCE`, the test hooks) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code (`SCRUB` in `env.rs`) with `--env-scrub` / `--env-keep` to extend or exempt (a name, or a prefix ending in `*`). It applies to the base only: a request's `env` may set any name but layer 5's |
 | 3. Account | `HOME`, `USER`, `LOGNAME` from `getpwuid` when the base lacks them; `SHELL` set to the shell chosen ([below](#the-shell-and-login-or-not)); `LANG` filled when no locale is set ([Locale](#locale)) | What `login(1)` provides |
 | 4. Client `env` | the `create` request's `env` (validated, below); `null` removes | The caller knows what this terminal is for |
 | 5. termd's own | `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`, `G3D_TERMD_SOCKET=<socket>`, `PWD=<cwd>` | They describe this terminal, so nothing else may set them |
@@ -780,6 +896,9 @@ Filling matters for programs given as `argv` (no profile runs) and for `env_base
 it the C locale is ASCII, and for a terminal that draws glyphs, an ASCII locale is the worst
 default (zsh shows typed non-ASCII as `<…>` escapes; measured on the M2).
 
+"Set" means non-empty, and a request whose `env` names `LC_ALL`, `LC_CTYPE` or `LANG` (even to
+remove it) has chosen, so nothing is filled.
+
 A locale that **is** set is the person's choice and is never changed, even when it isn't UTF-8:
 the terminal starts, and the status stream carries an environment warning. mosh refuses to start
 in that case; a terminal that refuses to open is worse. `fill_locale = true` is a setting.
@@ -812,7 +931,7 @@ identity.
 `create.cwd` when given (absolute, an existing searchable directory; anything else is
 `bad_request` with the errno: a client that wants a fallback chooses it). Otherwise the account's
 home directory from `getpwuid` (a new window opens at home, as Ghostty, shpool and Linux terminals
-do), never the daemon's own (`/`). `PWD` is set to it. The relay passes its served root when
+do), never the daemon's own (`/`); `/` only when that home doesn't exist, as `login(1)` does. `PWD` is set to it. The relay passes its served root when
 `serve` has one and nothing otherwise; its own working directory says nothing about where a person
 wants a shell.
 
@@ -947,7 +1066,9 @@ too, as Ghostty does) at start, flags override the file, and the brain re-reads 
 start, so `g3d upgrade` applies changes without ending a shell (phux applies `[defaults]` the same
 way). The holder's own settings (`[holder]`) are read once when it starts. `g3d config` prints every
 setting with its value, its default and where the value came from. Settings that apply per
-terminal are fixed when the terminal is created.
+terminal are fixed when the terminal is created. Until the file exists (not built yet), every
+setting is a `g3d-termd` flag, named below, which the holder passes to each brain; what is built is
+in [Environment and defaults as built](#environment-and-defaults-as-built-2026-11-12).
 
 | Setting | Default | Decision | Reason and prior art |
 |---|---|---|---|
@@ -956,20 +1077,20 @@ terminal are fixed when the terminal is created.
 | socket and lock re-stamp | every hour (`utimes`), by the holder | **new** (from the macOS branch) | `/tmp` cleaners (macOS `tmp_cleaner`, 3 days; systemd-tmpfiles, 10 days) delete untouched regular files, and a lost lock means two daemons on one namespace. tmux survives the same cleaners because its socket's mtime moves with activity |
 | lock | `<socket>.lock`, left in place after exit | keep | a lock file outliving its holder is harmless with `flock`; it now holds the holder's pid |
 | log | `$XDG_STATE_HOME/g3d/termd-<ns>.log` (`~/.local/state/…`), on Linux and macOS | keep | XDG puts logs in state. `~/Library/Logs` (where Console looks) was considered for macOS; one rule on both systems is worth more, as the macOS agent argued and as Ghostty keeps `~/.config` on macOS. The status document and `g3d status` print the path, so nobody has to know it |
-| log size | rotate at 10 MiB, keep one previous file (`.log.1`) | **new** (S1 appends forever) | size-capped rotation is what logrotate and journald do; one previous file keeps the last crash's context |
+| log size | rotate at 10 MiB, keep one previous file (`.log.1`); `--log-max-bytes`, 0 = never | **new** (S1 appends forever) | size-capped rotation is what logrotate and journald do; one previous file keeps the last crash's context |
 | log line | `2026-11-12T15:25:13.751-06:00 holder[1230122] message` | **change** (S1: `[termd 1794518713.751]`, raw epoch seconds) | RFC 3339 is the normal form (journalctl's `short-iso-precise`, the relay's recordings use RFC 3339 too); local time with its offset reads at a glance and is still unambiguous. The role (`holder`/`brain`) and pid tell the two processes apart in one file. Values print as values: S1's `ended: code Some(0) signal None` becomes `ended: code 0` |
 | idle exit | 300 s with no terminals and no connections but status followers; 0 = never | keep (status followers newly don't count) | it works: the `default` namespace started 15:25:13, its `hello-world` exited 15:25:27, and the daemon logged `exiting: no terminals and no connections for 300s` at 15:30:27 (the log, the socket gone, the lock left). tmux's `exit-empty` exits at once; the 5 min grace absorbs a relay restart, and an empty exit is when a new binary takes over |
-| scrollback | 10,000,000 bytes per terminal (`create.scrollback_bytes`); clamp `max_scrollback` 64 MiB | **change** (S1: 2 MiB, clamp 16 MiB) | 10 MB is Ghostty's own `scrollback-limit` default. 2 MiB held only ~1.6k rows of 120-column text (measured), less than tmux's `history-limit` of 2000 lines; 10 MB holds ~9.3k (VTE and Alacritty keep 10,000 lines). Idle compression keeps it cheap: a full 10 MB history went from 9.9 MB to 0.86 MB resident (measured, build-log text). The clamp guards against a runaway request, not taste |
+| scrollback | 10,000,000 bytes per terminal (`create.scrollback_bytes`, `--scrollback`); clamp `--max-scrollback` 64 MiB | **change** (S1: 2 MiB, clamp 16 MiB) | 10 MB is Ghostty's own `scrollback-limit` default. 2 MiB held only ~1.6k rows of 120-column text (measured), less than tmux's `history-limit` of 2000 lines; 10 MB holds ~9.3k (VTE and Alacritty keep 10,000 lines). Idle compression keeps it cheap: a full 10 MB history went from 9.9 MB to 0.86 MB resident (measured, build-log text). The clamp guards against a runaway request, not taste |
 | idle compression | after 30 s with no output | keep | libghostty's incremental compression; contents unchanged |
-| lossy queue | 4 MiB per subscription | keep, now a setting | about a second of a flood at the browser's pace; hexe's ring and payload cap are 4 MiB too |
-| blocking owner | pause reads at 1 MiB queued, resume at 256 KiB | keep, now a setting | high/low watermarks; the 4:1 gap avoids flapping |
-| PTY input buffer | 16 MiB per terminal; a whole `INPUT` frame is accepted or refused (`input_full`) | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. 16 MiB matches `max_frame`, so any one paste fits; the memory is used only while a program stops reading |
+| lossy queue | 4 MiB per subscription (`--lossy-queue`) | keep, now a setting | about a second of a flood at the browser's pace; hexe's ring and payload cap are 4 MiB too |
+| blocking owner | pause reads at 1 MiB queued, resume at 256 KiB (`--block-high`, `--block-low`) | keep, now a setting | high/low watermarks; the 4:1 gap avoids flapping |
+| PTY input buffer | 16 MiB per terminal (`--input-buffer`); a whole `INPUT` frame is accepted or refused (`input_full`) | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. 16 MiB matches `max_frame`, so any one paste fits; the memory is used only while a program stops reading |
 | max frame | 16 MiB | keep | |
 | read chunk | 64 KiB | keep | one Linux pipe's worth; keeps a flood's per-read latency small |
 | continuation | 64 KiB | keep | needed for mid-sequence repaints and snapshots |
 | kill grace | `SIGHUP` (or the asked signal), then `SIGKILL` after 2 s | keep | a kill always ends; systemd's stop timeout (90 s) is for services, not a closed window |
 | default colours, `cell_px` | the browser's palette; `[8, 16]` | keep | OSC 10/11 and `CSI 14 t` must answer without waiting |
-| `TERM` | `xterm-256color` | keep | [Environment](#environment) |
+| `TERM` | `xterm-256color` (`--term`; also the emulator's terminfo name, kept per terminal) | keep | [Environment](#environment) |
 | detach | `Ctrl-\` twice (`g3d attach`; `--detach-key`, `G3D_DETACH_KEY`) | keep | dtach, abduco and zmx detach on `Ctrl-\`; pressing it twice keeps a single `Ctrl-\` (the program's `SIGQUIT`) one key away: the first press is held, any other key sends both. Platform note: on some non-US macOS layouts `\` needs Option, so the macOS agent checks it is typeable and the setting is the escape hatch |
 | start wait | a client that starts the daemon retries for 3 s, 20 ms doubling to 250 ms | keep | |
 | brain restart | 100 ms; at most 5 starts in 10 s; then 30 s doubling to 10 min | **new** | systemd's `RestartSec`, `DefaultStartLimitBurst` and `DefaultStartLimitIntervalSec` |
@@ -980,10 +1101,11 @@ terminal are fixed when the terminal is created.
 | snapshot interval | 2 s, terminals with new output only, LZ4 (`--snapshot-interval-ms`, 0 = never) | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
 | upgrade deadline | 10 s for the candidate to report ready | **new** | |
 | client reconnect | 100 ms doubling to 2 s, for 30 s (the relay: `serve --termd-reconnect`) | **new** | covers a crash restart plus the first crash-loop retries |
-| environment source | `auto` (the user manager on Linux, the holder's own otherwise) | **new** | [Environment](#environment) |
-| default program | the passwd shell, as a login shell (argv0 `-<basename>`); `shell`, `login_shell = true` | **change** (S1: the daemon's `$SHELL`, non-login; the relay sent its own `$SHELL`) | tmux, WezTerm's mux and shpool; [The shell, and login or not](#the-shell-and-login-or-not) |
-| locale fill | `LANG=C.UTF-8` (macOS: the user's locale) only when no locale is set and it loads; `fill_locale = true` | **new** | Ghostty, iTerm2, Terminal.app, and this macOS's own `/etc/zprofile`; [Locale](#locale) |
-| environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, launcher and parent-shell variables; `env_scrub` / `env_keep` | **new** | [The policy](#the-policy) |
+| environment source | `auto` (the user manager on Linux, the holder's own otherwise); `--env-source auto\|daemon`, `G3D_TERMD_ENV_SOURCE` | **new** | [Environment](#environment) |
+| user manager wait | 1 s per `create` (`--env-manager-timeout-ms`), then the daemon's own, logged | **new** | the D-Bus call takes 11 ms here; a manager that hangs must not hang a `create` for long |
+| default program | the passwd shell, as a login shell (argv0 `-<basename>`); `--shell`, `--login-shell true` | **change** (S1: the daemon's `$SHELL`, non-login; the relay sent its own `$SHELL`) | tmux, WezTerm's mux and shpool; [The shell, and login or not](#the-shell-and-login-or-not) |
+| locale fill | `LANG=C.UTF-8` (macOS: the user's locale) only when no locale is set and it loads; `--fill-locale true` | **new** | Ghostty, iTerm2, Terminal.app, and this macOS's own `/etc/zprofile`; [Locale](#locale) |
+| environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, launcher and parent-shell variables; `--env-scrub` / `--env-keep` | **new** | [The policy](#the-policy) |
 | `TERM_PROGRAM` | `g3d-termd` + `TERM_PROGRAM_VERSION` | **new** (S1 left the starter's) | tmux, WezTerm, Ghostty each name themselves; [TERM and friends](#term-and-friends) |
 | default cwd | the account's home | **change** (S1: the daemon's, `/`) | [Environment](#environment) |
 | status interval | 1 s (a follower may ask for 250 ms to 60 s); keepalive 30 s | **new** | [Status](#status) |
@@ -1227,7 +1349,8 @@ ours.
 - Builds are capped (`CARGO_BUILD_JOBS=8`) and `target/` is gitignored.
 - `libghostty-vt-sys` builds `ReleaseFast` in every profile (`[profile.dev.package]`): its
   Debug mode parses a flood slowly enough to stall the daemon's own tests.
-- **What `make` builds today (S1):** `make termd` (part of `make build`) builds `g3d-termd`
+- **What `make` builds** (see also [as built](#environment-and-defaults-as-built-2026-11-12): the
+  missing-`vendor/` message, the test hooks compiled out, `make release`): `make termd` (part of `make build`) builds `g3d-termd`
   and `g3d` natively on a Linux host and copies them beside `glyph3d-cli`; on linux-amd64,
   `make linux-amd64` also puts them in `dist/`. `make linux-arm64` builds them as static
   `aarch64-unknown-linux-musl` binaries through cargo-zigbuild and the vendored Zig, when
@@ -1237,7 +1360,8 @@ ours.
   1. linux-arm64 on real hardware (and a glibc build if a target needs one);
   2. macOS (darwin-arm64, then darwin-amd64): a native build on the Mac (the vendor script
      fetches the macOS Zig);
-  3. `make release` shipping `g3d-termd`/`g3d` beside each `glyph3d-cli`;
+  3. `make release` shipping `g3d-termd`/`g3d` beside each `glyph3d-cli`: done for linux-amd64
+     (required) and linux-arm64 (when built); darwin with item 2;
   4. Windows: none (no PTYs; the relay has no terminals there).
 
 ## Workspace layout (D10)
@@ -1330,7 +1454,8 @@ holder.
   `IUTF8` set, ignored signals reset (a holder with `SIGINT` ignored still gives its shell a
   working Ctrl-C), the soft fd limit restored. With a user manager present, the session source is
   read per `create` (a value changed with `systemctl --user set-environment` reaches the next
-  terminal, not a running one).
+  terminal, not a running one). Built as `tests/env.rs`; the per-create read is driven through a
+  file standing in for the manager (a test hook), so no test changes the person's session.
 - **cgroup scopes** (Linux, when a user manager answers): holder, brain and each program in their
   own scopes; with the manager unreachable, spawns still succeed and the status says why.
 - **Status.** The document's shape against a golden file (keys and types); a quiet daemon sends

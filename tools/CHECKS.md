@@ -852,9 +852,11 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
 
 ## The terminal daemon (`crates/`, `g3d-termd`)
 
-- **`cargo test --workspace`** — the Rust side: `g3d-wire` decodes and re-encodes
+- **`cargo test --workspace --features g3d-termd/test-hooks`** — the Rust side (the daemon's test
+  hooks exist only in a `test-hooks` build, so a release binary has none; without the feature the
+  daemon's test binaries fail loud saying so): `g3d-wire` decodes and re-encodes
   PROTOCOL.md's hex examples byte for byte (read straight out of the spec) and filters terminal
-  queries split at every byte; 24 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
+  queries split at every byte; 25 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
   repaints replayed into a fresh libghostty equal the live screen (primary and alternate, modes,
   cursor, title), a subscribe cut mid-escape-sequence, the resize event's exact seq, queries
   answered once, `view` anchoring, history rows, a lossy subscriber resynced (one `lagged`, its
@@ -862,21 +864,29 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   terminal keeps its pace), `take` freeing a wedged blocking owner (and the frame order of `take`
   and subscribe-as-own), a late subscriber told `modes` and the title, a blocking owner and
   a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling (the brain's), a
-  HUP-ignoring child, a panicking owner thread, the namespace lock, idle exit, stop; the holder and
+  HUP-ignoring child, a panicking owner thread, the namespace lock, idle exit, stop, a daemonized
+  log rotating with the brain following it; the holder and
   brain (`tests/restart.rs`): a brain SIGKILLed under a flood (shells and handles kept, a quiet
   screen back exactly, the flood's history whole up to the snapshot and from the high-water mark,
   the gap exactly the reported unseen bytes), `upgrade` under a flood (all 300000 lines in the
   history across it, screens identical, ERROR restart at the exact cut), failed upgrades leaving
   the brain serving, a VT handoff across engines, a crash loop to `brain_failed` and back on
   SIGHUP, the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
+  the environment (`src/env.rs` unit tests, and `tests/env.rs`: a daemon started from a stripped
+  environment with a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's state,
+  `SIGINT` ignored and a low fd limit; its programs' `/proc` environ, argv, cwd, signal masks and
+  limits match the policy: the passwd shell as `-<name>`, home, the locale filled only when none is
+  set, reserved names and bad cwds refused, the session source re-read per create (a file standing
+  in for the user manager), and the real user manager beating a stale starter when one answers);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
   the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
   tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
-  cargo test --workspace
+  cargo test --workspace --features g3d-termd/test-hooks
   ```
 - **`termd-relay-check.mjs`** (tier full) — the relay on termd with a simulated display: spawn +
-  typing, `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
+  typing, a spawn with no argv from a relay carrying another terminal's identity (the account's
+  shell as a login shell in the served root, termd's `TERM_PROGRAM`, none of the relay's identity), `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
   screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
   the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a
