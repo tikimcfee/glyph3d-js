@@ -9,18 +9,21 @@ const MAP_LABEL_OFF_PX = 170;
 
 /**
  * WallNames — how terminals wear their names: a TitleBar on each terminal's top edge, and, when a
- * terminal is too small on screen for its bar to carry the name, a map label instead (placed so
- * no two overlap, with a trace line when detached). Updated once per frame from the same camera
+ * terminal's bar can't carry its name — the terminal is too narrow on screen, or the whole name
+ * would have to shrink past the bar's text floor (TitleBar.nameFits) — a map label instead (placed
+ * so no two overlap, with a trace line when detached). Updated once per frame from the same camera
  * the canvas renders with.
  */
 export default class WallNames {
     /**
      * @param {{ atlas: any, host: HTMLElement, camera: import('./WallCamera.js').default,
-     *           onLabelPress: (id: string, e: PointerEvent) => void }} o
+     *           onLabelPress: (id: string, e: PointerEvent) => void, minTextPx?: number }} o
+     *   minTextPx: the bars' text floor (TitleBar), CSS px; TitleBar's default when absent
      */
-    constructor({ atlas, host, camera, onLabelPress }) {
+    constructor({ atlas, host, camera, onLabelPress, minTextPx }) {
         this._atlas = atlas;
         this._camera = camera;
+        this._minTextPx = minTextPx;
         /** @type {Map<string, TitleBar>} */
         this._bars = new Map();
         /** Terminals whose name is currently a map label. @type {Set<string>} */
@@ -30,7 +33,7 @@ export default class WallNames {
 
     /** Give a newly arrived terminal its title bar. */
     attach(id, grid) {
-        const bar = new TitleBar({ atlas: this._atlas, maxWorldHeight: FLOW_GAP * 0.8 });
+        const bar = new TitleBar({ atlas: this._atlas, maxWorldHeight: FLOW_GAP * 0.8, minTextPx: this._minTextPx });
         grid.add(bar);
         this._bars.set(id, bar);
     }
@@ -69,7 +72,8 @@ export default class WallNames {
             if (b.right < 0 || b.left > view.w || b.bottom < 0 || b.top > view.h) continue;
             boxes.set(id, b);
             const wpx = b.right - b.left;
-            if (wpx < MAP_LABEL_ON_PX) this._mapMode.add(id);
+            const fits = this._bars.get(id)?.nameFits ?? true;
+            if (wpx < MAP_LABEL_ON_PX || !fits) this._mapMode.add(id);
             else if (wpx > MAP_LABEL_OFF_PX) this._mapMode.delete(id);
         }
         const rank = (id) => (id === s.focusedId ? 0 : id === s.hoveredId ? 1 : 2);

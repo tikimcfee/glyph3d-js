@@ -31,14 +31,18 @@ export default class MapLabels {
         /** @type {Map<string, { el: HTMLDivElement, line: SVGLineElement, dot: SVGCircleElement, key: string }>} */
         this._nodes = new Map();
         this._prev = new Map();     // id → candidate held last frame (placement hysteresis)
-        this._widths = new Map();   // name → measured text width
+        /** id → its label's width and the name measured; dropped with the label's node. @type {Map<string, { name: string, w: number }>} */
+        this._widths = new Map();
         this._ctx = document.createElement('canvas').getContext('2d');
         this._ctx.font = FONT;
     }
 
-    _width(name) {
-        let w = this._widths.get(name);
-        if (w == null) { w = Math.ceil(this._ctx.measureText(name).width) + 2 * PAD_X + 2; this._widths.set(name, w); }
+    /** A label's box width (CSS px), measured once per name it shows. */
+    _width(id, name) {
+        const c = this._widths.get(id);
+        if (c?.name === name) return c.w;
+        const w = Math.ceil(this._ctx.measureText(name).width) + 2 * PAD_X + 2;
+        this._widths.set(id, { name, w });
         return w;
     }
 
@@ -70,7 +74,7 @@ export default class MapLabels {
      * @param {import('./labelPlacement.js').Box[]} obstacles - every on-screen terminal's rect (labels avoid covering them when they can)
      */
     update(items, view, obstacles) {
-        const placed = placeLabels(items.map((it) => ({ id: it.id, target: it.target, w: this._width(it.name), h: LABEL_H })), view, this._prev, obstacles);
+        const placed = placeLabels(items.map((it) => ({ id: it.id, target: it.target, w: this._width(it.id, it.name), h: LABEL_H })), view, this._prev, obstacles);
         const live = new Set();
         for (const it of items) {
             const p = placed.get(it.id);
@@ -100,7 +104,7 @@ export default class MapLabels {
         for (const [id, n] of this._nodes) {
             if (live.has(id)) continue;
             n.el.remove(); n.line.remove(); n.dot.remove();
-            this._nodes.delete(id); this._prev.delete(id);
+            this._nodes.delete(id); this._prev.delete(id); this._widths.delete(id);
         }
     }
 
@@ -118,5 +122,5 @@ export default class MapLabels {
         return out;
     }
 
-    dispose() { this._root.remove(); this._nodes.clear(); }
+    dispose() { this._root.remove(); this._nodes.clear(); this._widths.clear(); }
 }
