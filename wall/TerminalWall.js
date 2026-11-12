@@ -10,6 +10,11 @@ import WallStore from './WallStore.js';
 import WallNames from './WallNames.js';
 import WallPointer from './WallPointer.js';
 import WallKeys from './WallKeys.js';
+import WallGroups from './WallGroups.js';
+import BarButtons from './BarButtons.js';
+import SelectionOverlay from './SelectionOverlay.js';
+import registerWallCommands from './wallCommands.js';
+import { WALL_CONFIG } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
@@ -70,10 +75,15 @@ function shortTitle(title) {
  *                (_terminalHost: where terminals land, what focus means, what persists), and one
  *                WebSocketBridge (this page is the relay's DISPLAY)
  *   scene        the renderer's scene systems (core SceneSystems — the set the IDE installs)
- *   terminals    arrival order, focus, hover, placement, names (WallStore persists positions + names,
- *                per relay, pruned against the relay's live terminals on every connect)
+ *   terminals    arrival order, focus, hover, selection, placement, names, hiding (WallStore
+ *                persists spots, names, hidden terminals, groups and the sidebar, per relay, pruned
+ *                against the relay's live terminals on every connect)
+ *   verbs        the wall's own (wallCommands: wall.hide/show/close/select/group…/sidebar/config) on
+ *                the same router — the buttons, sidebar, palette and chords all run them (run())
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
- *                map labels), WallPointer (gestures), WallKeys (keyboard)
+ *                map labels), WallGroups (groups: tiling, header drags, frames), BarButtons (a hovered
+ *                bar's hide + hold-to-close), SelectionOverlay (lasso, outlines, the group button),
+ *                WallPointer (gestures), WallKeys (keyboard)
  *
  * The constructor builds what lives as long as the wall (store, camera mapping, router, bridge);
  * start() installs everything that touches the scene, the registry, the DOM or the socket, and stop()
@@ -83,15 +93,20 @@ function shortTitle(title) {
 export default class TerminalWall {
     /**
      * @param {{ scene: import('three').Scene, camera: import('three').OrthographicCamera, gl: any,
-     *           atlas: any, registry: any, relayPort: number }} deps
+     *           atlas: any, registry: any, relayPort: number, config?: Partial<import('./wallConfig.js').WallConfig> }} deps
+     *   config: knobs over WALL_CONFIG (also dialable live: wall.config)
      */
-    constructor({ scene, camera, gl, atlas, registry, relayPort }) {
+    constructor({ scene, camera, gl, atlas, registry, relayPort, config = {} }) {
         /** Terminal ids in arrival order — the order cycling walks. @type {string[]} */
         this.order = [];
         /** @type {string|null} */
         this.focusedId = null;
         /** @type {string|null} */
         this.hoveredId = null;
+        /** Selected terminals (shown ones only) — what wall.group gathers. @type {Set<string>} */
+        this.selection = new Set();
+        /** @type {import('./wallConfig.js').WallConfig} */
+        this.config = { ...WALL_CONFIG, ...config };
         /** @type {RelayState} */
         this.relay = { state: 'offline', reason: '' };
         this._listeners = new Set();
@@ -108,6 +123,7 @@ export default class TerminalWall {
         };
         this.router = new CommandRouter(this.ctx);
         registerTerminalCommands(this.router);
+        registerWallCommands(this.router, this);
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
         this.bridge = null;
@@ -122,9 +138,21 @@ export default class TerminalWall {
         this.ctx.sceneSystems = new SceneSystems(scene, atlas, renderer);
         this.pointer = new WallPointer(this, this.viewport);
         this.keys = new WallKeys(this);
+        const host = this.viewport.canvas.parentElement;
         this.names = new WallNames({
-            atlas, host: this.viewport.canvas.parentElement, camera: this.viewport,
+            atlas, host, camera: this.viewport,
             onLabelPress: (id, e) => this.pointer.pressLabel(id, e),
+        });
+        this.groups = new WallGroups(this, { atlas, scene });
+        this.barButtons = new BarButtons(host, {
+            onHide: (id) => this.run(['wall.hide', id]),
+            onClose: (id) => this.run(['wall.close', id]),
+            holdMs: () => this.config.closeHoldMs,
+            minPx: () => this.config.barButtonsMinPx,
+        });
+        this.selectionOverlay = new SelectionOverlay(host, {
+            onGroup: () => this.run(['wall.group']),
+            onClear: () => this.run(['wall.select', 'none']),
         });
         for (const id of this.order) this.names.attach(id, this.ctx.terminals.get(id));
         registry.addChangeListener(this._onRegistry);
@@ -154,26 +182,60 @@ export default class TerminalWall {
         this.ctx.registry.removeChangeListener(this._onRegistry);
         this.names.dispose();
         this.names = null;
+        this.groups.dispose();
+        this.groups = null;
+        this.barButtons.dispose();
+        this.barButtons = null;
+        this.selectionOverlay.dispose();
+        this.selectionOverlay = null;
         this.ctx.sceneSystems.dispose();  // hands the scene's hooks back to three
         this.ctx.sceneSystems = null;
     }
 
-    /** Per frame: track the viewport, ease the camera, lay out names, far-LOD. */
+    /** Per frame: track the viewport, ease the camera, lay out names, group frames, the screen-space
+     *  chrome (bar buttons, selection), far-LOD. */
     tick(dt, size) {
         if (!this._running) return;
         this.viewport.setView(size.width, size.height);
         this.viewport.step(dt);
+        const shown = this.shownOrder();
         this.names.update({
-            order: this.order, terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
+            order: shown, terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
             nameOf: (id) => this.nameOf(id), windowRect: (id) => this.windowRect(id),
         });
+        this.groups.update(this.viewport.zoom, this.focusedId);
+        this._tickChrome();
         this.ctx.sceneSystems.update(this.viewport.camera, size.height);
+    }
+
+    /** Place the DOM chrome that tracks the canvas: the hovered bar's buttons, the selection marks. */
+    _tickChrome() {
+        const v = this.viewport;
+        const bid = this.barButtons.holdTarget ?? (this.pointer.busy ? null : this.hoveredId);
+        if (bid && this.isShown(bid)) {
+            const win = v.toScreenBox(this.windowRect(bid)), body = v.toScreenBox(this.terminalRect(bid));
+            this.barButtons.update(bid, win, body.top - win.top);
+        } else this.barButtons.update(null, null, 0);
+        const items = [];
+        for (const id of this.selection) if (this.isShown(id)) items.push({ id, box: v.toScreenBox(this.windowRect(id)) });
+        this.selectionOverlay.update(items, v.view, this.pointer.lassoing);
     }
 
     /** Subscribe to state changes (connection, terminal set, focus, names). Returns an unsubscribe. */
     onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
 
     _emit() { for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } } }
+
+    /**
+     * Run a verb on the wall's router — what the buttons, sidebar, palette and chords call. A refusal
+     * is logged with the request, loud, and returned.
+     * @param {string|string[]} cmd @returns {Promise<{text: string, data: any}>}
+     */
+    async run(cmd) {
+        const r = await this.router.execute(cmd);
+        if (r.text.startsWith('ERR')) console.warn(`[wall] ${Array.isArray(cmd) ? cmd.join(' ') : cmd} → ${r.text}`);
+        return r;
+    }
 
     // ── the relay ───────────────────────────────────────────────────────────
 
@@ -229,7 +291,11 @@ export default class TerminalWall {
         if (!r) { console.warn(`[wall] no terminal.recovered reply in ${RECOVER_REPLY_MS} ms — names and spots kept as they were`); return; }
         if (!Array.isArray(r.live)) { console.warn(`[wall] the relay couldn't list its terminals (${r.error ?? 'no live list'}) — names and spots kept as they were`); return; }
         const gone = this.store.prune(new Set([...r.live, ...this.ctx.terminals.keys()]));
-        if (gone.length) { console.info(`[wall] forgot ${gone.length} terminal(s) whose sessions are gone: ${gone.join(', ')}`); this._emit(); }
+        if (gone.length) {
+            console.info(`[wall] forgot ${gone.length} terminal(s) whose sessions are gone: ${gone.join(', ')}`);
+            this.groups?.relayoutAll();
+            this._emit();
+        }
     }
 
     // ── terminals ───────────────────────────────────────────────────────────
@@ -248,16 +314,33 @@ export default class TerminalWall {
     }
 
     /**
-     * What's under a world point: each terminal in stacking order (the focused one on top, then the
-     * latest arrivals), tested whole — its border band (of the whole window, so the top edge is the
-     * bar's top), then its title bar, then its body — before the one beneath it.
-     * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|null}
+     * What's under a world point: each SHOWN terminal in stacking order (the focused one on top, then
+     * the latest arrivals), tested whole — its border band (of the whole window, so the top edge is
+     * the bar's top), then its title bar, then its body — before the one beneath it; then a group's
+     * header. A group's backdrop is canvas.
+     * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|{ group: string, part: 'header' }|null}
      */
     hit(p) {
-        const ids = [...this.order].reverse();
+        const ids = this.shownOrder().reverse();
         if (this.focusedId) ids.sort((a, b) => (b === this.focusedId) - (a === this.focusedId));
         const stack = ids.map((id) => ({ id, window: this.windowRect(id), body: this.terminalRect(id) }));
-        return hitTest(stack, p.x, p.y, EDGE_GRAB_PX / this.viewport.zoom);
+        const t = hitTest(stack, p.x, p.y, EDGE_GRAB_PX / this.viewport.zoom);
+        if (t) return t;
+        const group = this.groups.headerAt(p, this.viewport.zoom);
+        return group ? { group, part: 'header' } : null;
+    }
+
+    /** Whether a terminal is on the wall and not hidden. */
+    isShown(id) { return this.ctx.terminals.has(id) && !this.store.hidden(id); }
+
+    /** The shown terminals, in arrival order — what cycling, fitting, hitting and naming walk. */
+    shownOrder() { return this.order.filter((id) => !this.store.hidden(id)); }
+
+    /** Move a terminal so its body's top-left sits at (x, y) — a tiling's place. */
+    placeBody(id, { x, y }) {
+        const grid = this.ctx.terminals.get(id), r = rectOf(grid);
+        grid.position.x += x - r.minX;
+        grid.position.y += y - r.maxY;
     }
 
     /** Light the hovered terminal's border. */
@@ -287,30 +370,89 @@ export default class TerminalWall {
         return true;
     }
 
+    // ── hide + show ─────────────────────────────────────────────────────────
+
+    /** Take a terminal off the canvas; it keeps running (and its spot), and comes back with show(). */
+    hide(id) {
+        const grid = this.ctx.terminals.get(id);
+        if (!grid || this.store.hidden(id)) return;
+        this.store.setHidden(id, true);
+        grid.visible = false;
+        if (this.focusedId === id) this.focus(null);
+        if (this.hoveredId === id) this.setHovered(null);
+        this.selection.delete(id);
+        this.groups.relayoutOf(id);
+        this._emit();
+    }
+
+    /** Bring a hidden terminal back, at its own spot (a tiled member: its place in the tiling). */
+    show(id) {
+        const grid = this.ctx.terminals.get(id);
+        if (!grid || !this.store.hidden(id)) return;
+        this.store.setHidden(id, false);
+        grid.visible = true;
+        this.groups.relayoutOf(id);
+        this._emit();
+    }
+
+    // ── selection ───────────────────────────────────────────────────────────
+
+    /** Select exactly these terminals (hidden or absent ones are left out). */
+    select(ids) {
+        const next = new Set(ids.filter((id) => this.isShown(id)));
+        if (next.size === this.selection.size && [...next].every((id) => this.selection.has(id))) return;
+        this.selection = next;
+        this._emit();
+    }
+
+    // ── the sidebar ─────────────────────────────────────────────────────────
+
+    /** @param {Partial<import('./WallStore.js').SidebarState>} patch */
+    setSidebar(patch) {
+        this.store.setSidebar(patch);
+        this._emit();
+    }
+
     /**
-     * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null,
-     *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string}[] }}
+     * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null, selection: string[],
+     *   sidebar: import('./WallStore.js').SidebarState,
+     *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null}[],
+     *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform', columns:number, gap:number, members:string[]}[] }}
+     *   a group lists only its members on the wall
      */
     snapshot() {
         return {
             connected: this.relay.state === 'up',
             relay: this.relay,
             focusedId: this.focusedId,
+            selection: [...this.selection],
+            sidebar: this.store.sidebar(),
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
                 const lines = g.readText();
                 let preview = '';
                 for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { preview = lines[i].trim(); break; } }
-                return { id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview };
+                return {
+                    id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview,
+                    hidden: this.store.hidden(id), group: this.store.groupOf(id),
+                };
             }),
+            groups: this.groups ? this.groups.ids().map((gid) => {
+                const g = this.groups.get(gid);
+                return {
+                    id: gid, name: this.groups.nameOf(gid), named: !!g.name, layout: g.layout, columns: g.columns, gap: g.gap,
+                    members: g.members.filter((id) => this.ctx.terminals.has(id)),
+                };
+            }) : [],
         };
     }
 
     // ── focus + framing ─────────────────────────────────────────────────────
 
-    /** Focus a terminal (keys go to it). `frame` also eases the camera to fit it. */
+    /** Focus a terminal (keys go to it) — a hidden one is shown first. `frame` also eases the camera to fit it. */
     focus(id, { frame = false } = {}) {
         if (id != null && !this.ctx.terminals.has(id)) return false;
+        if (id != null) this.show(id);
         const prev = this.focusedId ? this.ctx.terminals.get(this.focusedId) : null;
         if (prev && this.focusedId !== id) {
             prev.setBorderFlag(BORDER_FLAGS.FOCUSED, false);
@@ -329,9 +471,9 @@ export default class TerminalWall {
         return true;
     }
 
-    /** Cycle focus through the terminals in arrival order, framing the one it lands on. */
+    /** Cycle focus through the shown terminals in arrival order, framing the one it lands on. */
     cycleFocus(dir) {
-        const next = cycle(this.order, this.focusedId, dir);
+        const next = cycle(this.shownOrder(), this.focusedId, dir);
         if (next) this.focus(next, { frame: true });
     }
 
@@ -348,12 +490,26 @@ export default class TerminalWall {
         return this.viewport.fitTarget(this.windowRect(id, first.zoom), 0.94, cap);
     }
 
-    /** Ease the camera to fit every terminal (bars included). */
+    /** Ease the camera to fit every shown terminal (bars included). */
     fitAll() {
-        const all = unionRect(this.order.map((id) => this.terminalRect(id)));
+        const shown = this.shownOrder();
+        const all = unionRect(shown.map((id) => this.terminalRect(id)));
         if (!all) return;
         const first = this.viewport.fitTarget(all, 0.9);
-        this.viewport.easeTo(this.viewport.fitTarget(unionRect(this.order.map((id) => this.windowRect(id, first.zoom))), 0.9));
+        this.viewport.easeTo(this.viewport.fitTarget(unionRect(shown.map((id) => this.windowRect(id, first.zoom))), 0.9));
+    }
+
+    /** Ease the camera to fit a group's shown members, its header included. @returns {boolean} */
+    frameGroup(gid) {
+        const groupRect = (zoom) => {
+            const f = this.groups.frameRect(gid, zoom), h = this.groups.headerRect(gid, zoom);
+            return f && h ? unionRect([f, h]) : f;
+        };
+        const at = groupRect(this.viewport.zoom);
+        if (!at) return false;
+        const first = this.viewport.fitTarget(at, 0.9);
+        this.viewport.easeTo(this.viewport.fitTarget(groupRect(first.zoom), 0.9));
+        return true;
     }
 
     /** Toggle between framing the focused terminal and fitting everything. */
@@ -375,10 +531,16 @@ export default class TerminalWall {
         return { ok: false, id: r.data?.id, reason: r.text };
     }
 
-    /** Fully close a terminal — its shell and tmux session too — and forget its name and spot now. */
+    /** Fully close a terminal — its shell and tmux session too — and forget it now: its name, spot,
+     *  hiding and place in a group (the group re-tiles; a group left empty goes). */
     kill(id) {
+        const gid = this.store.groupOf(id);
         this.store.forget(id);
-        return this.router.execute(['terminal.kill', id]);
+        this.selection.delete(id);
+        const r = this.router.execute(['terminal.kill', id]);
+        if (gid && this.store.group(gid)) this.groups?.relayout(gid);
+        this._emit();
+        return r;
     }
 
     _syncTerminals() {
@@ -390,17 +552,23 @@ export default class TerminalWall {
             grid.setBorder(BORDER_STYLE);
             grid.setBorderFlag(BORDER_FLAGS.EDGE, true);   // the always-visible frame
             for (const { role } of TerminalGrid.CONTROL_SPEC) grid.setControlVisible(role, false);
-            grid.onResize(() => this._emit());
+            grid.onResize(() => { this.groups?.relayoutOf(id); this._emit(); });
             grid.onWindowTitle(() => this._emit());
+            if (this.store.hidden(id)) grid.visible = false;
             this.names.attach(id, grid);
+            this.groups?.relayoutOf(id);
             changed = true;
         }
         this.names.prune((id) => live.has(id));
-        const before = this.order.length;
-        this.order = this.order.filter((id) => live.has(id));
-        if (this.order.length !== before) changed = true;
+        const left = this.order.filter((id) => !live.has(id));
+        if (left.length) {
+            this.order = this.order.filter((id) => live.has(id));
+            for (const id of left) this.groups?.relayoutOf(id);   // a tiling closes over a grid that went
+            changed = true;
+        }
         if (this.focusedId && !live.has(this.focusedId)) { this.focusedId = null; changed = true; }
         if (this.hoveredId && !live.has(this.hoveredId)) this.hoveredId = null;
+        for (const id of this.selection) if (!live.has(id)) { this.selection.delete(id); changed = true; }
         if (changed) this._emit();
     }
 
@@ -428,7 +596,8 @@ export default class TerminalWall {
         };
     }
 
-    /** Land a new grid at its remembered spot, else the first free flow slot. */
+    /** Land a new grid at its remembered spot, else the first free flow slot (a hidden terminal's
+     *  spot stays taken: it comes back there). */
     _place(grid) {
         const saved = this.store.position(grid.terminalId);
         if (saved) { grid.position.set(saved.x, saved.y, 0); return; }
