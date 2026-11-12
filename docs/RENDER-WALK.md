@@ -112,6 +112,35 @@ each sweep).
 Measured on the hub shape: a 4-channel pick's passes, 1.6–1.8 → 0.3–0.4 ms. The hover pick runs as
 fast as picks land, so while the pointer moves that is up to ~1.3 ms a frame.
 
+## The batches' own walks
+
+The batches refresh from `scene.onBeforeRender` every frame, so what they visit at rest is a
+per-frame cost too. Each skips what held still:
+
+- **GlyphBatch** caches each label's refusal verdict until its slots, count or group table move,
+  reuses one record per label, and skips a label's depth, pose and row math while its world matrix,
+  the camera, its group row and its shown state hold; it uploads only the group rows that changed
+  (none at rest).
+- **PanelBatch** keeps the list of enrolled panels under its scene and shown, rebuilt only when
+  SceneTransforms' show generation or the enrolled set moves (an enrol, an add, a remove), so at rest
+  it never touches a hidden panel; a shown one keeps its cull outcome and instance matrix while it
+  and the camera hold, re-reads a flat panel's colours only when its material's `panelVersion`
+  moves, and each bucket uploads only the span that changed (none at rest).
+- **InstancedField** group tables start at one row (group 0) and double on demand; the 1×1
+  placeholder textures are shared by every glyph material.
+
+Measured on the hub shape (3,235 panels enrolled, 1,598 shown): the shown list was not rebuilt once
+in 221 frames at rest, and PanelBatch's self time fell 0.84 · 0.61 → 0.29 · 0.13 ms a frame
+(interleaved A/B on one scene). With everything above, the pass measured main-thread work a frame
+at p50 5.7 · 5.1 → 3.3 · 3.5 · 2.9 ms and three's `projectObject` at 1.22–1.66 → 0.26–0.35 ms.
+
+The largest costs of ours left at rest, in that profile: `PanelBatch.update` (0.39–0.44 ms — it
+still visits every shown panel: a lookup and a 16-element matrix compare each), three's walk of the
+flat lists (0.26–0.35 ms), the GlyphBatch gather (0.23–0.36 ms: every label's verdict and matrix
+compare), then `GlyphFarLod.update` (~0.2 ms: each live field's box math every frame). Cutting the
+PanelBatch walk further needs a frame-level "nothing moved" signal, which SceneTransforms can't give
+yet: the nodes it hands to three every walk (cameras, hand-written matrices, pivots) move unmarked.
+
 ## Not covered
 
 - The WebGPU renderer (this is WebGL2's `WebGLRenderer`).

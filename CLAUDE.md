@@ -151,7 +151,10 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 
 - **Single instanced draw call.** Text becomes a `Float32Array` of per-glyph instance
   attributes (built single-pass, optionally in a Web Worker via `WorkerBridge`) and
-  renders as one `InstancedBufferGeometry`.
+  renders as one `InstancedBufferGeometry`. A field's group table (per-group pose, colour, clip)
+  starts at one row — group 0, all most fields use — and `createGroup` doubles it on demand up to
+  `groupCap` (past it: loud, the dead group); the 1×1 placeholder textures are shared by every glyph
+  material. Gate: `tools/group-table.test.mjs`.
 - **CodeGrid** is a source file as an `Object3D` — cursor + in-place edit ops, highlight
   ranges, a windowing/framing layout, and a caret overlay. The edit path funnels
   through `_relayoutPreservingCursor()`.
@@ -205,21 +208,26 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (this frame's matrices; never on pick passes) into one draw per kind × render state, taking each
   object off the view camera's layer 0. Buckets cull per instance, sort translucent instances as
   three sorts objects, and draw just before their render-order band (panels, then fills, then
-  outlines). A still panel costs it nothing: its cull outcome stands while its world matrix and the
-  camera hold, its instance matrix while it and the eye hold, and a flat panel's colours and flags
+  outlines). It walks only the enrolled panels under its scene and shown (a list rebuilt when the
+  show generation or the enrolled set moves), and a still one costs it nothing: its cull outcome
+  stands while its world matrix and the camera hold, its instance matrix while it and the eye hold, and a flat panel's colours and flags
   are re-read only when its material's `panelVersion` moves — every restyle goes through the
   `createPanelMaterial` handle, which bumps it (a hand-written uniform goes unseen); box fills and
   edges are read and compared every frame. Each bucket uploads only the span that changed.
-  Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-skip.test.mjs`, `tools/panel-batch-check.mjs`.
+  Gates: `tools/panel-batch.test.mjs`, `tools/panel-batch-skip.test.mjs`,
+  `tools/panel-batch-shown.test.mjs`, `tools/panel-batch-check.mjs`.
 - **Glyph batching** (`collections/GlyphBatch.js`): labels (every FieldLabel — book tabs,
   nameplates, dock titles) stay real InstancedFields their owners write and pose, but draw from
   ONE arena field: `enrollGlyphField(field)` marks one; a `GlyphBatch` refreshes from
   `scene.onBeforeRender`, copies each label's glyphs into a range (in three's far → near order;
   recopied only when text, colour, membership or that order changes) with its own group-table
-  row, writes each row's pose from the label mesh's matrixWorld (camera-relative) every frame,
-  and zeroes the alpha of hidden or off-frustum labels. A sheared pose or a glyph outside group 0
-  draws itself; batched labels skip far-LOD. Gates: `tools/glyph-batch.test.mjs`,
-  `tools/glyph-batch-check.mjs`.
+  row, writes each row's pose from the label mesh's matrixWorld (camera-relative), and zeroes the
+  alpha of hidden or off-frustum labels. A still label costs it nothing: its verdict is cached until
+  its slots, count or group table move, and its pose and row math are skipped while its world
+  matrix, the camera, its group row and its shown state hold; only changed rows upload (per-row
+  ranges up to `rangeRows`, else the whole table; none at rest). A sheared pose or a glyph outside
+  group 0 draws itself; batched labels skip far-LOD. Gates: `tools/glyph-batch.test.mjs`,
+  `tools/glyph-batch-upload.test.mjs`, `tools/glyph-batch-check.mjs`.
 - **Scene transforms** (`collections/SceneTransforms.js`): world matrices are recomputed where
   something moved, not across the whole tree every frame. A node joining the scene gets
   `TrackedVector3` position/scale (its old vectors are frozen — a write through a reference held
