@@ -14,7 +14,6 @@
 
 import * as TSMOD from 'web-tree-sitter';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { LANGUAGES } from '../packages/glyph3d-core/src/parsing/languageRegistry.js';
 
 const { Parser, Language, Query } = (TSMOD.default && TSMOD.default.Parser) ? TSMOD.default : TSMOD;
@@ -34,7 +33,7 @@ let failures = 0;
 for (const key of Object.keys(LANGUAGES)) {
   const desc = LANGUAGES[key];
   try {
-    const bytes = new Uint8Array(readFileSync(fileURLToPath(desc.grammarUrl)));
+    const bytes = new Uint8Array(readFileSync(desc.grammarUrl));
     const lang = await Language.load(bytes);
     let q;
     try { q = new Query(lang, desc.query); }

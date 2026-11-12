@@ -1,0 +1,25 @@
+// knip — unused files, exports and dependencies. REPORT-ONLY: the check runner prints its
+// counts as a NOTE (`knip` in tools/check-manifest.mjs) and gates nothing; the baseline's
+// findings are cleanup to do, listed in full by `bunx knip`.
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // _experiments/ needs no ignore: it is in no workspace's project, so knip reports nothing there
+  // (app/glyph-bench.jsx reaching into it counts as a use of those files).
+  // Run as binaries by tools (tools/verb.mjs, tools/check.mjs) or read into a page by path
+  // (webgl-memory, tools/itest/driver.mjs): knip sees neither as a use.
+  "ignoreDependencies": ["@ast-grep/cli", "srcwalk", "dependency-cruiser", "webgl-memory"],
+  "workspaces": {
+    ".": {
+      "entry": ["tools/**/*.mjs"],
+      "project": ["tools/**/*.mjs"]
+    },
+    "app": {
+      // glyph-bench.html loads /glyph-bench.jsx by a root-absolute src knip does not follow.
+      "entry": ["*.html", "glyph-bench.jsx"]
+    },
+    "wall": {
+      "entry": ["index.html"]
+    },
+    "packages/*": {}
+  }
+}

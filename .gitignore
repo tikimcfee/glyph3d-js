@@ -51,5 +51,13 @@ app/public/slug-core/
 
 # Browser console capture (dev aid)
 console.log
-.claude/
+# Agent state stays local (worktrees live in .claude/worktrees); the project skills are shared.
+.claude/*
+!.claude/skills/
 .glyph3d/
+
+# Check runner output (tools/check.mjs): last-run.json, kept failures, its Vite cache
+/out/
+
+# Perf ledger rows (tools/perf-ledger.mjs): this machine's measurements, never committed
+/perf/

@@ -4,7 +4,7 @@
  *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
- * --relay (tools/wall-relay.mjs: `serve --relay-only` on the tmux socket `glyph-wall-e2e`, no
+ * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` on the tmux socket `glyph-wall-e2e`, no
  * gomuxai), so it can neither adopt nor kill a person's terminals, and refuses a port something
  * already listens on — the relay takes one display, and a person's may be on it — unless
  * --reuse-relay names one you started (then it says so, and skips the relay-restart steps). Spawns
@@ -24,7 +24,7 @@
  * terminal verbs run against the wall (terminal.move, terminal.focus). Exit 1 on any FAIL.
  */
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
-import { privateRelay } from './wall-relay.mjs';
+import { privateRelay } from './lib/wall-relay.mjs';
 import { dialRelay } from './lib/relay.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };

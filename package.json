@@ -21,9 +21,18 @@
   "homepage": "https://github.com/tikimcfee/glyph3d-js#readme",
   "bugs": "https://github.com/tikimcfee/glyph3d-js/issues",
   "devDependencies": {
+    "@ast-grep/cli": "^0.51.2",
     "@types/three": "~0.185.0",
+    "dependency-cruiser": "^18.7.2",
     "harfbuzzjs": "^0.4.8",
+    "knip": "^6.45.1",
     "playwright": "^1.60.0",
-    "three": "^0.185.1"
-  }
+    "srcwalk": "^1.8.1",
+    "three": "^0.185.1",
+    "webgl-memory": "^1.1.3"
+  },
+  "trustedDependencies": [
+    "@ast-grep/cli",
+    "srcwalk"
+  ]
 }

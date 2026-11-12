@@ -6,7 +6,7 @@
  *                                      [--terminals 14] [--width 3024 --height 1964] [--frames 120]
  *
  * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
- * (tools/wall-relay.mjs: tmux socket `glyph-wall-gpu`, no gomuxai; killed with its tmux server at the
+ * (tools/lib/wall-relay.mjs: tmux socket `glyph-wall-gpu`, no gomuxai; killed with its tmux server at the
  * end) and refuses a port something already listens on, unless --reuse-relay names a relay you
  * started. Spawns --terminals of its own and fills only those with text (a reused relay's other
  * terminals are drawn, never typed into); kills them at the end. Launches a real-GPU browser
@@ -18,7 +18,7 @@
  * GPU time is per main render pass, one pass per frame here (the wall has no second pass).
  */
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
-import { privateRelay, spawnOwnTerminals } from './wall-relay.mjs';
+import { privateRelay, spawnOwnTerminals } from './lib/wall-relay.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL = arg('--url', 'http://localhost:5180/');

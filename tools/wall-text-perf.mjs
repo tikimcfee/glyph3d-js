@@ -14,7 +14,7 @@
  *                                [--seq 300000] [--source-bytes 2000000] [--top 25]
  *
  * Needs the wall's Vite (:5180) and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
- * (tools/wall-relay.mjs: tmux socket `glyph-wall-text-perf`, no gomuxai; killed with its tmux server
+ * (tools/lib/wall-relay.mjs: tmux socket `glyph-wall-text-perf`, no gomuxai; killed with its tmux server
  * at the end) and refuses a port something already listens on, unless --reuse-relay names a relay
  * you started. Spawns max(--scale) terminals of its own and writes only to those (a reused relay's
  * other terminals are drawn, never typed into); kills them at the end. Launches a real-GPU browser
@@ -56,7 +56,7 @@
  */
 
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
-import { privateRelay, spawnOwnTerminals } from './wall-relay.mjs';
+import { privateRelay, spawnOwnTerminals } from './lib/wall-relay.mjs';
 import { writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

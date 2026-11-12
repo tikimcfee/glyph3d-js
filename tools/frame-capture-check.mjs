@@ -5,10 +5,13 @@
 // pattern we can screenshot — making the FrameGrid render path verifiable headlessly. Opens
 // CLIENT-ONLY (no relay dial) so it never touches the live session.
 //
-//   bun tools/frame-capture-check.mjs   →   /tmp/frame-capture-check.png + a state dump
+//   bun tools/frame-capture-check.mjs [--url URL]   →   /tmp/frame-capture-check.png + a state dump
 
 import { chromium } from 'playwright';
 import { openApp, webgpuArgs } from './itest/driver.mjs';
+
+const urlAt = process.argv.indexOf('--url');
+const URL = urlAt > 0 ? process.argv[urlAt + 1] : 'http://localhost:5173/';
 
 const browser = await chromium.launch({
   headless: true,
@@ -20,7 +23,7 @@ const browser = await chromium.launch({
   ],
 });
 try {
-  const app = await openApp(browser, { wait: 4000 }); // relayPort null → client-only, no contention
+  const app = await openApp(browser, { url: URL, wait: 4000 }); // relayPort null → client-only, no contention
   const cap = await app.cmd('frame.capture');
   console.log('frame.capture →', JSON.stringify(cap));
   await app.waitFor(2500); // let the video deliver frames + the field render

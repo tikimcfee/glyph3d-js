@@ -19,7 +19,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(ROOT, 'glyph3d-cli');
 
 /** @param {number} port @param {string} host @returns {Promise<boolean>} */

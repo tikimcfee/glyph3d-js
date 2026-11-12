@@ -22,7 +22,7 @@ terminals in 3D space. The repo is organized as **packages, two apps, and a cli*
   (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. Names and spots
   (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
   a kill forgets at once. `TerminalWall` is its composition root (start/stop symmetric); gate
-  `bun tools/wall-e2e.mjs` — its own relay (`tools/wall-relay.mjs`, which the wall's perf tools
+  `bun tools/wall-e2e.mjs` — its own relay (`tools/lib/wall-relay.mjs`, which the wall's perf tools
   share), tmux socket and terminals; `--reuse-relay` to run on one you started.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.

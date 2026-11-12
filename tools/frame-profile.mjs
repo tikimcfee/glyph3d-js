@@ -7,7 +7,9 @@
  *                callbacks), and GPU time per frame (EXT_disjoint_timer_query_webgl2).
  *   2. CENSUS  — draw calls per frame by program, GL calls per frame by name, bytes
  *                uploaded per frame (buffer + texture), renderer.info, scene census
- *                (meshes, visible, instanced fields, live instances).
+ *                (meshes, visible, instanced fields, live instances), and with --vram the GPU
+ *                memory the context holds, by type (webgl-memory: buffer / texture /
+ *                renderbuffer / drawingbuffer bytes, live object counts).
  *   3. PROFILE — a CDP sampling CPU profile, self time bucketed (three.js / our core /
  *                app / react / other) with the top functions.
  *
@@ -17,6 +19,9 @@
  *                               [--cmd 'verb args']…   (after the load + fit, before measuring)
  *                               [--eval 'js']          (page setup after --cmd, e.g. an A/B toggle)
  *                               [--hitch MS]           (frames longer than MS: what ran in them; default 25)
+ *                               [--vram]               (CENSUS gains GPU bytes by type — see below)
+ *                               [--ledger SCENARIO]    (append the headline numbers to this host's
+ *                                                       perf ledger and compare them to its history)
  *
  * Needs Vite (:5173) and a PRIVATE relay serving a root you don't mind (session=off keeps
  * the page from autosaving, but the relay's root is where a save would land):
@@ -24,11 +29,18 @@
  * --dir must sit inside that relay's root (file.openDir is relay-rooted).
  *
  * --uncapped disables vsync so the frame floor is visible below 16.6ms.
+ * --vram loads webgl-memory into the page before the app (tools/itest/driver.mjs), which wraps
+ * EVERY GL call of the context: the TIMING pass then carries that wrapper's cost, and says so
+ * (timing.skewedBy). Take timings for the ledger without it, VRAM with it, when both matter.
+ * --ledger SCENARIO appends frame gap, main-thread work, the main pass's CPU/GPU ms, draws and
+ * upload bytes per frame (+ VRAM bytes with --vram) to perf/<host-key>.jsonl
+ * (tools/perf-ledger.mjs), then prints each against this host's rolling median for SCENARIO.
  * Refuses to report from a SOFTWARE GL renderer (SwiftShader / llvmpipe) unless
  * GLYPH_ALLOW_SOFTWARE=1.
  */
 
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
+import { appendRows, compare, hostKey, printCompare } from './perf-ledger.mjs';
 import { writeFileSync } from 'node:fs';
 
 const arg = (k, d = null) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -44,13 +56,15 @@ const CALLERS = (arg('--callers') ?? '').split(',').filter(Boolean);
 const CMDS = process.argv.flatMap((a, i) => (a === '--cmd' ? [process.argv[i + 1]] : []));
 const EVAL = arg('--eval');
 const HITCH = Number(arg('--hitch', 25));
+const VRAM = has('--vram');
+const LEDGER = arg('--ledger');
 
 const browser = await launchGpuBrowser({
     extraArgs: has('--uncapped') ? ['--disable-gpu-vsync', '--disable-frame-rate-limit'] : [],
 });
 const result = {};
 try {
-    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 6000, session: 'off', viewport: { width: W, height: H } });
+    const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 6000, session: 'off', viewport: { width: W, height: H }, webglMemory: VRAM });
     if (!app.booted) throw new Error('app did not boot');
 
     const gpu = await app.evalPage(() => {
@@ -92,7 +106,7 @@ try {
     if (CMDS.length || EVAL) await app.waitFor(1000);
 
     // ── 1. TIMING ───────────────────────────────────────────────────────────
-    result.timing = await app.evalPage(async (ms) => {
+    result.timing = await app.evalPage(async ({ ms, skewedBy }) => {
         const r = window.__glyphClient.ctx.renderer;
         const gl = r.getContext();
         const tq = gl.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -146,6 +160,7 @@ try {
         const mean = (a) => a.length ? +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(2) : null;
         const work = [...frameWork.values()];
         return {
+            ...(skewedBy ? { skewedBy } : {}),
             frames: gaps.length,
             gapMs: { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), worst: pct(gaps, 1) },
             mainThreadPerFrameMs: { p50: pct(work, 0.5), p95: pct(work, 0.95), mean: mean(work) },
@@ -158,7 +173,7 @@ try {
                 }];
             })),
         };
-    }, MS);
+    }, { ms: MS, skewedBy: VRAM ? 'webgl-memory wraps every GL call on this page (--vram)' : null });
 
     // ── 2. CENSUS ───────────────────────────────────────────────────────────
     result.census = await app.evalPage(async (ms) => {
@@ -177,10 +192,15 @@ try {
         const label = (p) => p.name || p.type || `program#${p.id}`;
         for (const p of r.info.programs ?? []) progName.set(p.program, label(p));
         const bytesOf = (v) => (v && typeof v === 'object' && 'byteLength' in v) ? v.byteLength : 0;
+        // The context may carry its own per-instance wrappers (webgl-memory, --vram): wrap THOSE,
+        // and put them back afterwards, so the census neither bypasses nor removes them.
+        const own = new Map();
         for (const name of Object.getOwnPropertyNames(proto)) {
             const d = Object.getOwnPropertyDescriptor(proto, name);
             if (typeof d.value !== 'function' || name === 'constructor') continue;
-            const orig = d.value;
+            const mine = Object.getOwnPropertyDescriptor(gl, name);
+            if (mine) own.set(name, mine);
+            const orig = mine?.value ?? d.value;
             gl[name] = function (...a) {
                 counts[name] = (counts[name] ?? 0) + 1;
                 if (name === 'useProgram') curProgram = a[0];
@@ -210,7 +230,7 @@ try {
         drawsByProgram.clear(); bytes.buffer = 0; bytes.texture = 0; frames = 0;
         await new Promise((res) => setTimeout(res, ms));
         on = false;
-        for (const n of wrapped) delete gl[n];
+        for (const n of wrapped) { if (own.has(n)) Object.defineProperty(gl, n, own.get(n)); else delete gl[n]; }
 
         const per = (v) => +(v / Math.max(1, frames)).toFixed(1);
         let meshes = 0, visible = 0, fields = 0, instances = 0, objects = 0;
@@ -239,6 +259,12 @@ try {
                 fieldInstances: fieldSizes.length ? { min: fieldSizes[0], p50: fieldSizes[fieldSizes.length >> 1], max: fieldSizes[fieldSizes.length - 1] } : null },
         };
     }, Math.min(MS, 2000));
+    if (VRAM) {
+        const { memory, resources } = await app.glMemory();
+        result.census.vram = { bytes: memory, objects: resources };
+        const mb = (b) => `${(b / 1048576).toFixed(1)} MB`;
+        console.log(`[vram] total ${mb(memory.total)} · texture ${mb(memory.texture)} · buffer ${mb(memory.buffer)} · renderbuffer ${mb(memory.renderbuffer)} · drawingbuffer ${mb(memory.drawingbuffer)} · ${resources.texture ?? 0} textures, ${resources.buffer ?? 0} buffers (renderer.info: ${result.census.info.textures} textures, ${result.census.info.geometries} geometries)`);
+    }
 
     // ── 3. PROFILE ──────────────────────────────────────────────────────────
     const cdp = await app.page.context().newCDPSession(app.page);
@@ -377,6 +403,32 @@ try {
     result.errors = app.errors.slice(0, 5);
     console.log(JSON.stringify(result, null, 2));
     if (OUT) writeFileSync(OUT, JSON.stringify(result, null, 2));
+    if (LEDGER) ledger(LEDGER, result);
 } finally {
     await browser.close();
+}
+
+/** The headline numbers → this host's perf ledger, then each against its history. */
+function ledger(scenario, r) {
+    const { timing: t, census: c } = r;
+    const rows = [
+        { metric: 'frame.gap.ms', median: t.gapMs.p50, p95: t.gapMs.p95, n: t.frames },
+        { metric: 'frame.main-thread.ms', median: t.mainThreadPerFrameMs.p50, p95: t.mainThreadPerFrameMs.p95, n: t.frames },
+    ];
+    const main = t.passes.main;
+    if (main) {
+        rows.push({ metric: 'render.main.cpu.ms', median: main.renderCpuMs.p50, p95: main.renderCpuMs.p95, n: Math.round(main.perFrame * t.frames) });
+        if (typeof main.gpuMs === 'object') rows.push({ metric: 'render.main.gpu.ms', median: main.gpuMs.p50, p95: main.gpuMs.p95, n: main.gpuMs.samples });
+    }
+    // every pass's draws (GL draw* calls per frame, all programs) — renderer.info holds only the last pass
+    rows.push({ metric: 'draws.per-frame', median: +Object.values(c.drawsPerFrameByProgram).reduce((a, b) => a + b, 0).toFixed(1), n: c.frames });
+    rows.push({ metric: 'upload.buffer.bytes-per-frame', median: c.uploadBytesPerFrame.buffer, n: c.frames });
+    rows.push({ metric: 'upload.texture.bytes-per-frame', median: c.uploadBytesPerFrame.texture, n: c.frames });
+    if (c.vram) for (const k of ['total', 'texture', 'buffer']) rows.push({ metric: `vram.${k}.bytes`, median: c.vram.bytes[k] });
+    // A timing taken under webgl-memory's wrappers is a different measurement: its own scenario.
+    const scen = t.skewedBy ? `${scenario}+vram` : scenario;
+    const valid = rows.filter((x) => Number.isFinite(x.median));
+    const path = appendRows({ scenario: scen, adapter: r.gpu.renderer, rows: valid });
+    console.log(`\n[ledger] ${valid.length} rows → ${path}`);
+    printCompare(compare({ key: hostKey(r.gpu.renderer), scenario: scen }));
 }
