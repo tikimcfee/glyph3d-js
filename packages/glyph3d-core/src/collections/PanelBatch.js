@@ -33,21 +33,23 @@
  */
 
 import * as THREE from 'three';
-import { rootOf, isShown, isTracked } from './SceneTransforms.js';
+import { rootOf, isShown, isTracked, showGeneration } from './SceneTransforms.js';
 
 /** The view camera renders layer 0; an enrolled object leaves it while a batch draws it. */
 const VIEW_LAYER = 0;
 
 /** @type {Set<THREE.Object3D>} enrolled objects currently attached to a parent */
 const _panels = new Set();
+/** Moves whenever `_panels` gains or loses an object (a batch's shown list keys on it). */
+let _panelsVersion = 0;
 /** @type {WeakMap<THREE.Object3D, Kind>} */
 const _kindOf = new WeakMap();
 
-function onAdded(e) { _panels.add(e.target); }
+function onAdded(e) { if (!_panels.has(e.target)) { _panels.add(e.target); _panelsVersion++; } }
 function onRemoved(e) { release(e.target); }
 function onMaterialDispose(e) { for (const m of _panels) if (m.material === e.target) release(m); }
 function release(obj) {
-    _panels.delete(obj);
+    if (_panels.delete(obj)) _panelsVersion++;
     if (!obj.layers.isEnabled(VIEW_LAYER)) obj.layers.enable(VIEW_LAYER);
 }
 
@@ -177,7 +179,10 @@ function readColor(a, i, p) {
  * @property {() => THREE.BufferGeometry} geometry - the unit geometry every instance scales
  * @property {number} radius - that geometry's bounding radius about its origin (the cull sphere)
  * @property {(obj: THREE.Object3D) => string|null} refuse - why `obj` can't enroll, or null
- * @property {(m: THREE.Material) => boolean} accepts - the material still fits (checked per frame)
+ * @property {(m: THREE.Material) => boolean} accepts - the material still fits (checked when it changes)
+ * @property {((m: THREE.Material) => number)|undefined} version - a count that moves whenever the
+ *   material's lanes do (absent: the lanes are read and compared every frame — basic materials'
+ *   owners set colour / opacity directly)
  * @property {boolean} glsl3 - the shader writes its own `out` (else three's dialect: gl_FragColor + output chunks)
  * @property {boolean} fogless - drawn without fog: under a fogged scene its objects draw themselves
  * @property {Object<string, number>} lanes - per-instance attribute → item size
@@ -199,6 +204,8 @@ const KINDS = {
             return o.material?.uniforms?.uFill ? null : `a panel wears a createPanelMaterial material, got ${o.material?.type}`;
         },
         accepts: (m) => !!m.uniforms?.uFill,
+        // Its lanes change only through the material's handle, which bumps this (panelMaterial.js).
+        version: (m) => m.userData.panelVersion,
         lanes: { aFill: 4, aBorder: 4, aMisc: 2, aHover: 3, aFocus: 3, aInput: 3, aCapture: 3 },
         vs: PANEL_VS, fs: PANEL_FS,
         read(a, i, p) {
@@ -269,7 +276,7 @@ export function enrollPanel(obj) {
         obj.material.userData.panelBatchDispose = true;
         obj.material.addEventListener('dispose', onMaterialDispose);
     }
-    if (obj.parent) _panels.add(obj);
+    if (obj.parent && !_panels.has(obj)) { _panels.add(obj); _panelsVersion++; }
     return obj;
 }
 
@@ -280,6 +287,20 @@ export function enrolledPanels() {
 
 const _proj = new THREE.Matrix4();
 const _eye = new THREE.Vector3();
+
+/** Copy 16 matrix elements into `out` and say whether they changed. */
+function take16(out, e) {
+    let same = true;
+    for (let i = 0; i < 16; i++) if (out[i] !== e[i]) { same = false; out[i] = e[i]; }
+    return !same;
+}
+
+/**
+ * A panel's per-frame memo (PanelBatch keeps one per object): its material's verdict, and its
+ * cull outcome — reused while its world matrix and the camera both held still.
+ * @typedef {{ material: THREE.Material|null, accepts: boolean, mw: Float64Array,
+ *             out: 'drawn'|'culled'|null, moved: boolean }} PanelRec
+ */
 const _frustum = new THREE.Frustum();
 const _sphere = new THREE.Sphere();
 
@@ -322,6 +343,14 @@ class Bucket {
         this.members = [];
         /** @type {THREE.Object3D[]} the sort's scratch list (swapped with members) */
         this.sorted = [];
+        /** @type {THREE.Object3D[]} last write's members, slot by slot (a still slot isn't rewritten) */
+        this.written = [];
+        /** the lane version each slot was last read at (kinds with a version) */
+        this.readAt = [];
+        /** the kind's lanes as [array name, item size] pairs */
+        this._lanes = Object.entries(kind.lanes);
+        /** one instance's lanes as they were before this frame's read (to tell what changed) */
+        this._was = new Float32Array(32);
         /** projected depth per member (the sort key), and the sorted member order */
         this.depth = new Float64Array(64);
         this.order = new Uint32Array(64);
@@ -357,30 +386,62 @@ class Bucket {
         this.capacity = capacity;
     }
 
-    /** Write this frame's members as instances, eye-relative. */
-    write(eye, proj) {
+    /**
+     * Write this frame's members as instances, eye-relative — only what changed: a slot whose
+     * member, world matrix and the eye all held keeps its matrix; every slot's lanes are read and
+     * compared; the upload covers the changed span (none when nothing changed).
+     * @param {THREE.Vector3} eye @param {THREE.Matrix4} proj @param {boolean} eyeMoved
+     * @param {WeakMap<THREE.Object3D, PanelRec>} recs
+     */
+    write(eye, proj, eyeMoved, recs) {
         const n = this.members.length;
-        if (n > this.capacity) this._grow(Math.max(n, this.capacity * 2));
+        let grown = false;
+        if (n > this.capacity) { this._grow(Math.max(n, this.capacity * 2)); grown = true; }
         if (this.transparent && n > 1) this._sort(proj);
-        const mesh = this.mesh, g = mesh.geometry, attrs = g.attributes;
+        const mesh = this.mesh, g = mesh.geometry, attrs = g.attributes, lanes = this.kind.lanes;
         mesh.matrixWorld.makeTranslation(eye.x, eye.y, eye.z);
         const arrays = {};
-        for (const name in this.kind.lanes) arrays[name] = attrs[name].array;
-        const im = attrs.aInstance.array;
+        for (const name in lanes) arrays[name] = attrs[name].array;
+        const im = attrs.aInstance.array, was = this._was, written = this.written, readAt = this.readAt;
+        const laneList = this._lanes, version = this.kind.version;
+        let lo = Infinity, hi = -1;
         for (let i = 0; i < n; i++) {
             const p = this.members[i];
-            const e = p.matrixWorld.elements, o = i * 16;
-            for (let k = 0; k < 12; k++) im[o + k] = e[k];
-            im[o + 12] = e[12] - eye.x; im[o + 13] = e[13] - eye.y; im[o + 14] = e[14] - eye.z; im[o + 15] = e[15];
-            this.kind.read(arrays, i, p);
+            const fresh = grown || written[i] !== p;
+            let dirty = fresh;
+            if (fresh || eyeMoved || recs.get(p)?.moved) {
+                const e = p.matrixWorld.elements, o = i * 16;
+                for (let k = 0; k < 12; k++) im[o + k] = e[k];
+                im[o + 12] = e[12] - eye.x; im[o + 13] = e[13] - eye.y; im[o + 14] = e[14] - eye.z; im[o + 15] = e[15];
+                dirty = true;
+            }
+            if (version) {
+                // A versioned kind's lanes moved only if its material's version did.
+                const v = version(p.material);
+                if (fresh || readAt[i] !== v) { this.kind.read(arrays, i, p); readAt[i] = v; dirty = true; }
+            } else {
+                // The lanes change without telling anyone: read, and compare what was there.
+                let w = 0;
+                for (let l = 0; l < laneList.length; l++) { const a = arrays[laneList[l][0]], sz = laneList[l][1], b = i * sz; for (let k = 0; k < sz; k++) was[w++] = a[b + k]; }
+                this.kind.read(arrays, i, p);
+                if (!dirty) {
+                    w = 0;
+                    for (let l = 0; l < laneList.length && !dirty; l++) { const a = arrays[laneList[l][0]], sz = laneList[l][1], b = i * sz; for (let k = 0; k < sz; k++) if (was[w++] !== a[b + k]) { dirty = true; break; } }
+                }
+            }
+            written[i] = p;
+            if (dirty) { if (i < lo) lo = i; hi = i; }
         }
+        written.length = n;
+        readAt.length = n;
         g.instanceCount = n;
         mesh.visible = n > 0;
-        if (n > 0) {
-            attrs.aInstance.addUpdateRange(0, n * 16);
+        this.uploaded = hi < 0 ? 0 : hi - lo + 1;
+        if (hi >= 0) {
+            attrs.aInstance.addUpdateRange(lo * 16, (hi - lo + 1) * 16);
             attrs.aInstance.needsUpdate = true;
-            for (const name in this.kind.lanes) {
-                attrs[name].addUpdateRange(0, n * this.kind.lanes[name]);
+            for (const name in lanes) {
+                attrs[name].addUpdateRange(lo * lanes[name], (hi - lo + 1) * lanes[name]);
                 attrs[name].needsUpdate = true;
             }
         }
@@ -430,9 +491,20 @@ export default class PanelBatch {
         this._buckets = new Map();
         /** @type {WeakMap<THREE.Object3D, Object>} each object's bucket and the render state that chose it */
         this._bucketOf = new WeakMap();
-        /** Last refresh: objects drawn as instances, hidden, outside the view frustum, drawing
-         *  themselves (material no longer batchable, or fog), under another root, and the buckets. */
-        this.stats = { enrolled: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, buckets: 0 };
+        /** @type {WeakMap<THREE.Object3D, PanelRec>} each object's memo (verdict, cull outcome) */
+        this._recs = new WeakMap();
+        /** the last refresh's projection·view and eye (a still camera skips still panels' math) */
+        this._view = new Float64Array(16).fill(NaN);
+        this._lastEye = new THREE.Vector3(NaN, NaN, NaN);
+        /** The enrolled objects under this scene and shown, as of `_shownKey` (the show generation and
+         *  the enrolled set's version): the per-frame walk visits these only; the hidden and the
+         *  elsewhere are counted when the list is rebuilt. @type {THREE.Object3D[]} */
+        this._shown = [];
+        this._shownKey = { show: -1, panels: -1, hidden: 0, elsewhere: 0 };
+        /** Last refresh: objects walked (the shown list), drawn as instances, hidden, outside the view
+         *  frustum, drawing themselves (material no longer batchable, or fog), under another root, and
+         *  the buckets. */
+        this.stats = { enrolled: 0, walked: 0, drawn: 0, hidden: 0, culled: 0, own: 0, elsewhere: 0, buckets: 0, uploaded: 0 };
         const prev = scene.onBeforeRender;
         this._prevHook = prev;
         scene.onBeforeRender = (renderer, sc, camera, target) => {
@@ -463,22 +535,51 @@ export default class PanelBatch {
             this._foggedWarned = true;
             console.warn('PanelBatch: the scene has fog, which the box fill/edge shader does not draw — those objects draw themselves (one draw each) while it is set');
         }
-        for (const p of _panels) {
-            if (rootOf(p) !== this.scene) { elsewhere++; continue; }
+        const camMoved = take16(this._view, _proj.elements);
+        // Which enrolled objects are under this scene and shown changes only when the show generation
+        // (a visible flip, a node gaining or losing a child) or the enrolled set moves: the list is
+        // rebuilt then, and at rest the walk never touches the hidden ones.
+        const k = this._shownKey, show = showGeneration();
+        if (k.show !== show || k.panels !== _panelsVersion) {
+            k.show = show; k.panels = _panelsVersion; k.hidden = 0; k.elsewhere = 0;
+            this._shown.length = 0;
+            for (const p of _panels) {
+                if (rootOf(p) !== this.scene) { k.elsewhere++; continue; }
+                if (!isShown(p)) {
+                    k.hidden++;
+                    const rec = this._recs.get(p);
+                    if (rec) rec.out = null;   // shown again, its outcome is decided afresh
+                    continue;
+                }
+                this._shown.push(p);
+            }
+        }
+        hidden = k.hidden; elsewhere = k.elsewhere;
+        for (const p of this._shown) {
             const kind = _kindOf.get(p), m = p.material;
-            if (!kind.accepts(m) || (fogged && kind.fogless)) {
+            let rec = this._recs.get(p);
+            if (!rec) { rec = { material: null, accepts: false, mw: new Float64Array(16).fill(NaN), out: null, moved: true }; this._recs.set(p, rec); }
+            // A material's verdict holds until the panel wears another material.
+            if (rec.material !== m) { rec.material = m; rec.accepts = kind.accepts(m); }
+            if (!rec.accepts || (fogged && kind.fogless)) {
                 // re-materialled into something the batch can't draw, or fogged: it draws itself
                 if (!p.layers.isEnabled(VIEW_LAYER)) p.layers.enable(VIEW_LAYER);
+                rec.out = null;
                 own++;
                 continue;
             }
             if (p.layers.isEnabled(VIEW_LAYER)) p.layers.disable(VIEW_LAYER);
-            if (!isShown(p) || !m.visible) { hidden++; continue; }
-            // three's per-object cull, kept: the unit geometry's sphere through the world matrix
-            const e = p.matrixWorld.elements;
-            _sphere.center.set(e[12], e[13], e[14]);
-            _sphere.radius = kind.radius * p.matrixWorld.getMaxScaleOnAxis();
-            if (!_frustum.intersectsSphere(_sphere)) { culled++; continue; }
+            if (!m.visible) { rec.out = null; hidden++; continue; }
+            // Its cull outcome stands while its world matrix and the camera held.
+            rec.moved = take16(rec.mw, p.matrixWorld.elements);
+            if (rec.moved || camMoved || !rec.out) {
+                // three's per-object cull, kept: the unit geometry's sphere through the world matrix
+                const e = p.matrixWorld.elements;
+                _sphere.center.set(e[12], e[13], e[14]);
+                _sphere.radius = kind.radius * p.matrixWorld.getMaxScaleOnAxis();
+                rec.out = _frustum.intersectsSphere(_sphere) ? 'drawn' : 'culled';
+            }
+            if (rec.out === 'culled') { culled++; continue; }
             let c = this._bucketOf.get(p);
             if (!c || !sameState(c, p, m)) {
                 const key = stateKey(kind, p, m);
@@ -492,8 +593,11 @@ export default class PanelBatch {
             drawn++;
         }
         const eye = camera.getWorldPosition(_eye);
-        for (const b of this._buckets.values()) b.write(eye, _proj);
-        this.stats = { enrolled: _panels.size, drawn, hidden, culled, own, elsewhere, buckets: this._buckets.size };
+        const eyeMoved = !eye.equals(this._lastEye);
+        this._lastEye.copy(eye);
+        let uploaded = 0;
+        for (const b of this._buckets.values()) { b.write(eye, _proj, eyeMoved, this._recs); uploaded += b.uploaded; }
+        this.stats = { enrolled: _panels.size, walked: this._shown.length, drawn, hidden, culled, own, elsewhere, buckets: this._buckets.size, uploaded };
         return this.stats;
     }
 

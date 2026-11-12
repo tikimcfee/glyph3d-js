@@ -187,6 +187,10 @@ try {
                 else if (name.startsWith('draw')) {
                     const k = progName.get(curProgram) ?? 'program?';
                     drawsByProgram.set(k, (drawsByProgram.get(k) ?? 0) + 1);
+                } else if (name === 'bufferSubData' && ArrayBuffer.isView(a[2]) && a.length >= 4) {
+                    // a ranged upload (target, offset, src, srcOffset[, length]): only the range moves
+                    const n = a.length >= 5 && a[4] > 0 ? a[4] : a[2].length - a[3];
+                    bytes.buffer += n * a[2].BYTES_PER_ELEMENT;
                 } else if (name === 'bufferData' || name === 'bufferSubData') {
                     bytes.buffer += typeof a[1] === 'number' ? a[1] : bytesOf(a[2]) || bytesOf(a[1]);
                 } else if (name.startsWith('texImage') || name.startsWith('texSubImage')) {

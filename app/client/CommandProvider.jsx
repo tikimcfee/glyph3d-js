@@ -421,8 +421,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // The renderer's scene systems, in their one order (SceneSystems): world matrices recomputed
     // only where something moved (scene.transforms reports and verifies it); far-LOD (a field too
     // small to read draws one backdrop quad — Display & glyph LOD dials it); panels as batched
-    // instances; labels (book tabs, nameplates, dock titles) from one glyph arena, one draw for all.
-    state.ctx.sceneSystems = new SceneSystems(scene, atlas);
+    // instances; labels (book tabs, nameplates, dock titles) from one glyph arena, one draw for all;
+    // and the view renders a flat list of the drawables it sees, not the scene tree (render.flatRoot).
+    state.ctx.sceneSystems = new SceneSystems(scene, atlas, gl);
+    state.ctx.sceneSystems.flatRoot.enabled = getSetting('render.flatRoot');
+    pickingSystem.flatLists = getSetting('pick.flatRoot');   // each pick channel renders its flat list (needs the SceneTransforms)
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
     // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node

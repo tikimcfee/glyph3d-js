@@ -108,6 +108,32 @@ not pass a flag, and a tool author cannot forget the rule. Correctness gates
 (evaluator parity, does-it-boot) keep using `launchBrowser()` and stay headless
 everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 
+- **`flat-root.test.mjs`** (headless) and **`flat-root-check.mjs`** (GPU) — the flat render root
+  (`collections/FlatRenderRoot.js`): the view camera renders a flat list of the drawables it sees,
+  rebuilt only when visibility, membership or layers move. The test locks the list against a fresh walk
+  of the scene, rebuild counts (none at rest; one per visible / layer-0 / membership change), the
+  three-walks-it-whole cases (a Group with renderOrder, lights, LODs) and the loud refusals (a drawable
+  whose own onBeforeRender may read the scene, a shadow-casting light → the full scene, named). The
+  check renders frames through the list and through the full scene — byte-identical across camera
+  distances, mid-flight poses and the library layout; a half-list render must differ.
+  `scene.render [time <n>]` reports it live.
+  ```
+  bun tools/flat-root.test.mjs
+  bun tools/flat-root-check.mjs
+  ```
+
+- **`pick-flat-root.test.mjs`** (headless) and **`pick-flat-root-check.mjs`** (GPU) — each pick
+  channel draws its own short list of the meshes on its layer (`pick.flatRoot`, on) instead of three
+  walking the whole scene per channel: the test locks each list against a fresh walk, rebuilds per
+  layer bit (registering a glyph field rebuilds only the glyph list; the pick camera's own per-pass
+  layer change rebuilds nothing); the check compares pick results list vs full scene over pointer
+  sweeps of glyphs, batched panels, resize handles, volumes and the library layout — identical, while
+  removing a hit mesh always changes them.
+  ```
+  bun tools/pick-flat-root.test.mjs
+  bun tools/pick-flat-root-check.mjs
+  ```
+
 - **`gpu-traffic.mjs`** — per-frame GPU upload attribution: wraps
   `device.queue.writeBuffer`/`writeTexture`, counts display frames, reports a
   per-label bytes/frame histogram plus a greppable verdict line. The law it enforces:

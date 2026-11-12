@@ -85,7 +85,7 @@ export default class TerminalWall {
         /** @type {WallContext} */
         this.ctx = {
             scene, atlas, registry, camera, renderer: gl,
-            sceneSystems: new SceneSystems(scene, atlas),
+            sceneSystems: new SceneSystems(scene, atlas, gl),
             terminals: new Map(),
             wsbridge: null,
             terminalHost: assertTerminalHost(this._terminalHost(), 'wall'),
