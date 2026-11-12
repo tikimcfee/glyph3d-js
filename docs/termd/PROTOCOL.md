@@ -1,4 +1,4 @@
-# The termd wire, version 1.0
+# The termd wire, version 1.1
 
 `g3d-termd` keeps terminals alive: it owns each terminal's pseudo-terminal (PTY), its
 process and a libghostty-vt emulator holding the terminal's screen and scrollback.
@@ -8,6 +8,10 @@ this page is a third. This page is the whole contract. If the daemon and this pa
 disagree, the daemon has a bug.
 
 The protocol is public and versioned. Nothing in it is specific to glyph3d.
+
+Version 1.1 is the first release. What is marked **(1.1)** is designed and not yet built: the
+daemon on branch `termd` speaks 1.0, which is 1.1 without those parts (and with the 1.0 defaults
+listed in [Versions](#versions)).
 
 ## At a glance
 
@@ -25,6 +29,10 @@ The protocol is public and versioned. Nothing in it is specific to glyph3d.
   answers.
 - One subscriber at a time **owns** a terminal's size. Everyone else sees the size the
   owner picked.
+- The daemon can restart its engine without ending any terminal. Connections close and clients
+  reconnect ([Restarts](#restarts-11)). (1.1)
+- One request follows the daemon's whole state as a document pushed on change
+  ([`status_follow`](#status_follow-status_unfollow-11)). (1.1)
 
 ## Transport
 
@@ -35,19 +43,24 @@ first of these directories that applies:
 
 1. `$G3D_TERMD_DIR`, when set and not empty;
 2. `$XDG_RUNTIME_DIR/g3d`, when `XDG_RUNTIME_DIR` is set and not empty;
-3. `<temp dir>/g3d-<uid>` otherwise (macOS, for one): `$TMPDIR`, else `/tmp`, then
-   `g3d-` and the numeric user id.
+3. `/tmp/g3d-<uid>` otherwise (always on macOS), with the numeric user id. `$TMPDIR` is not
+   consulted: different runtimes resolve an unset `$TMPDIR` differently, and every client must
+   find the same socket.
 
 A namespace's name is 1 to 64 bytes of `[A-Za-z0-9._-]`. A daemon can also serve an
 explicit socket path instead (`g3d-termd --socket <path>`); it then has no namespace.
 
 If nothing listens there, a client that wants a daemon starts one:
 `g3d-termd --ns <namespace> --daemon` (or `--socket <path> --daemon`) detaches into the
-background and serves until it has had no terminals and no connections for 5 minutes. Then
-retry the connection for a few seconds. Starting a second daemon on a socket that already
+background and serves until it has had no terminals and no connections (other than status
+followers) for 5 minutes. Then
+retry the connection for a few seconds. (1.1) The process that listens is the namespace's
+holder, which keeps the terminals alive across restarts of the daemon's engine; see
+[Restarts](#restarts-11). Starting a second daemon on a socket that already
 has one fails and leaves the first serving, so two clients racing to start one are safe.
 
-The socket's directory is mode `0700` and the socket `0600`. The daemon checks the
+The socket's directory is mode `0700` and the socket `0600`; the daemon refuses to serve from a
+directory another user owns or that group or others can write. The daemon checks the
 peer's uid (`SO_PEERCRED` on Linux, `getpeereid` elsewhere) and closes connections from
 any other user. There is no other authentication: anyone who can open the socket can
 run commands as its owner.
@@ -127,6 +140,9 @@ position in that count (a `u64`).
   `seq`.
 - An `EVENT` that changes how bytes are read (`size`) carries the `seq` it takes effect
   at.
+- (1.1) `seq` never repeats within a terminal's life, across daemon restarts too. After a crash
+  it can jump forward past output the crashed engine read and never saved
+  ([Restarts](#restarts-11)).
 
 ## Handshake
 
@@ -142,16 +158,23 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 0], "daemon": "g3d-termd/0.1.0", "engine": "libghostty-vt/1.0.1",
- "ns": "default", "pid": 41200, "features": ["raw", "view", "capture"],
- "max_frame": 16777216}
+{"proto": [1, 1], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+ "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
+ "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
+ "features": ["raw", "view", "capture", "status", "upgrade"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
 - `ns`: the namespace. Absent when the daemon serves an explicit `--socket`.
+- `pid`: the process serving this connection (the brain, in 1.1).
+- `instance` (1.1): the namespace's identity, a random hex string fixed for the holder's life.
+  The same `instance` after a reconnect means the same terminals may still be there.
+- `generation` (1.1): which brain this is in the holder's life: 1 for the first, +1 for each
+  restart or upgrade.
+- `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
-  before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `cells`
-  (packed cells, reserved).
+  before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
+  `upgrade` (1.1), `cells` (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -192,6 +215,7 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
+| `busy` | (1.1) the op can't run now because another one of its kind is running (`upgrade`) |
 
 ### `create`
 
@@ -207,28 +231,58 @@ Starts a program on a new PTY.
 | field | default | meaning |
 |---|---|---|
 | `id` | required | the terminal's name |
-| `argv` | the daemon's `$SHELL`, else `/bin/sh` | program and arguments, run directly (no shell) |
+| `argv` | the user's shell, started as below | program and arguments, run directly (no shell). `argv[0]` without a `/` is looked up in the program's `PATH` |
 | `cols`, `rows` | required | initial size, 1 to 4096 each |
-| `cwd` | the daemon's working directory | |
+| `cwd` | the user's home directory | an absolute path to an existing directory; anything else is `bad_request` |
 | `env` | `{}` | added to the environment (below); a `null` value removes a variable |
+| `env_base` | `"session"` | (1.1) `"session"`: start from the user's session environment (below). `"none"`: start from nothing but the account variables and termd's own |
 | `if_exists` | `"error"` | `"adopt"` returns the live terminal with this id instead of failing |
-| `scrollback_bytes` | daemon default (2 MiB) | primary-screen history cap; the daemon clamps it to its own maximum |
+| `scrollback_bytes` | daemon default (10,000,000) | primary-screen history cap; the daemon clamps it to its own maximum |
 | `colors` | daemon defaults | the default foreground, background and cursor colours termd reports when the program asks (OSC 10/11/12). Set them to what your renderer draws |
 | `cell_px` | `[8, 16]` | cell size in pixels, reported to programs that ask for the window size in pixels (`CSI 14 t`, `CSI 16 t`) |
 
-The program's environment is the daemon's own, then `TERM=xterm-256color`,
-`COLORTERM=truecolor`, `G3D_TERMD_ID=<id>` and `G3D_TERMD_SOCKET=<socket path>`, then
-`env`. `TMUX` and `TMUX_PANE` are removed: the program is not inside tmux.
+**The program's environment (1.1)** is built for each `create`, later layers winning:
+
+1. the user's session environment: on Linux with a systemd user manager, that manager's
+   environment as it is now (what a terminal opened from the desktop gets); otherwise the
+   environment the daemon started with. Skipped with `env_base: "none"`;
+2. minus what describes some other process: another terminal, multiplexer, editor or agent
+   (`TMUX`, `STY`, `VTE_VERSION`, `KITTY_*`, `VSCODE_*`, `NVIM`, …), the launcher (`INVOCATION_ID`,
+   `NOTIFY_SOCKET`, `LISTEN_*`, …) and the parent shell (`SHLVL`, `OLDPWD`, `COLUMNS`, `LINES`, …);
+   the daemon's documentation lists them all;
+3. `HOME`, `USER`, `LOGNAME` from the account when missing;
+4. the request's `env`;
+5. termd's own, which describe this terminal: `TERM=xterm-256color`, `COLORTERM=truecolor`,
+   `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`,
+   `G3D_TERMD_SOCKET=<socket path>`, `PWD=<cwd>`.
+
+`env` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL and are at most
+128 KiB each, and `argv` plus the environment total at most 1 MiB (`bad_request` or
+`too_large`, naming the variable). The names in layer 5 are reserved: setting or removing one is
+`bad_request`.
+
+With no `argv`, the program is the user's shell: the account's shell from the user database
+(passwd), else the environment's `SHELL` when it names an executable, else `/bin/sh`, and `SHELL`
+is set to the one chosen. It starts as a login shell (its `argv[0]` is `-` and the shell's name,
+as `login(1)` and tmux start shells), on every platform, so the system's and the user's profile
+run. Daemon settings can change the shell and turn login off. An explicit `argv` runs exactly as
+given, never as a login shell.
+
+When the environment sets none of `LC_ALL`, `LC_CTYPE` and `LANG`, the daemon sets `LANG` to a
+UTF-8 locale the system has (`C.UTF-8`; on macOS the user's own locale when installed). A locale
+that is set is left alone.
 
 Reply:
 
 ```json
 {"req": 1, "ok": true, "id": "t1", "handle": 7, "pid": 41234, "created": true,
- "cols": 80, "rows": 24}
+ "cols": 80, "rows": 24, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src"}
 ```
 
 `created` is `false` when `if_exists: "adopt"` returned a live terminal; then `cols` and
-`rows` are its current size, not the requested one. `create` does not subscribe.
+`rows` are its current size, not the requested one. (1.1) `argv` is what actually runs (its
+first element the resolved path), `login` whether it was started as a login shell, and `cwd`
+where. `create` does not subscribe.
 
 ### `list`
 
@@ -398,8 +452,123 @@ client that wants liveness pings.
 ### `stop`
 
 `{"req": 12, "op": "stop"}` kills every terminal (as `kill` does) and exits the daemon
-after replying. Every shell in the namespace dies. It exists for tests and for
-replacing the daemon.
+after replying. Every shell in the namespace dies. It exists for tests and for ending a
+namespace on purpose; to replace the daemon, use [`upgrade`](#upgrade-11).
+
+### `status` (1.1)
+
+Feature `status`. The daemon's state as one document: the daemon, every terminal and its
+subscribers, and recent errors. It is built for rendering as is (a status window, `g3d status`),
+so a client never lists terminals and then asks each one.
+
+```json
+{"req": 13, "op": "status"}
+```
+
+Reply: `{"req": 13, "ok": true, "status": {…}}`, the document below.
+
+### `status_follow`, `status_unfollow` (1.1)
+
+```json
+{"req": 14, "op": "status_follow", "interval_ms": 1000}
+{"req": 15, "op": "status_unfollow"}
+```
+
+`status_follow` replies `{"req": 14, "ok": true, "interval_ms": 1000}` (the interval in effect:
+`interval_ms` is clamped to 250–60000; default 1000), then sends an `EVENT` `status` on stream 0
+at once, and again whenever the document has changed, no sooner than the interval after the
+previous one. Changes are any field except the sampled gauges (`rss`, `memory`, the `*_bps`
+rates), or a rate crossing zero; while any terminal produces output, every interval counts as a
+change, so its rate stays current. With nothing changing, a keepalive arrives every 30 s with
+fresh gauges. A status event is dropped, not queued, when the connection is behind on its earlier
+ones: the next one replaces it. `status_unfollow` stops them; closing the connection does too.
+
+The document (the `EVENT` carries it with `"ev": "status"` added; numbers are integers, times are
+Unix epoch milliseconds, sizes are bytes):
+
+```json
+{"at": 1794519127407,
+ "daemon": {
+   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 1],
+   "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
+   "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
+   "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
+   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [1, 0], "rss": 3145728},
+   "brain": {"pid": 41200, "generation": 2, "started_at": 1794519100000, "rss": 41943040,
+             "restarts": {"crash": 1, "watchdog": 0, "upgrade": 0},
+             "last_start": {"reason": "crash", "at": 1794519100000, "exit": {"signal": "SEGV"},
+                            "restored": {"exact": 0, "snapshot": 3, "blank": 0}, "unseen": 512}},
+   "snapshots": {"interval_ms": 2000, "bytes": 1835008},
+   "env": {"source": "systemd-user", "warnings": []}},
+ "terminals": [
+   {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src",
+    "pwd": "/srv/src/app", "title": "~/src/app", "cols": 120, "rows": 40, "alt": false,
+    "created_at": 1794480000123, "seq": 18211, "out_bps": 1253000, "in_bps": 12,
+    "last_output_at": 1794519127390, "flow": "live", "input_queued": 0,
+    "scrollback_rows": 1567, "memory": {"resident": 1986560, "compressed": 0},
+    "restored": "snapshot",
+    "subscribers": [
+      {"conn": 12, "client": "glyph3d-cli/0.2.0", "pid": 5011, "role": "own", "mode": "raw",
+       "flow": "block", "queued": 0, "lagging": false, "lags": 0, "view": 0}]}],
+ "errors": [
+   {"code": "brain_crash", "message": "brain exited on SIGSEGV; 3 screens restored from snapshots, 512 bytes unseen",
+    "first_at": 1794519099900, "at": 1794519099900, "count": 1}]}
+```
+
+`daemon`:
+
+| field | meaning |
+|---|---|
+| `version`, `engine`, `proto`, `ns`, `instance` | as in `WELCOME` |
+| `socket`, `log` | where the daemon listens and logs (absolute paths) |
+| `exiting` | `true` only in the last document a follower gets before an idle daemon exits; the connection then closes and nothing listens. An empty namespace leaving, not a failure |
+| `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
+| `connections` | client connections open now |
+| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` |
+| `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade) |
+| `snapshots` | crash-restore saving: the interval and the bytes held |
+| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale, the user manager unreachable, a cgroup scope that couldn't be made) |
+
+Each of `terminals` (one per live terminal; the count is the array's length):
+
+| field | meaning |
+|---|---|
+| `id`, `handle`, `pid`, `argv`, `cwd`, `created_at`, `seq`, `title`, `alt` | as in `list` (`argv` is what actually ran) |
+| `login` | started as a login shell, as in the `create` reply |
+| `pwd` | the directory the program last reported (OSC 7), absent if none |
+| `cols`, `rows` | the size now |
+| `out_bps`, `in_bps` | output and input bytes per second over the last 5 s |
+| `last_output_at` | when output last arrived |
+| `flow` | `"live"` (termd reads the program's output as it comes), `"blocked"` (a `block` owner is behind and termd has stopped reading; the program waits), `"paused"` (an upgrade's cut) |
+| `input_queued` | input bytes waiting for the program to read them |
+| `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
+| `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain) |
+| `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
+
+`errors`: the last 32 distinct errors, newest first, each `code`, `message`, `first_at`, `at` (the
+latest), `count`, and `id` when it concerns one terminal. Codes are the request and event codes
+above plus `brain_crash`, `brain_watchdog`, `upgrade_failed`, `spawn_failed`, `env` and `cgroup`.
+They are for people; nothing depends on reading them.
+
+Like every payload, the document only grows: a client renders the fields it knows and ignores
+the rest.
+
+### `upgrade` (1.1)
+
+Feature `upgrade`. Replaces the daemon's engine (the brain) without ending any terminal:
+
+```json
+{"req": 16, "op": "upgrade", "binary": "/opt/g3d/bin/g3d-termd"}
+```
+
+`binary` is optional (default: the path the daemon was started from, where a new build would be
+installed). The reply `{"req": 16, "ok": true, "generation": 2}` means the upgrade has started;
+`generation` is the current brain's. If the new engine takes over, every connection then gets
+`ERROR` `restart` and closes, and a reconnect's `WELCOME` shows a higher `generation`. If it
+doesn't, connections stay open and the status document's `errors` carries `upgrade_failed`.
+`bad_request` when `binary` isn't an executable file; `busy` while another upgrade runs.
+Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it uses the same op with
+`"holder": true`.
 
 ## Data frames
 
@@ -468,7 +637,7 @@ old one. Ask for another `repaint` then if that matters.
 
 `EVENT` frames carry `{"ev": "<name>", ...}` with `stream` = the handle. Events reach
 every subscriber of the terminal, including `mode: "none"`, in order with its
-`OUTPUT`.
+`OUTPUT`. (1.1) An event on stream 0 belongs to the connection, not a terminal (`status`).
 
 | `ev` | fields | when |
 |---|---|---|
@@ -481,13 +650,14 @@ every subscriber of the terminal, including `mode: "none"`, in order with its
 | `lagged` | `dropped` (bytes), `seq` | you fell behind and were resynced (see [Flow control](#flow-control)) |
 | `exit` | `code` or `signal`, `seq` | the program exited; `seq` is the end of its output. `code` is its exit status; `signal`, the name of the signal that ended it, without `SIG` (`"HUP"`). Only the one that applies is present; the other is absent, not `null`. Both are absent if termd couldn't learn the status |
 | `closed` | | the terminal is gone; the handle is dead. Always last |
-| `error` | `code`, `message` | something with no reply went wrong: an `INPUT` refused (`not_subscribed`, `read_only`, `no_terminal`, or `input_full` when the program has 1 MiB of unread input), or the terminal failed inside termd (`panic`; `exit` and `closed` follow) |
+| `error` | `code`, `message` | something with no reply went wrong: an `INPUT` refused (`not_subscribed`, `read_only`, `no_terminal`, or `input_full` when the program's input buffer is full), or the terminal failed inside termd (`panic`; `exit` and `closed` follow) |
+| `status` | the status document | (1.1) on stream 0, to a connection that asked with `status_follow` |
 
 The `error` event's codes are the request codes above plus two of its own:
 
 | code | meaning |
 |---|---|
-| `input_full` | the program hasn't read 1 MiB of earlier input; this `INPUT` was dropped |
+| `input_full` | the program hasn't read its earlier input and the daemon's input buffer for it is full (16 MiB by default); this `INPUT` was dropped whole |
 | `panic` | the terminal failed inside termd and is closing |
 
 Clients must ignore events they don't know.
@@ -543,6 +713,37 @@ the daemon. Each subscription has a queue of the frames termd has yet to write t
   back until it reads again, unsubscribes, or someone `take`s the terminal (which makes
   it lossy).
 
+## Restarts (1.1)
+
+A namespace is two processes: a small **holder** that keeps every terminal's program and PTY alive
+and owns the listening socket, and the **brain** that speaks this protocol. The brain can restart
+(it crashed, or `upgrade` replaced it) while every terminal keeps running. Its connections close;
+the socket does not. A client that wants to ride a restart:
+
+1. **When to reconnect.** On `ERROR` `restart`: at once, after a random delay of up to 100 ms. On a
+   connection that just closed: with backoff, 100 ms doubling to 2 s, for as long as you are
+   willing to wait (the glyph3d relay waits 30 s).
+2. **What `connect` says.** While the holder lives, `connect` succeeds even before a brain is
+   accepting; `HELLO` is answered when one is. `ENOENT` or `ECONNREFUSED` means no holder: the
+   namespace and every terminal in it are gone. `ERROR` `brain_failed` means the holder is alive
+   (so are the programs, frozen once they fill their output buffers) but no brain is running; its
+   `message` says why. Retry slowly or tell a person.
+3. **Same namespace?** Compare `WELCOME.instance` with the one you had. If it is the same, your
+   terminals may still exist: `subscribe` again by `id` (not `create` with `if_exists: "adopt"`,
+   which would start a new program if the terminal ended meanwhile). The `REPAINT` brings your
+   screen back; `no_terminal` means that terminal ended. A different `instance` is a new namespace.
+4. **Input is at most once.** Don't resend `INPUT` you sent before the connection closed: it may
+   or may not have reached the program, and a repeated command line is worse than a lost key.
+5. **Unknown is not empty.** Until a brain answers, you don't know which terminals exist. Don't
+   forget terminals on the strength of an empty answer you didn't get.
+
+After a planned restart (`upgrade`), each terminal continues exactly: `seq` resumes where it was
+and nothing was skipped. After a crash, each terminal's screen comes back from a snapshot the
+daemon saved a few seconds earlier (or blank, when none fits), the program is sent `SIGWINCH` so
+it redraws, and `seq` resumes past every byte the crashed brain read, so it never repeats. Output
+the crashed brain read but never saved is missing from screens and history; the status document
+counts it (`unseen`, `restored`).
+
 ## Errors and closing
 
 A malformed frame gets `ERROR` `{"code": "...", "message": "..."}` and the daemon closes
@@ -554,6 +755,8 @@ the connection:
 | `too_large` | `len` over `max_frame` |
 | `version` | `HELLO` with a different major |
 | `auth` | the peer is another user |
+| `restart` | (1.1) the daemon's engine is being replaced on purpose; reconnect now ([Restarts](#restarts-11)) |
+| `brain_failed` | (1.1) the holder answered because no brain is running; `message` says why and where the log is |
 
 Request-level failures are `REPLY` errors and the connection stays.
 
@@ -577,7 +780,8 @@ A client connects, creates a shell, subscribes, sees the prompt `$ `, and types 
 `len` = `0x2e` = 46 = 8 header bytes after `len` + 38 bytes of JSON. Type `0x01`, flags
 0, reserved 0, stream 0.
 
-`WELCOME` (daemon → client):
+`WELCOME` (daemon → client; a 1.0 daemon's: a 1.1 `WELCOME` adds fields, which a 1.0 client
+ignores):
 
 ```
 0000  96 00 00 00 81 00 00 00 00 00 00 00 7b 22 70 72   ............{"pr
@@ -731,3 +935,15 @@ writes, and send keystrokes as `INPUT`.
   major change: a new `proto` major, refused by older peers at `HELLO`.
 - Frame types `0x04`–`0x7F` (client → daemon) and `0x87`–`0xFE` (daemon → client) are
   free for future minors.
+
+## Versions
+
+- **1.1** (the first release): `status`, `status_follow`, `status_unfollow`, `upgrade`; the
+  `status` event; `WELCOME.instance`, `generation`, `holder`; `ERROR` `restart` and
+  `brain_failed`; the `busy` code; `create.env_base` and the `argv`/`login`/`cwd` reply fields;
+  [Restarts](#restarts-11). Before any release, `create`'s defaults changed: `argv` was the
+  daemon's `$SHELL` as a non-login shell, `cwd` the daemon's working directory, `scrollback_bytes`
+  2 MiB, the socket fallback `$TMPDIR/g3d-<uid>`, and the environment the daemon's own
+  plus termd's variables (without `TERM_PROGRAM`), with only `TMUX`/`TMUX_PANE` removed and no
+  reserved names. No released client depends on those.
+- **1.0**: the branch-only first cut.

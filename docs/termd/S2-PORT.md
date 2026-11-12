@@ -428,6 +428,12 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
     A clean end (`closed`, kill, LOST termd, relay shutdown) is not re-adopted. Test hook,
     mirroring termd's: with `G3D_RELAY_TEST_HOOKS=1`, a `terminal.bytes` carrying a magic string
     panics that adapter's task.
+  - **termd ready.** S2 ports whichever relay is current when it starts. If termd ready (DESIGN.md:
+    holder and brain, protocol 1.1) has landed in the Go relay by then, the port carries it too: the
+    reconnect rule of "Riding a restart" in each virtual adapter (`LOST termd` only when the
+    window ends or `instance` changed), the per-namespace status connection, the `termd/status`
+    notification and request, and the `termd.status` verb. The tape gains a `termd/status`
+    scenario (with `at`, pids and the gauges masked).
 - **Rewritten checks:**
   - `tools/termd-relay-check.mjs`'s "adapter killed" step finds no process to `ps`; it uses the
     hook instead;

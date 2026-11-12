@@ -11,6 +11,11 @@ This page is what stage S1 builds against: the daemon, the `g3d` client and the 
 adapter's move off `tmux attach`. S2 (the relay in Rust) and S3 (packed cells to the
 browser) build on it and are only sketched here.
 
+It is also the design termd is built to before S2 ("termd ready"): the [holder and
+brain](#holder-and-brain) split, the [environment](#environment) a terminal gets, the
+[defaults](#defaults) and the [status](#status) stream. "S1 as built" below says what the branch
+has today; the sections after it are the design.
+
 ## S1 as built (2026-11-12)
 
 What exists on branch `termd`, and where it departs from the plan below:
@@ -48,6 +53,15 @@ What exists on branch `termd`, and where it departs from the plan below:
   (the "resize clearing prompt lines" risk below), and `g3d attach` under vim and Claude Code
   by hand (the query-filter coverage risk) — both are for the operator to try. Hot upgrade,
   packed cells and the Rust relay are later stages.
+- **Designed after S1, not built yet:** the holder/brain split (S1 is one process: a crash or a
+  `stop` ends every shell), the environment policy (S1's programs inherit the starting process's
+  environment, start in `/` when no `cwd` is given, and get no `IUTF8`), the defaults marked
+  "change" or "new", RFC 3339 log lines, and protocol 1.1's status stream.
+- **On branch `termd-macos`, to be merged:** darwin-arm64 builds and passes every gate; close-on-exec
+  set after creation where macOS has no atomic form; the slave opened before `TIOCSWINSZ`; tests
+  measure processes with `ps` instead of `/proc`; the socket fallback `/tmp/g3d-<uid>` with its
+  directory checks and hourly re-stamp. Its findings are folded into this design (environment,
+  platform seams, defaults); the code lands with the merge.
 
 ## Measured ground (2026-11-12)
 
@@ -70,6 +84,10 @@ update to vt-1.0.1" commit), built with Zig 0.17.0 and Rust 1.98.1.
 | Dirty rows | `RenderState::update` + `next_dirty`: a fresh terminal reports Full/24 rows, a 2-line write Partial/2, one character Partial/1, a resize Full/30. | Probe (for S3's packer). |
 | rusqlite bundled FTS5 (S2) | Yes. rusqlite 0.37 (SQLite 3.50.2): an FTS5 table answers `MATCH`, `PRAGMA compile_options` lists `ENABLE_FTS5`. | Probe, native and cross-built. |
 | cargo-zigbuild with Zig 0.17 | Works. cargo-zigbuild 0.24.1 + Zig 0.17.0 builds `aarch64-unknown-linux-musl` through its zig-cc wrapper, including rusqlite's C; both run under qemu-aarch64. `aarch64-unknown-linux-gnu` was not tried (its rustup target isn't installed here), nor libghostty itself for arm64. | Probe. |
+| Snapshot cost (for crash restore) | 120×40, full 2 MiB history: 489 KB in 0.3 ms, decode 0.5 ms; full 10 MB history: 2.6 MB in 1.4 ms (16 MiB: 4.5 MB, 1.6 ms encode, 5 ms decode); an idle prompt: 1.2 KB in 8 µs. LZ4 on build-log text: 37 KB / 205 KB / 349 KB | Probe (`encode_snapshot_alloc`), single runs; `lz4 -1` on the encoded bytes |
+| Rows per scrollback cap, and idle compression | 120 columns of build-log text: 2 MiB ≈ 1,600 rows, 10 MB ≈ 9,300, 16 MiB ≈ 15,800. `compress(Full)` takes 10 MB resident to 0.86 MB in 1.4 ms | Probe (`memory_usage`) |
+| PTY output buffered with no reader | 13,824 bytes, then the writer blocks | Python `pty.openpty`, raw mode, non-blocking writes |
+| `IUTF8` on a new PTY | off (Linux) | Python `termios` on `pty.openpty` |
 | Parse speed, native | 100,000 coloured lines (about 5 MB) through `vt_write` in 10.6 ms. The ghostty wasm build measured 69–80 MB/s in the spike. | Probe (single run). |
 
 ## Prior art taken, and not
@@ -81,7 +99,7 @@ update to vt-1.0.1" commit), built with Zig 0.17.0 and Rust 1.98.1.
   - versioning where only a major refuses, minors add fields that old peers skip and features are announced;
   - fence-and-recut instead of an unbounded backlog for a lagging consumer.
 
-  Its hot upgrade (re-exec, re-adopt live PTYs, a frozen upgrade blob) is our later path (below). Not taken:
+  Its hot upgrade (hand the listening socket and PTY fds to the new image, a frozen upgrade blob the candidate parses first) shapes `g3d upgrade` ([Holder and brain](#holder-and-brain)). Not taken:
   - structured key input encoded server-side (our input is the bytes a keyboard sends; that is what a tty attach client has, and what the browser's `keyEncoding` already produces);
   - its "smallest view wins" size rule;
   - a single current-thread runtime for every terminal (a flood in one would stall the rest; the spike's load is 14 terminals flooding at once).
@@ -101,16 +119,28 @@ update to vt-1.0.1" commit), built with Zig 0.17.0 and Rust 1.98.1.
 ### One daemon per namespace
 
 A namespace is a name (`default`, a test's random name). Its socket is
-`$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`. Off Linux, or when that variable is unset, it is
-a `g3d-<uid>` directory under the system temp directory, created `0700`.
-`g3d-termd --ns <name>` or `--socket <path>` picks it.
+`$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`. When that variable is unset (always on macOS; on Linux
+without logind, as in some containers) it is `/tmp/g3d-<uid>/termd-<ns>.sock`, tmux's rule
+(`/tmp/tmux-<uid>`). It ignores `$TMPDIR` on purpose: with `$TMPDIR` unset, Rust's `temp_dir()`
+answers macOS's per-user `/var/folders/…/T/` while Go's `os.TempDir()` answers `/tmp`, so a relay
+and the daemon it started would look in different places (measured on the M2); and macOS's
+`$TMPDIR` is 49 bytes, which leaves too little of `sun_path`'s 104 for a 64-byte namespace (zellij
+carries a hard-coded guard for the same reason). `g3d-termd --ns <name>` or `--socket <path>`
+picks it.
+
+Every directory the daemon serves from (`$G3D_TERMD_DIR`, `$XDG_RUNTIME_DIR/g3d`, `/tmp/g3d-<uid>`)
+is created `0700` and refused, loudly, when it is not a directory, is owned by another user, or is
+writable by group or others (tmux's check). Because `/tmp` is cleaned (macOS's `tmp_cleaner` deletes
+regular files untouched for 3 days, systemd-tmpfiles' `/tmp` rule after 10), the holder re-stamps
+its socket and lock with `utimes` every hour: a deleted lock would let a second daemon take the
+namespace and unlink the live one's socket.
 
 The namespace replaces `--tmux-socket`. `glyph3d-cli serve --termd-ns <name>` points a
 relay, and every adapter it forks, at that namespace, so a second relay can neither see
 nor kill the first's terminals. Tests always pass `--socket` with a path in their own
 scratch directory, never a namespace someone might use.
 
-Single instance: the daemon holds an exclusive `flock` on `<socket>.lock` for its whole
+Single instance: the holder holds an exclusive `flock` on `<socket>.lock` for its whole
 life. Only the lock holder may unlink a stale socket file and bind. A second daemon on
 the same namespace fails at the lock and exits non-zero, naming the holder's pid.
 
@@ -140,52 +170,565 @@ The relay finds the binary next to its own executable, then on `PATH`, or at
 `serve --termd <path>`. If none is found it fails loud with all three places it looked.
 There is no tmux fallback.
 
-### Lifetime, crash, upgrade
+### Lifetime
 
-- **Idle exit.** With no terminals and no connections for `--idle-exit` (default 5 min;
-  0 = never), the daemon removes its socket and exits, as tmux does with no sessions.
-  The next relay operation starts a fresh one.
-- **A child exits.** termd reaps it (`waitpid` once the PTY reads EOF, so no output is
-  lost), sends `exit` + `closed`, and forgets the terminal. The relay's adapter sees
-  `closed` and tears down the grid, as it does today on PTY EOF.
-- **termd crashes.** Every PTY master closes, so every terminal's session gets `SIGHUP`
-  from the kernel: all shells in the namespace die, as with `tmux kill-server`. This is
-  D3's accepted cost. Relay-side, every adapter's socket drops, every adapter exits, and
-  the grids close. The next spawn starts a new daemon. `terminal.recover` lists termd's
-  (empty) live set, and displays prune their spots against it. A Rust panic in one
-  terminal's owner thread doesn't crash the daemon: the thread's `catch_unwind` closes
-  that terminal (its shell gets `SIGHUP`), logs the panic, and every other terminal
-  carries on. Undefined behaviour or an abort inside libghostty does crash the daemon.
-- **Upgrade, v1.** Replacing termd means `stop` (every shell dies) and starting the new
-  binary. `WELCOME` carries the daemon version, and the relay logs a mismatch between
-  its bundled termd and the running one. It refuses a different protocol major loud
-  rather than talking past it, and never replaces a running daemon on its own.
-- **Upgrade, later: keep the shells.** Hot upgrade as phux does it:
-  1. the old daemon writes a handoff record (per terminal: id, handle, pid, argv, size,
-     seq, the PTY master's fd number);
-  2. it clears `FD_CLOEXEC` on the PTY masters and the listening socket;
-  3. it `exec`s the new binary, which re-adopts the fds.
+- **Idle exit.** When the namespace has no terminals and the brain has had no connections for
+  `idle_exit` (default 300 s; 0 = never), the holder removes the socket and exits, and the brain
+  with it. A connection that only follows status (or pings) does not count: the relay keeps a
+  status connection to every namespace it serves ([Status](#status)), and an empty daemon must
+  still be able to leave. Followers get a last `status` event with `daemon.exiting: true`, then
+  the close. The next relay operation starts a fresh namespace. An empty daemon exiting is also the
+  natural point where a new binary takes over.
+- **A child exits.** The holder reaps it and tells the brain its status. The brain reads the PTY to
+  EOF (so no output is lost), sends `exit` + `closed`, and releases the terminal. The relay's
+  adapter sees `closed` and tears down the grid.
+- **The brain crashes, or is upgraded.** The shells keep running. See [Holder and
+  brain](#holder-and-brain).
+- **The holder dies.** Every PTY hangs up and every shell in the namespace gets `SIGHUP`, as with
+  `tmux kill-server`. See [If the holder dies](#if-the-holder-dies).
 
-  The process tree, PTYs and child pids survive, because `exec` keeps them. Screen state
-  crosses as a libghostty snapshot when both binaries share a libghostty version.
-  Snapshots aren't stable across versions, so when the version changes it crosses as
-  the formatter's VT repaint with `history_rows` (exact screen, styled-text history).
-  The handoff record is a format; every shape a release wrote stays decodable. This is
-  outside S1.
+## Holder and brain
+
+Until S1, one process held the PTYs and ran everything else, so a crash or an upgrade of termd
+ended every shell. termd is now two processes per namespace:
+
+```
+            g3d-termd  (the HOLDER: one per namespace, the shells' parent)
+            ┌──────────────────────────────────────────────────────────────┐
+            │ <socket>.lock (flock) and the listening socket (re-stamped)  │
+            │ per terminal: the PTY master fd, pid, argv, exit status      │
+            │ the store: snapshot and handoff fds (FDSTORE-style, named)   │
+            │ supervises the brain: start, restart, backoff, watchdog      │
+            └───────┬─────────────────────────────────┬────────────────────┘
+      fork + exec   │   socketpair: the hold protocol │  fork + exec
+      each program  │   (frames + SCM_RIGHTS)         │  the brain
+            ▼       │                                 ▼
+     shells, each   └────────────────────▶ g3d-termd --brain  (the BRAIN)
+     on its own PTY                        libghostty, the owner threads, the
+                                           public protocol, clients, status
+```
+
+- The **holder** is the shells' parent and keeps a copy of every PTY master fd. It is small and
+  changes rarely: no libghostty, no tokio, one thread, a `poll` loop. It does not read the PTYs.
+- The **brain** is everything else: one libghostty `Terminal` per terminal on its owner thread,
+  the public protocol, the clients, the status stream, the environment policy. It reads and writes
+  its own copy of each master fd. It can crash, be killed, or be replaced, and no shell notices.
+- The brain gets its fds from the holder over `SCM_RIGHTS`: the listening socket, every PTY master,
+  and the stored snapshots and handoff record.
+
+Both run from the one `g3d-termd` binary: `g3d-termd --ns <ns>` is the holder, which starts
+`g3d-termd --brain` itself (the brain is never started by hand). The holder's code is its own crate,
+`g3d-hold`, which depends on `rustix`, `libc` and `g3d-wire` (the frame codec and its JSON) and
+nothing else, so Cargo itself keeps libghostty and tokio out of the holder. On Linux
+the processes name themselves `g3d-termd` and `g3d-termd-brain` (`PR_SET_NAME`), so `ps` and the
+status window tell them apart.
+
+### What others do
+
+| Tool | Who holds the PTY | What a crash or upgrade does | Taken / not |
+|---|---|---|---|
+| **tmux** | one server process holds every pane's PTY, grid and history | `kill-server`, a crash or an upgrade ends every pane. A new client against an older server refuses with a protocol version mismatch, so people keep the old binary running until their sessions end. One process keeps tmux simple: one event loop, one shared state, no cross-process consistency | Not taken: the single process is what this split removes |
+| **dtach**, **abduco** | one tiny master process per session holds the PTY and serves attaches; no screen state | the master never upgrades; a reattach gets no screen, only a redraw nudge (dtach `-r none\|ctrl_l\|winch`, default `ctrl_l`) | Taken: the holder is dtach's master minus the serving; the redraw nudge after a crash (`winch`) |
+| **zmx** | one daemon per session holds the PTY and a libghostty-vt beside the stream | the session's daemon is the session; restore on reattach is a libghostty snapshot | Taken: the snapshot as the way a screen comes back |
+| **shpool** | one daemon holds every shell in a table, with an in-memory `shpool_vt100` render | shells are the daemon's children, so a daemon restart ends them; ships a systemd user service and socket | Taken: restore modes (`screen` = redraw from the render; `simple` = only `SIGWINCH`) |
+| **hexe** | a `pod` process per pane owns the PTY and a 4 MiB raw byte ring; `ses` is the session authority | "SES can crash and be restarted, and the pods — and the shells inside them — do not notice"; reattach replays ≤ 1 MiB of the ring | Taken: the split itself. Not taken: the ring (below) and a process per pane |
+| **phux** | one server process | "Hot upgrades re-exec and re-adopt live PTYs; cold restarts, crashes and reboots do not preserve PTYs." The upgrade blob is a frozen format and the candidate binary must parse it before the running one execs into it | Taken: the frozen handoff record, validated by the candidate first; the listening socket handed over |
+| **systemd FD store** | the service manager keeps fds a service uploads (`sd_pid_notify_with_fds`, `FDSTORE=1`, `FDNAME=`), and hands them back on restart as `LISTEN_FDS` / `LISTEN_FDNAMES`; a stored fd that shows `POLLHUP`/`POLLERR` is dropped; state rides along in a memfd, saved "when state changes sufficiently" so it survives an abnormal exit | a restart job keeps the store; a stop clears it | Taken as the model: the holder is a per-namespace FD store with named fds, auto-drop on hangup, and state in memfds. Not used directly: the shells need a living parent that reports their exit status (keeping them alive under systemd needs `KillMode=process`, which systemd discourages, and loses exit statuses), macOS has no systemd, and one design serves both |
+| **socket activation** | the manager owns the listening socket and passes it in (`LISTEN_FDS`) | connections queue in the backlog while the service restarts, so clients see no refusal | Taken: the holder owns the listening socket |
+| **mosh** | `mosh-server` holds the PTY and a terminal emulator per connection | the server is the session; there is no restart that keeps the shell. Clients get the latest screen state, not a byte replay (no scrollback) | Taken: a reconnecting viewer gets the screen (a repaint), not a replay |
+| **Eternal Terminal** | the server side keeps the shell across client reconnects | each side keeps a `BackedWriter` buffer of recent bytes and replays what the peer's byte count says it missed | Not taken for clients: a repaint is exact and cheaper than a replay buffer per connection |
+| **WezTerm** | `wezterm-mux-server` holds the panes in one process; the GUI attaches over a unix domain | panes persist "until they are closed"; the docs want a compatible version on both ends; no restart keeps panes | Not taken (tmux's shape) |
+| **kitty**, **Ghostty** | the app holds its own PTYs; no detached server | quitting the app ends the shells. Ghostty's contribution is libghostty-vt itself (which zmx, phux, hexe and termd build on), its environment practice and per-surface cgroup scopes (below) | Taken: the environment and cgroup practice |
+
+### Does the holder read the PTY? No.
+
+The holder keeps each master fd open and never reads it. The brain reads and writes its own copy.
+
+- **While no brain reads, nothing is lost.** The program's output waits in the kernel's PTY buffer
+  (13.8 KB on the build machine, measured with a raw-mode PTY and no reader), then the program
+  blocks in `write` until a brain reads again. A restarted brain resumes at exactly the byte the
+  old one had not read. The only bytes lost are those the crashed brain had read but not yet saved
+  (below), and termd counts them.
+- **No extra copy.** Reading in the holder would move every byte through a second process (one
+  more copy and context switch per chunk) at flood rates of hundreds of MB/s.
+- **Nothing for output to crash.** The holder parses nothing a program writes, so no escape
+  sequence, flood or malformed UTF-8 can reach its code.
+- **No ring to leak.** hexe's ring is replayed to whoever attaches, so it clears and pauses the
+  ring while a password is typed. With no ring there is no such hazard.
+
+The cost is that a program blocks while no brain reads: about 100 ms during a restart, and until a
+brain returns if none does. A frozen program is the honest state of a terminal nobody is
+processing. tmux behaves the same when its server is wedged.
+
+### Screens after a crash
+
+The brain saves each terminal while it runs, so a restarted brain can bring the screen back:
+
+- **Snapshot.** Every `snapshot_interval` (default 2 s), each terminal with new output since its
+  last save encodes a libghostty snapshot on its owner thread, compresses it with LZ4 and writes it
+  into a new anonymous shared-memory object sized to fit (Linux: a `memfd`, then sealed against
+  writes and growth; macOS: `shm_open` of a random name, `shm_unlink` at once, sized once, which is
+  all macOS allows). It sends that fd to the holder, which keeps the newest two per terminal and
+  closes the older. The object is complete before it is sent, so a crash mid-encode leaves the
+  previous one whole; there are no slots to tear. Its header carries a magic, the engine
+  (`libghostty-vt/1.0.1` plus the snapshot format version), the terminal's id, the `seq` the
+  snapshot is at, the length and a CRC32C. Shared memory, not a file: screens can hold what was
+  typed at a prompt, and RAM-backed objects never reach a disk (beyond swap). Measured: a 120×40 terminal with a full 2 MiB history snapshots to 489 KB in
+  0.3 ms; with a 10 MB history, 2.6 MB in 1.4 ms (decode 5 ms). LZ4 shrinks those to 37 KB and
+  205 KB on build-log text. An idle prompt is 1.2 KB in 8 µs. The cost to the owner thread is
+  well under 0.1% at a 2 s interval.
+- **The seq high-water mark.** One fixed-size shared page per brain (`seq_marks`, 64 KiB: 8,192
+  terminals × 8 bytes, created at brain start and handed to the holder) holds each terminal's
+  `seq` after each read, as one relaxed atomic store at the terminal's handle-assigned index. A restarted brain knows exactly how many bytes
+  the dead brain read after its last snapshot: `unseen = high-water − snapshot seq`.
+- **Restore.** The new brain decodes the newest valid slot if its engine string matches its own
+  exactly (the snapshot format is outside libghostty's ABI promise), resizes it to the PTY's
+  current size (`TIOCGWINSZ`, the kernel's truth), and resumes `seq` at the high-water mark, so
+  `seq` never repeats. With no matching snapshot the terminal starts blank.
+- **Redraw nudge.** Then termd sends `SIGWINCH` to the PTY's foreground process group (dtach's
+  `winch` method and shpool's `simple` mode). Full-screen programs redraw everything; a shell
+  redraws its prompt line. Output from the unseen bytes is missing from the screen and history.
+  The status stream reports, per terminal, how it came back (`snapshot` or `blank`) and the
+  unseen byte count.
+
+### Screens after an upgrade: `g3d upgrade`
+
+A planned replacement loses nothing, because the old brain hands over at an exact cut.
+
+1. `g3d upgrade [--ns NS] [--binary PATH]` sends `upgrade` to the running brain. The reply means
+   "accepted"; the client then reconnects and waits for a `WELCOME` with a higher brain
+   generation, or for the status stream's `last_start` to say the upgrade failed.
+2. The old brain asks the holder to start the candidate: `PATH`, else the path the holder was
+   started from (a new file installed there; the holder never uses `/proc/self/exe`, which would
+   name the old, replaced inode). The candidate says hello to the holder with its engine and the
+   handoff formats it reads.
+3. The old brain stops accepting connections (the listening socket stays in the holder, so new
+   connections wait in its backlog) and stops each owner thread at a cut between PTY reads. Each
+   terminal is encoded at its cut: a libghostty snapshot when the candidate's engine is the same,
+   else the formatter's VT repaint with all of its history (exact screen and modes, styled-text
+   history). The handoff record (per terminal: id, handle, pid, argv, cwd, created time, seq,
+   title, pwd, colours, cell size, scrollback cap; plus the recent errors and counters) and the
+   blobs go to the holder as memfds.
+4. The candidate decodes and validates everything and tells the holder it is ready. Only then does
+   the old brain close each connection with `ERROR` `restart` and exit. The candidate becomes the
+   brain, starts reading the PTYs at each cut's `seq`, and starts accepting. No byte is skipped and
+   `seq` continues exactly.
+5. If the candidate exits, or isn't ready within `upgrade_deadline` (10 s), the holder kills it and
+   the old brain resumes: it reopens accept and its owner threads read again. Connections were
+   never dropped. The failure is in the log and in the status stream.
+
+The handoff record is a format: every shape a release wrote stays decodable, and an append-only
+fixture set holds one sample per release (phux's rule). The same applies to the holder record
+below.
+
+`g3d upgrade` is the only upgrade command. `g3d stop` (every shell dies) remains for tests and for
+ending a namespace on purpose.
+
+### If the brain never returns
+
+The holder restarts a brain that exits without a handoff (a crash, a kill, a failed upgrade's
+leftover) the way systemd restarts a failing service, using systemd's own defaults:
+
+- restart after `brain_restart_delay` (100 ms, systemd's `RestartSec` default);
+- at most `brain_start_burst` (5) starts in `brain_start_interval` (10 s), systemd's
+  `DefaultStartLimitBurst` / `DefaultStartLimitIntervalSec`;
+- past that limit, the brain is **failed**. The holder keeps retrying, slowly: after 30 s, then
+  doubling to at most 10 min, forever. A fixed binary installed meanwhile is picked up at the next
+  try. `SIGHUP` to the holder (the usual "reload" signal; its pid is in the lock file) retries
+  now and resets the backoff, and `g3d upgrade` sends it when it finds the brain failed.
+- While failed, the holder accepts connections itself and answers each with `ERROR`
+  `brain_failed`, whose message names the brain's last exit, the log path and the holder's pid,
+  then closes. Clients never hang on a silent socket.
+- The shells stay alive and freeze once their PTY buffers fill. The holder never kills a shell on
+  its own. Idle exit still applies: a failed namespace with no terminals exits.
+- **Watchdog.** The brain sends the holder `alive` every 5 s from its socket runtime. After
+  `brain_watchdog` (30 s; 0 = off) without one, the holder sends `SIGABRT` (systemd's
+  `WatchdogSignal` default, so a core dump shows where it hung), then `SIGKILL` 5 s later, and
+  restarts the brain as after a crash.
+
+### Riding a restart: relay and clients
+
+A brain restart drops every client connection; the holder and the listening socket stay. One rule
+for every client, written into PROTOCOL.md ("Restarts"):
+
+- On `ERROR` `restart` (planned), reconnect at once (with up to 100 ms of jitter, so a hundred
+  adapters don't arrive together). On a dropped connection, reconnect with backoff: 100 ms,
+  doubling to 2 s, for up to `reconnect_window` (default 30 s, which covers a crash restart and the
+  first crash-loop retries).
+- `connect` succeeds while the holder lives, even before a brain accepts (the backlog). `ENOENT` or
+  `ECONNREFUSED` means no holder: the namespace and its shells are gone.
+- After `WELCOME`, compare `instance` with the one you had. The same instance means your terminals
+  may still exist: re-`subscribe` by id (never `create … if_exists: adopt`, which would start a new
+  program in a terminal that ended meanwhile). The `REPAINT` brings your screen back. `no_terminal`
+  means that terminal ended. A different instance means a new namespace: your terminals are gone.
+- Input is at most once. `INPUT` sent while disconnected is dropped, never replayed after the
+  reconnect: a doubled command line is worse than a lost keystroke (hexe dedups input by
+  `(epoch, seq)` for the same reason).
+- The relay's terminals (forked adapters in S1, virtual controllers in S2) follow that rule; each
+  keeps its grid during the window and logs `LOST termd` only when the window ends or the instance
+  changed. A terminal whose adapter gave up is vacant, and the relay re-adopts vacant terminals
+  itself when its status connection sees a brain again, so grids come back with no display action.
+- **Unknown is not empty.** `terminal.recover`, and anything that lists terminals for a display to
+  prune against, reports an error (not an empty list) when the holder answers but no brain does
+  (`brain_failed`, a `WELCOME` timeout, the reconnect window). Only "nothing listens" is an empty
+  namespace. Otherwise a brain restart would make the wall forget the names and spots of terminals
+  that are still running.
+
+### If the holder dies
+
+Every master fd closes, the kernel hangs up each PTY, and every shell gets `SIGHUP`. The brain sees
+the hold link close and exits; clients find nothing listening and report the namespace lost. This is
+`tmux kill-server`. What makes it unlikely:
+
+- **Little code, and no untrusted input.** The holder parses no program output and no client JSON.
+  Its peers are the brain (over a socketpair, with a fuzzed decoder) and, only while the brain is
+  failed, connections it answers with a fixed `ERROR` without reading them.
+- **One thread, bounded state.** A `poll` loop over the hold link, the signal pipe, the listening
+  socket (only while failed) and timers. Memory grows only with the terminal table.
+- **Its own cgroup scope** (Linux, below). systemd-oomd kills whole cgroups, so the holder, the
+  brain and each shell get their own scope: oomd's choice falls on the brain (restartable) or one
+  runaway shell, never on the holder. The brain also raises its own `oom_score_adj` by
+  `brain_oom_score_adj` (300) above the holder's, so the kernel's OOM killer prefers it too. Without
+  this, termd and every shell live in the cgroup of whatever started the relay (on the build
+  machine, a terminal window's transient scope), and a kill of that scope, or of that window's
+  scope by oomd, ends them all.
+- **Signals.** It ignores `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGPIPE`. `SIGHUP` retries the brain.
+  `SIGTERM` stops the namespace (every shell dies), as `tmux kill-server` on `SIGTERM`.
+- **It changes rarely**, and it changes by re-exec (below), never by a restart.
+- **Panics abort.** Unwinding can't help a process whose death ends every shell; the panic is
+  logged first.
+
+### Versions between holder and brain
+
+- The **hold protocol** (holder ↔ brain) is internal and versioned `[major, minor]` in its own
+  hello. It uses the public frame header, JSON control payloads and fds in `SCM_RIGHTS` ancillary
+  data. Minors only add messages and fields. A brain speaks exactly one major (no compatibility
+  paths). A brain whose major differs from the holder's exits at hello and says so in the log; the
+  holder treats it as failed.
+- **Upgrading the holder** is a re-exec: `exec` keeps the pid, so the shells stay its children and
+  the fds stay open. `g3d upgrade --holder` does a brain upgrade with the holder's re-exec in the
+  middle: the old brain hands off into the store and exits, the holder writes its own record
+  (terminals, fds, pids, exit statuses, the store's names, counters, instance id) to a memfd,
+  runs the candidate binary once as `g3d-termd --check-holder-record <fd>` (it must parse the
+  record before anything irreversible happens), clears `FD_CLOEXEC` on what it keeps and execs
+  `g3d-termd --holder-resume <fd>`, which starts the new brain from the handoff. `g3d upgrade`
+  without `--holder` refuses, naming `--holder`, when the candidate's hold major differs from the
+  running holder's.
+- **Snapshots** restore only into the exact same engine. **Handoff and holder records** are
+  frozen formats with append-only fixtures.
+- `WELCOME` reports the daemon (brain) version, the holder's version and hold protocol, the
+  `instance` (the holder's random id, fixed for its life, re-exec included) and the brain's
+  `generation` (1 for the first brain, +1 per start).
 
 ### Spawning a terminal
 
-For each `create`, the daemon:
+The brain decides what to run ([Environment](#environment)): the resolved argv, the full
+environment and the working directory. The holder runs it, because only the parent can reap a child
+and report its status, and only the parent can signal a pid without racing its reuse. For each
+spawn, the holder (single-threaded, so `fork` is safe):
 
-- opens a PTY with `posix_openpt`, `grantpt`, `unlockpt` (rustix `pty`) and sets the size
-  (`TIOCSWINSZ`) before the child starts;
-- forks the child from the terminal's owner thread. In the child, before `exec`, only
-  async-signal-safe calls: `setsid`, `TIOCSCTTY` on the PTY slave, `dup2` it onto
-  0/1/2, close everything else, reset the signal mask and dispositions, `chdir`, then
-  `execvpe` with the environment PROTOCOL.md specifies. The child gets no pdeathsig;
-  its lifetime is its PTY's;
-- on `kill`, signals the process group (`kill(-pgid, SIGHUP)`), closes the master, and
-  reaps.
+- opens a PTY with `posix_openpt`, `grantpt`, `unlockpt`, sets `FD_CLOEXEC` on the master (macOS's
+  `posix_openpt` takes no `O_CLOEXEC`), opens the slave, then sets `IUTF8` and the size
+  (`TIOCSWINSZ`) before the child starts. The slave is opened first because macOS answers
+  `TIOCSWINSZ` on a master whose slave was never opened with `ENOTTY` (found on the M2);
+- forks. The child first waits on a pipe while the holder moves it into a new transient systemd
+  scope (Linux, below). Then, using only async-signal-safe calls: `setsid`, `TIOCSCTTY` on the
+  slave, `dup2` onto 0/1/2, every signal disposition back to default and the mask cleared (an
+  ignored signal stays ignored across `exec`, so a holder that ignores `SIGINT` would otherwise
+  hand every shell a dead Ctrl-C), the soft `RLIMIT_NOFILE` back to its value at the holder's
+  start (the holder raises its own to the hard limit; programs using `select()` break above 1024,
+  so children get the original), close every fd above 2 (Linux: `close_range(3, ~0, 0)`; macOS,
+  which has none: the list of the holder's open fds, taken just before the fork, which is exact
+  because the holder is one thread; not a loop to `getdtablesize()`, which is 61,440 `fcntl`s on
+  the M2), `chdir`, `execve` the resolved path. An exec
+  failure reaches the holder through a close-on-exec pipe, and `create` fails with `spawn_failed`
+  naming the errno;
+- replies to the brain with the pid and a dup of the master fd; it keeps its own copy;
+- reaps on `SIGCHLD` (`waitpid(-1, WNOHANG)` in a loop) and reports `exited {id, code | signal}`.
+  It keeps the fd and the status until the brain, having read the PTY to EOF, releases the
+  terminal; a brain that restarts in between still gets both.
+
+Signals go through the holder: `kill` asks it to send `SIGHUP` (or the requested signal) to the
+program's process group and the PTY's foreground group, it closes its copy when the brain releases
+its own (the last close hangs up the PTY), and `SIGKILL` follows after `kill_grace` (2 s) if the
+program outlives it. Resize (`TIOCSWINSZ`) and I/O stay in the brain, on its own copy of the fd.
+
+### Linux and macOS
+
+One design; the platform seams are `cfg`-gated modules with one interface each, so the macOS work
+(branch `termd-macos`) slots in without touching the rest.
+
+| Seam | Linux | macOS (owned by the macOS agent) |
+|---|---|---|
+| socket directory | `$XDG_RUNTIME_DIR/g3d`, else `/tmp/g3d-<uid>` | `/tmp/g3d-<uid>` (`$XDG_RUNTIME_DIR` is never set); one rule, no `cfg` |
+| shared memory for snapshots, records and `seq_marks` | `memfd_create(MFD_CLOEXEC \| MFD_ALLOW_SEALING)`, sealed after writing | `shm_open` of a random name + `shm_unlink` at once, `ftruncate` once (macOS sizes a shm object only once), then `FD_CLOEXEC` |
+| close-on-exec at creation | atomic everywhere (`pipe2`, `accept4`, `SOCK_CLOEXEC`, `MSG_CMSG_CLOEXEC`) | none of those: set right after creation. Safe in the holder (one thread); in the brain the race is harmless because the brain never forks |
+| closing fds in a child | `close_range` | the pre-fork list ([Spawning a terminal](#spawning-a-terminal)) |
+| `TIOCSWINSZ` on a fresh master | works at once | `ENOTTY` until the slave is opened: open the slave first, on both |
+| process RSS (status) | `/proc/<pid>/statm` | `proc_pidinfo(PROC_PIDTASKINFO)`; tests use `ps -o rss=` on both and fail loud when it can't measure |
+| cgroup scopes | one transient scope per process role, via `StartTransientUnit` on the user manager (below) | none |
+| OOM preference | brain raises `oom_score_adj` | none |
+| process names | `PR_SET_NAME` | none (no `prctl`) |
+| parent death | not used: the brain sees the hold link close; shells see their PTY hang up | the same, so nothing to port |
+| `SCM_RIGHTS` receive | `MSG_CMSG_CLOEXEC` | no `MSG_CMSG_CLOEXEC`: the holder (one thread, so no race) sets `FD_CLOEXEC` right after `recvmsg`; the brain never execs |
+| peer credentials | `SO_PEERCRED` | `getpeereid` |
+| PTY buffer with no reader | 13.8 KB (measured) | to measure |
+| canonical-mode line limit (`MAX_CANON`) | 4,095 bytes | 1,023 bytes: the excess and the line's end are lost (BEL per byte), so a canonical reader (`read`, `head -n1`, Python's `input()`) waits. Kernel line discipline: termd writes what it was given, documents the limit, and does not split. Raw-mode programs (line editors, vim, Claude Code) take input of any size (the M2's 256 KiB `INPUT` gate) |
+| the session environment | the user manager's environment | the holder's own (launchd's when a LaunchAgent starts it); see [Environment](#environment) |
+| default locale when none is set | `C.UTF-8` | the `AppleLocale` preference `.UTF-8`, else `C.UTF-8` |
+
+**cgroup scopes (Linux).** The normal practice for terminals: Ghostty moves each surface into
+`app-ghostty-surface-transient-<pid>.scope`, VTE each child into `vte-spawn-<uuid>.scope`, and
+tmux (built with systemd, as on the build machine) each pane into `tmux-spawn-<uuid>.scope` while
+its server stays in its starter's scope. termd does the same for every process it starts:
+`app-g3d-termd-holder-<pid>.scope` (the holder moves itself at start), `app-g3d-termd-brain-<pid>.scope`
+and `app-g3d-termd-term-<pid>.scope` per program. The holder calls the user manager's
+`StartTransientUnit` (with `PIDs=[pid]` and `CollectMode=inactive-or-failed`, so an emptied scope is
+collected) through `busctl --user call`, systemd's own client, so the holder links no D-Bus library.
+The child waits on its pipe until the move is done, which avoids the race tmux users hit when a
+short-lived pane exits before its scope registers. Failure is soft, as Ghostty's default
+(`linux-cgroup-hard-fail = false`): logged once, shown in the status stream, and the spawn goes on.
+`cgroup_scopes = "auto" | "off"`; `auto` uses them when the user manager answers.
+
+## Environment
+
+S1's programs inherit whatever process first started the daemon: a relay started from a dev shell hands
+every terminal that shell's virtualenv, its editor's IPC sockets, a `DISPLAY` from whenever it
+started, and the daemon's working directory (`/`, after daemonizing). A terminal termd starts should look
+like a new terminal window on the user's desktop. That is the normal practice this policy follows.
+
+### What others do
+
+- **Ghostty** (its `termio/Exec.zig` and apprt sources, vendored here): starts from its own
+  process environment; on Linux removes what a desktop launch or systemd added
+  (`GIO_LAUNCHED_DESKTOP_FILE[_PID]`, `DBUS_STARTER_*`, `INVOCATION_ID`, `JOURNAL_STREAM`,
+  `NOTIFY_SOCKET`, its own GTK debug variables); removes `VTE_VERSION` "so children don't think
+  they're under VTE"; sets `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=ghostty`,
+  `TERM_PROGRAM_VERSION`, and `PWD` to the working directory (as Konsole and kitty do, so a
+  symlinked path keeps its name). `TERM=xterm-ghostty` only when its terminfo is found (it sets
+  `TERMINFO` to its bundled copy), else `xterm-256color`. Its `+ssh` helper installs the terminfo
+  on a remote host and otherwise falls back to `xterm-256color`, because "almost every system knows
+  `xterm-256color`". The shell is `$SHELL` only when launched from a CLI, else the passwd entry;
+  the working directory is home for a desktop launch. On macOS every terminal is a login shell
+  through `/usr/bin/login -flp <user>` (with `-q` when `~/.hushlogin` exists), because macOS users
+  keep their setup in `~/.bash_profile`; it also sets `LANG` from the system locale when it is
+  unset. It sets `IUTF8` on every PTY ("NOT on by default on macOS"; on the build machine it is not
+  on by default on Linux either).
+- **tmux** (3.8 here): the server copies its start environment into a global environment; each
+  session's environment comes from the client named in `update-environment` (default `DISPLAY
+  KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION WAYLAND_DISPLAY WINDOWID
+  XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE`), re-read at every attach for
+  *new* windows only. `default-command` empty starts a **login** shell from `default-shell` (`$SHELL`,
+  else `getpwuid`, else `/bin/sh`). It sets `TERM` from `default-terminal` (`tmux-256color`),
+  `TERM_PROGRAM=tmux`, and `TMUX`. Running panes keep stale values, which tmux users work around by
+  re-reading `show-environment -s` from a shell hook.
+- **shpool**: `forward_env` copies `TERM`, `DISPLAY`, `LANG`, `SSH_AUTH_SOCK` from the attaching
+  shell into **new** shells only; `SSH_AUTH_SOCK` becomes a per-session symlink re-pointed at each
+  attach; `/etc/environment` is read; the initial `PATH` copies OpenSSH's; the default directory
+  is home.
+- **hexe**: a session's environment is captured from the shell that opened it and re-captured on
+  every attach, for new panes; running panes keep theirs, "because a running process's environment
+  cannot be rewritten from outside".
+- **The Linux session.** PAM (`pam_systemd`, `pam_env`) sets up the login session; the systemd user
+  manager's environment comes from `environment.d` plus what the desktop imports into it
+  (`systemctl --user import-environment`, `dbus-update-activation-environment --systemd`). On the
+  build machine (KDE Plasma, Wayland) it holds `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
+  `DBUS_SESSION_BUS_ADDRESS`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`, the locale and the profile's
+  variables. Units, and D-Bus-activated terminal servers such as GNOME Terminal's, start from it.
+  `systemctl --user show-environment` prints it; reading it as JSON takes 11 ms with `busctl`.
+- **mosh** refuses to start without a UTF-8 locale and passes the client's `LANG`/`LC_*` to the
+  server. Debian's OpenSSH sends and accepts `LANG LC_*`.
+- **The daemons that start shells** (from source, read by the macOS agent): tmux, WezTerm's mux
+  server and shpool all start the default shell as a **login shell by argv0 `-<basename>`**, on
+  every platform. WezTerm and shpool take the shell from the passwd entry (WezTerm drops `$SHELL`
+  as possibly stale); WezTerm sets `TERM_PROGRAM=WezTerm` and removes `OLDPWD PWD SHLVL` (and by
+  default the SSH variables, `mux_env_remove`); shpool starts from `env_clear()`.
+- **macOS terminals**: Terminal.app, iTerm2 and Ghostty all start a login shell through
+  `login -fpl <user>`, take the shell from passwd (via `login`), set their own `TERM_PROGRAM` and
+  fill an unset `LANG` from the system locale.
+- **Measured on macOS 27.2 (the M2)**, an interactive zsh's `env` in three cases. Terminal.app's
+  shape (launchd's environment, then `login -pfl`): `PATH` from `path_helper` (`/etc/paths`,
+  `/etc/paths.d`) plus `~/.zprofile` (Homebrew's `shellenv`), and `LANG=C.UTF-8`, which this macOS's
+  `/etc/zprofile` sets when unset. S1 termd started with launchd's environment (a LaunchAgent, or
+  anything a GUI app starts): a non-login shell, so `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin` plus
+  `.zshrc` (no Homebrew, no `paths.d`), and **no `LANG`**, so `locale charmap` is `US-ASCII` and zsh
+  shows typed non-ASCII as `<…>` escapes. S1 termd started from a Terminal.app shell: that shell's
+  everything, including `TERM_PROGRAM=Apple_Terminal`, so Apple's `/etc/zshrc` sources
+  `/etc/zshrc_Apple_Terminal` and every termd shell installs Terminal.app's OSC 7 hook and (with
+  its `TERM_SESSION_ID`) shares one Terminal tab's `~/.zsh_sessions` history. The same identity
+  leak happens on Linux from Ghostty, Konsole or VS Code. `ssh-add -l` and the login keychain
+  (`security find-generic-password`) work from a daemon inside the GUI session.
+
+### The policy
+
+A terminal's environment is built per `create`, in this order (later wins):
+
+| Layer | What | Why |
+|---|---|---|
+| 1. Session base | **Linux with a user manager:** the systemd user manager's environment, read at each `create` (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, 1 s timeout). **Otherwise** (no user manager: macOS, containers, hosts without logind): the holder's own environment as it started | What a terminal launched from the desktop gets. On a host reached only by SSH, logind still starts a user manager, but nothing imports a profile into it, so its environment is thin (`PATH` is systemd's default); the login shell ([below](#the-shell-and-login-or-not)) supplies the profile there. Reading it at every create means a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK`: the desktop re-imports them at each login. The fallback is the starter's environment, scrubbed (layer 2); the status stream names the source |
+| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (`INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`); termd's own controls (`G3D_TERMD_DIR`, `G3D_TERMD_TEST_HOOKS`) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code with `env_scrub` / `env_keep` to extend or exempt |
+| 3. Account | `HOME`, `USER`, `LOGNAME` from `getpwuid` when the base lacks them; `SHELL` set to the shell chosen ([below](#the-shell-and-login-or-not)); `LANG` filled when no locale is set ([Locale](#locale)) | What `login(1)` provides |
+| 4. Client `env` | the `create` request's `env` (validated, below); `null` removes | The caller knows what this terminal is for |
+| 5. termd's own | `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`, `G3D_TERMD_SOCKET=<socket>`, `PWD=<cwd>` | They describe this terminal, so nothing else may set them |
+
+`g3d` run inside a termd terminal reaches that terminal's daemon through `G3D_TERMD_SOCKET` when no
+`--ns`/`--socket` is given, as tmux's client finds its server through `TMUX`.
+
+**Running shells are never rewritten.** No mechanism pushes new values into live terminals, and
+termd keeps no per-namespace environment that `create` mutates. tmux's `update-environment` is the
+convention rejected here: it changes the next window's environment, not the running ones, and the
+fix it needs (a prompt hook that re-reads `show-environment`) is the workaround. A fresh base per
+`create` makes new terminals right, and a running shell's environment is its own, as hexe says.
+
+### The shell, and login or not
+
+- With no `argv`, the program is the user's shell: the passwd entry's shell (`getpwuid`, which on
+  macOS reads the directory service, what `dscl . -read /Users/<user> UserShell` shows) when it
+  names an executable, else the composed environment's `SHELL` when that is an absolute path to an
+  executable, else `/bin/sh`. Whichever is chosen becomes `SHELL`, as `login(1)` sets it. The
+  daemon setting `shell` (a path) overrides the passwd entry for a whole namespace.
+  - Why passwd first: a daemon's `$SHELL` is whatever its starter had: an old value from before a
+    `chsh`, or a `nix-shell`'s bash. The passwd entry is the account's truth, and a `chsh` takes
+    effect at the next terminal without restarting anything. WezTerm's mux, shpool and Ghostty
+    (outside a CLI launch) do the same; tmux's `$SHELL`-first order comes from a server started by
+    the person's own shell, which a daemon started by a relay is not.
+- **A login shell, on Linux and macOS: argv0 `-<basename>`** (`execve("/bin/zsh", ["-zsh"])`),
+  the POSIX login convention that `login(1)` itself uses and every shell honours. This is what
+  tmux, WezTerm's mux server and shpool do, the daemons that start shells, on every platform.
+  - Why: termd is a daemon, and what it starts must not depend on who happened to start it (the
+    macOS agent's third defect). The login shell runs the system's and the user's profile every
+    time: on macOS `/etc/zprofile` runs `path_helper` (`/etc/paths`, `/etc/paths.d`) and fills
+    `LANG`, and `~/.zprofile` holds Homebrew's `shellenv`; on a headless Linux host it is the only
+    place the profile's `PATH` comes from. Every SSH login is a login shell too, so people's
+    dotfiles already work this way.
+  - The cost on a Linux desktop, where the session base already carries the profile: the profile
+    runs a second time, and a profile that prepends without checking repeats `PATH` entries. That
+    is cosmetic (the same entries, the same order of precedence), and many profiles guard against
+    it (Arch's `/etc/profile` `append_path`, zsh's `typeset -U path`). A missing `PATH` entry, the
+    failure a non-login shell gives on a headless host or under launchd, breaks commands. The
+    lesser footgun wins. `login_shell = false` restores the Linux desktop terminals' non-login
+    habit for a person who wants it.
+  - Not `login -flp` (Ghostty's, Terminal.app's and iTerm2's macOS form): `login(1)` opens a login
+    *session* (a utmp entry, `setlogin`, a PAM session, a "Last login" banner unless
+    `~/.hushlogin`), which a GUI terminal window is and a daemon's terminal is not. The argv0 form
+    gives the shell the same login behaviour without those.
+- An explicit `argv` runs as given, never as a login shell and never wrapped, on both platforms. A
+  caller that wants a login shell sends no `argv`.
+- `argv[0]` without a slash is looked up in the composed environment's `PATH` (`execvpe`
+  semantics), not the daemon's.
+- **The relay sends no `argv`** for a plain new terminal (S1's `cli/attach.go` sends its own
+  `$SHELL`, which bypasses all of the above), and `g3d new` sends none unless given a command.
+  The daemon is the one place that knows the user's shell.
+
+### TERM and friends
+
+`TERM=xterm-256color`, `COLORTERM=truecolor`, and termd's emulator answers terminfo queries as
+`xterm-256color` (`set_terminfo_name`). `TERM` names what parses the bytes, and in raw mode that is
+downstream of termd: xterm.js in the browser today, or whatever terminal `g3d attach` runs in.
+`xterm-ghostty` would invite sequences (Kitty keyboard, Kitty graphics) those parsers don't take,
+and `ssh` carries `TERM` to hosts that lack its terminfo, which is the classic footgun Ghostty's own
+`+ssh` helper exists to patch. `xterm-256color` is the fallback Ghostty itself chooses whenever the
+terminfo is uncertain. At S3, when the browser draws termd's cells and termd is the only parser,
+`TERM` is reconsidered under Ghostty's rule (ship the terminfo, set `TERMINFO`, fall back to
+`xterm-256color` across `ssh`). `term` (daemon setting) changes it for a whole namespace; a
+`create` cannot, because the emulator's answers have to match it.
+
+`TERM_PROGRAM=g3d-termd` with its version, as tmux sets `TERM_PROGRAM=tmux`: programs that key
+behaviour on `TERM_PROGRAM` (Claude Code, Neovim) then see an honest unknown terminal instead of the
+starter's (`ghostty`, `vscode`), whose features the browser may not have.
+
+### Locale
+
+`LANG`, `LANGUAGE` and `LC_*` come from the session base and the client's `env`. When the
+composed environment sets **none** of `LC_ALL`, `LC_CTYPE` and `LANG`, termd fills `LANG`:
+
+- macOS: `<language>_<region>.UTF-8` from the user's locale (the `AppleLocale` preference, as
+  Ghostty, iTerm2 and Terminal.app read it) when that locale is installed, else `C.UTF-8`;
+- Linux: `C.UTF-8`.
+
+The brain checks at start that the value loads (`newlocale(LC_CTYPE_MASK, …)`); if it doesn't, it
+fills nothing and says so. `C.UTF-8` is built into glibc since 2.35, into musl, and into this
+macOS (whose own `/etc/zprofile` sets it), so it is a locale the system has, not an invented one.
+Filling matters for programs given as `argv` (no profile runs) and for `env_base: "none"`; without
+it the C locale is ASCII, and for a terminal that draws glyphs, an ASCII locale is the worst
+default (zsh shows typed non-ASCII as `<…>` escapes; measured on the M2).
+
+A locale that **is** set is the person's choice and is never changed, even when it isn't UTF-8:
+the terminal starts, and the status stream carries an environment warning. mosh refuses to start
+in that case; a terminal that refuses to open is worse. `fill_locale = true` is a setting.
+
+### SSH agent, display and bus variables
+
+On a systemd desktop, `SSH_AUTH_SOCK` (when an agent runs), `DISPLAY`, `WAYLAND_DISPLAY` and
+`DBUS_SESSION_BUS_ADDRESS` (`unix:path=$XDG_RUNTIME_DIR/bus`) are stable per login and come from
+the session base, fresh at each `create`. The staleness tmux users hit comes from a server that
+outlives the session it captured; here only running shells can hold old values, and they are
+theirs. Agent forwarding: `g3d new` run inside an SSH session forwards its own `SSH_AUTH_SOCK`,
+`SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_ASKPASS`, `KRB5CCNAME`, `DISPLAY`, `WAYLAND_DISPLAY` and
+`XAUTHORITY` in the request's `env` (tmux's `update-environment` default, less `MSYSTEM`, which is
+Windows', `WINDOWID`, which names the outer terminal's own window, and the `XDG_*` desktop names,
+which the base has). `g3d new --forward-env LIST` changes the list; `--forward-env ''` sends none.
+A forwarded agent socket dies with its SSH session, as in tmux; shpool's per-session symlink is the
+known remedy and is not built while termd serves a local desktop.
+
+Platform note, macOS: there is no user manager, so the base is the holder's environment. launchd's
+`SSH_AUTH_SOCK` lives as long as the GUI login and is inherited; the login keychain is reachable
+from a daemon inside the GUI session (measured). A daemon first started from an SSH login lives in
+that login's audit session, where the keychain is locked (reported, not measured). termd is
+therefore started inside the GUI session: by the relay or a Terminal shell today, and by a
+LaunchAgent in `gui/<uid>` (shpool's Homebrew service is one) if it ever has to start on its own.
+The scrub (layer 2) is what keeps a Terminal-started daemon from handing out Terminal.app's
+identity.
+
+### Working directory
+
+`create.cwd` when given (absolute, an existing searchable directory; anything else is
+`bad_request` with the errno: a client that wants a fallback chooses it). Otherwise the account's
+home directory from `getpwuid` (a new window opens at home, as Ghostty, shpool and Linux terminals
+do), never the daemon's own (`/`). `PWD` is set to it. The relay passes its served root when
+`serve` has one and nothing otherwise; its own working directory says nothing about where a person
+wants a shell.
+
+### termios
+
+`IUTF8` is set on every PTY before the program starts (Ghostty's practice; off by default on
+Linux, measured here, and on macOS), so the kernel's line editor erases a whole UTF-8 character on
+backspace in canonical mode (`cat`, `read`, password prompts). The rest stays the platform's
+default (`VERASE` = `^?`, matching what the browser's key encoding and xterm send). Platform note:
+macOS's bundled ncurses describes `xterm-256color` backspace as `^H`; the macOS agent checks
+`kbs` against what the browser and `g3d attach` send.
+
+### What a client supplies at `create`, and how it is checked
+
+- `env`: names match `[A-Za-z_][A-Za-z0-9_]*`; values contain no NUL and are at most 128 KiB each
+  (Linux's `MAX_ARG_STRLEN`); argv plus environment total at most 1 MiB. A violation is
+  `bad_request` (or `too_large`) naming the variable. The layer-5 names are reserved: setting or
+  removing one is `bad_request` (the terminal's type and identity are termd's to state).
+- `env_base`: `"session"` (default, layers 1–5) or `"none"` (layers 3–5 only: an `env -i`-like
+  terminal, for hermetic tests and agents that want nothing inherited).
+- `cwd`, `argv` as above. The `create` reply reports the `argv` actually run (the resolved path
+  first), `login` (whether it was started as a login shell) and the `cwd`.
+
+Tests always use `env_base: "none"` or a daemon with `env_source = "daemon"`, so a test terminal
+never picks up the real desktop session's environment.
+
+### Rejected, and why
+
+- **Inheriting the starter's environment** (S1): the environment of whatever started the daemon
+  is an accident, and it stays for the daemon's whole life.
+- **`update-environment`-style session environments**: they make the next window right and the
+  running ones silently wrong, and need a shell-hook workaround.
+- **A non-login default shell**: what Linux desktop terminals do, because their session already
+  ran the profile. termd's base doesn't always have (launchd, a headless host, `env_base:
+  "none"`), and the result is a missing `PATH` and an ASCII locale (both measured on the M2).
+- **`login -flp` from a daemon**: opens a login session (utmp, `setlogin`, PAM, a banner) for
+  something that isn't one; argv0 `-<shell>` is the daemons' form.
+- **`$SHELL` before passwd**: a daemon's `$SHELL` is its starter's, and outlives a `chsh`.
+- **`TERM=xterm-ghostty` now**: breaks over `ssh` and promises the browser's parser things it
+  can't parse.
+- **Inventing a locale**: termd fills only `C.UTF-8` (or the macOS user's own locale), only when
+  nothing is set, and only after checking it loads; a guessed `en_US.UTF-8` can name a locale the
+  system doesn't have, and perl and bash then warn at every start.
 
 ## Threading
 
@@ -227,26 +770,31 @@ the terminal's **owner thread**, and it does everything that touches the termina
 - Blocking flow (`own` with `flow: "block"`): the owner thread stops polling the PTY for
   reads while the owner's queue is over its high mark, and the socket side wakes it when
   the queue drains below the low mark.
-- The Pdeathsig trap in the plan (tokio's blocking pool retires the forking thread)
-  doesn't arise: children are forked from owner threads, which live as long as their
-  terminal, and pdeathsig isn't used.
+- The brain forks nothing: programs are started by the holder, which is single-threaded
+  ([Spawning a terminal](#spawning-a-terminal)). An owner thread adopts the master fd the
+  holder returns. The Pdeathsig trap in the plan (tokio's blocking pool retires the forking
+  thread) can't arise, and pdeathsig isn't used.
+- Each owner thread also saves its terminal for crash restore ([Screens after a
+  crash](#screens-after-a-crash)) and publishes the counters the status stream reads.
 
 ## Bounded memory
 
 | What | Bound |
 |---|---|
-| Primary-screen scrollback | `scrollback_bytes`, default 2 MiB, clamped to `--max-scrollback` (default 16 MiB). Always set explicitly, never the library default. |
+| Primary-screen scrollback | `scrollback_bytes`, default 10,000,000 bytes (Ghostty's default), clamped to `max_scrollback` (default 64 MiB). Always set explicitly, never the library default. |
 | Alternate screen | One screen, no scrollback (about one 400 KB page). |
 | Idle history | After 30 s with no output, `compress(Incremental)` in steps until complete, restarted when `compression_activity` changes. Resident memory drops; contents don't change. |
 | Unfinished input | `set_continuation_max_bytes(64 KiB)`. Needed for mid-sequence repaints. |
 | Kitty images | `kitty_image_storage_limit` 0 in S1 (termd draws no images, and the browser can't either yet). |
 | Per subscription | Every frame counts: output, repaints and events. Lossy queue 4 MiB, then drop everything droppable, queue nothing until the subscriber has read what is left, then one `lagged` + repaint (or `size`) + state. Blocking owner: pause PTY reads at 1 MiB, resume at 256 KiB; a `take` demotes it to lossy. BELs coalesce to one `bell` per read. |
-| PTY input buffer | 1 MiB per terminal. |
+| PTY input buffer | 16 MiB per terminal (whole frames accepted or refused). |
+| Crash snapshots | two LZ4-compressed slots per terminal in memfds the holder keeps; about a tenth of the history's resident size on text (measured). The status stream reports the store's total. |
 | Frames | 16 MiB payload. |
 
-At the defaults, a busy terminal costs about 2–3 MiB of emulator memory (the probe's
-terminal with a 2 MiB cap and 100k scrolled lines held about 1.9 MB resident on the
-primary screen, plus one alternate page), so 50 terminals stay well under 200 MiB. S1's
+At the defaults, a terminal that has filled its history holds about 10 MB while it is busy and
+about 1 MB once idle compression has run (measured on build-log text), plus one alternate page,
+so 50 terminals with full histories cost about 50–100 MiB at rest and 500 MiB only if all of them
+flood at once. S1's
 flood gate checks daemon RSS with a ceiling, so a regression of the spike's 44 GB kind
 fails a test, not the machine.
 
@@ -259,11 +807,158 @@ fails a test, not the machine.
 - `on_size` answers XTWINOPS from the size and `cell_px`. `on_xtversion` answers
   `g3d-termd <version>`. `set_terminfo_name("xterm-256color")` matches the `TERM` the
   child sees.
-- `TERM=xterm-256color` while the browser parses raw bytes with xterm.js. Advertising
-  `xterm-ghostty` would invite sequences (Kitty graphics, Kitty keyboard) the browser
-  doesn't parse. Revisit at S3, when the browser draws termd's cells instead of parsing.
+- `TERM=xterm-256color`; why, and when it is reconsidered, is in [TERM and
+  friends](#term-and-friends).
 - `set_title_report_enabled(false)` (title reports are a known injection vector).
   Clipboard writes (OSC 52) are refused in S1: no handler is installed.
+
+## Defaults
+
+Every default termd has, with its reason and the prior art it follows. Each is a setting: the
+daemon reads `$XDG_CONFIG_HOME/g3d/termd.toml` (`~/.config/g3d/termd.toml` when unset, on macOS
+too, as Ghostty does) at start, flags override the file, and the brain re-reads the file at every
+start, so `g3d upgrade` applies changes without ending a shell (phux applies `[defaults]` the same
+way). The holder's own settings (`[holder]`) are read once when it starts. `g3d config` prints every
+setting with its value, its default and where the value came from. Settings that apply per
+terminal are fixed when the terminal is created.
+
+| Setting | Default | Decision | Reason and prior art |
+|---|---|---|---|
+| namespace | `default` | keep | tmux's socket name is `default` |
+| socket | `$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`; else `/tmp/g3d-<uid>/termd-<ns>.sock`; `G3D_TERMD_DIR` overrides; directories checked (owner, `0700`) | **change** (S1: `$TMPDIR`, else `/tmp`; the macOS branch makes the change) | the XDG base-directory spec puts sockets in `XDG_RUNTIME_DIR` (shpool, hexe, zmx do); the fallback is tmux's `/tmp/tmux-<uid>` and its ownership check. `$TMPDIR` made Rust and Go disagree and was too long for `sun_path` on macOS ([One daemon per namespace](#one-daemon-per-namespace)) |
+| socket and lock re-stamp | every hour (`utimes`), by the holder | **new** (from the macOS branch) | `/tmp` cleaners (macOS `tmp_cleaner`, 3 days; systemd-tmpfiles, 10 days) delete untouched regular files, and a lost lock means two daemons on one namespace. tmux survives the same cleaners because its socket's mtime moves with activity |
+| lock | `<socket>.lock`, left in place after exit | keep | a lock file outliving its holder is harmless with `flock`; it now holds the holder's pid |
+| log | `$XDG_STATE_HOME/g3d/termd-<ns>.log` (`~/.local/state/…`), on Linux and macOS | keep | XDG puts logs in state. `~/Library/Logs` (where Console looks) was considered for macOS; one rule on both systems is worth more, as the macOS agent argued and as Ghostty keeps `~/.config` on macOS. The status document and `g3d status` print the path, so nobody has to know it |
+| log size | rotate at 10 MiB, keep one previous file (`.log.1`) | **new** (S1 appends forever) | size-capped rotation is what logrotate and journald do; one previous file keeps the last crash's context |
+| log line | `2026-11-12T15:25:13.751-06:00 holder[1230122] message` | **change** (S1: `[termd 1794518713.751]`, raw epoch seconds) | RFC 3339 is the normal form (journalctl's `short-iso-precise`, the relay's recordings use RFC 3339 too); local time with its offset reads at a glance and is still unambiguous. The role (`holder`/`brain`) and pid tell the two processes apart in one file. Values print as values: S1's `ended: code Some(0) signal None` becomes `ended: code 0` |
+| idle exit | 300 s with no terminals and no connections but status followers; 0 = never | keep (status followers newly don't count) | it works: the `default` namespace started 15:25:13, its `hello-world` exited 15:25:27, and the daemon logged `exiting: no terminals and no connections for 300s` at 15:30:27 (the log, the socket gone, the lock left). tmux's `exit-empty` exits at once; the 5 min grace absorbs a relay restart, and an empty exit is when a new binary takes over |
+| scrollback | 10,000,000 bytes per terminal (`create.scrollback_bytes`); clamp `max_scrollback` 64 MiB | **change** (S1: 2 MiB, clamp 16 MiB) | 10 MB is Ghostty's own `scrollback-limit` default. 2 MiB held only ~1.6k rows of 120-column text (measured), less than tmux's `history-limit` of 2000 lines; 10 MB holds ~9.3k (VTE and Alacritty keep 10,000 lines). Idle compression keeps it cheap: a full 10 MB history went from 9.9 MB to 0.86 MB resident (measured, build-log text). The clamp guards against a runaway request, not taste |
+| idle compression | after 30 s with no output | keep | libghostty's incremental compression; contents unchanged |
+| lossy queue | 4 MiB per subscription | keep, now a setting | about a second of a flood at the browser's pace; hexe's ring and payload cap are 4 MiB too |
+| blocking owner | pause reads at 1 MiB queued, resume at 256 KiB | keep, now a setting | high/low watermarks; the 4:1 gap avoids flapping |
+| PTY input buffer | 16 MiB per terminal; a whole `INPUT` frame is accepted or refused (`input_full`) | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. 16 MiB matches `max_frame`, so any one paste fits; the memory is used only while a program stops reading |
+| max frame | 16 MiB | keep | |
+| read chunk | 64 KiB | keep | one Linux pipe's worth; keeps a flood's per-read latency small |
+| continuation | 64 KiB | keep | needed for mid-sequence repaints and snapshots |
+| kill grace | `SIGHUP` (or the asked signal), then `SIGKILL` after 2 s | keep | a kill always ends; systemd's stop timeout (90 s) is for services, not a closed window |
+| default colours, `cell_px` | the browser's palette; `[8, 16]` | keep | OSC 10/11 and `CSI 14 t` must answer without waiting |
+| `TERM` | `xterm-256color` | keep | [Environment](#environment) |
+| detach | `Ctrl-\` twice (`g3d attach`; `--detach-key`, `G3D_DETACH_KEY`) | keep | dtach, abduco and zmx detach on `Ctrl-\`; pressing it twice keeps a single `Ctrl-\` (the program's `SIGQUIT`) one key away: the first press is held, any other key sends both. Platform note: on some non-US macOS layouts `\` needs Option, so the macOS agent checks it is typeable and the setting is the escape hatch |
+| start wait | a client that starts the daemon retries for 3 s, 20 ms doubling to 250 ms | keep | |
+| brain restart | 100 ms; at most 5 starts in 10 s; then 30 s doubling to 10 min | **new** | systemd's `RestartSec`, `DefaultStartLimitBurst` and `DefaultStartLimitIntervalSec` |
+| brain watchdog | 30 s; `SIGABRT`, then `SIGKILL` 5 s later | **new** | systemd's `WatchdogSec` / `WatchdogSignal` practice; generous so a loaded machine doesn't trip it |
+| brain OOM preference | `oom_score_adj` +300 over the holder (Linux) | **new** | the restartable process should be the one the kernel picks |
+| cgroup scopes | `auto` (Linux, soft failure) | **new** | Ghostty, VTE and tmux put each child in its own scope |
+| snapshot interval | 2 s, terminals with new output only, LZ4 | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
+| upgrade deadline | 10 s for the candidate to report ready | **new** | |
+| client reconnect | 100 ms doubling to 2 s, for 30 s | **new** | covers a crash restart plus the first crash-loop retries |
+| environment source | `auto` (the user manager on Linux, the holder's own otherwise) | **new** | [Environment](#environment) |
+| default program | the passwd shell, as a login shell (argv0 `-<basename>`); `shell`, `login_shell = true` | **change** (S1: the daemon's `$SHELL`, non-login; the relay sent its own `$SHELL`) | tmux, WezTerm's mux and shpool; [The shell, and login or not](#the-shell-and-login-or-not) |
+| locale fill | `LANG=C.UTF-8` (macOS: the user's locale) only when no locale is set and it loads; `fill_locale = true` | **new** | Ghostty, iTerm2, Terminal.app, and this macOS's own `/etc/zprofile`; [Locale](#locale) |
+| environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, launcher and parent-shell variables; `env_scrub` / `env_keep` | **new** | [The policy](#the-policy) |
+| `TERM_PROGRAM` | `g3d-termd` + `TERM_PROGRAM_VERSION` | **new** (S1 left the starter's) | tmux, WezTerm, Ghostty each name themselves; [TERM and friends](#term-and-friends) |
+| default cwd | the account's home | **change** (S1: the daemon's, `/`) | [Environment](#environment) |
+| status interval | 1 s (a follower may ask for 250 ms to 60 s); keepalive 30 s | **new** | [Status](#status) |
+| recent errors | the last 32 distinct, with counts | **new** | the page-side log storm brake's coalescing, applied to the daemon |
+
+## Status
+
+The daemon publishes one status document that any client can render as it is: no client lists
+terminals, then asks each one for its state, then polls. The shape is PROTOCOL.md's ["Status"
+(1.1)](./PROTOCOL.md#status-11); this is how it is made and carried.
+
+### In the daemon
+
+- Each owner thread keeps its terminal's counters where the socket side can read them without a
+  command round trip: `seq`, input bytes, flow state, title, size, the alternate screen, memory
+  use (sampled on its own idle tick). The socket side already knows every subscription's queue,
+  role and lag count. A status tick reads those; it never wakes an idle owner thread.
+- Rates (`out_bps`, `in_bps`) are byte deltas over the last 5 s, sampled at each tick.
+- The brain builds the document once per tick and sends the same bytes to every follower. One
+  serialization serves every client, at any number of clients.
+- A push happens when something changed since the last one, and no sooner than the follower's
+  interval (default 1 s). "Changed" means any field except the sampled gauges (RSS, memory,
+  rates) changed, or a rate crossed zero; while any terminal is producing output, every interval
+  counts as changed so its rate stays live. When nothing happens, a keepalive every 30 s carries
+  fresh gauges. A quiet daemon therefore sends nothing but keepalives.
+- RSS of the holder and the brain comes from `/proc/<pid>/statm` on Linux and `proc_pidinfo` on
+  macOS (a `cfg` seam).
+- Recent errors are a ring of the last 32 distinct `(code, terminal)` pairs with first and last
+  times and a count: owner-thread panics, spawn failures, `input_full`, lags, brain restarts and
+  why, failed upgrades, environment warnings, cgroup-scope failures.
+- `g3d status [--json] [--follow]` renders it in a terminal: a header (daemon, holder, brain), one
+  row per terminal, the recent errors.
+
+### Through the relay
+
+The relay keeps one status connection per namespace, separate from its terminals' connections,
+with `status_follow`. A status follower doesn't keep an empty daemon alive ([Lifetime](#lifetime)). It never starts the daemon to do so: it dials at start and, while nothing
+listens, re-dials every 5 s (a failed `connect` costs a syscall). It pushes to the display a JSON-RPC
+notification on the control plane:
+
+```json
+{"jsonrpc": "2.0", "method": "termd/status", "params": {
+  "relay": {"state": "ok", "since": 1794519100000, "ns": "default", "bundled": "g3d-termd/0.2.0"},
+  "status": { …the daemon's status event, without "ev"… }}}
+```
+
+- `relay.state`, from the relay's side of the socket:
+  - `ok`: a brain answers;
+  - `absent`: nothing listens, and the last document the relay had listed no terminals or said
+    `exiting` (or it never had one). Normal: an empty namespace that left by idle exit;
+  - `restarting`: a holder is there but no brain yet, or a planned restart, within 5 s;
+  - `unreachable`: the same, past 5 s;
+  - `failed`: the holder answered `brain_failed` (shells alive, frozen);
+  - `lost`: the last document listed terminals, had no `exiting`, and now nothing listens (the
+    holder died and its shells with it).
+- `status` is the last document received, or `null` while none is current.
+- A state change is pushed at once. Status documents pass through at the daemon's own cadence.
+- The relay keeps the last notification and answers the display's `termd/status` request with it
+  (a reloaded page renders at once), and the relay-resident verb `termd.status` answers the CLI
+  and agents page-less (`./glyph3d-cli termd.status`), as `log.query` does.
+- `relay.bundled` is the termd the relay ships with. When it differs from the running daemon's
+  version, the window says so and names `g3d upgrade`; the relay never upgrades a daemon itself.
+
+S2's Rust relay carries the same notification byte for byte; its wire tape gains a scenario for it.
+
+### In the app
+
+A core model, `services/terminal/TermdStatus.js`, holds the last `termd/status` and answers
+`state`, the document, and per-terminal lookups by id. The wall renders it first; the IDE's HUD can
+render the same model later. The operator judges the look on the live display: what follows is the starting point, small and
+quiet, with every number from the document.
+
+- **The chip.** Beside the topbar's `● relay`: `● termd 4` (the terminal count). The dot is the
+  relay chip's green when `ok`, a dim ring with `termd idle` when `absent`, amber when
+  `restarting`, red otherwise.
+- **The window.** Clicking the chip, or the verb `wall.status [show|hide|toggle]` (the chord is the
+  operator's to choose), opens a small panel under the topbar in the topbar's own style (`#141821`
+  panel, `#2a303c` border, `#c8ced8` text, `#6b7383` for anything secondary), monospace, about
+  12 px, sized to its content:
+
+  ```
+  g3d-termd 0.2.0 · libghostty-vt 1.0.1 · ns default                    up 3h 12m
+  holder 1230122 · 3 MB      brain 1230130 · gen 2 · 41 MB      1 restart: crash 14:02
+  build log    bash     120×40   own · 2 watch    1.2 MB/s
+  claude       claude   100×30   own              idle 12m        alt
+  gx-alice     sh        80×24   own              blocked 1.4s
+  14:02  brain crashed (SEGV); 3 screens restored from snapshot, 512 B unseen
+  ```
+
+  Names come from the wall (`WallNames`), the program from `argv[0]`'s basename. Amber marks only
+  what needs attention (blocked, lagging, a recent error); everything else stays muted. Hovering a
+  row shows its full argv, cwd, pid, title and subscribers.
+- **The termd-lost notice.** Loud, and only when something is actually wrong: a single line
+  centred under the topbar, red text on the panel colour, no icon, no animation.
+  - `unreachable`: `termd not answering · 12 s · retrying`;
+  - `failed`: `termd's engine is down (crashed 5× in 10 s) · shells are alive, frozen · run g3d
+    upgrade`;
+  - `lost`: `termd lost: the shells in namespace "default" are gone · a new terminal starts a
+    fresh termd`.
+
+  `unreachable` and `failed` clear themselves when the brain returns. `lost` stays until
+  dismissed or a terminal is spawned. A planned upgrade, or a crash restart within 5 s, shows only
+  the amber chip.
 
 ## The Go adapter moves to termd (S1)
 
@@ -284,7 +979,7 @@ browser and the relay protocol are untouched: the same `terminal.create` /
 | `terminal.refresh` → OSC 2 from `#{pane_title}` + `refresh-client -t <our client>` | `repaint` (the title is part of every repaint). The adapter writes the `REPAINT` bytes into the `0x01` stream at the repaint's size |
 | `terminal.scroll` → copy-mode `scroll-up`/`scroll-down`, cancel at bottom | `view {delta}`; the browser gets the viewed rows as repaint bytes, as copy-mode's redraw did. Alt screen: unchanged `forwardWheelToApp`, deciding from the last `modes` event instead of `display-message` |
 | `terminal.shutdown` → `kill-session` | `kill` |
-| PTY EOF → teardown | `closed` event → teardown. `terminal.close` to the display is unchanged. A dropped termd socket → teardown without kill (detach), as today |
+| PTY EOF → teardown | `closed` event → teardown. `terminal.close` to the display is unchanged. A dropped termd socket → teardown without kill (detach), as today (S1; termd ready replaces this with [the reconnect rule](#riding-a-restart-relay-and-clients)) |
 | liveness `terminal.ping`, re-adopt by `terminal.create` | unchanged. A re-adopting adapter re-`subscribe`s, and its `REPAINT` fills the fresh grid |
 
 What the browser sees differently: **pane-raw bytes** instead of tmux's redraw stream.
@@ -424,7 +1119,10 @@ Cargo.toml              workspace: members crates/*, shared versions, libghostty
 crates/
   g3d-wire/             the protocol: frame codec, op/event types, the query filter.
                         No I/O, no libghostty. TCEL types join it at S3.
-  g3d-termd/            the daemon: owner threads, PTYs, libghostty, the socket server
+  g3d-hold/             the holder: PTY fds, spawning, reaping, the fd store, brain
+                        supervision. rustix, libc and g3d-wire's frame codec only.
+  g3d-termd/            the binary: holder entry (g3d-hold), and the brain (owner
+                        threads, libghostty, the socket server, status)
   g3d/                  the client binary: attach, watch, ls, new, kill, stop
 ```
 
@@ -473,12 +1171,57 @@ available, `flock` on the shared heavy lock, one at a time).
 - **`g3d attach`** in a real terminal against a shell and vim: no stray query replies
   typed into the shell, detach restores the tty, `--take` resizes the display's grid.
 
+## termd-ready gates
+
+Each runs its own namespace under a scratch directory with `env_source = "daemon"` (never the
+desktop session's environment) and kills every process it started, holder first-to-last, on
+success or failure. Kills target pids, never `pkill` patterns, which would match a person's
+holder.
+
+- **Brain crash under load.** `SIGKILL` the brain while N terminals flood: no shell dies; each
+  screen returns from its snapshot; `seq` never repeats; the unseen byte count equals the
+  high-water mark minus the snapshot's `seq`; every subscriber reconnects and repaints; the
+  relay's grids stay and `terminal.recover` never reports an empty list meanwhile.
+- **Crash loop.** A brain that exits at start: 5 starts in 10 s, then `brain_failed` answers,
+  the shells alive; `SIGHUP` retries at once.
+- **Watchdog.** A brain that stops answering the holder is aborted and restarted.
+- **Upgrade.** `g3d upgrade` under a flood loses no byte (each subscriber's stream across the
+  restart, repaint included, equals a fresh terminal fed the same bytes) and `seq` continues
+  exactly; a candidate that fails to decode, or never reports ready, leaves the old brain serving
+  with its connections open. Across engines (a fixture pair), the VT handoff reproduces the
+  screen.
+- **Records.** Every fixture of the handoff and holder records decodes; `--check-holder-record`
+  refuses a corrupt one and the holder stays.
+- **Holder death.** `SIGKILL` the holder: every shell gets `SIGHUP`, the brain exits, clients see
+  nothing listening, the relay reports `lost`.
+- **Environment.** A child's environment: scrubbed names absent, reserved names refused at
+  `create`, `PWD` = `cwd`, the default cwd is home, the default program the passwd shell with
+  argv0 `-<basename>` (a `$SHELL` naming another shell is ignored), `LANG=C.UTF-8` under
+  `env_base: "none"` and an existing non-UTF-8 `LANG` left alone, `TERM_PROGRAM=g3d-termd` with a
+  starter's `TERM_PROGRAM=Apple_Terminal` and `TERM_SESSION_ID` gone,
+  `IUTF8` set, ignored signals reset (a holder with `SIGINT` ignored still gives its shell a
+  working Ctrl-C), the soft fd limit restored. With a user manager present, the session source is
+  read per `create` (a value changed with `systemctl --user set-environment` reaches the next
+  terminal, not a running one).
+- **cgroup scopes** (Linux, when a user manager answers): holder, brain and each program in their
+  own scopes; with the manager unreachable, spawns still succeed and the status says why.
+- **Status.** The document's shape against a golden file (keys and types); a quiet daemon sends
+  only keepalives; a flood pushes at the interval with live rates; 100 followers get one
+  serialization per tick.
+- **Relay and wall.** `termd/status` reaches a simulated display with each `relay.state`
+  (`absent` → `ok` → `restarting` → `ok`, then `lost` after a holder kill); the wall's chip,
+  window and notice render in `tools/wall-e2e.mjs` (the operator judges the look on the live display).
+
 ## Risks carried into S1
 
-- **One daemon, one blast radius.** A libghostty abort kills every shell in the
-  namespace (D3). Mitigations: the panic boundary per owner thread, an explicit
-  scrollback cap, and the hot-upgrade path for planned restarts. Revisit with a
-  process per terminal if libghostty ever crashes in practice.
+- **One holder, one blast radius.** A libghostty abort now ends only the brain; the
+  shells survive and their screens come back from snapshots. The holder's death still
+  ends every shell in the namespace (D3), which is why it is small, parses no output, sits
+  in its own cgroup scope and changes only by a validated re-exec ([If the holder
+  dies](#if-the-holder-dies)).
+- **Crash restore loses up to one snapshot interval of parsed output** (2 s by default),
+  counted and reported. A restored terminal whose snapshot came from another engine version
+  starts blank and relies on the program's redraw.
 - **Resize clearing prompt lines.** zmx found that libghostty's resize clears prompt
   lines in anticipation of the shell's redraw, and turns that off in its Zig code. That
   switch isn't in the C API. termd feeds the shell's redraw into the same terminal, so
@@ -490,5 +1233,6 @@ available, `flock` on the shared heavy lock, one at a time).
 - **libghostty-rs is pre-1.0** ("bindings expected to move with the pinned Ghostty
   source"). The pin holds it still. A bump is a deliberate change with the full gate
   suite.
-- **Snapshot format instability** limits a hot upgrade across libghostty versions to the
-  VT repaint (above).
+- **Snapshot format instability** limits an upgrade across libghostty versions to the VT
+  repaint (exact screen, styled-text history) and a crash restore across versions to a blank
+  screen plus the redraw nudge.
