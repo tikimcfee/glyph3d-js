@@ -43,22 +43,39 @@ build: prep termd
 	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
 
 # --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
-# The relay finds g3d-termd next to its own executable. libghostty-vt builds from vendor/
-# (tools/termd-vendor.sh: the verified release tarballs and Zig). Linux hosts only for now
-# (linux-arm64 cross-builds in `make linux-arm64`); macOS is TODO (docs/termd/DESIGN.md,
-# "Build and vendoring").
+# The relay finds g3d-termd next to its own executable. Release builds have no test hooks (the
+# `test-hooks` feature is the tests' alone). libghostty-vt builds from vendor/, which
+# tools/termd-vendor.sh fills once. Linux hosts build linux-amd64 natively; `make linux-arm64`
+# cross-builds with cargo-zigbuild when it is installed.
+# TODO(macOS): darwin-arm64 / darwin-amd64 are built natively on a Mac, by the macOS branch
+# (termd-macos; docs/termd/DESIGN.md, "Build and vendoring"). Until it lands, a macOS host
+# builds no g3d-termd and its relay has no terminals.
 CARGO_OUT := $(or $(CARGO_TARGET_DIR),target)
 HOST_OS   := $(shell go env GOOS)
 
+define TERMD_VENDOR_MISSING
+g3d-termd: vendor/ has no libghostty-vt source or Zig.
+
+  libghostty-vt (the terminal emulator g3d-termd links) builds from the verified
+  libghostty-vt 1.0.1 release tarballs and Zig 0.17, never a build-time git fetch.
+  Fetch, verify (minisign + pinned SHA-256) and unpack them once:
+
+      tools/termd-vendor.sh          # into vendor/ (gitignored)
+      tools/termd-vendor.sh DIR      # into DIR, with vendor/ a link to it
+
+  It needs curl and minisign (or rsign). See docs/termd/DESIGN.md, "Build and vendoring".
+endef
+export TERMD_VENDOR_MISSING
+
 termd:
 ifeq ($(HOST_OS),linux)
-	@test -e vendor/ghostty/build.zig || { echo "no vendor/ghostty — run tools/termd-vendor.sh first"; exit 1; }
+	@{ test -e vendor/ghostty/build.zig && test -x vendor/zig/zig; } || { echo "$$TERMD_VENDOR_MISSING" >&2; exit 1; }
 	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
 	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd
 	cp $(CARGO_OUT)/release/g3d ./g3d
 	@echo "Built ./g3d-termd ./g3d"
 else
-	@echo "g3d-termd: not built on $(HOST_OS) yet (Linux only; see docs/termd/DESIGN.md) — this relay will have no terminals"
+	@echo "g3d-termd: not built on $(HOST_OS): TODO(macOS) above — this relay will have no terminals"
 endif
 
 # --- Prep: build the app (Vite) and stage it into cli/web/ for go:embed ---
@@ -173,6 +190,8 @@ ifeq ($(HOST_OS),linux)
 	else echo "  g3d-termd-linux-arm64: skipped (needs cargo-zigbuild and the aarch64-unknown-linux-musl rustup target)"; fi
 endif
 
+# TODO(macOS): g3d-termd-darwin-* and g3d-darwin-* beside these, built natively on a Mac by the
+# macOS branch (see the termd target above); a Linux host cannot build them.
 darwin-amd64: prep
 	@mkdir -p $(OUT_DIR)
 	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath \
@@ -203,10 +222,19 @@ windows-amd64: prep
 # and a dist/ whose version stamp doesn't match VERSION — publish ships
 # exactly what was built and inspected, or nothing.
 
+# The terminal daemon ships for linux-amd64 always, linux-arm64 when it was built (cargo-zigbuild),
+# darwin once the macOS branch builds it (TODO(macOS)).
+TERMD_DIST = $(OUT_DIR)/g3d-termd-linux-amd64 $(OUT_DIR)/g3d-linux-amd64 \
+	$(wildcard $(OUT_DIR)/g3d-termd-linux-arm64 $(OUT_DIR)/g3d-linux-arm64)
+
 release:
 	@for p in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64.exe; do \
 		test -f $(OUT_DIR)/$(BINARY)-$$p || { echo "missing $(OUT_DIR)/$(BINARY)-$$p — run: make all VERSION=$(VERSION)"; exit 1; }; \
 	done
+	@for f in $(OUT_DIR)/g3d-termd-linux-amd64 $(OUT_DIR)/g3d-linux-amd64; do \
+		test -f $$f || { echo "missing $$f — run make all on a linux-amd64 host"; exit 1; }; \
+	done
+	@test -f $(OUT_DIR)/g3d-termd-linux-arm64 || echo "note: no g3d-termd-linux-arm64 (needs cargo-zigbuild); releasing without it"
 	@got=$$($(OUT_DIR)/$(BINARY)-$(HOST_PLATFORM) version | head -1 | awk '{print $$2}'); \
 	test "$$got" = "$(VERSION)" || { echo "dist/ is stale: built $$got, releasing $(VERSION) — run: make all VERSION=$(VERSION)"; exit 1; }
 	@echo ""
@@ -217,6 +245,7 @@ release:
 		$(OUT_DIR)/$(BINARY)-darwin-amd64 \
 		$(OUT_DIR)/$(BINARY)-darwin-arm64 \
 		$(OUT_DIR)/$(BINARY)-windows-amd64.exe \
+		$(TERMD_DIST) \
 		--title "$(BINARY) $(VERSION)" \
 		--notes-file RELEASE_NOTES.md
 	@echo ""
