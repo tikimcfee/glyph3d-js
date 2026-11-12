@@ -2,8 +2,8 @@
  * wall-text-perf.mjs — the wall's terminal TEXT path, timed stage by stage:
  *
  *   bytes in (OUTPUT frame → TerminalGrid.writeBytes) → xterm-headless parse → cells
- *   (TerminalEmulator._readScreen) → TerminalGrid.applyScreen (atlas ensure · cell writes ·
- *   history · slot sync) → GL uploads inside renderer.render → drawn (GPU fence).
+ *   (TerminalEmulator.readScreen, pulled once a frame by the scene's TerminalScreenQueue) → TerminalGrid.applyScreen
+ *   (atlas ensure · diff of the live rows · changed-span writes · row poses) → GL uploads inside renderer.render → drawn (GPU fence).
  *
  *   bun tools/wall-text-perf.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *                                [--width 3024 --height 1964] [--json OUT]
@@ -79,7 +79,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // ── stage codes (shared with the page) ──────────────────────────────────────────────────────────
 const S = {
-    write: 0, parse: 1, read: 2, apply: 3, ensure: 4, snapshot: 5, history: 6, sync: 7, render: 8,
+    write: 0, parse: 1, read: 2, apply: 3, ensure: 4, diff: 5, pose: 6, spans: 7, render: 8,
     upBuf: 9, upTex: 10, ensureCp: 11, ensureGlyphs: 12, appendGlyphs: 13, appendBitmap: 14,
     emojiRefresh: 15, raf: 16, gpu: 17, longtask: 18, stamp: 19, glProgram: 20, buildTextures: 21,
     addGlyphs: 22, setSlug: 23, shape: 24,
@@ -165,10 +165,10 @@ function installProbe({ S, light, own }) {
         wrap(G, 'writeBytes', S.write, ofGrid, (a) => a[0]?.byteLength ?? a[0]?.length ?? 0);
         wrap(G, 'applyScreen', S.apply, ofGrid, null, () => { if (st.armed) st.applied = true; });
         wrap(G, '_ensureAtlasCodepoints', S.ensure, ofGrid);
-        wrap(G, '_snapshotLive', S.snapshot, ofGrid);
-        wrap(G, '_paintHistory', S.history, ofGrid);
-        wrap(G, '_writeToInstanceBuffer', S.sync, ofGrid);
-        wrap(Object.getPrototypeOf(grids[0]._emulator), '_readScreen', S.read, (t) => emuIdx.get(t));
+        wrap(G, '_diffLive', S.diff, ofGrid);
+        wrap(G, '_poseRows', S.pose, ofGrid);
+        wrap(G, '_writeSpans', S.spans, ofGrid);
+        wrap(Object.getPrototypeOf(grids[0]._emulator), 'readScreen', S.read, (t) => emuIdx.get(t));
         grids.forEach((g, i) => wrap(g._emulator._term._core._writeBuffer, '_action', S.parse, () => i, (a) => a[0]?.length ?? 0));
         const live = c.ctx.atlas._live;
         wrap(live, 'ensureCodepoints', S.ensureCp, null, (a) => a[0]?.length ?? 0);
@@ -243,7 +243,7 @@ function installProbe({ S, light, own }) {
 
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const frames = (n) => new Promise((res) => { const tick = () => (--n <= 0 ? res() : requestAnimationFrame(tick)); requestAnimationFrame(tick); });
-    const busy = (targets) => targets.some((i) => { const e = grids[i]._emulator; return e._raf || e._term._core._writeBuffer._writeBuffer.length > 0; });
+    const busy = (targets) => targets.some((i) => { const g = grids[i]; return g._screenQueued || g._emulator._term._core._writeBuffer._writeBuffer.length > 0; });
     const idle = async (targets, timeoutMs = 180000) => {
         const dl = now() + timeoutMs;
         while (busy(targets)) { if (now() > dl) throw new Error('[wtp] terminals never went idle'); await sleep(4); }
@@ -376,8 +376,8 @@ function summarize(E, t0, t1, nTerms, { wholeWindow = false } = {}) {
         stageMs: {
             write: r2(ms('write')), parse: r2(ms('parse')), readScreen: r2(ms('read')),
             apply: {
-                total: r2(ms('apply')), ensureAtlas: r2(ms('ensure')), snapshot: r2(ms('snapshot')), history: r2(ms('history')), sync: r2(ms('sync')),
-                cells: r2(ms('apply') - ms('ensure') - ms('snapshot') - ms('history') - ms('sync')),
+                total: r2(ms('apply')), ensureAtlas: r2(ms('ensure')), diff: r2(ms('diff')), pose: r2(ms('pose')), spans: r2(ms('spans')),
+                cells: r2(ms('apply') - ms('ensure') - ms('diff') - ms('pose') - ms('spans')),
             },
             render: {
                 cpu: r2(ms('render')), uploadBuffer: r2(ms('upBuf')), uploadTexture: r2(ms('upTex')), glProgram: r2(ms('glProgram')),
@@ -388,7 +388,7 @@ function summarize(E, t0, t1, nTerms, { wholeWindow = false } = {}) {
         },
         uploads: { bufferBytes: num('upBuf'), bufferCalls: cnt('upBuf'), textureBytes: num('upTex'), textureCalls: cnt('upTex'), programCalls: cnt('glProgram') },
         perOutputFrameMs: { parse: per(ms('parse'), outFrames), readScreen: per(ms('read'), outFrames), apply: per(ms('apply'), outFrames), upload: per(ms('upBuf') + ms('upTex'), outFrames) },
-        perApplyScreen: { readScreenMs: per(ms('read'), applies), applyMs: per(ms('apply'), applies), syncMs: per(ms('sync'), applies), uploadMs: per(ms('upBuf') + ms('upTex'), applies), uploadBytes: per(num('upBuf') + num('upTex'), applies) },
+        perApplyScreen: { readScreenMs: per(ms('read'), applies), applyMs: per(ms('apply'), applies), spansMs: per(ms('spans'), applies), uploadMs: per(ms('upBuf') + ms('upTex'), applies), uploadBytes: per(num('upBuf') + num('upTex'), applies) },
         parseMsPerMB: per(ms('parse'), num('parse') / 1e6),
         perDisplayFrameMs: {
             parse: dist(col((f) => g(f, 'parse'))), text: dist(col((f) => g(f, 'read') + g(f, 'apply'))),
@@ -412,7 +412,7 @@ function coldSplit(E, b) {
     const inRender = (stage) => ev(stage).filter((e) => e.t >= b.fence.t0 && e.t <= b.fence.t1);
     const ensure = sum(inApply(S.ensure)), ensureCp = sum(inApply(S.ensureCp)), ensureGlyphs = sum(inApply(S.ensureGlyphs));
     const addGlyphs = sum(inApply(S.addGlyphs)), build = sum(inApply(S.buildTextures)), bitmap = sum(inApply(S.appendBitmap));
-    const emoji = sum(inApply(S.emojiRefresh)), setSlug = inApply(S.setSlug), sync = sum(inApply(S.sync));
+    const emoji = sum(inApply(S.emojiRefresh)), setSlug = inApply(S.setSlug), spans = sum(inApply(S.spans));
     const upTex = inRender(S.upTex), upBuf = inRender(S.upBuf), prog = inRender(S.glProgram);
     const r0 = read.find((e) => e.t <= a0.t && e.t >= a0.t - 50) ?? read[0];
     // The frames after the fenced one: render CPU and the worst frame gap in the next 30 frames.
@@ -450,7 +450,7 @@ function coldSplit(E, b) {
             outlineExtraction: r2(addGlyphs), buildTextures: r2(build), bitmapSlots: r2(bitmap), emojiRefresh: r2(emoji),
             fieldHotSwap: r2(sum(setSlug)), fieldsSwapped: setSlug.length,
             ensureOther: r2(ensure - (ensureCp - ensureGlyphs) - addGlyphs - build - bitmap - emoji - sum(setSlug)),
-            sync: r2(sync), cellsAndRest: r2(a0.dur - ensure - sync),
+            spans: r2(spans), cellsAndRest: r2(a0.dur - ensure - spans),
         },
         render: {
             uploadTextureMs: r2(sum(upTex)), uploadTextureBytes: upTex.reduce((x, y) => x + y.n, 0),
@@ -651,7 +651,7 @@ try {
             result.flood.push(row);
             const a = s.stageMs;
             console.log(`FLOOD ${source.padEnd(6)} ${pname.padEnd(6)} ×${String(n).padEnd(2)} ${String(Math.round(digestMs)).padStart(6)} ms · in ${mb(s.bytesIn)} MB (${mb(row.throughput.receivedBytesPerSecPerTerminal)} MB/s/term; program wrote ${mb(produced)} MB → ${mb(row.throughput.producedBytesPerSecPerTerminal)} MB/s/term) · ${s.outputFrames} out-frames, ${s.applyScreens} applyScreens, ${s.displayFrames} frames @ ${s.fps} fps`);
-            console.log(`      main ms: parse ${a.parse} · readScreen ${a.readScreen} · apply ${a.apply.total} (ensure ${a.apply.ensureAtlas}, cells ${a.apply.cells}, snapshot ${a.apply.snapshot}, history ${a.apply.history}, sync ${a.apply.sync}) · render ${a.render.cpu} (upload buf ${a.render.uploadBuffer} / tex ${a.render.uploadTexture}) · raf other ${a.rafOther}`);
+            console.log(`      main ms: parse ${a.parse} · readScreen ${a.readScreen} · apply ${a.apply.total} (ensure ${a.apply.ensureAtlas}, cells ${a.apply.cells}, diff ${a.apply.diff}, pose ${a.apply.pose}, spans ${a.apply.spans}) · render ${a.render.cpu} (upload buf ${a.render.uploadBuffer} / tex ${a.render.uploadTexture}) · raf other ${a.rafOther}`);
             console.log(`      per applyScreen: read ${s.perApplyScreen.readScreenMs} + apply ${s.perApplyScreen.applyMs} ms, upload ${s.perApplyScreen.uploadBytes} B · parse ${s.parseMsPerMB} ms/MB · frame busy p50 ${s.perDisplayFrameMs.busy.p50} p95 ${s.perDisplayFrameMs.busy.p95} max ${s.perDisplayFrameMs.busy.max} · gap p50 ${s.gapMs.p50} p95 ${s.gapMs.p95} max ${s.gapMs.max} (>33ms: ${s.gapMs.over33}) · long tasks ${s.longTasks.count} (max ${s.longTasks.maxMs} ms) · gpu p50 ${s.gpuMs.p50} p95 ${s.gpuMs.p95}`);
         }
         await closeWall(app);
@@ -673,7 +673,7 @@ try {
             const s = split.split, a = split.applyScreen, rr = split.render;
             console.log(`COLD ${label.padEnd(16)} ${kind.padEnd(5)} total ${String(split.totalMs).padStart(7)} ms = parse ${s.parse} + rAF wait ${s.waitForRaf} + read ${s.readScreen} + apply ${s.applyScreen} + →render ${s.applyToRenderStart} + render ${s.renderCpu} + gpu ${s.gpuFinish} (pass ${split.gpuPassMs}) | atlas +${split.atlas.after.glyphs - split.atlas.before.glyphs} (→${split.atlas.after.glyphs})`);
             if (kind === 'cold') console.log(`      between apply and render: ${split.betweenApplyAndRender.wallMs} ms wall, ${split.betweenApplyAndRender.mainThreadBusyMs} ms main-thread busy · long tasks ${split.longTasks.count} (max ${split.longTasks.maxMs} ms)${split.logs.length ? ` · ${split.logs.map((l) => l.slice(0, 110)).join(' | ')}` : ''}`);
-            console.log(`      apply: shape lookups ${a.shapeLookups} (${a.shapeCalls} shapes) · outlines ${a.outlineExtraction} · build textures ${a.buildTextures} · bitmap slots ${a.bitmapSlots} · emoji refresh ${a.emojiRefresh} · hot-swap ${a.fieldHotSwap} (${a.fieldsSwapped} fields) · sync ${a.sync} · cells+rest ${a.cellsAndRest} | render: tex ${rr.uploadTextureMs} ms / ${rr.uploadTextureBytes} B, buf ${rr.uploadBufferMs} ms / ${rr.uploadBufferBytes} B, programs ${rr.glProgramMs} ms (${rr.glProgramCalls} calls) | after: render ${split.framesAfter.renderCpuMs.join(' ')} · worst gap ${split.framesAfter.worstGapMs} · programs ${split.framesAfter.glProgramMs} ms`);
+            console.log(`      apply: shape lookups ${a.shapeLookups} (${a.shapeCalls} shapes) · outlines ${a.outlineExtraction} · build textures ${a.buildTextures} · bitmap slots ${a.bitmapSlots} · emoji refresh ${a.emojiRefresh} · hot-swap ${a.fieldHotSwap} (${a.fieldsSwapped} fields) · spans ${a.spans} · cells+rest ${a.cellsAndRest} | render: tex ${rr.uploadTextureMs} ms / ${rr.uploadTextureBytes} B, buf ${rr.uploadBufferMs} ms / ${rr.uploadBufferBytes} B, programs ${rr.glProgramMs} ms (${rr.glProgramCalls} calls) | after: render ${split.framesAfter.renderCpuMs.join(' ')} · worst gap ${split.framesAfter.worstGapMs} · programs ${split.framesAfter.glProgramMs} ms`);
         };
         for (let k = 0; k < 3; k++) await one('ascii', 'warm', rowsOf(BURSTS.ascii.cps, BURSTS.ascii.perRow), 20 * 78, BURSTS.ascii.cps.length);
         for (const cls of COLD_ORDER) {

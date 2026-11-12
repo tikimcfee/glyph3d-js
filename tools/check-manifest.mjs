@@ -216,6 +216,7 @@ export const CHECKS = [
 
     // ── terminal / relay wires ───────────────────────────────────────────────────────────────
     h('terminal-depth.test.mjs', ['terminal'], 'scrollback-into-depth: scroll detection, row capture, fade, synced into a real slot buffer', 'tmux\'s real repaint stream'),
+    h('terminal-text-path.test.mjs', ['terminal'], 'only changes: a random walk of screens against a reference model, exact written slots + upload ranges, zero allocation per update, parse → update → render order', 'xterm\'s internals moving (the emulator throws at construction)'),
     h('terminal-paste.test.mjs', ['terminal'], 'keyEncoding declines the paste chord; TerminalGrid.paste frames one bracketed burst', 'the browser clipboard'),
     h('terminal-emulator-resize-check.mjs', ['terminal'], 'TerminalEmulator under a write+resize storm: coalesced, uncorrupted, correct final screen', 'a real PTY'),
     h('terminal-dock-sync-check.mjs', ['terminal', 'desk'], 'the Terminals-panel activation guard is timing-proof', 'dockview\'s real event timing'),
