@@ -20,7 +20,6 @@ use rustix::process::{Pid, Signal};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
-use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
@@ -1109,7 +1108,6 @@ impl Owner {
         let _ = rustix::process::kill_process_group(self.pgid, Signal::HUP);
         self.master = None;
         let status = self.reap(&[self.pgid]);
-        let _ = io::Write::flush(&mut io::stderr());
         let bytes = frame::encode_json(
             ty::EVENT,
             self.tref.handle,
@@ -1121,8 +1119,7 @@ impl Owner {
         for s in &self.subs {
             s.out.sub_frame(&s.shared, Kind::Other, bytes.clone(), None);
         }
-        let _ = status;
-        self.finish(None);
+        self.finish(status);
     }
 }
 
