@@ -1,7 +1,7 @@
 # glyph3d-cli — single-binary build
 #
 # Build:
-#   make              Build for current platform (+ g3d-termd and g3d beside it, on Linux)
+#   make              Build for current platform (+ g3d-termd and g3d beside it, on Linux and macOS)
 #   make termd        Build only the terminal daemon and its client (crates/, Rust)
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
@@ -45,11 +45,9 @@ build: prep termd
 # --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
 # The relay finds g3d-termd next to its own executable. Release builds have no test hooks (the
 # `test-hooks` feature is the tests' alone). libghostty-vt builds from vendor/, which
-# tools/termd-vendor.sh fills once. Linux hosts build linux-amd64 natively; `make linux-arm64`
-# cross-builds with cargo-zigbuild when it is installed.
-# TODO(macOS): darwin-arm64 / darwin-amd64 are built natively on a Mac, by the macOS branch
-# (termd-macos; docs/termd/DESIGN.md, "Build and vendoring"). Until it lands, a macOS host
-# builds no g3d-termd and its relay has no terminals.
+# tools/termd-vendor.sh fills once. Linux and macOS hosts build their own platform natively;
+# `make linux-arm64` cross-builds with cargo-zigbuild when it is installed. darwin-amd64 needs an
+# Intel Mac or rustup's x86_64-apple-darwin target (docs/termd/MACOS.md).
 CARGO_OUT := $(or $(CARGO_TARGET_DIR),target)
 HOST_OS   := $(shell go env GOOS)
 
@@ -68,14 +66,14 @@ endef
 export TERMD_VENDOR_MISSING
 
 termd:
-ifeq ($(HOST_OS),linux)
+ifneq ($(filter linux darwin,$(HOST_OS)),)
 	@{ test -e vendor/ghostty/build.zig && test -x vendor/zig/zig; } || { echo "$$TERMD_VENDOR_MISSING" >&2; exit 1; }
 	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
 	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd
 	cp $(CARGO_OUT)/release/g3d ./g3d
 	@echo "Built ./g3d-termd ./g3d"
 else
-	@echo "g3d-termd: not built on $(HOST_OS): TODO(macOS) above — this relay will have no terminals"
+	@echo "g3d-termd: not built on $(HOST_OS) (no PTYs; see docs/termd/DESIGN.md) — this relay will have no terminals"
 endif
 
 # --- Prep: build the app (Vite) and stage it into cli/web/ for go:embed ---
@@ -205,6 +203,12 @@ darwin-arm64: prep
 		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=darwin-arm64' \
 		-o ../$(OUT_DIR)/$(BINARY)-darwin-arm64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-arm64"
+ifeq ($(HOST_PLATFORM),darwin-arm64)
+	$(MAKE) termd
+	cp ./g3d-termd $(OUT_DIR)/g3d-termd-darwin-arm64
+	cp ./g3d $(OUT_DIR)/g3d-darwin-arm64
+	@echo "  → $(OUT_DIR)/g3d-termd-darwin-arm64 $(OUT_DIR)/g3d-darwin-arm64"
+endif
 
 windows-amd64: prep
 	@mkdir -p $(OUT_DIR)

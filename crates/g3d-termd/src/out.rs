@@ -44,8 +44,13 @@ impl Wake {
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
-            use rustix::pipe::{PipeFlags, pipe_with};
-            let (rd, wr) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
+            // No pipe2 off Linux: the flags are set after the fact, and a fork racing that
+            // window is covered by spawn's child-side sweep (spawn::close_inherited).
+            let (rd, wr) = rustix::pipe::pipe()?;
+            for fd in [&rd, &wr] {
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
+                rustix::fs::fcntl_setfl(fd, rustix::fs::OFlags::NONBLOCK)?;
+            }
             Ok(Wake { rd, wr: Some(wr) })
         }
     }

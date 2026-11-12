@@ -100,19 +100,22 @@ impl Outer {
         rows: u16,
         setup: impl FnOnce(&mut Command, &str),
     ) -> Self {
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
+        // macOS's posix_openpt takes no O_CLOEXEC; a test can set it after.
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
         let name = ptsname(&master, Vec::new()).unwrap();
-        rustix::termios::tcsetwinsize(
-            &master,
-            rustix::termios::Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 },
-        )
-        .unwrap();
         let slave = rustix::fs::open(
             name.as_c_str(),
             rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
             rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        // After the slave is open: macOS refuses TIOCSWINSZ on a master with no slave (ENOTTY).
+        rustix::termios::tcsetwinsize(
+            &master,
+            rustix::termios::Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 },
         )
         .unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));

@@ -9,11 +9,8 @@ use g3d_wire::*;
 use std::time::{Duration, Instant};
 
 fn pid_alive(pid: u32) -> bool {
-    // A zombie still has /proc/<pid>; read its state.
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(s) => !s.split(") ").nth(1).is_some_and(|r| r.starts_with('Z')),
-        Err(_) => false,
-    }
+    // A zombie is still listed; read its state.
+    ps_field(pid, "stat").is_some_and(|s| !s.starts_with('Z'))
 }
 
 fn wait_dead(pid: u32, secs: u64) -> bool {
@@ -168,6 +165,34 @@ fn input_reaches_the_program_and_watch_is_read_only() {
     let f = x.next_frame().unwrap();
     let ev: Event = serde_json::from_slice(&f.payload).unwrap();
     assert!(matches!(ev, Event::Error { code, .. } if code == code::NOT_SUBSCRIBED));
+}
+
+/// One INPUT far bigger than the kernel's PTY input queue (1 KiB on macOS, 4 KiB on Linux)
+/// reaches a raw-mode program whole and in order: termd keeps what the PTY refuses and
+/// writes it as the program reads.
+#[test]
+fn input_bigger_than_the_pty_queue_arrives_whole() {
+    let d = Daemon::start();
+    let mut c = d.client();
+    const N: usize = 256 << 10;
+    let script = format!("stty raw -echo; printf READY; head -c {N} | cksum; sleep 5");
+    create(&mut c, "t", &["sh", "-c", &script], 80, 24);
+    let s = subscribe(&mut c, "t", Role::Attach, None);
+    let mut seen = Seen::default();
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+    // Text and newlines: nothing a raw tty still acts on (XON/XOFF, with IXON on).
+    let data: Vec<u8> = (0..N).map(|i| b"abcdefghijklmnopqrstuvwxyz0123456789\n"[i % 37]).collect();
+    c.input(s.handle, &data).unwrap();
+    let mut ck = std::process::Command::new("cksum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    ck.stdin.take().unwrap().write_all(&data).unwrap();
+    let want = String::from_utf8(ck.wait_with_output().unwrap().stdout).unwrap();
+    let want = want.trim();
+    read_until(&mut c, &mut seen, 20, |s| contains(&s.output, want.as_bytes()));
 }
 
 /// Two subscribers: one from the start (its emulator is the truth), one late (its
@@ -713,12 +738,7 @@ fn flood_in_several_terminals_stays_bounded() {
         })
         .collect();
     while handles.iter().any(|h| !h.is_finished()) {
-        if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/status"))
-            && let Some(l) = s.lines().find(|l| l.starts_with("VmRSS:"))
-        {
-            let kb: u64 = l.split_whitespace().nth(1).unwrap().parse().unwrap();
-            peak_rss_kb = peak_rss_kb.max(kb);
-        }
+        peak_rss_kb = peak_rss_kb.max(rss_kb(pid));
         std::thread::sleep(Duration::from_millis(50));
     }
     for h in handles {

@@ -284,13 +284,21 @@ pub fn stalled_client(d: &Daemon) -> Client {
 }
 
 /// The daemon's resident memory, in KiB.
+/// One `ps` field of a process (`stat`, `rss`), or `None` once it is gone. `ps -o` reads
+/// the same on Linux and macOS, which has no /proc.
+pub fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+/// A live process's resident set, in KiB.
 pub fn rss_kb(pid: u32) -> u64 {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
-    s.lines()
-        .find(|l| l.starts_with("VmRSS:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+    let rss = ps_field(pid, "rss").unwrap_or_else(|| panic!("no process {pid} to measure"));
+    rss.parse().unwrap_or_else(|_| panic!("ps rss of {pid}: {rss:?}"))
 }
 
 pub fn sub_req(id: &str, mode: Mode, role: Role, flow: Option<Flow>, size: Option<(u16, u16)>) -> Op {
