@@ -1,0 +1,4 @@
+# ast-grep project config for the saved rules: bunx ast-grep scan -c tools/sg/sgconfig.yml packages app wall
+# One rule per file in rules/; the check runner runs them as `sg-rules` (tier full).
+ruleDirs:
+  - rules

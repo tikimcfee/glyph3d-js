@@ -1,0 +1,27 @@
+# A write into an InstancedField's group table through a LOCAL ALIAS of `_groupData`
+# (`const G = field._groupData; … G[i] = v`).
+#
+# Why it's worth a look: `InstancedField._growGroups` replaces `_groupData` with a taller array
+# (and a new texture). An alias taken before anything that can grow the table keeps writing into
+# the OLD array — silently, the write lands nowhere the GPU reads. And a write through the alias
+# bypasses `_touchGroup`, so the rows must be marked for upload by the writer itself.
+#
+# Each hit is fine when: nothing between the alias and the write can claim/grow a group, and the
+# writer flags the rows it changed. Severity `hint`: a listing to review, not a gate (raise it to
+# `error` and `bun tools/check.mjs sg-rules` turns red on it).
+id: group-table-alias-write
+language: js
+severity: hint
+message: write through a local alias of an InstancedField's _groupData (the group table)
+note: a table grow (_growGroups) between the alias and this write leaves the alias on the old array; the writer must also mark the rows for upload
+rule:
+  pattern: $G[$I] = $V
+  inside:
+    stopBy: end
+    kind: statement_block
+    has:
+      stopBy: end
+      kind: variable_declarator
+      all:
+        - has: { field: name, pattern: $G }
+        - has: { field: value, pattern: $X._groupData }
