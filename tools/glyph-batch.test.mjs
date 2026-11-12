@@ -198,6 +198,8 @@ function poseError(field) {
     holder.add(shear); shear.add(tilt); tilt.add(d.instanceMesh); scene.updateMatrixWorld();
     st = batch.update(camera);
     ok(st.own === 1 && d.instanceMesh.layers.isEnabled(0), 'a sheared pose (non-uniform scale above a rotation) draws itself');
+    st = batch.update(camera);   // a still frame: the cached outcome must keep it drawing itself
+    ok(st.own === 1 && d.instanceMesh.layers.isEnabled(0), 'and keeps drawing itself while it and the camera hold still');
     tilt.rotation.z = 0; scene.updateMatrixWorld();
     st = batch.update(camera);
     ok(st.own === 0 && !d.instanceMesh.layers.isEnabled(0) && poseError(d) < 1e-6 * 40000, 'unsheared again: batched, and posed right');

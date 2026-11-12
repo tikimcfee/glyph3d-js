@@ -105,6 +105,13 @@ const _scale = new THREE.Vector3();
 /** One group row as it will be stored (f32: compared at the table's own precision). */
 const _row = new Float32Array(ROW);
 
+/** Copy 16 matrix elements into `out` and say whether they changed. */
+function take16(out, e) {
+    let same = true;
+    for (let i = 0; i < 16; i++) if (out[i] !== e[i]) { same = false; out[i] = e[i]; }
+    return !same;
+}
+
 /** Whether `a` and `b` agree to f32 precision, element by element. */
 function sameMatrix(a, b) {
     const x = a.elements, y = b.elements;
@@ -130,8 +137,17 @@ export default class GlyphBatch {
         this.arena = null;
         /** @type {{ mesh: THREE.Mesh, field: InstancedField, version: number, count: number, depth: number }[]} in slot order; member i is group i + 1 */
         this._members = [];
-        /** @type {WeakMap<InstancedField, { version: number, count: number }>} fields refused, keyed to the slot version and count they were refused at */
-        this._refused = new WeakMap();
+        /** @type {WeakMap<InstancedField, { version: number, count: number, gtex: Object, gv: number, why: string|null }>}
+         *  each field's verdict (refusal), kept until its slots, count or group table change — the
+         *  check walks every glyph, so it runs when its inputs move, not every frame */
+        this._verdicts = new WeakMap();
+        /** @type {WeakMap<THREE.Mesh, { mesh: THREE.Mesh, field: InstancedField, version: number, count: number, depth: number }>}
+         *  one member record per mesh, reused frame to frame */
+        this._records = new WeakMap();
+        /** @type {Set<THREE.Mesh>} scratch: meshes already gathered this refresh */
+        this._seen = new Set();
+        /** the last refresh's projection·view (a still camera skips every still label's math) */
+        this._view = new Float64Array(16).fill(NaN);
         this._generation = -1;
         /** Last refresh: fields drawn from the arena, hidden, outside the view frustum, drawing
          *  themselves (refused), under another root, and the arena's glyph count. */
@@ -197,42 +213,65 @@ export default class GlyphBatch {
      */
     update(camera) {
         _proj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        const camMoved = take16(this._view, _proj.elements);
         _frustum.setFromProjectionMatrix(_proj, THREE.WebGLCoordinateSystem, camera.reversedDepth);
         const eye = camera.getWorldPosition(_eye);
 
-        // membership: who draws from the arena, in a stable order
+        // membership: who draws from the arena, in a stable order. Gathered in last refresh's order
+        // (so the depth sort below starts nearly sorted), each mesh's record reused, each field's
+        // verdict recomputed only when its slots, count or group table moved.
         let changed = this._generation !== _generation;
         this._generation = _generation;
         let own = 0, elsewhere = 0;
         const next = [];
-        for (const mesh of _meshes) {
-            if (rootOf(mesh) !== this.scene) { elsewhere++; continue; }
+        const prev = this._members, seen = this._seen;
+        seen.clear();
+        const gather = (mesh) => {
+            seen.add(mesh);
+            if (rootOf(mesh) !== this.scene) { elsewhere++; return; }
             const field = mesh.userData.glyphField;
             const version = field._interleavedBuffer?.version ?? 0, count = field.getGlyphCount();
-            const was = this._refused.get(field);
-            if (was && was.version === version && was.count === count) { own++; continue; }
-            const why = count ? refusal(field) : null;
-            if (why) {
-                this._refused.set(field, { version, count });
-                console.warn(`GlyphBatch: a field draws itself — ${why}`);
+            const gtex = field._groupTexture, gv = gtex.version;
+            let v = this._verdicts.get(field);
+            if (!v || v.version !== version || v.count !== count || v.gtex !== gtex || v.gv !== gv) {
+                const why = count ? refusal(field) : null;
+                if (why && v?.why !== why) {
+                    console.warn(`GlyphBatch: a field draws itself — ${why}`);
+                    changed = true;
+                }
+                v = { version, count, gtex, gv, why };
+                this._verdicts.set(field, v);
+            }
+            if (v.why) {
                 if (!mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.enable(VIEW_LAYER);
                 own++;
-                changed = true;
-                continue;
+                return;
             }
-            const bs = field.geometry.boundingSphere;
-            _c.copy(bs ? bs.center : _zero).applyMatrix4(mesh.matrixWorld).applyMatrix4(_proj);
-            next.push({ mesh, field, version, count, depth: _c.z });
-        }
+            let rec = this._records.get(mesh);
+            if (!rec) {
+                rec = { mesh, field, version, count, depth: 0, mw: new Float64Array(16).fill(NaN), still: false, gv: -1, gtex: null, shown: null, out: null };
+                this._records.set(mesh, rec);
+                changed = true;
+            } else if (rec.version !== version || rec.count !== count) { rec.version = version; rec.count = count; changed = true; }
+            // A label whose world matrix and the camera both held still keeps its depth (and,
+            // below, its row): the per-label matrix math runs only for what moved.
+            const moved = take16(rec.mw, mesh.matrixWorld.elements);
+            rec.still = !moved && !camMoved;
+            if (!rec.still) {
+                const bs = field.geometry.boundingSphere;
+                _c.copy(bs ? bs.center : _zero).applyMatrix4(mesh.matrixWorld).applyMatrix4(_proj);
+                rec.depth = _c.z;
+            }
+            next.push(rec);
+        };
+        for (const m of prev) if (_meshes.has(m.mesh)) gather(m.mesh);
+        for (const mesh of _meshes) if (!seen.has(mesh)) gather(mesh);
         // three's transparent order: projected depth far → near, then id
         next.sort((x, y) => (y.depth - x.depth) || (x.mesh.id - y.mesh.id));
-        const prev = this._members;
-        if (!changed && next.length === prev.length) {
-            for (let i = 0; i < next.length; i++) {
-                const a = next[i], b = prev[i];
-                if (a.mesh !== b.mesh || a.version !== b.version || a.count !== b.count) { changed = true; break; }
-            }
-        } else changed = true;
+        if (!changed) {
+            if (next.length !== prev.length) changed = true;
+            else for (let i = 0; i < next.length; i++) if (next[i] !== prev[i]) { changed = true; break; }
+        }
         this._members = next;
         if (changed) this._repack();
         if (!this.arena) return this.stats;
@@ -247,34 +286,60 @@ export default class GlyphBatch {
         _back.makeTranslation(-eye.x, -eye.y, -eye.z);
         next.forEach((m, i) => {
             const { mesh, field } = m;
-            if (mesh.layers.isEnabled(VIEW_LAYER)) mesh.layers.disable(VIEW_LAYER);
             const r = (i + 1) * ROW;
-            if (m.count === 0 || !isShown(mesh)) { dark(r); hidden++; return; }
-            const bs = field.geometry.boundingSphere;
-            if (bs) {
-                _sphere.copy(bs).applyMatrix4(mesh.matrixWorld);
-                if (!_frustum.intersectsSphere(_sphere)) { dark(r); culled++; return; }
+            // Nothing this row is built from moved (the label, the camera, its group row, whether
+            // it shows) and it sits where it sat: its row and its outcome stand.
+            const shown = m.count !== 0 && isShown(mesh), gtex = field._groupTexture, gv = gtex.version;
+            if (changed || !m.still || m.shown !== shown || m.gtex !== gtex || m.gv !== gv || !m.out) {
+                m.shown = shown; m.gtex = gtex; m.gv = gv;
+                m.out = this._row(m, i, r, shown, dark, dirty);
             }
-            _m.multiplyMatrices(_back, mesh.matrixWorld).decompose(_pos, _quat, _scale);
-            if (!sameMatrix(_m, _check.compose(_pos, _quat, _scale))) {
-                // sheared (a non-uniform scale above a rotation): a group row can't hold it
-                dark(r);
-                mesh.layers.enable(VIEW_LAYER);
-                own++;
-                return;
-            }
-            const S = field._groupData;
-            _row[0] = _pos.x; _row[1] = _pos.y; _row[2] = _pos.z; _row[3] = G[r + 3];
-            _row[4] = _quat.x; _row[5] = _quat.y; _row[6] = _quat.z; _row[7] = _quat.w;
-            for (let k = 8; k < 12; k++) _row[k] = S[k];            // colour + alpha
-            _row[12] = _scale.x; _row[13] = _scale.y; _row[14] = _scale.z; _row[15] = S[15];   // scale + colour blend
-            for (let k = 16; k < ROW; k++) _row[k] = S[k];          // clip, background
-            for (let k = 0; k < ROW; k++) {
-                if (G[r + k] !== _row[k]) { G.set(_row, r); dirty.push(i + 1); break; }
-            }
-            drawn++;
-            glyphs += m.count;
+            // the outcome decides the mesh's own view layer: only a label the arena can't pose draws itself
+            const self = m.out === 'own';
+            if (mesh.layers.isEnabled(VIEW_LAYER) !== self) { if (self) mesh.layers.enable(VIEW_LAYER); else mesh.layers.disable(VIEW_LAYER); }
+            if (m.out === 'drawn') { drawn++; glyphs += m.count; } else if (m.out === 'hidden') hidden++; else if (m.out === 'culled') culled++; else own++;
         });
+        this._finishUpload(arena, changed, dirty);
+        arena.instanceMesh.matrixWorld.makeTranslation(eye.x, eye.y, eye.z);
+        this.stats = { enrolled: _meshes.size, drawn, hidden, culled, own, elsewhere, glyphs, uploadRows: this._uploadRows };
+        return this.stats;
+    }
+
+    /**
+     * Build member i's row (eye-relative pose, its field's colour/alpha/clip) and store it if it
+     * changed. @returns {'drawn'|'hidden'|'culled'|'own'} @private
+     */
+    _row(m, i, r, shown, dark, dirty) {
+        const { mesh, field } = m, G = this.arena._groupData;
+        if (!shown) { dark(r); return 'hidden'; }
+        const bs = field.geometry.boundingSphere;
+        if (bs) {
+            _sphere.copy(bs).applyMatrix4(mesh.matrixWorld);
+            if (!_frustum.intersectsSphere(_sphere)) { dark(r); return 'culled'; }
+        }
+        _m.multiplyMatrices(_back, mesh.matrixWorld).decompose(_pos, _quat, _scale);
+        if (!sameMatrix(_m, _check.compose(_pos, _quat, _scale))) {
+            // sheared (a non-uniform scale above a rotation): a group row can't hold it
+            dark(r);
+            return 'own';
+        }
+        const S = field._groupData;
+        _row[0] = _pos.x; _row[1] = _pos.y; _row[2] = _pos.z; _row[3] = G[r + 3];
+        _row[4] = _quat.x; _row[5] = _quat.y; _row[6] = _quat.z; _row[7] = _quat.w;
+        for (let k = 8; k < 12; k++) _row[k] = S[k];            // colour + alpha
+        _row[12] = _scale.x; _row[13] = _scale.y; _row[14] = _scale.z; _row[15] = S[15];   // scale + colour blend
+        for (let k = 16; k < ROW; k++) _row[k] = S[k];          // clip, background
+        for (let k = 0; k < ROW; k++) {
+            if (G[r + k] !== _row[k]) { G.set(_row, r); dirty.push(i + 1); break; }
+        }
+        return 'drawn';
+    }
+
+    /**
+     * Queue the arena table's upload for what changed this refresh. @private
+     * @param {InstancedField} arena @param {boolean} changed  a repack @param {number[]} dirty  changed rows
+     */
+    _finishUpload(arena, changed, dirty) {
         // The upload: a repack (rows re-assigned) or many changed rows → the whole table; a few →
         // one range per row (three merges only within a texel row, and each group row is one);
         // none → nothing. three clears the ranges once it has uploaded them.
@@ -293,9 +358,6 @@ export default class GlyphBatch {
             tex.needsUpdate = true;
             this._uploadRows = dirty.length;
         } else this._uploadRows = 0;
-        arena.instanceMesh.matrixWorld.makeTranslation(eye.x, eye.y, eye.z);
-        this.stats = { enrolled: _meshes.size, drawn, hidden, culled, own, elsewhere, glyphs, uploadRows: this._uploadRows };
-        return this.stats;
     }
 
     /** Unhook, drop the arena, and hand every enrolled field back its own draw. */
