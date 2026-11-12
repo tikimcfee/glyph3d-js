@@ -19,7 +19,8 @@
  * titles come back; a remembered terminal the relay no longer has is pruned), a kill forgetting its
  * name at once, a relay restart (the re-adopted terminal takes typing again with no reload; the next
  * spawn mints a fresh id), wheel over the focused terminal → scrollback while the camera holds, pinch
- * → zoom, map labels (no overlaps, bar names hidden, trace lines when crowded, click frames exactly
+ * → zoom, a plain wheel elsewhere → an eased zoom that lands exactly and holds the point under the
+ * pointer, map labels (no overlaps, bar names hidden, trace lines when crowded, click frames exactly
  * like frame(), drag moves the terminal), the shared scene systems serving frames, and the core
  * terminal verbs run against the wall (terminal.move, terminal.focus). Exit 1 on any FAIL.
  */
@@ -272,6 +273,20 @@ try {
     for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(50); }
     await page.keyboard.down('Control'); await page.mouse.wheel(0, -40); await page.keyboard.up('Control'); await settle(300);
     ok((await cam()).zoom !== c1.zoom, 'pinch over the focused terminal zooms the canvas');
+
+    // ── wheel zoom: plain wheel glides about the pointer, lands exactly, holds the point under it ──
+    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
+    const cr = await W(() => { const r = window.__wall.viewport.canvas.getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.4 }; });
+    await page.mouse.move(cr.x, cr.y);
+    const z0 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), step: v.wheelZoom.stepFactor }; }, cr);
+    for (let i = 0; i < 3; i++) await page.mouse.wheel(0, -100);
+    const mid = await W(() => window.__wall.viewport.moving);
+    await settle(800);
+    const z1 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), moving: v.moving }; }, cr);
+    const zWant = z0.zoom * z0.step ** 3;
+    ok(mid && !z1.moving && Math.abs(z1.zoom / zWant - 1) < 1e-6,
+        `three wheel notches glide (moving mid-way) and land exactly at ${z0.step}^3 (zoom ${z0.zoom.toFixed(4)} → ${z1.zoom.toFixed(4)}, want ${zWant.toFixed(4)})`);
+    ok(Math.hypot(z1.at.x - z0.at.x, z1.at.y - z0.at.y) * z1.zoom < 0.5, 'the world point under the pointer stays under it through the glide');
 
     // ── map labels ─────────────────────────────────────────────────────────
     for (let i = 0; i < 5; i++) { const r = await W(() => window.__wall.spawn()); if (r.ok) spawned.push(r.id); }

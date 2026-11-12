@@ -5,6 +5,10 @@ import { edgeCursor, resizeFromDrag } from './wallLayout.js';
 const DRAG_SLOP_PX = 4;
 /** Smallest terminal a border drag can make. */
 const MIN_SIZE = { minCols: 20, minRows: 5 };
+/** A wheel event in lines (deltaMode 1) moves this many CSS px. */
+const LINE_PX = 16;
+/** A ctrl+wheel delta under this (CSS px) is a trackpad pinch, followed directly; at or over it, a mouse notch. */
+const PINCH_MAX_DELTA = 50;
 
 /**
  * WallPointer — every pointer gesture on the wall, as one state machine.
@@ -17,8 +21,10 @@ const MIN_SIZE = { minCols: 20, minRows: 5 };
  *   a terminal's body          focus                      — (the body never drags…)
  *   ⌥ + anywhere on a terminal focus                      move  (…unless ⌥ is held: drawing-canvas move)
  *
- * Wheel: two-finger scroll over the FOCUSED terminal drives its scrollback; pinch (ctrl+wheel)
- * zooms about the pointer; anywhere else the wheel pans. Double-click a terminal: focus + frame;
+ * Wheel: over the FOCUSED terminal it drives that terminal's scrollback; anywhere else it zooms
+ * about the pointer in small eased steps (WallCamera.wheelZoomAt), and a sideways delta pans. A
+ * trackpad pinch (ctrl+wheel, small deltas) zooms directly with the fingers; ctrl + a mouse notch
+ * glides like a plain notch. Double-click a terminal: focus + frame;
  * double-click empty canvas: fit all. Hover lights the border and sets the cursor (⌥ shows move).
  * A pointercancel or a lost pointer capture ends the gesture where it stands (no click), and so
  * does the gesture's terminal going away; either way the capture is given back.
@@ -186,8 +192,14 @@ export default class WallPointer {
                 return;
             }
         }
-        if (e.ctrlKey) this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
-        else this.camera.panBy(e.deltaX, e.deltaY);
+        const px = e.deltaMode === 1 ? LINE_PX : e.deltaMode === 2 ? this.camera.view.h : 1;
+        const dy = e.deltaY * px;
+        if (e.ctrlKey && Math.abs(dy) < PINCH_MAX_DELTA) {
+            this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.01));
+            return;
+        }
+        if (e.deltaX) this.camera.panBy(e.deltaX * px, 0);
+        if (dy) this.camera.wheelZoomAt(e.clientX, e.clientY, dy);
     }
 
     _hover(e) {

@@ -16,8 +16,8 @@ terminals in 3D space. The repo is organized as **packages, two apps, and a cli*
   WorkspaceModel); `app/commands/` holds the command spine (handlers).
 - **`wall/`** — the wall: an infinite flat (orthographic) canvas of terminals on the same
   core and relay (Vite :5180, `?relay=PORT`, default 8080 — a relay takes ONE display, so beside
-  the IDE the wall needs its own relay; a refused display's chip says why). Pan, pinch-zoom,
-  type, cycle, resize by the border; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`).
+  the IDE the wall needs its own relay; a refused display's chip says why). Pan (drag), zoom (wheel or pinch,
+  eased about the pointer: `WallCamera.WHEEL_ZOOM`), type, cycle, resize by the border; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`).
   Title bars hold each terminal's whole name, shrunk to fit; past the bar's text floor
   (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. Names and spots
   (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
