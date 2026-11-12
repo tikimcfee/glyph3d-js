@@ -2,7 +2,7 @@
  * wall-gpu-attribution.mjs — where the wall's GPU frame goes, by toggling one layer at a time at a
  * fixed camera state and timing the main render pass with EXT_disjoint_timer_query_webgl2.
  *
- *   bun tools/wall-gpu-attribution.mjs [--url http://localhost:5180/] [--relay 8080]
+ *   bun tools/wall-gpu-attribution.mjs [--url http://localhost:5180/] [--relay 8099]
  *                                      [--width 3024 --height 1964] [--frames 120]
  *
  * Needs the wall's Vite + a relay with terminals (the wall re-adopts glyphd sessions). Launches a
@@ -17,9 +17,11 @@ import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL = arg('--url', 'http://localhost:5180/');
-const RELAY = Number(arg('--relay', 8080));
+const RELAY = Number(arg('--relay', 8099));   // a PRIVATE relay — never the one a person's display is on
 const W = Number(arg('--width', 3024)), H = Number(arg('--height', 1964));
 const FRAMES = Number(arg('--frames', 120));
+const OUT = arg('--json');
+const rows = [];
 
 const browser = await launchGpuBrowser({});
 try {
@@ -85,8 +87,9 @@ try {
             const s = [...st.samples].sort((a, b) => a - b);
             const q = (p) => +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(2);
             const w = window.__wall;
-            return { p50: q(0.5), p95: q(0.95), n: s.length, zoom: +w.camera.zoom.toFixed(2), framed: w.focusedId };
+            return { p50: q(0.5), p95: q(0.95), n: s.length, zoom: +w.viewport.zoom.toFixed(2), framed: w.focusedId };
         }, FRAMES);
+        rows.push({ label, ...r, state });
         console.log(`${label.padEnd(34)} gpu p50 ${String(r.p50).padStart(6)} ms  p95 ${String(r.p95).padStart(6)} ms  (n=${r.n}, zoom ${r.zoom}, focus ${r.framed ?? '-'}) ${state ? JSON.stringify(state) : ''}`);
     };
     const restore = () => { window.__layers.glyphs(true); window.__layers.panels(true); window.__layers.depth(true); };
@@ -120,6 +123,7 @@ try {
                 const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(1); };
                 return { g50: pct(st.samples, 0.5), g95: pct(st.samples, 0.95), gmax: pct(st.samples, 1), f95: pct(gaps, 0.95), fmax: pct(gaps, 1), over: gaps.filter((x) => x > 20).length, n: gaps.length };
             }, nT);
+            rows.push({ label: `LAP ${lap}`, terminals: nT, ...r });
             console.log(`LAP ${lap.padEnd(20)} (${nT})  gpu p50 ${r.g50} p95 ${r.g95} max ${r.gmax} ms | frame gap p95 ${r.f95} max ${r.fmax} ms, ${r.over}/${r.n} frames >20ms`);
         }
     }
@@ -143,15 +147,15 @@ try {
     // Zoom sweep about the wall's centre, all layers: the in-between zooms a framing animation
     // passes through, where many terminals are on screen AND their glyphs are above greek size.
     if (process.argv.includes('--sweep')) {
-        const fit = await app.evalPage(() => { const w = window.__wall; w.focus(null); w.fitAll(); return w._anim; });
+        const fit = await app.evalPage(() => { const w = window.__wall; w.focus(null); w.fitAll(); return w.viewport.target; });
         await app.waitFor(1200);
         for (const mult of [1, 1.5, 2, 2.5, 3, 4, 6]) {
             await measure(`SWEEP zoom ×${mult} of fit`, (m) => {
-                const w = window.__wall; const c = w.camera;
-                w._anim = null; c.zoom = m.z; c.position.x = m.x; c.position.y = m.y; c.updateProjectionMatrix();
+                const w = window.__wall; const c = w.viewport.camera;
+                w.viewport.target = null; c.zoom = m.z; c.position.x = m.x; c.position.y = m.y; c.updateProjectionMatrix();
                 const px = (1 / c.zoom);   // world units per CSS px
                 let onScreen = 0;
-                const vw = w._view.w * px / 2, vh = w._view.h * px / 2;
+                const vw = w.viewport.view.w * px / 2, vh = w.viewport.view.h * px / 2;
                 for (const g of w.ctx.terminals.values()) {
                     const b = g.getBounds();
                     if (b.max.x > m.x - vw && b.min.x < m.x + vw && b.max.y > m.y - vh && b.min.y < m.y + vh) onScreen++;
@@ -163,7 +167,7 @@ try {
     // Motion: which KIND of change produces the spikes — camera pan alone, zoom alone, focus
     // changes alone (no camera), or the full cycle (focus + framing ease). Max matters here.
     if (process.argv.includes('--motion')) {
-        const fit = await app.evalPage(() => { const w = window.__wall; w.focus(null); w.fitAll(); return w._anim; });
+        const fit = await app.evalPage(() => { const w = window.__wall; w.focus(null); w.fitAll(); return w.viewport.target; });
         await app.waitFor(1200);
         const run = async (label, start) => {
             await app.evalPage(start, fit);
@@ -177,6 +181,7 @@ try {
                 const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(1); };
                 return { g50: pct(st.samples, 0.5), g95: pct(st.samples, 0.95), gmax: pct(st.samples, 1), f95: pct(gaps, 0.95), fmax: pct(gaps, 1), over: gaps.filter((x) => x > 20).length, n: gaps.length };
             }, 240);
+            rows.push({ label, ...r });
             console.log(`${label.padEnd(30)} gpu p50 ${r.g50} p95 ${r.g95} max ${r.gmax} ms | frame gap p95 ${r.f95} max ${r.fmax} ms, ${r.over}/${r.n} frames >20ms`);
             await app.evalPage(() => { window.__motionStop = false; const w = window.__wall; w.focus(null); w.fitAll(); });
             await app.waitFor(1000);
@@ -184,11 +189,11 @@ try {
         const zoomMid = (f) => f.zoom * 2.5;
         await run('MOTION none (control)', () => {});
         await run('MOTION pan only', (f) => {
-            const w = window.__wall; const c = w.camera; w._anim = null; c.zoom = f.zoom * 2.5; c.updateProjectionMatrix();
+            const w = window.__wall; const c = w.viewport.camera; w.viewport.target = null; c.zoom = f.zoom * 2.5; c.updateProjectionMatrix();
             let t = 0; const step = () => { if (window.__motionStop) return; t += 1 / 60; c.position.x = f.x + Math.sin(t * 1.5) * 60; c.position.y = f.y; window.__motionRaf = requestAnimationFrame(step); }; step();
         });
         await run('MOTION zoom only', (f) => {
-            const w = window.__wall; const c = w.camera; w._anim = null; c.position.x = f.x; c.position.y = f.y;
+            const w = window.__wall; const c = w.viewport.camera; w.viewport.target = null; c.position.x = f.x; c.position.y = f.y;
             let t = 0; const step = () => { if (window.__motionStop) return; t += 1 / 60; c.zoom = f.zoom * (1 + 2.5 * (0.5 + 0.5 * Math.sin(t * 1.5))); c.updateProjectionMatrix(); window.__motionRaf = requestAnimationFrame(step); }; step();
         });
         await run('MOTION focus changes only', () => {
@@ -199,6 +204,7 @@ try {
         });
     }
     if (app.errors.length) console.log('[page errors]', app.errors.slice(0, 5));
+    if (OUT) (await import('node:fs')).writeFileSync(OUT, JSON.stringify({ gpu, terminals: n, argv: process.argv.slice(2), rows, errors: app.errors.slice(0, 5) }, null, 2));
 } finally {
     await browser.close();
 }
