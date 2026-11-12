@@ -111,10 +111,11 @@ console.log('Testing Emoji WebGL2 Pipeline...');
         },
     };
 
-    const live = new LiveSlugAtlas({ atlas: {}, shaper, initialGlyphIds: [65, 66] });
+    // No outline glyph is asked for here, so the encoder is never called.
+    const live = new LiveSlugAtlas({ atlas: {}, shaper, encoder: { encode: () => { throw new Error('no outline expected'); } } });
     // Encode the emoji codepoints
     const res = live.ensureCodepoints([0x1F600, 0x1F680], shaper);
-    assert(res.grew === true, 'LiveSlugAtlas grows when emoji codepoints are ensured');
+    assert(res.queued === 2 && res.pending === 0, 'emoji codepoints get their map entries at once (nothing in flight)');
 
     // Check glyphMap entry
     const mapTex = live.slugData.glyphMapTexture;
@@ -168,7 +169,7 @@ console.log('Testing Emoji WebGL2 Pipeline...');
             unregisterField: () => {},
             ensureCodepoints: (cps, cache) => {
                 ensuredCps.push(...cps);
-                return { grew: true, added: cps.length, total: cps.length };
+                return { queued: cps.length, pending: 0, total: cps.length };
             },
         },
         getCharSize: () => ({ width: 10, height: 20 }),

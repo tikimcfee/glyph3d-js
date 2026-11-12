@@ -1,5 +1,5 @@
 /**
- * Slug rendering constants — shared between SlugEncoder (CPU) and shaders (GPU).
+ * Slug rendering constants — shared between the Slug encode + atlas (CPU) and the shaders (GPU).
  *
  * Both Slug textures are RGBA32Uint (THREE.RGBAIntegerFormat + UnsignedIntType),
  * read via textureLoad in TSL. Coordinates are normalized to [0,1] per-glyph
@@ -15,6 +15,19 @@ export const CURVE_TEXELS_PER_CURVE = 2;
 
 /** Width of all Slug DataTextures (matches existing highlight texture convention) */
 export const TEXTURE_WIDTH = 1024;
+
+/** Uint32 values one curve occupies in the curve texture (its two RGBA texels). */
+export const CURVE_U32_PER_CURVE = CURVE_TEXELS_PER_CURVE * 4;
+
+/**
+ * Rows each Slug texture is born with. Both textures are allocated at a CAPACITY, not at
+ * their used size: new glyphs append into the spare rows and only the touched texels are
+ * uploaded. A texture is reallocated (doubling its rows) only when an append would overrun
+ * it — a new texture object every field rebinds to, amortized over the doublings.
+ * 64 curve rows = 32,768 curves; 4 map rows = 4,096 slots.
+ */
+export const CURVE_INITIAL_ROWS = 64;
+export const MAP_INITIAL_ROWS = 4;
 
 /**
  * Pack a [0,1] normalized float to uint16.

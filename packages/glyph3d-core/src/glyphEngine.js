@@ -16,7 +16,11 @@ import {
   loadServedSlugCore,
   saveSlugCore,
   discardSlugCore,
+  slugGrowthKey,
+  loadSlugGrowth,
+  saveSlugGrowth,
 } from './shaping/index.js';
+import SlugEncodeClient from './workers/SlugEncodeClient.js';
 import { getWorkerBridge } from './workers/WorkerBridge.js';
 import { LARGE_CORE_RANGES } from './core/coreRanges.js';
 
@@ -33,7 +37,8 @@ export { LARGE_CORE_RANGES };
  * @property {Array<[number, number]>} [primeRanges] - Inclusive codepoint ranges to prime in shape cache.
  * @property {Array<[number, number]>} [encodeRanges] - Inclusive codepoint ranges to encode into Slug textures.
  * @property {(stage: string) => void} [onStage] - Progress callback.
- * @property {boolean}  [cache]      - Set false to bypass prebaked slug-core cache.
+ * @property {boolean}  [cache]      - Set false to bypass the slug-core cache AND the persisted
+ *   runtime growth (neither is read nor written).
  * @property {string}   [coreAssetBase] - Base path for served slug-core asset (default '/').
  */
 
@@ -55,6 +60,12 @@ const codepointsFromRanges = (ranges) => {
 
 /**
  * Boot the glyph pipeline.
+ *
+ * The ladder: the core (the encode ranges' glyphs) hydrates from the local cache, else the
+ * served bake, else is encoded in the encode worker and cached; then the runtime growth a
+ * previous session learned on this font chain hydrates on top. The encode worker (outline
+ * extraction) and the emoji raster worker start here; growth after boot runs through them.
+ *
  * @param {GlyphEngineOptions} options
  * @returns {Promise<GlyphAtlas>} atlas with `_shaper`, `_slugData`, etc. attached.
  */
@@ -77,6 +88,8 @@ export async function bootGlyphEngine(options = {}) {
     wasmUrl: opts.wasmUrl,
     wasmBinary: opts.wasmBinary,
   });
+  // The encode worker loads the same fonts into its own HarfBuzz while the main thread primes.
+  const encoder = new SlugEncodeClient({ fonts: shaper.fontSources(), wasmUrl: opts.wasmUrl, wasmBinary: opts.wasmBinary });
 
   const emojiAtlas = new EmojiAtlas();
   shaper.setEmojiAtlas(emojiAtlas);
@@ -94,6 +107,9 @@ export async function bootGlyphEngine(options = {}) {
 
   const useCache = opts.cache !== false;
   const cacheKey = slugCoreKey({ fonts: fontSpecs, encodeRanges: opts.encodeRanges });
+  const growthKey = slugGrowthKey({ fonts: fontSpecs });
+  const chain = { fontCount: shaper.fontCount };
+  const persist = useCache ? { save: (growth) => saveSlugGrowth(growthKey, growth, chain) } : null;
   const cachedDescriptor = useCache
     ? (await loadSlugCore(cacheKey)) || (await loadServedSlugCore(cacheKey, opts.coreAssetBase ?? '/'))
     : null;
@@ -101,7 +117,7 @@ export async function bootGlyphEngine(options = {}) {
   let live = null;
   if (cachedDescriptor) {
     try {
-      live = new LiveSlugAtlas({ atlas, shaper, initialDescriptor: cachedDescriptor });
+      live = new LiveSlugAtlas({ atlas, shaper, encoder, emojiAtlas, persist, initialDescriptor: cachedDescriptor });
     } catch (err) {
       console.warn(`[glyphEngine] slug-core hydrate failed (${err.message}) → recompute`);
       await discardSlugCore(cacheKey);
@@ -110,12 +126,33 @@ export async function bootGlyphEngine(options = {}) {
   }
   if (!live) {
     const shaped = shapeText(shapeCache, codepointsFromRanges(opts.encodeRanges));
-    const glyphIds = collectUniqueGlyphIds(shaped.lines);
-    live = new LiveSlugAtlas({ atlas, shaper, initialGlyphIds: glyphIds });
+    live = new LiveSlugAtlas({ atlas, shaper, encoder, emojiAtlas, persist });
+    await live.encodeCore(collectUniqueGlyphIds(shaped.lines));
     if (useCache) await saveSlugCore(cacheKey, live.serialize());
+  }
+  // What earlier sessions learned beyond the core, back before the first frame. After the
+  // prime (it fixes the core's slots); each grown glyph takes the next slot through the chain.
+  if (useCache) {
+    const growth = await loadSlugGrowth(growthKey, chain);
+    if (growth) {
+      const t0 = performance.now();
+      const added = live.hydrateGrowth(growth);
+      console.log(`[glyphEngine] hydrated ${added}/${growth.gid.length} grown glyph(s) in ${(performance.now() - t0).toFixed(1)}ms`);
+    }
   }
   atlas._live = live;
 
   stage('ready');
   return atlas;
+}
+
+/**
+ * Release a booted engine's workers and textures (a boot whose result nobody will use — e.g.
+ * a React effect that was cancelled while booting). The shaper stays: the worker bridge may
+ * hold it.
+ * @param {GlyphAtlas} atlas
+ */
+export function disposeGlyphEngine(atlas) {
+  atlas._live?.dispose();
+  atlas._emojiAtlas?.dispose();
 }

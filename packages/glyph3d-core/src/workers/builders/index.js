@@ -5,7 +5,7 @@
  * No intermediate objects, no spread operators.
  *
  * Reads pre-shaped glyph arrays from item.shaped (shaped on the main thread).
- * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's
+ * Outputs HarfBuzz glyph IDs that index directly into the Slug atlas's
  * glyphMapTexture for Slug vector rendering. Variable-width advances from
  * HarfBuzz.
  *
@@ -114,7 +114,7 @@ export function resolveLayoutParams(layout) {
  * This eliminates per-worker WASM instances — shaping runs once on the main thread, workers
  * only do buffer math.
  *
- * Outputs HarfBuzz glyph IDs that index directly into SlugEncoder's glyphMapTexture.
+ * Outputs HarfBuzz glyph IDs that index directly into the Slug atlas's glyphMapTexture.
  * One slot per codepoint — invisible glyphs (space, tab, .notdef) get a slot too and
  * render to nothing via 0-curve fragment discard, so the slot offset within a line
  * equals the codepoint index. That identity is what lets the kernel resolve a slot to

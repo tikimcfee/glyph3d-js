@@ -129,7 +129,7 @@ export default class HarfBuzzShaper {
     }
 
     /**
-     * Extract outline curves for a glyph (for SlugEncoder in Phase 2).
+     * Extract outline curves for a glyph (for the Slug encode, encodeGlyphBatch).
      *
      * Returns parsed path segments from glyphToJson:
      *   M = moveTo [x, y]

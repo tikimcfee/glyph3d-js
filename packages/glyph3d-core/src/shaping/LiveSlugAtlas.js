@@ -1,86 +1,133 @@
 /**
  * LiveSlugAtlas — the live, growable Slug curve atlas.
  *
- * The renderer (GlyphField) draws glyphs from two textures: a curve texture
- * (quadratic beziers) and a glyph-map texture (glyphId → curve range). Those
- * are produced by SlugEncoder. Historically they were encoded ONCE at boot for
- * a fixed codepoint range (printable ASCII), so any glyph encountered later —
- * box-drawing, the Claude Code spinner stars, rounded box corners — indexed an
- * empty glyph-map slot and rendered blank.
+ * The renderer draws glyphs from two textures: a curve texture (quadratic beziers) and a
+ * glyph-map texture (slot → curve range, or → emoji cell). This class owns them (through
+ * SlugTextures), the set of live fields that draw from them, and their GROWTH: when a grid
+ * meets a glyph that isn't encoded yet it calls ensureGlyphsEncoded()/ensureCodepoints(), and
+ * the glyph is encoded OFF the main thread and lands a little later.
  *
- * This class makes that encoding LIVE: it owns the set of encoded glyph IDs, the
- * current slug textures, and the set of live GlyphFields. When a grid encounters
- * an OUTLINE glyph that hasn't been encoded yet, it calls ensureGlyphsEncoded();
- * if the set grows, we re-encode and hot-swap the new textures into every live field in
- * one shot (covering both SceneContext topologies — every field registers here
- * regardless of which context owns its grid). BITMAP (emoji) slots are NOT encoded —
- * their curve entry is empty by construction; a new emoji cell only refreshes the
- * shared emoji texture, never the curve atlas. Every growth logs its source
- * (codepoint → font:glyph) so a missing core glyph is bakeable, not a mystery.
+ * The growth contract (what a caller can rely on):
  *
- * Boot seeds this with the up-front-encoded glyph IDs + their slug data so the
- * first frame is already warm; growth from there is incremental at the call site
- * and a (currently) full re-encode under the hood. Re-encode is a few ms and
- * growth is rare (only on first sighting of a new glyph), so the simple full
- * rebuild is the right tradeoff until profiling says otherwise.
+ *   1. Slots are synchronous. A codepoint's slot comes from the shaper (FontChain /
+ *      MonospaceShapeCache) the moment it is looked up, and never changes; a cell writes that
+ *      slot into its instance buffer straight away.
+ *   2. ensure*() never blocks. It reserves the slot's glyph-map texel (an all-zero entry) and
+ *      queues the glyph; the queue goes to the encode worker (SlugEncodeWorker, its own
+ *      HarfBuzz) as one batch per task.
+ *   3. In flight, a cell draws BLANK: its glyph-map texel is all zero (mode 0, no curves), the
+ *      shader's empty-glyph case — the cell's background/fill still paints, no ink. A new emoji
+ *      is the same: its map entry is written at once, but its atlas cell is transparent until
+ *      EmojiAtlas's raster lands.
+ *   4. On landing the curves are copied into the textures' spare capacity and ONLY the touched
+ *      texels upload (update ranges on the texture objects every field already holds). The
+ *      cell needs no rewrite: the slot it holds now resolves to ink on the next frame.
+ *   5. `onGlyphsReady(cb)` fires once per landed batch (outlines encoded, or emoji pixels
+ *      rasterized) with { slots, codepoints, version } — for callers that cache anything per
+ *      glyph or render on demand. Nothing needs it to draw correctly.
  *
- * Step 1 will back this with a multi-font chain (the glyph IDs become dense
- * global slots spanning several fonts); Step 3 will persist/restore the encoded
- * set + textures to disk. The field-registry + ensure/re-encode/broadcast core
- * here stays the same through both.
+ * A texture is REBORN only when its array doubles (it fills its capacity): then every
+ * registered field gets setSlugData() with the new pair — rare and amortized, never per glyph.
+ *
+ * Runtime growth PERSISTS: the glyphs learned after boot (not the core) are handed to
+ * `persist.save` (debounced) as records keyed by font glyph, and boot hydrates them back
+ * (hydrateGrowth) right after the core — see slugCoreCache. Every growth logs its source
+ * (codepoint → font:glyph), so a missing core glyph is bakeable, not a mystery.
  */
 
-import SlugEncoder from './SlugEncoder.js';
+import SlugTextures from './SlugTextures.js';
+import { CURVE_U32_PER_CURVE } from './slug-constants.js';
 import { loadStats } from '../core/loadStats.js';
+
+/** Growth tuning, born configurable (LiveSlugAtlas options override). */
+export const ATLAS_GROWTH = Object.freeze({
+    /** quiet time after the last growth before the grown glyphs are persisted */
+    persistDebounceMs: 1500,
+});
+
+/**
+ * @typedef {Object} GlyphsReady
+ * @property {number[]} slots       slots that just became drawable
+ * @property {number[]} codepoints  the codepoints that asked for them (where known; the core's
+ *   boot encode and hydrated growth have none)
+ * @property {number} version       the atlas version after the landing
+ */
 
 export default class LiveSlugAtlas {
     /**
      * @param {Object}   opts
      * @param {Object}   opts.atlas        - GlyphAtlas the fields read `_slugData` off of.
-     * @param {Object}   opts.shaper       - HarfBuzzShaper (or chain, later) for outline extraction.
-     * @param {Iterable<number>} [opts.initialGlyphIds] - Glyph IDs to encode at boot (the encoder
-     *           does the initial encode and stashes the result on atlas._slugData).
-     * @param {Object}   [opts.initialDescriptor] - A prebaked SlugBuffer descriptor (from the
-     *           slug-core cache). When present the encoder HYDRATES from it — skipping the boot
-     *           encode entirely — and `initialGlyphIds` is ignored. The buffer stays live (growth
-     *           appends from the hydrated set).
+     * @param {Object}   opts.shaper       - FontChain: slot routing (slotSource / slotFor /
+     *           isBitmapSlot / emojiCellOf / bitmapSlotOf / describeSlot).
+     * @param {{encode:(items:Uint32Array)=>Promise<{batch:Object, ms:number}>, dispose?:()=>void}} opts.encoder
+     *           - the off-thread encoder (SlugEncodeClient)
+     * @param {Object}   [opts.initialDescriptor] - a slug-core descriptor (the cache) to hydrate;
+     *           without one the atlas starts empty and boot calls encodeCore().
+     * @param {import('../EmojiAtlas.js').default|null} [opts.emojiAtlas] - whose landed pixels
+     *           and rebirths this atlas relays to its fields and listeners
+     * @param {{save:(growth:Object)=>Promise<number>}|null} [opts.persist] - where grown glyphs go
+     * @param {number}   [opts.persistDebounceMs]
      */
-    constructor({ atlas, shaper, initialGlyphIds = [], initialDescriptor = null }) {
+    constructor({ atlas, shaper, encoder, initialDescriptor = null, emojiAtlas = null, persist = null,
+                  persistDebounceMs = ATLAS_GROWTH.persistDebounceMs }) {
         /** @private */ this._atlas    = atlas;
         /** @private */ this._shaper   = shaper;
-        /** @private */ this._encoder  = new SlugEncoder(shaper);
-        /** @private @type {Set<Object>} live GlyphFields */ this._fields = new Set();
-        // The encoder that GROWS the atlas is the same one that holds the boot glyphs, so growth
-        // APPENDS instead of re-encoding the whole set. Boot either HYDRATES from a prebaked
-        // descriptor (cache hit → skip the encode) or encodes the glyph set from scratch (miss).
-        /** @private */ this._slugData = initialDescriptor
-            ? this._encoder.loadSerialized(initialDescriptor)
-            : this._encoder.encode(initialGlyphIds);
+        /** @private */ this._encoder  = encoder;
+        /** @private */ this._textures = initialDescriptor ? SlugTextures.hydrate(initialDescriptor) : new SlugTextures();
+        /** @private the pair fields bind; replaced only when a texture is reborn */
+        this._slugData = this._textures.pair;
         if (atlas) atlas._slugData = this._slugData;
-        /** @private bumped on every growth; lets callers detect staleness */
+        /** @private bumped on every landing; lets callers detect staleness */
         this._version = 0;
+        /** @private @type {Set<Object>} live fields */ this._fields = new Set();
+        /** @private slots queued or at the worker */ this._inFlight = new Set();
+        /** @private slots waiting for this task's batch, and who asked */
+        this._queue = [];
+        this._queueProv = new Map();
+        /** @private */ this._flushScheduled = false;
+        /** @private encode batches at the worker */ this._batches = 0;
+        /** @private resolvers waiting for quiet */ this._idleWaiters = [];
+        /** @private outline slots learned after boot — the persisted growth, in learning order */
+        this._grown = new Set();
+        /** @private */ this._persist = persist;
+        /** @private */ this._persistDebounceMs = persistDebounceMs;
+        /** @private */ this._persistTimer = null;
+        /** @private grown glyphs at the last save */ this._persistedCount = 0;
+        /** @private @type {Set<(e:GlyphsReady)=>void>} */ this._listeners = new Set();
+        /** @private */ this._emojiAtlas = emojiAtlas;
+        /** @private */ this._offEmoji = emojiAtlas ? emojiAtlas.onChange((e) => this._onEmoji(e)) : null;
     }
 
-    /** Snapshot the encoded core as a serializable descriptor (for the slug-core cache). */
+    /** Snapshot the encoded atlas as a serializable descriptor (for the slug-core cache). */
     serialize() {
-        return this._encoder.serialize();
+        return this._textures.buffer.serialize();
     }
 
-    /** @returns {Object|null} the current { curveTexture, glyphMapTexture } */
+    /** @returns {{curveTexture:Object, glyphMapTexture:Object}} the pair fields bind */
     get slugData() { return this._slugData; }
 
-    /** @returns {number} number of distinct glyph IDs currently encoded */
-    get size() { return this._encoder.size; }
+    /** @returns {number} number of distinct slots encoded (outline + emoji) */
+    get size() { return this._textures.buffer.size; }
 
-    /** @returns {number} monotonically increasing re-encode counter */
+    /** @returns {number} monotonically increasing landing counter */
     get version() { return this._version; }
 
+    /** @returns {number} glyphs requested and not yet landed (outlines + emoji pixels) */
+    get pending() { return this._inFlight.size + (this._emojiAtlas?.pending ?? 0); }
+
+    /** Upload accounting: { slug: SlugTextures stats, emoji: EmojiAtlas stats }. */
+    get uploadStats() {
+        return { slug: { ...this._textures.stats }, emoji: this._emojiAtlas ? { ...this._emojiAtlas.stats } : null };
+    }
+
+    /** @returns {number} glyphs learned since boot (the persisted growth) */
+    get grownCount() { return this._grown.size; }
+
     /**
-     * Register a live GlyphField so it receives texture hot-swaps on growth.
-     * Idempotent. Newly registered fields keep whatever slug data they were
-     * constructed with (the atlas's current `_slugData`), which is always the
-     * latest — no catch-up needed.
-     * @param {Object} field - a GlyphField with setSlugData()
+     * Register a live field so it gets the new pair when a texture is reborn (and the emoji
+     * texture when that one is). Idempotent. A field constructed now binds the atlas's current
+     * `_slugData`, which is always the latest — no catch-up needed.
+     * @param {Object} field - an InstancedField (setSlugData / setEmojiTexture)
      */
     registerField(field) {
         if (field) this._fields.add(field);
@@ -92,137 +139,78 @@ export default class LiveSlugAtlas {
     }
 
     /**
-     * Ensure every glyph ID in `glyphIds` has its curves encoded into the live
-     * textures. Glyph 0 (.notdef) is skipped — it has no curves and renders as a
-     * blank cell. BITMAP (emoji) slots are skipped too — their curve entry would
-     * be empty by construction (the bitmap branch renders them), so they only get
-     * an emoji-texture refresh, NOT a curve re-encode + per-field hot-swap (the
-     * recurring '+1 [.blank]' growths were emoji sightings paying full growth
-     * price for an empty entry). Re-encodes + broadcasts only when the encoded
-     * set actually grew.
+     * Listen for glyphs becoming drawable (see the growth contract, point 5).
+     * @param {(e:GlyphsReady) => void} cb
+     * @returns {() => void} unsubscribe
+     */
+    onGlyphsReady(cb) {
+        this._listeners.add(cb);
+        return () => this._listeners.delete(cb);
+    }
+
+    /**
+     * Resolves once nothing is in flight — every requested outline encoded, every emoji cell
+     * rasterized (for tools and tests; rendering never waits on it).
+     * @returns {Promise<void>}
+     */
+    async whenIdle() {
+        for (;;) {
+            if (this._inFlight.size > 0 || this._batches > 0) {
+                await new Promise((res) => this._idleWaiters.push(res));
+                continue;
+            }
+            if (this._emojiAtlas && this._emojiAtlas.pending > 0) {
+                await this._emojiAtlas.whenIdle();
+                continue;
+            }
+            return;
+        }
+    }
+
+    /**
+     * Ask for glyphs to be drawable. Never blocks: outline slots not yet encoded are queued for
+     * the encode worker (their map texels reserved, drawing blank until they land); bitmap
+     * (emoji) slots get their map entries now and draw once their cells are rasterized.
+     * Glyph 0 (.notdef / blank) and slots already encoded or in flight are skipped.
      *
      * @param {Iterable<number>} glyphIds
-     * @param {Map<number, number>} [provenance] - slot → codepoint that sighted it (log detail)
-     * @returns {{ grew: boolean, added: number, total: number }}
+     * @param {Map<number, number>} [provenance] - slot → codepoint that sighted it (log + event detail)
+     * @returns {{ queued: number, pending: number, total: number }}
      */
     ensureGlyphsEncoded(glyphIds, provenance) {
-        // Partition: bitmap slots to the emoji refresh, outline slots to the encoder.
-        let outlineIds = glyphIds;
-        const emojiSlots = [];
-        if (typeof this._shaper.isBitmapSlot === 'function') {
-            outlineIds = [];
-            for (const id of glyphIds) {
-                if (this._shaper.isBitmapSlot(id)) emojiSlots.push(id);
-                else outlineIds.push(id);
-            }
-        }
-        if (emojiSlots.length) this._refreshEmojiTextures(emojiSlots, provenance);
-
-        // Bitmap slots ALSO need their glyph-MAP entries (mode 1 + cell): without one
-        // the texel is all-zero — mode 0, curveCount 0 — and the slug branch discards
-        // the glyph as empty (the invisible-emoji bug). Map-only append; the outline
-        // append below rebuilds the full map from the same accumulator when IT grows.
-        const bitmapRes = emojiSlots.length ? this._encoder.appendBitmapSlots(emojiSlots) : null;
-
-        // The encoder skips .notdef + already-encoded internally and APPENDS only the new glyphs
-        // (each extracted exactly once — no full re-encode). It returns the rebuilt textures and
-        // whether anything grew.
-        const t0 = performance.now();
-        const res = this._encoder.appendGlyphs(outlineIds);
-        if (!res.grew && !bitmapRes?.grew) return { grew: false, added: 0, total: this._encoder.size };
-
-        const prev = this._slugData;   // orphaned by the swap — disposed after it lands
-        this._slugData = res.grew
-            ? res            // full rebuild — includes the bitmap entries from the accumulator
-            : { ...this._slugData, glyphMapTexture: bitmapRes.glyphMapTexture };
-        this._version++;
-        if (this._atlas) this._atlas._slugData = this._slugData;
-
-        let updated = 0;
-        for (const field of this._fields) {
-            if (field && typeof field.setSlugData === 'function') {
-                field.setSlugData(this._slugData, this._shaper);
-                // (No setEmojiTexture here: emoji cells are bitmap slots, and those
-                // never reach the encoder — _refreshEmojiTextures owns the refresh.)
-                updated++;
-            }
-        }
-
-        // Every live field now reads the NEW pair (registration is construction-time
-        // and unregister is dispose-time, so nothing live still points at the old
-        // one). The old pair's GPUTextures only die on texture.dispose() — without
-        // this, each growth leaks a pair until page unload (VRAM pressure on the
-        // bulk-load path: 7 growths in 2s preceded the 2026-08-04 device OOM).
-        if (prev) {
-            if (res.grew && prev.curveTexture && prev.curveTexture !== this._slugData.curveTexture) {
-                prev.curveTexture.dispose();
-            }
-            if (prev.glyphMapTexture && prev.glyphMapTexture !== this._slugData.glyphMapTexture) {
-                prev.glyphMapTexture.dispose();
-            }
-        }
-
-        // Name the new glyphs WITH their source so a growth is readable (and bakeable):
-        // U+XXXX 'c' → Font:gid 'name'. Bitmap slots never reach here (see above).
-        const ids = res.addedIds || [];
-        const desc = (id) => {
-            const d = this._shaper.describeSlot?.(id);
+        const buf = this._textures.buffer;
+        let emoji = null, queued = 0;
+        for (const id of glyphIds) {
+            if (id <= 0 || buf.has(id) || this._inFlight.has(id)) continue;
+            if (this._shaper.isBitmapSlot(id)) { (emoji ?? (emoji = [])).push(id); continue; }
+            this._inFlight.add(id);
+            this._queue.push(id);
             const cp = provenance?.get(id);
-            const src = cp != null
-                ? `U+${cp.toString(16).toUpperCase().padStart(4, '0')} ${JSON.stringify(String.fromCodePoint(cp))}`
-                : `slot ${id}`;
-            return d ? `${src}→${d.font}:${d.gid} "${d.name}"` : `${src}→${id}`;
-        };
-        const names = ids.slice(0, 24).map(desc).join(', ');
-        const more = ids.length > 24 ? ` …+${ids.length - 24}` : '';
-        const blanks = ids.filter((id) => this._shaper.describeSlot?.(id)?.name === '.blank').length;
-        const ms = performance.now() - t0;
-        // The load path's atlas cost, counted for the load trace (core/loadStats.js).
-        loadStats.atlasGrows++;
-        loadStats.atlasMs += ms;
-        loadStats.atlasFieldsSwapped += updated;
-        loadStats.atlasBlanks += blanks;
-        loadStats.atlasGlyphsAdded += res.added;
-        console.log(
-            `[LiveSlugAtlas] grew v${this._version}: +${res.added} → ${this._encoder.size} glyphs ` +
-            `[${names}${more}]${blanks ? ` (${blanks} blank)` : ''}, ` +
-            `${updated}/${this._fields.size} fields hot-swapped in ${ms.toFixed(1)}ms`
-        );
-        return { grew: true, added: res.added, total: this._encoder.size };
+            if (cp !== undefined) this._queueProv.set(id, cp);
+            buf.reserveSlot(id);
+            queued++;
+        }
+        if (emoji) {
+            // Map entries [0, 0, mode 1, cell] — without one the texel is all-zero and the slug
+            // branch discards the emoji as an empty glyph. Pixels arrive via the emoji atlas.
+            const res = buf.addBitmapSlots(this._shaper, emoji);
+            queued += res.added;
+            if (res.added) this._debugEmoji(res.addedIds, provenance);
+        }
+        if (queued) this._sync();
+        if (this._queue.length && !this._flushScheduled) {
+            this._flushScheduled = true;
+            queueMicrotask(() => this._flush());
+        }
+        return { queued, pending: this._inFlight.size, total: buf.size };
     }
 
     /**
-     * A new bitmap (emoji) slot needs NO curve work — but its atlas cell was just
-     * drawn, so every field's shared emoji texture wants its dims + dirty flag.
-     * Logged with the same provenance detail as a growth, at debug: emoji are an
-     * expected, cheap sighting, not an atlas event.
-     * @private
-     */
-    _refreshEmojiTextures(slots, provenance) {
-        let n = 0;
-        for (const field of this._fields) {
-            if (typeof field?.setEmojiTexture === 'function') { field.setEmojiTexture(); n++; }
-        }
-        const desc = (id) => {
-            const cp = provenance?.get(id);
-            const cell = this._shaper.describeSlot?.(id)?.name ?? id;
-            return cp != null
-                ? `U+${cp.toString(16).toUpperCase().padStart(4, '0')} ${JSON.stringify(String.fromCodePoint(cp))}→${cell}`
-                : String(id);
-        };
-        console.debug(
-            `[LiveSlugAtlas] emoji: +${slots.length} cell(s) [${slots.slice(0, 12).map(desc).join(', ')}` +
-            `${slots.length > 12 ? ` …+${slots.length - 12}` : ''}], ${n}/${this._fields.size} fields refreshed`
-        );
-    }
-
-    /**
-     * Convenience: ensure encoding for a list of Unicode codepoints, resolving
-     * each to its glyph ID through the shape cache (HarfBuzz fallback on miss).
-     * Passes the codepoint → slot provenance through to the growth log.
+     * Convenience: ensure a list of Unicode codepoints, resolving each to its slot through the
+     * shape cache (HarfBuzz on a miss). Passes codepoint → slot provenance through.
      * @param {Iterable<number>} codepoints
      * @param {{lookup:(cp:number)=>{g:number}}} shapeCache
-     * @returns {{ grew: boolean, added: number, total: number }}
+     * @returns {{ queued: number, pending: number, total: number }}
      */
     ensureCodepoints(codepoints, shapeCache) {
         const gids = [];
@@ -237,4 +225,241 @@ export default class LiveSlugAtlas {
         return this.ensureGlyphsEncoded(gids, provenance);
     }
 
+    /**
+     * Encode the boot core (a cache miss) through the worker and land it. Unlike growth it is
+     * awaited by boot and is not persisted as growth (the core has its own cache entry).
+     * @param {Iterable<number>} glyphIds
+     * @returns {Promise<void>}
+     */
+    async encodeCore(glyphIds) {
+        const t0 = performance.now();
+        const buf = this._textures.buffer;
+        const emoji = [];
+        const items = [];
+        for (const id of glyphIds) {
+            if (id <= 0 || buf.has(id)) continue;
+            if (this._shaper.isBitmapSlot(id)) { emoji.push(id); continue; }
+            const src = this._shaper.slotSource(id);
+            if (src) items.push(id, src.fontIdx, src.gid);
+        }
+        buf.addBitmapSlots(this._shaper, emoji);
+        const { batch, ms } = await this._encoder.encode(Uint32Array.from(items));
+        buf.appendEncoded(batch);
+        this._sync();
+        this._logOverhang(batch);
+        const s = this._textures.describe();
+        console.log(
+            `[LiveSlugAtlas] encoded core: ${s.glyphCount} glyphs, ${s.totalCurves} curves ` +
+            `(${s.curveTextureSizeKB}KB) — ${ms.toFixed(1)}ms in the worker, ${(performance.now() - t0).toFixed(1)}ms to land`
+        );
+    }
+
+    /**
+     * Land persisted growth (slugCoreCache.loadSlugGrowth) — called at boot right after the
+     * core hydrates, before any field exists. Each record's slot is allocated through the
+     * chain (slotFor(fontIdx, gid)); one the core already holds is skipped.
+     * @param {import('./slugCoreCache.js').SlugGrowth} growth
+     * @returns {number} glyphs added
+     */
+    hydrateGrowth(growth) {
+        const n = growth.gid.length;
+        const slots = new Uint32Array(n);
+        for (let i = 0; i < n; i++) slots[i] = this._shaper.slotFor(growth.fontIdx[i], growth.gid[i]);
+        const { addedIds } = this._textures.buffer.appendEncoded({ slots, counts: growth.counts, texels: growth.texels });
+        for (const id of addedIds) this._grown.add(id);
+        this._persistedCount = this._grown.size;
+        this._sync();
+        return addedIds.length;
+    }
+
+    /**
+     * Save the grown glyphs now (the debounce calls this). Resolves to the stored size (0 when
+     * there was nothing new or no persist sink).
+     * @returns {Promise<number>}
+     */
+    async persistNow() {
+        clearTimeout(this._persistTimer);
+        this._persistTimer = null;
+        if (!this._persist || this._grown.size === this._persistedCount) return 0;
+        const buf = this._textures.buffer;
+        const slots = [...this._grown];
+        const n = slots.length;
+        const fontIdx = new Uint32Array(n), gid = new Uint32Array(n), counts = new Uint32Array(n);
+        let total = 0;
+        for (let i = 0; i < n; i++) {
+            const src = this._shaper.slotSource(slots[i]);
+            fontIdx[i] = src.fontIdx; gid[i] = src.gid;
+            counts[i] = buf.slotTexels(slots[i]).length / CURVE_U32_PER_CURVE;
+            total += counts[i];
+        }
+        const texels = new Uint32Array(total * CURVE_U32_PER_CURVE);
+        for (let i = 0, o = 0; i < n; i++) {
+            const t = buf.slotTexels(slots[i]);
+            texels.set(t, o);
+            o += t.length;
+        }
+        this._persistedCount = n;
+        return this._persist.save({ fontIdx, gid, counts, texels });
+    }
+
+    /** Stop the worker, the persistence timer and the emoji relay; release the textures. */
+    dispose() {
+        clearTimeout(this._persistTimer);
+        this._offEmoji?.();
+        this._encoder.dispose?.();
+        this._textures.dispose();
+        this._fields.clear();
+        this._listeners.clear();
+    }
+
+    // ── internals ───────────────────────────────────────────────────────────────────────
+
+    /** @private send this task's queue to the worker as one batch */
+    _flush() {
+        this._flushScheduled = false;
+        const ids = this._queue.splice(0);
+        const prov = this._queueProv;
+        this._queueProv = new Map();
+        if (!ids.length) return;
+        const items = new Uint32Array(ids.length * 3);
+        let n = 0;
+        for (const id of ids) {
+            const src = this._shaper.slotSource(id);
+            if (!src) {
+                console.error(`[LiveSlugAtlas] slot ${id} has no font glyph (not outline, not bitmap) — it stays blank`);
+                this._inFlight.delete(id);
+                continue;
+            }
+            items[n++] = id; items[n++] = src.fontIdx; items[n++] = src.gid;
+        }
+        if (!n) return this._settle();
+        const sent = n / 3;
+        this._batches++;
+        this._encoder.encode(items.subarray(0, n).slice())
+            .then(({ batch, ms }) => this._land(batch, ms, prov))
+            .catch((err) => {
+                console.error(`[LiveSlugAtlas] growth of ${sent} glyph(s) failed (${err.message}) — ` +
+                    `they stay blank: [${ids.slice(0, 12).map((id) => this._describe(id, prov)).join(', ')}${ids.length > 12 ? ' …' : ''}]`);
+                for (const id of ids) this._inFlight.delete(id);
+            })
+            .finally(() => { this._batches--; this._settle(); });
+    }
+
+    /** @private copy a landed batch into the textures, tell the fields + listeners */
+    _land(batch, workerMs, prov) {
+        const t0 = performance.now();
+        const { added, addedIds } = this._textures.buffer.appendEncoded(batch);
+        for (const slot of batch.slots) this._inFlight.delete(slot);
+        for (const id of addedIds) this._grown.add(id);
+        const { bytes, reborn, rebound } = this._sync();
+        this._version++;
+        this._logOverhang(batch);
+
+        const ids = addedIds;
+        const blanks = ids.filter((id) => this._shaper.describeSlot?.(id)?.name === '.blank').length;
+        const ms = performance.now() - t0;
+        // The load path's atlas cost, counted for the load trace (core/loadStats.js): the
+        // MAIN-THREAD part of a growth (the worker's time is off it).
+        loadStats.atlasGrows++;
+        loadStats.atlasMs += ms;
+        loadStats.atlasFieldsSwapped += rebound;
+        loadStats.atlasBlanks += blanks;
+        loadStats.atlasGlyphsAdded += added;
+        const names = ids.slice(0, 24).map((id) => this._describe(id, prov)).join(', ');
+        console.log(
+            `[LiveSlugAtlas] grew v${this._version}: +${added} → ${this.size} glyphs ` +
+            `[${names}${ids.length > 24 ? ` …+${ids.length - 24}` : ''}]${blanks ? ` (${blanks} blank)` : ''}, ` +
+            `encoded in ${workerMs.toFixed(1)}ms off-thread, landed in ${ms.toFixed(1)}ms, ` +
+            `${bytes} B to upload${reborn ? `, textures reborn → ${rebound}/${this._fields.size} fields rebound` : ''}`
+        );
+        if (added) {
+            this._emit({ slots: ids, codepoints: ids.map((id) => prov.get(id)).filter((cp) => cp !== undefined), version: this._version });
+            this._schedulePersist();
+        }
+    }
+
+    /**
+     * @private bring the textures up to the buffer; a reborn texture goes to every field and
+     * the old one is disposed (each growth used to leak a pair until page unload — VRAM pressure
+     * on the bulk-load path preceded the 2026-08-04 device OOM)
+     */
+    _sync() {
+        const { reborn, bytes, retired } = this._textures.sync();
+        let rebound = 0;
+        if (reborn) {
+            this._slugData = this._textures.pair;
+            if (this._atlas) this._atlas._slugData = this._slugData;
+            for (const field of this._fields) {
+                if (typeof field?.setSlugData === 'function') { field.setSlugData(this._slugData, this._shaper); rebound++; }
+            }
+            for (const t of retired) t.dispose();
+        }
+        return { reborn, bytes, rebound };
+    }
+
+    /** @private relay the emoji atlas: a reborn texture to every field, landed pixels to listeners */
+    _onEmoji(e) {
+        if (e.kind === 'replaced') {
+            for (const field of this._fields) field?.setEmojiTexture?.();
+            return;
+        }
+        if (e.kind === 'rasterized') {
+            const slots = [];
+            for (const cp of e.codepoints) {
+                const slot = this._shaper.bitmapSlotOf(cp);
+                if (slot > 0) slots.push(slot);
+            }
+            this._version++;
+            this._emit({ slots, codepoints: e.codepoints, version: this._version });
+        }
+    }
+
+    /** @private */
+    _emit(e) {
+        for (const cb of this._listeners) {
+            try { cb(e); } catch (err) { console.error('[LiveSlugAtlas] onGlyphsReady listener failed:', err); }
+        }
+    }
+
+    /** @private wake whenIdle() waiters once nothing is in flight */
+    _settle() {
+        if (this._inFlight.size === 0 && this._batches === 0) {
+            for (const res of this._idleWaiters.splice(0)) res();
+        }
+    }
+
+    /** @private */
+    _schedulePersist() {
+        if (!this._persist) return;
+        clearTimeout(this._persistTimer);
+        this._persistTimer = setTimeout(() => { this.persistNow(); }, this._persistDebounceMs);
+    }
+
+    /** @private one aggregated overhang note per batch (ink clipped at the cell edge — benign) */
+    _logOverhang(batch) {
+        const o = batch.overhang;
+        if (!o || !o.count) return;
+        console.log(
+            `[LiveSlugAtlas] ${o.count}/${batch.slots.length} glyph(s) overhang the advance cell ` +
+            `(ink clipped at the edge; benign for monospace) — worst: ${o.worstSlot} ("${o.worstName}") +${(o.worstFrac * 100).toFixed(1)}%`
+        );
+    }
+
+    /** @private U+XXXX 'c' → Font:gid 'name' — a growth is readable (and bakeable) */
+    _describe(id, prov) {
+        const d = this._shaper.describeSlot?.(id);
+        const cp = prov?.get(id);
+        const src = cp != null
+            ? `U+${cp.toString(16).toUpperCase().padStart(4, '0')} ${JSON.stringify(String.fromCodePoint(cp))}`
+            : `slot ${id}`;
+        return d ? `${src}→${d.font}:${d.gid} "${d.name}"` : `${src}→${id}`;
+    }
+
+    /** @private emoji sightings are expected and cheap: debug, not an atlas event */
+    _debugEmoji(slots, provenance) {
+        console.debug(
+            `[LiveSlugAtlas] emoji: +${slots.length} cell(s) [${slots.slice(0, 12).map((id) => this._describe(id, provenance)).join(', ')}` +
+            `${slots.length > 12 ? ` …+${slots.length - 12}` : ''}]`
+        );
+    }
 }
