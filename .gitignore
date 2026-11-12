@@ -64,4 +64,4 @@ console.log
 
 # Rust workspace build output and vendored libghostty/zig (tools/termd-vendor.sh)
 /target/
-/vendor/
+/vendor

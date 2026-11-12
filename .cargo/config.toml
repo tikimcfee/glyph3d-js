@@ -1,0 +1,10 @@
+# libghostty-vt builds from the verified release tarballs and Zig that tools/termd-vendor.sh
+# unpacks into vendor/ (gitignored): no build-time git fetch, no absolute paths here.
+[env]
+GHOSTTY_SOURCE_DIR = { value = "vendor/ghostty", relative = true }
+GHOSTTY_ZIG_SYSTEM_DIR = { value = "vendor/ghostty-deps", relative = true }
+ZIG = { value = "vendor/zig/zig", relative = true }
+
+[build]
+# The libghostty build is heavy; keep a cold build from taking the whole machine.
+jobs = 8
