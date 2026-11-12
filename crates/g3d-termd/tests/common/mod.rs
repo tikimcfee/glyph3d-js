@@ -134,6 +134,8 @@ pub struct Seen {
     pub events: Vec<Event>,
     pub repaints: Vec<(RepaintHead, Vec<u8>)>,
     pub closed: bool,
+    /// Every frame in arrival order: `output@<seq>`, `repaint@<seq>`, or the event's name.
+    pub trace: Vec<String>,
 }
 
 impl Seen {
@@ -147,17 +149,21 @@ impl Seen {
                     self.gaps.push((n, seq));
                 }
                 self.next_seq = Some(seq + b.len() as u64);
+                self.trace.push(format!("output@{seq}"));
                 self.bytes.extend_from_slice(b);
                 self.output.extend_from_slice(b);
             }
             ty::REPAINT => {
                 let (h, vt) = frame::parse_repaint(&f.payload).unwrap();
                 self.next_seq = Some(h.seq);
+                self.trace.push(format!("repaint@{}", h.seq));
                 self.bytes.extend_from_slice(vt);
                 self.repaints.push((h, vt.to_vec()));
             }
             ty::EVENT => {
                 let ev: Event = serde_json::from_slice(&f.payload).unwrap();
+                let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap();
+                self.trace.push(v["ev"].as_str().unwrap_or("?").to_owned());
                 if ev == Event::Closed {
                     self.closed = true;
                 }
@@ -177,9 +183,41 @@ pub fn read_until(c: &mut Client, seen: &mut Seen, secs: u64, mut done: impl FnM
             "timed out; output so far: {:?}",
             String::from_utf8_lossy(&seen.output[seen.output.len().saturating_sub(400)..])
         );
-        let f = c.next_frame().unwrap();
+        let f = c.next_frame().unwrap_or_else(|e| {
+            panic!("{e}; frames so far end {:?}", &seen.trace[seen.trace.len().saturating_sub(12)..])
+        });
         seen.take(&f);
     }
+}
+
+/// A client whose socket buffers almost nothing: once it stops reading, the daemon's
+/// queue for it fills.
+pub fn stalled_client(d: &Daemon) -> Client {
+    let c = d.client();
+    rustix::net::sockopt::set_socket_recv_buffer_size(c.stream(), 4096).unwrap();
+    c
+}
+
+/// The daemon's resident memory, in KiB.
+pub fn rss_kb(pid: u32) -> u64 {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    s.lines()
+        .find(|l| l.starts_with("VmRSS:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn sub_req(id: &str, mode: Mode, role: Role, flow: Option<Flow>, size: Option<(u16, u16)>) -> Op {
+    Op::Subscribe(Subscribe {
+        id: id.into(),
+        mode,
+        role,
+        history_rows: None,
+        flow,
+        cols: size.map(|s| s.0),
+        rows: size.map(|s| s.1),
+    })
 }
 
 pub fn contains(hay: &[u8], needle: &[u8]) -> bool {

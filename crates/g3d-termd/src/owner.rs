@@ -24,6 +24,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::rc::Rc;
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
@@ -41,7 +42,8 @@ pub const TEST_PANIC_INPUT: &[u8] = b"\x00g3d-termd-test-panic\x00";
 
 /// Daemon-wide settings every terminal reads.
 pub struct Config {
-    pub ns: String,
+    /// `None` when the daemon was started on an explicit `--socket`.
+    pub ns: Option<String>,
     pub socket: PathBuf,
     pub default_scrollback: u64,
     pub max_scrollback: u64,
@@ -307,7 +309,13 @@ struct Sub {
     role: Role,
     mode: Mode,
     flow: Flow,
+    /// The flow it asked for at subscribe; an owner's flow is this, else `block`.
+    want_flow: Option<Flow>,
     view: Option<ViewState>,
+    /// Where its stream stands after the last data frame queued for it.
+    sent_end: u64,
+    /// Lagging (lossy only): where delivery stopped. Resynced once its queue drains.
+    lag: Option<u64>,
 }
 
 struct Owner {
@@ -325,6 +333,7 @@ struct Owner {
     input: Vec<u8>,
     modes: Modes,
     title: String,
+    pwd: String,
     eof: bool,
     last_output: Instant,
     compress_pending: bool,
@@ -438,6 +447,7 @@ impl Owner {
             input: Vec::new(),
             modes: Modes::default(),
             title: String::new(),
+            pwd: String::new(),
             eof: false,
             last_output: Instant::now(),
             compress_pending: false,
@@ -452,11 +462,7 @@ impl Owner {
     }
 
     fn reading(&self) -> bool {
-        !self.eof
-            && !self
-                .subs
-                .iter()
-                .any(|s| s.flow == Flow::Block && s.shared.paused.load(std::sync::atomic::Ordering::SeqCst))
+        !self.eof && !self.subs.iter().any(|s| s.flow == Flow::Block && s.shared.paused.load(SeqCst))
     }
 
     fn run(&mut self) {
@@ -468,6 +474,7 @@ impl Owner {
                     return;
                 }
             }
+            self.resync_drained();
             let reading = self.reading();
             let want_write = !self.input.is_empty() && !self.eof;
             let mut timeout = Duration::from_millis(500);
@@ -569,30 +576,13 @@ impl Owner {
         self.seq += chunk.len() as u64;
         self.last_output = Instant::now();
         self.compress_pending = true;
-        let mut lagged = Vec::new();
-        for (i, s) in self.subs.iter().enumerate() {
+        for i in 0..self.subs.len() {
+            let s = &self.subs[i];
             if s.mode != Mode::Raw || s.view.is_some() {
                 continue;
             }
-            let q = s.shared.queued.load(std::sync::atomic::Ordering::SeqCst);
-            if s.flow == Flow::Lossy && q + chunk.len() > LOSSY_MAX {
-                lagged.push(i);
-                continue;
-            }
-            s.out.sub_frame(
-                &s.shared,
-                Kind::Output,
-                frame::output_head(self.tref.handle, start, chunk.len()),
-                Some(chunk.clone()),
-            );
-            if s.flow == Flow::Block {
-                s.shared.maybe_pause();
-            }
-        }
-        for i in lagged {
-            let dropped = self.subs[i].out.drop_sub_data(&self.subs[i].shared) + chunk.len() as u64;
-            self.event_to(i, &Event::Lagged { dropped, seq: self.seq });
-            self.push_live_repaint(i, 0);
+            let head = frame::output_head(self.tref.handle, start, chunk.len());
+            self.send(i, false, head, Some(chunk.clone()), Some(self.seq));
         }
         self.flush_replies();
         self.emit_effects();
@@ -637,20 +627,21 @@ impl Owner {
             let t = repaint::clean_title(self.term.title().unwrap_or(b""));
             if t != self.title {
                 self.title = t.clone();
-                self.event_all(&Event::Title { title: t });
+                self.event_all(false, &Event::Title { title: t });
             }
         }
-        for _ in 0..self.fx.bells.replace(0) {
-            self.event_all(&Event::Bell);
+        // One `bell` for however many BELs this read held: a bell is a nudge, not a count.
+        if self.fx.bells.replace(0) > 0 {
+            self.event_all(false, &Event::Bell);
         }
         if self.fx.pwd.take() {
-            let pwd = String::from_utf8_lossy(self.term.pwd().unwrap_or(b"")).into_owned();
-            self.event_all(&Event::Pwd { pwd });
+            self.pwd = String::from_utf8_lossy(self.term.pwd().unwrap_or(b"")).into_owned();
+            self.event_all(false, &Event::Pwd { pwd: self.pwd.clone() });
         }
         let m = self.current_modes();
         if m != self.modes {
             self.modes = m;
-            self.event_all(&Event::Modes(m));
+            self.event_all(false, &Event::Modes(m));
         }
         let mut info = self.tref.info.lock().unwrap();
         info.seq = self.seq;
@@ -658,24 +649,106 @@ impl Owner {
         info.title.clone_from(&self.title);
     }
 
-    fn event_to(&self, i: usize, ev: &Event) {
-        let s = &self.subs[i];
-        s.out.sub_frame(&s.shared, Kind::Other, frame::encode_json(ty::EVENT, self.tref.handle, ev), None);
+    /// Queues a frame for subscription `i` under its flow (PROTOCOL.md, "Flow control").
+    /// `end` is where a data frame leaves the subscriber's stream (an `OUTPUT`'s end, a
+    /// `REPAINT`'s `seq`), `None` for an event. `keep` frames (`role`, `lagged`, `exit`,
+    /// `closed`, `error`) are never dropped. A lossy subscriber whose queue would pass
+    /// `LOSSY_MAX` starts lagging: its queued frames go, nothing but `keep` frames is
+    /// queued for it, and `resync_drained` catches it up once it has read what was left.
+    /// An empty queue always takes the frame, so one large repaint can't start a lag.
+    fn send(&mut self, i: usize, keep: bool, head: Vec<u8>, body: Option<Arc<[u8]>>, end: Option<u64>) {
+        let s = &mut self.subs[i];
+        if s.lag.is_some() && !keep {
+            return;
+        }
+        let len = head.len() + body.as_ref().map_or(0, |b| b.len());
+        let queued = s.shared.queued.load(SeqCst);
+        if s.flow == Flow::Lossy && !keep && queued > 0 && queued + len > LOSSY_MAX {
+            let stop = s.out.drop_sub_frames(&s.shared);
+            s.lag = Some(stop.unwrap_or(s.sent_end));
+            s.shared.lagging.store(true, SeqCst);
+            // It may have drained already; otherwise written() wakes us when it does.
+            self.wake.wake();
+            return;
+        }
+        let kind = match (keep, end) {
+            (true, _) => Kind::Keep,
+            (false, Some(_)) => Kind::Data { prev_end: s.sent_end },
+            (false, None) => Kind::Event,
+        };
+        s.out.sub_frame(&s.shared, kind, head, body);
+        if let Some(e) = end {
+            s.sent_end = e;
+        }
+        if s.flow == Flow::Block {
+            s.shared.maybe_pause();
+        }
     }
 
-    fn event_all(&self, ev: &Event) {
+    /// Catches up every lagging subscriber that has read all it was left: one `lagged`,
+    /// then a `REPAINT` (raw) or a `size` event (`mode: "none"`), then the state events.
+    fn resync_drained(&mut self) {
+        for i in 0..self.subs.len() {
+            let Some(from) = self.subs[i].lag else { continue };
+            if self.subs[i].shared.queued.load(SeqCst) != 0 {
+                continue;
+            }
+            self.subs[i].lag = None;
+            self.subs[i].shared.lagging.store(false, SeqCst);
+            let dropped = self.lag_dropped(i, from);
+            self.event_to(i, true, &Event::Lagged { dropped, seq: self.seq });
+            if self.subs[i].mode == Mode::Raw {
+                match self.view_top(i) {
+                    Some(top) => self.push_view_repaint(i, top),
+                    None => self.push_live_repaint(i, 0),
+                }
+            } else {
+                let (cols, rows) = self.cols_rows();
+                self.event_to(i, false, &Event::Size { cols, rows, seq: self.seq });
+            }
+            self.send_state(i);
+        }
+    }
+
+    /// The `OUTPUT` bytes a subscriber lagging since `from` did not get: none for one
+    /// that gets no output (`mode: "none"`, or scrolled back).
+    fn lag_dropped(&self, i: usize, from: u64) -> u64 {
+        let s = &self.subs[i];
+        if s.mode == Mode::Raw && s.view.is_none() { self.seq.saturating_sub(from) } else { 0 }
+    }
+
+    /// The terminal's state as events, for a subscriber that has none of it yet or lost
+    /// some: `modes`, then `title` and `pwd` when the program set them.
+    fn send_state(&mut self, i: usize) {
+        self.event_to(i, false, &Event::Modes(self.modes));
+        if !self.title.is_empty() {
+            self.event_to(i, false, &Event::Title { title: self.title.clone() });
+        }
+        if !self.pwd.is_empty() {
+            self.event_to(i, false, &Event::Pwd { pwd: self.pwd.clone() });
+        }
+    }
+
+    fn event_to(&mut self, i: usize, keep: bool, ev: &Event) {
         let bytes = frame::encode_json(ty::EVENT, self.tref.handle, ev);
-        for s in &self.subs {
-            s.out.sub_frame(&s.shared, Kind::Other, bytes.clone(), None);
+        self.send(i, keep, bytes, None, None);
+    }
+
+    fn event_all(&mut self, keep: bool, ev: &Event) {
+        let bytes = frame::encode_json(ty::EVENT, self.tref.handle, ev);
+        for i in 0..self.subs.len() {
+            self.send(i, keep, bytes.clone(), None, None);
         }
     }
 
     fn push_live_repaint(&mut self, i: usize, history_rows: u32) {
+        if self.subs[i].lag.is_some() {
+            return; // its resync repaints it
+        }
         let vt = repaint::live(&mut self.term, history_rows);
         let (cols, rows) = self.cols_rows();
         let head = RepaintHead { seq: self.seq, cols, rows, flags: 0 };
-        let s = &self.subs[i];
-        s.out.sub_frame(&s.shared, Kind::Repaint, frame::encode_repaint(self.tref.handle, head, &vt), None);
+        self.send(i, false, frame::encode_repaint(self.tref.handle, head, &vt), None, Some(self.seq));
     }
 
     fn update_counts(&self) {
@@ -694,15 +767,28 @@ impl Owner {
         self.subs.iter().position(|s| s.conn == conn)
     }
 
-    /// Makes subscription `i` the owner, demoting any other owner to `attach`.
+    /// Makes subscription `i` the owner, with the flow it asked for at subscribe, else
+    /// `block`. Any other owner is demoted first.
     fn make_owner(&mut self, i: usize) {
+        self.demote_owners(Some(i));
+        let s = &mut self.subs[i];
+        s.role = Role::Own;
+        s.flow = s.want_flow.unwrap_or(Flow::Block);
+    }
+
+    /// Demotes the owner (unless it is `except`) to an `attach` subscriber, which is lossy:
+    /// a wedged owner stops holding the PTY back the moment someone takes the terminal.
+    /// It hears so in a `role` event.
+    fn demote_owners(&mut self, except: Option<usize>) {
         for j in 0..self.subs.len() {
-            if j != i && self.subs[j].role == Role::Own {
-                self.subs[j].role = Role::Attach;
-                self.event_to(j, &Event::Role { role: Role::Attach });
+            if Some(j) != except && self.subs[j].role == Role::Own {
+                let s = &mut self.subs[j];
+                s.role = Role::Attach;
+                s.flow = Flow::Lossy;
+                s.shared.paused.store(false, SeqCst);
+                self.event_to(j, true, &Event::Role { role: Role::Attach });
             }
         }
-        self.subs[i].role = Role::Own;
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
@@ -728,7 +814,7 @@ impl Owner {
             info.cols = cols;
             info.rows = rows;
         }
-        self.event_all(&Event::Size { cols, rows, seq: self.seq });
+        self.event_all(false, &Event::Size { cols, rows, seq: self.seq });
         for i in 0..self.subs.len() {
             if self.subs[i].view.take().is_some() {
                 self.push_live_repaint(i, 0);
@@ -779,7 +865,11 @@ impl Owner {
                         return false;
                     }
                 };
-                // The new subscriber gets the resize as its reply and repaint, not an event.
+                // The old owner hears `role`, then `size`. The new subscriber joins after
+                // the resize: its reply and repaint carry the size.
+                if s.role == Role::Own {
+                    self.demote_owners(None);
+                }
                 if let Some((c, r)) = size {
                     self.resize(c, r);
                 }
@@ -787,23 +877,22 @@ impl Owner {
                     conn,
                     out: out.clone(),
                     shared: Arc::new(SubShared::new(self.wake.clone())),
-                    role: Role::Attach,
+                    role: s.role,
                     mode: s.mode,
                     flow,
+                    want_flow: s.flow,
                     view: None,
+                    sent_end: self.seq,
+                    lag: None,
                 });
                 let i = self.subs.len() - 1;
-                if s.role == Role::Own {
-                    self.make_owner(i);
-                } else {
-                    self.subs[i].role = s.role;
-                }
                 self.update_counts();
                 let (cols, rows) = self.cols_rows();
                 reply_ok(out, req, &SubscribeReply { handle, role: s.role, seq: self.seq, cols, rows });
                 if s.mode == Mode::Raw {
                     self.push_live_repaint(i, s.history_rows.unwrap_or(0));
                 }
+                self.send_state(i);
                 true
             }
             TermOp::Unsubscribe => match self.sub_index(conn) {
@@ -842,12 +931,13 @@ impl Owner {
                         return false;
                     }
                 };
+                // The old owner hears `role`, then `size`; the taker gets its reply, then `size`.
                 self.make_owner(i);
                 self.update_counts();
+                reply_ok(out, req, &TakeReply { role: Role::Own });
                 if let Some((c, r)) = size {
                     self.resize(c, r);
                 }
-                reply_ok(out, req, &TakeReply { role: Role::Own });
                 true
             }
             TermOp::Resize { cols, rows } => {
@@ -966,11 +1056,13 @@ impl Owner {
     }
 
     fn push_view_repaint(&mut self, i: usize, top: u32) {
+        if self.subs[i].lag.is_some() {
+            return; // its resync repaints it
+        }
         let vt = repaint::view(&self.term, top);
         let (cols, rows) = self.cols_rows();
         let head = RepaintHead { seq: self.seq, cols, rows, flags: REPAINT_FLAG_VIEW };
-        let s = &self.subs[i];
-        s.out.sub_frame(&s.shared, Kind::Repaint, frame::encode_repaint(self.tref.handle, head, &vt), None);
+        self.send(i, false, frame::encode_repaint(self.tref.handle, head, &vt), None, Some(self.seq));
     }
 
     fn view(&mut self, conn: ConnId, out: &Arc<ConnOut>, req: u64, delta: Option<i64>, live: bool) -> bool {
@@ -1081,8 +1173,14 @@ impl Owner {
             None => (None, None),
         };
         crate::log(&format!("terminal {} ended: code {code:?} signal {signal:?} at seq {}", self.tref.id, self.seq));
-        self.event_all(&Event::Exit { code, signal, seq: self.seq });
-        self.event_all(&Event::Closed);
+        for i in 0..self.subs.len() {
+            if let Some(from) = self.subs[i].lag.take() {
+                let dropped = self.lag_dropped(i, from);
+                self.event_to(i, true, &Event::Lagged { dropped, seq: self.seq });
+            }
+        }
+        self.event_all(true, &Event::Exit { code, signal, seq: self.seq });
+        self.event_all(true, &Event::Closed);
         self.subs.clear();
         self.reg.remove(&self.tref);
         self.done = true;
@@ -1108,17 +1206,8 @@ impl Owner {
         let _ = rustix::process::kill_process_group(self.pgid, Signal::HUP);
         self.master = None;
         let status = self.reap(&[self.pgid]);
-        let bytes = frame::encode_json(
-            ty::EVENT,
-            self.tref.handle,
-            &Event::Error {
-                code: "panic".into(),
-                message: format!("termd's owner thread for {} failed; the terminal is closed", self.tref.id),
-            },
-        );
-        for s in &self.subs {
-            s.out.sub_frame(&s.shared, Kind::Other, bytes.clone(), None);
-        }
+        let message = format!("termd's owner thread for {} failed; the terminal is closed", self.tref.id);
+        self.event_all(true, &Event::Error { code: code::PANIC.into(), message });
         self.finish(status);
     }
 }

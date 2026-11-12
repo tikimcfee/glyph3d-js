@@ -55,6 +55,7 @@ enum Cmd {
     Attach {
         id: String,
         /// Own the size: this window's size becomes the terminal's, for every viewer.
+        /// Ends when another client takes the terminal (attach again to take it back).
         #[arg(long)]
         take: bool,
         /// The key pressed twice to detach, as ^X.

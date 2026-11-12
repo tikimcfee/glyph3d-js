@@ -80,7 +80,7 @@ mod tests {
         let f = one_frame(&v[1]);
         assert_eq!(f.ty, ty::WELCOME);
         let w: Welcome = serde_json::from_slice(&f.payload).unwrap();
-        assert_eq!(w.ns, "test");
+        assert_eq!(w.ns.as_deref(), Some("test"));
         assert_eq!(w.features, FEATURES.map(String::from).to_vec());
         assert_eq!(w.max_frame, DEFAULT_MAX_FRAME as u64);
         assert_eq!(encode_json(ty::WELCOME, 0, &w), v[1]);

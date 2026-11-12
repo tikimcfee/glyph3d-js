@@ -23,7 +23,9 @@ pub struct Welcome {
     pub proto: [u32; 2],
     pub daemon: String,
     pub engine: String,
-    pub ns: String,
+    /// The namespace; absent when the daemon serves an explicit `--socket`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ns: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     pub features: Vec<String>,
@@ -69,8 +71,11 @@ pub mod code {
     pub const BAD_FRAME: &str = "bad_frame";
     pub const VERSION: &str = "version";
     pub const AUTH: &str = "auth";
-    // Raised by a request the input buffer refused (an `error` event).
+    // `error` events.
+    /// An `INPUT` the program's unread-input buffer had no room for.
     pub const INPUT_FULL: &str = "input_full";
+    /// The terminal failed inside termd; `exit` and `closed` follow.
+    pub const PANIC: &str = "panic";
 }
 
 /// A `REQUEST`: the client's `req` plus one op.

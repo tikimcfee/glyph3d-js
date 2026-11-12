@@ -146,25 +146,21 @@ fn daemonize(log_path: &Path, keep: &[i32]) {
 fn main() {
     let args = Args::parse();
     let (ns, socket) = match (&args.ns, &args.socket) {
+        // An explicit socket names no namespace.
         (_, Some(p)) => {
             let abs = if p.is_absolute() { p.clone() } else { std::env::current_dir().unwrap_or_default().join(p) };
-            let ns = abs
-                .file_stem()
-                .map(|s| s.to_string_lossy().trim_start_matches("termd-").to_owned())
-                .unwrap_or_default();
-            (ns, abs)
+            (None, abs)
         }
         (ns, None) => {
             let ns = ns.clone().unwrap_or_else(|| g3d::paths::DEFAULT_NS.to_owned());
             g3d::paths::validate_name("namespace", &ns).unwrap_or_else(|m| die(&m));
             let path = g3d::paths::socket_path(&ns);
-            (ns, path)
+            (Some(ns), path)
         }
     };
-    let log_path = if args.socket.is_some() {
-        PathBuf::from(format!("{}.log", socket.display()))
-    } else {
-        g3d::paths::log_path(&ns)
+    let log_path = match &ns {
+        Some(ns) => g3d::paths::log_path(ns),
+        None => PathBuf::from(format!("{}.log", socket.display())),
     };
     if let Some(dir) = socket.parent() {
         ensure_private_dir(dir);
@@ -184,8 +180,9 @@ fn main() {
         daemonize(&log_path, &[listener.as_raw_fd(), lock.as_raw_fd()]);
     }
     write_pid(&mut lock);
+    let serving = ns.as_ref().map_or_else(|| "its own socket".to_owned(), |n| format!("namespace {n:?}"));
     log(&format!(
-        "g3d-termd {} (pid {}) serving namespace {ns:?} at {}",
+        "g3d-termd {} (pid {}) serving {serving} at {}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         socket.display()

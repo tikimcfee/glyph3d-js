@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use g3d::Client;
 use g3d_wire::frame::{self, ty};
 use g3d_wire::*;
 use std::time::{Duration, Instant};
@@ -45,6 +46,8 @@ fn handshake_refuses_another_major() {
     assert_eq!(c.welcome.proto, PROTO);
     assert_eq!(c.welcome.features, vec!["raw", "view", "capture"]);
     assert_eq!(c.welcome.engine, "libghostty-vt/1.0.1");
+    // Started on an explicit --socket: there is no namespace to name.
+    assert_eq!(c.welcome.ns, None);
 }
 
 #[test]
@@ -165,7 +168,7 @@ fn repaint_matches(script: &str, check_alt: bool) {
     create(&mut c, "t", &["sh", "-c", script], 60, 12);
     let early = subscribe(&mut c, "t", Role::Attach, None);
     let mut truth = Seen::default();
-    read_until(&mut c, &mut truth, 10, |s| contains(&s.output, b"READY"));
+    read_until(&mut c, &mut truth, 10, |s| contains(&s.bytes, b"READY"));
 
     let mut late_c = d.client();
     let late = subscribe(&mut late_c, "t", Role::Watch, None);
@@ -266,7 +269,7 @@ fn resize_event_seq_is_exact() {
         }))
         .unwrap();
     let mut seen = Seen::default();
-    read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
     let _: Empty = c.request(Op::Resize(Resize { handle: s.handle, cols: 100, rows: 30 })).unwrap();
     // A watcher can't resize.
     let mut w = d.client();
@@ -315,15 +318,47 @@ fn take_moves_ownership_and_demotes_the_old_owner() {
     assert_eq!((sa.cols, sa.rows), (90, 20));
     let mut b = d.client();
     let sb = subscribe(&mut b, "t", Role::Attach, None);
-    let r: TakeReply = b.request(Op::Take(Take { handle: sb.handle, cols: Some(70), rows: Some(10) })).unwrap();
-    assert_eq!(r.role, Role::Own);
+    // The taker: its reply, then the size event.
+    let req = b.send_request(Op::Take(Take { handle: sb.handle, cols: Some(70), rows: Some(10) })).unwrap();
+    let mut order = Vec::new();
+    while !(order.iter().any(|o| o == "size") && order.iter().any(|o| o == "reply")) {
+        let f = b.next_frame().unwrap();
+        match f.ty {
+            ty::REPLY => {
+                let h: ReplyHead = serde_json::from_slice(&f.payload).unwrap();
+                assert_eq!(h.req, req);
+                let r: TakeReply = serde_json::from_slice(&f.payload).unwrap();
+                assert_eq!(r.role, Role::Own);
+                order.push("reply".to_owned());
+            }
+            ty::EVENT => {
+                let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap();
+                order.push(v["ev"].as_str().unwrap().to_owned());
+            }
+            _ => {}
+        }
+    }
+    let at =
+        |o: &[String], what: &str| o.iter().position(|x| x == what).unwrap_or_else(|| panic!("no {what} in {o:?}"));
+    assert!(at(&order, "reply") < at(&order, "size"), "taker saw {order:?}");
+    // The old owner: `role` first, so it knows the size is no longer its own.
     let mut seen = Seen::default();
-    read_until(&mut a, &mut seen, 5, |s| s.events.contains(&Event::Role { role: Role::Attach }));
     read_until(&mut a, &mut seen, 5, |s| s.events.iter().any(|e| matches!(e, Event::Size { cols: 70, rows: 10, .. })));
+    assert!(at(&seen.trace, "role") < at(&seen.trace, "size"), "old owner saw {:?}", seen.trace);
+    assert!(seen.events.contains(&Event::Role { role: Role::Attach }));
     assert_eq!(
         a.request::<Empty>(Op::Resize(Resize { handle: sa.handle, cols: 10, rows: 10 })).unwrap_err().code(),
         Some(code::NOT_OWNER)
     );
+
+    // Subscribing as `own` with a size takes it too; the demoted owner hears `role`, then `size`.
+    let mut c = d.client();
+    let _: SubscribeReply = c.request(sub_req("t", Mode::None, Role::Own, None, Some((60, 15)))).unwrap();
+    let mut bseen = Seen::default();
+    let is_new_size = |e: &Event| matches!(e, Event::Size { cols: 60, rows: 15, .. });
+    read_until(&mut b, &mut bseen, 5, |s| s.events.iter().any(is_new_size));
+    let role = bseen.events.iter().position(|e| *e == Event::Role { role: Role::Attach }).expect("a role event");
+    assert!(role < bseen.events.iter().position(is_new_size).unwrap(), "{:?}", bseen.events);
 }
 
 #[test]
@@ -371,7 +406,7 @@ fn view_scrolls_back_and_stays_anchored() {
     );
     let s = subscribe(&mut c, "t", Role::Attach, None);
     let mut seen = Seen::default();
-    read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
     let v: ViewReply = c.request(Op::View(View { handle: s.handle, delta: Some(10), live: None })).unwrap();
     assert_eq!(v.offset, 10);
     assert!(v.max >= 96);
@@ -463,7 +498,7 @@ fn lossy_subscriber_that_falls_behind_is_resynced() {
     create(&mut c, "t", &["sh", "-c", "printf READY; read x; seq 1 3000000; printf DONE; exec sleep 100"], 80, 24);
     let s = subscribe(&mut c, "t", Role::Attach, None);
     let mut seen = Seen::default();
-    read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
     c.input(s.handle, b"\r").unwrap();
     // Don't read for a while: the queue passes 4 MiB.
     std::thread::sleep(Duration::from_secs(3));
@@ -473,6 +508,7 @@ fn lossy_subscriber_that_falls_behind_is_resynced() {
                 && s.next_seq == s.repaints.last().map(|r| r.0.seq)
                 && contains(&s.repaints.last().unwrap().1, b"DONE")
     });
+    read_until(&mut c, &mut seen, 10, |s| s.trace.iter().skip_while(|t| *t != "lagged").any(|t| t == "modes"));
     let lagged = seen.events.iter().find_map(|e| match e {
         Event::Lagged { dropped, seq } => Some((*dropped, *seq)),
         _ => None,
@@ -480,7 +516,10 @@ fn lossy_subscriber_that_falls_behind_is_resynced() {
     let (dropped, seq) = lagged.expect("a lagged event");
     assert!(dropped > 0);
     assert!(seen.repaints.len() >= 2, "a repaint after the lag");
-    assert!(seen.repaints[1].0.seq >= seq);
+    // One `lagged`, then the repaint it names: never a run of them.
+    let p = seen.trace.iter().position(|t| t == "lagged").unwrap();
+    assert_eq!(seen.trace[p + 1], format!("repaint@{seq}"), "after lagged: {:?}", &seen.trace[p..]);
+    assert_eq!(seen.trace[p + 2], "modes", "the state follows the repaint: {:?}", &seen.trace[p..]);
     assert!(seen.gaps.is_empty(), "output after the resync continues at the repaint's seq: {:?}", seen.gaps);
 }
 
@@ -507,7 +546,7 @@ fn blocking_owner_sees_every_byte_of_a_flood() {
         }))
         .unwrap();
     let mut seen = Seen::default();
-    read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
     c.input(s.handle, b"\r").unwrap();
     // Read slowly at first, so the daemon has to hold the program back.
     std::thread::sleep(Duration::from_secs(2));
@@ -515,7 +554,7 @@ fn blocking_owner_sees_every_byte_of_a_flood() {
     assert!(seen.gaps.is_empty(), "seq gaps: {:?}", seen.gaps);
     assert!(!seen.events.iter().any(|e| matches!(e, Event::Lagged { .. })));
     let text = String::from_utf8_lossy(&seen.output).into_owned();
-    let start = text.find("READY").unwrap() + 5;
+    let start = text.find("READY").map_or(0, |i| i + 5);
     let body = &text[start..text.rfind("DONE").unwrap()];
     let lines: Vec<&str> = body.split('\n').filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 300000);
@@ -642,7 +681,7 @@ fn flood_in_several_terminals_stays_bounded() {
             }))
             .unwrap();
         let mut seen = Seen::default();
-        read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"READY"));
+        read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
         clients.push((c, s.handle, seen));
     }
     for (c, h, _) in &mut clients {
@@ -674,9 +713,179 @@ fn flood_in_several_terminals_stays_bounded() {
         let seen = h.join().unwrap();
         assert!(seen.gaps.is_empty(), "gaps: {:?}", seen.gaps);
         let text = String::from_utf8_lossy(&seen.output).into_owned();
-        let body = &text[text.find("READY").unwrap() + 5..text.rfind("DONE").unwrap()];
+        let body = &text[text.find("READY").map_or(0, |i| i + 5)..text.rfind("DONE").unwrap()];
         assert_eq!(body.split('\n').filter(|l| !l.is_empty()).count(), 300000);
     }
     eprintln!("flood: daemon peak RSS {} MiB for {n} terminals", peak_rss_kb / 1024);
     assert!(peak_rss_kb < 200 * 1024, "daemon RSS {} KiB is over the 200 MiB ceiling", peak_rss_kb);
+}
+
+/// The program rings and retitles without pause; two clients stop reading (one raw, one
+/// `mode: "none"`). Events count against a subscriber's queue like output and are dropped
+/// with it, so the daemon stays small (and the client that reads keeps its pace: printed,
+/// not asserted, as the suite's other floods share the CPU). Each
+/// stalled client, once it reads again, gets one `lagged`, then a repaint (raw) or a
+/// `size` (none), then the terminal's state.
+#[test]
+fn stalled_subscribers_do_not_hoard_events() {
+    let d = Daemon::start();
+    let mut c = d.client();
+    create(
+        &mut c,
+        "t",
+        &[
+            "sh",
+            "-c",
+            r#"printf READY; read x; i=0; while :; do i=$((i+1)); printf '\a\a\a\a\a\a\a\a\033]2;t%d\007' $i; done"#,
+        ],
+        80,
+        24,
+    );
+    let s = c.request::<SubscribeReply>(sub_req("t", Mode::Raw, Role::Own, None, None)).unwrap();
+    let mut seen = Seen::default();
+    read_until(&mut c, &mut seen, 10, |s| contains(&s.bytes, b"READY"));
+    c.input(s.handle, b"\r").unwrap();
+    let pid = d.pid();
+    // Reads for at least `secs` and `min_bytes` of output, sampling the daemon's memory:
+    // (output bytes per second, peak RSS KiB).
+    let read_for = |c: &mut Client, secs: f64, min_bytes: u64| {
+        let t0 = Instant::now();
+        let mut last = t0;
+        let (mut bytes, mut peak) = (0u64, rss_kb(pid));
+        while t0.elapsed().as_secs_f64() < secs || bytes < min_bytes {
+            assert!(t0.elapsed() < Duration::from_secs(90), "the flood made {bytes} B in 90 s");
+            let f = c.next_frame().unwrap();
+            if f.ty == ty::OUTPUT {
+                bytes += f.payload.len() as u64 - 8;
+            }
+            if last.elapsed() > Duration::from_millis(100) {
+                peak = peak.max(rss_kb(pid));
+                last = Instant::now();
+            }
+        }
+        (bytes as f64 / t0.elapsed().as_secs_f64(), peak)
+    };
+    let (alone, base_rss) = read_for(&mut c, 1.5, 0);
+
+    let mut raw = stalled_client(&d);
+    let _: SubscribeReply = raw.request(sub_req("t", Mode::Raw, Role::Watch, None, None)).unwrap();
+    let mut none = stalled_client(&d);
+    let _: SubscribeReply = none.request(sub_req("t", Mode::None, Role::Attach, None, None)).unwrap();
+    // 8 MiB of output carries well over 4 MiB of events too: both stalled queues overflow.
+    let (stalled, peak) = read_for(&mut c, 6.0, 8 << 20);
+    eprintln!(
+        "events flood: {:.1} MB/s alone, {:.1} MB/s beside two stalled clients; RSS {} -> peak {} MiB",
+        alone / 1e6,
+        stalled / 1e6,
+        base_rss / 1024,
+        peak / 1024
+    );
+    assert!(peak < base_rss + 48 * 1024, "the daemon grew from {base_rss} KiB to {peak} KiB");
+
+    // The stalled raw client reads again: one lagged, the repaint it names, the state.
+    let mut rs = Seen::default();
+    read_until(&mut raw, &mut rs, 20, |s| s.trace.iter().skip_while(|t| *t != "lagged").any(|t| t == "title"));
+    let p = rs.trace.iter().position(|t| t == "lagged").unwrap();
+    let Some(Event::Lagged { dropped, seq }) = rs.events.iter().find(|e| matches!(e, Event::Lagged { .. })).cloned()
+    else {
+        unreachable!()
+    };
+    assert!(dropped > 0);
+    assert_eq!(
+        &rs.trace[p + 1..p + 4],
+        [format!("repaint@{seq}"), "modes".into(), "title".into()],
+        "{:?}",
+        &rs.trace[p..]
+    );
+
+    // The `mode: "none"` client: one lagged (no output to drop), its size, the state.
+    let mut ns = Seen::default();
+    read_until(&mut none, &mut ns, 20, |s| s.trace.iter().skip_while(|t| *t != "lagged").any(|t| t == "title"));
+    let p = ns.trace.iter().position(|t| t == "lagged").unwrap();
+    assert_eq!(&ns.trace[p + 1..p + 4], ["size", "modes", "title"], "{:?}", &ns.trace[p..]);
+    let lag_seq = ns.events.iter().find_map(|e| match e {
+        Event::Lagged { dropped: 0, seq } => Some(*seq),
+        _ => None,
+    });
+    let lag_seq = lag_seq.expect("lagged with nothing dropped");
+    assert!(ns.events.contains(&Event::Size { cols: 80, rows: 24, seq: lag_seq }));
+    let mut k = d.client();
+    let _: Empty = k.request(Op::Kill(Kill { id: "t".into(), signal: None })).unwrap();
+}
+
+/// An owner that stops reading holds the program back (flow `block`). Taking the terminal
+/// demotes it to a lossy `attach`, so the program runs again for the taker.
+#[test]
+fn taking_from_a_wedged_owner_frees_the_terminal() {
+    let d = Daemon::start();
+    let mut a = stalled_client(&d);
+    create(&mut a, "t", &["yes"], 80, 24);
+    let _: SubscribeReply = a.request(sub_req("t", Mode::Raw, Role::Own, None, None)).unwrap();
+    let mut l = d.client();
+    let mut seq_now = || l.request::<ListReply>(Op::List).unwrap().terminals[0].seq;
+    let until = Instant::now() + Duration::from_secs(10);
+    let frozen = loop {
+        let s0 = seq_now();
+        std::thread::sleep(Duration::from_millis(300));
+        let s1 = seq_now();
+        if s1 == s0 && s1 > 0 {
+            break s1;
+        }
+        assert!(Instant::now() < until, "the wedged owner never held the program back");
+    };
+
+    let mut b = d.client();
+    let sb: SubscribeReply = b.request(sub_req("t", Mode::Raw, Role::Attach, None, None)).unwrap();
+    let r: TakeReply = b.request(Op::Take(Take { handle: sb.handle, cols: Some(100), rows: Some(30) })).unwrap();
+    assert_eq!(r.role, Role::Own);
+    let mut seen = Seen::default();
+    read_until(&mut b, &mut seen, 10, |s| s.output.len() > 4 << 20);
+    assert!(seen.gaps.is_empty(), "the taker owns with flow block: no gaps {:?}", seen.gaps);
+    let after = seq_now();
+    assert!(after > frozen + (4 << 20), "the program stayed frozen at {frozen} (now {after})");
+    let l2: ListReply = l.request(Op::List).unwrap();
+    assert_eq!(l2.terminals[0].subscribers, SubscriberCounts { own: 1, attach: 1, watch: 0 });
+}
+
+/// `modes` is sent when a mode changes and, for a late subscriber, right after it joins,
+/// with the title: a client that runs no emulator knows whether the program wants the
+/// wheel (PROTOCOL.md, `view`).
+#[test]
+fn a_new_subscriber_learns_the_terminals_state() {
+    let d = Daemon::start();
+    let mut c = d.client();
+    create(
+        &mut c,
+        "t",
+        &[
+            "sh",
+            "-c",
+            r#"printf '\033]2;state title\007\033[?1049h\033[?1002h\033[?1006h\033[?2004hREADY'; exec sleep 100"#,
+        ],
+        40,
+        10,
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while c.request::<ListReply>(Op::List).unwrap().terminals[0].title != "state title" {
+        assert!(Instant::now() < until, "the title never arrived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let want =
+        Modes { alt: true, mouse: true, mouse_sgr: true, bracketed_paste: true, app_cursor: false, focus: false };
+    for (mode, first) in [(Mode::Raw, Some("repaint@")), (Mode::None, None)] {
+        let mut s = d.client();
+        let _: SubscribeReply = s.request(sub_req("t", mode, Role::Watch, None, None)).unwrap();
+        let mut seen = Seen::default();
+        read_until(&mut s, &mut seen, 5, |s| s.events.len() >= 2);
+        let rest = match first {
+            Some(p) => {
+                assert!(seen.trace[0].starts_with(p), "{mode:?}: {:?}", seen.trace);
+                &seen.trace[1..]
+            }
+            None => &seen.trace[..],
+        };
+        assert_eq!(&rest[..2], ["modes", "title"], "{mode:?}: {:?}", seen.trace);
+        assert_eq!(seen.events[0], Event::Modes(want), "{mode:?}");
+        assert_eq!(seen.events[1], Event::Title { title: "state title".into() });
+    }
 }

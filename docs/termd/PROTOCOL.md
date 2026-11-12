@@ -28,10 +28,24 @@ The protocol is public and versioned. Nothing in it is specific to glyph3d.
 
 ## Transport
 
-The daemon listens on a Unix stream socket (`SOCK_STREAM`). Its path is chosen by
-whoever starts the daemon. The usual path is
-`$XDG_RUNTIME_DIR/g3d/termd-<namespace>.sock`, with namespace `default`. A namespace is
-an independent daemon with its own terminals; tests and second relays use their own.
+The daemon listens on a Unix stream socket (`SOCK_STREAM`). A **namespace** is an
+independent daemon with its own terminals (`default` unless you pick another; tests and
+second relays use their own). A namespace's socket is `termd-<namespace>.sock` in the
+first of these directories that applies:
+
+1. `$G3D_TERMD_DIR`, when set and not empty;
+2. `$XDG_RUNTIME_DIR/g3d`, when `XDG_RUNTIME_DIR` is set and not empty;
+3. `<temp dir>/g3d-<uid>` otherwise (macOS, for one): `$TMPDIR`, else `/tmp`, then
+   `g3d-` and the numeric user id.
+
+A namespace's name is 1 to 64 bytes of `[A-Za-z0-9._-]`. A daemon can also serve an
+explicit socket path instead (`g3d-termd --socket <path>`); it then has no namespace.
+
+If nothing listens there, a client that wants a daemon starts one:
+`g3d-termd --ns <namespace> --daemon` (or `--socket <path> --daemon`) detaches into the
+background and serves until it has had no terminals and no connections for 5 minutes. Then
+retry the connection for a few seconds. Starting a second daemon on a socket that already
+has one fails and leaves the first serving, so two clients racing to start one are safe.
 
 The socket's directory is mode `0700` and the socket `0600`. The daemon checks the
 peer's uid (`SO_PEERCRED` on Linux, `getpeereid` elsewhere) and closes connections from
@@ -134,6 +148,7 @@ The daemon replies `WELCOME`:
 ```
 
 - `proto`: the daemon's `[major, minor]`.
+- `ns`: the namespace. Absent when the daemon serves an explicit `--socket`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `cells`
   (packed cells, reserved).
@@ -148,7 +163,9 @@ an older peer ignores them. Until `WELCOME`, the only frame a client may send is
 
 Every `REQUEST` payload has `req` (a client-chosen integer, unique among the requests
 that connection has in flight) and `op`. The daemon answers each with one `REPLY`
-carrying the same `req`:
+carrying the same `req`. A `REQUEST` without an integer `req` can't be answered, so it is
+a malformed frame: `ERROR` `bad_frame`, and the connection closes (see
+[Errors and closing](#errors-and-closing)).
 
 ```json
 {"req": 5, "ok": true, ...}
@@ -163,7 +180,7 @@ Error codes, the same for every op:
 
 | code | meaning |
 |---|---|
-| `bad_request` | a field is missing, has the wrong type, or is out of range |
+| `bad_request` | a field is missing (other than `req`), has the wrong type, or is out of range |
 | `unknown_op` | the daemon does not know this `op` (an older daemon) |
 | `unsupported` | the op is known but a mode or feature it names is not available |
 | `no_terminal` | no live terminal has this `id` or `handle` |
@@ -260,13 +277,24 @@ Roles:
 - **`attach`**: may send `INPUT`. May not resize.
 - **`own`**: may send `INPUT` and is the only subscriber that can resize. A terminal has
   at most one owner. Subscribing as `own` while another connection owns the terminal
-  **takes** it: the previous owner is demoted to `attach` and gets a `role` event.
+  **takes** it, as [`take`](#take) does: the previous owner is demoted to `attach` (and
+  to `flow: "lossy"`) and gets a `role` event, then, if `cols`/`rows` changed the size,
+  a `size` event.
+
+Ownership can also be **vacant**: when the owner unsubscribes or its connection closes,
+the terminal has no owner. Nothing else changes: the size stays what the owner last set,
+no subscriber is sent anything, and nobody can `resize` until someone becomes the owner
+with `take` or by subscribing as `own`. `list` shows `subscribers.own` = 0. (The glyph3d
+relay reads a vacant, live terminal as one whose display adapter died and re-adopts it.)
 
 Reply, then frames, in this order:
 
 1. `REPLY` `{"req": 4, "ok": true, "handle": 7, "role": "attach", "seq": 18211, "cols": 80, "rows": 24}`
+   (the size after any `cols`/`rows` you gave).
 2. With `mode: "raw"`, one `REPAINT` at that `seq`.
-3. `OUTPUT` from that `seq` on, and events as they happen.
+3. The terminal's state as events, so a client learns it without waiting for a change:
+   `modes`, then `title` if the program set one, then `pwd` if it reported one.
+4. `OUTPUT` from that `seq` on, and events as they happen.
 
 One connection holds at most one subscription per terminal. To switch modes,
 `unsubscribe` and subscribe again. To become the owner, use `take`.
@@ -289,6 +317,13 @@ connection unsubscribes everything it held.
 Makes this connection's `attach` subscription the owner (a `watch` subscription gets
 `read_only`). `cols`/`rows` are optional and resize in the same step. Reply:
 `{"req": 6, "ok": true, "role": "own"}`.
+
+The new owner's flow becomes the `flow` it asked for when it subscribed, else `"block"`.
+The previous owner, if any, is demoted to `attach` with `flow: "lossy"`, so an owner that
+stopped reading no longer holds the program back once someone takes the terminal.
+
+Frames: the previous owner gets a `role` event, then a `size` event if the size changed.
+The taker gets its `REPLY`, then the `size` event (every subscriber gets one).
 
 ### `resize`
 
@@ -438,15 +473,22 @@ every subscriber of the terminal, including `mode: "none"`, in order with its
 | `ev` | fields | when |
 |---|---|---|
 | `size` | `cols`, `rows`, `seq` | the owner resized; bytes from `seq` on are at the new size |
-| `title` | `title` | the program set its title (OSC 0 or 2) |
-| `modes` | `alt`, `mouse`, `mouse_sgr`, `bracketed_paste`, `app_cursor`, `focus` (all bool) | any of these changed. `mouse` is true when the program asked for any mouse reporting (1000, 1002 or 1003) |
-| `bell` | | BEL |
-| `pwd` | `pwd` | the program reported its directory (OSC 7) |
+| `title` | `title` | the program set its title (OSC 0 or 2); also sent when you subscribe |
+| `modes` | `alt`, `mouse`, `mouse_sgr`, `bracketed_paste`, `app_cursor`, `focus` (all bool) | any of these changed; also sent when you subscribe and after a resync. `mouse` is true when the program asked for any mouse reporting (1000, 1002 or 1003) |
+| `bell` | | the program rang the bell: one event for the BELs in one read of its output, however many |
+| `pwd` | `pwd` | the program reported its directory (OSC 7); also sent when you subscribe |
 | `role` | `role` | your role changed (another client took ownership) |
 | `lagged` | `dropped` (bytes), `seq` | you fell behind and were resynced (see [Flow control](#flow-control)) |
-| `exit` | `code` or `signal`, `seq` | the program exited; `seq` is the end of its output. `signal` is the signal's name without `SIG` (`"HUP"`) |
+| `exit` | `code` or `signal`, `seq` | the program exited; `seq` is the end of its output. `code` is its exit status; `signal`, the name of the signal that ended it, without `SIG` (`"HUP"`). Only the one that applies is present; the other is absent, not `null`. Both are absent if termd couldn't learn the status |
 | `closed` | | the terminal is gone; the handle is dead. Always last |
 | `error` | `code`, `message` | something with no reply went wrong: an `INPUT` refused (`not_subscribed`, `read_only`, `no_terminal`, or `input_full` when the program has 1 MiB of unread input), or the terminal failed inside termd (`panic`; `exit` and `closed` follow) |
+
+The `error` event's codes are the request codes above plus two of its own:
+
+| code | meaning |
+|---|---|
+| `input_full` | the program hasn't read 1 MiB of earlier input; this `INPUT` was dropped |
+| `panic` | the terminal failed inside termd and is closing |
 
 Clients must ignore events they don't know.
 
@@ -474,23 +516,45 @@ bytes unchanged. So:
 
 ## Flow control
 
-termd never lets one slow subscriber stall a terminal or the other subscribers. Each
-subscription has an output queue.
+termd never lets one slow subscriber stall a terminal or the other subscribers, or grow
+the daemon. Each subscription has a queue of the frames termd has yet to write to it:
+`OUTPUT`, `REPAINT` and events alike.
 
-- **`flow: "lossy"`** (the default for `watch` and `attach`): if a subscriber's queue
-  passes 4 MiB, termd drops what is queued, sends `EVENT` `lagged` with the number of
-  bytes dropped, and then a `REPAINT` at the current `seq`. The subscriber's screen is
-  right again; the dropped bytes' scrollback is missing from its emulator only.
+- **`flow: "lossy"`** (the default for `watch` and `attach`): when a frame would take a
+  subscriber's queue past 4 MiB, the subscriber **lags**. termd drops its queued `OUTPUT`,
+  `REPAINT`, `title`, `modes`, `pwd`, `size` and `bell` frames (never `role`, `lagged`,
+  `exit`, `closed` or `error`) and queues nothing more for it until it has read everything
+  still on its way. Then it **resyncs**, in this order:
+  1. one `lagged` event. Its `seq` is the current `seq`, where output resumes. `dropped`
+     is the number of `OUTPUT` bytes you did not get: `seq` minus the end of the last
+     `OUTPUT` you got (0 for `mode: "none"` and for a subscriber scrolled back with `view`,
+     which get no output);
+  2. with `mode: "raw"`, a `REPAINT` at that `seq` (a view repaint if you are scrolled
+     back); with `mode: "none"`, a `size` event;
+  3. the state events, as at subscribe: `modes`, then `title` and `pwd` when set.
+
+  Your screen and state are right again; only the dropped bytes' scrollback is missing
+  from your emulator. Each lag ends in exactly one `lagged`. A subscriber that keeps
+  falling behind lags again, each time with its own `lagged` and repaint.
 - **`flow: "block"`** (the default for `own`): when the owner's queue passes 1 MiB,
   termd stops reading the PTY until it drains below 256 KiB. The program blocks on its
   writes, as it would with a slow real terminal, and nothing is dropped. Other
-  subscribers keep their own lossy queues.
+  subscribers keep their own lossy queues. An owner that stops reading holds the program
+  back until it reads again, unsubscribes, or someone `take`s the terminal (which makes
+  it lossy).
 
 ## Errors and closing
 
-A malformed frame (bad `len`, `len` over `max_frame`, a JSON payload that doesn't parse,
-`REQUEST` before `WELCOME`) gets `ERROR` `{"code": "...", "message": "..."}` and the
-daemon closes the connection. Codes: `bad_frame`, `too_large`, `version`, `auth`.
+A malformed frame gets `ERROR` `{"code": "...", "message": "..."}` and the daemon closes
+the connection:
+
+| code | when |
+|---|---|
+| `bad_frame` | `len` under 8; an unknown frame type; a control payload that isn't one JSON object; a `REQUEST` without an integer `req`; any frame but `HELLO` before `WELCOME`; a second `HELLO` |
+| `too_large` | `len` over `max_frame` |
+| `version` | `HELLO` with a different major |
+| `auth` | the peer is another user |
+
 Request-level failures are `REPLY` errors and the connection stays.
 
 When a terminal's program exits, its subscribers get the last `OUTPUT`, then `exit`,

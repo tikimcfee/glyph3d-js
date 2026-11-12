@@ -1,7 +1,7 @@
 //! A connection's outbound queue. Owner threads and the request handler push frames; the
 //! connection's writer task drains them to the socket in order. Each subscription's share
 //! of the queue is counted, so an owner thread can drop a lagging lossy subscriber's
-//! output or pause its PTY for a blocking owner (PROTOCOL.md, "Flow control").
+//! frames or pause its PTY for a blocking owner (PROTOCOL.md, "Flow control").
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// A lossy subscriber whose queue passes this is dropped and resynced.
+/// A lossy subscriber whose queue would pass this is dropped and, once drained, resynced.
 pub const LOSSY_MAX: usize = 4 << 20;
 /// A blocking owner whose queue passes this pauses the PTY...
 pub const BLOCK_HIGH: usize = 1 << 20;
@@ -61,12 +61,15 @@ pub struct SubShared {
     pub queued: AtomicUsize,
     /// A blocking owner over its high mark: the owner thread stops reading the PTY.
     pub paused: AtomicBool,
+    /// A lossy subscriber whose frames were dropped: the owner thread queues nothing more
+    /// for it but `Keep` frames, and resyncs it once `queued` reaches 0.
+    pub lagging: AtomicBool,
     pub wake: Arc<Wake>,
 }
 
 impl SubShared {
     pub fn new(wake: Arc<Wake>) -> Self {
-        Self { queued: AtomicUsize::new(0), paused: AtomicBool::new(false), wake }
+        Self { queued: AtomicUsize::new(0), paused: AtomicBool::new(false), lagging: AtomicBool::new(false), wake }
     }
 
     /// The owner thread pauses reads when over the high mark. Rechecks after setting the
@@ -88,14 +91,24 @@ impl SubShared {
         if left < BLOCK_LOW && self.paused.swap(false, SeqCst) {
             self.wake.wake();
         }
+        if left == 0 && self.lagging.load(SeqCst) {
+            self.wake.wake();
+        }
     }
 }
 
+/// How a subscription's frame fares when the subscriber lags.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    Output,
-    Repaint,
-    Other,
+    /// `OUTPUT` or `REPAINT`. `prev_end` is the subscriber's stream position before this
+    /// frame: if it is dropped, delivery stopped there.
+    Data { prev_end: u64 },
+    /// An event a resync restates (`title`, `modes`, `pwd`, `size`) or one that loses
+    /// nothing by going (`bell`): dropped with the data.
+    Event,
+    /// Never dropped: `role`, `lagged`, `exit`, `closed`, `error`. None can be produced
+    /// at a rate the program controls.
+    Keep,
 }
 
 pub struct Item {
@@ -142,9 +155,9 @@ impl ConnOut {
         self.notify.notify_one();
     }
 
-    /// A connection-level frame (reply, welcome, error) or an event.
+    /// A connection-level frame (reply, welcome, error, an `INPUT`'s error event).
     pub fn frame(&self, bytes: Vec<u8>) {
-        self.push(Item { head: bytes, body: None, sub: None, kind: Kind::Other });
+        self.push(Item { head: bytes, body: None, sub: None, kind: Kind::Keep });
     }
 
     /// A frame counted against a subscription's queue.
@@ -152,18 +165,19 @@ impl ConnOut {
         self.push(Item { head, body, sub: Some(sub.clone()), kind });
     }
 
-    /// Removes a subscription's queued output and repaints (events stay: they carry
-    /// ordering). Returns the PTY bytes dropped.
-    pub fn drop_sub_data(&self, sub: &Arc<SubShared>) -> u64 {
+    /// Removes a subscription's queued frames, all but `Keep` ones. Frames the writer has
+    /// already taken still go out. Returns where the subscriber's stream stops: the
+    /// `prev_end` of the first `Data` frame dropped, or `None` when none was.
+    pub fn drop_sub_frames(&self, sub: &Arc<SubShared>) -> Option<u64> {
         let mut q = self.q.lock().unwrap();
-        let mut dropped = 0u64;
+        let mut stop = None;
         let mut freed = 0usize;
         q.items.retain(|it| {
-            let mine = it.sub.as_ref().is_some_and(|s| Arc::ptr_eq(s, sub)) && it.kind != Kind::Other;
+            let mine = it.sub.as_ref().is_some_and(|s| Arc::ptr_eq(s, sub)) && it.kind != Kind::Keep;
             if mine {
                 freed += it.len();
-                if it.kind == Kind::Output {
-                    dropped += it.body.as_ref().map_or(0, |b| b.len()) as u64;
+                if let Kind::Data { prev_end } = it.kind {
+                    stop.get_or_insert(prev_end);
                 }
             }
             !mine
@@ -172,7 +186,7 @@ impl ConnOut {
         if freed > 0 {
             sub.written(freed);
         }
-        dropped
+        stop
     }
 
     /// Stops the queue now: queued frames are discarded and later pushes ignored.

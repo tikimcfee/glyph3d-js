@@ -74,7 +74,7 @@ impl Client {
                 proto: [0, 0],
                 daemon: String::new(),
                 engine: String::new(),
-                ns: String::new(),
+                ns: None,
                 pid: None,
                 features: Vec::new(),
                 max_frame: 0,
