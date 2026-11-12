@@ -416,7 +416,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
 - **Terminals** are tmux-backed (socket `tmux -L glyphd` — `serve --tmux-socket` gives a second
   relay its own, so it can't adopt or kill the first's — sessions `glyph-<id>`) via
   forked adapter subprocesses; they render as `TerminalGrid`s and re-adopt across
-  reloads. See the `saved-state` and `terminal-control-subsystem` memories.
+  reloads. See the `saved-state` and `terminal-control-subsystem` memories. The text path is
+  pulled by the frame: a parse only queues its grid on the scene's `TerminalScreenQueue`, and
+  `SceneSystems.update` (before the render) reads each queued screen once into a reused typed
+  `TerminalScreen` and applies it — so output is drawn by the next frame, never a frame later. A
+  grid's cells are a ring of `rows + depthMax` physical rows, each posed by its own group-table
+  row: a detected scroll moves the ring's head (scrolled-off rows become history without a
+  rewrite), and only the cells that differ from the slots are written and uploaded
+  (`InstancedField.markSlotsDirty` / `markHighlightDirty`: pooled ranges). No allocation per
+  update. Gate: `tools/terminal-text-path.test.mjs`.
 - **Sensor plane** — capture devices (an iPhone running the `motion-source-ios`
   MotionSource app) connect to the relay with a `SOURCE <kind>` handshake, a third
   client role beside `DISPLAY` and controllers. **Many may attach at once**, each

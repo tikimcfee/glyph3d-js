@@ -5,10 +5,8 @@
 //
 //   bun tools/terminal-emulator-resize-check.mjs   (or: node ...)
 //
-// Node has no requestAnimationFrame; shim it so TerminalEmulator's rAF-throttled read runs.
-let rafId = 1; const rafQ = new Map();
-globalThis.requestAnimationFrame = (fn) => { const id = rafId++; rafQ.set(id, fn); queueMicrotask(() => { const f = rafQ.get(id); if (f) { rafQ.delete(id); f(); } }); return id; };
-globalThis.cancelAnimationFrame = (id) => rafQ.delete(id);
+// The emulator is pulled: a parse marks it dirty, and the reader (here, a stand-in for the frame's
+// TerminalScreenQueue) reads the screen at its own size. `read` records what the frame would apply.
 
 const { default: TerminalEmulator } = await import('../packages/glyph3d-core/src/collections/TerminalEmulator.js');
 
@@ -28,7 +26,9 @@ let lastScreen = null, crash = null;
 process.on('uncaughtException', (e) => { crash = crash || e; });
 process.on('unhandledRejection', (e) => { crash = crash || e; });
 
-const emu = new TerminalEmulator(120, 50, (screen) => { lastScreen = screen; });
+let dirtied = 0;
+const emu = new TerminalEmulator(120, 50, () => { dirtied++; });
+const read = () => { if (emu.dirty) lastScreen = emu.readScreen(emu._term.cols, emu._term.rows); };
 // Spy on the underlying xterm resize to prove coalescing (storm of N resizes → far fewer real ones).
 const term = emu._term;
 let realResizes = 0; const origResize = term.resize.bind(term);
@@ -49,6 +49,7 @@ for (let step = 0; step < STEPS; step++) {
     emu.write('\r\n\r\n');
 }
 await sleep(60); // let the write buffer + coalesced resize drain
+read();
 
 ok(!crash, `no crash / no buffer corruption across a ${STEPS}-step storm` + (crash ? `  (${crash.message})` : ''));
 // Plain serialization: each resize runs behind the parser (inside a drained-write callback), so the
@@ -60,10 +61,11 @@ emu.resize(finalC, finalR);
 await sleep(30);
 emu.write(repaint(finalC, finalR));
 await sleep(30);
+read();
 ok(term.cols === finalC && term.rows === finalR, `xterm settled at the final size ${finalC}×${finalR} (got ${term.cols}×${term.rows})`);
-ok(lastScreen && lastScreen.cols === finalC && lastScreen.rows === finalR, `applyScreen sees the final size (${lastScreen?.cols}×${lastScreen?.rows})`);
+ok(dirtied > 0 && lastScreen && lastScreen.cols === finalC && lastScreen.rows === finalR, `the frame's read sees the final size (${lastScreen?.cols}×${lastScreen?.rows})`);
 // The final screen is real content (row labels), not blank — the settle repaint landed cleanly.
-const row0 = lastScreen?.cells?.[0]?.map((c) => String.fromCodePoint(c.codepoint)).join('').trim();
+const row0 = lastScreen ? String.fromCodePoint(...lastScreen.cp.subarray(0, lastScreen.cols)).trim() : null;
 ok(!!row0 && row0.startsWith('r0'), `final screen shows repainted content, not blank (row0="${row0?.slice(0, 8)}")`);
 
 // A no-op resize (same size) must not churn xterm.

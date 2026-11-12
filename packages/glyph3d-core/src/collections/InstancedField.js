@@ -23,6 +23,9 @@ export function liveInstancedFields() {
     return _liveFields;
 }
 
+/** Whether a Uint32 over RGBA8 bytes holds r in its low byte (highlightWords' packing). */
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
 /** sRGB byte → linear, the shader's pow(c, 2.2) decode. */
 const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, k) => Math.pow(k / 255, 2.2));
 
@@ -37,6 +40,69 @@ function makeGroupTexture(data, rows) {
     tex.generateMipmaps = false;
     tex.needsUpdate = true;
     return tex;
+}
+
+/**
+ * Partial uploads for one GPU target (the slot buffer, or the highlight texture). A write marks
+ * the range it touched and three uploads just those (`updateRanges`, merged and emptied by three
+ * after the upload — never cleared here: a cleared range is a write the GPU never sees).
+ *
+ * Two things make a target upload WHOLE until its next upload, and while it is whole a ranged
+ * mark adds no range (a range would turn the whole upload partial): a target that has never
+ * been uploaded (a fresh buffer or texture), and a whole-target write while ranges are pending
+ * (it adds ranges covering everything first). Ranges come from a pool — three's addUpdateRange
+ * makes an object per call, garbage on a target written every frame — and a target left
+ * un-uploaded (culled, hidden) stops collecting them at MAX_PENDING_RANGES and goes whole.
+ */
+const MAX_PENDING_RANGES = 64;
+class UploadRanges {
+    /** @param {(target: Object) => void} coverAll  adds ranges covering the whole target */
+    constructor(coverAll) {
+        this._coverAll = coverAll;
+        this.target = null;
+        this.whole = true;
+        this._pool = [];
+        this._used = 0;
+    }
+
+    /**
+     * Follow a new target: it uploads whole once, then ranged.
+     * @param {Object} target  an InterleavedBuffer or a DataTexture
+     * @param {(cb: () => void) => void} onUploaded  registers cb to run after three uploads it
+     */
+    track(target, onUploaded) {
+        this.target = target;
+        this.whole = true;
+        this._used = 0;
+        onUploaded(() => { if (this.target === target) this.whole = false; });
+    }
+
+    /** Mark [start, start + count) (in the target's array elements) for upload. */
+    add(start, count) {
+        const t = this.target;
+        if (!t) return;
+        t.needsUpdate = true;
+        if (this.whole) return;
+        const ranges = t.updateRanges;
+        if (ranges.length === 0) this._used = 0;   // three uploaded and emptied them: the pool is free
+        else if (ranges.length >= MAX_PENDING_RANGES) { this.all(); return; }
+        let r = this._pool[this._used];
+        if (r === undefined) { r = { start: 0, count: 0 }; this._pool.push(r); }
+        this._used++;
+        r.start = start;
+        r.count = count;
+        ranges.push(r);
+    }
+
+    /** Mark the whole target for upload. */
+    all() {
+        const t = this.target;
+        if (!t) return;
+        t.needsUpdate = true;
+        if (this.whole) return;
+        if (t.updateRanges.length > 0) this._coverAll(t);
+        this.whole = true;
+    }
 }
 
 export default class InstancedField {
@@ -96,6 +162,15 @@ export default class InstancedField {
         this._highlightTexture = null;
         this._highlightSize = 0;
         this._highlightTexWidth = 1024;
+        /** @private the highlight texels as one RGBA8 word each (a view of the texture's data) */
+        this._highlightWords = null;
+
+        // Partial uploads: the slot buffer by float range, the highlight texture by texel rows.
+        this._slotUploads = new UploadRanges((ib) => ib.addUpdateRange(0, ib.array.length));
+        this._highlightUploads = new UploadRanges((tex) => {
+            const row = tex.image.width * 4;
+            for (let o = 0; o < tex.image.data.length; o += row) tex.addUpdateRange(o, row);
+        });
 
         // Create Three.js geometry and mesh
         this.geometry = this._createGeometry();
@@ -184,6 +259,7 @@ export default class InstancedField {
 
         // Interleaved 32-byte slot buffer attribute bindings
         this._interleavedBuffer = this.slotBuffer.createInterleavedBuffer();
+        this._trackSlotUploads();
         InstancedSlotBuffer.bindGeometryAttributes(geometry, this._interleavedBuffer);
         geometry.instanceCount = 0;
 
@@ -270,14 +346,31 @@ export default class InstancedField {
         if (!this._interleavedBuffer || this._interleavedBuffer.array.buffer !== slotBuffer.buffer || this._interleavedBuffer.count < neededCapacity) {
             const hadOld = !!this._interleavedBuffer;
             this._interleavedBuffer = slotBuffer.createInterleavedBuffer();
+            this._trackSlotUploads();
             InstancedSlotBuffer.bindGeometryAttributes(this.geometry, this._interleavedBuffer);
             if (hadOld && this.geometry) {
                 this.geometry.dispose();
             }
         }
 
-        this._interleavedBuffer.needsUpdate = true;
+        this._slotUploads.all();
         this.geometry.instanceCount = count;
+    }
+
+    /** @private A new interleaved buffer uploads whole once, then by the ranges writers mark. */
+    _trackSlotUploads() {
+        const ib = this._interleavedBuffer;
+        this._slotUploads.track(ib, (cb) => ib.onUpload(cb));
+    }
+
+    /**
+     * Upload only slots [first, first + count) of what was written since the last render (the
+     * writer has already written them into slotBuffer). Ranges accumulate until three uploads.
+     * @param {number} first
+     * @param {number} count
+     */
+    markSlotsDirty(first, count) {
+        if (count > 0) this._slotUploads.add(first * SLOT_FLOATS, count * SLOT_FLOATS);
     }
 
     /**
@@ -442,9 +535,7 @@ export default class InstancedField {
         this._cachedGlyphCount = 0;
         this.geometry.instanceCount = 0;
         this.slotBuffer.clear();
-        if (this._interleavedBuffer) {
-            this._interleavedBuffer.needsUpdate = true;
-        }
+        this._slotUploads.all();
     }
 
     // ── Group Transform API ──────────────────────────────────────────────────
@@ -550,6 +641,24 @@ export default class InstancedField {
         this._touchGroup(g);
     }
 
+    /**
+     * Pose one group row — offset, color multiplier and alpha — from plain numbers (no objects:
+     * a writer posing many rows every frame makes no garbage).
+     * @param {number} groupId
+     * @param {number} x @param {number} y @param {number} z  the offset
+     * @param {number} r @param {number} g @param {number} b  the color multiplier
+     * @param {number} a  alpha (≤ 0.01 draws nothing)
+     */
+    setGroupOffsetColor(groupId, x, y, z, r, g, b, a) {
+        const row = groupId | 0;
+        if (row < 0 || row >= this.maxGroups) return;
+        const o = row * GROUP_STRIDE * 4;
+        const G = this._groupData;
+        G[o] = x; G[o + 1] = y; G[o + 2] = z;
+        G[o + 8] = r; G[o + 9] = g; G[o + 10] = b; G[o + 11] = a;
+        this._touchGroup(row);
+    }
+
     /** Set group alpha only */
     setGroupAlpha(groupId, alpha) {
         const g = groupId | 0;
@@ -632,6 +741,8 @@ export default class InstancedField {
 
         this._highlightTexture = tex;
         this._highlightSize = count;
+        this._highlightWords = null;
+        this._highlightUploads.track(tex, (cb) => { tex.onUpdate = cb; });
 
         if (this.material && this.material.uniforms) {
             this.material.uniforms.highlightTexture.value = tex;
@@ -660,7 +771,7 @@ export default class InstancedField {
             data[base + 2] = 0;
             data[base + 3] = 0;
         }
-        this._highlightTexture.needsUpdate = true;
+        this._highlightUploads.all();
         if (this.material && this.material.uniforms) {
             this.material.uniforms.hasHighlight.value = 1;
         }
@@ -671,7 +782,7 @@ export default class InstancedField {
     /** Write slot color */
     writeColor(slotIndex, packedColor) {
         this.slotBuffer.setColor(slotIndex, packedColor);
-        if (this._interleavedBuffer) this._interleavedBuffer.needsUpdate = true;
+        this._slotUploads.all();
     }
 
     /** Write multiple slot colors */
@@ -679,13 +790,13 @@ export default class InstancedField {
         for (let i = 0; i < packedColors.length; i++) {
             this.slotBuffer.setColor(firstSlot + i, packedColors[i]);
         }
-        if (this._interleavedBuffer) this._interleavedBuffer.needsUpdate = true;
+        this._slotUploads.all();
     }
 
     /** Write slot position */
     writePosition(slotIndex, x, y, z) {
         this.slotBuffer.setPosition(slotIndex, x, y, z);
-        if (this._interleavedBuffer) this._interleavedBuffer.needsUpdate = true;
+        this._slotUploads.all();
     }
 
     /** Set mesh visibility */
@@ -774,9 +885,7 @@ export default class InstancedField {
             }
         }
 
-        if (this._interleavedBuffer) {
-            this._interleavedBuffer.needsUpdate = true;
-        }
+        this._slotUploads.all();
     }
 
     /**
@@ -794,9 +903,7 @@ export default class InstancedField {
         for (let i = start; i < end; i++) {
             this.slotBuffer.setColor(i, packed);
         }
-        if (this._interleavedBuffer) {
-            this._interleavedBuffer.needsUpdate = true;
-        }
+        this._slotUploads.all();
     }
 
     /**
@@ -810,9 +917,7 @@ export default class InstancedField {
             : (color || this._defaultColor);
         const packed = packRgba8(c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1.0);
         this.slotBuffer.setColor(slotIndex, packed);
-        if (this._interleavedBuffer) {
-            this._interleavedBuffer.needsUpdate = true;
-        }
+        this._slotUploads.all();
     }
 
     /**
@@ -827,11 +932,11 @@ export default class InstancedField {
         for (let i = 0; i < count; i++) {
             f32[(dstSlot + i) * 8 + 4] = f32[(srcSlot + i) * 8 + 4];
         }
-        if (this._interleavedBuffer) this._interleavedBuffer.needsUpdate = true;
+        this._slotUploads.all();
         if (this._highlightTexture) {
             const hl = this._highlightTexture.image.data;
             hl.copyWithin(dstSlot * 4, srcSlot * 4, (srcSlot + count) * 4);
-            this._highlightTexture.needsUpdate = true;
+            this._highlightUploads.all();
         }
     }
 
@@ -856,17 +961,42 @@ export default class InstancedField {
         return fillOpacity > 0 ? Math.min(255, Math.max(1, (fillOpacity * 255 + 0.5) | 0)) : 0;
     }
 
-    highlightBuffer(count) {
+    /**
+     * The highlight texels as one little-endian RGBA8 word per slot (r in the low byte, fill alpha
+     * in the high byte) — a view of the texture's own data, so a writer stores a slot's texel in one
+     * write. Mark what was written with markHighlightDirty.
+     * @param {number} count  slots the texture must hold
+     * @returns {Uint32Array}
+     */
+    highlightWords(count) {
+        if (!LITTLE_ENDIAN) throw new Error('[InstancedField] highlightWords packs RGBA8 as little-endian words; this platform is big-endian');
         this._ensureHighlightTexture(count);
-        return this._highlightTexture ? this._highlightTexture.image.data : null;
+        const data = this._highlightTexture.image.data;
+        if (!this._highlightWords || this._highlightWords.buffer !== data.buffer) {
+            this._highlightWords = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
+        }
+        return this._highlightWords;
     }
 
-    markHighlightDirty() {
-        if (this._highlightTexture) {
-            this._highlightTexture.needsUpdate = true;
-            if (this.material && this.material.uniforms) {
-                this.material.uniforms.hasHighlight.value = 1;
-            }
+    /**
+     * Upload highlight texels the caller wrote: slots [first, first + count), or with no arguments
+     * the whole texture. A ranged upload goes up a texture row at a time (three uploads each range
+     * as one row strip), so a span crossing a row edge is split there.
+     * @param {number} [first]
+     * @param {number} [count]
+     */
+    markHighlightDirty(first, count) {
+        if (!this._highlightTexture) return;
+        if (this.material && this.material.uniforms) {
+            this.material.uniforms.hasHighlight.value = 1;
+        }
+        if (first === undefined) { this._highlightUploads.all(); return; }
+        const W = this._highlightTexWidth;
+        const end = first + count;
+        for (let s = first; s < end;) {
+            const rowEnd = Math.min(end, (Math.floor(s / W) + 1) * W);
+            this._highlightUploads.add(s * 4, (rowEnd - s) * 4);
+            s = rowEnd;
         }
     }
 
