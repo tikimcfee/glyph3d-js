@@ -7,6 +7,7 @@ export { default as GlyphFarLod, FAR_LOD_DEFAULTS } from './GlyphFarLod.js';
 export { default as PanelBatch, enrollPanel, enrolledPanels } from './PanelBatch.js';
 export { default as GlyphBatch, enrollGlyphField, enrolledGlyphFields, isBatchedGlyphField } from './GlyphBatch.js';
 export { default as SceneTransforms, verifyTransforms } from './SceneTransforms.js';
+export { default as SceneSystems } from './SceneSystems.js';
 export { default as Book, PAGE_FACE_DEFAULTS } from './Book.js';
 export { default as AgentBooks } from './AgentBooks.js';
 export { default as DeltaBooks } from './DeltaBooks.js';

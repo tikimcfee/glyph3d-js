@@ -48,8 +48,8 @@ export default function registerSceneCommands(router) {
     // saw — matrixAutoUpdate switched off, a pivot set or Object3D.copy onto a node already in the
     // scene, or a quaternion write that skips three's hook (SceneTransforms' header lists them).
     router.register('scene.transforms', (args, ctx) => {
-        const st = ctx.sceneTransforms;
-        if (!st) throw new Error('scene.transforms: no SceneTransforms on this scene');
+        const st = ctx.sceneSystems?.transforms;
+        if (!st) throw new Error('scene.transforms: no scene systems on this scene');
         const last = st.stats;
         st.update();
         const { checked, stale } = verifyTransforms(ctx.scene);

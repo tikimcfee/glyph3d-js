@@ -1,4 +1,4 @@
-import { wheelScrollCommand } from '../app/client/surfaceInteractions.js';
+import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { edgeCursor, resizeFromDrag } from './wallLayout.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
@@ -153,8 +153,8 @@ export default class WallPointer {
             const r = this.wall.terminalRect(focused);
             const p = this.camera.toWorld(e.clientX, e.clientY);
             if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) {
-                const cmd = wheelScrollCommand(this.wall.ctx.registry.get(focused), e.deltaY);
-                if (cmd) { this.wall.router.execute(cmd); return; }
+                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(e.deltaY))]);
+                return;
             }
         }
         if (e.ctrlKey) this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));

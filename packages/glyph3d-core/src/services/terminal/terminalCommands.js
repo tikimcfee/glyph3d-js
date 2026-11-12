@@ -6,28 +6,65 @@
  * These verbs manage lifecycle + layout.
  *
  * Control verbs:
- *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter; the new
- *                                             terminal docks, pins into the focus
- *                                             pane, and takes keyboard focus)
+ *   terminal.spawn  [cols] [rows]            (ask relay to fork an adapter; once it lands the
+ *                                             host shows it and gives it the keys)
  *   terminal.create <id> [cols] [rows] [--scale N]
  *   terminal.resize <id> <cols> <rows>       (grid + emulator + adapter PTY in lockstep)
  *   terminal.ping   <id>                     (liveness probe → re-adopt trigger)
  *   terminal.close  <id>                     (dispose display grid only)
  *   terminal.kill   <id>                     (full teardown: shell + tmux + grid)
- *   terminal.focus  <id>                     (attention primary + key)
+ *   terminal.focus  <id>                     (the keyboard target, as the host defines it)
  *   terminal.list · terminal.move <id> <x> <y> <z> · terminal.scale <id> <factor>
  *
  * Grids render fixed-size cell grids via TerminalGrid, writing directly to GPU
  * attribute arrays (no GlyphCollection deferred queue).
+ *
+ * Any application runs these verbs: its context is a TerminalContext, and its `terminalHost`
+ * (TerminalHost.js) answers what differs per application — where a terminal lands, what focus
+ * means, what persists its view. The IDE (app/client/terminalHost.js) and the wall
+ * (wall/TerminalWall.js) each install one.
  */
 
-import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
-import { terminalTheme } from '../../client/settings.js';
-import { encodeBase64 } from '@glyph3d/core/utils/encoding.js';
-import { createLogger } from '@glyph3d/core/utils/Logger.js';
-/** @import { AppContext } from '../../client/CommandProvider.jsx' */
+import TerminalGrid from '../../collections/TerminalGrid.js';
+import { encodeBase64 } from '../../utils/encoding.js';
+import { createLogger } from '../../utils/Logger.js';
+/** @import { TerminalContext } from './TerminalHost.js' */
+/** @import CommandRouter from '../orchestration/CommandRouter.js' */
+/** @import WebSocketBridge from '../orchestration/WebSocketBridge.js' */
 
 const log = createLogger('terminal');
+
+/** Wheel travel (CSS px) per line of tmux scrollback. */
+const WHEEL_PX_PER_LINE = 30;
+
+/**
+ * Lines of tmux scrollback a wheel delta asks for: wheel up (dy < 0) → + lines, back into
+ * history; ~30 px a line, at least one line in the wheel's direction. The argument to
+ * `terminal.scroll <id> <lines>`.
+ * @param {number} dy - wheel deltaY, CSS px
+ * @returns {number}
+ */
+export function terminalWheelLines(dy) {
+    const lines = -Math.round(dy / WHEEL_PX_PER_LINE);
+    return lines !== 0 ? lines : (dy > 0 ? -1 : 1);
+}
+
+/**
+ * Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes plus the size tmux drew
+ * them at → the terminal's emulator (grid.writeBytes). Aligns the grid to the size THIS content was
+ * drawn at BEFORE parsing it: size and redraw ride one ordered channel (cli/attach_unix.go), so a
+ * resize can never race ahead of its redraw and address a row that doesn't exist.
+ * @param {WebSocketBridge} bridge
+ * @param {TerminalContext} ctx
+ */
+export function routeTerminalOutput(bridge, ctx) {
+    bridge.onBinaryFrame(1, (id, bytes, cols, rows) => {
+        const grid = ctx.terminals?.get(id);
+        if (!grid) return;
+        if (cols > 0 && rows > 0 && (grid.cols !== cols || grid.rows !== rows)) grid.resize(cols, rows);
+        grid.writeBytes(bytes);
+    });
+}
 
 /**
  * Await a terminal's arrival in the registry — the "added and ready" callback for
@@ -56,7 +93,7 @@ export function waitForTerminal(registry, id, timeoutMs = 15000) {
 
 /**
  * Lazily initialise the terminal registry map on ctx.
- * @param {AppContext} ctx - command context
+ * @param {TerminalContext} ctx - command context
  * @returns {Map<string, TerminalGrid>}
  */
 function getTerminals(ctx) {
@@ -67,7 +104,7 @@ function getTerminals(ctx) {
 }
 
 /**
- * @param {import('../../client/CommandProvider.jsx').AppRouter} router
+ * @param {CommandRouter} router - its context is a TerminalContext
  */
 export default function registerTerminalCommands(router) {
 
@@ -80,10 +117,9 @@ export default function registerTerminalCommands(router) {
     //   and runs terminal.create + frames. (This is the "+ terminal" button's verb.)
     //   The verb then AWAITS its own terminal — the relay's `terminal.spawning` ack
     //   hands back the id, the registry's change event is the "added and ready"
-    //   callback — and docks + pins (spotlights) + focuses it. Per-spawn promises,
-    //   no shared state:
-    //   parallel spawns each pair with their own ack, and a restore-time re-adopt
-    //   (terminal.create with no spawn) never docks or steals focus.
+    //   callback — and hands it to the host to show + focus (terminalHost.landed).
+    //   Per-spawn promises, no shared state: parallel spawns each pair with their own
+    //   ack, and a restore-time re-adopt (terminal.create with no spawn) never lands.
     // ------------------------------------------------------------------
     router.register('terminal.spawn', async (args, ctx) => {
         const bridge = ctx.wsbridge;
@@ -110,26 +146,18 @@ export default function registerTerminalCommands(router) {
             const arrived = await waitForTerminal(ctx.registry, ack.id);
             if (!arrived) {
                 return {
-                    text: `OK: terminal '${ack.id}' spawning — the adapter hasn't connected yet; it will appear undocked`,
+                    text: `OK: terminal '${ack.id}' spawning — the adapter hasn't connected yet; it will appear where new terminals land`,
                     data: { requested: true, id: ack.id },
                 };
             }
-            // Compose the verbs (don't reach into dock/attention internals) so spawn
-            // behaves exactly like typing them at the CLI: lock into the dock, then
-            // PIN it — spotlight raises the tile into the dock's focus pane (the
-            // modal "new terminal tab": centered, enlarged, keyboard-live; its verb
-            // sets primary + key itself). terminal.focus is the no-dock fallback
-            // (headless), an idempotent re-set of the same slots otherwise.
-            await router.execute(`dock.lock ${ack.id}`);
-            await router.execute(`dock.spotlight ${ack.id}`);
-            await router.execute(`terminal.focus ${ack.id}`);
+            const landed = await ctx.terminalHost.landed(ack.id);
             return {
-                text: `OK: terminal '${ack.id}' spawned — pinned in the dock + focused`,
-                data: { id: ack.id, docked: true, pinned: true, focused: true },
+                text: `OK: terminal '${ack.id}' spawned — ${landed}`,
+                data: { id: ack.id, landed },
             };
         }
 
-        // A bridge without event waiters (mocks) — fire and forget, undocked.
+        // A bridge without event waiters (mocks) — fire and forget; it lands unannounced.
         bridge.send(JSON.stringify(msg));
         return {
             text: 'OK: requested terminal spawn (relay is forking an adapter)',
@@ -193,20 +221,19 @@ export default function registerTerminalCommands(router) {
         }
 
         try {
+            const host = ctx.terminalHost;
             const grid = new TerminalGrid(ctx.scene, ctx.atlas, {
                 id,
                 cols,
                 rows,
                 gridScale,
                 title: id,
-                ...terminalTheme(),
+                ...host.theme(),
             });
 
-            // Land it in the viewer's CURRENT view, not at the world origin — a spawned
-            // terminal appears where you're looking. Inverse of camera.focus: it moves the
-            // terminal in front of a still camera (no camera fly). No camera controller
-            // (e.g. headless CLI) → it stays at the origin, harmless.
-            ctx.cameraController?.placeInView?.(grid);
+            // The host says where a new terminal lands (the IDE: in the current view; the wall:
+            // its remembered spot, else the first free slot).
+            host.place(grid);
 
             terminals.set(id, grid);
 
@@ -247,12 +274,11 @@ export default function registerTerminalCommands(router) {
             }
 
             const pos = grid.position;
-            // Seed the surface view-intent in the model — but DON'T clobber an existing/restored
-            // one. On re-adopt the adapter re-creates at its startup 80×24; the model already holds
-            // the real resized size, and apply() (SessionStore._applyTerminalViews) pushes it back.
-            // Only a genuinely-new terminal seeds the default.
-            if (ctx.workspace?.setSurfaceView && !ctx.workspace.getSurface?.(id)) {
-                ctx.workspace.setSurfaceView(id, 'terminal', { cols, rows, position: { x: pos.x, y: pos.y, z: pos.z } });
+            // Seed the persisted view — but DON'T clobber an existing/restored one. On re-adopt the
+            // adapter re-creates at its startup 80×24; the host already holds the real resized size
+            // and pushes it back. Only a genuinely-new terminal seeds the default.
+            if (!host.surfaces.get(id)) {
+                host.surfaces.set(id, { cols, rows, position: { x: pos.x, y: pos.y, z: pos.z } });
             }
             return {
                 text: `OK: terminal '${id}' created (${cols}x${rows}) scale=${gridScale}`,
@@ -299,20 +325,14 @@ export default function registerTerminalCommands(router) {
         if (isNaN(cols) || isNaN(rows) || cols < 1 || rows < 1) {
             return { text: 'ERR: cols and rows must be positive integers', data: null };
         }
-        // An agent's screen shows the agent's OWN pane: a resize writes back — the relay resizes
-        // the agent's tmux window (no client), its CLI reflows, and the redraw streams in at the
-        // new size — while the screen's own PTY follows below like any terminal's.
-        const screenOf = ctx.gomuxHub?.screenAgent?.(id);
-        if (screenOf && ctx.wsbridge?.connected) {
-            ctx.wsbridge.send(JSON.stringify({ relay: 'gomux.resize', name: screenOf, cols, rows }));
-        }
-
-        // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the dock
-        // state — so a live grip-drag streams its steps through log.search/log.follow and the resize↔dock
-        // interplay is visible. No-op steps never reach here (the dragger fires only on an integer step).
+        // Verify-as-they-land: one terse record per resize, enriched with the FROM dims and the
+        // host's note (the IDE: where the terminal sits in the dock) — so a live grip-drag streams
+        // its steps through log.search/log.follow. No-op steps never reach here (the dragger fires
+        // only on an integer step). The host's own side effects run first (the IDE: an agent's
+        // screen writes the size back to the agent's pane).
         const from = `${grid.cols}x${grid.rows}`;
-        const dock = ctx.cameraDock;
-        const where = dock?.has?.(id) ? (dock.focusedPane === id ? ' [focus]' : (dock.isFramed?.(id) ? ' [pane]' : ' [docked]')) : '';
+        const note = ctx.terminalHost.resizing(id, cols, rows);
+        const where = note ? ` ${note}` : '';
 
         // Resize the REAL PTY (pty.Setsize → SIGWINCH → tmux) and let tmux's redraw drive the rest.
         // The redraw streams back tagged with the new size (attach_unix.go), and THAT resizes the grid +
@@ -330,9 +350,9 @@ export default function registerTerminalCommands(router) {
 
         log.info(`resize ${id} ${from} → ${cols}x${rows}${where}`);
 
-        // The model is the source of truth for persistence: capture serializes it, apply re-pushes
-        // it as the grid re-adopts. Writing it here is what makes the resized size survive reload.
-        ctx.workspace?.setSurfaceView?.(id, 'terminal', { cols, rows });
+        // The host's persisted view is what makes the resized size survive a reload (it re-pushes
+        // it as the grid re-adopts).
+        ctx.terminalHost.surfaces.set(id, { cols, rows });
 
         return {
             text: `OK: terminal '${id}' resized to ${cols}x${rows}`,
@@ -504,7 +524,7 @@ export default function registerTerminalCommands(router) {
         grid.dispose();
         terminals.delete(id);
         ctx.registry.unregister(id);
-        ctx.workspace?.removeSurface?.(id); // gone for real — drop its intent so it doesn't persist
+        ctx.terminalHost.surfaces.remove(id); // gone for real — drop its view so it doesn't persist
 
         return {
             text: `OK: terminal '${id}' closed`,
@@ -554,12 +574,12 @@ export default function registerTerminalCommands(router) {
             return { text: 'ERR: x, y, z must be numbers', data: null };
         }
 
-        // A held terminal (docked tile, carrel seat) lifts out where it hangs first: the
-        // coords place it in its HOME frame, never the holder's.
-        if (ctx.holding.holderOf(id)) ctx.holding.lift(id, { inPlace: true });
+        // A held terminal (the IDE: a docked tile, a carrel seat) lifts out where it hangs
+        // first: the coords place it in its HOME frame, never the holder's.
+        ctx.terminalHost.release(id);
         grid.position.set(x, y, z);
 
-        ctx.workspace?.setSurfaceView?.(id, 'terminal', { position: { x, y, z } });
+        ctx.terminalHost.surfaces.set(id, { position: { x, y, z } });
 
         return {
             text: `OK: terminal '${id}' moved to (${x},${y},${z})`,
@@ -639,9 +659,9 @@ export default function registerTerminalCommands(router) {
 
     // ------------------------------------------------------------------
     // terminal.focus <id>
-    //   Make a terminal the focused entity: primary (sticky/UI focus) AND key
-    //   (keystroke target) in one verb — the two slots a canvas click sets
-    //   together. Framing the camera is a separate concern (camera.focus <id>).
+    //   Make a terminal the keyboard target, as the host defines focus (the IDE:
+    //   attention primary + key, the two slots a canvas click sets together).
+    //   Framing the camera is a separate concern.
     // ------------------------------------------------------------------
     router.register('terminal.focus', (args, ctx) => {
         if (args.length < 1) {
@@ -651,17 +671,11 @@ export default function registerTerminalCommands(router) {
         if (!getTerminals(ctx).has(id)) {
             return { text: `ERR: no terminal '${id}'`, data: null };
         }
-        if (!ctx.attentionManager) {
-            return { text: 'ERR: AttentionManager not wired into ctx', data: null };
-        }
-        // Pass the resolved registry entry as the entity so keystroke routing
-        // (the keyboard router, keyed on entity.type) has a usable reference.
-        const entity = ctx.registry?.get(id) || null;
-        ctx.attentionManager.set('primary', id, { entity });
-        ctx.attentionManager.set('key', id, { entity });
+        const r = ctx.terminalHost.focus(id);
+        if (!r.ok) return { text: `ERR: ${r.text || `couldn't focus terminal '${id}'`}`, data: null };
         return {
-            text: `OK: focused terminal '${id}' (primary + key)`,
-            data: { id, entityType: entity?.type ?? null },
+            text: `OK: focused terminal '${id}'${r.text ? ` (${r.text})` : ''}`,
+            data: { id },
         };
-    }, { description: 'Focus a terminal: set attention primary + key (keystroke target)', usage: '<id>' });
+    }, { description: 'Focus a terminal: make it the keyboard target', usage: '<id>' });
 }

@@ -30,6 +30,12 @@ export default class WallStore {
         write(POSITIONS_KEY, this._positions);
     }
 
+    /** Forget a terminal that's gone for real (closed or killed): its spot and its name. @param {string} id */
+    forget(id) {
+        if (id in this._positions) { delete this._positions[id]; write(POSITIONS_KEY, this._positions); }
+        if (id in this._names) { delete this._names[id]; write(NAMES_KEY, this._names); }
+    }
+
     /** @param {string} id @returns {string|null} the name the person gave it, if any */
     name(id) { return this._names[id] || null; }
 

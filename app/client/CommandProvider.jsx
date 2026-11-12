@@ -30,10 +30,10 @@ import GitHubFileProvider from '@glyph3d/core/services/data/GitHubFileProvider.j
 import { PickingSystem } from '@glyph3d/core/picking/PickingSystem.js';
 import ContentTree from '@glyph3d/core/collections/ContentTree.js';
 import WorldLayout from '@glyph3d/core/collections/WorldLayout.js';
-import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
-import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
-import GlyphBatch from '@glyph3d/core/collections/GlyphBatch.js';
-import SceneTransforms from '@glyph3d/core/collections/SceneTransforms.js';
+import SceneSystems from '@glyph3d/core/collections/SceneSystems.js';
+import { routeTerminalOutput } from '@glyph3d/core/services/terminal/terminalCommands.js';
+import { assertTerminalHost } from '@glyph3d/core/services/terminal/TerminalHost.js';
+import createIdeTerminalHost from './terminalHost.js';
 import ContentTreeMarkers from '@glyph3d/core/collections/ContentTreeMarkers.js';
 import ContentTreeArrows from '@glyph3d/core/collections/ContentTreeArrows.js';
 import ContentTreeProbes from '@glyph3d/core/collections/ContentTreeProbes.js';
@@ -218,10 +218,8 @@ function buildClientContext({ scene, camera, renderer, atlas, registryBundle, ca
     /** @type {import('@glyph3d/core/collections/ContentTreeLabels.js').default|null} */ contentTreeLabels: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeArrows.js').default|null} */ contentTreeArrows: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeMotion.js').default|null} */ contentTreeMotion: null,
-    /** @type {import('@glyph3d/core/collections/GlyphFarLod.js').default|null} */ glyphFarLod: null,
-    /** @type {import('@glyph3d/core/collections/PanelBatch.js').default|null} */ panelBatch: null,
-    /** @type {import('@glyph3d/core/collections/GlyphBatch.js').default|null} */ glyphBatch: null,
-    /** @type {import('@glyph3d/core/collections/SceneTransforms.js').default|null} */ sceneTransforms: null,
+    /** @type {SceneSystems|null} */ sceneSystems: null,
+    /** @type {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalHost|null} */ terminalHost: null,
     /** @type {import('@glyph3d/core/collections/ContentTreeProbes.js').default|null} */ contentTreeProbes: null,
     /** @type {((id: string) => Object|null)|null} */ materializeActor: null,
     /** @type {import('@glyph3d/core/services/interaction/InteractionContext.js').default|null} */ interactionContext: null,
@@ -321,8 +319,8 @@ function DockRunner({ stateRef }) {
     c?.handPresence?.update(state.camera);
     // The calibration view rides the same rig (after it has been parked this frame).
     c?.handCalib?.update(state.camera);
-    // Far-LOD last: every system above has moved what it moves this frame.
-    c?.glyphFarLod?.update(state.camera, state.size.height);
+    // Scene systems (far-LOD's decision) last: every system above has moved what it moves this frame.
+    c?.sceneSystems?.update(state.camera, state.size.height);
   });
   return null;
 }
@@ -399,6 +397,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     });
     const router = new CommandRouter(ctx);
     registerAllCommands(router);
+    // What the terminal verbs (core) defer to this app for: placement, the dock on spawn,
+    // attention focus, holding, workspace persistence, agent-screen write-back.
+    ctx.terminalHost = assertTerminalHost(createIdeTerminalHost(ctx, router), 'IDE');
     router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? args : ''));
     stateRef.current = { ctx, router, registry: ctx.registry, bridge: null };
   }
@@ -417,9 +418,11 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const pickingSystem = new PickingSystem(gl);
     state.ctx.pickingSystem = pickingSystem;
 
-    // World matrices: a pose write marks its node, and the per-frame walk enters only what was
-    // marked — not every node of the tree, every frame (scene.transforms reports and verifies it).
-    state.ctx.sceneTransforms = new SceneTransforms(scene);
+    // The renderer's scene systems, in their one order (SceneSystems): world matrices recomputed
+    // only where something moved (scene.transforms reports and verifies it); far-LOD (a field too
+    // small to read draws one backdrop quad — Display & glyph LOD dials it); panels as batched
+    // instances; labels (book tabs, nameplates, dock titles) from one glyph arena, one draw for all.
+    state.ctx.sceneSystems = new SceneSystems(scene, atlas);
 
     // The world layout — the top-level spatial system. The major groupings (file tree, agent-trail
     // cluster, …) are SIBLINGS on a shared floor, laid out by a bottom-aligned stack (the same bounds-node
@@ -457,14 +460,6 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // overlays track the gliding nodes). layout.motion dials it.
     state.ctx.contentTreeMotion = new ContentTreeMotion(contentTree);
 
-    // Far-LOD: a glyph field whose rows are under a pixel on screen stops drawing its glyphs;
-    // one backdrop quad of its mean ink stands in (<DockRunner/> ticks it; Display & glyph LOD dials it).
-    state.ctx.glyphFarLod = new GlyphFarLod(scene);
-    // Panels (window backgrounds, page faces, label plates) draw as instances of a few meshes,
-    // refreshed from scene.onBeforeRender — not one draw each.
-    state.ctx.panelBatch = new PanelBatch(scene);
-    // Labels (book tabs, nameplates, dock titles) draw as ranges of one glyph field, one draw for all.
-    state.ctx.glyphBatch = new GlyphBatch(scene, atlas);
     applyGroupSettings(state.ctx, 'Tree & labels');      // fold persisted tree-line toggles + container-label dials in at boot
     applyGroupSettings(state.ctx, 'Motion');             // fold the persisted relayout-glide dials in at boot
     applyGroupSettings(state.ctx, 'Theme & appearance'); // set the configured interaction colors as the panel default before any window spawns
@@ -693,18 +688,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       lsp: state.ctx.lsp,
     });
 
-    // Terminal OUTPUT data plane: binary frames (type 1) carry raw VT bytes + the size tmux drew
-    // them at → the terminal's emulator (grid.writeBytes). The bridge demuxes by type byte; terminal
-    // semantics live here, keyed by the id the adapter stamped into the frame.
-    bridge.onBinaryFrame(1, (id, bytes, cols, rows) => {
-      const grid = state.ctx.terminals?.get(id);
-      if (!grid) return;
-      // Align the emulator to the size THIS content was drawn at BEFORE parsing it. Size and redraw
-      // ride one ordered channel (see attach_unix.go), so a resize can never race ahead of its redraw
-      // and address a row that doesn't exist — the split-across-a-WebSocket crash, gone by construction.
-      if (cols > 0 && rows > 0 && (grid.cols !== cols || grid.rows !== rows)) grid.resize(cols, rows);
-      grid.writeBytes?.(bytes);
-    });
+    // Terminal OUTPUT data plane: binary frames (type 1) → each terminal's emulator, size-aligned
+    // first (routeTerminalOutput, shared with every app that shows terminals).
+    routeTerminalOutput(bridge, state.ctx);
 
     // The relay's local file source. Swapped in as ctx.fileProvider on connect when
     // no explicit ?repo was given (the binary serving a project); GitHub stays the
@@ -897,14 +883,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       bridge.disconnect();
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
-      state.ctx.glyphBatch?.dispose();      // chained after the panel batch's hook: unhook it first
-      state.ctx.glyphBatch = null;
-      state.ctx.panelBatch?.dispose();     // unhooks scene.onBeforeRender — a second boot must not chain a second batch
-      state.ctx.panelBatch = null;
-      state.ctx.glyphFarLod?.dispose();
-      state.ctx.glyphFarLod = null;
-      state.ctx.sceneTransforms?.dispose();   // hands scene.updateMatrixWorld back — a second boot takes it over again
-      state.ctx.sceneTransforms = null;
+      state.ctx.sceneSystems.dispose();   // hands scene hooks back — a second boot installs its own
+      state.ctx.sceneSystems = null;
       state.ctx.gomuxHub?.dispose();
       state.ctx.gomuxHub = null;
       state.ctx.sessionDesk?.dispose();

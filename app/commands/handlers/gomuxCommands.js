@@ -16,7 +16,7 @@
  */
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 
-import { waitForTerminal } from './terminalCommands.js';
+import { waitForTerminal } from '@glyph3d/core/services/terminal/terminalCommands.js';
 
 const noHub = { text: 'ERR: no gomuxai hub (needs the relay)', data: null };
 

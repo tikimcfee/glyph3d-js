@@ -867,8 +867,8 @@ export const SETTINGS = [
   // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest depth
   // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
   // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.
-  { key: 'glyph.showGlyphsPx', label: 'Show glyphs from (px per row, 0 = always)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.showGlyphsPx, min: 0, max: 24, step: 0.25, apply: (ctx, v) => ctx.glyphFarLod?.setParam('showGlyphsPx', v) },
-  { key: 'glyph.backdropGain', label: 'Far backdrop strength (× ink cover)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.backdropGain, min: 0, max: 4, step: 0.05, apply: (ctx, v) => ctx.glyphFarLod?.setParam('backdropGain', v) },
+  { key: 'glyph.showGlyphsPx', label: 'Show glyphs from (px per row, 0 = always)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.showGlyphsPx, min: 0, max: 24, step: 0.25, apply: (ctx, v) => ctx.sceneSystems?.farLod.setParam('showGlyphsPx', v) },
+  { key: 'glyph.backdropGain', label: 'Far backdrop strength (× ink cover)', group: 'Display & glyph LOD', type: 'number', default: FAR_LOD_DEFAULTS.backdropGain, min: 0, max: 4, step: 0.05, apply: (ctx, v) => ctx.sceneSystems?.farLod.setParam('backdropGain', v) },
 
   // Agent Books — the agent shelf (each agent's run as a book of spreads). An agent book
   // is a SUBSET of the Books base (it inherits the shared page face + cover) plus

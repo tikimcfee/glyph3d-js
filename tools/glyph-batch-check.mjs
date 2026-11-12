@@ -78,7 +78,7 @@ try {
                 gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
                 return { px, calls };
             };
-            const gb = c.glyphBatch;
+            const gb = c.sceneSystems.glyphBatch;
             const batched = grab();
             const stats = { ...gb.stats };
             const arenas = [gb.arena.instanceMesh];

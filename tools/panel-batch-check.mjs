@@ -72,9 +72,9 @@ try {
                 return { px, calls };
             };
             const batched = grab();
-            const stats = { ...c.panelBatch.stats };
+            const stats = { ...c.sceneSystems.panelBatch.stats };
             const buckets = scene.children.filter((o) => o.name.startsWith('panel-batch'));
-            const panels = [...c.panelBatch._buckets.values()].flatMap((b) => [...b.members]);
+            const panels = [...c.sceneSystems.panelBatch._buckets.values()].flatMap((b) => [...b.members]);
             const hook = scene.onBeforeRender;
             scene.onBeforeRender = () => {};
             const shown = buckets.map((b) => b.visible);
@@ -82,7 +82,7 @@ try {
             for (const p of panels) p.layers.enable(0);
             const own = grab();
             const keep = panels.map((p) => p.renderOrder);
-            for (const b of c.panelBatch._buckets.values()) for (const p of b.members) p.renderOrder = b.mesh.renderOrder;
+            for (const b of c.sceneSystems.panelBatch._buckets.values()) for (const p of b.members) p.renderOrder = b.mesh.renderOrder;
             const shifted = grab();
             panels.forEach((p, i) => { p.renderOrder = keep[i]; });
             for (const p of panels) p.layers.disable(0);

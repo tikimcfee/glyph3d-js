@@ -14,7 +14,8 @@
  * ⌥-drag on the body, top-edge resize, names (shell title → name, palette rename, clear), wheel
  * over the focused terminal → scrollback while the camera holds, pinch → zoom, map labels (no
  * overlaps, bar names hidden, trace lines when crowded, click frames exactly like frame(), drag
- * moves the terminal). Exit 1 on any FAIL.
+ * moves the terminal), and the core terminal verbs run against the wall (terminal.move, terminal.focus).
+ * Exit 1 on any FAIL.
  */
 import { spawn as spawnProcess } from 'node:child_process';
 import net from 'node:net';
@@ -132,6 +133,16 @@ try {
     ok((await W(() => window.__wall.focusedId)) === B, 'the palette finds it by name');
     await W((i) => window.__wall.rename(i, ''), B);
     ok((await W((i) => window.__wall.nameOf(i), B)) === '/tmp', 'an empty name falls back to the shell title');
+
+    // ── the core terminal verbs, run against the wall (what the CLI reaches) ──
+    const mv = await W((i) => window.__wall.router.execute(`terminal.move ${i} 7 -3 0`).then((r) => r.text), C);
+    const at = await W((i) => { const p = window.__wall.terminal(i).position; return { x: p.x, y: p.y }; }, C);
+    const kept = await W(() => JSON.parse(localStorage.getItem('glyph3d.wall.positions') || '{}'));
+    ok(mv.startsWith('OK') && at.x === 7 && at.y === -3 && kept[C]?.x === 7 && kept[C]?.y === -3,
+        `terminal.move places a terminal and the wall remembers the spot (${mv})`);
+    const fv = await W((i) => window.__wall.router.execute(`terminal.focus ${i}`).then((r) => r.text), C);
+    ok(fv.startsWith('OK') && (await W(() => window.__wall.focusedId)) === C, `terminal.focus makes it the wall's keyboard target (${fv})`);
+    ok(await W(() => !!window.__glyphClient.ctx.sceneSystems?.panelBatch), 'the wall runs the shared scene systems (ctx.sceneSystems)');
 
     // ── wheel + pinch over the focused terminal ────────────────────────────
     await W((i) => window.__wall.terminal(i).sendInput('clear; seq 1 300\r'), A);

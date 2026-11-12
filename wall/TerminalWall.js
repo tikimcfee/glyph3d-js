@@ -1,12 +1,10 @@
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
-import SceneTransforms from '@glyph3d/core/collections/SceneTransforms.js';
-import PanelBatch from '@glyph3d/core/collections/PanelBatch.js';
-import GlyphBatch from '@glyph3d/core/collections/GlyphBatch.js';
-import GlyphFarLod from '@glyph3d/core/collections/GlyphFarLod.js';
+import SceneSystems from '@glyph3d/core/collections/SceneSystems.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
-import registerTerminalCommands from '../app/commands/handlers/terminalCommands.js';
+import registerTerminalCommands, { routeTerminalOutput } from '@glyph3d/core/services/terminal/terminalCommands.js';
+import { assertTerminalHost } from '@glyph3d/core/services/terminal/TerminalHost.js';
 import WallCamera from './WallCamera.js';
 import WallStore from './WallStore.js';
 import WallNames from './WallNames.js';
@@ -41,6 +39,13 @@ function rectOf(grid) {
     };
 }
 
+/**
+ * The wall's context: what the terminal verbs run in (TerminalContext), plus the camera, renderer and
+ * scene systems the repo's harness tools read through window.__glyphClient.ctx.
+ * @typedef {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalContext & {
+ *   camera: import('three').OrthographicCamera, renderer: any, sceneSystems: SceneSystems }} WallContext
+ */
+
 /** A shell title, shortened for naming: drop the `user@host:` prefix prompts put in front. */
 function shortTitle(title) {
     return (title || '').replace(/^[^@\s]+@[^:\s]+:/, '').trim();
@@ -49,11 +54,12 @@ function shortTitle(title) {
 /**
  * TerminalWall — an infinite 2D canvas of terminals: the composition root.
  *
- *   relay        one CommandRouter carrying the core terminal verbs (the IDE's own handlers —
- *                terminal.create/resize/kill/… arrive from the relay's adapters and run here) and
- *                one WebSocketBridge (this page is the relay's DISPLAY)
- *   scene        the renderer's systems, as the IDE installs them (SceneTransforms, PanelBatch,
- *                GlyphBatch, GlyphFarLod)
+ *   relay        one CommandRouter carrying the core terminal verbs (services/terminal —
+ *                terminal.create/resize/kill/… arrive from the relay's adapters and run here, and
+ *                the wall's own spawn and kill are those verbs too), the wall's TerminalHost
+ *                (_terminalHost: where terminals land, what focus means, what persists), and one
+ *                WebSocketBridge (this page is the relay's DISPLAY)
+ *   scene        the renderer's scene systems (core SceneSystems — the set the IDE installs)
  *   terminals    arrival order, focus, hover, placement, names (WallStore persists positions + names)
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
  *                map labels), WallPointer (gestures), WallKeys (keyboard)
@@ -76,21 +82,13 @@ export default class TerminalWall {
         this.store = new WallStore();
         this.viewport = new WallCamera(camera, gl.domElement);
 
-        // Scene systems, in the IDE CommandProvider's order: world matrices recomputed only where
-        // something moved (the batches read its marks, so it goes first); panels draw as batched
-        // instances, labels as one glyph field, a field too small to read as one backdrop quad.
-        this.sceneTransforms = new SceneTransforms(scene);
-        this.panelBatch = new PanelBatch(scene);
-        this.glyphBatch = new GlyphBatch(scene, atlas);
-        this.farLod = new GlyphFarLod(scene);
-
+        /** @type {WallContext} */
         this.ctx = {
             scene, atlas, registry, camera, renderer: gl,
+            sceneSystems: new SceneSystems(scene, atlas),
             terminals: new Map(),
             wsbridge: null,
-            // terminal.create lands each new grid "in view" through this hook; the wall's answer
-            // is its remembered spot, else the first free flow slot.
-            cameraController: { placeInView: (grid) => this._place(grid) },
+            terminalHost: assertTerminalHost(this._terminalHost(), 'wall'),
         };
         this.router = new CommandRouter(this.ctx);
         registerTerminalCommands(this.router);
@@ -99,14 +97,7 @@ export default class TerminalWall {
             url: `ws://${location.hostname}:${relayPort}`, port: relayPort, autoConnect: false, showStatus: false,
         });
         this.ctx.wsbridge = this.bridge;
-        // Terminal OUTPUT: raw VT bytes tagged with the size tmux drew them at. Align the grid to
-        // that size BEFORE parsing (size and redraw travel one ordered channel — see attach_unix.go).
-        this.bridge.onBinaryFrame(1, (id, bytes, cols, rows) => {
-            const grid = this.ctx.terminals.get(id);
-            if (!grid) return;
-            if (cols > 0 && rows > 0 && (grid.cols !== cols || grid.rows !== rows)) grid.resize(cols, rows);
-            grid.writeBytes(bytes);
-        });
+        routeTerminalOutput(this.bridge, this.ctx);
         this.bridge.onConnectionChange((up) => {
             // Re-adopt glyphd sessions whose adapters died with a relay restart.
             if (up) this.bridge.send(JSON.stringify({ relay: 'terminal.recover' }));
@@ -138,10 +129,7 @@ export default class TerminalWall {
         this.ctx.registry.removeChangeListener(this._onRegistry);
         this.bridge.disconnect();
         this.names.dispose();
-        this.farLod.dispose();
-        this.glyphBatch.dispose();        // its scene hook chains after the panel batch's: unhook it first
-        this.panelBatch.dispose();
-        this.sceneTransforms.dispose();   // hands scene.updateMatrixWorld back to three
+        this.ctx.sceneSystems.dispose();  // hands the scene's hooks back to three
     }
 
     /** Per frame: track the viewport, ease the camera, lay out names, far-LOD. */
@@ -152,7 +140,7 @@ export default class TerminalWall {
             order: this.order, terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
             nameOf: (id) => this.nameOf(id), windowRect: (id) => this.windowRect(id),
         });
-        this.farLod.update(this.viewport.camera, size.height);
+        this.ctx.sceneSystems.update(this.viewport.camera, size.height);
     }
 
     /** Subscribe to state changes (connection, terminal set, focus, names). Returns an unsubscribe. */
@@ -297,22 +285,13 @@ export default class TerminalWall {
     // ── relay-side lifecycle ────────────────────────────────────────────────
 
     /**
-     * Ask the relay to fork a new terminal, then focus + frame it once it lands. The spawn ack
-     * carries the new id; the grid arrives when its adapter connects and runs terminal.create.
+     * Ask the relay to fork a new terminal (terminal.spawn): it lands through the wall's host,
+     * focused + framed. @returns {Promise<{ ok: boolean, id?: string, reason?: string }>}
      */
     async spawn() {
-        if (!this.bridge.connected) return { ok: false, reason: 'not connected to the relay' };
-        const ack = this.bridge.waitForEvent('terminal.spawning', 5000);
-        this.bridge.send(JSON.stringify({ relay: 'terminal.spawn' }));
-        const id = (await ack)?.id;
-        if (!id) return { ok: false, reason: 'no spawn ack from the relay' };
-        const arrived = await new Promise((resolve) => {
-            if (this.ctx.terminals.has(id)) { resolve(true); return; }
-            const off = this.onChange(() => { if (this.ctx.terminals.has(id)) { off(); clearTimeout(t); resolve(true); } });
-            const t = setTimeout(() => { off(); resolve(false); }, 15000);
-        });
-        if (arrived) this.focus(id, { frame: true });
-        return { ok: arrived, id };
+        const r = await this.router.execute('terminal.spawn');
+        if (r.data?.landed) return { ok: true, id: r.data.id };
+        return { ok: false, id: r.data?.id, reason: r.text };
     }
 
     /** Fully close a terminal (its shell and tmux session too). */
@@ -339,6 +318,27 @@ export default class TerminalWall {
         if (this.focusedId && !live.has(this.focusedId)) { this.focusedId = null; changed = true; }
         if (this.hoveredId && !live.has(this.hoveredId)) this.hoveredId = null;
         if (changed) this._emit();
+    }
+
+    /**
+     * The wall's TerminalHost: what the core terminal verbs defer to this app for. Nothing holds a
+     * terminal here and tmux owns its size, so release and resizing have nothing to do.
+     * @returns {import('@glyph3d/core/services/terminal/TerminalHost.js').TerminalHost}
+     */
+    _terminalHost() {
+        return {
+            theme: () => ({}),
+            place: (grid) => this._place(grid),
+            landed: (id) => { this.focus(id, { frame: true }); return 'focused + framed'; },
+            focus: (id) => ({ ok: this.focus(id) }),
+            release: () => {},
+            resizing: () => '',
+            surfaces: {
+                get: (id) => { const p = this.store.position(id); return p ? { position: p } : null; },
+                set: (id, view) => { if (view.position) this.store.setPosition(id, view.position); },
+                remove: (id) => this.store.forget(id),
+            },
+        };
     }
 
     /** Land a new grid at its remembered spot, else the first free flow slot. */

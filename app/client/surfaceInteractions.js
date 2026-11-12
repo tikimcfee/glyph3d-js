@@ -22,6 +22,8 @@
  * computeGridFocus vs. center focusOnObject), so it remains the camera controller's call.
  */
 
+import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
+
 /**
  * @typedef {Object} SurfaceRecord
  * @property {(entry: Object, dy: number) => (string[]|null)} [wheelScroll] - command (array form,
@@ -44,13 +46,10 @@ function volumeOf(grid) {
 /** @type {Record<string, SurfaceRecord>} */
 const RECORDS = {
   terminal: {
-    // Fixed screen → the wheel always drives tmux scrollback. wheel up (dy<0) → +lines = back
-    // into history; the adapter runs copy-mode and the repaint streams back. ~30px ≈ one line,
-    // min one line in the wheel direction.
+    // Fixed screen → the wheel always drives tmux scrollback (terminalWheelLines: wheel up →
+    // back into history); the adapter runs copy-mode and the repaint streams back.
     wheelScroll(entry, dy) {
-      let lines = -Math.round(dy / 30);
-      if (lines === 0) lines = dy > 0 ? -1 : 1;
-      return ['terminal.scroll', entry.id, String(lines)];
+      return ['terminal.scroll', entry.id, String(terminalWheelLines(dy))];
     },
     moveVerb: 'terminal.move',
   },

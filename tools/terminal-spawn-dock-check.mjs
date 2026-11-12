@@ -5,12 +5,13 @@
 // ack for the id (WebSocketBridge.waitForEvent — one-shot, FIFO, self-cleaning on timeout),
 // awaits the terminal's arrival in the registry (the "added and ready" callback — the
 // registry fires change listeners synchronously on register, after the grid is fully wired),
-// then composes `dock.lock <id>` + `dock.spotlight <id>` (pin into the focus pane) +
-// `terminal.focus <id>` through the router. A restore-time re-adopt (terminal.create with
-// no spawn) never docks or steals focus.
+// then hands it to the IDE's terminal host, whose `landed` composes `dock.lock <id>` +
+// `dock.spotlight <id>` (pin into the focus pane) + `terminal.focus <id>` through the router.
+// A restore-time re-adopt (terminal.create with no spawn) never docks or steals focus.
 //
-// Runs the REAL spawn + create handlers (real TerminalGrid, real CommandRouter, real
-// WebSocketBridge) headlessly; dock.lock/terminal.focus are mocked at the router to record
+// Runs the REAL spawn + create handlers (core services/terminal) and the REAL IDE host
+// (app/client/terminalHost.js) with a real TerminalGrid, CommandRouter and WebSocketBridge,
+// headlessly; dock.lock/terminal.focus are mocked at the router to record
 // the composition, and the relay is simulated by feeding acks into bridge._handleMessage.
 //
 //   bun tools/terminal-spawn-dock-check.mjs
@@ -24,15 +25,19 @@ const THREE = await import('three');
 const { default: CommandRouter } = await import('../packages/glyph3d-core/src/services/orchestration/CommandRouter.js');
 const { default: WebSocketBridge } = await import('../packages/glyph3d-core/src/services/orchestration/WebSocketBridge.js');
 const { default: SceneRegistry } = await import('../packages/glyph3d-core/src/services/SceneRegistry.js');
-const { default: registerTerminalCommands } = await import('../app/commands/handlers/terminalCommands.js');
+const { default: registerTerminalCommands } = await import('../packages/glyph3d-core/src/services/terminal/terminalCommands.js');
+const { assertTerminalHost } = await import('../packages/glyph3d-core/src/services/terminal/TerminalHost.js');
+const { default: createIdeTerminalHost } = await import('../app/client/terminalHost.js');
+const { default: WorkspaceModel } = await import('../app/client/WorkspaceModel.js');
 
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? '✓' : '✗ FAIL'} ${msg}`); if (!cond) failures++; };
 const flush = () => new Promise((r) => setTimeout(r, 5)); // let promise continuations drain
 
-const ctx = { scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: new SceneRegistry() };
+const ctx = { scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: new SceneRegistry(), workspace: new WorkspaceModel() };
 const router = new CommandRouter(ctx);
 registerTerminalCommands(router);
+ctx.terminalHost = assertTerminalHost(createIdeTerminalHost(ctx, router), 'spawn-dock-check');
 
 // Mock the composed verbs — record what spawn fires.
 const calls = [];
@@ -70,7 +75,7 @@ const relayAck = (id) => bridge._handleMessage(JSON.stringify({ event: 'terminal
   const r = await p;
   ok(calls[0] === 'dock.lock term-7' && calls[1] === 'dock.spotlight term-7' && calls[2] === 'terminal.focus term-7',
     `spawn: fired dock.lock then dock.spotlight then terminal.focus (got: ${calls.join(', ') || 'nothing'})`);
-  ok(r.text.includes('term-7') && r.data?.pinned === true && r.data?.focused === true,
+  ok(r.text.includes('term-7') && r.data?.landed === 'pinned in the dock + focused',
     `spawn: result reports the pinned + focused terminal ("${r.text}")`);
 }
 

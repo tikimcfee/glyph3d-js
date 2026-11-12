@@ -175,7 +175,7 @@ export default class FramedGlyphField extends BoundedObject3D {
     _emitResize(cols, rows) {
         if (!this._resizeListeners) return;
         for (const cb of this._resizeListeners) {
-            try { cb(cols, rows); } catch { /* ignore tap errors */ }
+            try { cb(cols, rows); } catch (e) { console.error(`[${this.constructor.name}] a resize listener threw (the others still ran):`, e); }
         }
     }
 

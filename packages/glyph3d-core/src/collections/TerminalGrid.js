@@ -293,7 +293,7 @@ export default class TerminalGrid extends FramedGlyphField {
         this._emulator.onTitleChange((title) => {
             this.windowTitle = title;
             if (this._titleListeners) {
-                for (const cb of this._titleListeners) { try { cb(title); } catch (e) { /* ignore tap errors */ } }
+                for (const cb of this._titleListeners) { try { cb(title); } catch (e) { console.error(`[TerminalGrid ${this.terminalId}] a window-title listener threw (the others still ran):`, e); } }
             }
         });
     }
@@ -616,7 +616,7 @@ export default class TerminalGrid extends FramedGlyphField {
         // Byte-output tap: a 2D companion view (DOM xterm) consumes the SAME PTY stream the
         // 3D emulator renders — one source, two projections. Fires with the raw payload.
         if (this._byteListeners) {
-            for (const cb of this._byteListeners) { try { cb(payload); } catch (e) { /* ignore tap errors */ } }
+            for (const cb of this._byteListeners) { try { cb(payload); } catch (e) { console.error(`[TerminalGrid ${this.terminalId}] a byte listener threw (the others still ran):`, e); } }
         }
     }
 

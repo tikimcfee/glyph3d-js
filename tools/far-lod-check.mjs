@@ -62,7 +62,7 @@ try {
         await app.cmd(`camera.move ${pos.map((v) => v.toFixed(2)).join(' ')}`);
         await app.waitFor(2500);
         const r = await app.evalPage(() => {
-            const c = window.__glyphClient.ctx, lod = c.glyphFarLod, rnd = c.renderer, gl = rnd.getContext();
+            const c = window.__glyphClient.ctx, lod = c.sceneSystems.farLod, rnd = c.renderer, gl = rnd.getContext();
             const scene = c.scene, cam = c.camera;
             const Hc = rnd.domElement.clientHeight;
             const keep = { ...lod.params };

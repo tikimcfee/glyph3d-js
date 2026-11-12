@@ -13,7 +13,7 @@ import registerSpatialCommands from './spatialCommands.js';
 import registerCompositionCommands from './compositionCommands.js';
 import registerNavigationCommands from './navigationCommands.js';
 import registerRegistryCommands from './registryCommands.js';
-import registerTerminalCommands from './terminalCommands.js';
+import registerTerminalCommands from '@glyph3d/core/services/terminal/terminalCommands.js';
 import registerHighlightCommands from './highlightCommands.js';
 import registerSemanticCommands from './semanticCommands.js';
 import registerTourCommands from './tourCommands.js';

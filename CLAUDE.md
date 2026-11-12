@@ -4,7 +4,7 @@
 
 glyph3d-js renders thousands of text glyphs in 3D at 60fps via GPU instancing on
 Three.js (WebGL2 & WebGPU) — built for navigating source code, directory trees, and live
-terminals in 3D space. The repo is organized as **a package, an app, and a cli**:
+terminals in 3D space. The repo is organized as **packages, two apps, and a cli**:
 
 - **`packages/glyph3d-core`** (`@glyph3d/core`) — the publishable rendering library:
   glyph atlas + shaping, the `InstancedField` / `InstancedSlotBuffer` renderer, `CodeGrid` / `TerminalGrid`,
@@ -14,6 +14,10 @@ terminals in 3D space. The repo is organized as **a package, an app, and a cli**
   grids + terminals, driven by a command bus. `app/client/` holds the shared chrome
   (CommandProvider, CanvasInteraction, HudPanel, CommandBar, SessionStore,
   WorkspaceModel); `app/commands/` holds the command spine (handlers).
+- **`wall/`** — the wall: an infinite flat (orthographic) canvas of terminals on the same
+  core and relay (Vite :5180). Pan, pinch-zoom, type, cycle, resize by the border; title bars
+  and map labels name each terminal. `TerminalWall` is its composition root; gate
+  `bun tools/wall-e2e.mjs` (its own relay, tmux socket and terminals).
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.
 
@@ -43,15 +47,19 @@ packages/
     core/                  LayoutDescription (layout seam), constants, renderOrder, types
     services/              interaction (AttentionManager, keyEncoding),
                            camera (ViewerCameraController), data, orchestration
-                           (CommandRouter, WebSocketBridge), state, visual
+                           (CommandRouter, WebSocketBridge), state, visual,
+                           terminal (the terminal.* verbs + TerminalHost)
     picking/  shaping/  workers/  annotations/  parsing/  hand/  fonts/
   glyph3d-r3f/src/         GlyphCanvas, ViewerCamera, useGlyphEngine, useGridRegistry
 app/
   main.jsx index.html vite.config.js   the IDE entry (Vite)
   client/                CommandProvider, CanvasInteraction, HudPanel, CommandBar,
                          SessionStore, WorkspaceModel
-  commands/handlers/     command verbs (file.*, grid.*, edit.*, terminal.*, camera.*, …)
+  commands/handlers/     command verbs (file.*, grid.*, edit.*, camera.*, …)
   ButtonBar IdeDock FileTree TerminalsPanel AgentsPanel CarrelsPanel   dockview panels
+wall/
+  main.jsx TerminalWall.js            the wall entry + composition root (Vite :5180)
+  WallCamera WallPointer WallKeys WallNames WallStore   one job each
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminals
   gomux.go agentevents.go                           gomuxai: hub tree, agent sessions + events
@@ -97,7 +105,11 @@ still orphans its `agent export`).
 
 Every action is a verb. `CommandRouter.execute(input)` dispatches to a handler in
 `app/commands/handlers/`; UI clicks and CLI/RPC hit the same handlers (one source of
-truth). The relay forwards CLI commands to the browser display over WebSocket, and
+truth). The `terminal.*` verbs live in core (`services/terminal/terminalCommands.js`) so every
+app runs the same ones: what differs per app — where a terminal lands, what a finished spawn
+shows, what focus means, what holds it, what persists its view — is the app's `TerminalHost`
+(`ctx.terminalHost`; every member required, `assertTerminalHost` names a missing one at boot).
+The IDE's is `app/client/terminalHost.js`, the wall's `TerminalWall._terminalHost`. The relay forwards CLI commands to the browser display over WebSocket, and
 keeps a structured in-memory SQLite store of every browser log record — `log.query` /
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
 with live follow via `./glyph3d-cli log.follow` (the CLI renders log replies as records). Page-side, `emitLogRecord` runs a storm
@@ -214,6 +226,8 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   (loaded with the module), and `rootOf(obj)` / `isShown(obj)` re-walk an object's ancestors only
   when the show generation moves (a `visible` flip, a tracked node gaining or losing a child) —
   PanelBatch, GlyphBatch and GlyphFarLod read them, and need a SceneTransforms on their scene.
+  An app installs all four as one `SceneSystems` (`ctx.sceneSystems`: its order, its per-frame
+  `update`, its reverse-order `dispose`) — the IDE and the wall alike.
   `scene.transforms` reports the last walk and checks every world matrix against a fresh
   recompute. Gate: `tools/scene-transforms.test.mjs`.
 - **Agent sessions** (`app/client/SessionBooks.js`, `services/data/AgentSessionProvider.js`):
