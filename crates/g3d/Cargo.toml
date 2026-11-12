@@ -1,5 +1,6 @@
 # The client: attach, watch, ls, new, kill, stop. Speaks only the protocol (g3d-wire);
-# it never links libghostty.
+# it never links libghostty. Its library half (socket paths, a blocking client, starting
+# the daemon) is shared with the daemon and its tests.
 [package]
 name = "g3d"
 version.workspace = true
@@ -8,12 +9,20 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "g3d"
 path = "src/main.rs"
 
 [dependencies]
 g3d-wire.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
 clap.workspace = true
+signal-hook = "0.3.18"
+
+[dev-dependencies]
+libc = "0.2.177"

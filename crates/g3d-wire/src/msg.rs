@@ -101,8 +101,18 @@ pub enum Op {
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
 pub const KNOWN_OPS: [&str; 12] = [
-    "create", "list", "kill", "subscribe", "unsubscribe", "take", "resize", "repaint", "view",
-    "capture", "ping", "stop",
+    "create",
+    "list",
+    "kill",
+    "subscribe",
+    "unsubscribe",
+    "take",
+    "resize",
+    "repaint",
+    "view",
+    "capture",
+    "ping",
+    "stop",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

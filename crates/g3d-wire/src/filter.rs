@@ -44,9 +44,13 @@ enum St {
     /// Buffering a string's start until it can be judged.
     Str(Str),
     /// A string judged harmless: bytes pass straight through until it ends.
-    StrPass { bel_ends: bool },
+    StrPass {
+        bel_ends: bool,
+    },
     /// A query string: bytes are dropped until it ends.
-    StrDrop { bel_ends: bool },
+    StrDrop {
+        bel_ends: bool,
+    },
 }
 
 /// Removes terminal queries from a raw output stream. See the module docs.
@@ -343,8 +347,7 @@ fn csi_is_query(body: &[u8]) -> bool {
         b'u' => none && prefix == Some(b'?'),
         b'm' => none && prefix == Some(b'?'),
         b't' => {
-            none && prefix.is_none()
-                && matches!(param(&params, 0), Some(11 | 13 | 14 | 15 | 16 | 18 | 19 | 20 | 21))
+            none && prefix.is_none() && matches!(param(&params, 0), Some(11 | 13 | 14 | 15 | 16 | 18 | 19 | 20 | 21))
         }
         b'x' => none && prefix.is_none() && matches!(param(&params, 0), Some(0 | 1)),
         b'S' => none && prefix == Some(b'?') && param(&params, 1) == Some(1),
@@ -366,7 +369,7 @@ fn osc_is_query(body: &[u8]) -> bool {
     let rest: Vec<&str> = parts.collect();
     match num {
         4 | 5 => rest.iter().skip(1).step_by(2).any(|p| *p == "?"),
-        10..=19 => rest.iter().any(|p| *p == "?"),
+        10..=19 => rest.contains(&"?"),
         21 => rest.iter().any(|p| p.ends_with("=?")),
         52 => rest.iter().skip(1).any(|p| *p == "?"),
         _ => false,
@@ -426,13 +429,38 @@ mod tests {
     #[test]
     fn removes_queries() {
         let queries: &[&[u8]] = &[
-            b"\x1b[c", b"\x1b[0c", b"\x1b[>c", b"\x1b[>0c", b"\x1b[=c", b"\x1bZ",
-            b"\x1b[5n", b"\x1b[6n", b"\x1b[?6n", b"\x1b[?996n",
-            b"\x1b[?2004$p", b"\x1b[4$p", b"\x1b[>q", b"\x1b[>0q", b"\x1b[?u", b"\x1b[?4m",
-            b"\x1b[14t", b"\x1b[16t", b"\x1b[18t", b"\x1b[x", b"\x1b[?1;1S", b"\x1b[1;1;1;1;1;1*y",
-            b"\x1b]10;?\x07", b"\x1b]11;?\x1b\\", b"\x1b]12;?\x07", b"\x1b]4;1;?\x07",
-            b"\x1b]4;1;?;2;?\x1b\\", b"\x1b]52;c;?\x07", b"\x1b]21;foreground=?\x1b\\",
-            b"\x1bP$qm\x1b\\", b"\x1bP$q\"q\x1b\\", b"\x1bP+q544e\x1b\\",
+            b"\x1b[c",
+            b"\x1b[0c",
+            b"\x1b[>c",
+            b"\x1b[>0c",
+            b"\x1b[=c",
+            b"\x1bZ",
+            b"\x1b[5n",
+            b"\x1b[6n",
+            b"\x1b[?6n",
+            b"\x1b[?996n",
+            b"\x1b[?2004$p",
+            b"\x1b[4$p",
+            b"\x1b[>q",
+            b"\x1b[>0q",
+            b"\x1b[?u",
+            b"\x1b[?4m",
+            b"\x1b[14t",
+            b"\x1b[16t",
+            b"\x1b[18t",
+            b"\x1b[x",
+            b"\x1b[?1;1S",
+            b"\x1b[1;1;1;1;1;1*y",
+            b"\x1b]10;?\x07",
+            b"\x1b]11;?\x1b\\",
+            b"\x1b]12;?\x07",
+            b"\x1b]4;1;?\x07",
+            b"\x1b]4;1;?;2;?\x1b\\",
+            b"\x1b]52;c;?\x07",
+            b"\x1b]21;foreground=?\x1b\\",
+            b"\x1bP$qm\x1b\\",
+            b"\x1bP$q\"q\x1b\\",
+            b"\x1bP+q544e\x1b\\",
             b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\",
         ];
         for q in queries {
@@ -445,13 +473,31 @@ mod tests {
     #[test]
     fn keeps_everything_else() {
         let kept: &[&[u8]] = &[
-            b"\x1b[1;31mred\x1b[0m", b"\x1b[?1049h", b"\x1b[?2004h", b"\x1b[H\x1b[2J",
-            b"\x1b[!p", b"\x1b[>4;1m", b"\x1b[>1u", b"\x1b[=1;1u", b"\x1b[8;24;80t",
-            b"\x1b[22;0t", b"\x1b[>0n", b"\x1b[?25l", b"\x1b(0lqk\x1b(B", b"\x1b#8", b"\x1b7\x1b8",
-            b"\x1b]2;title\x07", b"\x1b]0;t\x1b\\", b"\x1b]10;#ffffff\x07", b"\x1b]4;1;#ff0000\x07",
-            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\", b"\x1b]52;c;aGk=\x07",
-            b"\x1bPq#0;2;0;0;0#0!10~-\x1b\\", b"\x1bP1000p\x1b\\",
-            b"\x1b_Gf=24,s=1,v=1,a=T;AAAA\x1b\\", "héllo 世界 😀".as_bytes(),
+            b"\x1b[1;31mred\x1b[0m",
+            b"\x1b[?1049h",
+            b"\x1b[?2004h",
+            b"\x1b[H\x1b[2J",
+            b"\x1b[!p",
+            b"\x1b[>4;1m",
+            b"\x1b[>1u",
+            b"\x1b[=1;1u",
+            b"\x1b[8;24;80t",
+            b"\x1b[22;0t",
+            b"\x1b[>0n",
+            b"\x1b[?25l",
+            b"\x1b(0lqk\x1b(B",
+            b"\x1b#8",
+            b"\x1b7\x1b8",
+            b"\x1b]2;title\x07",
+            b"\x1b]0;t\x1b\\",
+            b"\x1b]10;#ffffff\x07",
+            b"\x1b]4;1;#ff0000\x07",
+            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+            b"\x1b]52;c;aGk=\x07",
+            b"\x1bPq#0;2;0;0;0#0!10~-\x1b\\",
+            b"\x1bP1000p\x1b\\",
+            b"\x1b_Gf=24,s=1,v=1,a=T;AAAA\x1b\\",
+            "héllo 世界 😀".as_bytes(),
         ];
         for k in kept {
             assert_eq!(run(k), *k, "changed: {:?}", String::from_utf8_lossy(k));

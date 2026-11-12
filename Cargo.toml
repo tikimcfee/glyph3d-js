@@ -14,6 +14,7 @@ publish = false
 
 [workspace.dependencies]
 g3d-wire = { path = "crates/g3d-wire" }
+g3d = { path = "crates/g3d" }
 
 # Pinned to the libghostty-rs commit that tracks libghostty-vt 1.0.1 (Ghostty tag
 # vt-1.0.1). The Ghostty source itself comes from the verified release tarballs via
@@ -24,9 +25,15 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "cd4d49
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 rustix = { version = "1.1.6", features = ["pty", "termios", "process", "fs", "net", "event", "pipe", "stdio"] }
-tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "macros", "time", "signal"] }
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "macros", "time", "signal"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
 [profile.release]
 # The daemon holds every shell; keep panics catchable per owner thread.
 panic = "unwind"
+
+# libghostty-vt's build maps a debug profile to Zig's Debug mode, which parses a flood
+# slowly enough to stall the daemon's own tests. Build it optimized everywhere.
+[profile.dev.package.libghostty-vt-sys]
+opt-level = 3
+debug = false

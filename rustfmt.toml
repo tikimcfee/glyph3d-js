@@ -1,0 +1,3 @@
+# The Rust workspace (crates/): wide lines, like the JS and Go sides.
+max_width = 120
+use_small_heuristics = "Max"

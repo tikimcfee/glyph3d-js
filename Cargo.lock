@@ -126,8 +126,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "g3d-wire",
+ "libc",
  "rustix",
+ "serde",
  "serde_json",
+ "signal-hook",
 ]
 
 [[package]]
@@ -135,9 +138,12 @@ name = "g3d-termd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "g3d",
  "g3d-wire",
+ "libc",
  "libghostty-vt",
  "rustix",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -319,6 +325,16 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
 ]
 
 [[package]]

@@ -1,0 +1,258 @@
+//! A connection's outbound queue. Owner threads and the request handler push frames; the
+//! connection's writer task drains them to the socket in order. Each subscription's share
+//! of the queue is counted, so an owner thread can drop a lagging lossy subscriber's
+//! output or pause its PTY for a blocking owner (PROTOCOL.md, "Flow control").
+
+use std::collections::VecDeque;
+use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
+
+/// A lossy subscriber whose queue passes this is dropped and resynced.
+pub const LOSSY_MAX: usize = 4 << 20;
+/// A blocking owner whose queue passes this pauses the PTY...
+pub const BLOCK_HIGH: usize = 1 << 20;
+/// ...until it drains below this.
+pub const BLOCK_LOW: usize = 256 << 10;
+
+/// Wakes an owner thread out of `poll`: an eventfd (Linux) or a pipe.
+pub struct Wake {
+    rd: OwnedFd,
+    wr: Option<OwnedFd>,
+}
+
+impl Wake {
+    pub fn new() -> std::io::Result<Self> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use rustix::event::{EventfdFlags, eventfd};
+            let fd = eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
+            Ok(Wake { rd: fd, wr: None })
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            use rustix::pipe::{PipeFlags, pipe_with};
+            let (rd, wr) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
+            Ok(Wake { rd, wr: Some(wr) })
+        }
+    }
+
+    pub fn fd(&self) -> &OwnedFd {
+        &self.rd
+    }
+
+    pub fn wake(&self) {
+        let one = 1u64.to_ne_bytes();
+        let fd = self.wr.as_ref().unwrap_or(&self.rd);
+        let _ = rustix::io::write(fd, if self.wr.is_some() { &one[..1] } else { &one[..] });
+    }
+
+    /// Clears pending wakes.
+    pub fn drain(&self) {
+        let mut buf = [0u8; 64];
+        while matches!(rustix::io::read(&self.rd, &mut buf), Ok(n) if n > 0) {}
+    }
+}
+
+/// What a subscription shares between its owner thread and its connection's writer.
+pub struct SubShared {
+    /// Bytes of this subscription's frames queued and not yet written.
+    pub queued: AtomicUsize,
+    /// A blocking owner over its high mark: the owner thread stops reading the PTY.
+    pub paused: AtomicBool,
+    pub wake: Arc<Wake>,
+}
+
+impl SubShared {
+    pub fn new(wake: Arc<Wake>) -> Self {
+        Self { queued: AtomicUsize::new(0), paused: AtomicBool::new(false), wake }
+    }
+
+    /// The owner thread pauses reads when over the high mark. Rechecks after setting the
+    /// flag so a writer that drained in between can't leave it paused forever.
+    pub fn maybe_pause(&self) -> bool {
+        if self.queued.load(SeqCst) <= BLOCK_HIGH {
+            return false;
+        }
+        self.paused.store(true, SeqCst);
+        if self.queued.load(SeqCst) < BLOCK_LOW {
+            self.paused.store(false, SeqCst);
+            return false;
+        }
+        true
+    }
+
+    fn written(&self, n: usize) {
+        let left = self.queued.fetch_sub(n, SeqCst) - n;
+        if left < BLOCK_LOW && self.paused.swap(false, SeqCst) {
+            self.wake.wake();
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Output,
+    Repaint,
+    Other,
+}
+
+pub struct Item {
+    head: Vec<u8>,
+    body: Option<Arc<[u8]>>,
+    sub: Option<Arc<SubShared>>,
+    kind: Kind,
+}
+
+impl Item {
+    fn len(&self) -> usize {
+        self.head.len() + self.body.as_ref().map_or(0, |b| b.len())
+    }
+}
+
+#[derive(Default)]
+struct Q {
+    items: VecDeque<Item>,
+    closed: bool,
+    close_after: bool,
+}
+
+#[derive(Default)]
+pub struct ConnOut {
+    q: Mutex<Q>,
+    notify: Notify,
+}
+
+impl ConnOut {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn push(&self, item: Item) {
+        let mut q = self.q.lock().unwrap();
+        if q.closed || q.close_after {
+            return;
+        }
+        if let Some(s) = &item.sub {
+            s.queued.fetch_add(item.len(), SeqCst);
+        }
+        q.items.push_back(item);
+        drop(q);
+        self.notify.notify_one();
+    }
+
+    /// A connection-level frame (reply, welcome, error) or an event.
+    pub fn frame(&self, bytes: Vec<u8>) {
+        self.push(Item { head: bytes, body: None, sub: None, kind: Kind::Other });
+    }
+
+    /// A frame counted against a subscription's queue.
+    pub fn sub_frame(&self, sub: &Arc<SubShared>, kind: Kind, head: Vec<u8>, body: Option<Arc<[u8]>>) {
+        self.push(Item { head, body, sub: Some(sub.clone()), kind });
+    }
+
+    /// Removes a subscription's queued output and repaints (events stay: they carry
+    /// ordering). Returns the PTY bytes dropped.
+    pub fn drop_sub_data(&self, sub: &Arc<SubShared>) -> u64 {
+        let mut q = self.q.lock().unwrap();
+        let mut dropped = 0u64;
+        let mut freed = 0usize;
+        q.items.retain(|it| {
+            let mine = it.sub.as_ref().is_some_and(|s| Arc::ptr_eq(s, sub)) && it.kind != Kind::Other;
+            if mine {
+                freed += it.len();
+                if it.kind == Kind::Output {
+                    dropped += it.body.as_ref().map_or(0, |b| b.len()) as u64;
+                }
+            }
+            !mine
+        });
+        drop(q);
+        if freed > 0 {
+            sub.written(freed);
+        }
+        dropped
+    }
+
+    /// Stops the queue now: queued frames are discarded and later pushes ignored.
+    pub fn close(&self) {
+        let mut q = self.q.lock().unwrap();
+        q.closed = true;
+        let items: Vec<Item> = q.items.drain(..).collect();
+        drop(q);
+        for it in items {
+            if let Some(s) = &it.sub {
+                s.written(it.len());
+            }
+        }
+        self.notify.notify_one();
+    }
+
+    /// Writes what is queued, then ends the connection (after an `ERROR`, or `stop`).
+    pub fn close_after_drain(&self) {
+        self.q.lock().unwrap().close_after = true;
+        self.notify.notify_one();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.q.lock().unwrap().closed
+    }
+
+    /// Writes the queue to `w` until the connection closes.
+    pub async fn run_writer<W: tokio::io::AsyncWrite + Unpin>(&self, w: W) {
+        use tokio::io::AsyncWriteExt;
+        let mut w = tokio::io::BufWriter::with_capacity(256 << 10, w);
+        loop {
+            let batch: Vec<Item> = loop {
+                let notified = self.notify.notified();
+                let finish;
+                {
+                    let mut q = self.q.lock().unwrap();
+                    if q.closed {
+                        return;
+                    }
+                    if !q.items.is_empty() {
+                        let n = q.items.len().min(256);
+                        break q.items.drain(..n).collect();
+                    }
+                    finish = q.close_after;
+                    if finish {
+                        q.closed = true;
+                    }
+                }
+                if finish {
+                    let _ = w.flush().await;
+                    let _ = w.shutdown().await;
+                    return;
+                }
+                notified.await;
+            };
+            let mut ok = true;
+            for it in &batch {
+                if w.write_all(&it.head).await.is_err() {
+                    ok = false;
+                    break;
+                }
+                if let Some(b) = &it.body
+                    && w.write_all(b).await.is_err()
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok && w.flush().await.is_err() {
+                ok = false;
+            }
+            for it in &batch {
+                if let Some(s) = &it.sub {
+                    s.written(it.len());
+                }
+            }
+            if !ok {
+                self.close();
+                return;
+            }
+        }
+    }
+}

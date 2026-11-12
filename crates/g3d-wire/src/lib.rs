@@ -33,7 +33,9 @@ mod tests {
             }
             let Some(buf) = cur.as_mut() else { continue };
             // "0000  2e 00 …   ascii": a 4-hex-digit offset, two spaces, up to 16 bytes.
-            let bytes = line.get(..4).filter(|o| o.chars().all(|c| c.is_ascii_hexdigit()))
+            let bytes = line
+                .get(..4)
+                .filter(|o| o.chars().all(|c| c.is_ascii_hexdigit()))
                 .and_then(|_| line.get(6..).map(|r| r.get(..48).unwrap_or(r)));
             if let Some(hex) = bytes {
                 for tok in hex.split_whitespace() {
@@ -152,15 +154,25 @@ mod tests {
             Op::Stop,
             Op::Kill(Kill { id: "t".into(), signal: Some("TERM".into()) }),
             Op::Subscribe(Subscribe {
-                id: "t".into(), mode: Mode::Raw, role: Role::Own, history_rows: Some(10),
-                flow: Some(Flow::Block), cols: Some(100), rows: Some(30),
+                id: "t".into(),
+                mode: Mode::Raw,
+                role: Role::Own,
+                history_rows: Some(10),
+                flow: Some(Flow::Block),
+                cols: Some(100),
+                rows: Some(30),
             }),
             Op::Unsubscribe(HandleOnly { handle: 3 }),
             Op::Take(Take { handle: 3, cols: None, rows: None }),
             Op::Resize(Resize { handle: 3, cols: 1, rows: 4096 }),
             Op::Repaint(RepaintOp { handle: 3, history_rows: None }),
             Op::View(View { handle: 3, delta: Some(-5), live: None }),
-            Op::Capture(Capture { id: "t".into(), format: Some(CaptureFormat::Vt), history_rows: Some(9), unwrap: Some(true) }),
+            Op::Capture(Capture {
+                id: "t".into(),
+                format: Some(CaptureFormat::Vt),
+                history_rows: Some(9),
+                unwrap: Some(true),
+            }),
         ];
         for op in ops {
             let r = Request { req: 9, op };
