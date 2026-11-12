@@ -33,6 +33,7 @@ const { MonospaceShapeCache, shapeText, collectUniqueGlyphIds, LiveSlugAtlas,
 const { blobStore } = await import(`${ROOT}/packages/glyph3d-core/src/services/state/index.js`);
 const { default: SlugEncodeClient } = await import(`${ROOT}/packages/glyph3d-core/src/workers/SlugEncodeClient.js`);
 const { LARGE_CORE_RANGES } = await import(`${ROOT}/packages/glyph3d-core/src/core/coreRanges.js`);
+const { default: TextureUploads } = await import(`${ROOT}/packages/glyph3d-core/src/core/TextureUploads.js`);
 
 const codepointsFromRanges = (ranges) => {
     let s = '';
@@ -46,7 +47,7 @@ shapeCache.prime(text);
 const glyphIds = collectUniqueGlyphIds(shapeText(shapeCache, text).lines);
 
 const encoder = new SlugEncodeClient({ fonts: chain.fontSources() });
-const live = new LiveSlugAtlas({ atlas: null, shaper: chain, encoder });
+const live = new LiveSlugAtlas({ atlas: null, shaper: chain, encoder, uploads: new TextureUploads() });   // never drawn: its queue is never flushed
 await live.encodeCore(glyphIds);
 const descriptor = live.serialize();
 live.dispose();

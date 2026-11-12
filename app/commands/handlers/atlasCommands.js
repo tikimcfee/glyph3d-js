@@ -50,9 +50,10 @@ export default function registerAtlasCommands(router) {
                 : '(none)',
             pending: live.pending,
             grownSinceBoot: live.grownCount,
-            // what growth has asked the GPU for: in-place ranges vs whole reborn textures
-            slugUploads: (() => { const u = live.uploadStats.slug; return `${u.rangeBytes} B in ${u.ranges} ranges · ${u.reborn} reborn (${u.rebornBytes} B)`; })(),
-            emojiUploads: (() => { const u = live.uploadStats.emoji; return u ? `${u.rangeBytes} B in ${u.ranges} ranges · ${u.reborn} reborn · ${u.rasterCells} cells rastered` : '(no emoji atlas)'; })(),
+            // what growth has asked the GPU for: in-place rects, and reborn textures (old rows copied on the GPU)
+            slugUploads: (() => { const u = live.uploadStats.slug; return `${u.rectBytes} B in ${u.rects} rects · ${u.reborn} reborn`; })(),
+            emojiUploads: (() => { const u = live.uploadStats.emoji; return u ? `${u.rectBytes} B in ${u.rects} rects · ${u.reborn} reborn · ${u.rasterCells} cells rastered` : '(no emoji atlas)'; })(),
+            uploadQueue: (() => { const u = live.uploadStats.queue; return `${u.rects} rects (${u.rectBytes} B) · ${u.copies} GPU copies (${u.copyBytes} B never re-sent) · ${u.flushes} flushes · ${live.uploads.pending} pending`; })(),
         };
         // Per-font coverage detail (reaches into chain internals — diagnostic only).
         const lines = kvLines(info);

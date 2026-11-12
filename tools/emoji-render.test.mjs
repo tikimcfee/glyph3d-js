@@ -5,6 +5,7 @@ import InstancedField from '../packages/glyph3d-core/src/collections/InstancedFi
 import CodeGrid from '../packages/glyph3d-core/src/collections/CodeGrid.js';
 import { generateLayout } from '../packages/glyph3d-core/src/core/LayoutGenerator.js';
 import LiveSlugAtlas from '../packages/glyph3d-core/src/shaping/LiveSlugAtlas.js';
+import TextureUploads from '../packages/glyph3d-core/src/core/TextureUploads.js';
 
 let passed = 0;
 let failed = 0;
@@ -112,7 +113,7 @@ console.log('Testing Emoji WebGL2 Pipeline...');
     };
 
     // No outline glyph is asked for here, so the encoder is never called.
-    const live = new LiveSlugAtlas({ atlas: {}, shaper, encoder: { encode: () => { throw new Error('no outline expected'); } } });
+    const live = new LiveSlugAtlas({ atlas: {}, shaper, uploads: new TextureUploads(), encoder: { encode: () => { throw new Error('no outline expected'); } } });
     // Encode the emoji codepoints
     const res = live.ensureCodepoints([0x1F600, 0x1F680], shaper);
     assert(res.queued === 2 && res.pending === 0, 'emoji codepoints get their map entries at once (nothing in flight)');

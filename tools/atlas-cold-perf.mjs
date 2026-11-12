@@ -16,7 +16,11 @@
  *   gap       the worst frame-to-frame interval from the write to 300 ms past visible
  *   long      long tasks (>50 ms) in that window
  *   upload    texture bytes the GL calls asked for (texSubImage2D/texImage2D w × h × texel size —
- *             three hands the whole array with skip/row-length set, so its byteLength lies)
+ *             three hands the whole array with skip/row-length set, so its byteLength lies), the
+ *             calls that moved them, and GPU-side copies (copyTexSubImage2D: no bytes cross the bus)
+ *   gl        main-thread ms inside those calls — in the window, and in its worst frame
+ *   render    the worst renderer.render CPU ms in the window, and the worst GPU ms of one render
+ *             (EXT_disjoint_timer_query_webgl2) — where a big upload lands
  *
  * It reads the atlas through whichever growth API the page has (whenIdle when growth is async,
  * else the synchronous return), so the same tool measures before and after the change. One
@@ -49,11 +53,36 @@ function installProbe() {
     const c = window.__glyphClient, w = window.__wall;
     const gl = c.ctx.renderer.getContext();
     const now = () => performance.now();
-    const st = { frames: [], tex: [], apply: [], long: [] };
+    const st = { frames: [], tex: [], copies: [], apply: [], long: [], renders: [], gpu: [] };
     const bpp = (type) => (type === gl.UNSIGNED_INT || type === gl.INT || type === gl.FLOAT ? 16 : 4);
-    const origSub = gl.texSubImage2D, origImg = gl.texImage2D;
-    gl.texSubImage2D = function (...a) { if (a.length >= 9 && typeof a[4] === 'number') st.tex.push([now(), a[4] * a[5] * bpp(a[7])]); return origSub.apply(this, a); };
-    gl.texImage2D = function (...a) { if (a.length >= 9 && typeof a[3] === 'number' && a[8]) st.tex.push([now(), a[3] * a[4] * bpp(a[7])]); return origImg.apply(this, a); };
+    // Each upload call: [when, bytes, ms inside the call].
+    const timed = (orig, bytesOf, into) => function (...a) {
+        const t = now();
+        try { return orig.apply(this, a); } finally { const b = bytesOf(a); if (b !== null) into.push([t, b, now() - t]); }
+    };
+    gl.texSubImage2D = timed(gl.texSubImage2D, (a) => (a.length >= 9 && typeof a[4] === 'number' ? a[4] * a[5] * bpp(a[7]) : null), st.tex);
+    gl.texImage2D = timed(gl.texImage2D, (a) => (a.length >= 9 && typeof a[3] === 'number' && a[8] ? a[3] * a[4] * bpp(a[7]) : null), st.tex);
+    gl.copyTexSubImage2D = timed(gl.copyTexSubImage2D, () => 0, st.copies);
+    // renderer.render: CPU ms, and GPU ms through a timer query per render.
+    const r3 = c.ctx.renderer;
+    const tq = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    const pendingQ = [];
+    const origRender = r3.render;
+    r3.render = function (...a) {
+        let q = null;
+        if (tq && pendingQ.length < 16) { q = gl.createQuery(); gl.beginQuery(tq.TIME_ELAPSED_EXT, q); }
+        const t = now();
+        try { return origRender.apply(this, a); } finally {
+            st.renders.push([t, now() - t]);
+            if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); pendingQ.push([t, q]); }
+            for (let i = pendingQ.length - 1; i >= 0; i--) {
+                const [tq0, pq] = pendingQ[i];
+                if (!gl.getQueryParameter(pq, gl.QUERY_RESULT_AVAILABLE)) continue;
+                if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) st.gpu.push([tq0, gl.getQueryParameter(pq, gl.QUERY_RESULT) / 1e6]);
+                gl.deleteQuery(pq); pendingQ.splice(i, 1);
+            }
+        }
+    };
     const G = Object.getPrototypeOf(w.terminal(w.order[0]));
     const origApply = G.applyScreen;
     G.applyScreen = function (...a) { const t = now(); try { return origApply.apply(this, a); } finally { st.apply.push([t, now() - t]); } };
@@ -76,8 +105,16 @@ function installProbe() {
         const tLanded = now();
         const tVisible = await frame();   // the render of this frame uploads + draws the landed glyphs
         await sleep(300);
+        for (let i = 0; i < 6; i++) await frame();   // the timer queries of the window's renders resolve
         const tEnd = now();
         const inWin = ([t]) => t >= t0 && t <= tEnd;
+        // GL ms per frame: each upload call binned into the frame interval it ran in.
+        const fr0 = st.frames.filter((t) => t >= t0 - 20 && t <= tEnd);
+        const perFrame = new Map();
+        for (const [t, , ms] of [...st.tex, ...st.copies].filter(inWin)) {
+            let k = 0; while (k < fr0.length && fr0[k] <= t) k++;
+            perFrame.set(k, (perFrame.get(k) ?? 0) + ms);
+        }
         const fr = st.frames.filter((t) => t >= t0 - 20 && t <= tEnd);
         let gap = 0; for (let i = 1; i < fr.length; i++) gap = Math.max(gap, fr[i] - fr[i - 1]);
         const r = {
@@ -87,9 +124,15 @@ function installProbe() {
             worstGapMs: +gap.toFixed(1),
             longTasks: st.long.filter(([t]) => t >= t0 && t <= tEnd).map(([, d]) => +d.toFixed(0)),
             uploadBytes: st.tex.filter(inWin).reduce((s, [, b]) => s + b, 0),
+            uploadCalls: st.tex.filter(inWin).length,
+            gpuCopies: st.copies.filter(inWin).length,
+            glMs: +[...st.tex, ...st.copies].filter(inWin).reduce((s, [, , ms]) => s + ms, 0).toFixed(2),
+            glWorstFrameMs: +Math.max(0, ...perFrame.values()).toFixed(2),
+            renderMaxMs: +Math.max(0, ...st.renders.filter(inWin).map(([, ms]) => ms)).toFixed(2),
+            gpuMaxMs: +Math.max(0, ...st.gpu.filter(inWin).map(([, ms]) => ms)).toFixed(2),
             glyphsAdded: live.size - size0, timedOut: live.version === v0,
         };
-        st.frames.length = 0; st.tex.length = 0; st.apply.length = 0;
+        st.frames.length = 0; st.tex.length = 0; st.copies.length = 0; st.apply.length = 0; st.renders.length = 0; st.gpu.length = 0;
         return r;
     };
     window.__acp = st;
@@ -126,7 +169,7 @@ try {
         const text = cps.length === 1 ? String.fromCodePoint(cps[0]) : rowsOf(cps, perRow);
         const r = await app.evalPage((t) => window.__acp.burst(t), text);
         result.bursts.push({ label, ...r });
-        console.log(`COLD ${label.padEnd(16)} visible ${String(r.visibleMs).padStart(6)} ms (landed ${r.landedMs}) · applyScreen ${r.applyMs} ms (max ${r.maxApplyMs}) · worst gap ${r.worstGapMs} ms · long tasks [${r.longTasks.join(' ')}] · upload ${r.uploadBytes} B · +${r.glyphsAdded} glyphs${r.timedOut ? ' · TIMED OUT' : ''}`);
+        console.log(`COLD ${label.padEnd(16)} visible ${String(r.visibleMs).padStart(6)} ms (landed ${r.landedMs}) · applyScreen ${r.applyMs} ms (max ${r.maxApplyMs}) · worst gap ${r.worstGapMs} ms · long tasks [${r.longTasks.join(' ')}] · upload ${r.uploadBytes} B in ${r.uploadCalls} call(s) + ${r.gpuCopies} GPU copies · gl ${r.glMs} ms (worst frame ${r.glWorstFrameMs}) · render max ${r.renderMaxMs} ms, gpu max ${r.gpuMaxMs} ms · +${r.glyphsAdded} glyphs${r.timedOut ? ' · TIMED OUT' : ''}`);
     }
     if (SHOT) {
         // A mixed screen — ASCII, box drawing, core + NEW emoji, NEW Nerd icons and syllabics (cold on

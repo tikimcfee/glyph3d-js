@@ -271,6 +271,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   recompute; `scene.transforms who [ms]` names the moving nodes that started the recomputes over a
   window (the "who never rests" probe — an ease must LAND on its target, never approach it forever:
   `Carrel.update`'s member turns do). Gate: `tools/scene-transforms.test.mjs`.
+- **Atlas texture uploads** (`core/TextureUploads.js`, `atlas._textureUploads`): the Slug curve /
+  glyph-map textures and the emoji grid never re-send what the GPU holds. A landing queues its
+  written texels as rectangles (a span is at most three: a row's tail, whole rows, a row's head —
+  three's own `updateRanges` path sends one row per call); a texture whose array grew is born
+  allocated but unfilled (`source.dataReady = false`) and its old rows are copied GPU-side
+  (`renderer.copyTextureToTexture`), then the old texture is disposed. `SceneSystems` flushes the
+  queue before every top-level render (never a nested one), so a landing is drawn in the next
+  frame. Gates: `tools/texture-uploads.test.mjs` (bytes per event, against a model of three's
+  WebGL path), `tools/atlas-growth.test.mjs`; `atlas-cold-perf` measures it in a browser.
 - **Agent sessions** (`app/client/SessionBooks.js`, `services/data/AgentSessionProvider.js`):
   gomuxai is the ONE reader of agent transcripts (its docs/EVENTS.md); the relay runs
   `agent sessions --json` (pushed whole as `agentSessions/changed`; `agentSessions/list`) and

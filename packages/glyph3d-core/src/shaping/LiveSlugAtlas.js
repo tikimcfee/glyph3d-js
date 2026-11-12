@@ -20,14 +20,16 @@
  *      is the same: its map entry is written at once, but its atlas cell is transparent until
  *      EmojiAtlas's raster lands.
  *   4. On landing the curves are copied into the textures' spare capacity and ONLY the touched
- *      texels upload (update ranges on the texture objects every field already holds). The
- *      cell needs no rewrite: the slot it holds now resolves to ink on the next frame.
+ *      texels upload (rectangles on the texture objects every field already holds, queued on
+ *      the TextureUploads the renderer seam flushes before the next frame). The cell needs no
+ *      rewrite: the slot it holds now resolves to ink on the next frame.
  *   5. `onGlyphsReady(cb)` fires once per landed batch (outlines encoded, or emoji pixels
  *      rasterized) with { slots, codepoints, version } — for callers that cache anything per
  *      glyph or render on demand. Nothing needs it to draw correctly.
  *
  * A texture is REBORN only when its array doubles (it fills its capacity): then every
- * registered field gets setSlugData() with the new pair — rare and amortized, never per glyph.
+ * registered field gets setSlugData() with the new pair — rare and amortized, never per glyph —
+ * and the old texture's rows are copied into the new one on the GPU, not re-sent.
  *
  * Runtime growth PERSISTS: the glyphs learned after boot (not the core) are handed to
  * `persist.save` (debounced) as records keyed by font glyph, and boot hydrates them back
@@ -61,6 +63,8 @@ export default class LiveSlugAtlas {
      *           isBitmapSlot / emojiCellOf / bitmapSlotOf / describeSlot).
      * @param {{encode:(items:Uint32Array)=>Promise<{batch:Object, ms:number}>, dispose?:()=>void}} opts.encoder
      *           - the off-thread encoder (SlugEncodeClient)
+     * @param {import('../core/TextureUploads.js').default} opts.uploads - the texture-upload queue
+     *           the renderer seam flushes (shared with the emoji atlas)
      * @param {Object}   [opts.initialDescriptor] - a slug-core descriptor (the cache) to hydrate;
      *           without one the atlas starts empty and boot calls encodeCore().
      * @param {import('../EmojiAtlas.js').default|null} [opts.emojiAtlas] - whose landed pixels
@@ -68,12 +72,14 @@ export default class LiveSlugAtlas {
      * @param {{save:(growth:Object)=>Promise<number>}|null} [opts.persist] - where grown glyphs go
      * @param {number}   [opts.persistDebounceMs]
      */
-    constructor({ atlas, shaper, encoder, initialDescriptor = null, emojiAtlas = null, persist = null,
+    constructor({ atlas, shaper, encoder, uploads, initialDescriptor = null, emojiAtlas = null, persist = null,
                   persistDebounceMs = ATLAS_GROWTH.persistDebounceMs }) {
+        if (!uploads) throw new Error('[LiveSlugAtlas] needs a TextureUploads (the queue the renderer seam flushes)');
         /** @private */ this._atlas    = atlas;
         /** @private */ this._shaper   = shaper;
         /** @private */ this._encoder  = encoder;
-        /** @private */ this._textures = initialDescriptor ? SlugTextures.hydrate(initialDescriptor) : new SlugTextures();
+        /** @private */ this._uploads = uploads;
+        /** @private */ this._textures = initialDescriptor ? SlugTextures.hydrate(uploads, initialDescriptor) : new SlugTextures(uploads);
         /** @private the pair fields bind; replaced only when a texture is reborn */
         this._slugData = this._textures.pair;
         if (atlas) atlas._slugData = this._slugData;
@@ -115,9 +121,12 @@ export default class LiveSlugAtlas {
     /** @returns {number} glyphs requested and not yet landed (outlines + emoji pixels) */
     get pending() { return this._inFlight.size + (this._emojiAtlas?.pending ?? 0); }
 
-    /** Upload accounting: { slug: SlugTextures stats, emoji: EmojiAtlas stats }. */
+    /** @returns {import('../core/TextureUploads.js').default} the queue the renderer seam flushes */
+    get uploads() { return this._uploads; }
+
+    /** Upload accounting: { slug: SlugTextures stats, emoji: EmojiAtlas stats, queue: TextureUploads stats }. */
     get uploadStats() {
-        return { slug: { ...this._textures.stats }, emoji: this._emojiAtlas ? { ...this._emojiAtlas.stats } : null };
+        return { slug: { ...this._textures.stats }, emoji: this._emojiAtlas ? { ...this._emojiAtlas.stats } : null, queue: { ...this._uploads.stats } };
     }
 
     /** @returns {number} glyphs learned since boot (the persisted growth) */
@@ -370,7 +379,7 @@ export default class LiveSlugAtlas {
             `[LiveSlugAtlas] grew v${this._version}: +${added} → ${this.size} glyphs ` +
             `[${names}${ids.length > 24 ? ` …+${ids.length - 24}` : ''}]${blanks ? ` (${blanks} blank)` : ''}, ` +
             `encoded in ${workerMs.toFixed(1)}ms off-thread, landed in ${ms.toFixed(1)}ms, ` +
-            `${bytes} B to upload${reborn ? `, textures reborn → ${rebound}/${this._fields.size} fields rebound` : ''}`
+            `${bytes} B to upload${reborn ? `, textures reborn (old rows copied on the GPU) → ${rebound}/${this._fields.size} fields rebound` : ''}`
         );
         if (added) {
             this._emit({ slots: ids, codepoints: ids.map((id) => prov.get(id)).filter((cp) => cp !== undefined), version: this._version });
@@ -379,12 +388,12 @@ export default class LiveSlugAtlas {
     }
 
     /**
-     * @private bring the textures up to the buffer; a reborn texture goes to every field and
-     * the old one is disposed (each growth used to leak a pair until page unload — VRAM pressure
-     * on the bulk-load path preceded the 2026-08-04 device OOM)
+     * @private bring the textures up to the buffer; a reborn texture goes to every field (the old
+     * one is disposed by the uploads queue once its rows are copied — each growth used to leak a
+     * pair until page unload: VRAM pressure on the bulk-load path preceded the 2026-08-04 device OOM)
      */
     _sync() {
-        const { reborn, bytes, retired } = this._textures.sync();
+        const { reborn, bytes } = this._textures.sync();
         let rebound = 0;
         if (reborn) {
             this._slugData = this._textures.pair;
@@ -392,7 +401,6 @@ export default class LiveSlugAtlas {
             for (const field of this._fields) {
                 if (typeof field?.setSlugData === 'function') { field.setSlugData(this._slugData, this._shaper); rebound++; }
             }
-            for (const t of retired) t.dispose();
         }
         return { reborn, bytes, rebound };
     }

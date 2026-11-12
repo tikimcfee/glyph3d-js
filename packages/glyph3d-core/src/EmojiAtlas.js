@@ -18,12 +18,14 @@
  *            band of pixel rows they occupy. Until it lands a cell is transparent (the shader
  *            draws only the cell's background).
  *   upload   the pixels live in a CPU array the texture wraps (a DataTexture); a landed run is
- *            copied in and only its pixel rows are queued as update ranges — the texture
- *            object stays, nothing re-uploads whole.
+ *            copied in and only its cells are queued on the atlas's TextureUploads — at most
+ *            three rectangles (a cell row's tail, whole cell rows, a cell row's head) — which
+ *            the renderer seam flushes before the next frame. The texture object stays.
  *   growth   the column count is FIXED, so a cell never moves; when the cells run out the rows
  *            grow (×EMOJI_ATLAS.rowGrowth, up to MAX_ATLAS_DIM_PX tall): the array is
  *            reallocated with the old one as its prefix and the texture is reborn at the new
- *            size — the one case every field rebinds (the 'replaced' event).
+ *            size — the one case every field rebinds (the 'replaced' event). The old rows are
+ *            copied into it on the GPU (TextureUploads.grow); none of them is re-sent.
  *
  * Listeners (`onChange`) hear { kind: 'rasterized', cells, codepoints } when a run's pixels are
  * in, and { kind: 'replaced' } when the texture was reborn. With no rasterizer (no Worker or no
@@ -75,6 +77,8 @@ export default class EmojiAtlas {
      * @param {number} [options.rows]       rows to start with
      * @param {number} [options.rowGrowth]  row growth factor when full
      * @param {string} [options.fontFamily] CSS emoji font stack
+     * @param {import('./core/TextureUploads.js').default} [options.uploads] the texture-upload queue
+     *   the renderer seam flushes (required with a rasterizer — it carries every landed cell)
      * @param {EmojiRasterizer|null} [options.rasterizer] who draws cells (default: the worker;
      *   null = none, every `ensure` answers -1)
      */
@@ -89,6 +93,8 @@ export default class EmojiAtlas {
 
         /** @private @type {EmojiRasterizer|null} */
         this._rasterizer = options.rasterizer !== undefined ? options.rasterizer : defaultRasterizer();
+        if (this._rasterizer && !options.uploads) throw new Error('[EmojiAtlas] needs a TextureUploads (the queue the renderer seam flushes) to draw emoji');
+        /** @private */ this._uploads = options.uploads ?? null;
         /** @private codepoint → cell index */
         this._byCp = new Map();
         /** @private next free cell */
@@ -104,8 +110,8 @@ export default class EmojiAtlas {
         this._THREE = null;
         this._texture = null;
         /** @private */ this._listeners = new Set();
-        /** Upload accounting: bytes queued as ranges, and whole-texture rebirths. */
-        this.stats = { rasterRuns: 0, rasterCells: 0, rangeBytes: 0, ranges: 0, reborn: 0, rasterMs: 0 };
+        /** Upload accounting: bytes queued as rects (and the rects), and rebirths (old rows copied on the GPU). */
+        this.stats = { rasterRuns: 0, rasterCells: 0, rectBytes: 0, rects: 0, reborn: 0, rasterMs: 0 };
     }
 
     /** @returns {number} total cells (cols × rows) */
@@ -164,7 +170,7 @@ export default class EmojiAtlas {
 
     /**
      * Grow the rows (cols stay, so no cell moves): reallocate the pixels with the old array
-     * as the prefix and rebirth the texture at the new size.
+     * as the prefix and rebirth the texture at the new size, its old rows copied on the GPU.
      * @private
      * @returns {boolean} whether it grew
      */
@@ -176,11 +182,10 @@ export default class EmojiAtlas {
         grown.set(this._pixels);
         this._pixels = grown;
         if (this._texture) {
-            const old = this._texture;
-            this._texture = this._makeTexture();
+            // The uploads queue copies the old texture's rows into the new one, then disposes it.
+            this._texture = this._uploads.grow(this._texture, this._makeTexture());
             this.stats.reborn++;
-            this._emit({ kind: 'replaced' });   // every field rebinds to the new texture …
-            old.dispose();                      // … so the old one is free
+            this._emit({ kind: 'replaced' });   // every field rebinds to the new texture
         }
         console.log(`[EmojiAtlas] grew ${this.cols}×${prev} → ${this.cols}×${this.rows} cells (${this.capacity})`);
         return true;
@@ -210,7 +215,8 @@ export default class EmojiAtlas {
     }
 
     /**
-     * Copy a rasterized run into the pixels and queue its pixel rows for upload.
+     * Copy a rasterized run into the pixels and queue its cells for upload (one rect per cell
+     * row; whole cell rows merge into one).
      * @private
      */
     _land(firstIdx, cps, { row0, rows, col0, wCells, band }) {
@@ -219,7 +225,7 @@ export default class EmojiAtlas {
         const last = firstIdx + cps.length - 1;
         const atlasStride = this.widthPx * 4;
         const bandStride = wCells * cell * 4;
-        const tex = this._texture && this._texture.userData.uploaded ? this._texture : null;
+        const tex = this._texture;
         const src = band instanceof Uint8Array ? band : new Uint8Array(band.buffer, band.byteOffset, band.byteLength);
         for (let r = 0; r < rows; r++) {
             const R = row0 + r;
@@ -238,12 +244,11 @@ export default class EmojiAtlas {
                 }
             }
             if (tex) {
-                for (let y = 0; y < cell; y++) tex.addUpdateRange((R * cell + y) * atlasStride + xBytes, lenBytes);
-                this.stats.ranges += cell;
-                this.stats.rangeBytes += cell * lenBytes;
+                const rects = this._uploads.stats.rects;
+                this.stats.rectBytes += this._uploads.rect(tex, cA * cell, R * cell, (cB - cA + 1) * cell, cell);
+                this.stats.rects += this._uploads.stats.rects - rects;
             }
         }
-        if (tex) tex.needsUpdate = true;
         this.stats.rasterRuns++;
         this.stats.rasterCells += cps.length;
         const cells = new Array(cps.length);
@@ -258,7 +263,7 @@ export default class EmojiAtlas {
         }
     }
 
-    /** @private a DataTexture over the current pixels, marking itself uploaded once it is */
+    /** @private a DataTexture over the current pixels (the uploads queue adopts or grows it) */
     _makeTexture() {
         const THREE = this._THREE;
         const t = new THREE.DataTexture(this._pixels, this.widthPx, this.heightPx, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -272,12 +277,6 @@ export default class EmojiAtlas {
         t.generateMipmaps = false;
         t.flipY = false;
         t.premultiplyAlpha = false;
-        t.userData.uploaded = false;
-        t.onUpdate = () => {
-            t.userData.uploaded = true;
-            t.clearUpdateRanges();   // WebGL consumed them already; WebGPU uploads whole
-        };
-        t.needsUpdate = true;
         return t;
     }
 
@@ -291,13 +290,14 @@ export default class EmojiAtlas {
         if (!this._pixels) return null;
         if (!this._texture) {
             this._THREE = THREE;
-            this._texture = this._makeTexture();
+            this._texture = this._uploads.adopt(this._makeTexture());
         }
         return this._texture;
     }
 
     /** Release the texture, the pixels and the rasterizer's worker. */
     dispose() {
+        if (this._texture) this._uploads.forget(this._texture);
         this._texture?.dispose();
         this._texture = null;
         this._rasterizer?.dispose();

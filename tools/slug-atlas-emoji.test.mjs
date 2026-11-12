@@ -11,6 +11,7 @@
 // cleanly. The fake encoder runs the real encodeGlyphBatch in-process.
 
 import LiveSlugAtlas from '../packages/glyph3d-core/src/shaping/LiveSlugAtlas.js';
+import TextureUploads from '../packages/glyph3d-core/src/core/TextureUploads.js';
 import { encodeGlyphBatch } from '../packages/glyph3d-core/src/shaping/slugData.js';
 
 let pass = 0, fail = 0;
@@ -39,7 +40,7 @@ const encoder = {
 let emojiListener = null;
 const emojiAtlas = { pending: 0, onChange: (cb) => { emojiListener = cb; return () => {}; }, whenIdle: async () => {} };
 
-const atlas = new LiveSlugAtlas({ atlas: {}, shaper, encoder, emojiAtlas });
+const atlas = new LiveSlugAtlas({ atlas: {}, shaper, encoder, emojiAtlas, uploads: new TextureUploads() });
 const bornCurve = atlas.slugData.curveTexture;
 const map = () => atlas.slugData.glyphMapTexture.image.data;
 

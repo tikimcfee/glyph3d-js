@@ -9,10 +9,11 @@
  * worker, three's DataTextures without a GPU). What it locks:
  *
  *   [1] incremental upload   a glyph appended within capacity queues only its own texels as
- *                            update ranges (one per texture row — three's WebGL upload sends a
- *                            range as a one-row texSubImage2D) on the SAME texture objects; the
+ *                            rects on the atlas's TextureUploads (a span is at most three: a row's
+ *                            tail, whole rows, a row's head) on the SAME texture objects; the
  *                            bytes per new glyph are measured against the whole-texture upload
  *                            each growth used to cost. A texture not yet uploaded queues nothing.
+ *                            (texture-uploads.test.mjs counts what reaches the GPU per event.)
  *   [2] async contract       ensure* never blocks; an in-flight slot reads an all-zero (blank)
  *                            map texel; one glyphs-ready event per landed batch, carrying slots +
  *                            codepoints; a failed encode leaves its slots blank, logged, not pending.
@@ -23,9 +24,9 @@
  *                            the slots IT gives them, byte-identical, and asks for none of them
  *                            again; end to end through bootGlyphEngine (miss → encode → save;
  *                            boot 2 warm; a corrupt growth blob → boot still succeeds, cold).
- *   [5] emoji atlas          landed pixels go to the right cells; only their pixel rows are
- *                            queued; a growth adds rows (cells never move) and rebirths the
- *                            texture once ('replaced').
+ *   [5] emoji atlas          landed pixels go to the right cells; only their cells are queued
+ *                            (one rect); a growth adds rows (cells never move) and rebirths the
+ *                            texture once ('replaced'), its old rows queued as a GPU copy.
  */
 
 import * as THREE from 'three';
@@ -35,8 +36,9 @@ const { chain } = await bootHeadlessFontChain();
 const S = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
 const { default: SlugEncodeClient } = await import(`${ROOT}/packages/glyph3d-core/src/workers/SlugEncodeClient.js`);
 const { default: EmojiAtlas } = await import(`${ROOT}/packages/glyph3d-core/src/EmojiAtlas.js`);
+const { default: TextureUploads } = await import(`${ROOT}/packages/glyph3d-core/src/core/TextureUploads.js`);
 const { blobStore } = await import(`${ROOT}/packages/glyph3d-core/src/services/state/index.js`);
-const { TEXTURE_WIDTH, CURVE_U32_PER_CURVE } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/slug-constants.js`);
+const { CURVE_U32_PER_CURVE } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/slug-constants.js`);
 const { LiveSlugAtlas, MonospaceShapeCache, encodeGlyphBatch } = S;
 
 let pass = 0, fail = 0;
@@ -50,21 +52,25 @@ const SYLL = range(0x1401, 0x1420);                 // Canadian syllabics (DejaV
 
 // Mark a texture's first upload as landed (what three's renderer does after uploading).
 const uploaded = (t) => { t.onUpdate(t); return t; };
-const rowOf = (u32Index, w) => Math.floor(u32Index / 4 / w);
+/** The rects queued on an uploads queue for texture `t` (its pending ops). */
+const rectsOf = (uploads, t) => uploads._ops.filter((op) => op.kind === 'rect' && op.tex === t);
+/** Run a queue through a renderer that only takes the ops (the GPU side is texture-uploads.test's). */
+const flushed = (uploads) => uploads.flush({ copyTextureToTexture() {}, getRenderTarget: () => null, getActiveCubeFace: () => 0, getActiveMipmapLevel: () => 0, setRenderTarget() {} });
 
 // ── [1] incremental upload ─────────────────────────────────────────────────────────────────
 console.log('\n[1] incremental upload — bytes per new glyph');
 const encoder = new SlugEncodeClient({ fonts: chain.fontSources() });
 const shapeCache = new MonospaceShapeCache(chain);
-const live = new LiveSlugAtlas({ atlas: {}, shaper: chain, encoder });
+const uploads = new TextureUploads();
+const live = new LiveSlugAtlas({ atlas: {}, shaper: chain, encoder, uploads });
 await quiet(() => live.encodeCore(range(0x21, 0x7e).map((cp) => shapeCache.lookup(cp).g)))();
 const { curveTexture: curve0, glyphMapTexture: map0 } = live.slugData;
 const wholeBytes = curve0.image.data.byteLength + map0.image.data.byteLength;
 {
-    const before = live.uploadStats.slug.rangeBytes;
+    const before = live.uploadStats.slug.rectBytes;
     live.ensureCodepoints([0xf001], shapeCache);
     await quiet(() => live.whenIdle())();
-    ok(live.uploadStats.slug.rangeBytes === before, 'before the first upload nothing is queued (the first upload sends the live array)');
+    ok(live.uploadStats.slug.rectBytes === before && uploads.pending === 0, 'before the first upload nothing is queued (the first upload sends the live array)');
 }
 uploaded(curve0); uploaded(map0);
 {
@@ -74,28 +80,28 @@ uploaded(curve0); uploaded(map0);
     await quiet(() => live.whenIdle())();
     const s1 = live.uploadStats.slug;
     const curves = live._textures.buffer.slotTexels(slot).length / CURVE_U32_PER_CURVE;
-    const bytes = s1.rangeBytes - s0.rangeBytes;
+    const bytes = s1.rectBytes - s0.rectBytes;
     ok(live.slugData.curveTexture === curve0 && live.slugData.glyphMapTexture === map0, 'same texture objects after the growth (no field rebinds)');
     ok(s1.reborn === s0.reborn, 'no texture reborn');
     ok(bytes === (curves * 2 + 1) * 16, `one new glyph uploads its own texels: ${curves} curves → ${bytes} B (${curves * 2} curve texels + 1 map texel)`);
     ok(bytes * 100 < wholeBytes, `vs the whole-texture re-upload a growth used to cost: ${bytes} B vs ${wholeBytes} B (${(wholeBytes / bytes).toFixed(0)}×)`);
-    const rangesOk = [...curve0.updateRanges, ...map0.updateRanges].every((r) => rowOf(r.start, TEXTURE_WIDTH) === rowOf(r.start + r.count - 1, TEXTURE_WIDTH));
-    ok(curve0.updateRanges.length > 0 && rangesOk, `queued as ${curve0.updateRanges.length}+${map0.updateRanges.length} range(s), each inside one texture row`);
-    ok(curve0.version > 1, `the curve texture is flagged for upload (version ${curve0.version})`);
-    uploaded(curve0); uploaded(map0);
-    ok(curve0.updateRanges.length === 0, 'ranges cleared once the upload lands');
+    const cr = rectsOf(uploads, curve0), mr = rectsOf(uploads, map0);
+    ok(cr.length >= 1 && cr.length <= 3 && mr.length === 1, `queued as ${cr.length}+${mr.length} rect(s) (≤ 3 per span)`);
+    ok(curve0.updateRanges.length === 0 && curve0.version === 1, 'three\'s own path is untouched: no update ranges, no re-flag of the texture');
+    flushed(uploads);
+    ok(uploads.pending === 0, 'the renderer seam\'s flush takes them');
 }
 {
-    // A burst crossing curve-row boundaries splits per row.
+    // A burst crossing curve-row boundaries: one span, at most three rects, however many rows.
     const s0 = live.uploadStats.slug;
     live.ensureCodepoints(NERD, shapeCache);
     await quiet(() => live.whenIdle())();
     const s1 = live.uploadStats.slug;
-    const rowsTouched = new Set(curve0.updateRanges.map((r) => rowOf(r.start, TEXTURE_WIDTH))).size;
-    const rangesOk = curve0.updateRanges.every((r) => rowOf(r.start, TEXTURE_WIDTH) === rowOf(r.start + r.count - 1, TEXTURE_WIDTH));
-    ok(rowsTouched >= 2 && rangesOk && curve0.updateRanges.length === rowsTouched, `a ${NERD.length}-glyph burst: ${curve0.updateRanges.length} ranges over ${rowsTouched} rows, none crossing a row`);
-    ok(s1.rangeBytes - s0.rangeBytes < 64 * 1024, `burst uploads ${s1.rangeBytes - s0.rangeBytes} B (was ${wholeBytes} B per growth)`);
-    uploaded(curve0); uploaded(map0);
+    const cr = rectsOf(uploads, curve0);
+    const rows = cr.reduce((n, op) => n + op.h, 0);
+    ok(rows >= 2 && cr.length <= 3, `a ${NERD.length}-glyph burst: ${cr.length} rect(s) over ${rows} texture rows (was one call per row)`);
+    ok(s1.rectBytes - s0.rectBytes < 64 * 1024, `burst uploads ${s1.rectBytes - s0.rectBytes} B (was ${wholeBytes} B per growth)`);
+    flushed(uploads);
 }
 
 // ── [2] async contract ─────────────────────────────────────────────────────────────────────
@@ -124,7 +130,7 @@ console.log('\n[2] async contract');
     // A failing encoder: logged loudly, slots leave the pending set, stay blank.
     const errors = [];
     const err0 = console.error; console.error = (m) => errors.push(String(m));
-    const bad = new LiveSlugAtlas({ atlas: {}, shaper: chain, encoder: { encode: async () => { throw new Error('boom'); } } });
+    const bad = new LiveSlugAtlas({ atlas: {}, shaper: chain, uploads: new TextureUploads(), encoder: { encode: async () => { throw new Error('boom'); } } });
     const slot = shapeCache.lookup(0xf010).g;
     bad.ensureCodepoints([0xf010], shapeCache);
     await bad.whenIdle();
@@ -155,7 +161,7 @@ console.log('\n[4] persistence');
 {
     const saves = [];
     const grower = new LiveSlugAtlas({
-        atlas: {}, shaper: chain, encoder,
+        atlas: {}, shaper: chain, encoder, uploads: new TextureUploads(),
         persist: { save: async (g) => { saves.push(g); return 1; } }, persistDebounceMs: 30,
     });
     grower.ensureCodepoints(NERD.slice(0, 10), shapeCache);
@@ -180,7 +186,7 @@ console.log('\n[4] persistence');
     const cache2 = new MonospaceShapeCache(chain2);
     for (const cp of [...SYLL].reverse()) cache2.lookup(cp);   // a different allocation order
     const enc2 = { encode: async () => { throw new Error('a hydrated glyph must not be re-encoded'); } };
-    const fresh = new LiveSlugAtlas({ atlas: {}, shaper: chain2, encoder: enc2 });
+    const fresh = new LiveSlugAtlas({ atlas: {}, shaper: chain2, encoder: enc2, uploads: new TextureUploads() });
     const added = fresh.hydrateGrowth(loaded);
     ok(added === 16, `hydrated ${added} glyphs`);
     const cps = [...NERD.slice(0, 10), ...SYLL.slice(0, 6)];
@@ -246,7 +252,8 @@ console.log('\n[5] emoji atlas — raster lands in place, only its rows upload, 
         },
         dispose: () => {},
     };
-    const ea = new EmojiAtlas({ cellPx, cols, rows: 2, rowGrowth: 1.5, rasterizer });
+    const eu = new TextureUploads();
+    const ea = new EmojiAtlas({ cellPx, cols, rows: 2, rowGrowth: 1.5, rasterizer, uploads: eu });
     const events = [];
     ea.onChange((e) => events.push(e));
     const pixelAt = (idx) => {
@@ -260,10 +267,11 @@ console.log('\n[5] emoji atlas — raster lands in place, only its rows upload, 
     await ea.whenIdle();
     ok(runs.length === 1 && runs[0] === 3, 'three sightings in one task → one raster run');
     ok(cps0.every((cp, i) => pixelAt(i).join() === colorOf(cp).join()), 'each emoji landed in its own cell');
-    ok(tex0.updateRanges.length === cellPx && tex0.updateRanges.every((r) => r.count === 3 * cellPx * 4),
-        `queued ${tex0.updateRanges.length} pixel-row ranges of ${3 * cellPx * 4} B (only the 3 cells, not the atlas)`);
+    const r0 = rectsOf(eu, tex0);
+    ok(r0.length === 1 && r0[0].w === 3 * cellPx && r0[0].h === cellPx && ea.stats.rectBytes === 3 * cellPx * cellPx * 4,
+        `queued one ${r0[0]?.w}×${r0[0]?.h} rect: only the 3 cells (${ea.stats.rectBytes} B), not the atlas`);
     ok(events.some((e) => e.kind === 'rasterized' && e.codepoints.join() === cps0.join()), 'rasterized event names the codepoints');
-    uploaded(tex0);
+    flushed(eu);
 
     // Fill past the 8 cells: rows grow (2 → 3), cells keep their place, the texture is reborn once.
     const more = range(0x1f683, 0x1f689);
@@ -271,6 +279,8 @@ console.log('\n[5] emoji atlas — raster lands in place, only its rows upload, 
     await ea.whenIdle();
     ok(ea.rows === 3 && ea.cols === cols, `grew by rows: ${ea.cols}×${ea.rows}`);
     ok(events.filter((e) => e.kind === 'replaced').length === 1 && ea._texture !== tex0, 'texture reborn once (one replaced event)');
+    ok(eu._ops[0]?.kind === 'copy' && eu._ops[0].from === tex0 && eu._ops[0].to === ea._texture && ea._texture.source.dataReady === false,
+        'its old rows are queued as a GPU copy first; the new texture is allocated, not filled from the CPU');
     ok([...cps0, ...more].every((cp, i) => pixelAt(i).join() === colorOf(cp).join()), 'every cell, old and new, holds its emoji after the growth');
     ea.dispose();
 }
