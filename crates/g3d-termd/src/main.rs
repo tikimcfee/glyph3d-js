@@ -105,6 +105,13 @@ pub struct Args {
     /// ...to at most this many.
     #[arg(long, default_value_t = 600)]
     brain_failed_backoff_max: u64,
+    /// While the brain is failed, a refused connection stays open this long after its ERROR, its
+    /// input discarded, so a client's HELLO write succeeds and its read finds the ERROR, in ms.
+    #[arg(long, default_value_t = 2000)]
+    brain_failed_linger_ms: u64,
+    /// At most this many refused connections linger at once; past it the oldest is closed.
+    #[arg(long, default_value_t = 64)]
+    brain_failed_linger_max: usize,
     /// Abort a brain that sends the holder nothing for this many seconds (0 = off).
     #[arg(long, default_value_t = 30)]
     pub brain_watchdog: u64,
@@ -249,6 +256,8 @@ fn main() {
         start_interval: s(args.brain_start_interval),
         failed_backoff: s(args.brain_failed_backoff.max(1)),
         failed_backoff_max: s(args.brain_failed_backoff_max.max(args.brain_failed_backoff.max(1))),
+        refused_linger: Duration::from_millis(args.brain_failed_linger_ms),
+        refused_max: args.brain_failed_linger_max,
         watchdog: s(args.brain_watchdog),
         upgrade_deadline: s(args.upgrade_deadline.max(1)),
         kill_grace: s(args.kill_grace),

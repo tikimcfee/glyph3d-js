@@ -414,6 +414,28 @@ fn a_brain_that_never_returns_leaves_the_shells_frozen_and_says_so() {
     });
     let msg = refusal.unwrap();
     assert!(msg.contains(&format!("holder pid {}", d.pid())) && msg.contains("SIGHUP"), "{msg}");
+    // A client that follows the handshake (connect, HELLO, read) while the holder has already
+    // answered: its HELLO lands and its read finds the ERROR, never EPIPE (a lingering close).
+    for _ in 0..3 {
+        use std::io::{Read, Write};
+        let mut raw = std::os::unix::net::UnixStream::connect(&d.socket).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let hello = Hello { proto: PROTO, client: "doc-client".into() };
+        raw.write_all(&g3d_wire::frame::encode_json(g3d_wire::frame::ty::HELLO, 0, &hello))
+            .expect("HELLO to a failed namespace's holder failed: it closed before reading");
+        raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut got = Vec::new();
+        raw.read_to_end(&mut got).unwrap();
+        let mut dec = FrameDecoder::default();
+        dec.feed(&got);
+        let f = dec.next_frame().unwrap().expect("no frame before the close");
+        assert_eq!(f.ty, g3d_wire::frame::ty::ERROR);
+        let e: WireError = serde_json::from_slice(&f.payload).unwrap();
+        assert_eq!(e.code, code::BRAIN_FAILED, "{}", e.message);
+    }
+    // The reference client says why too, however late it writes.
+    let e = Client::connect(&d.socket, "test").err().expect("a failed brain answered WELCOME");
+    assert_eq!(e.code(), Some(code::BRAIN_FAILED), "{e}");
     assert!(pid_alive(t.pid), "the shell is alive while no brain runs");
     assert!(d.log().contains("brain FAILED"), "{}", d.log());
     // A fixed brain, and SIGHUP: it comes back at once, with the terminal.

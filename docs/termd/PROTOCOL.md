@@ -184,7 +184,12 @@ The daemon replies `WELCOME`:
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
-Minors never cause a refusal: a newer minor only adds fields, events and features, and
+(1.1) A namespace whose engine is down answers `ERROR` `brain_failed` as soon as it accepts,
+**before** reading `HELLO` ([Restarts](#restarts-11)). It keeps the connection open for a moment
+(2 s), reading and discarding, so a `HELLO` written meanwhile lands; but a client must read what
+is waiting even when its `HELLO` write fails (`EPIPE`, `ECONNRESET`): the `ERROR` is there, and
+says why. A client in a language that dies of `SIGPIPE` by default (C) ignores it, or writes with
+`MSG_NOSIGNAL`. Minors never cause a refusal: a newer minor only adds fields, events and features, and
 an older peer ignores them. Until `WELCOME`, the only frame a client may send is
 `HELLO`.
 
@@ -768,7 +773,9 @@ the socket does not. A client that wants to ride a restart:
    accepting; `HELLO` is answered when one is. `ENOENT` or `ECONNREFUSED` means no holder: the
    namespace and every terminal in it are gone. `ERROR` `brain_failed` means the holder is alive
    (so are the programs, frozen once they fill their output buffers) but no brain is running; its
-   `message` says why. Retry slowly or tell a person.
+   `message` says why. It may arrive before your `HELLO` is read ([Handshake](#handshake)): read
+   it even if writing `HELLO` failed, and don't count it as a dropped connection. Retry slowly
+   or tell a person.
 3. **Same namespace?** Compare `WELCOME.instance` with the one you had. If it is the same, your
    terminals may still exist: `subscribe` again by `id` (not `create` with `if_exists: "adopt"`,
    which would start a new program if the terminal ended meanwhile). The `REPAINT` brings your
@@ -942,8 +949,13 @@ def request(sock, req, **fields):
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(sys.argv[1])
-send(sock, 0x01, json.dumps({'proto': [1, 0], 'client': 'watch.py'}).encode())
+try:
+    send(sock, 0x01, json.dumps({'proto': [1, 0], 'client': 'watch.py'}).encode())
+except (BrokenPipeError, ConnectionResetError):
+    pass                                    # the daemon answered first: read why
 ftype, _, payload = recv(sock)
+if ftype == 0xFF:                           # ERROR, e.g. brain_failed
+    sys.exit('termd: ' + json.loads(payload)['message'])
 assert ftype == 0x81, payload
 print('terminals:', [t['id'] for t in request(sock, 1, op='list')['terminals']])
 sub = request(sock, 2, op='subscribe', id=sys.argv[2], mode='raw', role='watch')

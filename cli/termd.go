@@ -225,12 +225,15 @@ func dialTermd(ns string) (*termdClient, error) {
 	r := bufio.NewReaderSize(conn, 256<<10)
 	hello, _ := json.Marshal(map[string]any{"proto": []int{1, 1}, "client": "glyph3d-cli/" + Version})
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write(encodeTermdFrame(termdHello, 0, hello)); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("termd at %s: hello: %w", path, err)
-	}
+	// The daemon may answer before it reads HELLO (ERROR brain_failed, PROTOCOL.md "Handshake"): a
+	// failed write still reads what is waiting, which says why.
+	_, werr := conn.Write(encodeTermdFrame(termdHello, 0, hello))
 	f, err := readTermdFrame(r)
 	conn.SetDeadline(time.Time{})
+	if werr != nil && (err != nil || f.Type != termdErrorFrame) {
+		conn.Close()
+		return nil, fmt.Errorf("termd at %s: hello: %w", path, werr)
+	}
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("termd at %s: welcome: %w", path, err)

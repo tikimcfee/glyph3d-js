@@ -734,7 +734,15 @@ leftover) the way systemd restarts a failing service, using systemd's own defaul
   now and resets the backoff, and `g3d upgrade` sends it when it finds the brain failed.
 - While failed, the holder accepts connections itself and answers each with `ERROR`
   `brain_failed`, whose message names the brain's last exit, the log path and the holder's pid,
-  then closes. Clients never hang on a silent socket.
+  then closes. Clients never hang on a silent socket. The close **lingers** (as an HTTP server's
+  lingering close after an error response): the holder half-closes its write side, reads and
+  discards what the client sends, and closes on the client's EOF or after
+  `brain_failed_linger` (2 s; at most `brain_failed_linger_max`, 64, at once, the oldest closed
+  first). Without it the holder answered and closed before the client's `HELLO`, which then
+  failed with `EPIPE`: the doc's own minimal client raised `BrokenPipeError` and never read the
+  message, and a C client that doesn't ignore `SIGPIPE` died (found by the verifier). Both
+  reference clients (`g3d::Client`, the relay's `dialTermd`) also read what is waiting after a
+  failed `HELLO` write.
 - The shells stay alive and freeze once their PTY buffers fill. The holder never kills a shell on
   its own. Idle exit still applies: a failed namespace with no terminals exits.
 - **Watchdog.** The brain sends the holder `alive` every 5 s from its socket runtime. After
@@ -1249,6 +1257,7 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | detach | `Ctrl-\` twice (`g3d attach`; `--detach-key`, `G3D_DETACH_KEY`) | keep | dtach, abduco and zmx detach on `Ctrl-\`; pressing it twice keeps a single `Ctrl-\` (the program's `SIGQUIT`) one key away: the first press is held, any other key sends both. Platform note: on some non-US macOS layouts `\` needs Option, so the macOS agent checks it is typeable and the setting is the escape hatch |
 | start wait | a client that starts the daemon retries for 3 s, 20 ms doubling to 250 ms | keep | |
 | brain restart | 100 ms; at most 5 starts in 10 s; then 30 s doubling to 10 min | **new** | systemd's `RestartSec`, `DefaultStartLimitBurst` and `DefaultStartLimitIntervalSec` |
+| refused connection linger (brain failed) | 2 s after the `ERROR`, at most 64 at once (`--brain-failed-linger-ms`, `--brain-failed-linger-max`) | **new** | an HTTP server's lingering close after an error response: long enough for any client to write `HELLO` and read; bounded so a connect storm costs fds, not memory |
 | brain watchdog | 30 s; `SIGABRT`, then `SIGKILL` 5 s later | **new** | systemd's `WatchdogSec` / `WatchdogSignal` practice; generous so a loaded machine doesn't trip it |
 | brain OOM preference | `oom_score_adj` +300 over the holder (Linux); `--brain-oom-score-adj` | **new** | the restartable process should be the one the kernel picks |
 | most terminals | 8,192 per namespace (`--max-terminals`; the `seq_marks` page is 8 B each, 64 KiB) | **new** | far above any wall or desk; the page stays one small fixed allocation the holder never grows |

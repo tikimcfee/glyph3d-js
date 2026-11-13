@@ -64,7 +64,9 @@ impl Client {
 
     pub fn handshake(mut sock: UnixStream, name: &str) -> Result<Self, ClientError> {
         let hello = Hello { proto: g3d_wire::PROTO, client: name.to_owned() };
-        sock.write_all(&frame::encode_json(ty::HELLO, 0, &hello))?;
+        // The daemon may answer before reading HELLO (ERROR brain_failed, PROTOCOL.md
+        // "Handshake"): a failed write still reads what is waiting, which says why.
+        let wrote = sock.write_all(&frame::encode_json(ty::HELLO, 0, &hello));
         let mut c = Client {
             sock,
             dec: FrameDecoder::default(),
@@ -83,7 +85,12 @@ impl Client {
                 holder: None,
             },
         };
-        let f = c.read_frame()?;
+        let f = match (c.read_frame(), wrote) {
+            (Ok(f), Ok(())) => f,
+            (Err(e @ ClientError::Wire(_)), _) => return Err(e),
+            (Err(e), Ok(())) => return Err(e),
+            (_, Err(w)) => return Err(ClientError::Io(w)),
+        };
         if f.ty != ty::WELCOME {
             return Err(ClientError::Protocol(format!("expected WELCOME, got frame type {:#04x}", f.ty)));
         }

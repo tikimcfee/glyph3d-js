@@ -43,6 +43,12 @@ pub struct Config {
     pub start_interval: Duration,
     pub failed_backoff: Duration,
     pub failed_backoff_max: Duration,
+    /// While the brain is failed, a refused connection stays open this long after its `ERROR`,
+    /// its input read and discarded (a lingering close), so the client's `HELLO` write succeeds
+    /// and its read finds the `ERROR` instead of `EPIPE`.
+    pub refused_linger: Duration,
+    /// At most this many refused connections linger; past it the oldest is closed.
+    pub refused_max: usize,
     /// Zero turns the watchdog off.
     pub watchdog: Duration,
     pub upgrade_deadline: Duration,
@@ -345,6 +351,9 @@ struct Holder {
     restart_at: Option<Instant>,
     /// The brain is failed: why, and when the next try is.
     failed: Option<(String, Instant)>,
+    /// Connections answered with `ERROR brain_failed`, lingering until the client closes or the
+    /// deadline (`refused_linger`).
+    refused: VecDeque<(OwnedFd, Instant)>,
     backoff: Duration,
     last_exit: String,
     /// The brain asked to end the namespace (idle exit, `stop`).
@@ -426,6 +435,7 @@ pub fn run(cfg: Config) -> ! {
         starts: VecDeque::new(),
         restart_at: Some(Instant::now()),
         failed: None,
+        refused: VecDeque::new(),
         backoff: cfg.failed_backoff,
         last_exit: String::new(),
         exiting: None,
@@ -455,6 +465,10 @@ impl Holder {
                     who.push(w);
                 }
             }
+            let first_refused = fds.len();
+            for (c, _) in &self.refused {
+                fds.push(pfd(c.as_fd(), libc::POLLIN));
+            }
             let listening = self.failed.is_some();
             if listening {
                 fds.push(pfd(self.listener.as_fd(), libc::POLLIN));
@@ -479,6 +493,9 @@ impl Holder {
                     self.read_peer(*w);
                 }
             }
+            let ready: Vec<bool> =
+                fds[first_refused..first_refused + self.refused.len()].iter().map(|f| f.revents != 0).collect();
+            self.drain_refused(&ready);
             if listening && fds.last().is_some_and(|f| f.revents & libc::POLLIN != 0) {
                 self.refuse_connections();
             }
@@ -497,6 +514,7 @@ impl Holder {
         let mut at: Vec<Instant> = Vec::new();
         at.extend(self.restart_at);
         at.extend(self.failed.as_ref().map(|f| f.1));
+        at.extend(self.refused.front().map(|r| r.1));
         at.extend(self.shutdown_at);
         at.extend(self.upgrade.as_ref().map(|u| u.deadline));
         for t in self.terms.values() {
@@ -522,6 +540,9 @@ impl Holder {
     fn tick(&mut self) {
         crate::log::rotate_if_due();
         let now = Instant::now();
+        while self.refused.front().is_some_and(|r| now >= r.1) {
+            self.refused.pop_front();
+        }
         if self.restart_at.is_some_and(|t| now >= t) && self.brain.is_none() {
             self.restart_at = None;
             self.start_brain();
@@ -779,10 +800,42 @@ impl Holder {
                     let _ = rustix::io::fcntl_setfd(&c, rustix::io::FdFlags::CLOEXEC);
                     let _ = rustix::fs::fcntl_setfl(&c, rustix::fs::OFlags::NONBLOCK);
                     let _ = rustix::io::write(&c, &bytes);
+                    // Not closed yet: a client that follows the handshake writes HELLO first, and
+                    // a close now would turn that write into EPIPE (SIGPIPE in a C client that
+                    // doesn't ignore it) before it reads the ERROR. Like an HTTP server's lingering
+                    // close: half-close the write side, read and discard, close on EOF or deadline.
+                    let _ = rustix::net::shutdown(&c, rustix::net::Shutdown::Write);
+                    self.refused.push_back((c, Instant::now() + self.cfg.refused_linger));
+                    while self.refused.len() > self.cfg.refused_max {
+                        self.refused.pop_front();
+                    }
                 }
                 Err(_) => return,
             }
         }
+    }
+
+    /// Reads and discards what refused connections sent (`ready`: which had events, in order);
+    /// one that closed, or failed, is dropped.
+    fn drain_refused(&mut self, ready: &[bool]) {
+        let mut buf = [0u8; 4096];
+        let mut i = 0;
+        self.refused.retain(|(c, _)| {
+            let r = ready.get(i).copied().unwrap_or(false);
+            i += 1;
+            if !r {
+                return true;
+            }
+            loop {
+                match rustix::io::read(c, &mut buf) {
+                    Ok(0) => return false,
+                    Ok(_) => continue,
+                    Err(rustix::io::Errno::AGAIN) => return true,
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(_) => return false,
+                }
+            }
+        });
     }
 
     fn read_peer(&mut self, w: Who) {
