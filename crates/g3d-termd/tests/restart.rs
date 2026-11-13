@@ -11,10 +11,7 @@ use g3d_wire::*;
 use std::time::{Duration, Instant};
 
 fn pid_alive(pid: u32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(s) => !s.split(") ").nth(1).is_some_and(|r| r.starts_with('Z')),
-        Err(_) => false,
-    }
+    ps_field(pid, "stat").is_some_and(|s| !s.starts_with('Z'))
 }
 
 fn wait_until(secs: u64, what: &str, mut f: impl FnMut() -> bool) {

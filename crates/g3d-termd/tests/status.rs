@@ -26,8 +26,10 @@ fn shape(v: &Value) -> Value {
     }
 }
 
-/// The next status event on `c`, with the time it arrived.
+/// The next status event on `c`, with the time it arrived (within 20 s: its own read timeout, not
+/// the sliver a previous [`statuses_for`] left on the socket).
 fn next_status(c: &mut Client) -> (Instant, Status) {
+    c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     loop {
         let f = c.next_frame().unwrap();
         if f.ty == ty::EVENT

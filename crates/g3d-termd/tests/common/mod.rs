@@ -2,6 +2,8 @@
 //! (every terminal killed) when the test ends, pass or fail.
 #![allow(dead_code)]
 
+pub mod procinfo;
+
 use g3d::Client;
 use g3d_wire::frame::{self, ty};
 use g3d_wire::*;
@@ -283,7 +285,6 @@ pub fn stalled_client(d: &Daemon) -> Client {
     c
 }
 
-/// The daemon's resident memory, in KiB.
 /// One `ps` field of a process (`stat`, `rss`), or `None` once it is gone. `ps -o` reads
 /// the same on Linux and macOS, which has no /proc.
 pub fn ps_field(pid: u32, field: &str) -> Option<String> {

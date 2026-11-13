@@ -2,8 +2,9 @@
 //! deliberately odd environment (stripped, a stale `DISPLAY`, another terminal's identity, a
 //! parent shell's state, `SIGINT` ignored, a low fd limit), callers that send their own odd
 //! environment and creators that send none, and what their terminals' programs see, read from
-//! the kernel (`/proc/<pid>/environ`, `cmdline`, `cwd`, `status`, `limits`; the macOS branch
-//! reads them with `ps`) and from `env`'s tags.
+//! the kernel (common/procinfo.rs: `/proc` on Linux, `KERN_PROCARGS2` and `proc_pidinfo` on
+//! macOS), the signal masks and fd limit the program reports itself ([`probe`]: macOS can't read
+//! them from outside), and `env`'s tags.
 
 mod common;
 
@@ -78,35 +79,89 @@ fn create_with(c: &mut Client, id: &str, f: impl FnOnce(&mut Create)) -> Result<
     c.request(Op::Create(cr))
 }
 
-/// A process's environment as it was exec'd.
-fn environ(pid: u32) -> BTreeMap<String, String> {
-    let raw = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
-    raw.split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|kv| {
-            let s = String::from_utf8_lossy(kv);
-            let (k, v) = s.split_once('=').unwrap();
-            (k.to_owned(), v.to_owned())
-        })
-        .collect()
-}
-
-fn cmdline(pid: u32) -> Vec<String> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
-    raw.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect()
-}
-
-fn status_field(pid: u32, name: &str) -> String {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    s.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_owned()).unwrap_or_default()
-}
+use common::procinfo::{argv as cmdline, cwd, environ};
 
 /// The passwd entry: (name, home, shell).
 fn passwd() -> (String, String, String) {
-    let out = Command::new("getent").arg("passwd").arg(unsafe { libc::getuid() }.to_string()).output().unwrap();
-    let line = String::from_utf8(out.stdout).unwrap();
-    let f: Vec<&str> = line.trim().split(':').collect();
-    (f[0].to_owned(), f[5].to_owned(), f[6].to_owned())
+    // SAFETY: getpwuid's entry is read before any other passwd call on this thread.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        assert!(!pw.is_null(), "no passwd entry for this uid");
+        let s = |p: *const libc::c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+        (s((*pw).pw_name), s((*pw).pw_dir), s((*pw).pw_shell))
+    }
+}
+
+/// The terminals' program in these tests: this test binary running [`probe`], which reports
+/// what it was started with and idles. Not `sleep`: macOS withholds an Apple platform binary's
+/// environment from every other process (`KERN_PROCARGS2`, `ps -E`), and ours it doesn't.
+fn probe_argv() -> Option<Vec<String>> {
+    let exe = std::env::current_exe().unwrap().display().to_string();
+    Some([exe.as_str(), "--exact", "probe", PROBE_MODE, "--nocapture", "--test-threads=1"].map(String::from).to_vec())
+}
+
+/// A second test-name filter (it matches no test) that only [`probe_argv`] passes.
+const PROBE_MODE: &str = "g3d-probe-mode";
+
+/// As a terminal's program ([`probe_argv`]), prints what it was started with that macOS can't
+/// read from outside (its blocked signals, its ignored ones, its soft fd limit), then idles. In
+/// an ordinary test run it does nothing.
+#[test]
+fn probe() {
+    if !std::env::args().any(|a| a == PROBE_MODE) {
+        return;
+    }
+    // SAFETY: queries only, into structs we own.
+    let (blocked, ignored, nofile) = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut set);
+        let blocked: Vec<i32> = (1..32).filter(|&s| libc::sigismember(&set, s) == 1).collect();
+        // Not SIGPIPE: Rust's runtime ignores it itself before main.
+        let ignored: Vec<i32> = (1..32)
+            .filter(|&s| s != libc::SIGPIPE && s != libc::SIGKILL && s != libc::SIGSTOP)
+            .filter(|&s| {
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(s, std::ptr::null(), &mut sa) == 0 && sa.sa_sigaction == libc::SIG_IGN
+            })
+            .collect();
+        let mut rl: libc::rlimit = std::mem::zeroed();
+        libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl);
+        (blocked, ignored, rl.rlim_cur)
+    };
+    println!("PROBE blocked={blocked:?} ignored={ignored:?} nofile={nofile} END");
+    std::thread::sleep(Duration::from_secs(60));
+}
+
+/// The report of the [`probe`] running as terminal `id`.
+fn probe_report(c: &mut Client, id: &str) -> String {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        let cap: CaptureReply = c
+            .request(Op::Capture(Capture { id: id.into(), format: None, history_rows: None, unwrap: Some(true) }))
+            .unwrap();
+        // libtest prints "test probe ... " ahead of it on the same line.
+        if let Some(l) =
+            cap.text.lines().filter_map(|l| l.find("PROBE ").map(|i| &l[i..])).find(|l| l.ends_with(" END"))
+        {
+            return l.to_owned();
+        }
+        assert!(Instant::now() < until, "no probe report: {}", cap.text);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The locale termd fills in when none is set: `C.UTF-8` on Linux; on macOS the user's own
+/// (`AppleLocale`, as Terminal.app reads it) as `<language>_<region>.UTF-8`.
+fn default_locale() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLocale"]).output().unwrap();
+        let tag = String::from_utf8_lossy(&out.stdout).trim().split('@').next().unwrap_or("").to_owned();
+        if out.status.success() && tag.contains('_') {
+            return format!("{tag}.UTF-8");
+        }
+    }
+    "C.UTF-8".into()
 }
 
 /// The `env` op's answer for a terminal: name → (value, source, via).
@@ -121,10 +176,8 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     let d = odd_daemon(&["--idle-exit", "0"]);
     let mut c = d.client();
     let (user, home, shell) = passwd();
-    let r = create_with(&mut c, "e1", |cr| cr.argv = Some(vec!["sleep".into(), "60".into()])).unwrap();
-    // `sleep` resolved in the program's own PATH; an explicit argv is never a login shell.
-    assert!(r.argv[0].ends_with("/sleep") && r.argv[0].starts_with('/'), "{:?}", r.argv);
-    assert!(!r.login);
+    let r = create_with(&mut c, "e1", |cr| cr.argv = probe_argv()).unwrap();
+    assert!(!r.login, "an explicit argv is never a login shell");
     let env = environ(r.pid);
     // Scrubbed: other processes' identity, the launcher, the parent shell, termd's controls.
     for gone in [
@@ -191,13 +244,14 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     // The default directory is home, and PWD says so.
     assert_eq!(r.cwd, home);
     assert_eq!(get("PWD"), Some(home.as_str()));
-    assert_eq!(std::fs::read_link(format!("/proc/{}/cwd", r.pid)).unwrap().to_str(), Some(home.as_str()));
-    // The starter's ignored SIGINT and the holder's raised fd limit stay out.
-    assert_eq!(status_field(r.pid, "SigIgn:"), "0000000000000000", "ignored signals reached the program");
-    assert_eq!(status_field(r.pid, "SigBlk:"), "0000000000000000", "blocked signals reached the program");
-    let limits = std::fs::read_to_string(format!("/proc/{}/limits", r.pid)).unwrap();
-    let nofile = limits.lines().find(|l| l.starts_with("Max open files")).unwrap();
-    assert_eq!(nofile.split_whitespace().nth(3), Some("1000"), "{nofile}");
+    assert_eq!(cwd(r.pid).to_str(), Some(home.as_str()));
+    // The starter's ignored SIGINT and the holder's raised fd limit stay out, and no signal is
+    // blocked: the program's own report.
+    assert_eq!(probe_report(&mut c, "e1"), "PROBE blocked=[] ignored=[] nofile=1000 END");
+    // A bare name resolves in the program's own PATH (made last: the locale warning above names
+    // the latest terminal).
+    let s = create_with(&mut c, "s", |cr| cr.argv = Some(vec!["sleep".into(), "60".into()])).unwrap();
+    assert!(s.argv[0].ends_with("/sleep") && s.argv[0].starts_with('/'), "{:?}", s.argv);
 }
 
 /// termd.toml: `pass` adds a name to the no-caller allowlist, `drop` removes one, `set` sets one
@@ -208,7 +262,7 @@ fn termd_toml_adjusts_the_allowlist_sets_names_and_a_bad_one_fails_loudly() {
     let d = odd_daemon(&["--idle-exit", "0"]);
     let toml = d.dir.join("termd.toml");
     let mut c = d.client();
-    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let sleep = probe_argv;
     let st: StatusReply = c.request(Op::Status).unwrap();
     assert_eq!(
         (st.status.daemon.env.config.path.as_str(), st.status.daemon.env.config.state.as_str()),
@@ -267,7 +321,13 @@ fn the_default_program_is_the_account_shell_as_a_login_shell() {
     // argv[0] is "-<name>": the login convention (the starter's SHELL=/bin/sh is ignored).
     let name = shell.rsplit('/').next().unwrap();
     assert_eq!(cmdline(r.pid).first().map(String::as_str), Some(format!("-{name}").as_str()));
-    assert_eq!(environ(r.pid).get("SHELL"), Some(&shell));
+    // SHELL as the shell has it (its own report: macOS withholds a platform binary's environment).
+    let sub = subscribe(&mut c, "sh", Role::Attach, None);
+    c.input(sub.handle, b"printf 'SHELL<%s>\\n' \"$SHELL\"\r").unwrap();
+    let mut seen = Seen::default();
+    let want = format!("SHELL<{shell}>\r\n");
+    read_until(&mut c, &mut seen, 20, |s| contains(&s.output, want.as_bytes()));
+    let _: Empty = c.request(Op::Unsubscribe(HandleOnly { handle: sub.handle })).unwrap();
     // The list shows what runs, and an adopt answers the same.
     let a = create_with(&mut c, "sh", |cr| cr.if_exists = Some(IfExists::Adopt)).unwrap();
     assert!(!a.created && a.login && a.argv == r.argv && a.cwd == r.cwd);
@@ -297,7 +357,7 @@ fn an_empty_caller_environment_starts_from_the_fill_alone() {
     let mut c = d.client();
     let (user, home, shell) = passwd();
     let r = create_with(&mut c, "bare", |cr| {
-        cr.argv = Some(vec!["/bin/sleep".into(), "60".into()]);
+        cr.argv = probe_argv();
         cr.env_base = Some(BTreeMap::new());
         cr.env = Some(BTreeMap::from([("FOO".into(), Some("bar".into()))]));
     })
@@ -323,7 +383,7 @@ fn an_empty_caller_environment_starts_from_the_fill_alone() {
             "USER"
         ]
     );
-    assert_eq!(env["LANG"], "C.UTF-8");
+    assert_eq!(env["LANG"], default_locale());
     assert_eq!(
         (env["HOME"].as_str(), env["USER"].as_str(), env["SHELL"].as_str()),
         (home.as_str(), user.as_str(), shell.as_str())
@@ -334,7 +394,7 @@ fn an_empty_caller_environment_starts_from_the_fill_alone() {
 fn create_refuses_reserved_names_bad_values_and_a_bad_cwd() {
     let d = odd_daemon(&["--idle-exit", "0"]);
     let mut c = d.client();
-    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let sleep = probe_argv;
     for (name, value) in [("TERM", Some("dumb")), ("TERM_PROGRAM", None), ("PWD", Some("/")), ("bad-name", Some("x"))] {
         let e = create_with(&mut c, "r", |cr| {
             cr.argv = sleep();
@@ -432,7 +492,7 @@ fn the_session_environment_is_read_at_every_create() {
         &first.iter().map(String::as_str).collect::<Vec<_>>(),
     );
     let mut c = d.client();
-    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let sleep = probe_argv;
     let a = create_with(&mut c, "a", |cr| cr.argv = sleep()).unwrap();
     let ea = environ(a.pid);
     // The session's values, not the starter's stale ones; the allowlist only; the scrub too.
@@ -476,7 +536,7 @@ fn the_session_environment_is_read_at_every_create() {
 fn a_callers_environment_is_the_base_and_none_is_the_sessions() {
     let d = session_daemon(&[("PATH", "/usr/bin:/bin")], &["DISPLAY=:0", "WAYLAND_DISPLAY=wayland-0"]);
     let mut c = d.client();
-    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let sleep = probe_argv;
     let odd: BTreeMap<String, String> = [
         ("PATH", "/caller/bin:/usr/bin:/bin"),
         ("DISPLAY", ":55"),
@@ -541,7 +601,7 @@ fn a_stripped_creator_gets_the_sessions_handles() {
         ],
     );
     let mut c = d.client();
-    let r = create_with(&mut c, "relay", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
+    let r = create_with(&mut c, "relay", |cr| cr.argv = probe_argv()).unwrap();
     let env = environ(r.pid);
     for (k, v) in [
         ("DISPLAY", ":0"),
@@ -566,7 +626,7 @@ fn a_stripped_creator_gets_the_sessions_handles() {
 }
 
 /// The real user manager, when this host has one: a starter's stale DISPLAY never wins over its
-/// own. Read only (nothing is set in the session), into a terminal that runs `sleep`.
+/// own. Read only (nothing is set in the session), into a terminal that runs the probe.
 #[test]
 fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     let out = Command::new("busctl")
@@ -594,7 +654,7 @@ fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     // The odd starter has no bus address: the daemon finds the user bus at /run/user/<uid>.
     let d = odd_daemon(&["--idle-exit", "0", "--env-source", "auto"]);
     let mut c = d.client();
-    let r = create_with(&mut c, "um", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
+    let r = create_with(&mut c, "um", |cr| cr.argv = probe_argv()).unwrap();
     let env = environ(r.pid);
     // A manager without DISPLAY (a headless host) leaves the starter's for that name.
     assert_eq!(

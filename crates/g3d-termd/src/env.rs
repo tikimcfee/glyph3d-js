@@ -1908,14 +1908,21 @@ mod tests {
         r.cwd = Some("/");
         let p = compose0(Env::new(), &r).unwrap();
         assert_eq!((p.cwd.as_str(), get(&p, "PWD")), ("/", Some("/")));
-        // PWD may hold no `.` or `..`: such a cwd becomes the directory's real path.
-        for given in ["/usr/../usr", "/usr/./", "/proc/self/../"] {
+        // PWD may hold no `.` or `..`: such a cwd becomes the directory's real path, also when
+        // `..` follows a symlink (`link/..` is `real`, not the link's directory).
+        let dir = std::env::temp_dir().join(format!("g3d-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("real/inner")).unwrap();
+        let _ = std::os::unix::fs::symlink(dir.join("real/inner"), dir.join("link"));
+        let through_link = format!("{}/link/../", dir.display());
+        for given in ["/usr/../usr", "/usr/./", through_link.as_str()] {
             let mut r = req(Some(&t), None);
             r.cwd = Some(given);
             let p = compose0(Env::new(), &r).unwrap();
             let real = std::fs::canonicalize(given).unwrap().display().to_string();
             assert_eq!((p.cwd.as_str(), get(&p, "PWD")), (real.as_str(), Some(real.as_str())), "{given}");
         }
+        assert!(through_link.ends_with("/link/../") && std::fs::canonicalize(&through_link).unwrap().ends_with("real"));
+        let _ = std::fs::remove_dir_all(&dir);
         for bad in ["relative/dir", "/nonexistent/dir", "/bin/sh"] {
             let mut r = req(Some(&t), None);
             r.cwd = Some(bad);

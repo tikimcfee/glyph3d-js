@@ -972,7 +972,7 @@ fn a_daemonized_log_rotates_and_the_brain_follows() {
             let lock = std::fs::read_to_string(format!("{}.lock", self.0.display())).unwrap_or_default();
             if let Ok(pid) = lock.trim().parse::<i32>() {
                 std::thread::sleep(Duration::from_millis(500));
-                if std::fs::read_to_string(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.contains("g3d-termd")) {
+                if ps_field(pid as u32, "command").is_some_and(|c| c.contains("g3d-termd")) {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
             }

@@ -374,16 +374,28 @@ fn attach_and_watch_ride_an_upgrade_and_a_crash() {
     assert!(w.wait_exit(10).success());
 }
 
-/// A process's environment as it was exec'd (Linux's /proc; the macOS branch reads it with `ps`).
-fn environ(pid: u32) -> std::collections::BTreeMap<String, String> {
-    let raw = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
-    raw.split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .filter_map(|kv| {
-            let s = String::from_utf8_lossy(kv);
-            s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned()))
-        })
-        .collect()
+#[path = "../../g3d-termd/tests/common/procinfo.rs"]
+mod procinfo;
+use procinfo::environ;
+
+/// A second test-name filter (it matches no test) that only [`idle_argv`] passes.
+const IDLE_MODE: &str = "g3d-idle-mode";
+
+/// A program whose environment a test can read, for `g3d new <id> -- <it>`: this test binary,
+/// idling in [`idle`]. Not `sleep`: macOS withholds an Apple platform binary's environment from
+/// other processes.
+fn idle_argv() -> [&'static str; 4] {
+    static EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let exe = EXE.get_or_init(|| std::env::current_exe().unwrap().display().to_string());
+    [exe, "--exact", "idle", IDLE_MODE]
+}
+
+/// As [`idle_argv`]'s program, waits; in an ordinary test run, does nothing.
+#[test]
+fn idle() {
+    if std::env::args().any(|a| a == IDLE_MODE) {
+        std::thread::sleep(Duration::from_secs(600));
+    }
 }
 
 /// `g3d new` from a shell with an odd environment (a stale DISPLAY, a Rex tab's marker, a custom
@@ -392,7 +404,6 @@ fn environ(pid: u32) -> std::collections::BTreeMap<String, String> {
 /// sets or passes a name; `g3d env` tags every variable with its source. The session is the
 /// daemon's test hook (a file standing in for the user manager): run with
 /// `--features g3d-termd/test-hooks`, as tools/CHECKS.md says.
-#[cfg(target_os = "linux")]
 #[test]
 fn new_sends_its_environment_and_clean_takes_the_sessions() {
     let d = Daemon::start_session(&["DISPLAY=:0", "XAUTHORITY=/run/user/0/xauth_session"]);
@@ -415,7 +426,7 @@ fn new_sends_its_environment_and_clean_takes_the_sessions() {
     };
     let pid_of = |id: &str| list(&d.socket).into_iter().find(|t| t.id == id).map(|t| t.pid).unwrap();
 
-    g3d(&["new", "sub", "-e", "BAR=asked", "-e", "HERE", "--", "sleep", "600"]);
+    g3d(&[&["new", "sub", "-e", "BAR=asked", "-e", "HERE", "--"][..], &idle_argv()].concat());
     let e = environ(pid_of("sub"));
     let get = |k: &str| e.get(k).map(String::as_str);
     assert_eq!(get("FOO"), Some("custom"));
@@ -437,7 +448,7 @@ fn new_sends_its_environment_and_clean_takes_the_sessions() {
     assert!(json["env"].as_array().unwrap().iter().any(|v| v["name"] == "FOO" && v["source"] == "caller"), "{json}");
 
     // --clean: the session's DISPLAY, fresh; none of the caller's.
-    g3d(&["new", "clean", "--clean", "-e", "HERE", "--", "sleep", "600"]);
+    g3d(&[&["new", "clean", "--clean", "-e", "HERE", "--"][..], &idle_argv()].concat());
     let e = environ(pid_of("clean"));
     assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":0"), "the stale DISPLAY won over the session's");
     assert_eq!(
