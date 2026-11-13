@@ -212,9 +212,22 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         reason: w.reason.clone(),
         at: w.at,
         exit: w.exit.clone(),
+        failed_at: w.failed_at,
         restored: restored_counts,
         unseen: unseen_total,
     };
+    if let Some(since) = w.failed_at {
+        let secs = w.at.saturating_sub(since) / 1000;
+        errors.record_at(
+            "brain_failed",
+            None,
+            format!(
+                "no termd engine ran for {secs} s: the brain kept failing and was marked failed (the shells were \
+                 frozen once their output filled); see the log"
+            ),
+            w.at,
+        );
+    }
     if matches!(w.reason.as_str(), "crash" | "watchdog") {
         let how = match &w.exit {
             Some(ExitStatus { signal: Some(s), .. }) => format!(" (SIG{s})"),

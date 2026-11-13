@@ -563,7 +563,7 @@ Unix epoch milliseconds, sizes are bytes):
 | `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
 | `connections` | client connections open now, status followers included |
 | `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
-| `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
+| `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
 | `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale to fill, the user manager unreachable while it is, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
@@ -588,7 +588,8 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 `message`, `first_at`, `at` (the latest), `count`, and `id` when it concerns one terminal. Codes are
 the request and event codes above (`spawn_failed`, `input_full`, `panic`) plus `lagged` (a lossy
 subscriber fell behind and was resynced), `restore` (a terminal that could not come back),
-`upgrade_failed`, `brain_crash` and `brain_watchdog` (why this brain started). The list is the
+`upgrade_failed`, `brain_crash`, `brain_watchdog` and `brain_failed` (why this brain started, and
+that no brain ran for a while before it). The list is the
 current brain's: a restart starts it over with the reason for the restart. They are for people;
 nothing depends on reading them.
 

@@ -352,6 +352,9 @@ struct Holder {
     restart_at: Option<Instant>,
     /// The brain is failed: why, and when the next try is.
     failed: Option<(String, Instant)>,
+    /// When the brain was last marked failed (epoch ms), until a brain is welcomed: the next
+    /// brain's `last_start.failed_at`, so the episode is on record once it is over.
+    failed_since: Option<u64>,
     /// Connections answered with `ERROR brain_failed`, lingering until the client closes or the
     /// deadline (`refused_linger`).
     refused: VecDeque<(OwnedFd, Instant)>,
@@ -440,6 +443,7 @@ pub fn run(cfg: Config) -> ! {
         starts: VecDeque::new(),
         restart_at: Some(Instant::now()),
         failed: None,
+        failed_since: None,
         refused: VecDeque::new(),
         backoff: cfg.failed_backoff,
         last_exit: String::new(),
@@ -784,6 +788,7 @@ impl Holder {
                 std::process::id()
             ));
             self.failed = Some((why, now + retry));
+            self.failed_since.get_or_insert_with(ms_now);
         } else {
             self.restart_at = Some(now + self.cfg.restart_delay);
         }
@@ -892,6 +897,9 @@ impl Holder {
             (self.restarts, self.next_start.clone())
         };
         last_start["at"] = json!(ms_now());
+        if let Some(t) = self.failed_since.filter(|_| !candidate) {
+            last_start["failed_at"] = json!(t);
+        }
         let msg = json!({
             "m": "welcome", "hold": HOLD, "instance": self.instance,
             "generation": self.generation + 1, "holder_pid": std::process::id(),
@@ -968,6 +976,9 @@ impl Holder {
                 let (msg, f) = self.welcome(w == Who::Candidate);
                 if let Some(p) = self.peer(w) {
                     p.queue(msg, f);
+                }
+                if w == Who::Brain {
+                    self.failed_since = None;
                 }
                 match w {
                     Who::Brain => {

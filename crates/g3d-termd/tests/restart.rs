@@ -516,6 +516,11 @@ fn a_brain_that_never_returns_leaves_the_shells_frozen_and_says_so() {
     let mut c = d.reconnect(&instance);
     let l: ListReply = c.request(Op::List).unwrap();
     assert_eq!(l.terminals.iter().map(|x| (x.id.as_str(), x.pid)).collect::<Vec<_>>(), vec![("a", t.pid)]);
+    // The episode is on record once it is over: when the brain was failed, and an error saying so.
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    let ls = &st.status.daemon.brain.last_start;
+    assert!(ls.failed_at.is_some_and(|f| f <= ls.at), "{ls:?}");
+    assert!(st.status.errors.iter().any(|e| e.code == "brain_failed"), "{:?}", st.status.errors);
     let s = subscribe(&mut c, "a", Role::Attach, None);
     c.input(s.handle, b"echo back-$((5*5))\r").unwrap();
     let mut seen = Seen::default();

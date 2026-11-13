@@ -248,6 +248,10 @@ pub struct BrainStart {
     /// How the previous brain ended (absent for the first, and after an upgrade's handoff).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<ExitStatus>,
+    /// When the namespace's brain was failed before this one started (no brain ran from then until
+    /// `at`); absent when it wasn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<u64>,
     pub restored: RestoredCounts,
     /// Output the previous brain read and never saved.
     pub unseen: u64,

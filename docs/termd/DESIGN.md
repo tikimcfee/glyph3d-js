@@ -368,7 +368,10 @@ daemon announces `proto` `[1, 1]` and the feature `status`.
 - The holder tells each brain, in `welcome` (hold protocol 2.1, an additive minor), `restarts`
   (brains replaced by crash, watchdog, upgrade) and `last_start` (`first`/`crash`/`watchdog`/
   `upgrade`, when, and the dead brain's exit). The brain adds what came back how and the unseen
-  bytes, in total and per terminal (`terminals[].unseen`, beside `restored`). A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
+  bytes, in total and per terminal (`terminals[].unseen`, beside `restored`). A brain started
+  after the brain was failed also gets `last_start.failed_at` (when the holder marked it failed,
+  carried until a brain is welcomed) and opens its errors with `brain_failed`, so the outage is on
+  record once it is over. A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
 - RSS: `/proc/<pid>/statm` on Linux, `proc_pidinfo(PROC_PIDTASKINFO)` on macOS (`status::rss`, the
   cfg seam; the macOS branch verifies it); absent where it can't be measured.
 - Recent errors: the last `--status-errors` (32) distinct `(code, terminal)`, newest first, from

@@ -31,6 +31,8 @@ pub struct Welcome {
     /// the last one ended; `unknown` from an older holder.
     pub reason: String,
     pub at: u64,
+    /// When the namespace's brain was last failed before this one (epoch ms).
+    pub failed_at: Option<u64>,
     pub exit: Option<g3d_wire::ExitStatus>,
 }
 
@@ -165,6 +167,7 @@ pub fn start(fd: i32, engine: &str) -> Start {
         restarts: w.get("restarts").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default(),
         reason: w.pointer("/last_start/reason").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
         at: w.pointer("/last_start/at").and_then(Value::as_u64).unwrap_or(0),
+        failed_at: w.pointer("/last_start/failed_at").and_then(Value::as_u64),
         exit: w.pointer("/last_start/exit").map(|e| {
             let e = Exit::from_msg(e);
             g3d_wire::ExitStatus { code: e.code, signal: e.signal.map(crate::spawn::signal_name) }
