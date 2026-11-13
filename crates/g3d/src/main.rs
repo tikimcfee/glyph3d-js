@@ -6,6 +6,9 @@
 //!   g3d attach <id> [--take] [--detach-key ^\]
 //!   g3d watch <id>
 //!   g3d capture <id> [--history N] [--vt]
+//!   g3d send <id> [text]          (stdin when no text)
+//!   g3d key <id> <chord>...       (shift+enter, ctrl+c, alt+left)
+//!   g3d paste <id> [text] [--unsafe]   (stdin when no text)
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
 //!   g3d upgrade [--binary PATH]
 //!   g3d status [--json] [--follow [--interval MS]]
@@ -91,6 +94,27 @@ enum Cmd {
         /// Keep colours and styles (SGR).
         #[arg(long)]
         vt: bool,
+    },
+    /// Type bytes into a terminal exactly as given (stdin when no text), as tmux send-keys -l
+    /// does: no encoding, no bracketing.
+    Send { id: String, text: Option<String> },
+    /// Press keys in a terminal, each a chord (shift+enter, ctrl+c, alt+left, F5, a): termd
+    /// encodes them as the program asked to read keys (Kitty keyboard, modifyOtherKeys, cursor
+    /// key modes), as a terminal's keyboard would.
+    Key {
+        id: String,
+        #[arg(required = true)]
+        chords: Vec<String>,
+    },
+    /// Paste text into a terminal (stdin when no text): bracketed when the program asked for
+    /// bracketed paste, refused when it could run commands (Ghostty's paste protection).
+    Paste {
+        id: String,
+        text: Option<String>,
+        /// Paste even text that could run commands: a line break the program would read as Enter,
+        /// or the bracketed-paste end.
+        #[arg(long = "unsafe")]
+        allow_unsafe: bool,
     },
     /// Kill a terminal's program.
     Kill {
@@ -217,6 +241,41 @@ fn main() {
                 println!();
             }
         }
+        Cmd::Send { id, text } => {
+            let bytes = text.map_or_else(stdin_all, String::into_bytes);
+            let (mut c, handle) = writer(&target, &id, None);
+            for chunk in bytes.chunks(1 << 20) {
+                c.input(handle, chunk).unwrap_or_else(|e| die(e));
+            }
+            done_writing(&mut c, handle);
+        }
+        Cmd::Key { id, chords } => {
+            let keys: Vec<Key> = chords.iter().map(|k| g3d::chord::parse(k).unwrap_or_else(|e| die(e))).collect();
+            let (mut c, handle) = writer(&target, &id, Some("key"));
+            for mut k in keys {
+                k.handle = handle;
+                let _: WrittenReply = c.request(Op::Key(k)).unwrap_or_else(|e| die(e));
+            }
+            done_writing(&mut c, handle);
+        }
+        Cmd::Paste { id, text, allow_unsafe } => {
+            let text = text.unwrap_or_else(|| {
+                String::from_utf8(stdin_all())
+                    .unwrap_or_else(|_| die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"))
+            });
+            let (mut c, handle) = writer(&target, &id, Some("paste"));
+            let r = c.request::<WrittenReply>(Op::Paste(Paste {
+                handle,
+                text,
+                allow_unsafe: allow_unsafe.then_some(true),
+            }));
+            match r {
+                Ok(_) => {}
+                Err(e) if e.code() == Some(code::UNSAFE_PASTE) => die(format!("{e} (g3d paste --unsafe)")),
+                Err(e) => die(e),
+            }
+            done_writing(&mut c, handle);
+        }
         Cmd::Kill { id, signal } => {
             let mut c = connect(&target);
             let _: Empty = c.request(Op::Kill(Kill { id, signal })).unwrap_or_else(|e| die(e));
@@ -232,6 +291,49 @@ fn main() {
             attach(&target, &id, role, parse_key(&detach_key), window);
         }
         Cmd::Watch { id, detach_key } => attach(&target, &id, Role::Watch, parse_key(&detach_key), window),
+    }
+}
+
+fn stdin_all() -> Vec<u8> {
+    let mut b = Vec::new();
+    std::io::stdin().read_to_end(&mut b).unwrap_or_else(|e| die(format!("stdin: {e}")));
+    b
+}
+
+/// A connection that may type into terminal `id` (an input-only `attach` subscription), and its
+/// handle. `feature` is the daemon feature the command needs beyond `INPUT`.
+fn writer(target: &Target, id: &str, feature: Option<&str>) -> (Client, u32) {
+    let mut c = connect(target);
+    if let Some(f) = feature
+        && !c.welcome.features.iter().any(|x| x == f)
+    {
+        die(format!("{} has no `{f}` op (protocol 1.2); upgrade it (g3d upgrade)", c.welcome.daemon));
+    }
+    let sub: SubscribeReply = c
+        .request(Op::Subscribe(Subscribe {
+            id: id.to_owned(),
+            mode: Mode::None,
+            role: Role::Attach,
+            history_rows: None,
+            flow: None,
+            cols: None,
+            rows: None,
+        }))
+        .unwrap_or_else(|e| die(e));
+    (c, sub.handle)
+}
+
+/// Ends a write: `unsubscribe` goes through the terminal's owner after everything sent before
+/// it, so its reply means the input was taken, and any `error` event about it came first.
+fn done_writing(c: &mut Client, handle: u32) {
+    let _: Empty = c.request(Op::Unsubscribe(HandleOnly { handle })).unwrap_or_else(|e| die(e));
+    for f in c.take_backlog() {
+        if f.ty == ty::EVENT
+            && f.stream == handle
+            && let Ok(Event::Error { code, message }) = serde_json::from_slice(&f.payload)
+        {
+            die(format!("{code}: {message}"));
+        }
     }
 }
 
