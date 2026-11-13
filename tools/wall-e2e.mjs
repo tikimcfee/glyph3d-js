@@ -396,14 +396,23 @@ try {
     await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
     const cr = await W(() => { const r = window.__wall.viewport.canvas.getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.4 }; });
     await page.mouse.move(cr.x, cr.y);
-    const z0 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), step: v.wheelZoom.stepFactor }; }, cr);
+    // The deltas the page receives, which are what the wall zooms by: a synthetic wheel of 100 px
+    // reaches a headed macOS Chrome as 200 (measured), so the notches are counted from them.
+    const z0 = await W((p) => {
+        const v = window.__wall.viewport;
+        window.__wheelSeen = [];
+        window.addEventListener('wheel', (e) => window.__wheelSeen.push([e.deltaY, e.deltaMode]), { capture: true });
+        return { zoom: v.zoom, at: v.toWorld(p.x, p.y), step: v.wheelZoom.stepFactor, perNotch: v.wheelZoom.pixelsPerNotch };
+    }, cr);
     for (let i = 0; i < 3; i++) await page.mouse.wheel(0, -100);
     const mid = await W(() => window.__wall.viewport.moving);
     await settle(800);
     const z1 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), moving: v.moving }; }, cr);
-    const zWant = z0.zoom * z0.step ** 3;
-    ok(mid && !z1.moving && Math.abs(z1.zoom / zWant - 1) < 1e-6,
-        `three wheel notches glide (moving mid-way) and land exactly at ${z0.step}^3 (zoom ${z0.zoom.toFixed(4)} → ${z1.zoom.toFixed(4)}, want ${zWant.toFixed(4)})`);
+    const seen = await W(() => window.__wheelSeen);
+    const notches = -seen.reduce((n, [dy, mode]) => n + (mode === 0 ? dy : NaN), 0) / z0.perNotch;
+    const zWant = z0.zoom * z0.step ** notches;
+    ok(seen.length === 3 && notches > 0 && mid && !z1.moving && Math.abs(z1.zoom / zWant - 1) < 1e-6,
+        `three wheel notches glide (moving mid-way) and land exactly at ${z0.step}^${notches} for the deltas the page got (${seen.map(([dy]) => dy).join(' ')} px; zoom ${z0.zoom.toFixed(4)} → ${z1.zoom.toFixed(4)}, want ${zWant.toFixed(4)})`);
     ok(Math.hypot(z1.at.x - z0.at.x, z1.at.y - z0.at.y) * z1.zoom < 0.5, 'the world point under the pointer stays under it through the glide');
 
     // ── map labels ─────────────────────────────────────────────────────────
