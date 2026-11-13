@@ -845,6 +845,22 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 to_owner(c, &t, req, TermOp::View { delta: vw.delta, live: vw.live == Some(true) }).await;
             }
         }
+        Op::Key(k) => {
+            if let Some(t) = subscribed(srv, c, req, k.handle).cloned() {
+                match crate::keys::spec(&k) {
+                    Ok(spec) => {
+                        to_owner(c, &t, req, TermOp::Key(Box::new(spec))).await;
+                    }
+                    Err((code, message)) => reply_err(&c.out, req, code, message),
+                }
+            }
+        }
+        Op::Paste(p) => {
+            if let Some(t) = subscribed(srv, c, req, p.handle).cloned() {
+                let allow_unsafe = p.allow_unsafe == Some(true);
+                to_owner(c, &t, req, TermOp::Paste { text: p.text, allow_unsafe }).await;
+            }
+        }
         Op::Capture(cp) => {
             if let Some(t) = by_id(srv, c, req, &cp.id) {
                 to_owner(c, &t, req, TermOp::Capture(cp)).await;

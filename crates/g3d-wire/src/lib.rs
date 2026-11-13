@@ -177,6 +177,16 @@ mod tests {
             Op::StatusFollow(StatusFollow { interval_ms: Some(250) }),
             Op::StatusFollow(StatusFollow::default()),
             Op::StatusUnfollow,
+            Op::Key(Key {
+                handle: 3,
+                code: "Enter".into(),
+                key: "Enter".into(),
+                mods: vec!["Shift".into()],
+                text: String::new(),
+                action: Some(KeyAction::Repeat),
+            }),
+            Op::Key(Key { handle: 3, key: "é".into(), text: "é".into(), ..Default::default() }),
+            Op::Paste(Paste { handle: 3, text: "a\nb".into(), allow_unsafe: Some(true) }),
         ];
         for op in ops {
             let r = Request { req: 9, op };

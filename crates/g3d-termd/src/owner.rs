@@ -4,6 +4,7 @@
 use crate::blob;
 use crate::env;
 use crate::hold::{Exit, Held, Hold, Marks};
+use crate::keys::{self, Keyboard};
 use crate::out::{self, ConnOut, Kind, SubShared, Wake};
 use crate::repaint;
 use crate::spawn;
@@ -12,8 +13,10 @@ use g3d_wire::frame::{self, REPAINT_FLAG_VIEW, RepaintHead, ty};
 use g3d_wire::msg::*;
 use libghostty_vt::Terminal;
 use libghostty_vt::color::Rgb;
+use libghostty_vt::effect::ClipboardMime;
 use libghostty_vt::grid_ref::TrackedGridRef;
 use libghostty_vt::mode::Mode as VtMode;
+use libghostty_vt::paste::{Options as PasteOptions, Source as PasteSource};
 use libghostty_vt::point::{Coordinate, Point, Space};
 use libghostty_vt::screen::Screen;
 use libghostty_vt::terminal::CompressionMode;
@@ -200,6 +203,13 @@ pub enum TermOp {
     },
     Capture(Capture),
     Input(Vec<u8>),
+    /// (1.2) A key event, encoded here against the terminal's live modes.
+    Key(Box<keys::Spec>),
+    /// (1.2) A paste, framed here per the program's bracketed-paste mode.
+    Paste {
+        text: String,
+        allow_unsafe: bool,
+    },
     /// `kill` (with a reply) or part of `stop` (`reply: false`).
     Kill {
         signal: Signal,
@@ -512,6 +522,8 @@ struct Owner {
     wake: Arc<Wake>,
     rx: mpsc::Receiver<Cmd>,
     term: Terminal<'static, 'static>,
+    /// Its key encoder (libghostty's, made on first use): `key` ops.
+    keyboard: Option<Keyboard>,
     fx: Rc<Fx>,
     master: Option<OwnedFd>,
     slot: u32,
@@ -789,6 +801,7 @@ impl Owner {
             wake,
             rx,
             term,
+            keyboard: None,
             fx,
             master: Some(held.master),
             slot: held.slot,
@@ -1540,14 +1553,13 @@ impl Owner {
                 let err = |code: &str, msg: String| {
                     out.frame(frame::encode_json(ty::EVENT, handle, &Event::Error { code: code.into(), message: msg }));
                 };
-                let Some(i) = self.sub_index(conn) else {
-                    err(code::NOT_SUBSCRIBED, format!("INPUT for handle {handle} without a subscription"));
-                    return false;
+                let i = match self.writer(conn, "INPUT") {
+                    Ok(i) => i,
+                    Err((code, msg)) => {
+                        err(code, msg);
+                        return false;
+                    }
                 };
-                if self.subs[i].role == Role::Watch {
-                    err(code::READ_ONLY, format!("INPUT on a watch subscription to {}", self.tref.id));
-                    return false;
-                }
                 #[cfg(feature = "test-hooks")]
                 {
                     if self.reg.cfg.test_hooks && bytes == TEST_PANIC_INPUT {
@@ -1559,32 +1571,77 @@ impl Owner {
                         return true;
                     }
                 }
-                if self.cut {
-                    // At most once: input the handoff didn't carry is dropped, and said so.
-                    err(
-                        code::BUSY,
-                        format!("termd is upgrading; {} B of input to {} dropped", bytes.len(), self.tref.id),
-                    );
-                    return false;
+                match self.write_input(i, &bytes) {
+                    Ok(()) => true,
+                    Err((code, msg)) => {
+                        err(code, msg);
+                        false
+                    }
                 }
-                if self.subs[i].view.take().is_some() {
-                    self.push_live_repaint(i, 0);
+            }
+            TermOp::Key(spec) => {
+                let i = match self.writer(conn, "key") {
+                    Ok(i) => i,
+                    Err((code, msg)) => {
+                        reply_err(out, req, code, msg);
+                        return false;
+                    }
+                };
+                if self.keyboard.is_none() {
+                    match Keyboard::new() {
+                        Ok(k) => self.keyboard = Some(k),
+                        Err(e) => {
+                            reply_err(out, req, code::UNSUPPORTED, e);
+                            return false;
+                        }
+                    }
                 }
-                self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
-                if self.input.len() + bytes.len() > self.reg.cfg.input_max {
-                    let msg = format!(
-                        "{} has {} B of unread input; {} B refused",
-                        self.tref.id,
-                        self.input.len(),
-                        bytes.len()
-                    );
-                    self.reg.errors.record(code::INPUT_FULL, Some(&self.tref.id), msg.clone());
-                    err(code::INPUT_FULL, msg);
-                    return false;
+                let Some(kb) = self.keyboard.as_mut() else { unreachable!("made above") };
+                let bytes = match kb.encode(&self.term, &spec) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        reply_err(out, req, code::BAD_REQUEST, e);
+                        return false;
+                    }
+                };
+                self.written(out, req, i, &bytes)
+            }
+            TermOp::Paste { text, allow_unsafe } => {
+                let i = match self.writer(conn, "paste") {
+                    Ok(i) => i,
+                    Err((code, msg)) => {
+                        reply_err(out, req, code, msg);
+                        return false;
+                    }
+                };
+                // libghostty's paste writes through the terminal's pty callback, where query
+                // answers collect too: send any waiting first, so the paste's bytes are its own.
+                self.flush_replies();
+                let mimes = [ClipboardMime::new(b"text/plain")];
+                let options = PasteOptions::new().with_source(PasteSource::Clipboard).with_allow_unsafe(allow_unsafe);
+                let r = self.term.paste(options, &mimes, |_, w| w.write_all(text.as_bytes()));
+                let bytes = std::mem::take(&mut *self.fx.replies.borrow_mut());
+                match r {
+                    Ok(_) => self.written(out, req, i, &bytes),
+                    Err(libghostty_vt::Error::Rejected) => {
+                        let why = if self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false) {
+                            "it holds the bracketed-paste end (ESC [ 201 ~)"
+                        } else {
+                            "it holds a line break and the program hasn't asked for bracketed paste, so each line would run"
+                        };
+                        reply_err(
+                            out,
+                            req,
+                            code::UNSAFE_PASTE,
+                            format!("paste refused: {why}; allow_unsafe pastes it"),
+                        );
+                        false
+                    }
+                    Err(e) => {
+                        reply_err(out, req, code::BAD_REQUEST, format!("paste: {e}"));
+                        false
+                    }
                 }
-                self.input.extend_from_slice(&bytes);
-                self.flush_input();
-                true
             }
             TermOp::Kill { signal, reply } => {
                 if self.cut && reply {
@@ -1622,6 +1679,62 @@ impl Owner {
             TermOp::Resume => {
                 self.cut = false;
                 true
+            }
+        }
+    }
+
+    /// The subscription `conn` writes through (`attach` or `own`), for an op named `what`.
+    fn writer(&self, conn: ConnId, what: &str) -> Result<usize, (&'static str, String)> {
+        let Some(i) = self.sub_index(conn) else {
+            return Err((
+                code::NOT_SUBSCRIBED,
+                format!("{what} for handle {} without a subscription", self.tref.handle),
+            ));
+        };
+        if self.subs[i].role == Role::Watch {
+            return Err((code::READ_ONLY, format!("{what} on a watch subscription to {}", self.tref.id)));
+        }
+        Ok(i)
+    }
+
+    /// Queues input for the program from subscription `i`, as typed: `INPUT`'s bytes, an encoded
+    /// `key`, a framed `paste`. Typing snaps the writer's view back to live.
+    fn write_input(&mut self, i: usize, bytes: &[u8]) -> Result<(), (&'static str, String)> {
+        if self.cut {
+            // At most once: input the handoff didn't carry is dropped, and said so.
+            return Err((
+                code::BUSY,
+                format!("termd is upgrading; {} B of input to {} dropped", bytes.len(), self.tref.id),
+            ));
+        }
+        if self.subs[i].view.take().is_some() {
+            self.push_live_repaint(i, 0);
+        }
+        self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
+        if self.input.len() + bytes.len() > self.reg.cfg.input_max {
+            let msg = format!("{} has {} B of unread input; {} B refused", self.tref.id, self.input.len(), bytes.len());
+            self.reg.errors.record(code::INPUT_FULL, Some(&self.tref.id), msg.clone());
+            return Err((code::INPUT_FULL, msg));
+        }
+        self.input.extend_from_slice(bytes);
+        self.flush_input();
+        Ok(())
+    }
+
+    /// Writes a `key`'s or `paste`'s bytes and answers with how many.
+    fn written(&mut self, out: &ConnOut, req: u64, i: usize, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            reply_ok(out, req, &WrittenReply { written: 0 });
+            return true;
+        }
+        match self.write_input(i, bytes) {
+            Ok(()) => {
+                reply_ok(out, req, &WrittenReply { written: bytes.len() as u64 });
+                true
+            }
+            Err((code, msg)) => {
+                reply_err(out, req, code, msg);
+                false
             }
         }
     }

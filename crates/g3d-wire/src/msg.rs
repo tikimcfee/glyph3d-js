@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 1];
+pub const PROTO: [u32; 2] = [1, 2];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
-/// The features this daemon announces: the core plus `status` and `upgrade` (1.1).
-pub const DAEMON_FEATURES: [&str; 5] = ["raw", "view", "capture", "status", "upgrade"];
+/// The features this daemon announces: the core plus `status` and `upgrade` (1.1), `key` and
+/// `paste` (1.2).
+pub const DAEMON_FEATURES: [&str; 7] = ["raw", "view", "capture", "status", "upgrade", "key", "paste"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +89,9 @@ pub mod code {
     pub const TOO_LARGE: &str = "too_large";
     /// (1.1) Another op of its kind is running (`upgrade`).
     pub const BUSY: &str = "busy";
+    /// (1.2) A `paste` whose text could run commands (a line break the program would read as
+    /// Enter, or the bracketed-paste end), refused without `allow_unsafe`.
+    pub const UNSAFE_PASTE: &str = "unsafe_paste";
     // Connection-level (ERROR frames).
     pub const BAD_FRAME: &str = "bad_frame";
     pub const VERSION: &str = "version";
@@ -134,10 +138,14 @@ pub enum Op {
     StatusFollow(StatusFollow),
     /// (1.1) Stop following it.
     StatusUnfollow,
+    /// (1.2) A key event, encoded by termd against the terminal's live keyboard modes.
+    Key(Key),
+    /// (1.2) Text pasted: bracketed when the program asked for bracketed paste.
+    Paste(Paste),
 }
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
-pub const KNOWN_OPS: [&str; 16] = [
+pub const KNOWN_OPS: [&str; 18] = [
     "create",
     "list",
     "kill",
@@ -154,7 +162,59 @@ pub const KNOWN_OPS: [&str; 16] = [
     "status",
     "status_follow",
     "status_unfollow",
+    "key",
+    "paste",
 ];
+
+/// (1.2) `key`: one key event, with W3C `KeyboardEvent` semantics (PROTOCOL.md, "`key`").
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Key {
+    pub handle: u32,
+    /// The physical key, a W3C `KeyboardEvent.code` value (`"KeyA"`, `"Enter"`, `"ArrowLeft"`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code: String,
+    /// The logical key, a W3C `KeyboardEvent.key` value (`"a"`, `"A"`, `"Enter"`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// The modifiers held, as W3C modifier key names: `Shift`, `Control`, `Alt`, `Meta`,
+    /// `CapsLock`, `NumLock` (and `AltGraph`, which only ever made `text`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<String>,
+    /// The text the key produced in the client's layout, after Shift, AltGr, dead keys, IME and
+    /// Option-as-character; empty when it produced none (Enter, an arrow).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// `press` (the default), `repeat` or `release`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<KeyAction>,
+}
+
+/// (1.2) `key.action`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
+/// (1.2) `paste`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Paste {
+    pub handle: u32,
+    pub text: String,
+    /// Paste text that could run commands (Ghostty's `clipboard-paste-protection` answered yes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_unsafe: Option<bool>,
+}
+
+/// (1.2) The `key` and `paste` replies: how many bytes went to the program (0: the key encodes
+/// to nothing in the terminal's modes, a release outside Kitty's event reporting, say).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WrittenReply {
+    pub written: u64,
+}
 
 /// (1.1) `status_follow`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
