@@ -156,7 +156,7 @@ fn send_key_and_paste_type_what_a_keyboard_and_a_clipboard_would() {
     ok(g3d(&d.socket, &["send", "plain"], Some(b"\x03\r")));
     p.read(b"\x03\r");
     ok(g3d(&d.socket, &["key", "plain", "shift+enter", "!"], None));
-    p.read(b"\x1b[27;2;13~!");
+    p.read(b"\r!");
     // A line break into a program without bracketed paste would run it: refused, and said how.
     let o = g3d(&d.socket, &["paste", "plain"], Some(b"one\ntwo"));
     assert!(!o.status.success());
@@ -164,6 +164,15 @@ fn send_key_and_paste_type_what_a_keyboard_and_a_clipboard_would() {
     assert!(err.contains("unsafe_paste") && err.contains("--unsafe"), "{err}");
     ok(g3d(&d.socket, &["paste", "--unsafe", "plain"], Some(b"one\ntwo")));
     p.read(b"one\rtwo");
+
+    // A paste larger than the daemon takes is said, and never sent (the daemon would end the
+    // connection over it, and the client would read a broken pipe).
+    let big = vec![b'x'; 17_000_000];
+    let o = g3d(&d.socket, &["paste", "plain"], Some(&big));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && err.contains("too_large") && err.contains("the daemon takes at most"), "{err}");
+    ok(g3d(&d.socket, &["send", "plain", "z"], None));
+    p.read(b"z");
 
     let mut b = Hex::start(&d.socket, "bracketed", "\\033[?2004h");
     ok(g3d(&d.socket, &["paste", "bracketed", "x\ny"], None));

@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,6 +152,7 @@ type termdClient struct {
 		NS       string   `json:"ns"`
 		PID      int      `json:"pid"`
 		Features []string `json:"features"`
+		MaxFrame int      `json:"max_frame"`
 		// The namespace's identity (fixed for the holder's life) and which brain this is.
 		Instance   string `json:"instance"`
 		Generation int    `json:"generation"`
@@ -335,6 +337,11 @@ func (c *termdClient) Send(op string, fields map[string]any) (<-chan termdReplyM
 	if err != nil {
 		return nil, err
 	}
+	// A request over the daemon's max_frame would make it end this whole connection (and every
+	// subscription on it): refuse it here, unsent.
+	if max := c.maxFrame(); len(payload) > max {
+		return nil, &termdError{Code: "too_large", Message: fmt.Sprintf("the %s request is %d B as JSON; termd takes at most %d B (max_frame)", op, len(payload), max)}
+	}
 	ch := make(chan termdReplyMsg, 1)
 	c.mu.Lock()
 	if c.err != nil {
@@ -350,6 +357,34 @@ func (c *termdClient) Send(op string, fields map[string]any) (<-chan termdReplyM
 		return nil, err
 	}
 	return ch, nil
+}
+
+// maxFrame is the largest payload the daemon takes: its WELCOME's, else the protocol's default.
+func (c *termdClient) maxFrame() int {
+	if c.Welcome.MaxFrame > 0 {
+		return c.Welcome.MaxFrame
+	}
+	return termdMaxFrame
+}
+
+// Has reports whether the daemon offers a feature (WELCOME.features): a client checks before
+// using anything newer than protocol 1.0 (PROTOCOL.md "Handshake").
+func (c *termdClient) Has(feature string) bool {
+	return slices.Contains(c.Welcome.Features, feature)
+}
+
+// termdInputOps are the ops a display's typing and pasting need (protocol 1.2).
+var termdInputOps = []string{"key", "paste"}
+
+// lacks lists the ops in want the daemon doesn't offer.
+func (c *termdClient) lacks(want []string) []string {
+	out := []string{}
+	for _, f := range want {
+		if !c.Has(f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Request sends a request and decodes its reply into out (nil = ignore the body).

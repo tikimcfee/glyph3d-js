@@ -113,11 +113,18 @@ try {
     ok(spawned.length === 3, `spawned 3 terminals (${spawned.join(', ')})`);
     const [A, B, C] = spawned;
     await W((i) => window.__wall.focus(i), A);
-    await page.keyboard.type('echo wall-e2e-typed');
+    // The shell's answer, not the echoed command line: `wall-e2e-42` is only on screen once Enter ran it.
+    await page.keyboard.type('echo wall-e2e-$((6*7))');
     await page.keyboard.press('Enter');
     await settle(900);
-    const typedOk = await screenHas(A, 'wall-e2e-typed');
-    ok(typedOk, `typing reaches the focused shell${typedOk ? '' : ` (screen: ${JSON.stringify((await W((i) => window.__wall.terminal(i).readText().filter((l) => l.trim()), A)).slice(-4))})`}`);
+    const lastLines = async (i) => JSON.stringify((await W((id) => window.__wall.terminal(id).readText().filter((l) => l.trim()), i)).slice(-4));
+    const typedOk = await screenHas(A, 'wall-e2e-42');
+    ok(typedOk, `typing reaches the focused shell and Enter runs it${typedOk ? '' : ` (screen: ${await lastLines(A)})`}`);
+    // A shell that asked for no keyboard mode reads Shift+Enter as Enter (\r), as xterm sends it.
+    await page.keyboard.type('echo shift-$((1+1))');
+    await page.keyboard.press('Shift+Enter');
+    const shiftOk = !!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'shift-2'), A, 8000);
+    ok(shiftOk, `Shift+Enter runs the line in a plain shell${shiftOk ? '' : ` (screen: ${await lastLines(A)})`}`);
 
     // ── key events and paste: termd encodes them in the program's own modes ──
     // A program that pushes Kitty keyboard flags (CSI > 1 u) and bracketed paste, then echoes in hex

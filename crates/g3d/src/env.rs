@@ -27,16 +27,23 @@ pub fn caller_env(vars: impl IntoIterator<Item = (OsString, OsString)>) -> (BTre
 }
 
 /// `-e` arguments as the request's `env`: `NAME=VALUE` sets; `NAME` passes this shell's `NAME`,
-/// or removes it when this shell has none (`get`).
+/// or removes it when this shell has none (`get`). A value the protocol can't carry (not UTF-8)
+/// is an error: the person asked for that name by name.
 pub fn request_env(
     args: &[String],
-    get: impl Fn(&str) -> Option<String>,
+    get: impl Fn(&str) -> Option<OsString>,
 ) -> Result<BTreeMap<String, Option<String>>, String> {
     let mut env = BTreeMap::new();
     for a in args {
         let (k, v) = match a.split_once('=') {
             Some((k, v)) => (k, Some(v.to_owned())),
-            None => (a.as_str(), get(a)),
+            None => match get(a).map(OsString::into_string) {
+                None => (a.as_str(), None),
+                Some(Ok(v)) => (a.as_str(), Some(v)),
+                Some(Err(_)) => {
+                    return Err(format!("-e {a}: this shell's {a} is not UTF-8, which the protocol can't carry"));
+                }
+            },
         };
         if !env_name_ok(k) {
             return Err(format!("-e {a:?}: a name is [A-Za-z_][A-Za-z0-9_]*"));
@@ -88,7 +95,11 @@ mod tests {
 
     #[test]
     fn dash_e_sets_passes_or_removes() {
-        let get = |k: &str| (k == "HERE").then(|| "here".to_owned());
+        let get = |k: &str| match k {
+            "HERE" => Some(OsString::from("here")),
+            "LATIN1" => Some(OsString::from_vec(b"caf\xe9".to_vec())),
+            _ => None,
+        };
         let env = request_env(&["A=1".into(), "B=".into(), "C=x=y".into(), "HERE".into(), "GONE".into()], get).unwrap();
         assert_eq!(env["A"], Some("1".into()));
         assert_eq!(env["B"], Some(String::new()));
@@ -97,6 +108,9 @@ mod tests {
         assert_eq!(env["GONE"], None);
         assert!(request_env(&["BAD-NAME=1".into()], get).is_err());
         assert!(request_env(&["=1".into()], get).is_err());
+        // Asked for by name, a value that isn't UTF-8 is said, never sent as "unset".
+        let e = request_env(&["LATIN1".into()], get).unwrap_err();
+        assert!(e.contains("LATIN1") && e.contains("UTF-8"), "{e}");
     }
 
     #[test]

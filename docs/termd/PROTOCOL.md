@@ -96,7 +96,11 @@ u16 reserved · u32 streamId · payload`). The type numbers below belong to this
 only.
 
 - `len` is at least 8. The largest payload is 16 MiB (16,777,216 bytes) unless
-  `WELCOME.max_frame` says otherwise. A larger frame is a protocol error.
+  `WELCOME.max_frame` says otherwise. A larger frame is a protocol error: the daemon answers
+  `ERROR too_large` and closes the connection, every subscription on it with it. So a client
+  measures a request before it sends one and refuses it itself (`g3d` and the relay say
+  `too_large`, naming `max_frame`): a paste of a few MB of control characters is six times
+  that as JSON.
 - The header is 12 bytes, so a payload starts 4-byte aligned in a buffer that starts
   aligned. Binary prefixes below are laid out so their fields are naturally aligned.
 - A reader accumulates bytes until it holds `4 + len` of them, then handles one frame.
@@ -269,12 +273,12 @@ session's.**
    session's: an allowlist of names, each looked up at this `create` in the platform's session
    source (Linux: the systemd user manager's environment; macOS: `launchctl getenv`), and a name
    the source lacks takes the value the daemon started with, for that name only. The allowlist
-   is the locale (`LANG`, `LANGUAGE`, `LC_*`), the desktop session (`DISPLAY`, `WAYLAND_DISPLAY`,
-   `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_*`), the credential agents (`SSH_AUTH_SOCK`,
-   `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `KRB5CCNAME`), `TMPDIR`, `TZ`, the network proxies
-   (`http_proxy` and its kin, both cases), `TERMINFO_DIRS`, and macOS's `__CF_USER_TEXT_ENCODING`
-   and `COMMAND_MODE` (`SESSION` in `crates/g3d-termd/src/env.rs`); the daemon's config file
-   adjusts it. Nothing else of the daemon's own environment is ever a base;
+   is the locale (`LANG`, `LC_*`) and the session's handles (`DISPLAY`, `WAYLAND_DISPLAY`,
+   `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `XDG_SESSION_*`,
+   `XDG_CURRENT_DESKTOP`, `SSH_AUTH_SOCK`, `TMPDIR`) (`SESSION` in
+   `crates/g3d-termd/src/env.rs`); the daemon's config file adjusts it (`pass`, `drop`). The
+   locale is one group: when the source has any locale name, none comes from the daemon's start
+   values. Nothing else of the daemon's own environment is ever a base;
 2. minus what points back at the creator's tab or process: another terminal, multiplexer,
    editor or agent (`TMUX`, `STY`, `TERM_SESSION_ID`, `REX_*`, `KITTY_*`, `VSCODE_*`, `NVIM`,
    `CLAUDECODE`, …), the launcher or service unit (`INVOCATION_ID`, `NOTIFY_SOCKET`, `LISTEN_*`,
@@ -295,9 +299,10 @@ session's.**
 
 `env` and `env_base` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL, each
 `NAME=value` with its terminating NUL is at most 128 KiB (Linux's `MAX_ARG_STRLEN`, which counts
-the whole string), and `argv` plus the environment total at most 1 MiB, counted as `execve` counts
-them (each string with its NUL, plus a pointer for each) (`bad_request` or `too_large`, naming the
-variable). A client sending its own environment leaves out what can't pass (bash's exported
+the whole string), and `argv` plus the environment total at most the host's `ARG_MAX`
+(`sysconf(_SC_ARG_MAX)`: 2 MiB on Linux at the usual 8 MiB stack limit, never over the kernel's
+6 MiB; 1 MiB on macOS), counted as `execve` counts them (each string with its NUL, plus a pointer
+for each) (`bad_request` or `too_large`, naming the variable). A client sending its own environment leaves out what can't pass (bash's exported
 functions, `BASH_FUNC_f%%`; a name or value that isn't UTF-8). The names in layer 6 are reserved
 in `env`: setting or removing one is `bad_request` (in `env_base` they may appear, and layer 6
 replaces them). Any other name may be set, including one layer 2 removes: the request knows what
@@ -560,14 +565,24 @@ What some keys become (the bytes the program reads):
 | key | no mode set | Kitty flags 1 | modifyOtherKeys 2 | DECCKM on |
 |---|---|---|---|---|
 | Enter | `\r` | `\r` | `\r` | `\r` |
-| Shift+Enter | `CSI 27 ; 2 ; 13 ~` | `CSI 13 ; 2 u` | `CSI 27 ; 2 ; 13 ~` | `CSI 27 ; 2 ; 13 ~` |
+| Shift+Enter | `\r` | `CSI 13 ; 2 u` | `CSI 27 ; 2 ; 13 ~` | `\r` |
 | Ctrl+C (`text` `"c"`) | `0x03` | `CSI 99 ; 5 u` | `CSI 27 ; 5 ; 99 ~` | `0x03` |
+| Ctrl+Shift+A (`text` `"A"`) | `0x01` | `CSI 97 ; 6 u` | `CSI 27 ; 6 ; 65 ~` | `0x01` |
+| Ctrl+Backspace | `0x17` | `CSI 127 ; 5 u` | `0x08` | `0x17` |
 | Alt+B (`text` `"b"`) | `ESC b` | `CSI 98 ; 3 u` | `CSI 27 ; 3 ; 98 ~` | `ESC b` |
 | ArrowUp | `CSI A` | `CSI A` | `CSI A` | `ESC O A` |
+| Numpad8 (`key` `"ArrowUp"`: NumLock off) | `CSI A` | `CSI 57419 u` | `CSI A` | `ESC O A` |
 | Alt+ArrowLeft | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` |
 
-(Shift+Enter with no mode set is xterm's modified-key form, which Ghostty sends there too; Enter
-alone is always `\r`.)
+A program that asked for no keyboard mode (no Kitty flags, no modifyOtherKeys) gets xterm's bytes
+with modifyOtherKeys off where Ghostty's legacy encoding would send a protocol it never asked for:
+Enter with Shift, Ctrl or Super is `\r` (with Alt, `ESC \r`); Ctrl+Shift+letter is the letter's
+C0 byte; Ctrl+`[`, Ctrl+I and Ctrl+M are `ESC`, `TAB` and `CR`; Ctrl+Backspace is `^W`, the word
+rubout a browser keeps Ctrl+W from (as VS Code's terminal binds it). Every other key, and every key
+once the program asks for a mode, is Ghostty's encoding. A keypad digit `code` whose `key` is a
+navigation key (NumLock off) is that keypad navigation key, as Ghostty's own keyboard gives it.
+`"CapsLock"` and `"NumLock"` ride in the Kitty modifiers as Ghostty sends them (Shift+Enter with
+NumLock on is `CSI 13 ; 130 u` under Kitty flags).
 
 Reply: `{"req": 17, "ok": true, "written": 7}`, the bytes written for the program (0: the key
 encodes to nothing in these modes, as a release does outside Kitty's event reporting). The bytes
@@ -580,7 +595,9 @@ buffer is full. Errors are replies (`not_subscribed`, `read_only`, `no_terminal`
 
 Feature `paste`. Text pasted into the terminal, framed as a terminal frames a paste: inside
 `ESC [ 200 ~` … `ESC [ 201 ~` when the program asked for bracketed paste (mode 2004), else with
-each line feed sent as `\r`, the Enter key. Either way the control characters xterm strips from
+each line break sent as `\r`, the Enter key (a `\r\n` is one `\r`, as WezTerm's
+`canonicalize_pasted_newlines` and the wall's own paste made it: clipboard text from Windows runs
+one line per line, not an empty one between). Either way the control characters xterm strips from
 pasted text become spaces: NUL, BS, ENQ, EOT, ESC, DEL, and the ones a tty acts on (Ctrl+C, \, U,
 Z, Q, S, W, V, R, O). So a paste never carries its own escape sequences, and can't end its bracket
 early. This is Ghostty's paste encoding, run by libghostty.

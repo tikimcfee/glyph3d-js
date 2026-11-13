@@ -77,7 +77,12 @@ export function keyEventFor(e, { captureEscape = false } = {}) {
     if (isPasteChord(e)) return null;
     if (k === 'Escape' && !captureEscape) return null;
 
-    const mods = MODS.filter(([, held]) => held(e)).map(([name]) => name);
+    // AltGr (European layouts' third level) is Ctrl+Alt to a Windows browser: ctrlKey and altKey
+    // both set, with AltGraph held. They made the character, as Shift makes 'A', so they don't
+    // ride: German AltGr+Q is the text '@', not Ctrl+Alt+@ (which termd would make NUL).
+    const altGr = !!e.getModifierState?.('AltGraph');
+    const mods = MODS.filter(([name, held]) => held(e) && !(altGr && (name === 'Control' || name === 'Alt')))
+        .map(([name]) => name);
     // One character (one code point, so an astral emoji counts) is what the key typed; a named
     // key ("Enter", "ArrowLeft") typed nothing. With Ctrl held the browser still names the
     // character ("c" for Ctrl+C), which is what termd wants: the C0 byte is its to make.

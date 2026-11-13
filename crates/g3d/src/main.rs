@@ -212,7 +212,7 @@ fn main() {
             }
         }
         Cmd::New { id, cols, rows, cwd, clean, env, argv } => {
-            let env = g3d::env::request_env(&env, |k| std::env::var(k).ok()).unwrap_or_else(|e| die(e));
+            let env = g3d::env::request_env(&env, |k| std::env::var_os(k)).unwrap_or_else(|e| die(e));
             let env_base = if clean {
                 None
             } else {

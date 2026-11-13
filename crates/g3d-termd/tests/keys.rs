@@ -58,7 +58,7 @@ fn expect(c: &mut Client, seen: &mut Seen, op: Op, want: &[u8]) {
 }
 
 #[test]
-fn shift_enter_reaches_a_kitty_program_as_csi_u_and_a_legacy_one_as_ghostty_sends_it() {
+fn shift_enter_reaches_a_kitty_program_as_csi_u_and_a_legacy_one_as_a_carriage_return() {
     let d = Daemon::start();
     let (mut c, h, mut seen) = start(&d, "kitty", "\\033[>1u");
     expect(&mut c, &mut seen, key(h, "Enter", "Enter", &["Shift"], ""), b"\x1b[13;2u");
@@ -66,7 +66,12 @@ fn shift_enter_reaches_a_kitty_program_as_csi_u_and_a_legacy_one_as_ghostty_send
     expect(&mut c, &mut seen, key(h, "KeyC", "c", &["Control"], "c"), b"\x1b[99;5u");
 
     let (mut c, h, mut seen) = start(&d, "legacy", "");
-    expect(&mut c, &mut seen, key(h, "Enter", "Enter", &["Shift"], ""), b"\x1b[27;2;13~");
+    expect(&mut c, &mut seen, key(h, "Enter", "Enter", &["Shift"], ""), b"\r");
+    expect(&mut c, &mut seen, key(h, "Enter", "Enter", &["Control"], ""), b"\r");
+    expect(&mut c, &mut seen, key(h, "KeyA", "A", &["Control", "Shift"], "A"), b"\x01");
+    expect(&mut c, &mut seen, key(h, "Backspace", "Backspace", &["Control"], ""), b"\x17");
+    expect(&mut c, &mut seen, key(h, "Numpad8", "ArrowUp", &[], ""), b"\x1b[A");
+    expect(&mut c, &mut seen, key(h, "NumpadDecimal", "Delete", &[], ""), b"\x1b[3~");
     expect(&mut c, &mut seen, key(h, "Enter", "Enter", &[], ""), b"\r");
     expect(&mut c, &mut seen, key(h, "KeyC", "c", &["Control"], "c"), b"\x03");
     expect(&mut c, &mut seen, key(h, "Digit1", "!", &["Shift"], "!"), b"!");
@@ -91,6 +96,8 @@ fn paste_is_bracketed_only_when_the_program_asked() {
     let d = Daemon::start();
     let (mut c, h, mut seen) = start(&d, "bracketed", "\\033[?2004h");
     expect(&mut c, &mut seen, paste(h, "one\ntwo", false), b"\x1b[200~one\ntwo\x1b[201~");
+    // Inside a bracket the text is the program's to read as it came.
+    expect(&mut c, &mut seen, paste(h, "a\r\nb", false), b"\x1b[200~a\r\nb\x1b[201~");
 
     let (mut c, h, mut seen) = start(&d, "plain", "");
     expect(&mut c, &mut seen, paste(h, "echo hi", false), b"echo hi");
@@ -99,6 +106,8 @@ fn paste_is_bracketed_only_when_the_program_asked() {
     assert_eq!(e.code(), Some(code::UNSAFE_PASTE), "{e}");
     // Then as xterm and Ghostty paste it: newlines as Enter.
     expect(&mut c, &mut seen, paste(h, "one\ntwo", true), b"one\rtwo");
+    // A Windows line break is one Enter, not two.
+    expect(&mut c, &mut seen, paste(h, "a\r\nb", true), b"a\rb");
 }
 
 #[test]

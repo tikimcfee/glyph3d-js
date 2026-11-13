@@ -205,7 +205,8 @@ from them.
 the base (the caller's, or the session's), the scrub, the fill, `termd.toml`, the request, termd's
 own, the program's path and argv, the working directory. The holder execs exactly that: it no longer looks anything up in `PATH`, which
 took a branch out of it. `argv[0]` without a slash is found in the composed environment's `PATH`,
-or `confstr(_CS_PATH)` when it has none (what `execvp` does); not found is `spawn_failed` before
+or `confstr(_CS_PATH)` when it has none (what `execvp` does), an empty entry or a relative one
+(`.`) being the program's working directory, as for `execvp` run there; not found is `spawn_failed` before
 anything forks. The `create` reply and `list` show the resolved path first (`/usr/bin/sh`, not
 `sh`), and the reply says `login` and `cwd`; a restored terminal keeps them in the holder's record
 (`login` and `term` are new fields there, read with defaults from an older brain's record). The
@@ -279,9 +280,13 @@ daemon.
   and a shell that finds them discards `PWD`) becomes the directory's real path, in `PWD` and in
   the reply; any other keeps its spelling, so a symlink's name stays.
 - **Limits** are counted as the kernel counts them: a value's limit (`MAX_ARG_STRLEN`, 128 KiB)
-  is on the whole `NAME=value` string and its NUL, and the 1 MiB total adds a pointer per string
-  and per list end, as `ARG_MAX` counts them (on macOS too). A value one byte under the old
-  documented maximum used to pass the check and fail at `execve` with `E2BIG`.
+  is on the whole `NAME=value` string and its NUL, and the total adds a pointer per string and per
+  list end, as `ARG_MAX` counts them (on macOS too). The total is this host's `ARG_MAX`
+  (`sysconf(_SC_ARG_MAX)`, read once: on Linux a quarter of the stack limit, 2 MiB at the usual
+  8 MiB, capped at the kernel's own ceiling of 6 MiB, `_STK_LIM / 4 * 3` in fs/exec.c; macOS's
+  1 MiB), so whatever a shell here can exec, `g3d new` from it can start too, as screen and tmux
+  started from that shell would. A value one byte under the old documented maximum used to pass
+  the check and fail at `execve` with `E2BIG`.
 - **A set locale that doesn't give UTF-8** (it doesn't load, or its charset isn't UTF-8: checked
   per `create` with `newlocale` and `nl_langinfo(CODESET)`) starts as asked, and is said: in the
   log when the problem changes, and in the status document's `daemon.env.warnings` while it is
@@ -300,7 +305,9 @@ daemon.
   UTF-8; a variable over `execve`'s per-string limit). `--clean` sends none: the no-caller rule.
   `-e NAME=VALUE` sets a name in the request's `env`; `-e NAME` passes this shell's `NAME`, or
   removes it when this shell has none (docker's `-e NAME` passes; with no value here the
-  terminal has none either). `g3d env <id> [--json]` prints the effective environment, each line
+  terminal has none either); a `NAME` whose value here isn't UTF-8 is an error, since the
+  person asked for it by name. A request larger than the daemon's `max_frame` is refused by
+  `g3d` before it is sent (`too_large`), so a huge `g3d paste` says so rather than a broken pipe. `g3d env <id> [--json]` prints the effective environment, each line
   its source (and `via`) then `NAME=value`. `g3d` inside a termd terminal reaches that terminal's
   daemon through `G3D_TERMD_SOCKET` when given neither `--ns` nor `--socket`. The detach key also
   reads `G3D_DETACH_KEY`.
@@ -308,7 +315,11 @@ daemon.
   (`attach --cwd`, which the relay sets when `serve` has a root); a hand-run `glyph3d-cli attach`
   with no `--cwd` starts at home. It sends **no `env_base` and no `env`** (`termdCreate` in
   `cli/attach_unix.go`, which `TestTermdCreateSendsNoEnvironment` holds): it is a creator with no
-  shell, so its terminals get the desktop session's environment whatever started the relay.
+  shell, so its terminals get the desktop session's environment whatever started the relay
+  (`termd-relay-check.mjs` starts a second relay from a stripped environment with a stale
+  `DISPLAY`, a stale bus address, a missing runtime directory, another terminal's identity, a
+  `TZ`, an `XDG_CONFIG_HOME` and `LC_ALL=C`, its daemon asking the real user manager read-only:
+  the terminal gets the manager's handles, tagged `session (systemd-user)`, and none of the rest).
 
 **Defaults applied** (the table's "change" and "new" rows): scrollback 10,000,000 bytes, clamp
 64 MiB (`--scrollback`, `--max-scrollback`); the PTY input buffer 16 MiB (`--input-buffer`); the
@@ -1055,8 +1066,8 @@ the layer that set it, which `env` answers ([Seeing it](#seeing-it-g3d-env)).
 
 | Layer | What | Why |
 |---|---|---|
-| 1. Base | **A caller's** (`create.env_base`, tag `caller`): its environment, as sent. **A creator with none** (tag `session`): start empty; copy the allowlist (`SESSION` in `env.rs`): the locale (`LANG`, `LANGUAGE`, `LC_*`), the desktop session (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_*`: the runtime directory, the session's names, the desktop's name, the base directories), the credential agents (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `KRB5CCNAME`), `TMPDIR`, `TZ`, the network proxies (curl's and wget's names, both cases), `TERMINFO_DIRS`, launchd's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; `termd.toml`'s `pass` adds names and `drop` removes them. Each name is looked up at this `create` in the session source: **Linux**, the systemd user manager's environment (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, filtered to the allowlist; via `systemd-user`); **macOS**, `launchctl getenv <name>` for each (one `sh` running them all; a prefix is asked as the names the daemon's start environment and POSIX's locale and XDG names give it; via `launchd`). **A name the source lacks takes the daemon's start value, for that name only** (via `daemon`); a source that doesn't answer leaves every allowlisted name to them, warned. The account (`HOME`, `USER`, `LOGNAME`, `SHELL`) and `PATH` are the fill's (layer 3), not looked up | The multiplexer convention for a caller; `login(1)`'s for a creator with none, plus the desktop's handles fresh at every `create`, so a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK` (the desktop re-imports them at each login). An allowlist, because the daemon's starter is an accident (an agent's shell carries `GIT_EDITOR=true`, an IPC token and its session ids; a shell tool its session id; a unit its cgroup's pressure file) and so is whatever someone imported into the user manager (an argument-less `systemctl --user import-environment` from a terminal imports that terminal's everything): no denylist names all of it. The per-name fallback keeps a session handle the source doesn't hold (a headless host's user manager has no `DISPLAY`; an SSH-forwarded agent is only in the starter's) without making the starter the base. The status stream names the source |
-| 2. Scrub | best effort: remove what points back at the creator's tab or process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `REX_*`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `AI_AGENT`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); the creator's own terminal device (`SSH_TTY`, `GPG_TTY`); the app and launchd job that started it on macOS (`__CFBundleIdentifier`, `XPC_SERVICE_NAME`); launcher and unit state (systemd.exec(5)'s list: `INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `MANAGERPIDFDID`, `MAINPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `MEMORY_PRESSURE_*`, the `*_DIRECTORY` names, `FDSTORE`, `PIDFILE`, `TRIGGER_*`, `MONITOR_*`, `SERVICE_RESULT`, `EXIT_CODE`, `EXIT_STATUS`; and `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, the startup tokens `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`, atuin's per-shell `ATUIN_SESSION`, `ATUIN_HISTORY_ID`, `ATUIN_SHLVL`); termd's own controls (`G3D_TERMD_*`). Applies to both bases. Unlisted variables ride along | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history; Rex's `REX_SESSION`/`REX_BLOCK` name its tab and block). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested, and its `CLAUDE_CODE_MESSAGING_TOKEN` is a live IPC credential; a leaked `ATUIN_SESSION` makes every shell share the creator's history session (atuin's settings, `ATUIN_CONFIG_DIR` and the like, are the person's and ride along); a leaked `COLUMNS` overrides the real size; a startup token is single-use; `SSH_TTY` names the creator's terminal, and `GPG_TTY` sends pinentry there. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. A convenience, not the safety mechanism (the no-caller allowlist is): tmux and screen remove only their own markers and pass the rest. The list is a constant in code (`SCRUB` in `env.rs`); `--env-scrub` adds names and `termd.toml`'s `pass` exempts them (a name, or a prefix ending in `*`). A request's `env` may set any name but layer 6's |
+| 1. Base | **A caller's** (`create.env_base`, tag `caller`): its environment, as sent. **A creator with none** (tag `session`): start empty; copy the allowlist (`SESSION` in `env.rs`), no wider than the locale (`LANG`, `LC_*`) and the session's handles (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `XDG_SESSION_*`, `XDG_CURRENT_DESKTOP`, `SSH_AUTH_SOCK`, `TMPDIR`); `termd.toml`'s `pass` adds names and `drop` removes them. Each name is looked up at this `create` in the session source: **Linux**, the systemd user manager's environment (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, filtered to the allowlist; via `systemd-user`); **macOS**, `launchctl getenv <name>` for each (one `sh` running them all; a prefix is asked as the names the daemon's start environment and POSIX's locale and XDG names give it; via `launchd`). **A name the source lacks takes the daemon's start value, for that name only** (via `daemon`), except the locale, which is one group: when the source has any of `LANG`, `LANGUAGE`, `LC_*`, none comes from the start values (a starter's `LC_ALL=C` under the session's `LANG` would make every terminal ASCII). A source that doesn't answer leaves every allowlisted name to the start values, warned. The account (`HOME`, `USER`, `LOGNAME`, `SHELL`) and `PATH` are the fill's (layer 3), not looked up | The multiplexer convention for a caller; `login(1)`'s for a creator with none, plus the desktop's handles fresh at every `create`, so a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK` (the desktop re-imports them at each login). An allowlist, because the daemon's starter is an accident (an agent's shell carries `GIT_EDITOR=true`, an IPC token and its session ids; a shell tool its session id; a unit its cgroup's pressure file) and so is whatever someone imported into the user manager (an argument-less `systemctl --user import-environment` from a terminal imports that terminal's everything): no denylist names all of it. The per-name fallback keeps a session handle the source doesn't hold (a headless host's user manager has no `DISPLAY`; an SSH-forwarded agent is only in the starter's) without making the starter the base. Because every allowlisted name falls back so, the list holds only the session's own handles: a name that is the person's rather than the session's (`TZ`, the proxies, `XDG_CONFIG_HOME` and the other base directories, `KRB5CCNAME`, `LANGUAGE`) is absent from the Linux user manager, so it would always come from whoever started the daemon (a harness's scratch `XDG_CONFIG_HOME` reaching every wall terminal, the hazard the passwd fill exists for); the login shell's profile sets those, as after `login(1)`, and `pass` brings one back. macOS's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE` are left off too: CoreFoundation reads `~/.CFUserTextEncoding` when the first is unset, and libc's default for the second is `unix2003`. The status stream names the source |
+| 2. Scrub | best effort: remove what points back at the creator's tab or process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `REX_*`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `AI_AGENT`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`, `TERMCAP`, GNOME Terminal's `GNOME_TERMINAL_*`, Windows Terminal's `WT_PROFILE_ID`, Tilix's `TILIX_ID`, Terminator's `TERMINATOR_*`, vim's `:terminal` `VIM_TERMINAL` and `VIM_SERVERNAME`, older Neovim's `NVIM_LISTEN_ADDRESS`); the creator's own terminal device (`SSH_TTY`, `GPG_TTY`); the app and launchd job that started it on macOS (`__CFBundleIdentifier`, `XPC_SERVICE_NAME`); launcher and unit state (systemd.exec(5)'s list: `INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `MANAGERPIDFDID`, `MAINPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `MEMORY_PRESSURE_*`, the `*_DIRECTORY` names, `FDSTORE`, `PIDFILE`, `TRIGGER_*`, `MONITOR_*`, `SERVICE_RESULT`, `EXIT_CODE`, `EXIT_STATUS`; and `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, the startup tokens `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`, atuin's per-shell `ATUIN_SESSION`, `ATUIN_HISTORY_ID`, `ATUIN_SHLVL`); termd's own controls (`G3D_TERMD_*`). Applies to both bases. Unlisted variables ride along | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history; Rex's `REX_SESSION`/`REX_BLOCK` name its tab and block). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested, and its `CLAUDE_CODE_MESSAGING_TOKEN` is a live IPC credential; a leaked `ATUIN_SESSION` makes every shell share the creator's history session (atuin's settings, `ATUIN_CONFIG_DIR` and the like, are the person's and ride along); a leaked `COLUMNS` overrides the real size; a startup token is single-use; `SSH_TTY` names the creator's terminal, and `GPG_TTY` sends pinentry there; a leaked `GNOME_TERMINAL_SCREEN` makes `gnome-terminal --tab` open its tab in the creator's window (Tilix's, Terminator's and Windows Terminal's ids the same), a leaked `VIM_SERVERNAME` or `NVIM_LISTEN_ADDRESS` sends `--remote` edits to the creator's editor, and screen's per-window `TERMCAP` describes screen, not this terminal. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which a caller's base carries and a profile sets. A convenience, not the safety mechanism (the no-caller allowlist is): tmux and screen remove only their own markers and pass the rest. The list is a constant in code (`SCRUB` in `env.rs`); `--env-scrub` adds names and `termd.toml`'s `pass` exempts them (a name, or a prefix ending in `*`). A request's `env` may set any name but layer 6's |
 | 3. Fill | where the base has none (empty is none): `HOME`, `USER`, `LOGNAME` from `getpwuid` (via `passwd`); `PATH` as `login(1)` sets it (via `login`); `LANG` when no locale is set ([Locale](#locale); via `locale`). And `SHELL`, always: the shell chosen ([below](#the-shell-and-login-or-not); via `passwd`, `setting`, `base` or `default`) | What `login(1)` provides. A caller's own `HOME` or `PATH` is its subshell's and stays; a creator with none gets passwd's whatever the daemon's starter had (a test harness's overridden `HOME` would send every login shell to the wrong dotfiles) |
 | 4. File | `termd.toml`'s `[env.set]` ([below](#the-config-file-termdtoml)) | A person's own names for every terminal, without a profile |
 | 5. Request | the `create` request's `env` (validated, below); `null` removes; `g3d new -e` | The caller knows what this terminal is for |
@@ -1148,7 +1159,7 @@ the warnings.
 - An explicit `argv` runs as given, never as a login shell and never wrapped, on both platforms. A
   caller that wants a login shell sends no `argv`.
 - `argv[0]` without a slash is looked up in the composed environment's `PATH` (`execvpe`
-  semantics), not the daemon's.
+  semantics: an empty or relative entry is the program's working directory), not the daemon's.
 - **The relay sends no `argv`** for a plain new terminal (S1's `cli/attach.go` sends its own
   `$SHELL`, which bypasses all of the above), and `g3d new` sends none unless given a command.
   The daemon is the one place that knows the user's shell.
@@ -1172,7 +1183,7 @@ starter's (`ghostty`, `vscode`), whose features the browser may not have.
 
 ### Locale
 
-`LANG`, `LANGUAGE` and `LC_*` come from the base (a caller's, or the session's allowlist), the
+`LANG`, `LANGUAGE` and `LC_*` come from the base (a caller's; or the session's `LANG` and `LC_*`, taken as one group), the
 config file and the client's `env`. When the
 composed environment sets **none** of `LC_ALL`, `LC_CTYPE` and `LANG`, termd fills `LANG`:
 
@@ -1240,7 +1251,7 @@ macOS's bundled ncurses describes `xterm-256color` backspace as `^H`; the macOS 
 ### What a client supplies at `create`, and how it is checked
 
 - `env`: names match `[A-Za-z_][A-Za-z0-9_]*`; values contain no NUL and are at most 128 KiB each
-  (Linux's `MAX_ARG_STRLEN`); argv plus environment total at most 1 MiB. A violation is
+  (Linux's `MAX_ARG_STRLEN`); argv plus environment total at most the host's `ARG_MAX`. A violation is
   `bad_request` (or `too_large`) naming the variable. The layer-6 names are reserved: setting or
   removing one is `bad_request` (the terminal's type and identity are termd's to state).
 - `env_base`: the caller's environment, `{name: value}`, under the same name and size rules (its
@@ -1459,7 +1470,7 @@ notification on the control plane:
 
 ```json
 {"jsonrpc": "2.0", "method": "termd/status", "params": {
-  "relay": {"state": "ok", "since": 1794519100000, "ns": "default", "bundled": "g3d-termd/0.2.0"},
+  "relay": {"state": "ok", "since": 1794519100000, "ns": "default", "bundled": "g3d-termd/0.2.0", "lacks": []},
   "status": { …the daemon's status event, without "ev"… }}}
 ```
 
@@ -1479,6 +1490,9 @@ notification on the control plane:
   and agents page-less (`./glyph3d-cli termd.status`), as `log.query` does.
 - `relay.bundled` is the termd the relay ships with. When it differs from the running daemon's
   version, the window says so and names `g3d upgrade`; the relay never upgrades a daemon itself.
+- `relay.lacks` lists the input ops (`key`, `paste`) the brain answering now doesn't offer (its
+  `WELCOME.features`), `[]` when it has them or while no brain answers: the display's typing
+  can't reach a brain that lacks them, so the wall's notice says so and names `g3d upgrade`.
 
 S2's Rust relay carries the same notification byte for byte; its wire tape gains a scenario for it.
 
@@ -1553,17 +1567,33 @@ Option-as-character (all into `text`), so termd encodes Alt as Alt on a macOS da
 (`macos_option_as_alt` true). termd derives what the W3C event leaves implicit: the unshifted
 character (the client's `key` when it is unshifted, a shifted letter lowercased, else the US
 layout's character for `code`, Ghostty's `Key.codepoint()` table) and the consumed modifiers (Shift
-when it changed the text, Alt when it made another character). What comes out is Ghostty's byte for
-byte, including where that departs from xterm's defaults: Shift+Enter to a program that set no mode
-is `CSI 27;2;13~` (Ghostty's function-key table sends xterm's modified-key form for every modified
-Enter whatever modifyOtherKeys says), and Ctrl+Backspace is `^H`. PROTOCOL.md's table of keys is
-checked against the encoder by a unit test.
+when it changed the text, Alt when it made another character). A keypad digit `code` whose `key` is
+a navigation key (NumLock off: `Numpad8` with `ArrowUp`) is the keypad's navigation key
+(`numpad_up`), as Ghostty's apprt gives it from the keysym `KP_Up`: the cursor key's bytes, Kitty's
+`KP_UP`, never the digit. What comes out is Ghostty's byte for byte, but for a program that asked
+for **no keyboard mode** (no Kitty flags, no modifyOtherKeys 2), which gets xterm's bytes with
+modifyOtherKeys off where Ghostty's legacy encoding would speak a protocol the program never
+asked for: Enter with Shift, Ctrl or Super is `\r` (Ghostty's
+function-key table sends `CSI 27;2;13~` for every modified Enter whatever modifyOtherKeys says,
+which bash runs as `;2;13~` and python reads as junk), with Alt `ESC \r`; Ctrl+Shift+letter is the
+letter's C0 byte (Ghostty: fixterms' `CSI 97;6u`); Ctrl+`[`, Ctrl+I and Ctrl+M are `ESC`, `TAB`, `CR`
+(Ghostty leaves them to fixterms on purpose); Ctrl+Backspace is `^W`, readline's and zsh's word
+rubout, as VS Code's terminal binds it (`deleteWordLeft`), since a browser keeps Ctrl+W for itself
+(Ghostty: `^H`). libghostty has no getter for modifyOtherKeys, so `keys.rs` asks the encoder, set
+from the terminal: Ctrl+P is `0x10` unless state 2 is on. The lock modifiers ride as Ghostty sends
+them: its `KittyMods.fromInput` carries caps_lock and num_lock into the Kitty modifiers (bits 64 and
+128 in the Kitty spec), so Shift+Enter with NumLock on is `CSI 13;130u` to a Kitty program from the
+wall as from Ghostty. PROTOCOL.md's table of keys is checked against the encoder by a unit test.
 
 **Paste.** `paste` runs libghostty's `Terminal::paste`: bracketed in `ESC[200~`…`ESC[201~` when
 mode 2004 is on, else each `\n` as `\r` (xterm); xterm's strip list (NUL, BS, ENQ, EOT, ESC, DEL
 and the tty's control characters) made spaces in both, so pasted text can't close its bracket
 early or carry an escape sequence. Text that could run commands (a line break without bracketed
-paste; the bracket end with it) is refused with `unsafe_paste` unless `allow_unsafe`: Ghostty's
+paste; the bracket end with it) is refused with `unsafe_paste` unless `allow_unsafe`. Outside a
+bracket a `\r\n` is one `\r` (WezTerm's `canonicalize_pasted_newlines`, and the wall's own paste
+before termd encoded it): libghostty's `\n` → `\r` alone makes it `\r\r` (as xterm does), which
+runs an empty line after each line of Windows-origin text; inside a bracket the text is the
+program's, as it came. The refusal is Ghostty's
 `clipboard-paste-protection` rule, with the confirmation left to the client. `g3d paste` refuses
 it and says `--unsafe`; the browser's paste is the person's own paste chord in a focused terminal
 and the display has no confirmation dialog, so the adapter sends `allow_unsafe` (as xterm and
@@ -1573,9 +1603,20 @@ callback, so a program's Kitty paste events (mode 5522) are never offered: a pas
 **The browser.** `keyEncoding.js` (core, `services/interaction`) maps a `KeyboardEvent` to a key
 event (`keyEventFor`) and encodes nothing: modifiers held, `text` the one character `key` names,
 null for a bare modifier, a dead key's own keydown, an IME keystroke and the paste chord (so the
-browser's `paste` event fires). `TerminalGrid.sendKey` and `TerminalGrid.paste` hand them to the
+browser's `paste` event fires). AltGr on a Windows browser arrives as Ctrl+Alt with `AltGraph`
+held: those made the character (German AltGr+Q is `@`), so they don't ride, as Shift doesn't make
+`A` a chord. `TerminalGrid.sendKey` and `TerminalGrid.paste` hand them to the
 grid's owner route, the relay pushes `terminal.key` / `terminal.paste`, and the adapter
-(`cli/attach_unix.go`) sends `key` / `paste` on its termd connection. The wall (`WallKeys`) and the
+(`cli/attach_unix.go`) sends `key` / `paste` on its termd connection, once it has checked them in
+the brain's `WELCOME.features` (PROTOCOL.md asks a client to check before using anything newer than
+1.0). A brain from an earlier build (a holder kept across `g3d upgrade`s) lacks them: the adapter
+logs that once per connection, never sends the op, and the status follower puts the missing ops in
+`relay.lacks`, which the wall shows as a red notice ("typing can't reach termd … g3d upgrade") and
+`termd.status` as a line; before, every keystroke died as an `unknown_op` relay-log line and the
+wall showed nothing (the version numbers alone can't tell: both builds say `g3d-termd/0.1.0`). A
+request over the brain's `max_frame` (a paste of tens of MB, or a few MB of control characters,
+six bytes each as JSON) is refused unsent and logged, so the adapter's connection, which the
+daemon would end over it, stays. The wall (`WallKeys`) and the
 IDE (`keyboardRouter`'s terminal tier and paste tier) both take this path: they share the core
 grid and its owner route, so there is one. The wall also sends the release of a key whose press
 it sent, to the terminal that got the press (Kitty's event reporting reads releases); the IDE's
@@ -1859,14 +1900,21 @@ holder.
   serialization per tick.
 - **Keys and paste** (`tests/keys.rs`, `src/keys.rs`, `crates/g3d/tests/input.rs`). A program
   that sets a mode and prints every byte it reads in hex: Shift+Enter is `CSI 13;2u` after
-  `CSI > 1 u` and `CSI 27;2;13~` without it; Ctrl+P is `CSI 27;5;112~` under modifyOtherKeys 2;
-  ArrowUp is `ESC O A` under DECCKM; a paste is bracketed exactly when mode 2004 is on, a line
-  break without it is refused (`unsafe_paste`) and with `allow_unsafe` arrives as `\r`, and a
-  pasted `ESC [201~` arrives as ` [201~` inside one bracket; `key` and `paste` need a writing
-  subscription. PROTOCOL.md's key table equals the encoder's output. `g3d send`/`key`/`paste`
-  against a private daemon. Through the relay (`termd-relay-check.mjs`): `terminal.key` Shift+Enter
-  and Ctrl+C into a Kitty-mode program, `terminal.paste` bracketed with its `ESC` a space. In the
-  browser (`wall-e2e.mjs`): a real Shift+Enter into a Kitty-mode program and a real paste event.
+  `CSI > 1 u` and `\r` without it (Ctrl+Enter too; Ctrl+Shift+A `0x01`, Ctrl+Backspace `^W`, a
+  NumLock-off keypad 8 `CSI A` and keypad `.` `CSI 3~`); Ctrl+P is `CSI 27;5;112~` under
+  modifyOtherKeys 2; ArrowUp is `ESC O A` under DECCKM; a paste is bracketed exactly when mode 2004
+  is on, a line break without it is refused (`unsafe_paste`) and with `allow_unsafe` arrives as
+  `\r`, a `\r\n` as one `\r` (inside a bracket, as it came), and a pasted `ESC [201~` arrives as
+  ` [201~` inside one bracket; `key` and `paste` need a writing subscription. PROTOCOL.md's key
+  table equals the encoder's output. `g3d send`/`key`/`paste` against a private daemon, and a
+  17 MB `g3d paste` refused as `too_large` before it is sent. The relay's adapter sends no `key` or
+  `paste` to a brain whose features lack them, and refuses a request over `max_frame` unsent
+  (`cli/termd_input_test.go`); the wall's notice says so (`wall-panels.test.mjs`). Through the relay
+  (`termd-relay-check.mjs`): `terminal.key` Shift+Enter and Ctrl+C into a Kitty-mode program,
+  `terminal.paste` bracketed with its `ESC` a space, `relay.lacks` empty for a current brain. In
+  the browser (`wall-e2e.mjs`): Enter running a typed line (its output, not the echo), a real
+  Shift+Enter running a line in a plain shell and reaching a Kitty-mode program as `CSI 13;2u`, and
+  a real paste event.
 - **Relay and wall.** `termd/status` reaches a simulated display with each `relay.state`
   (`absent` → `ok` → `restarting` → `ok`, then `lost` after a holder kill); the wall's chip,
   window and notice render in `tools/wall-e2e.mjs` (the operator judges the look on the live display).

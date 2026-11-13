@@ -447,6 +447,29 @@ fn new_sends_its_environment_and_clean_takes_the_sessions() {
     let shown = g3d(&["env", "clean"]);
     assert_eq!(tag(&shown, "DISPLAY").as_deref(), Some("session (systemd-user)"), "{shown}");
     assert!(!shown.lines().any(|l| l.starts_with("caller")), "{shown}");
+
+    // `-e NAME` with a value the protocol can't carry is said, never sent as "unset".
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
+    cmd.arg("--socket").arg(&d.socket).args(["new", "latin", "--clean", "-e", "LATIN1", "--", "sleep", "600"]);
+    odd(&mut cmd);
+    use std::os::unix::ffi::OsStrExt;
+    cmd.env("LATIN1", std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("LATIN1") && err.contains("UTF-8"), "{err}");
+    assert!(!list(&d.socket).iter().any(|t| t.id == "latin"));
+
+    // A caller whose PATH holds `.` starts a program from its own directory, as its shell does.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
+    cmd.arg("--socket").arg(&d.socket).args(["new", "dot", "--", "sh", "-c", "sleep 600"]);
+    odd(&mut cmd);
+    cmd.env("PATH", ".:/nonexistent").current_dir("/bin");
+    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Found in the caller's own directory (`/bin`, as the OS spells it): `<dir>/sh`.
+    let said = String::from_utf8_lossy(&out.stdout);
+    let dir = std::fs::canonicalize("/bin").unwrap();
+    assert!(said.contains(&format!(": {}/sh -c sleep 600 in {}", dir.display(), dir.display())), "{said}");
 }
 
 /// The socket a namespace lives at doesn't depend on the starter's environment: a relay or daemon

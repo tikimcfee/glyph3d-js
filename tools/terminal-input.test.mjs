@@ -27,7 +27,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const ev = (key, code, mods = {}, extra = {}) => ({
     type: 'keydown', key, code, repeat: false, isComposing: false,
     ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, altKey: !!mods.alt, metaKey: !!mods.meta,
-    getModifierState: (m) => (m === 'CapsLock' ? !!mods.caps : false),
+    getModifierState: (m) => (m === 'CapsLock' ? !!mods.caps : m === 'AltGraph' ? !!mods.altGr : false),
     ...extra,
 });
 
@@ -59,6 +59,12 @@ const ev = (key, code, mods = {}, extra = {}) => ({
     ok(keyEventFor(ev('Escape', 'Escape'), { captureEscape: true })?.code === 'Escape', 'captured, Esc goes to the terminal');
     ok(keyEventFor(ev('a', 'KeyA', {}, { repeat: true }))?.action === 'repeat', 'a held key repeats');
     ok(keyEventFor(ev('a', 'KeyA', {}, { type: 'keyup' }))?.action === 'release', 'a keyup is a release');
+    // AltGr on a Windows browser is Ctrl+Alt with AltGraph held: the character is the text, and
+    // Ctrl/Alt went into it (termd would make Ctrl+Alt+@ a NUL).
+    ok(same(keyEventFor(ev('@', 'KeyQ', { ctrl: true, alt: true, altGr: true })), { code: 'KeyQ', key: '@', mods: [], text: '@', action: 'press' }),
+        'AltGr+Q on a German layout types @, no Ctrl or Alt');
+    ok(same(keyEventFor(ev('{', 'Digit7', { ctrl: true, alt: true, altGr: true }))?.mods, []), 'AltGr+7 types {');
+    ok(same(keyEventFor(ev('@', 'KeyQ', { ctrl: true, alt: true }))?.mods, ['Control', 'Alt']), 'a real Ctrl+Alt still rides');
 }
 
 // ── 3. the grid stamps its id; the push names the kind ──

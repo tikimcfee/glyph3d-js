@@ -63,18 +63,18 @@ let relayLog = '';
 // The relay starts from an environment that is not a desktop session's: another terminal's
 // identity and a parent shell's state, none of which may reach a terminal (DESIGN.md, "Environment").
 const relayEnv = { ...termd.env, TERM_PROGRAM: 'Apple_Terminal', TERM_SESSION_ID: 'w0t0p0:check', SHLVL: '7', COLUMNS: '33', TMUX: '/nonexistent/tmux,1,0' };
-async function startRelay() {
-    relay = spawn(BIN, ['serve', '--listen', '127.0.0.1', '--port', String(PORT), '--relay-only', '--termd-ns', NS, '--no-gomuxai', root],
-        { env: relayEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+async function startRelay(env = relayEnv, ns = NS, port = PORT) {
+    relay = spawn(BIN, ['serve', '--listen', '127.0.0.1', '--port', String(port), '--relay-only', '--termd-ns', ns, '--no-gomuxai', root],
+        { env, stdio: ['ignore', 'pipe', 'pipe'] });
     relay.stdout.on('data', (b) => { relayLog += b; });
     relay.stderr.on('data', (b) => { relayLog += b; });
     for (let i = 0; i < 100; i++) {
-        const up = await new Promise((res) => { const s = net.connect(PORT, '127.0.0.1', () => { s.end(); res(true); }); s.on('error', () => res(false)); });
+        const up = await new Promise((res) => { const s = net.connect(port, '127.0.0.1', () => { s.end(); res(true); }); s.on('error', () => res(false)); });
         if (up) return;
         if (relay.exitCode != null) break;
         await sleep(50);
     }
-    throw new Error(`relay did not start on :${PORT}\n${relayLog.slice(-800)}`);
+    throw new Error(`relay did not start on :${port}\n${relayLog.slice(-800)}`);
 }
 async function stopRelay() {
     if (!relay || relay.exitCode != null) return;
@@ -83,7 +83,10 @@ async function stopRelay() {
     await Promise.race([gone, sleep(3000)]);
     if (relay.exitCode == null) { relay.kill('SIGKILL'); await gone; }
 }
-const cleanup = () => { try { relay?.kill('SIGKILL'); } catch { /* gone */ } stopTermdSync(termd.dir, NS); };
+// The stripped relay's own namespace (its daemon reads the session source: G3D_TERMD_ENV_SOURCE unset).
+const AUTO_NS = 'tra';
+const autoTermd = privateTermd(`tra${process.pid}`);
+const cleanup = () => { try { relay?.kill('SIGKILL'); } catch { /* gone */ } stopTermdSync(termd.dir, NS); stopTermdSync(autoTermd.dir, AUTO_NS); };
 process.on('exit', cleanup);
 process.once('SIGINT', () => { cleanup(); process.exit(130); });
 
@@ -93,8 +96,8 @@ const terms = new Map();
 const term = (id) => { if (!terms.has(id)) terms.set(id, { owner: null, text: '', sizes: [], closes: 0 }); return terms.get(id); };
 let display = null;
 const events = [];
-async function connectDisplay() {
-    display = new WebSocket(`ws://127.0.0.1:${PORT}`);
+async function connectDisplay(port = PORT) {
+    display = new WebSocket(`ws://127.0.0.1:${port}`);
     display.binaryType = 'arraybuffer';
     await new Promise((res, rej) => { display.onopen = res; display.onerror = () => rej(new Error('display could not connect')); });
     display.onmessage = (e) => {
@@ -185,6 +188,7 @@ try {
         ok(!!st, `a termd/status push says ok with termd's document listing ${A} (${st ? `${st.status.daemon.version}, ns ${st.relay.ns}, bundled ${st.relay.bundled}` : 'none'})`);
         ok(statuses(0).some((p) => p.relay.state === 'absent'), 'before the first spawn it read absent (no daemon yet)');
         ok(!!st && st.relay.bundled === st.status.daemon.version, `the relay ships the termd it runs (${st?.relay.bundled})`);
+        ok(Array.isArray(st?.relay.lacks) && st.relay.lacks.length === 0, `the brain offers every input op the display uses (lacks ${JSON.stringify(st?.relay.lacks)})`);
         const id = 777;
         display.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'termd/status', params: {} }));
         let reply = null;
@@ -372,6 +376,50 @@ try {
     ok(!!daemon2 && daemon2 !== daemon1, `the next spawn started a fresh daemon (pid ${daemon2})`);
     type(s3.id, 'echo fresh-$((4*4))\r');
     ok(await screenHas(s3.id, 'fresh-16'), 'the fresh daemon serves typing');
+
+    // ── a relay started from a stripped environment, its daemon asking the session source ──
+    // The environment's gate: a relay-created terminal from a stripped relay environment gets the session's
+    // handles. The relay carries a stale DISPLAY, a stale bus address, a missing runtime directory,
+    // another terminal's identity and names that are no session's; its daemon (namespace "tra", no
+    // G3D_TERMD_ENV_SOURCE) asks the systemd user manager, read-only, as a person's would.
+    display.close();
+    await stopRelay();
+    terms.clear();
+    events.length = 0;
+    const PORT2 = await freePort();
+    const strippedEnv = {
+        PATH: process.env.PATH, HOME: process.env.HOME,
+        G3D_TERMD_DIR: autoTermd.dir, G3D_TERMD_CONFIG: path.join(autoTermd.dir, 'termd.toml'),
+        DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', XDG_RUNTIME_DIR: '/nonexistent',
+        TERM_PROGRAM: 'Apple_Terminal', REX_SESSION: 'rex-tab-3', SECRET_LEAK: 'leak',
+        XDG_CONFIG_HOME: path.join(autoTermd.dir, 'scratch-cfg'), TZ: 'UTC', LC_ALL: 'C',
+    };
+    await startRelay(strippedEnv, AUTO_NS, PORT2);
+    await connectDisplay(PORT2);
+    const sa = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: ['sleep', '300'] }, 'terminal.spawning');
+    await waitFor(() => term(sa.id).owner, 8000, 'the stripped relay\'s terminal');
+    const g3dAuto = (...args) => execFileSync(g3dBeside(BIN), ['--ns', AUTO_NS, ...args], { env: { ...process.env, G3D_TERMD_DIR: autoTermd.dir }, encoding: 'utf8' });
+    const autoPid = Number(/ pid (\d+)/.exec(g3dAuto('ls').split('\n').find((l) => l.startsWith(`${sa.id} `)) ?? '')?.[1]);
+    let manager = null;
+    try {
+        const out = execFileSync('busctl', ['--user', '--json=short', 'get-property', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
+            'org.freedesktop.systemd1.Manager', 'Environment'], { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` }, encoding: 'utf8', timeout: 5000 });
+        manager = Object.fromEntries(JSON.parse(out).data.map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+    } catch (e) { info(`no systemd user manager answers here (${e.message.split('\n')[0]}): the handles fall back to the relay's start values`); }
+    if (existsSync(`/proc/${autoPid}`)) {
+        const env = Object.fromEntries(readFileSync(`/proc/${autoPid}/environ`, 'utf8').split('\0').filter(Boolean)
+            .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+        const tags = Object.fromEntries((JSON.parse(g3dAuto('env', sa.id, '--json')).env ?? []).map((v) => [v.name, `${v.source}${v.via ? ` (${v.via})` : ''}`]));
+        const leaked = ['REX_SESSION', 'SECRET_LEAK', 'TZ', 'XDG_CONFIG_HOME', 'LC_ALL'].filter((k) => k in env && env[k] === strippedEnv[k]);
+        ok(env.TERM_PROGRAM === 'g3d-termd' && leaked.length === 0, `the stripped relay's terminal carries none of its creator's (leaked: ${leaked.join(' ') || 'none'})`);
+        const handles = ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS'].filter((k) => manager?.[k]);
+        if (handles.length) {
+            const wrong = handles.filter((k) => env[k] !== manager[k] || tags[k] !== 'session (systemd-user)');
+            ok(wrong.length === 0, `...and the session's handles, fresh from the user manager: ${handles.map((k) => `${k}=${env[k]} [${tags[k]}]`).join(', ')}`);
+        } else {
+            ok(env.DISPLAY === ':99' && tags.DISPLAY === 'session (daemon)', `...and, with no user manager holding the handles, the relay's DISPLAY by name (${env.DISPLAY} [${tags.DISPLAY}])`);
+        }
+    } else info(`no /proc/${autoPid}: the stripped-relay checks are Linux-only here`);
 } catch (e) {
     failures++;
     console.log(`FAIL  ${e.message}`);
@@ -380,6 +428,7 @@ try {
     display?.close();
     await stopRelay();
     await stopTermd(termd.dir, NS);
+    await stopTermd(autoTermd.dir, AUTO_NS);
 }
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

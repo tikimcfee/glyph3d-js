@@ -303,14 +303,18 @@ func runTerminal(cfg terminalConfig) {
 				},
 				key: func(k termdKey) {
 					s := sess.Load()
-					send("key", k.fields(s.handle))
+					if s.offers("key") {
+						send("key", k.fields(s.handle))
+					}
 				},
 				// The display's paste is the person's own (a paste chord in a focused terminal),
 				// and the display has no confirmation dialog: it pastes as xterm and WezTerm do
 				// (allow_unsafe), with termd's Ghostty encoding still making control bytes spaces.
 				paste: func(text string) {
 					s := sess.Load()
-					send("paste", map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true})
+					if s.offers("paste") {
+						send("paste", map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true})
+					}
 				},
 				resize:   onResize,
 				scroll:   scroll,
@@ -524,6 +528,22 @@ func runTerminal(cfg terminalConfig) {
 type termdSession struct {
 	tc     *termdClient
 	handle uint32
+	// said: the ops this brain lacks that were already logged (once per op per connection).
+	said sync.Map
+}
+
+// offers reports whether this session's brain has `op` (WELCOME.features), as PROTOCOL.md asks of
+// a client before it uses anything newer than 1.0. A brain from an earlier build (a holder kept
+// across upgrades) lacks `key` and `paste`: the display's typing can't reach it, which is logged
+// once here and shown in termd's status (`relay.lacks`, the wall's notice), never per keystroke.
+func (s *termdSession) offers(op string) bool {
+	if s.tc.Has(op) {
+		return true
+	}
+	if _, was := s.said.LoadOrStore(op, true); !was {
+		log.Printf("[attach] termd %s has no %q op (protocol 1.2): the display's input is dropped until it is upgraded (g3d upgrade)", s.tc.Welcome.Daemon, op)
+	}
+	return false
 }
 
 // encodeOutputFrame builds an OUTPUT data-plane frame:

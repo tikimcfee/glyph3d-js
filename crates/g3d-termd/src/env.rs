@@ -39,10 +39,17 @@ pub const SCRUB: &[&str] = &[
     "ALACRITTY_*",
     "GHOSTTY_*",
     "WT_SESSION",
+    "WT_PROFILE_ID",
+    "GNOME_TERMINAL_*",
+    "TILIX_ID",
+    "TERMINATOR_*",
     "TERMINAL_EMULATOR",
     "REX_*",
     "VSCODE_*",
     "NVIM",
+    "NVIM_LISTEN_ADDRESS",
+    "VIM_TERMINAL",
+    "VIM_SERVERNAME",
     "INSIDE_EMACS",
     "CLAUDECODE",
     "CLAUDE_CODE_*",
@@ -53,6 +60,7 @@ pub const SCRUB: &[&str] = &[
     "COLORTERM",
     "TERM_PROGRAM*",
     "TERMINFO",
+    "TERMCAP",
     "LC_TERMINAL",
     "LC_TERMINAL_VERSION",
     "COLORFGBG",
@@ -109,49 +117,39 @@ pub const SCRUB: &[&str] = &[
 /// The no-caller allowlist: what a terminal whose creator sends no environment (the wall, the
 /// relay, an agent) copies from the desktop session, each name looked up at every `create`. A
 /// base built from a known set, as `login(1)`, `sshd` and sudo's `env_reset` build a session;
-/// the login shell's profile brings back what a person exports. The account (`HOME`, `USER`,
-/// `LOGNAME`, `SHELL`) and a minimal `PATH` are the fill's (layer 3), from passwd and as
+/// the login shell's profile brings back what a person exports. Only the locale and the session's
+/// handles: each name here also takes the daemon's start value when the session source lacks it,
+/// so a name that is the person's (a time zone, a proxy, an XDG base directory) and not the
+/// session's would leak whatever started the daemon into every terminal. The account (`HOME`,
+/// `USER`, `LOGNAME`, `SHELL`) and a minimal `PATH` are the fill's (layer 3), from passwd and as
 /// `login(1)` sets them, not looked up. `termd.toml`'s `pass` adds names and `drop` removes them.
 pub const SESSION: &[&str] = &[
     // The locale.
     "LANG",
-    "LANGUAGE",
     "LC_*",
     // The desktop session: the display server, the session bus, pam_systemd's runtime directory
-    // and session names, the desktop's name and its XDG base directories.
+    // and session names, the desktop's name.
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
     "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_*",
-    // The session's credential agents (tmux's update-environment carries the same).
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_*",
+    "XDG_CURRENT_DESKTOP",
+    // The session's SSH agent (tmux's update-environment carries it too).
     "SSH_AUTH_SOCK",
-    "SSH_AGENT_PID",
-    "GPG_AGENT_INFO",
-    "KRB5CCNAME",
-    // The host's: the temporary directory (macOS's is per user), the time zone, the network
-    // proxies (curl's and wget's names, both cases), the user's own terminfo directories.
+    // The temporary directory (macOS's is per user, from launchd).
     "TMPDIR",
-    "TZ",
-    "http_proxy",
-    "https_proxy",
-    "ftp_proxy",
-    "all_proxy",
-    "no_proxy",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "FTP_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    "TERMINFO_DIRS",
-    // macOS: what launchd gives every process of the GUI session.
-    "__CF_USER_TEXT_ENCODING",
-    "COMMAND_MODE",
 ];
+
+/// The locale's names, which a no-caller base takes as one group: when the session source has
+/// any of them, none comes from the daemon's start values, so a terminal's locale is never half
+/// the session's (`LANG`) and half its starter's (`LC_ALL=C`).
+const LOCALE_GROUP: &[&str] = &["LANG", "LANGUAGE", "LC_*"];
 
 /// For a session source asked name by name (launchd's `getenv`), the names a prefix in the
 /// allowlist stands for, besides those the daemon's start environment holds: POSIX's locale
-/// categories and the XDG names a session sets.
+/// categories and the session names `pam_systemd` sets.
 const PREFIX_NAMES: &[&str] = &[
     "LC_ALL",
     "LC_CTYPE",
@@ -160,14 +158,6 @@ const PREFIX_NAMES: &[&str] = &[
     "LC_MONETARY",
     "LC_NUMERIC",
     "LC_TIME",
-    "XDG_RUNTIME_DIR",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_DIRS",
-    "XDG_DATA_DIRS",
-    "XDG_CURRENT_DESKTOP",
     "XDG_SESSION_TYPE",
     "XDG_SESSION_DESKTOP",
     "XDG_SESSION_CLASS",
@@ -179,9 +169,20 @@ const PREFIX_NAMES: &[&str] = &[
 pub const RESERVED: &[&str] =
     &["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "G3D_TERMD_ID", "G3D_TERMD_SOCKET", "PWD"];
 
-/// argv plus the environment, as `execve` counts them against `ARG_MAX`: each string and its NUL,
-/// and a pointer for each (and for each list's terminating null).
-pub const EXEC_MAX: usize = 1 << 20;
+/// The most argv plus the environment may be, as `execve` counts them: each string and its NUL,
+/// and a pointer for each (and for each list's terminating null). This host's `ARG_MAX`
+/// (`sysconf(_SC_ARG_MAX)`: on Linux a quarter of the stack limit, 2 MiB at the usual 8 MiB; 1 MiB
+/// on macOS), so a program a shell here can start, a terminal can too; on Linux at most the
+/// kernel's own ceiling whatever the stack limit (`_STK_LIM / 4 * 3`, 6 MiB, fs/exec.c).
+pub fn exec_max() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        // SAFETY: sysconf reads a limit.
+        let n = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+        let n = if n > 0 { n as usize } else { 1 << 20 };
+        if cfg!(target_os = "linux") { n.min(6 << 20) } else { n }
+    })
+}
 
 /// Where a no-caller base looks its names up (`--env-source`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -425,7 +426,8 @@ fn choose_shell(s: &Settings, account: &Account, env_shell: Option<&str>) -> (St
 }
 
 /// The no-caller base (layer 1): each name `allowed` lets through, from the session source's
-/// answer (`found`: its variables and its name), else the daemon's start value for that name.
+/// answer (`found`: its variables and its name), else the daemon's start value for that name;
+/// the locale as one group ([`LOCALE_GROUP`]).
 pub fn session_base(
     allowed: &dyn Fn(&str) -> bool,
     found: Option<(&[(String, String)], &'static str)>,
@@ -437,7 +439,11 @@ pub fn session_base(
             env.insert(k.clone(), Var::new(v, EnvSource::Session, Some(via)));
         }
     }
+    let session_locale = env.keys().any(|k| any_match(LOCALE_GROUP, k));
     for (k, v) in start.iter().filter(|(k, _)| allowed(k)) {
+        if session_locale && any_match(LOCALE_GROUP, k) {
+            continue;
+        }
         env.entry(k.clone()).or_insert_with(|| Var::new(v, EnvSource::Session, Some("daemon")));
     }
     env
@@ -559,7 +565,7 @@ pub fn compose(s: &Settings, base: Env, file: &FileEnv, account: &Account, req: 
     // The program.
     let (path, argv, shown, login) = match req.argv {
         Some(a) => {
-            let path = resolve(&a[0], env.get("PATH").map(|v| v.value.as_str()))?;
+            let path = resolve(&a[0], env.get("PATH").map(|v| v.value.as_str()), &cwd)?;
             let shown = std::iter::once(path.clone()).chain(a[1..].iter().cloned()).collect();
             (path, a.to_vec(), shown, false)
         }
@@ -573,10 +579,11 @@ pub fn compose(s: &Settings, base: Env, file: &FileEnv, account: &Account, req: 
     let total: usize = argv.iter().map(|a| a.len() + 1 + ptr).sum::<usize>()
         + env.iter().map(|(k, v)| k.len() + v.value.len() + 2 + ptr).sum::<usize>()
         + 2 * ptr;
-    if total > EXEC_MAX {
+    let max = exec_max();
+    if total > max {
         return Err(WireError::new(
             code::TOO_LARGE,
-            format!("argv and environment are {total} bytes; the most is {EXEC_MAX}"),
+            format!("argv and environment are {total} bytes; the most is {max} (this host's ARG_MAX)"),
         ));
     }
     let tagged = env
@@ -593,16 +600,21 @@ pub fn compose(s: &Settings, base: Env, file: &FileEnv, account: &Account, req: 
 }
 
 /// `argv[0]` to a path: as given when it has a slash, else looked up in the program's own `PATH`
-/// (execvp's semantics, with its default when `PATH` is unset).
-fn resolve(prog: &str, path: Option<&str>) -> Result<String, WireError> {
+/// (execvp's semantics, with its default when `PATH` is unset), where an empty entry or a relative
+/// one (`.`) is the program's working directory `cwd`, as it is to `execvp` run there.
+fn resolve(prog: &str, path: Option<&str>, cwd: &str) -> Result<String, WireError> {
     if prog.contains('/') {
         return Ok(prog.to_owned());
     }
     let search = path.map(str::to_owned).unwrap_or_else(default_path);
     search
         .split(':')
-        .filter(|d| !d.is_empty())
-        .map(|d| Path::new(d).join(prog))
+        .map(|d| match d {
+            "" | "." => PathBuf::from(cwd),
+            d if !d.starts_with('/') => Path::new(cwd).join(d),
+            d => PathBuf::from(d),
+        })
+        .map(|d| d.join(prog))
         .find(|p| is_executable(p))
         .map(|p| p.display().to_string())
         .ok_or_else(|| WireError::new(code::SPAWN_FAILED, format!("{prog}: not found in PATH {search:?}")))
@@ -1371,6 +1383,15 @@ mod tests {
             ("LC_TERMINAL", "iTerm2"),
             ("TERMINFO", "/opt/kitty/terminfo"),
             ("TERMINFO_DIRS", "/usr/share/terminfo"),
+            ("GNOME_TERMINAL_SCREEN", "/org/gnome/Terminal/screen/x"),
+            ("GNOME_TERMINAL_SERVICE", ":1.92"),
+            ("VIM_TERMINAL", "900"),
+            ("VIM_SERVERNAME", "VIM"),
+            ("NVIM_LISTEN_ADDRESS", "/run/nvim.sock"),
+            ("WT_PROFILE_ID", "{61c54bbd}"),
+            ("TILIX_ID", "a1b2"),
+            ("TERMINATOR_UUID", "urn:uuid:1"),
+            ("TERMCAP", "SC|screen|VT 100/ANSI X3.64 virtual terminal:"),
             ("PATH", "/usr/bin:/bin"),
             ("DISPLAY", ":0"),
             ("SSH_AUTH_SOCK", "/run/agent"),
@@ -1406,6 +1427,15 @@ mod tests {
             "G3D_TERMD_TEST_HOOKS",
             "LC_TERMINAL",
             "TERMINFO",
+            "GNOME_TERMINAL_SCREEN",
+            "GNOME_TERMINAL_SERVICE",
+            "VIM_TERMINAL",
+            "VIM_SERVERNAME",
+            "NVIM_LISTEN_ADDRESS",
+            "WT_PROFILE_ID",
+            "TILIX_ID",
+            "TERMINATOR_UUID",
+            "TERMCAP",
         ] {
             assert_eq!(get(&p, gone), None, "{gone} should be scrubbed");
         }
@@ -1555,6 +1585,92 @@ mod tests {
         assert_eq!(get(&p, "PATH"), Some("/usr/local/bin:/usr/bin:/bin"));
         assert_eq!(get(&p, "EDITOR"), None);
         assert_eq!(get(&p, "LANG"), Some("en_US.UTF-8"));
+    }
+
+    /// The allowlist is the locale and the session's handles, no wider. A name that is the
+    /// person's and not the session's (an XDG base directory, a time zone, a proxy, a Kerberos
+    /// cache) is never taken from the daemon's starter: a harness's scratch `XDG_CONFIG_HOME`
+    /// would reach every terminal the wall opens.
+    #[test]
+    fn the_allowlist_is_the_locale_and_the_sessions_handles_only() {
+        let start = kv(&[
+            ("XDG_RUNTIME_DIR", "/run/user/1"),
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("XDG_CURRENT_DESKTOP", "KDE"),
+            ("XDG_CONFIG_HOME", "/scratch/cfg"),
+            ("XDG_DATA_HOME", "/scratch/data"),
+            ("XDG_LEAK", "leak"),
+            ("TZ", "UTC"),
+            ("https_proxy", "http://127.0.0.1:9"),
+            ("NO_PROXY", "*"),
+            ("LANGUAGE", "de"),
+            ("KRB5CCNAME", "FILE:/scratch/krb"),
+            ("SSH_AGENT_PID", "7"),
+            ("GPG_AGENT_INFO", "/scratch/gpg"),
+            ("TERMINFO_DIRS", "/scratch/terminfo"),
+            ("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0"),
+            ("COMMAND_MODE", "unix2003"),
+            ("TMPDIR", "/scratch/tmp"),
+        ]);
+        let file = FileEnv::default();
+        let b = session_base(&|k| file.allowed(k), None, &start);
+        assert_eq!(
+            b.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["TMPDIR", "XDG_CURRENT_DESKTOP", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE"]
+        );
+        // `pass` still brings one back, when a person asks.
+        let file = FileEnv { pass: vec!["TZ".into()], ..Default::default() };
+        let b = session_base(&|k| file.allowed(k), None, &start);
+        assert_eq!(b.get("TZ").map(|v| (v.value.as_str(), v.via)), Some(("UTC", Some("daemon"))));
+    }
+
+    /// The locale is one group: when the session has any locale name, none comes from the
+    /// daemon's starter (a CI shell's `LC_ALL=C` would make every terminal ASCII under the
+    /// session's `LANG`). With none in the session, the starter's names fill in, name by name.
+    #[test]
+    fn the_locale_comes_whole_from_the_session_or_whole_from_the_daemon() {
+        let file = FileEnv::default();
+        let start = kv(&[("LC_ALL", "C"), ("LC_TIME", "C"), ("LANG", "C"), ("DISPLAY", ":99")]);
+        let source = kv(&[("LANG", "en_US.UTF-8")]);
+        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        assert_eq!(b.keys().map(String::as_str).collect::<Vec<_>>(), ["DISPLAY", "LANG"]);
+        assert_eq!(b["LANG"].value, "en_US.UTF-8");
+        let source = kv(&[("DISPLAY", ":0")]);
+        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        assert_eq!(b.keys().map(String::as_str).collect::<Vec<_>>(), ["DISPLAY", "LANG", "LC_ALL", "LC_TIME"]);
+        assert_eq!(b["LC_ALL"].via, Some("daemon"));
+    }
+
+    /// `execvp` takes an empty `PATH` entry, or a relative one, as the working directory: a caller
+    /// whose `PATH` holds `.` starts `./prog` the way its own shell does.
+    #[test]
+    fn an_empty_or_relative_path_entry_is_the_programs_working_directory() {
+        for path in [".:/nonexistent", ":/nonexistent", "/nonexistent:"] {
+            assert_eq!(resolve("sh", Some(path), "/bin").unwrap(), "/bin/sh", "{path}");
+        }
+        assert_eq!(resolve("sh", Some("bin"), "/").unwrap(), "/bin/sh");
+        assert_eq!(resolve("sh", Some("/nonexistent"), "/bin").unwrap_err().code, code::SPAWN_FAILED);
+    }
+
+    /// argv and the environment may be as large as this host's `ARG_MAX`, as for any program a
+    /// shell here starts: a 1.2 MB environment is not refused where the kernel takes 2 MiB.
+    #[test]
+    fn the_exec_limit_is_this_hosts_arg_max() {
+        // SAFETY: sysconf reads a limit.
+        let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+        assert_eq!(exec_max(), if cfg!(target_os = "linux") { arg_max.min(6 << 20) } else { arg_max });
+        let t = sleep();
+        let big: Vec<(String, String)> = (0..3000).map(|i| (format!("V{i}"), "x".repeat(400))).collect();
+        let base: Env = big.iter().map(|(k, v)| (k.clone(), Var::new(v, EnvSource::Caller, None))).collect();
+        if exec_max() > 1_300_000 {
+            compose0(base.clone(), &req(Some(&t), None)).expect("a 1.2 MB environment under ARG_MAX");
+        }
+        let huge: Env = (0..exec_max() / 400 + 1)
+            .map(|i| (format!("V{i}"), Var::new("x".repeat(400), EnvSource::Caller, None)))
+            .collect();
+        let e = compose0(huge, &req(Some(&t), None)).unwrap_err();
+        assert_eq!(e.code, code::TOO_LARGE);
+        assert!(e.message.contains(&exec_max().to_string()), "{}", e.message);
     }
 
     #[test]
@@ -1779,7 +1895,8 @@ mod tests {
         let env = BTreeMap::from([("X".to_string(), Some("a".repeat(ENV_VALUE_MAX - 2)))]);
         let e = compose0(Env::new(), &req(Some(&t), Some(&env))).unwrap_err();
         assert_eq!(e.code, code::TOO_LARGE);
-        let env: BTreeMap<_, _> = (0..10).map(|i| (format!("V{i}"), Some("x".repeat(ENV_VALUE_MAX - 10)))).collect();
+        let n = exec_max() / (ENV_VALUE_MAX - 10) + 1;
+        let env: BTreeMap<_, _> = (0..n).map(|i| (format!("V{i}"), Some("x".repeat(ENV_VALUE_MAX - 10)))).collect();
         let e = compose0(Env::new(), &req(Some(&t), Some(&env))).unwrap_err();
         assert_eq!(e.code, code::TOO_LARGE);
     }

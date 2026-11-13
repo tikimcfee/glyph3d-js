@@ -152,11 +152,22 @@ impl Client {
         }
     }
 
-    /// Sends a request without waiting; returns its `req`.
-    pub fn send_request(&mut self, op: Op) -> io::Result<u64> {
+    /// Sends a request without waiting; returns its `req`. A request larger than the daemon's
+    /// `max_frame` is refused here (`too_large`) and never sent: the daemon would end the whole
+    /// connection over it.
+    pub fn send_request(&mut self, op: Op) -> Result<u64, ClientError> {
         let req = self.next_req;
+        let bytes = frame::encode_json(ty::REQUEST, 0, &Request { req, op });
+        let len = bytes.len() - frame::HEADER_LEN;
+        let max = self.welcome.max_frame as usize;
+        if max > 0 && len > max {
+            return Err(ClientError::Wire(WireError::new(
+                g3d_wire::code::TOO_LARGE,
+                format!("the request is {len} B as JSON; the daemon takes at most {max} B (max_frame)"),
+            )));
+        }
         self.next_req += 1;
-        self.sock.write_all(&frame::encode_json(ty::REQUEST, 0, &Request { req, op }))?;
+        self.sock.write_all(&bytes)?;
         Ok(req)
     }
 

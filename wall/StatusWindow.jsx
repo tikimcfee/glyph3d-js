@@ -15,8 +15,9 @@ import { DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
  *                 per relay. A row's click reveals its terminal (wall.reveal: shown, focused, framed).
  *                 Toggled by the chord + S or `wall.status`.
  *   TermdNotice   one line under the topbar, only when something is wrong: a restart that lingers
- *                 (amber, after restartNoticeMs), unreachable, failed, or lost (red; lost stays until
- *                 dismissed or a terminal is spawned).
+ *                 (amber, after restartNoticeMs), unreachable, failed, lost (red; lost stays until
+ *                 dismissed or a terminal is spawned), or a brain too old for the display's typing
+ *                 (red: it has no `key`/`paste` op, so keys and pastes are dropped).
  *
  * Quiet by default: amber marks only what needs a look (blocked, lagging, queued input, a warning),
  * everything secondary is muted.
@@ -157,11 +158,15 @@ export function TermdChip({ wall }) {
 
 // ── the notice ───────────────────────────────────────────────────────────
 
-/** The notice for a state, or null: `{ tone, text, dismiss }`. */
-function noticeFor(termd, sinceMs, now, cfg) {
+/** The notice for a state, or null: `{ kind, tone, text, dismiss }`. */
+export function noticeFor(termd, sinceMs, now, cfg) {
   if (termd.lost) {
     return { kind: 'lost', tone: C.red, dismiss: true,
       text: `termd lost: the shells in namespace "${termd.lost.ns}" are gone · a new terminal starts a fresh termd` };
+  }
+  if (termd.lacks.length) {
+    return { kind: 'lacks', tone: C.red,
+      text: `typing can't reach termd: its engine has no ${termd.lacks.join(' or ')} op (protocol 1.2) · g3d upgrade moves it to the relay's, every shell kept` };
   }
   switch (termd.state) {
     case 'restarting':

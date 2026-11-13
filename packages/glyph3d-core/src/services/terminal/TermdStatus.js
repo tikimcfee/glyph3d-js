@@ -21,7 +21,9 @@
 
 /**
  * The relay's half of a notification.
- * @typedef {{ state: TermdState, since: number, ns: string, bundled: string }} TermdRelayView
+ * `lacks`: the input ops (`key`, `paste`) the brain answering now doesn't offer (one from an
+ * earlier build): the display's typing can't reach it until `g3d upgrade`.
+ * @typedef {{ state: TermdState, since: number, ns: string, bundled: string, lacks?: string[] }} TermdRelayView
  */
 
 export default class TermdStatus {
@@ -55,6 +57,15 @@ export default class TermdStatus {
     get upgradeAvailable() {
         const ship = this.relay?.bundled, run = this.doc?.daemon?.version;
         return ship && run && ship !== run ? ship : null;
+    }
+
+    /**
+     * The input ops the running brain lacks (`key`, `paste`): typing and pasting from this display
+     * are dropped until the operator runs `g3d upgrade`. Empty when it has them.
+     * @returns {string[]}
+     */
+    get lacks() {
+        return this.state === 'ok' ? (this.relay?.lacks ?? []) : [];
     }
 
     /**

@@ -10,7 +10,7 @@
 use g3d_wire::code;
 use g3d_wire::msg::{Key as WireKey, KeyAction};
 use libghostty_vt::Terminal;
-use libghostty_vt::key::{Action, Encoder, Event, Key, Mods, OptionAsAlt};
+use libghostty_vt::key::{Action, Encoder, Event, Key, KittyKeyFlags, Mods, OptionAsAlt};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -142,6 +142,46 @@ fn lower(c: char) -> char {
     }
 }
 
+/// A keypad key with NumLock off: the browser names the physical key (`Numpad8`) and the logical
+/// one (`ArrowUp`). Ghostty's apprt hands its encoder the keypad's navigation key then
+/// (`numpad_up`, from the keysym `KP_Up`), which is the cursor key's bytes (`CSI A`) and Kitty's
+/// `KP_UP`; the digit would type `8`.
+fn keypad_navigation(physical: Key, logical: &str) -> Option<Key> {
+    use Key::*;
+    let keypad = matches!(
+        physical,
+        Numpad0
+            | Numpad1
+            | Numpad2
+            | Numpad3
+            | Numpad4
+            | Numpad5
+            | Numpad6
+            | Numpad7
+            | Numpad8
+            | Numpad9
+            | NumpadDecimal
+    );
+    if !keypad {
+        return None;
+    }
+    Some(match logical {
+        "ArrowUp" => NumpadUp,
+        "ArrowDown" => NumpadDown,
+        "ArrowLeft" => NumpadLeft,
+        "ArrowRight" => NumpadRight,
+        "Home" => NumpadHome,
+        "End" => NumpadEnd,
+        "PageUp" => NumpadPageUp,
+        "PageDown" => NumpadPageDown,
+        "Insert" => NumpadInsert,
+        "Delete" => NumpadDelete,
+        // Keypad 5 with NumLock off (X11's KP_Begin).
+        "Clear" => NumpadBegin,
+        _ => return None,
+    })
+}
+
 /// W3C modifier key names (UI Events KeyboardEvent key values, "Modifier keys") → libghostty's.
 /// The ones a terminal has no bit for (`AltGraph`, `Fn`, the lock keys but Caps and Num) are
 /// accepted and dropped: they only ever shaped `text`, which the client resolved.
@@ -193,6 +233,7 @@ pub fn spec(k: &WireKey) -> Result<Spec, (&'static str, String)> {
         .copied()
         .or_else(|| one.and_then(|c| us_key(lower(c))))
         .unwrap_or(Key::Unidentified);
+    let key = keypad_navigation(key, &k.key).unwrap_or(key);
     if key == Key::Unidentified && k.text.is_empty() {
         return Err(bad(format!("key names no key: code {:?}, key {:?} and no text", k.code, k.key)));
     }
@@ -248,6 +289,15 @@ impl Keyboard {
         // Option-as-character is the client's to resolve (into `text`); an Alt that reaches
         // termd is Alt, on a macOS daemon too.
         self.enc.set_options_from_terminal(term).set_macos_option_as_alt(OptionAsAlt::True);
+        if let Some(bytes) = legacy_chord(s)
+            && self.legacy(term)?
+        {
+            return Ok(bytes);
+        }
+        self.encode_event(s)
+    }
+
+    fn encode_event(&mut self, s: &Spec) -> Result<Vec<u8>, String> {
         self.ev
             .set_action(s.action)
             .set_key(s.key)
@@ -259,6 +309,62 @@ impl Keyboard {
         let mut out = Vec::new();
         self.enc.encode_to_vec(&self.ev, &mut out).map_err(|e| format!("key encoding: {e}"))?;
         Ok(out)
+    }
+
+    /// Whether the program asked for no keyboard mode: no Kitty flags and no modifyOtherKeys
+    /// state 2. libghostty has no getter for modifyOtherKeys; the encoder, set from the terminal
+    /// just now, answers it: Ctrl+P is `0x10` unless state 2 is on (`CSI 27;5;112~`).
+    fn legacy(&mut self, term: &Terminal<'_, '_>) -> Result<bool, String> {
+        let kitty = term.kitty_keyboard_flags().map_err(|e| format!("kitty keyboard flags: {e}"))?;
+        if kitty != KittyKeyFlags::DISABLED {
+            return Ok(false);
+        }
+        let probe = Spec {
+            key: Key::P,
+            mods: Mods::CTRL,
+            consumed: Mods::empty(),
+            text: Some("p".into()),
+            unshifted: Some('p'),
+            action: Action::Press,
+        };
+        Ok(self.encode_event(&probe)? == [0x10])
+    }
+}
+
+/// What a program that asked for no keyboard mode (no Kitty flags, no modifyOtherKeys) gets for
+/// the chords where Ghostty's legacy encoding speaks a protocol the program never asked for:
+/// xterm's bytes with modifyOtherKeys off, which a plain readline program reads (and the wall's
+/// own encoder sent before termd encoded keys). `None`: Ghostty's encoding stands.
+///
+/// - Enter with Shift, Ctrl or Super is `\r` (Ghostty: `CSI 27;2;13~`, which bash runs as junk);
+///   with Alt too, `ESC \r`.
+/// - Ctrl+Shift+letter is the letter's C0 byte, as Ctrl+letter (Ghostty: fixterms' `CSI 97;6u`).
+/// - Ctrl+`[`, Ctrl+I and Ctrl+M are ESC, TAB and CR (Ghostty leaves them to fixterms' CSI u
+///   on purpose, key_encode.zig `ctrlSeq`); with Alt, ESC first.
+/// - Ctrl+Backspace is `^W`, readline's and zsh's word rubout: VS Code's terminal binds it so
+///   (`deleteWordLeft`), since a browser keeps Ctrl+W for itself (Ghostty: `^H`, one character).
+fn legacy_chord(s: &Spec) -> Option<Vec<u8>> {
+    if !matches!(s.action, Action::Press | Action::Repeat) {
+        return None;
+    }
+    let (shift, ctrl, alt, sup) = (
+        s.mods.contains(Mods::SHIFT),
+        s.mods.contains(Mods::CTRL),
+        s.mods.contains(Mods::ALT),
+        s.mods.contains(Mods::SUPER),
+    );
+    let with_alt = |b: u8| if alt { vec![0x1b, b] } else { vec![b] };
+    match s.key {
+        Key::Enter | Key::NumpadEnter if (shift || ctrl || sup) && s.text.is_none() => Some(with_alt(b'\r')),
+        Key::Backspace if ctrl && !shift && !alt && !sup => Some(vec![0x17]),
+        _ if ctrl && !sup => match s.unshifted {
+            Some(c @ 'a'..='z') if shift => Some(with_alt(c as u8 - b'a' + 1)),
+            Some('[') if !shift => Some(with_alt(0x1b)),
+            Some('i') if !shift => Some(with_alt(b'\t')),
+            Some('m') if !shift => Some(with_alt(b'\r')),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -333,19 +439,71 @@ mod tests {
         assert_eq!((s.unshifted, s.consumed, s.text), (None, Mods::empty(), None));
     }
 
-    /// Shift+Enter is `CSI 13;2u` to a program that pushed Kitty flags, and Ghostty's legacy
-    /// encoding to one that didn't: xterm's `CSI 27;2;13~` (src/input/function_keys.zig), which
-    /// Ghostty sends whatever modifyOtherKeys says. Enter alone is `\r` either way.
+    /// Shift+Enter is `CSI 13;2u` to a program that pushed Kitty flags, and `\r` to one that
+    /// asked for no keyboard mode (xterm with modifyOtherKeys off), not
+    /// Ghostty's legacy `CSI 27;2;13~`, which bash and python run as junk. Enter alone is `\r`
+    /// either way; under modifyOtherKeys 2 the program asked for xterm's `CSI 27;2;13~`.
     #[test]
-    fn shift_enter_is_csi_u_under_kitty_flags_and_ghosttys_legacy_without() {
+    fn shift_enter_is_csi_u_under_kitty_flags_and_a_carriage_return_without() {
         let k = w("Enter", "Enter", &["Shift"], "");
         let enter = w("Enter", "Enter", &[], "");
-        assert_eq!(enc(b"", &k), b"\x1b[27;2;13~");
+        assert_eq!(enc(b"", &k), b"\r");
+        assert_eq!(enc(b"", &w("Enter", "Enter", &["Control"], "")), b"\r");
+        assert_eq!(enc(b"", &w("Enter", "Enter", &["Control", "Shift"], "")), b"\r");
+        assert_eq!(enc(b"", &w("Enter", "Enter", &["Alt", "Shift"], "")), b"\x1b\r");
+        assert_eq!(enc(b"", &w("NumpadEnter", "Enter", &["Shift"], "")), b"\r");
         assert_eq!(enc(b"", &enter), b"\r");
         assert_eq!(enc(b"\x1b[>1u", &k), b"\x1b[13;2u");
         assert_eq!(enc(b"\x1b[>1u", &enter), b"\r");
+        assert_eq!(enc(b"\x1b[>4;2m", &k), b"\x1b[27;2;13~");
         // The flags are a stack: popping them is legacy again.
-        assert_eq!(enc(b"\x1b[>1u\x1b[<u", &k), b"\x1b[27;2;13~");
+        assert_eq!(enc(b"\x1b[>1u\x1b[<u", &k), b"\r");
+        // A release encodes nothing outside Kitty's event reporting.
+        let mut rel = k.clone();
+        rel.action = Some(KeyAction::Release);
+        assert_eq!(enc(b"", &rel), b"");
+    }
+
+    /// The legacy chords a plain readline program reads as xterm (modifyOtherKeys off) sends
+    /// them, where Ghostty's legacy encoding sends fixterms' CSI u; a program that asked for a
+    /// keyboard mode still gets Ghostty's.
+    #[test]
+    fn legacy_control_chords_are_xterms() {
+        assert_eq!(enc(b"", &w("KeyA", "A", &["Control", "Shift"], "A")), b"\x01");
+        assert_eq!(enc(b"", &w("KeyA", "A", &["Control", "Shift", "Alt"], "A")), b"\x1b\x01");
+        assert_eq!(enc(b"", &w("BracketLeft", "[", &["Control"], "[")), b"\x1b");
+        assert_eq!(enc(b"", &w("KeyI", "i", &["Control"], "i")), b"\t");
+        assert_eq!(enc(b"", &w("KeyM", "m", &["Control"], "m")), b"\r");
+        assert_eq!(enc(b"", &w("Backspace", "Backspace", &["Control"], "")), b"\x17");
+        assert_eq!(enc(b"", &w("Backspace", "Backspace", &[], "")), b"\x7f");
+        assert_eq!(enc(b"", &w("KeyC", "c", &["Control"], "c")), b"\x03");
+        // Under Kitty flags, Ghostty's.
+        assert_eq!(enc(b"\x1b[>1u", &w("KeyA", "A", &["Control", "Shift"], "A")), b"\x1b[97;6u");
+        assert_eq!(enc(b"\x1b[>1u", &w("BracketLeft", "[", &["Control"], "[")), b"\x1b[91;5u");
+        assert_eq!(enc(b"\x1b[>4;2m", &w("KeyA", "A", &["Control", "Shift"], "A")), b"\x1b[27;6;65~");
+    }
+
+    /// A keypad key with NumLock off is its navigation key, as Ghostty's apprt gives it: the
+    /// cursor key's bytes, and Kitty's KP_ codes; with NumLock on, the digit.
+    #[test]
+    fn keypad_keys_with_numlock_off_navigate() {
+        assert_eq!(enc(b"", &w("Numpad8", "ArrowUp", &[], "")), b"\x1b[A");
+        assert_eq!(enc(b"", &w("Numpad1", "End", &[], "")), b"\x1b[F");
+        assert_eq!(enc(b"", &w("NumpadDecimal", "Delete", &[], "")), b"\x1b[3~");
+        assert_eq!(enc(b"", &w("Numpad9", "PageUp", &[], "")), b"\x1b[5~");
+        assert_eq!(enc(b"\x1b[?1h", &w("Numpad4", "ArrowLeft", &[], "")), b"\x1bOD");
+        assert_eq!(enc(b"\x1b[>1u", &w("Numpad8", "ArrowUp", &[], "")), b"\x1b[57419u");
+        assert_eq!(enc(b"", &w("Numpad8", "8", &["NumLock"], "8")), b"8");
+    }
+
+    /// The lock modifiers ride in the Kitty modifiers as Ghostty sends them (key_encode.zig's
+    /// `KittyMods.fromInput` carries caps_lock and num_lock; the Kitty spec gives them bits 64 and
+    /// 128), so a desktop's NumLock reaches a Kitty program from the wall as it does from Ghostty.
+    #[test]
+    fn lock_modifiers_ride_as_ghostty_sends_them() {
+        assert_eq!(enc(b"\x1b[>1u", &w("Enter", "Enter", &["Shift", "NumLock"], "")), b"\x1b[13;130u");
+        assert_eq!(enc(b"", &w("Enter", "Enter", &["Shift", "NumLock"], "")), b"\r");
+        assert_eq!(enc(b"", &w("KeyC", "c", &["Control", "NumLock"], "c")), b"\x03");
     }
 
     #[test]
@@ -371,7 +529,7 @@ mod tests {
         let spec = include_str!("../../../docs/termd/PROTOCOL.md");
         let start = spec.find("| key | no mode set |").expect("the key table");
         let rows: Vec<&str> = spec[start..].lines().skip(2).take_while(|l| l.starts_with('|')).collect();
-        assert_eq!(rows.len(), 6, "{rows:?}");
+        assert_eq!(rows.len(), 9, "{rows:?}");
         let modes: [&[u8]; 4] = [b"", b"\x1b[>1u", b"\x1b[>4;2m", b"\x1b[?1h"];
         for row in rows {
             let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
@@ -380,6 +538,9 @@ mod tests {
                 "Enter" => w("Enter", "Enter", &[], ""),
                 "Shift+Enter" => w("Enter", "Enter", &["Shift"], ""),
                 "Ctrl+C" => w("KeyC", "c", &["Control"], "c"),
+                "Ctrl+Shift+A" => w("KeyA", "A", &["Control", "Shift"], "A"),
+                "Ctrl+Backspace" => w("Backspace", "Backspace", &["Control"], ""),
+                "Numpad8" => w("Numpad8", "ArrowUp", &[], ""),
                 "Alt+B" => w("KeyB", "b", &["Alt"], "b"),
                 "ArrowUp" => w("ArrowUp", "ArrowUp", &[], ""),
                 "Alt+ArrowLeft" => w("ArrowLeft", "ArrowLeft", &["Alt"], ""),
@@ -393,7 +554,7 @@ mod tests {
                         "CSI" => b"\x1b[".to_vec(),
                         "ESC" => b"\x1b".to_vec(),
                         "\\r" => b"\r".to_vec(),
-                        "0x03" => vec![3],
+                        t if t.starts_with("0x") => vec![u8::from_str_radix(&t[2..], 16).unwrap()],
                         t => t.as_bytes().to_vec(),
                     })
                     .collect();

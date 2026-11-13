@@ -49,6 +49,9 @@ type termdRelayState struct {
 	Since   int64  `json:"since"`
 	NS      string `json:"ns"`
 	Bundled string `json:"bundled"`
+	// Lacks: the input ops (`key`, `paste`) the running brain doesn't offer, so the display's
+	// typing can't reach it (a brain from an earlier build); empty when it has them, or no brain.
+	Lacks []string `json:"lacks"`
 }
 
 // termdStatusParams is a termd/status notification's params: the relay's view and the last
@@ -75,6 +78,7 @@ type termdStatusFollower struct {
 	since    time.Time
 	doc      json.RawMessage // the last document, while the terminals it lists may still be there
 	terms    bool            // the last document listed terminals
+	lacks    []string        // the input ops the brain answering now lacks
 	exiting  bool            // the last document said exiting
 	instance string
 	epoch    int // bumps on every state change: a stale grace timer does nothing
@@ -118,8 +122,12 @@ func (f *termdStatusFollower) paramsLocked() termdStatusParams {
 	if doc == nil {
 		doc = json.RawMessage("null")
 	}
+	lacks := f.lacks
+	if f.state != "ok" || lacks == nil {
+		lacks = []string{}
+	}
 	return termdStatusParams{
-		Relay:  termdRelayState{State: f.state, Since: f.since.UnixMilli(), NS: f.ns, Bundled: f.bundled},
+		Relay:  termdRelayState{State: f.state, Since: f.since.UnixMilli(), NS: f.ns, Bundled: f.bundled, Lacks: lacks},
 		Status: doc,
 	}
 }
@@ -252,7 +260,12 @@ func (f *termdStatusFollower) follow(c *termdClient) {
 	f.mu.Lock()
 	was, sameInstance := f.state, f.instance == c.Welcome.Instance
 	f.instance = c.Welcome.Instance
+	lacks := c.lacks(termdInputOps)
+	f.lacks = lacks
 	f.mu.Unlock()
+	if len(lacks) > 0 {
+		log.Printf("[termd-status] namespace %q: %s has no %s (protocol 1.2): typing from the display can't reach it until it is upgraded (g3d upgrade)", f.ns, c.Welcome.Daemon, strings.Join(lacks, ", "))
+	}
 	ms := f.interval.Milliseconds()
 	if err := c.Request("status_follow", map[string]any{"interval_ms": ms}, nil); err != nil {
 		log.Printf("[termd-status] status_follow: %v", err)
@@ -336,6 +349,9 @@ func termdStatusText(p termdStatusParams) string {
 	head += fmt.Sprintf(" · %s · brain %d gen %d · %d terminal(s)", doc.Daemon.Version, doc.Daemon.Brain.PID, doc.Daemon.Brain.Generation, len(doc.Terminals))
 	if p.Relay.Bundled != "" && p.Relay.Bundled != doc.Daemon.Version {
 		head += fmt.Sprintf(" · the relay ships %s (g3d upgrade)", p.Relay.Bundled)
+	}
+	if len(p.Relay.Lacks) > 0 {
+		head += fmt.Sprintf(" · typing can't reach it: no %s op (protocol 1.2; g3d upgrade)", strings.Join(p.Relay.Lacks, ", "))
 	}
 	lines := []string{head}
 	for _, t := range doc.Terminals {

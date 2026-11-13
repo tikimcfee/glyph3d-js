@@ -1635,6 +1635,13 @@ impl Owner {
                 // libghostty's paste writes through the terminal's pty callback, where query
                 // answers collect too: send any waiting first, so the paste's bytes are its own.
                 self.flush_replies();
+                // Outside a bracket each line break is Enter: a `\r\n` is one (WezTerm's
+                // canonicalize_pasted_newlines), not the two libghostty's `\n` → `\r` makes of it.
+                let text = if self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false) {
+                    text
+                } else {
+                    text.replace("\r\n", "\n")
+                };
                 let mimes = [ClipboardMime::new(b"text/plain")];
                 let options = PasteOptions::new().with_source(PasteSource::Clipboard).with_allow_unsafe(allow_unsafe);
                 let r = self.term.paste(options, &mimes, |_, w| w.write_all(text.as_bytes()));

@@ -840,8 +840,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs
   ```
-- **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, a real
-  Shift+Enter into a Kitty-keyboard program arriving as `CSI 13;2u` and a real paste event arriving
+- **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing (Enter runs the
+  line: the shell's output, not its echo), a real Shift+Enter running a line in a plain shell and
+  reaching a Kitty-keyboard program as `CSI 13;2u`, and a real paste event arriving
   bracketed (termd encodes the browser's key events), ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
   the wheel, wheel zoom about the pointer, pinch zoom, map labels, the core terminal verbs,
@@ -921,14 +922,19 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   crash and an upgrade counted in the next brain's document);
   keys and paste (`src/keys.rs` unit tests and `tests/keys.rs`: a program that sets a keyboard or
   paste mode and prints what it reads in hex gets Shift+Enter as `CSI 13;2u` under Kitty flags and
-  `CSI 27;2;13~` without, modifyOtherKeys and DECCKM honoured, a paste bracketed exactly under mode
-  2004, a line break without it refused unless `allow_unsafe`, a pasted `ESC [201~` unable to close
-  the bracket; PROTOCOL.md's key table equal to the encoder's output);
-  `g3d send`/`key`/`paste` against a private daemon (`crates/g3d/tests/input.rs`);
+  `\r` without (xterm's legacy chords: Ctrl+Enter `\r`, Ctrl+Shift+A `0x01`, Ctrl+Backspace `^W`;
+  a NumLock-off keypad key navigates), modifyOtherKeys and DECCKM honoured, a paste bracketed
+  exactly under mode 2004, a line break without it refused unless `allow_unsafe`, a `\r\n` one
+  `\r` outside a bracket, a pasted `ESC [201~` unable to close the bracket; PROTOCOL.md's key table
+  equal to the encoder's output);
+  `g3d send`/`key`/`paste` against a private daemon, a 17 MB paste refused unsent as `too_large`
+  (`crates/g3d/tests/input.rs`);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
   the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` sending its
   environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
-  `--clean` taking the session's fresh `DISPLAY`) and `g3d env`'s tags, and the socket path the
+  `--clean` taking the session's fresh `DISPLAY`; `-e NAME` with a non-UTF-8 value refused; a
+  `PATH` holding `.` finding a program in the caller's directory) and `g3d env`'s tags, and the
+  socket path the
   same from `env -i` as from a desktop environment. Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
   tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
@@ -947,11 +953,15 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   a `g3d upgrade` (every adapter rides them: no grid closes, no `LOST termd`, the repaint brings the
   screen back, `terminal.recover` mid-restart never answers empty), a SIGKILLed termd holder
   (adapters close their grids, the relay log says `LOST termd`, the next spawn starts a fresh
-  daemon); and termd's status reaching the simulated display with no per-terminal query (a
-  `termd/status` push for each state the run passes through: absent, ok with the document,
-  one at registration after the relay restart, restarting then ok on generation 2 across the brain
-  crash, lost when the holder dies; the display's `termd/status` request; the CLI's
-  `termd.status`).
+  daemon); termd's status reaching the simulated display with no per-terminal query (a
+  `termd/status` push for each state the run passes through: absent, ok with the document and
+  `relay.lacks` empty, one at registration after the relay restart, restarting then ok on
+  generation 2 across the brain crash, lost when the holder dies; the display's `termd/status`
+  request; the CLI's `termd.status`); and a second relay started from a stripped environment (a
+  stale `DISPLAY` and bus address, `XDG_RUNTIME_DIR=/nonexistent`, another terminal's identity,
+  `TZ`, a scratch `XDG_CONFIG_HOME`, `LC_ALL=C`) whose daemon asks the session source: its terminal
+  gets the systemd user manager's handles (read-only; tagged `session (systemd-user)`) and none of
+  the rest, or, with no manager answering, the relay's `DISPLAY` by name.
 - **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
   (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
   parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty

@@ -5,6 +5,8 @@
 import { test, expect } from 'bun:test';
 import { dockLayout, DOCK_WIDTHS } from '../wall/Panel.jsx';
 import { WALL_CONFIG, checkConfig } from '../wall/wallConfig.js';
+import { noticeFor } from '../wall/StatusWindow.jsx';
+import TermdStatus from '../packages/glyph3d-core/src/services/terminal/TermdStatus.js';
 
 const panel = (open, side) => ({ open, side });
 const EDGE = 12;
@@ -47,4 +49,20 @@ test("the status window's knobs are the wall's: born in WALL_CONFIG, checked by 
     expect(() => checkConfig('errorsShown', '1.5')).toThrow(/whole number/);
     expect(() => checkConfig('restartNoticeMs', '-1')).toThrow(/≥ 0/);
     expect(() => checkConfig('closeHoldMs', 'soon')).toThrow(/closeHoldMs/);
+});
+
+test("a brain without the key and paste ops says typing can't reach it", () => {
+    const t = new TermdStatus();
+    const relay = (state, lacks) => ({ state, since: 0, ns: 'n', bundled: '', lacks });
+    t.update({ relay: relay('ok', ['key', 'paste']), status: { daemon: { version: 'g3d-termd/0.1.0' }, terminals: [] } });
+    expect(t.lacks).toEqual(['key', 'paste']);
+    const n = noticeFor(t, 0, 0, WALL_CONFIG);
+    expect(n?.kind).toBe('lacks');
+    expect(n.text).toContain('key or paste');
+    expect(n.text).toContain('g3d upgrade');
+    // A current brain, or none answering: no such notice.
+    t.update({ relay: relay('ok', []), status: { daemon: {}, terminals: [] } });
+    expect(noticeFor(t, 0, 0, WALL_CONFIG)).toBe(null);
+    t.update({ relay: relay('restarting', ['key']), status: null });
+    expect(t.lacks).toEqual([]);
 });
