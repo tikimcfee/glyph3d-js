@@ -17,6 +17,30 @@ pub mod spawn;
 
 pub use holder::{Config, run};
 
+/// A pipe, both ends close-on-exec, both nonblocking when asked. Linux sets the flags with the
+/// pipe (`pipe2`); macOS has no `pipe2`, so they are set right after, which is exact in the
+/// holder (one thread: no fork can come between) and leaves a brain's thread a window that
+/// `spawn` doesn't reach (the holder starts every program).
+pub fn pipe(nonblock: bool) -> std::io::Result<(rustix::fd::OwnedFd, rustix::fd::OwnedFd)> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use rustix::pipe::{PipeFlags, pipe_with};
+        let flags = if nonblock { PipeFlags::CLOEXEC | PipeFlags::NONBLOCK } else { PipeFlags::CLOEXEC };
+        Ok(pipe_with(flags)?)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (rd, wr) = rustix::pipe::pipe()?;
+        for fd in [&rd, &wr] {
+            rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
+            if nonblock {
+                rustix::fs::fcntl_setfl(fd, rustix::fs::OFlags::NONBLOCK)?;
+            }
+        }
+        Ok((rd, wr))
+    }
+}
+
 /// The hold protocol's `[major, minor]` (holder ↔ brain). A brain speaks exactly one major; a
 /// minor only adds messages and fields. 2: `spawn` names the program's `path` apart from its
 /// `argv` (a login shell execs `/bin/bash` as `-bash`), and the holder no longer searches `PATH`.

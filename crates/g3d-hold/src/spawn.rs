@@ -93,7 +93,7 @@ fn open_fds() -> Vec<i32> {
 /// an exec failure comes back as the child's errno.
 pub fn spawn(plan: &Plan, nofile: libc::rlim_t) -> io::Result<(OwnedFd, i32)> {
     let (master, slave) = open_pty(plan.cols, plan.rows)?;
-    let (err_r, err_w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+    let (err_r, err_w) = crate::pipe(false)?;
     let mut argv: Vec<*const libc::c_char> = plan.argv.iter().map(|a| a.as_ptr()).collect();
     argv.push(std::ptr::null());
     let mut envp: Vec<*const libc::c_char> = plan.env.iter().map(|a| a.as_ptr()).collect();

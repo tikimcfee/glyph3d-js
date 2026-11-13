@@ -511,6 +511,9 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
             out.run_writer(wr).await;
             return;
         }
+        // macOS answers getpeereid with ENOTCONN once the client has closed (a probe that only
+        // connects); Linux's SO_PEERCRED still answers. Either way there is no one to serve.
+        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN) => return,
         Err(e) => {
             crate::log(&format!("peer credentials: {e}"));
             return;

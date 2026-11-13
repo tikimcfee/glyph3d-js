@@ -23,7 +23,6 @@
 
 use rustix::fd::OwnedFd;
 use std::io;
-use std::os::unix::fs::FileExt;
 
 const MAGIC: &[u8; 8] = b"G3DBLOB1";
 const HEAD: usize = 44;
@@ -73,12 +72,8 @@ pub fn write(
     head.extend_from_slice(&(input.len() as u32).to_le_bytes());
     head.extend_from_slice(&(engine.len() as u16).to_le_bytes());
     head.extend_from_slice(&(id.len() as u16).to_le_bytes());
-    let fd = g3d_hold::shm::create(&format!("g3d-termd blob {id}"), HEAD + body.len())?;
-    let f = std::fs::File::from(fd);
-    f.write_all_at(&head, 0)?;
-    f.write_all_at(&body, HEAD as u64)?;
-    let fd = OwnedFd::from(f);
-    g3d_hold::shm::seal(&fd)?;
+    head.extend_from_slice(&body);
+    let fd = g3d_hold::shm::create_from(&format!("g3d-termd blob {id}"), &head)?;
     Ok(fd)
 }
 
@@ -86,16 +81,20 @@ fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
-/// Reads and checks a blob (positional reads: the fd's offset is shared with the holder's copy).
+/// Reads and checks a blob. Its length is the header's: macOS rounds a shm object's size up to a
+/// page, so the object may end in padding past the blob.
 pub fn read(fd: &OwnedFd) -> io::Result<Blob> {
-    let size = g3d_hold::shm::size(fd)?;
-    if size < HEAD {
-        return Err(bad(format!("{size} B is shorter than the header")));
-    }
-    let f = std::fs::File::from(fd.try_clone()?);
-    let mut all = vec![0u8; size];
-    f.read_exact_at(&mut all, 0)?;
+    let mut all = g3d_hold::shm::read(fd)?;
+    all.truncate(declared_len(&all).unwrap_or(all.len()));
     parse(&all)
+}
+
+/// The blob's whole length as its header states it (None when there is no whole header).
+fn declared_len(all: &[u8]) -> Option<usize> {
+    let h = all.get(..HEAD)?;
+    let u16_at = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]) as usize;
+    let u32_at = |o: usize| u32::from_le_bytes(h[o..o + 4].try_into().unwrap()) as usize;
+    Some(HEAD + u16_at(40) + u16_at(42) + u32_at(32) + u32_at(36))
 }
 
 /// Parses a blob's bytes (the fixtures test this directly).
@@ -160,9 +159,8 @@ mod tests {
     #[test]
     fn a_corrupt_blob_is_refused() {
         let fd = write(KIND_VT, false, 7, "e", "t", b"hello hello hello", b"").unwrap();
-        let size = g3d_hold::shm::size(&fd).unwrap();
-        let mut all = vec![0u8; size];
-        std::fs::File::from(fd).read_exact_at(&mut all, 0).unwrap();
+        let mut all = g3d_hold::shm::read(&fd).unwrap();
+        all.truncate(declared_len(&all).unwrap());
         assert!(parse(&all).is_ok());
         let mut flip = all.clone();
         *flip.last_mut().unwrap() ^= 1;
@@ -187,9 +185,8 @@ mod tests {
             b"ls\r",
         )
         .unwrap();
-        let size = g3d_hold::shm::size(&fd).unwrap();
-        let mut all = vec![0u8; size];
-        std::fs::File::from(fd).read_exact_at(&mut all, 0).unwrap();
+        let mut all = g3d_hold::shm::read(&fd).unwrap();
+        all.truncate(declared_len(&all).unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, all).unwrap();
     }

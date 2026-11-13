@@ -39,6 +39,15 @@ use tokio::sync::oneshot;
 pub type ConnId = u64;
 
 const READ_CHUNK: usize = 64 * 1024;
+
+/// The ioctl that says how many bytes a read of a PTY master would take now. Linux answers
+/// `FIONREAD` on the master. macOS answers it with 0 whatever is queued (measured), which made
+/// every read one byte and every OUTPUT frame one byte; its `TIOCOUTQ` on the master gives the
+/// slave's output queue, which is exactly what the master reads.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const QUEUED: libc::c_ulong = libc::FIONREAD as libc::c_ulong;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const QUEUED: libc::c_ulong = libc::TIOCOUTQ as libc::c_ulong;
 const CONTINUATION_MAX: usize = 64 * 1024;
 const COMPRESS_IDLE: Duration = Duration::from_secs(30);
 /// An `INPUT` of exactly these bytes panics the owner thread, in a build with the `test-hooks`
@@ -1076,13 +1085,13 @@ impl Owner {
         let master = self.master.as_ref()?;
         // The high-water mark covers what this read can take BEFORE it runs: a SIGKILL that
         // lands inside the read syscall (the kernel has dequeued the bytes; this thread never
-        // runs again) must not lose them uncounted. The read takes at most what FIONREAD said,
+        // runs again) must not lose them uncounted. The read takes at most what QUEUED said,
         // so the mark is exact unless the kill falls between the store and the syscall; then it
         // overstates by bytes the next brain still reads (seq skips ahead; nothing is lost).
         // Measured: without this, a SIGKILL mid-flood lost ~100 uncounted bytes in 1 run of 4.
         let mut avail: libc::c_int = 0;
-        // SAFETY: FIONREAD into a c_int we own, on an fd we hold.
-        let ok = unsafe { libc::ioctl(master.as_raw_fd(), libc::FIONREAD as _, &mut avail) } == 0;
+        // SAFETY: QUEUED into a c_int we own, on an fd we hold.
+        let ok = unsafe { libc::ioctl(master.as_raw_fd(), QUEUED as _, &mut avail) } == 0;
         // Nothing queued: a one-byte read still tells EOF from EAGAIN, and a byte that races in
         // between the ioctl and the read stays covered.
         let want = match (ok, avail) {

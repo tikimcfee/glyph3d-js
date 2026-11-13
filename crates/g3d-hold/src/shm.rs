@@ -5,6 +5,9 @@
 //!   writes, growth and shrinking.
 //! - macOS: `shm_open` of a random name, `shm_unlink` at once, sized once with `ftruncate` (macOS
 //!   sizes a shm object only once), then `FD_CLOEXEC`. No seals; nothing else holds the fd.
+//!
+//! A blob's bytes go in and come out through a mapping ([`create_from`], [`read`]), never
+//! `pwrite`/`pread`: macOS refuses both on a shm object (`ESPIPE`).
 
 use rustix::fd::OwnedFd;
 use std::io;
@@ -77,7 +80,54 @@ pub unsafe fn unmap(p: *mut u8, size: usize) {
     unsafe { libc::munmap(p.cast(), size.max(1)) };
 }
 
-/// The object's size.
+/// A new sealed object holding exactly `bytes`.
+pub fn create_from(name: &str, bytes: &[u8]) -> io::Result<OwnedFd> {
+    let fd = create(name, bytes.len())?;
+    if !bytes.is_empty() {
+        let p = map(&fd, bytes.len(), true)?;
+        // SAFETY: `p` maps `bytes.len()` writable bytes of an object no one else holds yet.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+            unmap(p, bytes.len());
+        }
+    }
+    seal(&fd)?;
+    Ok(fd)
+}
+
+/// A copy of the object's bytes.
+pub fn read(fd: &OwnedFd) -> io::Result<Vec<u8>> {
+    let n = size(fd)?;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let p = map(fd, n, false)?;
+    // SAFETY: `p` maps `n` readable bytes; copied out, then unmapped.
+    let v = unsafe { std::slice::from_raw_parts(p, n).to_vec() };
+    unsafe { unmap(p, n) };
+    Ok(v)
+}
+
+/// The object's size: what was asked on Linux, rounded up to a page on macOS.
 pub fn size(fd: &OwnedFd) -> io::Result<usize> {
     Ok(rustix::fs::fstat(fd)?.st_size as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    /// What goes in comes out first, then zeros up to the object's size: exact on Linux, a
+    /// page multiple on macOS.
+    #[test]
+    fn an_object_reads_back_what_was_written() {
+        for len in [1usize, 100, 4096, 70_001] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+            let fd = super::create_from("test", &bytes).unwrap();
+            let got = super::read(&fd).unwrap();
+            assert_eq!(got.len(), super::size(&fd).unwrap());
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            assert_eq!(got.len(), len);
+            assert_eq!(&got[..len], &bytes[..]);
+            assert!(got[len..].iter().all(|&b| b == 0));
+        }
+    }
 }

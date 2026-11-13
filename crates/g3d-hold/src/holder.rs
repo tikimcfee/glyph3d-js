@@ -184,8 +184,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
 }
 
 fn install_signals() -> OwnedFd {
-    let (rd, wr) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK)
-        .unwrap_or_else(|e| die(&format!("signal pipe: {e}")));
+    let (rd, wr) = crate::pipe(true).unwrap_or_else(|e| die(&format!("signal pipe: {e}")));
     // SAFETY: SIG_WR is written before any handler that reads it is installed; the handlers
     // only write one byte to it. Leaked on purpose: it lives as long as the process.
     unsafe {
@@ -715,7 +714,7 @@ impl Holder {
         let path = CString::new(binary.as_os_str().as_bytes()).map_err(|_| std::io::Error::other("path has NUL"))?;
         let mut argv: Vec<*const libc::c_char> = args.iter().map(|a| a.as_ptr()).collect();
         argv.push(std::ptr::null());
-        let (err_r, err_w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        let (err_r, err_w) = crate::pipe(false)?;
         let (child_fd, err_fd, nofile) = (theirs.as_raw_fd(), err_w.as_raw_fd(), self.nofile);
         // SAFETY: one thread; the child makes only async-signal-safe calls before execv.
         let pid = unsafe { libc::fork() };
