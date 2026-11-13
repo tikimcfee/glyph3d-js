@@ -1027,7 +1027,8 @@ impl Policy {
 }
 
 /// Parses the user manager's `Environment` property as `busctl --json=short` prints it:
-/// `{"type":"as","data":["K=V",…]}`.
+/// `{"type":"as","data":["K=V",…]}`. Linux's, and the test hook's file on every platform.
+#[cfg(any(target_os = "linux", feature = "test-hooks", test))]
 pub fn parse_manager_env(json: &str) -> Result<Vec<(String, String)>, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("not JSON: {e}"))?;
     if v.get("type").and_then(|t| t.as_str()) != Some("as") {
@@ -1267,8 +1268,10 @@ mod platform {
     }
 
     /// launchd's value for each of `names` (`launchctl getenv`, one `sh` for all of them), as the
-    /// GUI session holds them now. Unverified here: written on Linux, the parser unit-tested; the
-    /// macOS branch proves the lookup.
+    /// GUI session holds them now. `TMPDIR` is not among what `getenv` answers (that is what was
+    /// `setenv`'d, and the agents' sockets): launchd gives each job the per-user directory
+    /// `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, so that is the session's `TMPDIR` unless
+    /// `launchctl setenv` set one.
     pub fn session_env(
         names: &[String],
         _start: &[(String, String)],
@@ -1277,7 +1280,27 @@ mod platform {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(super::launchd::SCRIPT).arg("sh").args(names);
         let out = super::run_bounded(cmd, "launchctl getenv", timeout)?;
-        Ok((super::launchd::parse(&out, names)?, "launchd"))
+        let mut vars = super::launchd::parse(&out, names)?;
+        if names.iter().any(|n| n == "TMPDIR")
+            && !vars.iter().any(|(k, _)| k == "TMPDIR")
+            && let Some(dir) = user_temp_dir()
+        {
+            vars.push(("TMPDIR".into(), dir));
+        }
+        Ok((vars, "launchd"))
+    }
+
+    /// `confstr(_CS_DARWIN_USER_TEMP_DIR)`: this user's temporary directory, as launchd sets
+    /// `TMPDIR` for its jobs (`/var/folders/…/T/`).
+    fn user_temp_dir() -> Option<String> {
+        let mut buf = vec![0u8; 1024];
+        // SAFETY: confstr writes at most `buf.len()` bytes, NUL included, into a buffer we own.
+        let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+        if n == 0 || n > buf.len() {
+            return None;
+        }
+        buf.truncate(n - 1);
+        String::from_utf8(buf).ok().filter(|d| d.starts_with('/'))
     }
 }
 

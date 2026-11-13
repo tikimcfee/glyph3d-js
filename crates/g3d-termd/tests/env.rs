@@ -62,9 +62,14 @@ const ODD: &[(&str, &str)] = &[
 ];
 
 fn odd_daemon(args: &[&str]) -> Daemon {
-    Daemon::start_cmd(args, |cmd, _| {
+    odd_daemon_with(args, &[])
+}
+
+/// [`odd_daemon`] whose starter also has `extra`.
+fn odd_daemon_with(args: &[&str], extra: &'static [(&'static str, &'static str)]) -> Daemon {
+    Daemon::start_cmd(args, move |cmd, _| {
         use std::os::unix::process::CommandExt;
-        cmd.env_clear().envs(ODD.iter().copied());
+        cmd.env_clear().envs(ODD.iter().copied()).envs(extra.iter().copied());
         // SAFETY: plain calls between fork and exec. The starter ignores SIGINT (as a shell's
         // background job does) and has a low soft fd limit; neither may reach a terminal.
         unsafe {
@@ -637,6 +642,7 @@ fn a_stripped_creator_gets_the_sessions_handles() {
 
 /// The real user manager, when this host has one: a starter's stale DISPLAY never wins over its
 /// own. Read only (nothing is set in the session), into a terminal that runs the probe.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     let out = Command::new("busctl")
@@ -674,4 +680,55 @@ fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     );
     assert_eq!(env.get("KEEP_ME"), None);
     assert!(d.log().contains("terminal environment: the session's from the systemd user manager"), "{}", d.log());
+}
+
+/// launchd, in a GUI (Aqua) session: a starter's stale SSH agent and temporary directory never
+/// win over the session's own (`launchctl getenv`; `TMPDIR` is the per-user directory launchd
+/// gives its jobs), a name launchd lacks keeps the starter's value, tagged so, and `env` names
+/// the source. Read only (nothing is set in the session): `launchctl setenv` reaching the next
+/// create is checked by hand (MACOS.md).
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_wins_over_a_stale_starter_in_a_gui_session() {
+    let launchctl = |args: &[&str]| {
+        let out = Command::new("/bin/launchctl").args(args).output().expect("/bin/launchctl");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    // An ssh login or a launch daemon is not in the GUI session: launchd's per-user environment
+    // (the agent's socket) isn't there to read.
+    let manager = launchctl(&["managername"]);
+    if manager != "Aqua" {
+        eprintln!("SKIPPED: launchctl managername is {manager:?}, not Aqua (no GUI session to read)");
+        return;
+    }
+    let agent = Some(launchctl(&["getenv", "SSH_AUTH_SOCK"])).filter(|v| !v.is_empty());
+    let tmpdir = Some(launchctl(&["getenv", "TMPDIR"])).filter(|v| !v.is_empty()).unwrap_or_else(|| {
+        let out = Command::new("/usr/bin/getconf").arg("DARWIN_USER_TEMP_DIR").output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    });
+    assert!(tmpdir.starts_with('/'), "no per-user temporary directory: {tmpdir:?}");
+    let d = odd_daemon_with(
+        &["--idle-exit", "0", "--env-source", "auto"],
+        &[("SSH_AUTH_SOCK", "/nonexistent/stale-agent"), ("TMPDIR", "/nonexistent/stale-tmp/")],
+    );
+    let mut c = d.client();
+    let r = create_with(&mut c, "ld", |cr| cr.argv = probe_argv()).unwrap();
+    let env = environ(r.pid);
+    let t = tagged(&mut c, "ld");
+    let launchd = |v: &str| (v.to_owned(), EnvSource::Session, Some("launchd".to_owned()));
+    let daemon = |v: &str| (v.to_owned(), EnvSource::Session, Some("daemon".to_owned()));
+    assert_eq!(env.get("TMPDIR"), Some(&tmpdir), "the starter's TMPDIR won over the session's");
+    assert_eq!(t["TMPDIR"], launchd(&tmpdir));
+    match &agent {
+        Some(a) => assert_eq!(t["SSH_AUTH_SOCK"], launchd(a), "the starter's stale agent won"),
+        None => assert_eq!(t["SSH_AUTH_SOCK"], daemon("/nonexistent/stale-agent")),
+    }
+    // No X server in launchd's session: the starter's DISPLAY, for that name only, said so.
+    if launchctl(&["getenv", "DISPLAY"]).is_empty() {
+        assert_eq!(t["DISPLAY"], daemon(":99"));
+    }
+    assert_eq!(env.get("KEEP_ME"), None, "the starter's environment leaked");
+    assert!(d.log().contains(SOURCE_SAID), "{}", d.log());
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(st.status.daemon.env.source, "launchd");
 }
