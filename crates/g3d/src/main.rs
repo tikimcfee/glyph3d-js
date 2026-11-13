@@ -21,7 +21,8 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "g3d", version, about = "Attach to, watch and manage g3d-termd terminals")]
@@ -33,6 +34,10 @@ struct Cli {
     /// An explicit daemon socket instead of a namespace's.
     #[arg(long, global = true, conflicts_with = "ns")]
     socket: Option<PathBuf>,
+    /// attach, watch and status --follow ride a restart of termd's engine (a crash, an upgrade)
+    /// for up to this many seconds before giving up.
+    #[arg(long, global = true, default_value_t = start::RECONNECT_WINDOW.as_secs(), env = "G3D_RECONNECT_WINDOW")]
+    reconnect_window: u64,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -139,6 +144,7 @@ fn connect(target: &Target) -> Client {
 
 fn main() {
     let cli = Cli::parse();
+    let window = Duration::from_secs(cli.reconnect_window);
     // Inside a termd terminal, its own daemon, as tmux's client finds its server through $TMUX.
     let inside = std::env::var_os("G3D_TERMD_SOCKET").filter(|v| !v.is_empty()).map(PathBuf::from);
     let target = match (cli.socket, cli.ns, inside) {
@@ -232,12 +238,12 @@ fn main() {
             let _: Empty = c.request(Op::Stop).unwrap_or_else(|e| die(e));
         }
         Cmd::Upgrade { binary } => upgrade(&target, binary),
-        Cmd::Status { json, follow, interval } => status(&target, json, follow, interval),
+        Cmd::Status { json, follow, interval } => status(&target, json, follow, interval, window),
         Cmd::Attach { id, take, detach_key } => {
             let role = if take { Role::Own } else { Role::Attach };
-            attach(&target, &id, role, parse_key(&detach_key));
+            attach(&target, &id, role, parse_key(&detach_key), window);
         }
-        Cmd::Watch { id, detach_key } => attach(&target, &id, Role::Watch, parse_key(&detach_key)),
+        Cmd::Watch { id, detach_key } => attach(&target, &id, Role::Watch, parse_key(&detach_key), window),
     }
 }
 
@@ -280,21 +286,29 @@ fn send_request(w: &Mutex<UnixStream>, op: Op) {
     let _ = w.lock().unwrap().write_all(&frame::encode_json(ty::REQUEST, 0, &Request { req, op }));
 }
 
-fn attach(target: &Target, id: &str, role: Role, detach: u8) {
+/// The subscription `attach` holds: the same request at the start and after every reconnect.
+fn subscribe(c: &mut Client, id: &str, role: Role) -> Result<SubscribeReply, ClientError> {
+    let size = if role == Role::Own { local_size() } else { None };
+    c.request(Op::Subscribe(Subscribe {
+        id: id.to_owned(),
+        mode: Mode::Raw,
+        role,
+        history_rows: None,
+        flow: Some(Flow::Lossy),
+        cols: size.map(|s| s.0),
+        rows: size.map(|s| s.1),
+    }))
+}
+
+/// `g3d attach` / `g3d watch`. A restart of termd's engine (a crash, an upgrade) is ridden by the
+/// rule every client follows (PROTOCOL.md "Restarts"): reconnect, the same instance, subscribe
+/// again by id; the `REPAINT` brings the screen back. Keys typed while it reconnects are dropped
+/// (input is at most once). It ends when the terminal does, the namespace goes, or no engine
+/// answers within `window`.
+fn attach(target: &Target, id: &str, role: Role, detach: u8, window: Duration) {
     let mut c = connect(target);
     let tty = termios::isatty(std::io::stdin()) && termios::isatty(std::io::stdout());
-    let size = if role == Role::Own { local_size() } else { None };
-    let sub: SubscribeReply = c
-        .request(Op::Subscribe(Subscribe {
-            id: id.to_owned(),
-            mode: Mode::Raw,
-            role,
-            history_rows: None,
-            flow: Some(Flow::Lossy),
-            cols: size.map(|s| s.0),
-            rows: size.map(|s| s.1),
-        }))
-        .unwrap_or_else(|e| die(e));
+    let sub = subscribe(&mut c, id, role).unwrap_or_else(|e| die(e));
     if role != Role::Own
         && let Some((lc, lr)) = local_size()
         && (lc < sub.cols || lr < sub.rows)
@@ -313,25 +327,43 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8) {
         termios::tcsetattr(std::io::stdin(), OptionalActions::Flush, &raw).unwrap_or_else(|e| die(format!("tty: {e}")));
         *SAVED.lock().unwrap() = Some(saved);
     }
+    // The connection's write side and the subscription's handle, both replaced on a reconnect.
     let writer = Mutex::new(c.try_clone_stream().unwrap_or_else(|e| die(e)));
     let writer: &'static Mutex<UnixStream> = Box::leak(Box::new(writer));
-    let handle = sub.handle;
+    let handle: &'static AtomicU32 = Box::leak(Box::new(AtomicU32::new(sub.handle)));
     let name = id.to_owned();
+    let target = target.clone();
 
     // Output: frames → query filter → this tty.
     std::thread::spawn(move || {
         let mut filter = QueryFilter::new();
+        let mut instance = c.welcome.instance.clone();
         // Locked per write: leave() on the input thread needs it too.
         let out = std::io::stdout();
         let mut buf = Vec::with_capacity(64 * 1024);
         loop {
             let f = match c.next_frame() {
                 Ok(f) => f,
-                Err(e) => {
-                    leave(&format!("g3d: lost the daemon: {e}"), 1);
+                Err(why) => {
+                    let planned = why.code() == Some(code::RESTART);
+                    c = start::reconnect(&target, "g3d", planned, instance.as_deref(), window)
+                        .unwrap_or_else(|gone| leave(&format!("g3d: {why}; {gone}"), 1));
+                    instance = c.welcome.instance.clone();
+                    match subscribe(&mut c, &name, role) {
+                        Ok(s) => {
+                            *writer.lock().unwrap() =
+                                c.try_clone_stream().unwrap_or_else(|e| leave(&format!("g3d: {e}"), 1));
+                            handle.store(s.handle, Ordering::SeqCst);
+                        }
+                        Err(e) if e.code() == Some(code::NO_TERMINAL) => leave(&format!("[{name} exited]"), 0),
+                        Err(e) => leave(&format!("g3d: subscribe {name} again after {why}: {e}"), 1),
+                    }
+                    // The REPAINT that follows starts the screen over.
+                    filter = QueryFilter::new();
+                    continue;
                 }
             };
-            if f.stream != handle && f.ty != ty::REPLY {
+            if f.stream != handle.load(Ordering::SeqCst) && f.ty != ty::REPLY {
                 continue;
             }
             buf.clear();
@@ -374,7 +406,7 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8) {
                 let now = local_size();
                 if now != last {
                     if let Some((cols, rows)) = now {
-                        send_request(writer, Op::Resize(Resize { handle, cols, rows }));
+                        send_request(writer, Op::Resize(Resize { handle: handle.load(Ordering::SeqCst), cols, rows }));
                     }
                     last = now;
                 }
@@ -413,7 +445,8 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8) {
             continue;
         }
         if !send.is_empty() {
-            let _ = writer.lock().unwrap().write_all(&frame::encode(ty::INPUT, handle, &send));
+            // While reconnecting this writes to the closed connection and the keys are dropped.
+            let _ = writer.lock().unwrap().write_all(&frame::encode(ty::INPUT, handle.load(Ordering::SeqCst), &send));
         }
     }
 }
@@ -498,7 +531,7 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
 /// `g3d status`: the daemon's status document, rendered (or as JSON). With `--follow`, each
 /// document the daemon pushes replaces the last on a terminal (appended when piped); a restart of
 /// termd's engine is ridden (PROTOCOL.md "Restarts"), and the namespace leaving ends it.
-fn status(target: &Target, json: bool, follow: bool, interval: Option<u64>) {
+fn status(target: &Target, json: bool, follow: bool, interval: Option<u64>, window: Duration) {
     let tty = termios::isatty(std::io::stdout());
     let color = tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
     let style = if color { g3d::render::Style::SGR } else { g3d::render::Style::PLAIN };
@@ -558,25 +591,7 @@ fn status(target: &Target, json: bool, follow: bool, interval: Option<u64>) {
         if !json {
             eprintln!("g3d: {why}; reconnecting");
         }
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut wait = std::time::Duration::from_millis(if planned { 0 } else { 100 });
-        c = loop {
-            std::thread::sleep(wait);
-            match start::connect(target, "g3d") {
-                Ok(n) if instance.is_some() && n.welcome.instance != instance => {
-                    die("a different namespace answers: the terminals this followed are gone")
-                }
-                Ok(n) => break n,
-                Err(ClientError::Io(e))
-                    if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) =>
-                {
-                    die("nothing listens any more: the namespace and its terminals are gone")
-                }
-                Err(e) if std::time::Instant::now() >= until => die(format!("no termd engine answered for 30s: {e}")),
-                Err(_) => {}
-            }
-            wait = (wait * 2).clamp(std::time::Duration::from_millis(100), std::time::Duration::from_secs(2));
-        };
+        c = start::reconnect(target, "g3d", planned, instance.as_deref(), window).unwrap_or_else(|gone| die(gone));
         instance = c.welcome.instance.clone();
     }
 }

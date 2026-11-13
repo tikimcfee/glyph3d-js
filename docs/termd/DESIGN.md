@@ -1439,6 +1439,13 @@ agent's own terminal, and could even take input.
   the owner: its `SIGWINCH` resizes the terminal for everyone, and the display follows
   the `size` events. A later version can draw a clipped or letterboxed view by running
   its own libghostty terminal and rendering it.
+- ride a restart of termd's engine by the client rule ([Riding a restart](#riding-a-restart-relay-and-clients)),
+  as the relay's adapters and `g3d status --follow` do: on `ERROR restart` or a dropped
+  connection, reconnect (`start::reconnect` in the `g3d` crate, the one implementation), check the
+  instance, `subscribe` again by id with the same role (`--take` takes the size again), and let the
+  `REPAINT` redraw. Keys typed meanwhile are dropped. It ends with `[<id> exited]` when the
+  terminal ended meanwhile (`no_terminal`), and with a message when the namespace is gone or no
+  engine answers within `--reconnect-window` (30 s, `G3D_RECONNECT_WINDOW`);
 - `g3d ls`, `g3d new <id> -- cmd...`, `g3d kill <id>`, `g3d stop` are thin wrappers over
   the ops.
 

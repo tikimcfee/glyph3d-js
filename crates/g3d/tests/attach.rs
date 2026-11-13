@@ -23,7 +23,9 @@ impl Daemon {
         let g3d = PathBuf::from(env!("CARGO_BIN_EXE_g3d"));
         let termd = g3d.with_file_name("g3d-termd");
         assert!(termd.is_file(), "no {} — run `cargo test --workspace` so the daemon is built", termd.display());
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("attach-{}", std::process::id()));
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("attach-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("termd-attach.sock");
@@ -251,4 +253,89 @@ fn attach_repaints_types_filters_queries_and_detaches() {
     t.expect(b"[t exited]", 2);
     cap.text.clear();
     assert!(list(&d.socket).is_empty());
+}
+
+/// The brain's pid, from a fresh connection's WELCOME.
+fn brain_pid(socket: &std::path::Path) -> i32 {
+    Client::connect(socket, "test").unwrap().welcome.pid.unwrap() as i32
+}
+
+/// Waits until a brain other than `old` answers.
+fn wait_new_brain(socket: &std::path::Path, old: i32) {
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(c) = Client::connect(socket, "test")
+            && c.welcome.pid.is_some_and(|p| p as i32 != old)
+        {
+            return;
+        }
+        assert!(Instant::now() < until, "no new brain answered");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// attach and watch follow the restart rule (PROTOCOL.md "Restarts"), as the relay does: a brain
+/// upgrade and a brain crash are ridden, the screen comes back and typing still reaches the shell.
+#[test]
+fn attach_and_watch_ride_an_upgrade_and_a_crash() {
+    let d = Daemon::start();
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let env =
+        std::collections::BTreeMap::from([("PS1".to_string(), Some("$ ".to_string())), ("ENV".to_string(), None)]);
+    let _: CreateReply = c
+        .request(Op::Create(Create {
+            id: "r".into(),
+            argv: Some(vec!["sh".into()]),
+            cols: 80,
+            rows: 24,
+            env: Some(env),
+            ..Default::default()
+        }))
+        .unwrap();
+    drop(c);
+    let mut a = Outer::spawn(&d.socket, &["attach", "r"], 80, 24);
+    let mut w = Outer::spawn(&d.socket, &["watch", "r"], 80, 24);
+    // Keys typed before the attach is up, or while it reconnects, may be dropped: type until
+    // one lands.
+    let typed = |o: &mut Outer, tag: &str| {
+        let until = Instant::now() + Duration::from_secs(15);
+        let want = format!("{tag}-{}", 6 * 7);
+        loop {
+            o.type_(format!("echo {tag}-$((6*7))\r").as_bytes());
+            std::thread::sleep(Duration::from_millis(300));
+            o.pump();
+            if String::from_utf8_lossy(&o.seen).contains(&want) {
+                return;
+            }
+            assert!(o.child.try_wait().unwrap().is_none(), "g3d exited: {:?}", String::from_utf8_lossy(&o.seen));
+            assert!(Instant::now() < until, "typing never landed: {:?}", String::from_utf8_lossy(&o.seen));
+        }
+    };
+    typed(&mut a, "first");
+    w.expect(b"first-42", 10);
+
+    // An upgrade: the brain hands over and every client gets ERROR restart.
+    let old = brain_pid(&d.socket);
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let _: UpgradeReply = c.request(Op::Upgrade(Upgrade { binary: None, holder: None })).unwrap();
+    wait_new_brain(&d.socket, old);
+    typed(&mut a, "upgraded");
+    w.expect(b"upgraded-42", 10);
+    assert!(w.child.try_wait().unwrap().is_none(), "watch left on the upgrade");
+
+    // A crash: the connection drops with no word, and the holder starts a new brain.
+    let old = brain_pid(&d.socket);
+    unsafe { libc::kill(old, libc::SIGKILL) };
+    wait_new_brain(&d.socket, old);
+    typed(&mut a, "crashed");
+    w.expect(b"crashed-42", 10);
+    assert!(w.child.try_wait().unwrap().is_none(), "watch left on the crash");
+    let seen = String::from_utf8_lossy(&a.seen).into_owned();
+    assert!(!seen.contains("lost the daemon"), "{seen}");
+
+    // The terminal ending still ends them both.
+    a.type_(b"exit\r");
+    assert!(a.wait_exit(10).success());
+    a.expect(b"[r exited]", 2);
+    assert!(w.wait_exit(10).success());
 }
