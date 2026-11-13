@@ -10,6 +10,7 @@
  *   - a spawn with no argv, from a relay whose environment carries another terminal's identity and
  *     a parent shell's state: termd starts the account's shell as a login shell in the relay's
  *     served root, with termd's own TERM_PROGRAM and none of the relay's identity (Linux: /proc);
+ *     the relay sends no environment of its own, so `g3d env` tags nothing `caller`;
  *   - flood: `seq 1 300000` through termd → adapter → relay → display arrives whole, in order;
  *   - relay restart: the terminal survives, terminal.recover re-adopts it, the adoption repaint
  *     carries the old screen, typing works again, the next spawn mints a fresh id; stopping the
@@ -203,6 +204,14 @@ try {
             `...with termd's own variables (TERM_PROGRAM ${env.TERM_PROGRAM}, TERM ${env.TERM}, PWD ${env.PWD})`);
         const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE'].filter((k) => k in env);
         ok(leaked.length === 0, `...and none of the relay's identity or shell state (leaked: ${leaked.join(' ') || 'none'})`);
+        // The relay is a creator with no shell: no env_base, so the session's names, never its own.
+        let tags = [];
+        try {
+            tags = JSON.parse(execFileSync(g3dBeside(BIN), ['--ns', NS, 'env', sd.id, '--json'], { env: termd.env, encoding: 'utf8' })).env ?? [];
+        } catch (e) { info(`g3d env: ${e.message}`); }
+        const callers = tags.filter((v) => v.source === 'caller').map((v) => v.name);
+        ok(tags.length === Object.keys(env).length && callers.length === 0,
+            `...the relay sent no environment of its own: g3d env tags ${tags.length} variables, none caller (${callers.join(' ') || 'none'})`);
     } else info(`no /proc/${shellPid}: the environment checks are Linux-only here`);
     // Ended as the display ends one (terminal.kill → terminal.shutdown), so later counts hold.
     display.send(JSON.stringify({ to: term(sd.id).owner, event: 'terminal.shutdown', data: { terminalId: sd.id } }));

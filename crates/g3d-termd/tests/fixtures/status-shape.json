@@ -47,6 +47,10 @@
     },
     "env": {
       "source": "string",
+      "config": {
+        "path": "string",
+        "state": "string"
+      },
       "warnings": []
     }
   },

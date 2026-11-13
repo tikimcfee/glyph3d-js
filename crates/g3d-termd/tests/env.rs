@@ -1,8 +1,9 @@
-//! The environment a terminal's program gets (DESIGN.md, "Environment", and its termd-ready
-//! gate): a daemon started from a deliberately odd environment (stripped, a stale `DISPLAY`,
-//! another terminal's identity, a parent shell's state, `SIGINT` ignored, a low fd limit) and
-//! what its terminals' programs see, read from the kernel (`/proc/<pid>/environ`, `cmdline`,
-//! `cwd`, `status`, `limits`; the macOS branch reads them with `ps`).
+//! The environment a terminal's program gets (DESIGN.md, "Environment"): a daemon started from a
+//! deliberately odd environment (stripped, a stale `DISPLAY`, another terminal's identity, a
+//! parent shell's state, `SIGINT` ignored, a low fd limit), callers that send their own odd
+//! environment and creators that send none, and what their terminals' programs see, read from
+//! the kernel (`/proc/<pid>/environ`, `cmdline`, `cwd`, `status`, `limits`; the macOS branch
+//! reads them with `ps`) and from `env`'s tags.
 
 mod common;
 
@@ -108,6 +109,13 @@ fn passwd() -> (String, String, String) {
     (f[0].to_owned(), f[5].to_owned(), f[6].to_owned())
 }
 
+/// The `env` op's answer for a terminal: name → (value, source, via).
+fn tagged(c: &mut Client, id: &str) -> BTreeMap<String, (String, EnvSource, Option<String>)> {
+    let r: EnvReply = c.request(Op::Env(EnvQuery { id: id.into() })).unwrap();
+    assert_eq!(r.id, id);
+    r.env.into_iter().map(|v| (v.name, (v.value, v.source, v.via))).collect()
+}
+
 #[test]
 fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     let d = odd_daemon(&["--idle-exit", "0"]);
@@ -161,10 +169,18 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     assert_eq!(get("USER"), Some(user.as_str()));
     assert_eq!(get("LOGNAME"), Some(user.as_str()));
     assert_eq!(get("SHELL"), Some(shell.as_str()));
-    // With --env-source daemon the starter's environment is the base, its session variables only:
-    // its DISPLAY passes, its own tool's variable (KEEP_ME) does not.
+    // No caller's environment, and --env-source daemon: each allowlisted name from the starter's
+    // values (its DISPLAY passes), nothing else of it (its own tool's KEEP_ME, its PATH: PATH is
+    // login(1)'s).
     assert_eq!(get("DISPLAY"), Some(":99"));
-    assert_eq!(get("PATH"), Some("/usr/bin:/bin"));
+    let t = tagged(&mut c, "e1");
+    assert_eq!((t["PATH"].1, t["PATH"].2.as_deref()), (EnvSource::Fill, Some("login")));
+    assert_ne!(get("PATH"), Some("/usr/bin:/bin"), "the starter's PATH is not a session's");
+    assert_eq!(t["DISPLAY"], (":99".into(), EnvSource::Session, Some("daemon".into())));
+    assert_eq!(t["HOME"], (home.clone(), EnvSource::Fill, Some("passwd".into())));
+    assert_eq!(t["TERM"].1, EnvSource::Termd);
+    assert!(t.values().all(|(_, s, _)| *s != EnvSource::Caller), "no caller sent an environment");
+    assert_eq!(t.len(), environ(r.pid).len(), "env names every variable the program has");
     // A set locale is the person's, even when it isn't UTF-8; the status document and the log say
     // what it costs.
     assert_eq!(get("LANG"), Some("en_US.ISO-8859-1"));
@@ -184,14 +200,59 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     assert_eq!(nofile.split_whitespace().nth(3), Some("1000"), "{nofile}");
 }
 
+/// termd.toml: `pass` adds a name to the no-caller allowlist, `drop` removes one, `set` sets one
+/// with `${VAR}` from the base; re-read when it changes; a bad file fails every create, naming its
+/// line, until it is fixed; the status document says which.
 #[test]
-fn env_keep_passes_a_starter_variable_the_session_lacks() {
-    let d = odd_daemon(&["--idle-exit", "0", "--env-keep", "KEEP_*"]);
+fn termd_toml_adjusts_the_allowlist_sets_names_and_a_bad_one_fails_loudly() {
+    let d = odd_daemon(&["--idle-exit", "0"]);
+    let toml = d.dir.join("termd.toml");
     let mut c = d.client();
-    let r = create_with(&mut c, "k", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
+    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(
+        (st.status.daemon.env.config.path.as_str(), st.status.daemon.env.config.state.as_str()),
+        (toml.to_str().unwrap(), "absent")
+    );
+    std::fs::write(&toml, "[env]\npass = [\"KEEP_*\"]\ndrop = [\"DISPLAY\"]\n[env.set]\nWHERE = \"${HOME}/x\"\n")
+        .unwrap();
+    let r = create_with(&mut c, "k", |cr| cr.argv = sleep()).unwrap();
     let env = environ(r.pid);
+    let (_, home, _) = passwd();
     assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("kept"));
+    assert_eq!(env.get("DISPLAY"), None, "drop took DISPLAY off the allowlist");
+    assert_eq!(env.get("WHERE"), Some(&format!("{home}/x")));
     assert_eq!(env.get("GIT_EDITOR"), None);
+    let t = tagged(&mut c, "k");
+    assert_eq!(t["KEEP_ME"], ("kept".into(), EnvSource::Session, Some("daemon".into())));
+    assert_eq!(t["WHERE"].1, EnvSource::File);
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(st.status.daemon.env.config.state, "loaded");
+    assert!(d.log().contains("pass KEEP_*; drop DISPLAY; set WHERE"), "{}", d.log());
+    // A bad file: every create fails, naming the line, and the status document says so.
+    std::fs::write(&toml, "[env]\npass = [\"KEEP_*\"]\n[env.set]\nTERM = \"dumb\"\n").unwrap();
+    let e = create_with(&mut c, "bad", |cr| cr.argv = sleep()).unwrap_err().to_string();
+    assert!(
+        e.contains("spawn_failed") && e.contains("termd.toml") && e.contains("line 4") && e.contains("TERM"),
+        "{e}"
+    );
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    let cfg = &st.status.daemon.env.config;
+    assert_eq!(cfg.state, "error");
+    assert!(cfg.error.as_deref().is_some_and(|e| e.contains("line 4")), "{cfg:?}");
+    assert!(st.status.daemon.env.warnings.iter().any(|w| w.contains("line 4")), "{:?}", st.status.daemon.env.warnings);
+    // Fixed: the next create reads it again.
+    std::fs::write(&toml, "[env.set]\nFIXED = \"yes\"\n").unwrap();
+    let r = create_with(&mut c, "fixed", |cr| cr.argv = sleep()).unwrap();
+    assert_eq!(environ(r.pid).get("FIXED").map(String::as_str), Some("yes"));
+    assert_eq!(environ(r.pid).get("KEEP_ME"), None, "the old pass outlived its file");
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(st.status.daemon.env.config.state, "loaded");
+    assert!(
+        st.status.daemon.env.warnings.iter().all(|w| !w.contains("termd.toml")),
+        "{:?}",
+        st.status.daemon.env.warnings
+    );
 }
 
 #[test]
@@ -231,13 +292,13 @@ fn the_default_program_is_the_account_shell_as_a_login_shell() {
 }
 
 #[test]
-fn env_base_none_starts_from_the_account_and_fills_the_locale() {
+fn an_empty_caller_environment_starts_from_the_fill_alone() {
     let d = odd_daemon(&["--idle-exit", "0"]);
     let mut c = d.client();
     let (user, home, shell) = passwd();
     let r = create_with(&mut c, "bare", |cr| {
         cr.argv = Some(vec!["/bin/sleep".into(), "60".into()]);
-        cr.env_base = Some(EnvBase::None);
+        cr.env_base = Some(BTreeMap::new());
         cr.env = Some(BTreeMap::from([("FOO".into(), Some("bar".into()))]));
     })
     .unwrap();
@@ -253,6 +314,7 @@ fn env_base_none_starts_from_the_account_and_fills_the_locale() {
             "HOME",
             "LANG",
             "LOGNAME",
+            "PATH",
             "PWD",
             "SHELL",
             "TERM",
@@ -295,6 +357,27 @@ fn create_refuses_reserved_names_bad_values_and_a_bad_cwd() {
         .unwrap_err();
         assert!(e.to_string().contains("bad_request"), "{cwd}: {e}");
     }
+    // A caller's environment: the same name and size rules, but termd's own names may be there.
+    let e = create_with(&mut c, "r", |cr| {
+        cr.argv = sleep();
+        cr.env_base = Some(BTreeMap::from([("BASH_FUNC_f%%".into(), "() { :; }".into())]));
+    })
+    .unwrap_err();
+    assert!(e.to_string().contains("bad_request") && e.to_string().contains("env_base"), "{e}");
+    let e = create_with(&mut c, "r", |cr| {
+        cr.argv = sleep();
+        cr.env_base = Some(BTreeMap::from([("HUGE".into(), "x".repeat(200 << 10))]));
+    })
+    .unwrap_err();
+    assert!(e.to_string().contains("too_large") && e.to_string().contains("HUGE"), "{e}");
+    let r = create_with(&mut c, "own", |cr| {
+        cr.argv = sleep();
+        cr.env_base = Some(BTreeMap::from([("TERM".into(), "screen".into()), ("PWD".into(), "/x".into())]));
+    })
+    .unwrap();
+    assert_eq!(environ(r.pid).get("TERM").map(String::as_str), Some("xterm-256color"));
+    let e = c.request::<EnvReply>(Op::Env(EnvQuery { id: "nope".into() })).unwrap_err();
+    assert_eq!(e.code(), Some(code::NO_TERMINAL));
     let e = create_with(&mut c, "r", |cr| cr.argv = Some(vec!["no-such-program-here".into()])).unwrap_err();
     assert!(e.to_string().contains("spawn_failed") && e.to_string().contains("not found in PATH"), "{e}");
     // A given cwd keeps its spelling in PWD unless that holds `.` or `..` (POSIX forbids them
@@ -307,45 +390,183 @@ fn create_refuses_reserved_names_bad_values_and_a_bad_cwd() {
     assert_eq!((r.cwd.as_str(), environ(r.pid).get("PWD").map(String::as_str)), ("/usr", Some("/usr")));
 }
 
+/// Writes a stand-in for the user manager's environment (busctl's JSON; the test hook), so the
+/// real desktop session is never read or changed.
+#[cfg(feature = "test-hooks")]
+fn write_manager(dir: &std::path::Path, vars: &[&str]) {
+    let data: Vec<String> = vars.iter().map(|v| format!("{v:?}")).collect();
+    std::fs::write(dir.join("manager.json"), format!(r#"{{"type":"as","data":[{}]}}"#, data.join(","))).unwrap();
+}
+
+/// A daemon whose starter is `starter` and whose user manager is the hook's file.
+#[cfg(feature = "test-hooks")]
+fn session_daemon(starter: &[(&str, &str)], manager: &[&str]) -> Daemon {
+    let (starter, manager): (Vec<(String, String)>, Vec<String>) = (
+        starter.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        manager.iter().map(|s| s.to_string()).collect(),
+    );
+    Daemon::start_cmd(&["--idle-exit", "0", "--env-source", "auto"], move |cmd, dir| {
+        write_manager(dir, &manager.iter().map(String::as_str).collect::<Vec<_>>());
+        cmd.env_clear().envs(starter).env("G3D_TERMD_TEST_SESSION_ENV_FILE", dir.join("manager.json"));
+    })
+}
+
 /// The session source is read at every create: a value the session changes reaches the next
-/// terminal, never a running one. The user manager is stood in for by a file of busctl's JSON
-/// (a test hook), so the real desktop session is never read or changed.
+/// terminal, never a running one; only the allowlist comes from it; a name it lacks is the
+/// daemon's start value; a source that can't be read leaves the start values, said.
 #[cfg(feature = "test-hooks")]
 #[test]
 fn the_session_environment_is_read_at_every_create() {
-    let write = |dir: &std::path::Path, display: &str| {
-        let json = format!(
-            r#"{{"type":"as","data":["DISPLAY={display}","PATH=/usr/bin:/bin","TMUX=leaked","LANG=C.UTF-8","SESSION_ONLY=yes"]}}"#
-        );
-        std::fs::write(dir.join("manager.json"), json).unwrap();
+    let manager = |display: &str| {
+        vec![
+            format!("DISPLAY={display}"),
+            "PATH=/session/bin:/usr/bin".into(),
+            "LC_TERMINAL=iTerm2".into(),
+            "LANG=C.UTF-8".into(),
+            "SESSION_ONLY=yes".into(),
+        ]
     };
-    let d = Daemon::start_cmd(&["--idle-exit", "0", "--env-source", "auto"], |cmd, dir| {
-        write(dir, ":7");
-        cmd.env_clear().envs(ODD.iter().copied()).env("G3D_TERMD_TEST_SESSION_ENV_FILE", dir.join("manager.json"));
-    });
+    let first = manager(":7");
+    let d = session_daemon(
+        &[ODD, &[("SSH_AUTH_SOCK", "/starter/agent")]].concat(),
+        &first.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     let mut c = d.client();
     let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
     let a = create_with(&mut c, "a", |cr| cr.argv = sleep()).unwrap();
     let ea = environ(a.pid);
-    // The session's values, not the starter's stale ones; the scrub applies to it too.
+    // The session's values, not the starter's stale ones; the allowlist only; the scrub too.
     assert_eq!(ea.get("DISPLAY").map(String::as_str), Some(":7"));
-    assert_eq!(ea.get("SESSION_ONLY").map(String::as_str), Some("yes"));
-    assert_eq!(ea.get("KEEP_ME"), None, "the starter's environment leaked past the session's");
-    assert_eq!(ea.get("TMUX"), None);
-    write(&d.dir, ":8");
+    assert_eq!(ea.get("LANG").map(String::as_str), Some("C.UTF-8"));
+    assert_eq!(ea.get("SESSION_ONLY"), None, "a name off the allowlist came from the session");
+    assert_ne!(ea.get("PATH").map(String::as_str), Some("/session/bin:/usr/bin"), "PATH is login(1)'s");
+    assert_eq!(ea.get("LC_TERMINAL"), None);
+    assert_eq!(ea.get("KEEP_ME"), None, "the starter's environment leaked");
+    // A name the session lacks: the starter's value for that name only.
+    assert_eq!(ea.get("SSH_AUTH_SOCK").map(String::as_str), Some("/starter/agent"));
+    let t = tagged(&mut c, "a");
+    assert_eq!(t["DISPLAY"], (":7".into(), EnvSource::Session, Some("systemd-user".into())));
+    assert_eq!(t["SSH_AUTH_SOCK"], ("/starter/agent".into(), EnvSource::Session, Some("daemon".into())));
+    write_manager(&d.dir, &manager(":8").iter().map(String::as_str).collect::<Vec<_>>());
     let b = create_with(&mut c, "b", |cr| cr.argv = sleep()).unwrap();
     assert_eq!(environ(b.pid).get("DISPLAY").map(String::as_str), Some(":8"));
     assert_eq!(environ(a.pid).get("DISPLAY").map(String::as_str), Some(":7"));
-    assert!(d.log().contains("terminal environment: the systemd user manager's"), "{}", d.log());
-    // A manager that can't be read: the daemon's own, said once in the log.
+    assert!(d.log().contains("terminal environment: the session's from the systemd user manager"), "{}", d.log());
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(st.status.daemon.env.source, "systemd-user");
+    // A manager that can't be read: the daemon's start values, said in the log and the status.
     std::fs::remove_file(d.dir.join("manager.json")).unwrap();
     let e = create_with(&mut c, "e", |cr| cr.argv = sleep()).unwrap();
     assert_eq!(environ(e.pid).get("DISPLAY").map(String::as_str), Some(":99"));
-    assert!(d.log().contains("terminal environment: the daemon's own:"), "{}", d.log());
+    assert!(d.log().contains("terminal environment: the daemon's start values:"), "{}", d.log());
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    assert_eq!(st.status.daemon.env.source, "daemon");
+    assert!(
+        st.status.daemon.env.warnings.iter().any(|w| w.contains("unreachable")),
+        "{:?}",
+        st.status.daemon.env.warnings
+    );
 }
 
-/// The real user manager, when this host has one: a starter's stale DISPLAY never reaches a
-/// terminal. Read only (nothing is set in the session), into a terminal that runs `sleep`.
+/// A caller's environment is the base (the multiplexer convention): its custom variable and
+/// even its stale DISPLAY arrive, its tab's markers don't; the same caller with no environment
+/// sent (`g3d new --clean`) gets the session's fresh DISPLAY. `env` tags each.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_callers_environment_is_the_base_and_none_is_the_sessions() {
+    let d = session_daemon(&[("PATH", "/usr/bin:/bin")], &["DISPLAY=:0", "WAYLAND_DISPLAY=wayland-0"]);
+    let mut c = d.client();
+    let sleep = || Some(vec!["/bin/sleep".to_string(), "60".into()]);
+    let odd: BTreeMap<String, String> = [
+        ("PATH", "/caller/bin:/usr/bin:/bin"),
+        ("DISPLAY", ":55"),
+        ("REX_SESSION", "rex-tab-3"),
+        ("REX_BLOCK", "9"),
+        ("TERM_PROGRAM", "Apple_Terminal"),
+        ("FOO", "custom"),
+        ("HOME", "/caller/home"),
+        ("SHLVL", "2"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let r = create_with(&mut c, "sub", |cr| {
+        cr.argv = sleep();
+        cr.env_base = Some(odd.clone());
+        cr.env = Some(BTreeMap::from([("BAR".into(), Some("asked".into()))]));
+    })
+    .unwrap();
+    let env = environ(r.pid);
+    let get = |k: &str| env.get(k).map(String::as_str);
+    assert_eq!(get("FOO"), Some("custom"));
+    assert_eq!(get("DISPLAY"), Some(":55"), "a caller's own DISPLAY is its subshell's");
+    assert_eq!(get("PATH"), Some("/caller/bin:/usr/bin:/bin"));
+    assert_eq!(get("HOME"), Some("/caller/home"));
+    assert_eq!((get("REX_SESSION"), get("REX_BLOCK"), get("SHLVL")), (None, None, None));
+    assert_eq!(get("TERM_PROGRAM"), Some("g3d-termd"));
+    assert_eq!(get("WAYLAND_DISPLAY"), None, "the session's handles mixed into a caller's base");
+    let t = tagged(&mut c, "sub");
+    assert_eq!(t["FOO"], ("custom".into(), EnvSource::Caller, None));
+    assert_eq!(t["BAR"].1, EnvSource::Request);
+    assert_eq!(t["USER"].1, EnvSource::Fill);
+    assert_eq!(t["TERM_PROGRAM"].1, EnvSource::Termd);
+    // No environment sent: the session's DISPLAY, looked up now.
+    let r = create_with(&mut c, "clean", |cr| cr.argv = sleep()).unwrap();
+    let env = environ(r.pid);
+    assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":0"));
+    assert_eq!(env.get("FOO"), None);
+    assert_eq!(tagged(&mut c, "clean")["DISPLAY"], (":0".into(), EnvSource::Session, Some("systemd-user".into())));
+}
+
+/// A creator with no shell and a stripped environment (the relay started by a unit, cron, an
+/// agent): its terminals get the desktop session's handles from the session source, and none of
+/// the session's other variables.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_stripped_creator_gets_the_sessions_handles() {
+    let d = session_daemon(
+        &[("PATH", "/usr/bin:/bin")],
+        &[
+            "DISPLAY=:0",
+            "WAYLAND_DISPLAY=wayland-0",
+            "XAUTHORITY=/run/user/1/xauth",
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1/bus",
+            "XDG_RUNTIME_DIR=/run/user/1",
+            "XDG_SESSION_TYPE=wayland",
+            "XDG_CURRENT_DESKTOP=KDE",
+            "SSH_AUTH_SOCK=/run/user/1/ssh-agent",
+            "LANG=C.UTF-8",
+            "EDITOR=vim",
+            "GIT_EDITOR=true",
+        ],
+    );
+    let mut c = d.client();
+    let r = create_with(&mut c, "relay", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
+    let env = environ(r.pid);
+    for (k, v) in [
+        ("DISPLAY", ":0"),
+        ("WAYLAND_DISPLAY", "wayland-0"),
+        ("XAUTHORITY", "/run/user/1/xauth"),
+        ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1/bus"),
+        ("XDG_RUNTIME_DIR", "/run/user/1"),
+        ("XDG_SESSION_TYPE", "wayland"),
+        ("XDG_CURRENT_DESKTOP", "KDE"),
+        ("SSH_AUTH_SOCK", "/run/user/1/ssh-agent"),
+    ] {
+        assert_eq!(env.get(k).map(String::as_str), Some(v), "{k}");
+    }
+    assert_eq!((env.get("EDITOR"), env.get("GIT_EDITOR")), (None, None));
+    let t = tagged(&mut c, "relay");
+    assert!(
+        ["DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK"]
+            .iter()
+            .all(|k| t[*k].1 == EnvSource::Session && t[*k].2.as_deref() == Some("systemd-user")),
+        "{t:?}"
+    );
+}
+
+/// The real user manager, when this host has one: a starter's stale DISPLAY never wins over its
+/// own. Read only (nothing is set in the session), into a terminal that runs `sleep`.
 #[test]
 fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     let out = Command::new("busctl")
@@ -375,7 +596,12 @@ fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     let mut c = d.client();
     let r = create_with(&mut c, "um", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
     let env = environ(r.pid);
-    assert_eq!(env.get("DISPLAY"), display.as_ref(), "the starter's DISPLAY=:99 reached the terminal");
+    // A manager without DISPLAY (a headless host) leaves the starter's for that name.
+    assert_eq!(
+        env.get("DISPLAY").map(String::as_str),
+        Some(display.as_deref().unwrap_or(":99")),
+        "the starter's DISPLAY=:99 won over the manager's"
+    );
     assert_eq!(env.get("KEEP_ME"), None);
-    assert!(d.log().contains("terminal environment: the systemd user manager's"), "{}", d.log());
+    assert!(d.log().contains("terminal environment: the session's from the systemd user manager"), "{}", d.log());
 }

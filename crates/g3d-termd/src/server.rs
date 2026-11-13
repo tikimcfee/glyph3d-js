@@ -142,10 +142,11 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         args.env_source,
         env::Settings {
             scrub: env::SCRUB.iter().map(|s| s.to_string()).chain(args.env_scrub.iter().cloned()).collect(),
-            keep: args.env_keep.clone(),
             shell: args.shell.clone(),
             login_shell: args.login_shell,
             locale_fill,
+            login_path: env::login_path(),
+            config: args.config.clone(),
             term: args.term.clone(),
             socket: socket.display().to_string(),
             version: crate::VERSION.to_owned(),
@@ -843,6 +844,11 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             }
             if let Some(t) = subscribed(srv, c, req, vw.handle).cloned() {
                 to_owner(c, &t, req, TermOp::View { delta: vw.delta, live: vw.live == Some(true) }).await;
+            }
+        }
+        Op::Env(q) => {
+            if let Some(t) = by_id(srv, c, req, &q.id) {
+                reply_ok(&c.out, req, &EnvReply { id: t.id.clone(), env: t.env.clone() });
             }
         }
         Op::Capture(cp) => {

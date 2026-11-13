@@ -3,7 +3,7 @@
 //! `g3d` (the binary) is built on it; so are the daemon's own tests.
 
 pub mod client;
-pub mod forward;
+pub mod env;
 pub mod paths;
 pub mod render;
 pub mod start;

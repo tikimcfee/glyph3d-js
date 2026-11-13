@@ -33,3 +33,5 @@ rustix.workspace = true
 tokio.workspace = true
 clap.workspace = true
 libc = "0.2.177"
+# termd.toml (DESIGN.md, "Environment"): parsed with spans, so an error names its line.
+toml = { version = "1.2.0", default-features = false, features = ["std", "serde", "parse"] }

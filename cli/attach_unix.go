@@ -142,9 +142,6 @@ func runTerminal(cfg terminalConfig) {
 	if err != nil {
 		fail("attach: %v", err)
 	}
-	// No argv: termd starts the account's shell as a login shell. No cwd: the account's home.
-	// The adapter's own $SHELL and working directory say nothing about what a person wants
-	// (DESIGN.md, "Environment").
 	var created struct {
 		PID     int      `json:"pid"`
 		Created bool     `json:"created"`
@@ -152,14 +149,7 @@ func runTerminal(cfg terminalConfig) {
 		Login   bool     `json:"login"`
 		Cwd     string   `json:"cwd"`
 	}
-	create := map[string]any{"id": cfg.id, "cols": cfg.cols, "rows": cfg.rows, "if_exists": "adopt"}
-	if len(cfg.cmdArgs) > 0 {
-		create["argv"] = cfg.cmdArgs
-	}
-	if cfg.cwd != "" {
-		create["cwd"] = cfg.cwd
-	}
-	if err := tc.Request("create", create, &created); err != nil {
+	if err := tc.Request("create", termdCreate(cfg), &created); err != nil {
 		fail("attach: termd create %s: %v", cfg.id, err)
 	}
 	// The display owns the size (DESIGN.md D11): subscribe as the owner, at its size.
@@ -598,4 +588,19 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 		}
 		log.Printf("[attach] %s", text)
 	}
+}
+
+// termdCreate is the adapter's termd `create` (create-or-adopt). No argv: termd starts the
+// account's shell as a login shell. No cwd: the account's home. No env_base: the relay is a
+// creator with no shell, so the terminal gets the desktop session's environment, never the
+// relay's own (DESIGN.md, "Environment"), whatever started the relay.
+func termdCreate(cfg terminalConfig) map[string]any {
+	create := map[string]any{"id": cfg.id, "cols": cfg.cols, "rows": cfg.rows, "if_exists": "adopt"}
+	if len(cfg.cmdArgs) > 0 {
+		create["argv"] = cfg.cmdArgs
+	}
+	if cfg.cwd != "" {
+		create["cwd"] = cfg.cwd
+	}
+	return create
 }
