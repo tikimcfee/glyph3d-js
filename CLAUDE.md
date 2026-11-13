@@ -16,16 +16,28 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   WorkspaceModel); `app/commands/` holds the command spine (handlers).
 - **`wall/`** — the wall: an infinite flat (orthographic) canvas of terminals on the same
   core and relay (Vite :5180, `?relay=PORT`, default 8080 — a relay takes ONE display, so beside
-  the IDE the wall needs its own relay; a refused display's chip says why). Pan, pinch-zoom,
-  type, cycle, resize by the border; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`).
+  the IDE the wall needs its own relay; a refused display's chip says why). Pan (drag), zoom (wheel or pinch,
+  eased about the pointer: `WallCamera.WHEEL_ZOOM`), type, cycle, resize by the border; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`).
   Title bars hold each terminal's whole name, shrunk to fit; past the bar's text floor
-  (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. Names and spots
-  (`WallStore`) are per relay and pruned against the relay's live terminals on every connect;
-  a kill forgets at once. termd's status rides along with no query of its own: the topbar's termd
-  chip, a status window (the daemon and its terminals; the chord + S or `wall.status`, floating or
-  docked, placement per relay — `wall/StatusWindow.jsx`, `wall/statusCommands.js`) and a notice
-  under the topbar when its brain restarts (amber, once it lingers) or is unreachable, failed or
-  lost (red). `TerminalWall` is its composition root (start/stop symmetric); gate
+  (`TitleBar` `minTextPx`) or on a narrow terminal, a map label carries it. A hovered bar shows
+  hide (a click: off the canvas, still running) and close (HELD for `closeHoldMs`, a ring filling:
+  kills it); chord+- hides, chord+X held closes. ⇧-drag on empty canvas lassoes terminals into the
+  selection (⇧-click toggles one); its button or chord+G makes a group (`WallGroups`): named, `tile`
+  (N columns packed `gap` apart, `wallLayout.tileLayout`) or `freeform` (members keep their spots),
+  drawn as a quiet backdrop + header; drag the header to move every member. The palette (chord+K)
+  and the sidebar (chord+B) list every terminal, hidden ones marked, under its group (groups fold).
+  The terminals live in `g3d-termd` (below), and termd's status rides along with no query of its
+  own: the topbar's termd chip, a status window (chord+S: the daemon and its terminals; a row
+  reveals its terminal — `wall/StatusWindow.jsx`) and a notice under the topbar when its brain
+  restarts (amber, once it lingers past `restartNoticeMs`) or is unreachable, failed or lost (red).
+  The sidebar and the status window float or dock left/right, side by side on one edge
+  (`wall/Panel.jsx`). Every action is a `wall.*` verb (`wall/wallCommands.js`:
+  hide/show/reveal/close/select/group…/sidebar/status/config) that the buttons, chords, palette,
+  sidebar, status window and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`).
+  Names, spots, hidden terminals, groups, the sidebar and the status window's place (`WallStore`)
+  are per relay and pruned against the relay's live terminals on every connect (a group loses dead
+  members, goes when empty); a kill forgets at once. `TerminalWall` is its composition root
+  (start/stop symmetric); gate
   `bun tools/wall-e2e.mjs` — its own relay (`tools/lib/wall-relay.mjs`, which the wall's perf tools
   share), termd namespace and terminals; `--reuse-relay` to run on one you started.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
@@ -75,6 +87,7 @@ app/
 wall/
   main.jsx TerminalWall.js            the wall entry + composition root (Vite :5180)
   WallCamera WallPointer WallKeys WallNames WallStore   one job each
+  WallGroups GroupFrame BarButtons SelectionOverlay Sidebar StatusWindow Panel Palette wallCommands
 cli/
   main.go relay.go fs.go embed.go attach_unix.go   serve + relay + fs-RPC + terminal adapters
   termd.go                                          the relay's g3d-termd client (start, list, …)
@@ -288,6 +301,15 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   recompute; `scene.transforms who [ms]` names the moving nodes that started the recomputes over a
   window (the "who never rests" probe — an ease must LAND on its target, never approach it forever:
   `Carrel.update`'s member turns do). Gate: `tools/scene-transforms.test.mjs`.
+- **Atlas texture uploads** (`core/TextureUploads.js`, `atlas._textureUploads`): the Slug curve /
+  glyph-map textures and the emoji grid never re-send what the GPU holds. A landing queues its
+  written texels as rectangles (a span is at most three: a row's tail, whole rows, a row's head —
+  three's own `updateRanges` path sends one row per call); a texture whose array grew is born
+  allocated but unfilled (`source.dataReady = false`) and its old rows are copied GPU-side
+  (`renderer.copyTextureToTexture`), then the old texture is disposed. `SceneSystems` flushes the
+  queue before every top-level render (never a nested one), so a landing is drawn in the next
+  frame. Gates: `tools/texture-uploads.test.mjs` (bytes per event, against a model of three's
+  WebGL path), `tools/atlas-growth.test.mjs`; `atlas-cold-perf` measures it in a browser.
 - **Agent sessions** (`app/client/SessionBooks.js`, `services/data/AgentSessionProvider.js`):
   gomuxai is the ONE reader of agent transcripts (its docs/EVENTS.md); the relay runs
   `agent sessions --json` (pushed whole as `agentSessions/changed`; `agentSessions/list`) and

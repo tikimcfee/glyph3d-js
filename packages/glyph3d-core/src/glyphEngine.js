@@ -4,6 +4,7 @@
 
 import GlyphAtlas from './GlyphAtlas.js';
 import EmojiAtlas from './EmojiAtlas.js';
+import TextureUploads from './core/TextureUploads.js';
 import { deriveCharSize } from './core/cellMetrics.js';
 import {
   MonospaceShapeCache,
@@ -91,7 +92,10 @@ export async function bootGlyphEngine(options = {}) {
   // The encode worker loads the same fonts into its own HarfBuzz while the main thread primes.
   const encoder = new SlugEncodeClient({ fonts: shaper.fontSources(), wasmUrl: opts.wasmUrl, wasmBinary: opts.wasmBinary });
 
-  const emojiAtlas = new EmojiAtlas();
+  // The atlas textures' bytes go through one queue the renderer seam flushes (SceneSystems):
+  // only what changed, as rectangles; a texture that grows has its old rows copied on the GPU.
+  const uploads = new TextureUploads();
+  const emojiAtlas = new EmojiAtlas({ uploads });
   shaper.setEmojiAtlas(emojiAtlas);
 
   const shapeCache = new MonospaceShapeCache(shaper);
@@ -104,6 +108,7 @@ export async function bootGlyphEngine(options = {}) {
   atlas._charSize = deriveCharSize(shaper, opts.fontSize);
   atlas._shapeCache = shapeCache;
   atlas._emojiAtlas = emojiAtlas;
+  atlas._textureUploads = uploads;
 
   const useCache = opts.cache !== false;
   const cacheKey = slugCoreKey({ fonts: fontSpecs, encodeRanges: opts.encodeRanges });
@@ -117,7 +122,7 @@ export async function bootGlyphEngine(options = {}) {
   let live = null;
   if (cachedDescriptor) {
     try {
-      live = new LiveSlugAtlas({ atlas, shaper, encoder, emojiAtlas, persist, initialDescriptor: cachedDescriptor });
+      live = new LiveSlugAtlas({ atlas, shaper, encoder, uploads, emojiAtlas, persist, initialDescriptor: cachedDescriptor });
     } catch (err) {
       console.warn(`[glyphEngine] slug-core hydrate failed (${err.message}) → recompute`);
       await discardSlugCore(cacheKey);
@@ -126,7 +131,7 @@ export async function bootGlyphEngine(options = {}) {
   }
   if (!live) {
     const shaped = shapeText(shapeCache, codepointsFromRanges(opts.encodeRanges));
-    live = new LiveSlugAtlas({ atlas, shaper, encoder, emojiAtlas, persist });
+    live = new LiveSlugAtlas({ atlas, shaper, encoder, uploads, emojiAtlas, persist });
     await live.encodeCore(collectUniqueGlyphIds(shaped.lines));
     if (useCache) await saveSlugCore(cacheKey, live.serialize());
   }

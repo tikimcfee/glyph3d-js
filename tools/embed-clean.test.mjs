@@ -5,8 +5,8 @@ import * as THREE from 'three';
 import * as Glyph3D from '../packages/glyph3d-core/src/index.js';
 import * as CoreExports from '../packages/glyph3d-core/src/core/index.js';
 import EmojiAtlas from '../packages/glyph3d-core/src/EmojiAtlas.js';
+import TextureUploads from '../packages/glyph3d-core/src/core/TextureUploads.js';
 import FontChain from '../packages/glyph3d-core/src/shaping/FontChain.js';
-import HarfBuzzShaper from '../packages/glyph3d-core/src/shaping/HarfBuzzShaper.js';
 import CodeGrid from '../packages/glyph3d-core/src/collections/CodeGrid.js';
 import InstancedField from '../packages/glyph3d-core/src/collections/InstancedField.js';
 
@@ -27,7 +27,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
 // 1. Root and Core Exports
 {
     assert(typeof Glyph3D.InstancedField === 'function', 'InstancedField exported from root');
-    assert(Glyph3D.GlyphField === undefined, 'no GlyphField alias (InstancedField is the one name)');
+    assert(!('GlyphField' in Glyph3D), 'no GlyphField alias (InstancedField is the one name)');
     assert(typeof Glyph3D.InstancedSlotBuffer === 'function', 'InstancedSlotBuffer exported from root');
     assert(typeof Glyph3D.generateLayout === 'function', 'generateLayout exported from root');
     assert(typeof Glyph3D.FontChain === 'function', 'FontChain exported from root');
@@ -41,7 +41,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
     assert(typeof Glyph3D.VStack === 'function', 'VStack exported from root');
     assert(typeof Glyph3D.HStack === 'function', 'HStack exported from root');
     assert(typeof Glyph3D.ZStack === 'function', 'ZStack exported from root');
-    assert(typeof Glyph3D.StackLayoutManager === 'undefined', 'StackLayoutManager is removed');
+    assert(!('StackLayoutManager' in Glyph3D), 'StackLayoutManager is removed');
 
     // Check core exports
     assert(typeof CoreExports.InstancedSlotBuffer === 'function', 'core exports InstancedSlotBuffer');
@@ -87,6 +87,7 @@ console.log('Testing @glyph3d/core Embeddability & Refactoring Cleanups...');
         cellPx: 8,
         cols: 16,
         rows: 16,
+        uploads: new TextureUploads(),
         rasterizer: {
             raster: async ({ cps, cellPx }) => {
                 rasters++;

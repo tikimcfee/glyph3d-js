@@ -599,14 +599,18 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
   `import('…')` path (TS2307), a typedef-only script that isn't a module (TS2306), a
   missing export/typedef (TS2305/2614/2724/2694), a `.jsx` import without `"jsx"` in
   jsconfig (TS6142), and a JSDoc type NAME the file never imports (TS2304/2552/2503, counted
-  only inside block comments; in code those codes are runtime globals). Baseline is zero,
-  so any hit is a regression. ~4s.
+  only inside block comments; in code those codes are runtime globals). It also fails any
+  JS file of a bun workspace (root `package.json` `workspaces`) that jsconfig's `include`
+  leaves out of the program: such a file is checked by nothing here, and tsserver gives it an
+  inferred project where every `@glyph3d/core/…` import types as `any` (TS7016). Baseline is
+  zero, so any hit is a regression. ~4s.
   ```
   bun tools/type-imports-check.mjs
   ```
   Teeth, verified: a planted dead `CommandRouter.js` path, a missing typedef, a missing
   export, and an un-imported `{CodeGrid}` / `{THREE.Vector3}` each fail it, while an unknown
-  runtime global does not; dropping `"jsx"` from jsconfig fails it 124 times.
+  runtime global does not; dropping `"jsx"` from jsconfig fails it 124 times; dropping
+  `"wall"` from its `include` fails it once per wall file (23).
 
 - **`lsp.mjs`** — one-shot code intelligence from a shell: `hover`, `def`, `refs`,
   `impl`, `callers`, `callees`, `symbols <query>`, `outline <file>` via
@@ -828,14 +832,28 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   bun test tools/wall-layout.test.mjs tools/wall-labels.test.mjs
   ```
+- **`wall-store.test.mjs`** / **`wall-groups.test.mjs`** / **`wall-panels.test.mjs`** (headless,
+  `bun test`) — the wall's per-relay memory (names, spots, hidden terminals, groups, the sidebar
+  and the status window's place, pruned against the live set), its groups on a stand-in wall, and
+  its two side panels (where the sidebar and the status window dock, side by side on one edge; the
+  status window's knobs checked as `wall.config`'s).
+  ```
+  bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs
+  ```
 - **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
-  the wheel, pinch zoom, map labels, the core terminal verbs, and termd's status (the chip, the
-  window by chord listing the wall's terminals, a brain restart held by stopping the holder: the
-  amber restarting notice, then unreachable, both clearing, the shell typing after; docking and
-  closing by verb). Starts its own relay (`--relay-only`, termd namespace `glyph-wall-e2e` in a
-  scratch dir, no gomuxai) if nothing listens on `--relay`, and stops it and its termd daemon at
-  the end. `--shots DIR` saves the status window normal, restarting and unreachable.
+  the wheel, wheel zoom about the pointer, pinch zoom, map labels, the core terminal verbs,
+  termd's status (the chip, the window by chord listing the wall's terminals, a brain restart held
+  by stopping the holder: the amber restarting notice, then unreachable, both clearing, the shell
+  typing after; docking and closing by verb), the hovered bar's hide and hold-to-close, hiding
+  across a reload, the palette revealing a hidden terminal, lasso groups (tile, header drag,
+  freeform, a killed member leaving), the sidebar (lists, folds, docks, persists), and the two
+  panels together (docked on one edge side by side with the topbar clear of both, the status
+  window's knobs in `wall.config`, a status row revealing a hidden terminal). Starts its own relay
+  (`--relay-only`, termd namespace `glyph-wall-e2e` in a scratch dir, no gomuxai) if nothing
+  listens on `--relay`, and stops it and its termd daemon at the end. `--shots DIR` saves the
+  status window normal, restarting and unreachable, the bar buttons, a held close, the lasso, the
+  groups, the sidebar, and both panels docked right.
   ```
   bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099 [--shots DIR]
   ```

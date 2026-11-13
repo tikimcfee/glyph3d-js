@@ -422,26 +422,25 @@ restarting, unreachable, failed, lost, ok), with these specifics:
 **The app.** The core model `services/terminal/TermdStatus.js` (state, document, per-terminal
 lookup, the lost latch, `upgradeAvailable`) follows the bridge's `termd/status` pushes and asks
 once per registration; a dropped relay link makes it `unknown`, never empty. The wall renders it
-(`wall/StatusWindow.jsx`, verbs in `wall/statusCommands.js`):
+(`wall/StatusWindow.jsx`; its verbs are `wall.*` verbs in `wall/wallCommands.js`, its knobs in
+`wall/wallConfig.js`):
 
 - the chip after the relay chip (`● termd 4`, `○ termd idle`, amber restarting, red otherwise);
-- the window: chord + S, the chip, or `wall.status [toggle|open|close|left|right|float [x y]]`;
-  floats (default: under the topbar at the right; drag its head) or docks to an edge (440 px),
-  the placement persisted per relay in `WallStore` like the sidebar's on branch `wall`. Rows use the
-  wall's names; a click frames the terminal; hovering shows the whole row (argv, cwd and `pwd`,
+- the window: chord + S (free among the wall's chords: `[ ] ↵ 0 - X G B K`), the chip, or
+  `wall.status [toggle|open|close|left|right|float [x y]]`; floats (default: under the topbar at the
+  right; drag its head) or docks to an edge (440 px), the placement persisted per relay in
+  `WallStore` like the sidebar's. The two panels share their parts (`wall/Panel.jsx`: the dock
+  buttons, the head drag, the dock layout): docked on the same edge, the sidebar keeps the edge and
+  the window sits beside it, and the topbar and hint clear both. Rows use the wall's names; a click
+  reveals the terminal (`wall.reveal`: shown if hidden, focused, framed); hovering shows the whole row (argv, cwd and `pwd`,
   pid, title, every subscriber). While the brain is away the rows stay, dimmed;
 - the notice, centred under the topbar on the panel colour: **departure:** a brain restart says so
   in amber (`termd's engine is restarting · the shells are alive`) once it has lasted
   `restartNoticeMs` (400 ms; a blink shows only the chip), as the operator asked for a restart
   notice; `unreachable` counts the time since the brain went away; `failed` and `lost` as
   designed; `lost` until `wall.status.dismiss` (its ×) or a spawn;
-- knobs `restartNoticeMs` 400 and `errorsShown` 3 (`wall.status.config`).
-
-On branch `termd` the wall predates branch `wall`'s sidebar, `wallCommands.js` and `wallConfig.js`
-(not merged here): the status verbs are their own file and the knobs their own object, built to
-their patterns; merging the branches folds `registerStatusCommands` beside `registerWallCommands`,
-`STATUS_CONFIG` into `WALL_CONFIG` (and `wall.status.config` into `wall.config`), and `run()` into
-the one both branches added.
+- knobs `restartNoticeMs` 400 and `errorsShown` 3, beside the wall's own in `WALL_CONFIG`
+  (`wall.config`).
 
 **Gates:** `crates/g3d-termd/tests/status.rs` (the shape against `tests/fixtures/status-shape.json`,
 keys and types; throttling: the first push at once, a clamped interval, quiet between keepalives, a
@@ -1294,7 +1293,7 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | status rate window | bytes over the last 5 s (`--status-rate-window-ms`) | **new** | the load-average idea at a human scale: long enough that a prompt's echo doesn't flicker the rate, short enough that a finished flood reads idle within seconds |
 | recent errors | the last 32 distinct, with counts (`--status-errors`) | **new** | the page-side log storm brake's coalescing, applied to the daemon |
 | relay status connection | ask termd for 1 s; look again every 5 s while nothing listens or the brain is failed; `restarting` reads `unreachable` after 5 s (`serve --termd-status-interval`, `--termd-status-redial`, `--termd-status-grace`) | **new** | a failed `connect` costs a syscall; 5 s is the holder's own failed-retry scale and long past a crash restart (100 ms) and an upgrade's handoff, so `unreachable` means something |
-| wall restart notice | after 400 ms of restarting (`restartNoticeMs`); 3 errors shown (`errorsShown`); `wall.status.config` | **new** | a crash restart that returns in a blink shows only the chip (no flash); one that lingers is said in words. 400 ms is four times the crash restart measured here (about 100 ms from `SIGKILL` to a `WELCOME`, the 100 ms restart delay included, two terminals restored) and under the half second a person reads as "something is happening" |
+| wall restart notice | after 400 ms of restarting (`restartNoticeMs`); 3 errors shown (`errorsShown`); `wall.config` | **new** | a crash restart that returns in a blink shows only the chip (no flash); one that lingers is said in words. 400 ms is four times the crash restart measured here (about 100 ms from `SIGKILL` to a `WELCOME`, the 100 ms restart delay included, two terminals restored) and under the half second a person reads as "something is happening" |
 
 ## Status
 

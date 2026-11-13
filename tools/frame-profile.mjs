@@ -6,7 +6,10 @@
  *                three's renderer.render vs everything else (r3f loop, our useFrame
  *                callbacks), and GPU time per frame (EXT_disjoint_timer_query_webgl2).
  *   2. CENSUS  — draw calls per frame by program, GL calls per frame by name, bytes
- *                uploaded per frame (buffer + texture), renderer.info, scene census
+ *                uploaded per frame (buffer + texture: the bytes each call moves — a ranged
+ *                bufferSubData its range, a texSubImage its w × h region × texel size, never the
+ *                byteLength of the whole array three hands over with row-length/skips set),
+ *                renderer.info, scene census
  *                (meshes, visible, instanced fields, live instances), and with --vram the GPU
  *                memory the context holds, by type (webgl-memory: buffer / texture /
  *                renderbuffer / drawingbuffer bytes, live object counts).
@@ -192,6 +195,28 @@ try {
         const label = (p) => p.name || p.type || `program#${p.id}`;
         for (const p of r.info.programs ?? []) progName.set(p.program, label(p));
         const bytesOf = (v) => (v && typeof v === 'object' && 'byteLength' in v) ? v.byteLength : 0;
+        // A texture upload's bytes: its region × texel size. three uploads a range as the WHOLE
+        // array with UNPACK_ROW_LENGTH / SKIP_* set, so the array's byteLength overstates it.
+        const COMPONENTS = new Map([[gl.RGBA, 4], [gl.RGBA_INTEGER, 4], [gl.RGB, 3], [gl.RGB_INTEGER, 3], [gl.RG, 2],
+            [gl.RG_INTEGER, 2], [gl.RED, 1], [gl.RED_INTEGER, 1], [gl.ALPHA, 1], [gl.LUMINANCE, 1], [gl.LUMINANCE_ALPHA, 2],
+            [gl.DEPTH_COMPONENT, 1], [gl.DEPTH_STENCIL, 1]]);
+        const TYPE_BYTES = new Map([[gl.UNSIGNED_BYTE, 1], [gl.BYTE, 1], [gl.UNSIGNED_SHORT, 2], [gl.SHORT, 2], [gl.HALF_FLOAT, 2],
+            [gl.UNSIGNED_INT, 4], [gl.INT, 4], [gl.FLOAT, 4]]);
+        const PACKED = new Map([[gl.UNSIGNED_SHORT_5_6_5, 2], [gl.UNSIGNED_SHORT_4_4_4_4, 2], [gl.UNSIGNED_SHORT_5_5_5_1, 2],
+            [gl.UNSIGNED_INT_2_10_10_10_REV, 4], [gl.UNSIGNED_INT_10F_11F_11F_REV, 4], [gl.UNSIGNED_INT_5_9_9_9_REV, 4], [gl.UNSIGNED_INT_24_8, 4]]);
+        const texel = (format, type) => PACKED.get(type) ?? (COMPONENTS.get(format) ?? 4) * (TYPE_BYTES.get(type) ?? 1);
+        const texBytes = (name, a) => {
+            const dims = (w, h, d, format, type, src) => (src == null ? 0 : w * h * d * texel(format, type));
+            switch (name) {
+                // (target, level, x, y, w, h, format, type, src…) | the 7-arg DOM-source form
+                case 'texSubImage2D': return typeof a[4] === 'number' && a.length >= 9 ? dims(a[4], a[5], 1, a[6], a[7], a[8]) : (a[6]?.width ?? 0) * (a[6]?.height ?? 0) * texel(a[4], a[5]);
+                // (target, level, ifmt, w, h, border, format, type, src…) | the 6-arg DOM-source form
+                case 'texImage2D': return typeof a[3] === 'number' && a.length >= 9 ? dims(a[3], a[4], 1, a[6], a[7], a[8]) : (a[5]?.width ?? 0) * (a[5]?.height ?? 0) * texel(a[3], a[4]);
+                case 'texSubImage3D': return dims(a[5], a[6], a[7], a[8], a[9], a[10]);
+                case 'texImage3D': return dims(a[3], a[4], a[5], a[7], a[8], a[9]);
+                default: return 0;   // compressed / copyTex*: no client bytes, or not ours to size
+            }
+        };
         // The context may carry its own per-instance wrappers (webgl-memory, --vram): wrap THOSE,
         // and put them back afterwards, so the census neither bypasses nor removes them.
         const own = new Map();
@@ -214,7 +239,7 @@ try {
                 } else if (name === 'bufferData' || name === 'bufferSubData') {
                     bytes.buffer += typeof a[1] === 'number' ? a[1] : bytesOf(a[2]) || bytesOf(a[1]);
                 } else if (name.startsWith('texImage') || name.startsWith('texSubImage')) {
-                    for (const x of a) if (bytesOf(x)) { bytes.texture += bytesOf(x); break; }
+                    bytes.texture += texBytes(name, a);
                 }
                 return orig.apply(this, a);
             };
@@ -274,7 +299,7 @@ try {
     // (uncapped, the main thread never idles — a hitch isn't visible as a sample gap).
     await app.evalPage(() => {
         const st = (window.__fpStamps = []);
-        const tick = (ts) => { st.push(performance.now()); if (window.__fpStamps === st) requestAnimationFrame(tick); };
+        const tick = () => { st.push(performance.now()); if (window.__fpStamps === st) requestAnimationFrame(tick); };
         requestAnimationFrame(tick);
     });
     await cdp.send('Profiler.start');

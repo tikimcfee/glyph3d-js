@@ -7,45 +7,47 @@
  *   (RGBA32Uint / usampler / texelFetch)
  *
  * Each texture wraps its array at the array's CAPACITY, so a glyph appended into spare rows
- * lands in the texture that already exists: `sync()` queues the touched texels as update
- * ranges (one per texture row — three's WebGL upload sends each range as a one-row
- * texSubImage2D) and every field keeps the texture object it holds. Only when the buffer
- * reallocated an array (it doubles when full) is that texture REBORN: a new object, uploaded
- * whole, which the caller hands to every field. The bytes each sync asks to upload are
- * counted in `stats`.
+ * lands in the texture that already exists: `sync()` queues the touched texel span on the
+ * atlas's TextureUploads (at most three rectangles: a row's tail, whole rows, a row's head) and
+ * every field keeps the texture object it holds. Only when the buffer reallocated an array (it
+ * doubles when full) is that texture REBORN: a new object the caller hands to every field, whose
+ * old rows are copied GPU-side from the texture it replaces (TextureUploads.grow) — no byte of
+ * them crosses the bus again. The bytes each sync asks to upload are counted in `stats`.
  *
- * A texture not yet uploaded queues nothing: its first upload sends the whole live array.
- * Ranges are cleared once the upload lands (`onUpdate`) — three's WebGL backend consumes them
- * itself; its WebGPU backend ignores them and uploads the texture whole.
+ * A texture three hasn't uploaded yet queues nothing: its first upload sends the live array.
  */
 
 import * as THREE from 'three';
 import { SlugBuffer } from './slugData.js';
 
-const BYTES_PER_TEXEL = 16;   // RGBA × Uint32
-
 export default class SlugTextures {
-    /** @param {SlugBuffer} [buffer] - the backing arrays (a fresh, empty buffer by default) */
-    constructor(buffer = new SlugBuffer()) {
+    /**
+     * @param {import('../core/TextureUploads.js').default} uploads - the queue the renderer flushes
+     * @param {SlugBuffer} [buffer] - the backing arrays (a fresh, empty buffer by default)
+     */
+    constructor(uploads, buffer = new SlugBuffer()) {
+        if (!uploads) throw new Error('[SlugTextures] needs the atlas\'s TextureUploads (the renderer seam flushes it)');
+        /** @private */ this._uploads = uploads;
         /** @private */ this._buffer = buffer;
         /** @type {THREE.DataTexture|null} */ this.curveTexture = null;
         /** @type {THREE.DataTexture|null} */ this.glyphMapTexture = null;
         /** @private the buffer generation each texture wraps */
         this._curveGen = -1;
         this._mapGen = -1;
-        /** Upload accounting: bytes asked of the GPU, split by how. */
-        this.stats = { syncs: 0, rangeBytes: 0, ranges: 0, rebornBytes: 0, reborn: 0 };
+        /** Upload accounting: bytes queued as rects (and the rects), and rebirths (whose old rows the GPU copies). */
+        this.stats = { syncs: 0, rectBytes: 0, rects: 0, reborn: 0 };
         this.sync();
     }
 
     /**
      * Hydrate from a serialized descriptor (the slug-core cache). Throws if the descriptor is
      * structurally invalid — the boot ladder catches and encodes instead.
+     * @param {import('../core/TextureUploads.js').default} uploads
      * @param {ReturnType<SlugBuffer['serialize']>} descriptor
      * @returns {SlugTextures}
      */
-    static hydrate(descriptor) {
-        return new SlugTextures(SlugBuffer.deserialize(descriptor));
+    static hydrate(uploads, descriptor) {
+        return new SlugTextures(uploads, SlugBuffer.deserialize(descriptor));
     }
 
     /** @returns {SlugBuffer} */
@@ -55,56 +57,47 @@ export default class SlugTextures {
     get pair() { return { curveTexture: this.curveTexture, glyphMapTexture: this.glyphMapTexture }; }
 
     /**
-     * Bring the textures up to the buffer. A reallocated array gets a new texture (`reborn`;
-     * the old one is returned in `retired` for the caller to dispose once no field holds it);
-     * otherwise the written spans are queued as update ranges on the texture every field
-     * already holds.
-     * @returns {{ reborn: boolean, bytes: number, retired: THREE.DataTexture[] }}
+     * Bring the textures up to the buffer. A reallocated array gets a new texture (`reborn`) that
+     * the caller hands to every field; the old one is copied into it GPU-side and disposed by the
+     * uploads queue. Otherwise the written span is queued on the texture every field already holds.
+     * @returns {{ reborn: boolean, bytes: number }} bytes = what this sync queued to cross the bus
      */
     sync() {
         const buf = this._buffer;
         const dirty = buf.takeDirty();
-        const retired = [];
         let reborn = false, bytes = 0;
 
         if (buf.curveGeneration !== this._curveGen) {
-            if (this.curveTexture) retired.push(this.curveTexture);
-            const c = buf.curveTexture();
-            this.curveTexture = createSlugTexture(c.data, c.width, c.height);
+            this.curveTexture = this._born(this.curveTexture, buf.curveTexture());
             this._curveGen = buf.curveGeneration;
-            bytes += c.data.byteLength; this.stats.rebornBytes += c.data.byteLength; this.stats.reborn++;
             reborn = true;
-        } else if (dirty.curve) {
-            bytes += this._queue(this.curveTexture, dirty.curve);
         }
+        if (dirty.curve) bytes += this._queue(this.curveTexture, dirty.curve);
 
         if (buf.mapGeneration !== this._mapGen) {
-            if (this.glyphMapTexture) retired.push(this.glyphMapTexture);
-            const g = buf.glyphMapTexture();
-            this.glyphMapTexture = createSlugTexture(g.data, g.width, g.height);
+            this.glyphMapTexture = this._born(this.glyphMapTexture, buf.glyphMapTexture());
             this._mapGen = buf.mapGeneration;
-            bytes += g.data.byteLength; this.stats.rebornBytes += g.data.byteLength; this.stats.reborn++;
             reborn = true;
-        } else if (dirty.map) {
-            bytes += this._queue(this.glyphMapTexture, dirty.map);
         }
+        if (dirty.map) bytes += this._queue(this.glyphMapTexture, dirty.map);
 
         this.stats.syncs++;
-        return { reborn, bytes, retired };
+        return { reborn, bytes };
     }
 
-    /** @private queue the texel span [lo, hi) as one update range per texture row */
+    /** @private a texture over a (re)allocated array: grown from `prev` when there is one */
+    _born(prev, { data, width, height }) {
+        const t = createSlugTexture(data, width, height);
+        this.stats.reborn += prev ? 1 : 0;
+        return prev ? this._uploads.grow(prev, t) : this._uploads.adopt(t);
+    }
+
+    /** @private queue the texel span [lo, hi) — nothing while the texture's first upload is pending */
     _queue(texture, { lo, hi }) {
-        if (!texture.userData.uploaded) return 0;   // the pending first upload sends it all
-        const w = texture.image.width;
-        for (let row = Math.floor(lo / w); row * w < hi; row++) {
-            const s = Math.max(lo, row * w), e = Math.min(hi, (row + 1) * w);
-            texture.addUpdateRange(s * 4, (e - s) * 4);
-            this.stats.ranges++;
-        }
-        texture.needsUpdate = true;
-        const bytes = (hi - lo) * BYTES_PER_TEXEL;
-        this.stats.rangeBytes += bytes;
+        const before = this._uploads.stats.rects;
+        const bytes = this._uploads.span(texture, lo, hi);
+        this.stats.rects += this._uploads.stats.rects - before;
+        this.stats.rectBytes += bytes;
         return bytes;
     }
 
@@ -120,13 +113,16 @@ export default class SlugTextures {
     }
 
     dispose() {
-        this.curveTexture?.dispose();
-        this.glyphMapTexture?.dispose();
+        for (const t of [this.curveTexture, this.glyphMapTexture]) {
+            if (!t) continue;
+            this._uploads.forget(t);
+            t.dispose();
+        }
     }
 }
 
 /**
- * A RGBA32Uint DataTexture over `data`, marking itself uploaded once its first upload lands.
+ * A RGBA32Uint DataTexture over `data` (the uploads queue marks its upload state).
  * @param {Uint32Array} data @param {number} width @param {number} height
  * @returns {THREE.DataTexture}
  */
@@ -138,11 +134,5 @@ function createSlugTexture(data, width, height) {
     texture.minFilter = THREE.NearestFilter;
     texture.magFilter = THREE.NearestFilter;
     texture.generateMipmaps = false;
-    texture.userData.uploaded = false;
-    texture.onUpdate = () => {
-        texture.userData.uploaded = true;
-        texture.clearUpdateRanges();   // WebGL consumed them already; WebGPU uploads whole
-    };
-    texture.needsUpdate = true;
     return texture;
 }

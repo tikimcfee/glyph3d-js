@@ -1,6 +1,8 @@
-// wall-store.test.mjs — the wall's durable names + spots: scoped per relay (ids are each relay's
-// own), pruned against the relay's live terminals (ids recycle once a session is gone), forgotten on
-// purpose by a kill. Run: bun test tools/wall-store.test.mjs
+// wall-store.test.mjs — the wall's durable names, spots, hidden terminals, groups, sidebar and termd
+// status window: scoped
+// per relay (ids are each relay's own), pruned against the relay's live terminals (ids recycle once a
+// session is gone; a group loses its dead members and goes with its last), forgotten on purpose by a
+// kill, and round-tripped through storage. Run: bun test tools/wall-store.test.mjs
 import { test, expect, beforeEach } from 'bun:test';
 
 const mem = new Map();
@@ -45,4 +47,80 @@ test('forget drops one terminal now', () => {
     s.forget('term-5');
     expect(s.name('term-5')).toBeNull();
     expect(s.position('term-5')).toBeNull();
+});
+
+const group = (members, o = {}) => ({ name: '', layout: 'tile', columns: 2, gap: 2, origin: { x: 0, y: 0 }, members, ...o });
+
+test('hidden terminals, groups and the sidebar round-trip through storage, per relay', () => {
+    const s = new WallStore(8099);
+    s.setHidden('term-2', true);
+    s.setGroup(s.newGroupId(), group(['term-1', 'term-2'], { name: 'build' }));
+    s.setGroup(s.newGroupId(), group(['term-3'], { layout: 'freeform', origin: null }));
+    s.setSidebar({ open: true, side: 'left', collapsed: ['g-1'] });
+    const back = new WallStore(8099);
+    expect(back.hidden('term-2')).toBe(true);
+    expect(back.hidden('term-1')).toBe(false);
+    expect(back.groups()).toEqual({
+        'g-1': group(['term-1', 'term-2'], { name: 'build' }),
+        'g-2': group(['term-3'], { layout: 'freeform', origin: null }),
+    });
+    expect(back.groupOf('term-3')).toBe('g-2');
+    expect(back.sidebar()).toEqual({ open: true, side: 'left', float: { x: 80, y: 80 }, collapsed: ['g-1'] });
+    expect(new WallStore(8093).groups()).toEqual({});                    // another relay's are its own
+    expect(new WallStore(8093).sidebar().open).toBe(false);
+    expect(back.newGroupId()).toBe('g-3');
+});
+
+test('the termd status window keeps its own place beside the sidebar, per relay', () => {
+    const s = new WallStore(8099);
+    expect(s.statusWindow()).toEqual({ open: false, side: 'float', float: null });
+    s.setSidebar({ open: true, side: 'right' });
+    s.setStatusWindow({ open: true, side: 'float', float: { x: 40, y: 60 } });
+    s.setStatusWindow({ side: 'right' });
+    const back = new WallStore(8099);
+    expect(back.statusWindow()).toEqual({ open: true, side: 'right', float: { x: 40, y: 60 } });
+    expect(back.sidebar()).toEqual({ open: true, side: 'right', float: { x: 80, y: 80 }, collapsed: [] });
+    expect(back.keys.status).not.toBe(back.keys.sidebar);
+    expect(new WallStore(8093).statusWindow().open).toBe(false);          // another relay's is its own
+    back.prune(new Set());
+    expect(new WallStore(8099).statusWindow().open).toBe(true);           // a prune leaves the chrome be
+});
+
+test('a terminal is in one group at most: joining another takes it out of the first, which goes when emptied', () => {
+    const s = new WallStore(8099);
+    s.setGroup('g-1', group(['term-1', 'term-2']));
+    s.setGroup('g-2', group(['term-3']));
+    s.setGroup('g-2', group(['term-3', 'term-2']));
+    expect(s.group('g-1').members).toEqual(['term-1']);
+    s.setSidebar({ collapsed: ['g-1'] });
+    s.setGroup('g-2', group(['term-3', 'term-2', 'term-1']));
+    expect(s.group('g-1')).toBeNull();
+    expect(s.sidebar().collapsed).toEqual([]);                           // a gone group isn't folded
+    expect(new WallStore(8099).group('g-1')).toBeNull();
+});
+
+test('prune drops dead members from groups, the groups left empty, and dead hidden marks', () => {
+    const s = new WallStore(8099);
+    s.setGroup('g-1', group(['term-1', 'term-2']));
+    s.setGroup('g-2', group(['term-3']));
+    s.setHidden('term-2', true);
+    s.setHidden('term-4', true);
+    expect(s.prune(new Set(['term-1'])).sort()).toEqual(['term-2', 'term-3', 'term-4']);
+    expect(s.group('g-1').members).toEqual(['term-1']);
+    expect(s.group('g-2')).toBeNull();
+    expect(s.hidden('term-2')).toBe(false);
+    expect(s.hidden('term-4')).toBe(false);
+    const again = new WallStore(8099);
+    expect(Object.keys(again.groups())).toEqual(['g-1']);
+    expect(again.hidden('term-4')).toBe(false);
+});
+
+test('a kill (forget) takes the terminal out of its group and unhides it', () => {
+    const s = new WallStore(8099);
+    s.setGroup('g-1', group(['term-1']));
+    s.setHidden('term-1', true);
+    s.forget('term-1');
+    expect(s.group('g-1')).toBeNull();
+    expect(s.hidden('term-1')).toBe(false);
+    expect(s.groupOf('term-1')).toBeNull();
 });

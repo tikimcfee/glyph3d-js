@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { chordLabel } from './chord.js';
+import { DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
 
 /**
  * termd on the wall (docs/termd/DESIGN.md, "Status: in the app") — three small pieces, every number
@@ -10,7 +11,8 @@ import { chordLabel } from './chord.js';
  *                 unreachable, failed or lost. A click opens the window.
  *   StatusWindow  the daemon (version, engine, namespace, uptime, holder and brain, restarts) and its
  *                 terminals, one row each, then the latest errors. Floats (drag its head) or sticks to
- *                 the left or right edge, like the sidebar; open, side and spot persist per relay.
+ *                 the left or right edge, like the sidebar (Panel.jsx); open, side and spot persist
+ *                 per relay. A row's click reveals its terminal (wall.reveal: shown, focused, framed).
  *                 Toggled by the chord + S or `wall.status`.
  *   TermdNotice   one line under the topbar, only when something is wrong: a restart that lingers
  *                 (amber, after restartNoticeMs), unreachable, failed, or lost (red; lost stays until
@@ -19,9 +21,6 @@ import { chordLabel } from './chord.js';
  * Quiet by default: amber marks only what needs a look (blocked, lagging, queued input, a warning),
  * everything secondary is muted.
  */
-
-/** A docked window's width, CSS px (the topbar and hint make room for it). */
-export const DOCK_WIDTH = 440;
 
 const C = {
   panel: '#141821', border: '#2a303c', text: '#c8ced8', muted: '#6b7383',
@@ -187,10 +186,10 @@ export function TermdNotice({ wall }) {
   const [, poke] = useState(0);
   useEffect(() => {
     if (termd.state !== 'restarting') return undefined;
-    const t = setTimeout(() => poke((x) => x + 1), Math.max(0, wall.statusConfig.restartNoticeMs - (Date.now() - since)) + 10);
+    const t = setTimeout(() => poke((x) => x + 1), Math.max(0, wall.config.restartNoticeMs - (Date.now() - since)) + 10);
     return () => clearTimeout(t);
   }, [termd.state, since, wall]);
-  const n = noticeFor(termd, since, now, wall.statusConfig);
+  const n = noticeFor(termd, since, now, wall.config);
   if (!n) return null;
   return (
     <div data-termd-notice={n.kind} style={{ ...styles.notice, color: n.tone }}>
@@ -204,15 +203,6 @@ export function TermdNotice({ wall }) {
 }
 
 // ── the window ───────────────────────────────────────────────────────────
-
-/** A small button that never takes the keyboard (keys stay with the focused terminal). */
-function Btn({ title, onClick, children, on, ...rest }) {
-  return (
-    <button tabIndex={-1} title={title} onMouseDown={(e) => e.preventDefault()}
-      onClick={(e) => { e.stopPropagation(); onClick?.(e); }}
-      style={{ ...styles.btn, ...(on ? styles.on : null) }} {...rest}>{children}</button>
-  );
-}
 
 /** The header: the daemon, its holder and brain. */
 function Daemon({ termd, now }) {
@@ -261,7 +251,7 @@ function Terminals({ wall, termd, now, stale }) {
         const doing = t.out_bps > 0 ? `${bytes(t.out_bps)}/s` : t.last_output_at ? `idle ${span(now - t.last_output_at)}` : '';
         return (
           <tr key={t.id} data-status-row={t.id} className="termd-status-row" title={rowTitle(t)}
-            onClick={() => { if (onWall) wall.focus(t.id, { frame: true }); }}
+            onClick={() => { if (onWall) wall.run(['wall.reveal', t.id]); }}
             style={{ cursor: onWall ? 'pointer' : 'default' }}>
             <td style={{ ...styles.td, color: '#e6e9ef' }}>{name}</td>
             <td style={{ ...styles.td, ...styles.muted }}>{program(t.argv)}</td>
@@ -304,32 +294,14 @@ export default function StatusWindow({ wall, state }) {
   const sw = state.statusWindow;
   const termd = useTermd(wall);
   const now = useNow(sw.open);
-  const [drag, setDrag] = useState(null);   // { x, y } while the floating head is dragged
   const boxRef = useRef(null);
+  const { dragAt, onHeadDown } = useHeadDrag(wall, 'wall.status', sw.side, boxRef);
   if (!sw.open) return null;
 
-  const floatAt = drag ?? sw.float;
+  const floatAt = dragAt ?? sw.float;
   const box = sw.side === 'float'
     ? { ...(floatAt ? { left: floatAt.x, top: floatAt.y } : { right: 12, top: 46 }), maxHeight: 'calc(100% - 120px)', borderRadius: 7, border: `1px solid ${C.border}`, maxWidth: 'calc(100vw - 32px)' }
-    : { top: 0, bottom: 0, [sw.side]: 0, width: DOCK_WIDTH, [sw.side === 'left' ? 'borderRight' : 'borderLeft']: `1px solid ${C.border}` };
-
-  const onHeadDown = (e) => {
-    if (sw.side !== 'float' || e.button !== 0 || e.target.closest('button')) return;
-    e.preventDefault();
-    const r = boxRef.current.getBoundingClientRect();
-    const start = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-    let last = { x: r.left, y: r.top };
-    setDrag(last);
-    const move = (ev) => { last = { x: Math.max(0, ev.clientX - start.dx), y: Math.max(0, ev.clientY - start.dy) }; setDrag(last); };
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      setDrag(null);
-      wall.run(['wall.status', 'float', String(Math.round(last.x)), String(Math.round(last.y))]);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
+    : { top: 0, bottom: 0, [sw.side]: dockLayout(state).status, width: DOCK_WIDTHS.status, [sw.side === 'left' ? 'borderRight' : 'borderLeft']: `1px solid ${C.border}` };
 
   const stale = termd.state !== 'ok' && !!termd.doc;
   const look = chipLook(termd);
@@ -341,15 +313,12 @@ export default function StatusWindow({ wall, state }) {
           <span style={{ color: look.color }}>{look.mark}</span> <span style={{ color: C.muted }}>termd</span>
           {termd.state !== 'ok' && <span style={{ color: look.color }}> · {termd.state === 'absent' ? 'idle' : termd.state}</span>}
         </span>
-        <Btn title="stick to the left edge" data-action="left" on={sw.side === 'left'} onClick={() => wall.run(['wall.status', 'left'])}>⇤</Btn>
-        <Btn title="float" data-action="float" on={sw.side === 'float'} onClick={() => wall.run(['wall.status', 'float'])}>◫</Btn>
-        <Btn title="stick to the right edge" data-action="right" on={sw.side === 'right'} onClick={() => wall.run(['wall.status', 'right'])}>⇥</Btn>
-        <Btn title={`close (${chordLabel(['S'])})`} data-action="close-status" onClick={() => wall.run(['wall.status', 'close'])}>×</Btn>
+        <DockButtons wall={wall} verb="wall.status" side={sw.side} close={{ title: `close (${chordLabel(['S'])})`, action: 'close-status' }} />
       </div>
       <div style={styles.body}>
         <Daemon termd={termd} now={now} />
         <Terminals wall={wall} termd={termd} now={now} stale={stale} />
-        <Errors termd={termd} shown={wall.statusConfig.errorsShown} />
+        <Errors termd={termd} shown={wall.config.errorsShown} />
       </div>
     </div>
   );
@@ -376,9 +345,4 @@ const styles = {
   td: { padding: '0 14px 0 0', verticalAlign: 'top' },
   // Errors wrap (never cut); the window stays about as wide as its terminal rows.
   err: { maxWidth: 640, textIndent: '-3.2em', paddingLeft: '3.2em' },
-  btn: {
-    width: 18, height: 18, padding: 0, border: 'none', borderRadius: 4, background: 'transparent', color: '#8b95a7',
-    font: '12px/18px ui-monospace, monospace', cursor: 'pointer', textAlign: 'center', flex: '0 0 auto',
-  },
-  on: { color: '#e6e9ef', background: '#1d2330' },
 };

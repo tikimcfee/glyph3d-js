@@ -26,12 +26,12 @@ const { default: registerTerminalCommands } = await import('../packages/glyph3d-
 const { assertTerminalHost } = await import('../packages/glyph3d-core/src/services/terminal/TerminalHost.js');
 
 function setup() {
-    const ctx = { scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: new SceneRegistry(), terminals: new Map() };
-    ctx.terminalHost = assertTerminalHost({
+    const terminalHost = assertTerminalHost({
         theme: () => ({}), place: () => {}, landed: () => 'landed', focus: () => ({ ok: true }),
         release: () => {}, resizing: () => '',
         surfaces: { get: () => null, set: () => {}, remove: () => {} },
     }, 'readopt-test');
+    const ctx = { scene: new THREE.Scene(), atlas: HEADLESS_ATLAS, registry: new SceneRegistry(), terminals: new Map(), terminalHost };
     const router = new CommandRouter(ctx);
     registerTerminalCommands(router);
     const bridge = new WebSocketBridge(router, { autoConnect: false, showStatus: false });

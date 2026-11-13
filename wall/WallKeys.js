@@ -5,10 +5,13 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * WallKeys — the keyboard. Wall chords take the platform's chord modifier (chord.js: ⌘ on macOS,
  * Ctrl+Alt elsewhere) and are matched on e.code (the physical key) so layouts never rewrite them:
  * [ ] cycle focus, ↵ frames the focused terminal or returns to the overview, Shift+↵ opens a new
- * terminal, 0 fits all, S opens or closes the termd status window (K belongs to the DOM palette).
+ * terminal, 0 fits all, - hides the focused terminal, X HELD closes it (the bar's close ring fills
+ * over closeHoldMs; let go early and it's kept), G gathers the selection (or the focused terminal)
+ * into a group, Shift+G dissolves the focused terminal's group, B opens or closes the sidebar, S
+ * opens or closes the termd status window (K belongs to the DOM palette). Each runs a wall verb.
  * Everything else goes to the focused terminal as terminal bytes — Esc included (vim and readline
- * need it), Ctrl alone too (it's the shell's);
- * click empty canvas to drop focus. On macOS any other ⌘ key stays with the browser (⌘C, ⌘V);
+ * need it), Ctrl alone too (it's the shell's); click empty canvas to drop focus. With nothing
+ * focused, Esc clears the selection. On macOS any other ⌘ key stays with the browser (⌘C, ⌘V);
  * elsewhere any other Ctrl+Alt key is the shell's. A focused DOM input (the palette) keeps its own
  * keys. Paste goes to the focused terminal as one bracketed burst.
  */
@@ -19,17 +22,25 @@ export default class WallKeys {
         /** The chord's modifiers as Playwright key names — the e2e presses the platform's chord. */
         this.chordKeys = CHORD_KEYS;
         this._onKey = (e) => this._key(e);
+        this._onKeyUp = (e) => this._keyUp(e);
         this._onPaste = (e) => this._paste(e);
     }
 
     install() {
         window.addEventListener('keydown', this._onKey, true);
+        window.addEventListener('keyup', this._onKeyUp, true);
         document.addEventListener('paste', this._onPaste);
     }
 
     uninstall() {
         window.removeEventListener('keydown', this._onKey, true);
+        window.removeEventListener('keyup', this._onKeyUp, true);
         document.removeEventListener('paste', this._onPaste);
+    }
+
+    /** The held close chord ends when X or the chord comes up (or the window loses the keys). */
+    _keyUp(e) {
+        if (e.code === 'KeyX' || !isChord(e)) this.wall.barButtons?.releaseKey();
     }
 
     _key(e) {
@@ -43,13 +54,26 @@ export default class WallKeys {
                 case 'BracketLeft': claim(); wall.cycleFocus(-1); return;
                 case 'Enter': claim(); if (e.shiftKey) wall.spawn(); else wall.toggleFrame(); return;
                 case 'Digit0': claim(); wall.fitAll(); return;
+                case 'Minus': claim(); if (wall.focusedId) wall.run(['wall.hide', wall.focusedId]); return;
+                case 'KeyX': claim(); if (!e.repeat && wall.focusedId) wall.barButtons.holdKey(wall.focusedId); return;
+                case 'KeyG': {
+                    claim();
+                    const f = wall.focusedId;
+                    if (e.shiftKey) { const gid = f && wall.groups.groupOf(f); if (gid) wall.run(['wall.ungroup', gid]); }
+                    else wall.run(wall.selection.size || !f ? ['wall.group'] : ['wall.group', f]);
+                    return;
+                }
+                case 'KeyB': claim(); wall.run(['wall.sidebar', 'toggle']); return;
                 case 'KeyS': claim(); wall.run(['wall.status', 'toggle']); return;
                 case 'KeyK': return;   // the palette's (main.jsx)
                 default: if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
             }
         }
         const grid = wall.focusedId ? wall.terminal(wall.focusedId) : null;
-        if (!grid) return;
+        if (!grid) {
+            if (e.key === 'Escape' && wall.selection.size) { e.preventDefault(); wall.run(['wall.select', 'none']); }
+            return;
+        }
         const bytes = keyToTerminalBytes(e, { captureEscape: true });
         if (bytes == null) return;
         e.preventDefault();
