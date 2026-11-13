@@ -378,6 +378,13 @@ fn attach_and_watch_ride_an_upgrade_and_a_crash() {
 mod procinfo;
 use procinfo::environ;
 
+/// How `g3d env` tags a name from the platform's session source (the daemon's test hook stands
+/// in for it under that name).
+#[cfg(target_os = "macos")]
+const SESSION_TAG: &str = "session (launchd)";
+#[cfg(not(target_os = "macos"))]
+const SESSION_TAG: &str = "session (systemd-user)";
+
 /// A second test-name filter (it matches no test) that only [`idle_argv`] passes.
 const IDLE_MODE: &str = "g3d-idle-mode";
 
@@ -459,7 +466,7 @@ fn new_sends_its_environment_and_clean_takes_the_sessions() {
     assert_eq!((e.get("FOO"), e.get("REX_SESSION")), (None, None));
     assert_eq!(e.get("HERE").map(String::as_str), Some("passed"));
     let shown = g3d(&["env", "clean"]);
-    assert_eq!(tag(&shown, "DISPLAY").as_deref(), Some("session (systemd-user)"), "{shown}");
+    assert_eq!(tag(&shown, "DISPLAY").as_deref(), Some(SESSION_TAG), "{shown}");
     assert!(!shown.lines().any(|l| l.starts_with("caller")), "{shown}");
 
     // `-e NAME` with a value the protocol can't carry is said, never sent as "unset".

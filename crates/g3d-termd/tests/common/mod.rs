@@ -349,3 +349,14 @@ pub fn viewer(cols: u16, rows: u16, bytes: &[u8]) -> libghostty_vt::Terminal<'st
     t.vt_write(bytes);
     t
 }
+
+/// The platform's session source as the `env` op tags it, the status document names it and the
+/// log says it (the test hook's file stands in for it under that name).
+#[cfg(target_os = "macos")]
+pub const SOURCE_VIA: &str = "launchd";
+#[cfg(target_os = "macos")]
+pub const SOURCE_SAID: &str = "terminal environment: the session's from launchd (launchctl getenv)";
+#[cfg(not(target_os = "macos"))]
+pub const SOURCE_VIA: &str = "systemd-user";
+#[cfg(not(target_os = "macos"))]
+pub const SOURCE_SAID: &str = "terminal environment: the session's from the systemd user manager";

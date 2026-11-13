@@ -36,8 +36,11 @@ fn argv_and_env(pid: u32, _: bool) -> (Vec<String>, Vec<String>) {
     (argv, env)
 }
 
-/// `KERN_PROCARGS2`: `int argc`, the exec path, NUL padding, `argc` argv strings, then the
-/// environment's strings up to an empty one (Apple's own strings follow it).
+/// `KERN_PROCARGS2`: `int argc`, the exec path, NUL padding, `argc` argv strings, the
+/// environment's strings, then the kernel's "apple" strings for dyld (`ptr_munge=`, `main_stack=`,
+/// `executable_file=`, …). Nothing separates the last two: NUL padding sits between them only
+/// sometimes. So the environment ends at an empty string or at the first name that is all lowercase
+/// (the apple strings' form; no test here sets a lowercase variable).
 #[cfg(target_os = "macos")]
 fn argv_and_env(pid: u32, want_env: bool) -> (Vec<String>, Vec<String>) {
     let mut max: libc::c_int = 0;
@@ -68,7 +71,11 @@ fn argv_and_env(pid: u32, want_env: bool) -> (Vec<String>, Vec<String>) {
         Some(s)
     };
     let argv: Vec<String> = (0..argc).map_while(|_| next()).collect();
-    let env: Vec<String> = std::iter::from_fn(|| next().filter(|s| !s.is_empty())).collect();
+    let apple = |s: &str| {
+        let name = s.split('=').next().unwrap_or("");
+        s.contains('=') && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    let env: Vec<String> = std::iter::from_fn(|| next().filter(|s| !s.is_empty() && !apple(s))).collect();
     // macOS withholds the environment of Apple's platform binaries (`/bin/sleep`, `/bin/zsh`)
     // from every other process: none at all is that, never a real empty environment here.
     assert!(!want_env || !env.is_empty(), "macOS withholds the environment of {argv:?} (a platform binary?)");

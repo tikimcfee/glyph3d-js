@@ -286,7 +286,8 @@ fn default_path() -> String {
 }
 
 /// `ENV_PATH` of a `login.defs(5)`, as shadow's and util-linux's `login(1)` read it (`PATH=`
-/// before the list is optional).
+/// before the list is optional). Linux's; built elsewhere for its tests.
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_login_defs_path(text: &str) -> Option<String> {
     text.lines().find_map(|l| {
         let mut f = l.split_whitespace();
@@ -870,7 +871,8 @@ impl Policy {
         #[cfg(feature = "test-hooks")]
         if let Some(f) = &self.manager_file {
             let s = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
-            return Ok((parse_manager_env(&s)?, "systemd-user"));
+            // It stands in for the platform's session source, under that source's name.
+            return Ok((parse_manager_env(&s)?, platform::SOURCE.unwrap_or("hook")));
         }
         platform::session_env(names, &self.start_env, self.manager_timeout)
     }

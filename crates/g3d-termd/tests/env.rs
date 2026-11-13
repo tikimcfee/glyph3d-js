@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 /// What a starter that is not a desktop session hands down: no HOME or USER, a stale display,
 /// a Terminal.app identity, a tmux and an editor it isn't in, its own shell state.
 const ODD: &[(&str, &str)] = &[
-    ("PATH", "/usr/bin:/bin"),
+    ("PATH", "/usr/bin:/bin:/nonexistent/starter-bin"),
     ("DISPLAY", ":99"),
     ("TMUX", "/tmp/tmux-0/default,1,0"),
     ("TMUX_PANE", "%3"),
@@ -238,7 +238,7 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     assert_eq!(get("DISPLAY"), Some(":99"));
     let t = tagged(&mut c, "e1");
     assert_eq!((t["PATH"].1, t["PATH"].2.as_deref()), (EnvSource::Fill, Some("login")));
-    assert_ne!(get("PATH"), Some("/usr/bin:/bin"), "the starter's PATH is not a session's");
+    assert_ne!(get("PATH"), Some("/usr/bin:/bin:/nonexistent/starter-bin"), "the starter's PATH is not a session's");
     assert_eq!(t["DISPLAY"], (":99".into(), EnvSource::Session, Some("daemon".into())));
     assert_eq!(t["HOME"], (home.clone(), EnvSource::Fill, Some("passwd".into())));
     assert_eq!(t["TERM"].1, EnvSource::Termd);
@@ -515,15 +515,15 @@ fn the_session_environment_is_read_at_every_create() {
     // A name the session lacks: the starter's value for that name only.
     assert_eq!(ea.get("SSH_AUTH_SOCK").map(String::as_str), Some("/starter/agent"));
     let t = tagged(&mut c, "a");
-    assert_eq!(t["DISPLAY"], (":7".into(), EnvSource::Session, Some("systemd-user".into())));
+    assert_eq!(t["DISPLAY"], (":7".into(), EnvSource::Session, Some(SOURCE_VIA.into())));
     assert_eq!(t["SSH_AUTH_SOCK"], ("/starter/agent".into(), EnvSource::Session, Some("daemon".into())));
     write_manager(&d.dir, &manager(":8").iter().map(String::as_str).collect::<Vec<_>>());
     let b = create_with(&mut c, "b", |cr| cr.argv = sleep()).unwrap();
     assert_eq!(environ(b.pid).get("DISPLAY").map(String::as_str), Some(":8"));
     assert_eq!(environ(a.pid).get("DISPLAY").map(String::as_str), Some(":7"));
-    assert!(d.log().contains("terminal environment: the session's from the systemd user manager"), "{}", d.log());
+    assert!(d.log().contains(SOURCE_SAID), "{}", d.log());
     let st: StatusReply = c.request(Op::Status).unwrap();
-    assert_eq!(st.status.daemon.env.source, "systemd-user");
+    assert_eq!(st.status.daemon.env.source, SOURCE_VIA);
     // A manager that can't be read: the daemon's start values, said in the log and the status.
     std::fs::remove_file(d.dir.join("manager.json")).unwrap();
     let e = create_with(&mut c, "e", |cr| cr.argv = sleep()).unwrap();
@@ -585,7 +585,7 @@ fn a_callers_environment_is_the_base_and_none_is_the_sessions() {
     let env = environ(r.pid);
     assert_eq!(env.get("DISPLAY").map(String::as_str), Some(":0"));
     assert_eq!(env.get("FOO"), None);
-    assert_eq!(tagged(&mut c, "clean")["DISPLAY"], (":0".into(), EnvSource::Session, Some("systemd-user".into())));
+    assert_eq!(tagged(&mut c, "clean")["DISPLAY"], (":0".into(), EnvSource::Session, Some(SOURCE_VIA.into())));
 }
 
 /// A creator with no shell and a stripped environment (the relay started by a unit, cron, an
@@ -630,7 +630,7 @@ fn a_stripped_creator_gets_the_sessions_handles() {
     assert!(
         ["DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK"]
             .iter()
-            .all(|k| t[*k].1 == EnvSource::Session && t[*k].2.as_deref() == Some("systemd-user")),
+            .all(|k| t[*k].1 == EnvSource::Session && t[*k].2.as_deref() == Some(SOURCE_VIA)),
         "{t:?}"
     );
 }
