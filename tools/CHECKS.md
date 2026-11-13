@@ -873,22 +873,30 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   screen back exactly, the flood's history whole up to the snapshot and from the high-water mark,
   the gap exactly the reported unseen bytes), `upgrade` under a flood (all 300000 lines in the
   history across it, screens identical, ERROR restart at the exact cut), failed upgrades leaving
-  the brain serving, a VT handoff across engines, a crash loop to `brain_failed` and back on
-  SIGHUP, the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
+  the brain serving, a candidate dying after the commit (the next brain restores from the
+  handoff, logged as that), a VT handoff across engines, a crash loop to `brain_failed` (a client
+  that writes `HELLO` late still reads the `ERROR`, never `EPIPE`) and back on SIGHUP (the episode
+  in `last_start.failed_at` and a `brain_failed` error), a terminal restored from a snapshot saving
+  a new one while quiet (the next crash restores it exact), the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
   the environment (`src/env.rs` unit tests, and `tests/env.rs`: a daemon started from a stripped
   environment with a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's state,
-  `SIGINT` ignored and a low fd limit; its programs' `/proc` environ, argv, cwd, signal masks and
-  limits match the policy: the passwd shell as `-<name>`, home, the locale filled only when none is
+  `SIGINT` ignored, a low fd limit, a Claude Code shell's, atuin's and a unit's variables and a
+  scratch `HOME`; its programs' `/proc` environ, argv, cwd, signal masks and limits match the
+  policy: only the session's variables of the starter (`--env-keep` adds one), the account from
+  passwd, a set non-UTF-8 locale kept and named in the status document, the passwd shell as `-<name>`, home, the locale filled only when none is
   set, reserved names and bad cwds refused, the session source re-read per create (a file standing
   in for the user manager), and the real user manager beating a stale starter when one answers);
   the status document (`tests/status.rs`: its keys and types against
   `tests/fixtures/status-shape.json`, and PROTOCOL.md's example parsed field for field in
   `g3d-wire`; `status_follow`'s throttling — at once, then on change no sooner than the interval,
-  quiet between keepalives, every interval while output flows, a rate crossing zero; a status-only
-  follower doesn't hold an idle daemon and gets its `exiting` document; `stop`'s last document; a
+  quiet between keepalives, every interval while output flows, a rate crossing zero, one burst of
+  output one change (not a window of them); a status-only follower doesn't hold an idle daemon and
+  gets its `exiting` document, by which time the socket is gone and a new daemon can take the name; `stop`'s last document; a
   crash and an upgrade counted in the next brain's document);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
-  the outer terminal, detach). Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
+  the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` forwarding the
+  SSH variables only from a live SSH login (not a pane below an old one; what the login lacks
+  removed), and the socket path the same from `env -i` as from a desktop environment. Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
   tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
   cargo test --workspace --features g3d-termd/test-hooks
@@ -918,7 +926,8 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   connection (`TestTermdStatus*`) reads every state from its side of the socket (absent, ok,
   restarting across a crash, unreachable past the grace with the holder stopped, ok again with the
   orphans re-adopted, absent after `stop`, lost when the holder dies) and its display plane keeps
-  only the latest notification.
+  only the latest notification; `termd_paths_test.go`: the socket directory found from the uid,
+  the same with and without `XDG_RUNTIME_DIR` and `TMPDIR`.
 
 ## Build / serve
 
