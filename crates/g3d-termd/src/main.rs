@@ -58,20 +58,21 @@ pub struct Args {
     /// ...until it drains below this many.
     #[arg(long, default_value_t = 256 << 10)]
     pub block_low: usize,
-    /// Where a terminal's environment starts: the systemd user manager's when one answers
-    /// (auto), or always the daemon's own (daemon: hermetic, for tests).
-    #[arg(long, value_enum, default_value_t = env::EnvSource::Auto, env = "G3D_TERMD_ENV_SOURCE")]
-    pub env_source: env::EnvSource,
-    /// How long to wait for the user manager's environment, in milliseconds.
+    /// Where a terminal whose creator sends no environment looks the session's variables up: the
+    /// platform's session source (auto: the systemd user manager, launchd), each name it lacks
+    /// from the daemon's start values; or only those (daemon: hermetic, for tests).
+    #[arg(long, value_enum, default_value_t = env::SessionSource::Auto, env = "G3D_TERMD_ENV_SOURCE")]
+    pub env_source: env::SessionSource,
+    /// How long to wait for the session source, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     pub env_manager_timeout_ms: u64,
-    /// Also remove these variables (NAME, or PREFIX*) from the base environment. Repeatable.
+    /// Also remove these variables (NAME, or PREFIX*) from every base environment. Repeatable.
     #[arg(long, value_name = "NAME")]
     pub env_scrub: Vec<String>,
-    /// Keep these variables (NAME, or PREFIX*): though the scrub names them, and, in a base taken
-    /// from the daemon's own environment, though they aren't session variables. Repeatable.
-    #[arg(long, value_name = "NAME")]
-    pub env_keep: Vec<String>,
+    /// The termd.toml to read (default: $XDG_CONFIG_HOME/g3d/termd.toml, the session's
+    /// XDG_CONFIG_HOME, else ~/.config from passwd). Re-read on create when it changes.
+    #[arg(long, value_name = "PATH", env = "G3D_TERMD_CONFIG")]
+    pub config: Option<PathBuf>,
     /// The shell a terminal with no argv runs, for every terminal (default: the passwd entry's).
     #[arg(long)]
     pub shell: Option<String>,
@@ -210,6 +211,11 @@ fn check(args: &Args) {
     }
     if args.term.is_empty() || !args.term.bytes().all(|b| b.is_ascii_graphic()) {
         die(&format!("--term {:?} is not a terminal name", args.term));
+    }
+    if let Some(c) = &args.config
+        && !c.is_absolute()
+    {
+        die(&format!("--config {} is not an absolute path", c.display()));
     }
     if args.block_low >= args.block_high {
         die("--block-low must be below --block-high");

@@ -177,6 +177,7 @@ mod tests {
             Op::StatusFollow(StatusFollow { interval_ms: Some(250) }),
             Op::StatusFollow(StatusFollow::default()),
             Op::StatusUnfollow,
+            Op::Env(EnvQuery { id: "t".into() }),
         ];
         for op in ops {
             let r = Request { req: 9, op };

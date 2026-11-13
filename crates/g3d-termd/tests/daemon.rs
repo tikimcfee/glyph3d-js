@@ -44,7 +44,7 @@ fn handshake_refuses_another_major() {
 
     let c = d.client();
     assert_eq!(c.welcome.proto, PROTO);
-    assert_eq!(c.welcome.features, vec!["raw", "view", "capture", "status", "upgrade"]);
+    assert_eq!(c.welcome.features, vec!["raw", "view", "capture", "status", "upgrade", "env"]);
     assert_eq!(c.welcome.proto, [1, 1]);
     // 1.1: the namespace's identity, the brain's generation, the holder.
     assert_eq!(c.welcome.instance.as_ref().map(String::len), Some(16));

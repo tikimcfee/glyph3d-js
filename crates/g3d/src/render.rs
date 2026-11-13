@@ -172,9 +172,10 @@ pub fn status(doc: &Status, st: Style) -> String {
     }
     line(format!("holder {}{}   {brain}", d.holder.pid, rss(d.holder.rss)));
     line(format!(
-        "{}env {} · snapshots {} every {} · {} connection{} · log {}{}",
+        "{}env {}{} · snapshots {} every {} · {} connection{} · log {}{}",
         st.dim,
         d.env.source,
+        if d.env.config.state == "absent" { String::new() } else { format!(" · termd.toml {}", d.env.config.state) },
         bytes(d.snapshots.bytes),
         span(d.snapshots.interval_ms),
         d.connections,

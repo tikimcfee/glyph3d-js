@@ -18,16 +18,17 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /**
- * A scratch directory for a tool's daemons (G3D_TERMD_DIR: sockets, locks, logs). Their terminals
- * start from the tool's own environment (G3D_TERMD_ENV_SOURCE=daemon), never the desktop
- * session's.
+ * A scratch directory for a tool's daemons (G3D_TERMD_DIR: sockets, locks, logs). A terminal whose
+ * creator sends no environment takes the session's names from the tool's own start values
+ * (G3D_TERMD_ENV_SOURCE=daemon), never the desktop session's; and no termd.toml but the
+ * directory's own (G3D_TERMD_CONFIG, absent unless a tool writes it), never the person's.
  * @param {string} tag @returns {{ dir: string, env: NodeJS.ProcessEnv }}
  */
 export function privateTermd(tag) {
     const base = process.env.G3D_TEST_RUN_DIR || path.join(ROOT, 'out', 'termd');
     const dir = path.join(base, tag);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    return { dir, env: { ...process.env, G3D_TERMD_DIR: dir, G3D_TERMD_ENV_SOURCE: 'daemon' } };
+    return { dir, env: { ...process.env, G3D_TERMD_DIR: dir, G3D_TERMD_ENV_SOURCE: 'daemon', G3D_TERMD_CONFIG: path.join(dir, 'termd.toml') } };
 }
 
 /** The g3d-termd built beside a relay binary. @param {string} cli */

@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 pub const PROTO: [u32; 2] = [1, 1];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
-/// The features this daemon announces: the core plus `status` and `upgrade` (1.1).
-pub const DAEMON_FEATURES: [&str; 5] = ["raw", "view", "capture", "status", "upgrade"];
+/// The features this daemon announces: the core plus `status`, `upgrade` and `env` (1.1).
+pub const DAEMON_FEATURES: [&str; 6] = ["raw", "view", "capture", "status", "upgrade", "env"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,10 +134,12 @@ pub enum Op {
     StatusFollow(StatusFollow),
     /// (1.1) Stop following it.
     StatusUnfollow,
+    /// (1.1) A terminal's environment as it started, each variable with its source.
+    Env(EnvQuery),
 }
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
-pub const KNOWN_OPS: [&str; 16] = [
+pub const KNOWN_OPS: [&str; 17] = [
     "create",
     "list",
     "kill",
@@ -154,6 +156,7 @@ pub const KNOWN_OPS: [&str; 16] = [
     "status",
     "status_follow",
     "status_unfollow",
+    "env",
 ];
 
 /// (1.1) `status_follow`.
@@ -281,9 +284,22 @@ pub struct StatusSnapshots {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusEnv {
-    /// Where new terminals' environments start: `"systemd-user"` or `"daemon"`.
+    /// Where a terminal created with no caller's environment looks its session's variables up:
+    /// `"systemd-user"`, `"launchd"` or `"daemon"` (the daemon's start values: no session source
+    /// answers, or `--env-source daemon`).
     pub source: String,
+    /// The daemon's `termd.toml`: its path, whether it exists, and its error while it is bad.
+    pub config: StatusEnvConfig,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEnvConfig {
+    pub path: String,
+    /// `"absent"`, `"loaded"` or `"error"`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,9 +402,11 @@ pub struct Create {
     /// Added to the environment; a `null` value removes the variable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<BTreeMap<String, Option<String>>>,
-    /// (1.1) What the environment starts from: the session's (the default) or nothing.
+    /// (1.1) The caller's own environment, which the terminal's starts from (a shell's client
+    /// sends it, as a multiplexer's does). Absent: the creator has none, and the base is the
+    /// desktop session's (PROTOCOL.md, "The program's environment").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_base: Option<EnvBase>,
+    pub env_base: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_exists: Option<IfExists>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,17 +415,6 @@ pub struct Create {
     pub colors: Option<Colors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_px: Option<[u32; 2]>,
-}
-
-/// `create.env_base` (1.1).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EnvBase {
-    /// The user's session environment, scrubbed (PROTOCOL.md, "The program's environment").
-    #[default]
-    Session,
-    /// Nothing but the account variables, the request's `env` and termd's own.
-    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +544,61 @@ pub struct Capture {
     pub history_rows: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unwrap: Option<bool>,
+}
+
+/// A name `create`'s `env` and `env_base` take: `[A-Za-z_][A-Za-z0-9_]*`.
+pub fn env_name_ok(k: &str) -> bool {
+    let mut b = k.bytes();
+    b.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// One environment string's limit in `create`: `NAME=value` and its NUL as `execve` counts it
+/// (Linux's `MAX_ARG_STRLEN`, 32 pages).
+pub const ENV_VALUE_MAX: usize = 128 << 10;
+
+/// (1.1) `env`: a terminal's environment as termd started its program.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvQuery {
+    pub id: String,
+}
+
+/// Where one variable of a terminal's environment came from (PROTOCOL.md, "The program's
+/// environment"), its layers in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvSource {
+    /// The caller's own environment (`create.env_base`).
+    Caller,
+    /// The desktop session's, for a creator with no environment of its own.
+    Session,
+    /// What `login(1)` would set and the base lacked: the account, `SHELL`, `PATH`, the locale.
+    Fill,
+    /// The daemon's `termd.toml`.
+    File,
+    /// The request's `env`.
+    Request,
+    /// termd's own, describing the terminal.
+    Termd,
+}
+
+/// One variable as the program started with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+    pub source: EnvSource,
+    /// Within the source, where: a `session` variable's `"systemd-user"`, `"launchd"` or
+    /// `"daemon"` (the daemon's start value, which the session source lacked); a `fill`'s
+    /// `"passwd"`, `"login"` or `"locale"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvReply {
+    pub id: String,
+    /// Sorted by name. Empty for a terminal restored from a brain that kept no record of it.
+    pub env: Vec<EnvVar>,
 }
 
 /// A successful `REPLY`: `req`, `ok: true`, then the op's own fields.

@@ -77,8 +77,10 @@ func privateTermd(t *testing.T) {
 		t.Cleanup(func() { os.RemoveAll(dir) })
 	}
 	t.Setenv("G3D_TERMD_DIR", dir)
-	// Terminals start from the test's own environment, never the desktop session's.
+	// Terminals take the session's names from the test's own start values, never the desktop
+	// session's, and no termd.toml but the test's own (absent).
 	t.Setenv("G3D_TERMD_ENV_SOURCE", "daemon")
+	t.Setenv("G3D_TERMD_CONFIG", filepath.Join(dir, "termd.toml"))
 	savedNS, savedBin := termdNS, termdBin
 	termdNS, termdBin = "gotest", bin
 	t.Cleanup(func() {

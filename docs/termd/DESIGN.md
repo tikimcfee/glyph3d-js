@@ -202,13 +202,16 @@ What the branch has of [Environment](#environment) and [Defaults](#defaults), an
 from them.
 
 **Who decides what.** The brain composes everything a program starts with (`crates/g3d-termd/src/env.rs`):
-the base, the scrub, the account, the request, termd's own, the program's path and argv, the
-working directory. The holder execs exactly that: it no longer looks anything up in `PATH`, which
+the base (the caller's, or the session's), the scrub, the fill, `termd.toml`, the request, termd's
+own, the program's path and argv, the working directory. The holder execs exactly that: it no longer looks anything up in `PATH`, which
 took a branch out of it. `argv[0]` without a slash is found in the composed environment's `PATH`,
 or `confstr(_CS_PATH)` when it has none (what `execvp` does); not found is `spawn_failed` before
 anything forks. The `create` reply and `list` show the resolved path first (`/usr/bin/sh`, not
 `sh`), and the reply says `login` and `cwd`; a restored terminal keeps them in the holder's record
-(`login` and `term` are new fields there, read with defaults from an older brain's record).
+(`login` and `term` are new fields there, read with defaults from an older brain's record). The
+record also keeps the terminal's tagged environment (`env`: each variable, its value and its
+layer, what the `env` op answers; a few KB), so it survives a brain restart; a record an older
+brain wrote has none, and `env` answers an empty list for it.
 
 **Hold protocol 2.** `spawn` now carries the `path` to exec apart from `argv` (a login shell execs
 `/bin/bash` as `-bash`), which a hold-1 holder would ignore and exec `-bash` from `PATH`: a changed
@@ -219,23 +222,29 @@ before this change takes a restart (`g3d stop`, which ends its shells) to get th
 until the holder's re-exec (`g3d upgrade --holder`) exists. A hold-2 holder now names the reason
 in the `upgrade_failed` it sends.
 
-**Settings** (flags on `g3d-termd`, passed to every brain; the config file is not built):
+**Settings** (flags on `g3d-termd`, passed to every brain):
 `--env-source auto|daemon` (also `G3D_TERMD_ENV_SOURCE`, so a relay's tests and the check tools set
-it through the environment the relay hands the daemon), `--env-manager-timeout-ms` 1000,
-`--env-scrub NAME|PREFIX*` and `--env-keep NAME|PREFIX*` (repeatable; keep exempts from the
-scrub and adds to the session variables a base from the daemon's own environment keeps), `--shell PATH` (refused at
-start unless an absolute path to an executable), `--login-shell true`, `--fill-locale true`,
-`--term xterm-256color` (also the terminfo name the emulator answers with, stored per terminal).
+it through the environment the relay hands the daemon), `--env-manager-timeout-ms` 1000 (the
+session source's wait, either platform's), `--env-scrub NAME|PREFIX*` (repeatable, adds to the
+scrub), `--config PATH` (also `G3D_TERMD_CONFIG`; absolute; the tests and check tools point it into
+their scratch directory so a person's own file never reaches them), `--shell PATH` (refused at start
+unless an absolute path to an executable), `--login-shell true`, `--fill-locale true`, `--term
+xterm-256color` (also the terminfo name the emulator answers with, stored per terminal). The
+config file is `termd.toml`'s `[env]` only ([The config file](#the-config-file-termdtoml)); the
+other settings stay flags. **One mechanism adds a name to the allowlist and exempts it from the
+scrub: `termd.toml`'s `pass`** (no flag beside it), which a person edits without restarting the
+daemon.
 
 **Departures and details the design left open:**
 
 - **The scrub's last group is `G3D_TERMD_*`**, a prefix, rather than `G3D_TERMD_DIR` and
-  `G3D_TERMD_TEST_HOOKS` by name: it also covers `G3D_TERMD_ENV_SOURCE` and every test hook's file
-  variable. `G3D_TERMD_ID` and `G3D_TERMD_SOCKET` are layer 5's and set again after it.
+  `G3D_TERMD_TEST_HOOKS` by name: it also covers `G3D_TERMD_ENV_SOURCE`, `G3D_TERMD_CONFIG` and
+  every test hook's file variable. `G3D_TERMD_ID` and `G3D_TERMD_SOCKET` are layer 6's and set
+  again after it.
 - **Reaching the user manager from any starter.** `busctl --user` needs
   `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`; a daemon started without either (a relay run
   from `env -i`, cron) would never reach the manager, and one started with a stale address (a
-  bus from an earlier login) would fail to, and both fall back to the daemon's own environment,
+  bus from an earlier login) would fail to, and both fall back to the daemon's start values,
   which is the case the policy exists for. So termd finds the user bus from the uid, where
   `pam_systemd` puts it: when `/run/user/<uid>` exists and is the user's alone
   (`g3d::paths::user_runtime_dir`, which the socket rule shares), `busctl` gets
@@ -243,10 +252,14 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
   directory does the starter's address count. `busctl` is found in the daemon's `PATH`, then `/usr/bin`,
   `/bin`. Measured here: `env -i busctl --user …` fails with "$DBUS_SESSION_BUS_ADDRESS and
   $XDG_RUNTIME_DIR not defined"; with `XDG_RUNTIME_DIR=/run/user/<uid>` it answers.
-- **Which source a `create` used is logged when it changes** (`terminal environment: the systemd
-  user manager's` / `the daemon's own: <why>`), and the status document's `daemon.env` names it
-  (with a warning while the user manager is unreachable). A manager that stops answering costs each
-  `create` up to the timeout, then falls back.
+- **The policy is logged once at brain start** (`terminal environment: a caller's own when it
+  sends one; else <the allowlist>, each from <the source> at every create …`, and `termd.toml
+  <path>: …`, after the session source is probed off the async threads), and **which source a
+  no-caller `create` used is logged when it changes** (`terminal environment: the session's from
+  the systemd user manager` / `the daemon's start values: <why>`). The status document's
+  `daemon.env` names the source and the config file's state (with a warning while the session
+  source is unreachable or the file is bad). A source that stops answering costs each no-caller
+  `create` up to the timeout, then falls back; a caller's `create` never asks it.
 - **`SHELL`.** With no `argv`, a request's `env` `SHELL` is the shell that runs (an absolute path
   to an executable, else `bad_request`), so `$SHELL` names the running shell as `login(1)` and tmux
   mean it (vim's `:sh` and scripts read it). Otherwise the shell is chosen as designed (`--shell`,
@@ -254,8 +267,14 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
   path to an executable, else `/bin/sh`). The chosen shell becomes `SHELL` for every terminal, an
   explicit `argv` included (`login(1)` sets it regardless of what runs); with an `argv`, a
   request's own `SHELL` is only the variable, as any layer-4 value.
-- **The account** (`HOME`, `USER`, `LOGNAME`) always comes from the user database, over the
-  base, as `login(1)` sets it; a request's `env` can still set them.
+- **The account** (`HOME`, `USER`, `LOGNAME`) is filled from the user database where the base
+  has none (an empty value is none): a no-caller base never has them (the allowlist leaves them to
+  the fill), so a terminal the wall opens always gets passwd's, whatever the daemon's starter had
+  (a scratch harness's `HOME`); a caller's own are its subshell's, as in screen and tmux. `PATH`
+  likewise: login(1)'s (`/etc/login.defs`' `ENV_PATH` on Linux, which shadow's and util-linux's
+  `login` read, else util-linux's `/usr/local/bin:/bin:/usr/bin`; macOS `login`'s `_PATH_DEFPATH`,
+  `/usr/bin:/bin`), never the session source's, which is the profile's job in the login shell
+  (`pass = ["PATH"]` takes the session's instead).
 - **The working directory.** A `cwd` with a `.` or `..` component (POSIX forbids them in `PWD`,
   and a shell that finds them discards `PWD`) becomes the directory's real path, in `PWD` and in
   the reply; any other keeps its spelling, so a symlink's name stays.
@@ -275,21 +294,21 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
 - **A missing home** starts the program in `/`, as `login(1)` does ("No home directory, logging in
   with HOME=/"), rather than failing the `create`.
 - **`g3d new`** sends its own working directory unless `--cwd` (tmux's `new-session` starts in the
-  client's directory too); it forwards the `--forward-env` list only when run inside a **live** SSH
-  login (`g3d::forward`): `SSH_CONNECTION` set, and either one of fds 0 to 2 is the login's own
-  terminal (`SSH_TTY`, compared by device) or there is no terminal at all (`ssh host cmd`: no
-  controlling terminal). `SSH_CONNECTION` alone isn't enough: a tmux server started from SSH keeps
-  it in every pane long after that login, its agent socket and its display are gone, and
-  forwarding a pane's would bring back the staleness the session base removes. A process with a
-  controlling terminal but fds 0 to 2 redirected can't be told and forwards nothing. Inside a live
-  login, a listed name the login lacks is sent as a removal (tmux's `update-environment` rule), so
-  an SSH session without X forwarding doesn't get the desktop's `DISPLAY` and `XAUTHORITY`; the
-  list carries `SSH_CLIENT` beside `SSH_CONNECTION`, so "am I remote" checks agree. `g3d` inside a
-  termd terminal reaches that terminal's daemon through `G3D_TERMD_SOCKET` when given neither
-  `--ns` nor `--socket`. The detach key also reads `G3D_DETACH_KEY`.
+  client's directory too), and **its whole environment as `env_base`** (`g3d::env::caller_env`),
+  leaving out, with a note on stderr, what the protocol can't carry (a name outside
+  `[A-Za-z_][A-Za-z0-9_]*`, bash's exported functions among them; a name or value that isn't
+  UTF-8; a variable over `execve`'s per-string limit). `--clean` sends none: the no-caller rule.
+  `-e NAME=VALUE` sets a name in the request's `env`; `-e NAME` passes this shell's `NAME`, or
+  removes it when this shell has none (docker's `-e NAME` passes; with no value here the
+  terminal has none either). `g3d env <id> [--json]` prints the effective environment, each line
+  its source (and `via`) then `NAME=value`. `g3d` inside a termd terminal reaches that terminal's
+  daemon through `G3D_TERMD_SOCKET` when given neither `--ns` nor `--socket`. The detach key also
+  reads `G3D_DETACH_KEY`.
 - **The relay** sends no `argv` for a plain new terminal and passes its served root as `cwd`
   (`attach --cwd`, which the relay sets when `serve` has a root); a hand-run `glyph3d-cli attach`
-  with no `--cwd` starts at home.
+  with no `--cwd` starts at home. It sends **no `env_base` and no `env`** (`termdCreate` in
+  `cli/attach_unix.go`, which `TestTermdCreateSendsNoEnvironment` holds): it is a creator with no
+  shell, so its terminals get the desktop session's environment whatever started the relay.
 
 **Defaults applied** (the table's "change" and "new" rows): scrollback 10,000,000 bytes, clamp
 64 MiB (`--scrollback`, `--max-scrollback`); the PTY input buffer 16 MiB (`--input-buffer`); the
@@ -323,21 +342,35 @@ Makefile for the macOS branch, not a target that pretends. A bare `cargo build` 
 still fails inside libghostty-vt-sys's build script ("GHOSTTY_SOURCE_DIR does not contain
 build.zig"), whose message we don't control; `.cargo/config.toml` says where that comes from.
 
-**Gates** (all on private sockets, `--env-source daemon` unless the test is about the source):
-`src/env.rs`'s unit tests (scrub and keep, the account layer, the shell choice and login argv0,
-`PATH` resolution, the locale rule, the request's checks and limits, cwd checks, busctl's JSON);
-`tests/env.rs`, a daemon started with `env_clear` plus a stale `DISPLAY`, Terminal.app's and tmux's
-identity, a parent shell's `SHLVL`/`PWD`/`COLUMNS`, `SIGINT` ignored and a soft fd limit of 1000:
-each program's `/proc` environ, argv[0], cwd, `SigIgn`/`SigBlk` and limits against the policy,
-`env_base: "none"` composing exactly the account, `LANG=C.UTF-8` and termd's own, reserved and
-malformed names refused, `IUTF8` on (`stty -a` inside), the session source re-read at every create
-through the stand-in (a changed `DISPLAY` reaches the next terminal, not the running one; a
-missing one falls back to the daemon's, logged), and, when a user manager answers, the real one
-beating the starter's `DISPLAY=:99` (read-only, into a terminal running `sleep`);
-`tools/termd-relay-check.mjs`, a spawn with no `argv` from a relay carrying Terminal.app's and tmux's
-identity: `-bash` (the passwd shell) in the served root with `TERM_PROGRAM=g3d-termd`, none of the
-relay's identity; `tests/daemon.rs`, a daemonized namespace's log rotated at 4 KiB, with the brain's
-next line in the new file.
+**Gates** (all on private sockets and a scratch `--config`, `--env-source daemon` unless the test is
+about the source): `src/env.rs`'s unit tests (the composition: each layer winning over the one
+before and tagging what it set; the scrub and `pass` exempting from it; the fill only where the
+base lacks; the no-caller base from the source, else the daemon's start value per allowlisted name
+only, and `pass`/`drop`; the name-by-name expansion launchd is asked with and its answer's parser;
+`termd.toml` parsing and every error naming its line; `${VAR}` expansion; the config path; login.defs'
+`ENV_PATH`; the shell choice and login argv0, `PATH` resolution, the locale rule, the request's and
+the caller's checks and limits, cwd checks, busctl's JSON); `crates/g3d/src/env.rs`'s (what `g3d
+new` sends and leaves out, `-e`, `g3d env`'s lines); `tests/env.rs`, a daemon started with `env_clear`
+plus a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's `SHLVL`/`PWD`/`COLUMNS`,
+`SIGINT` ignored and a soft fd limit of 1000: each program's `/proc` environ, argv[0], cwd,
+`SigIgn`/`SigBlk` and limits against the policy, and `env`'s tags against environ; an empty caller
+environment composing exactly the fill and termd's own; reserved and malformed names refused (in
+`env`, and the size and name rules in `env_base`); a caller's odd environment (a stale `DISPLAY`, a
+Rex tab's `REX_SESSION`, a custom `FOO`) arriving but its markers, and the same daemon's no-caller
+terminal getting the session's fresh `DISPLAY`; a stripped creator (the relay's case) getting the
+session's handles and none of its other variables; the session source re-read at every create
+through the stand-in (a changed `DISPLAY` reaches the next terminal, not the running one; a name it
+lacks is the starter's; an unreadable one falls back to the start values, logged and warned);
+`termd.toml`'s `pass`, `drop` and `set` reaching a terminal, a bad file failing creates naming its
+line and the status saying so, a fixed one read again; and, when a user manager answers, the real
+one beating the starter's `DISPLAY=:99` (read-only, into a terminal running `sleep`);
+`crates/g3d/tests/attach.rs`, `g3d new` from a shell with that odd environment, with `-e`, then
+`--clean`, and `g3d env`'s tags; `cli/attach_unix_test.go`, the relay's `create` carrying no
+`env_base` or `env`; `tools/termd-relay-check.mjs`, a spawn with no `argv` from a relay carrying
+Terminal.app's and tmux's identity: `-bash` (the passwd shell) in the served root with
+`TERM_PROGRAM=g3d-termd`, none of the relay's identity, and `g3d env` tagging nothing `caller`;
+`tests/daemon.rs`, a daemonized namespace's log rotated at 4 KiB, with the brain's next line in the
+new file.
 
 ## Status as built (2026-11-12)
 
@@ -378,9 +411,10 @@ daemon announces `proto` `[1, 1]` and the feature `status`.
   `spawn_failed`, `input_full`, `panic`, `lagged`, `restore`, `upgrade_failed`. **Departure:** the
   ring is the current brain's: a restart starts it over (with the reason for the restart). Keeping
   it across a crash would mean the holder storing it; nothing yet needs that. **Departure:**
-  environment warnings ride `daemon.env.warnings` only (no UTF-8 locale; the user manager
-  unreachable, while it is), not the errors; the source is probed once at brain start, off the
-  async threads, so the document names it before the first terminal.
+  environment warnings ride `daemon.env.warnings` only (no UTF-8 locale; the session source
+  unreachable, while it is; a bad `termd.toml`, while it is), not the errors; the source and the
+  config file are probed once at brain start, off the async threads, so the document names them
+  before the first terminal.
 - Idle exit counts connections that do anything but `status`, `status_follow`,
   `status_unfollow` and `ping`; a status-only follower is passive. Leaving (idle exit, `stop`,
   `SIGTERM`) first **stops accepting** (a connection made then waits in the backlog and sees the
@@ -895,7 +929,8 @@ One design; the platform seams are `cfg`-gated modules with one interface each, 
 | peer credentials | `SO_PEERCRED` | `getpeereid` |
 | PTY buffer with no reader | 13.8 KB (measured) | to measure |
 | canonical-mode line limit (`MAX_CANON`) | 4,095 bytes | 1,023 bytes: the excess and the line's end are lost (BEL per byte), so a canonical reader (`read`, `head -n1`, Python's `input()`) waits. Kernel line discipline: termd writes what it was given, documents the limit, and does not split. Raw-mode programs (line editors, vim, Claude Code) take input of any size (the M2's 256 KiB `INPUT` gate) |
-| the session environment | the user manager's environment | the holder's own (launchd's when a LaunchAgent starts it); see [Environment](#environment) |
+| the session source (a creator with no environment) | the systemd user manager's environment, filtered to the allowlist | `launchctl getenv <name>` per allowlisted name (unverified here; the macOS branch proves it); either falls back per name to the daemon's start value; see [Environment](#environment) |
+| `PATH` when the base has none | `/etc/login.defs`' `ENV_PATH`, else `/usr/local/bin:/bin:/usr/bin` (util-linux `login`) | `/usr/bin:/bin` (`login`'s `_PATH_DEFPATH`) |
 | default locale when none is set | `C.UTF-8` | the `AppleLocale` preference `.UTF-8`, else `C.UTF-8` |
 
 **cgroup scopes (Linux).** The normal practice for terminals: Ghostty moves each surface into
@@ -913,10 +948,22 @@ short-lived pane exits before its scope registers. Failure is soft, as Ghostty's
 
 ## Environment
 
-S1's programs inherit whatever process first started the daemon: a relay started from a dev shell hands
-every terminal that shell's virtualenv, its editor's IPC sockets, a `DISPLAY` from whenever it
-started, and the daemon's working directory (`/`, after daemonizing). A terminal termd starts should look
-like a new terminal window on the user's desktop. That is the normal practice this policy follows.
+**A new terminal carries its creator's environment. A creator with none gets the desktop
+session's.** One rule on both platforms; the session's source is the only platform difference.
+
+- A caller with a shell (`g3d new`, any CLI client) sends its environment with `create`
+  (`env_base`), and that is the base: a terminal started from your shell behaves like a subshell,
+  the multiplexer convention (screen, dtach and abduco, zellij, tmux's first session).
+  `g3d new --clean` asks for the other rule.
+- A creator with no shell (the wall's "+ terminal", the relay, agents, tests) sends none, and the
+  base is the desktop session's: start empty, copy an allowlist of names, each looked up afresh at
+  every `create` in the platform's session source (Linux: the systemd user manager; macOS:
+  `launchctl getenv`), a name the source lacks taking the daemon's start value for that name only.
+- **The daemon's own start environment is never a base.** Nothing about who started termd leaks
+  into terminals. That was S1's defect: its programs inherited whatever process first started the
+  daemon (a relay started from a dev shell handed every terminal that shell's virtualenv, its
+  editor's IPC sockets, a `DISPLAY` from whenever it started; on the M2, Terminal.app's
+  `TERM_PROGRAM=Apple_Terminal` and Rex's per-tab `REX_SESSION`/`REX_BLOCK`).
 
 ### What others do
 
@@ -959,6 +1006,26 @@ like a new terminal window on the user's desktop. That is the normal practice th
   `systemctl --user show-environment` prints it; reading it as JSON takes 11 ms with `busctl`.
 - **mosh** refuses to start without a UTF-8 locale and passes the client's `LANG`/`LC_*` to the
   server. Debian's OpenSSH sends and accepts `LANG LC_*`.
+- **A new session from a shell carries that shell's environment** in the multiplexers: screen and
+  dtach/abduco fork the session from the client that asked, so its environment is the client's;
+  zellij's server takes the environment of the client that starts a session; tmux's server copies
+  its start environment (the first client's, which started it) into the global environment every
+  session starts from. termd is long-lived and shared like tmux's server, so it gets the client's
+  environment per `create`, not once at its own start.
+- **A session built from nothing** in `login(1)`, `sshd` and sudo's `env_reset`: they clear the
+  environment (login keeps only `TERM`; sudo keeps a short `env_keep` list), then set `HOME`,
+  `SHELL`, `USER`, `LOGNAME` from passwd and a minimal `PATH` (`login.defs(5)`' `ENV_PATH`, read by
+  shadow's and util-linux's `login`; macOS `login`'s `_PATH_DEFPATH`); the login shell's profile
+  brings back the rest. termd's no-caller base is that, plus the desktop session's handles.
+- **The session's handles, fresh**: `systemctl --user show-environment` (or busctl's read of the
+  manager's `Environment`) on Linux; on macOS launchd holds the GUI session's variables, which
+  `launchctl getenv NAME` reads one name at a time (`launchctl setenv` is how a person sets one for
+  every GUI app). tmux's `update-environment` re-reads its list from the attaching client for the
+  same reason: the handles change at each login.
+- **`environment.d(5)`**: `NAME=value` lines with `${NAME}` (and `${NAME:-default}`,
+  `${NAME:+alt}`) expanded from what came before, no shell; termd's `set` takes `${NAME}` only.
+- **docker run `-e NAME`** passes the caller's `NAME`; `-e NAME=value` sets it. `g3d new -e`
+  follows it.
 - **The daemons that start shells** (from source, read by the macOS agent): tmux, WezTerm's mux
   server and shpool all start the default shell as a **login shell by argv0 `-<basename>`**, on
   every platform. WezTerm and shpool take the shell from the passwd entry (WezTerm drops `$SHELL`
@@ -982,24 +1049,68 @@ like a new terminal window on the user's desktop. That is the normal practice th
 
 ### The policy
 
-A terminal's environment is built per `create`, in this order (later wins):
+A terminal's environment is built per `create`, in this order (later wins). Each variable keeps
+the layer that set it, which `env` answers ([Seeing it](#seeing-it-g3d-env)).
 
 | Layer | What | Why |
 |---|---|---|
-| 1. Session base | **Linux with a user manager:** the systemd user manager's environment, read at each `create` (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, 1 s timeout). **Otherwise** (no user manager: macOS, containers, hosts without logind): the session's variables of the holder's own environment as it started (`SESSION` in `env.rs`: the account and its paths, the locale, `XDG_*` and the display, the session bus, the credential agents, the proxies, `TERMINFO_DIRS`, launchd's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; `--env-keep` adds names), nothing else | What a terminal launched from the desktop gets. On a host reached only by SSH, logind still starts a user manager, but nothing imports a profile into it, so its environment is thin (`PATH` is systemd's default); the login shell ([below](#the-shell-and-login-or-not)) supplies the profile there. Reading it at every create means a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK`: the desktop re-imports them at each login. The fallback is the starter's environment, which is an accident (an agent's shell carries `GIT_EDITOR=true`, an IPC token and its session ids; a shell tool its session id; a unit its cgroup's pressure file), and no denylist names everything a starter may carry: so the fallback keeps a known set, as `login(1)` (which clears all but `TERM`), `sshd` and sudo's `env_reset` build a session, and the login shell's profile brings back what a person exports. Then the scrub (layer 2). The status stream names the source |
-| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `AI_AGENT`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (systemd.exec(5)'s list: `INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `MANAGERPIDFDID`, `MAINPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `MEMORY_PRESSURE_*`, the `*_DIRECTORY` names, `FDSTORE`, `PIDFILE`, `TRIGGER_*`, `MONITOR_*`, `SERVICE_RESULT`, `EXIT_CODE`, `EXIT_STATUS`; and `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`, atuin's `ATUIN_SESSION`, `ATUIN_HISTORY_ID`, `ATUIN_SHLVL`); termd's own controls (`G3D_TERMD_*`: `G3D_TERMD_DIR`, `G3D_TERMD_ENV_SOURCE`, the test hooks) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested, and its `CLAUDE_CODE_MESSAGING_TOKEN` is a live IPC credential; a leaked `ATUIN_SESSION` makes every shell share the starter's history session; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code (`SCRUB` in `env.rs`) with `--env-scrub` / `--env-keep` to extend or exempt (a name, or a prefix ending in `*`). It applies to the base only: a request's `env` may set any name but layer 5's. It matters most for the user manager's base, which holds whatever someone imported into it (an argument-less `systemctl --user import-environment` from a terminal imports that terminal's everything) |
-| 3. Account | `HOME`, `USER`, `LOGNAME` from `getpwuid`, whatever the base says (as `login(1)` and `sshd` set them: a starter with an overridden `HOME`, as test harnesses have, would send every login shell to the wrong dotfiles); `SHELL` set to the shell chosen ([below](#the-shell-and-login-or-not)); `LANG` filled when no locale is set ([Locale](#locale)) | What `login(1)` provides |
-| 4. Client `env` | the `create` request's `env` (validated, below); `null` removes | The caller knows what this terminal is for |
-| 5. termd's own | `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`, `G3D_TERMD_SOCKET=<socket>`, `PWD=<cwd>` | They describe this terminal, so nothing else may set them |
+| 1. Base | **A caller's** (`create.env_base`, tag `caller`): its environment, as sent. **A creator with none** (tag `session`): start empty; copy the allowlist (`SESSION` in `env.rs`): the locale (`LANG`, `LANGUAGE`, `LC_*`), the desktop session (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_*`: the runtime directory, the session's names, the desktop's name, the base directories), the credential agents (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `KRB5CCNAME`), `TMPDIR`, `TZ`, the network proxies (curl's and wget's names, both cases), `TERMINFO_DIRS`, launchd's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; `termd.toml`'s `pass` adds names and `drop` removes them. Each name is looked up at this `create` in the session source: **Linux**, the systemd user manager's environment (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, filtered to the allowlist; via `systemd-user`); **macOS**, `launchctl getenv <name>` for each (one `sh` running them all; a prefix is asked as the names the daemon's start environment and POSIX's locale and XDG names give it; via `launchd`). **A name the source lacks takes the daemon's start value, for that name only** (via `daemon`); a source that doesn't answer leaves every allowlisted name to them, warned. The account (`HOME`, `USER`, `LOGNAME`, `SHELL`) and `PATH` are the fill's (layer 3), not looked up | The multiplexer convention for a caller; `login(1)`'s for a creator with none, plus the desktop's handles fresh at every `create`, so a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK` (the desktop re-imports them at each login). An allowlist, because the daemon's starter is an accident (an agent's shell carries `GIT_EDITOR=true`, an IPC token and its session ids; a shell tool its session id; a unit its cgroup's pressure file) and so is whatever someone imported into the user manager (an argument-less `systemctl --user import-environment` from a terminal imports that terminal's everything): no denylist names all of it. The per-name fallback keeps a session handle the source doesn't hold (a headless host's user manager has no `DISPLAY`; an SSH-forwarded agent is only in the starter's) without making the starter the base. The status stream names the source |
+| 2. Scrub | best effort: remove what points back at the creator's tab or process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `REX_*`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `AI_AGENT`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); the creator's own terminal device (`SSH_TTY`, `GPG_TTY`); the app and launchd job that started it on macOS (`__CFBundleIdentifier`, `XPC_SERVICE_NAME`); launcher and unit state (systemd.exec(5)'s list: `INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `MANAGERPIDFDID`, `MAINPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `MEMORY_PRESSURE_*`, the `*_DIRECTORY` names, `FDSTORE`, `PIDFILE`, `TRIGGER_*`, `MONITOR_*`, `SERVICE_RESULT`, `EXIT_CODE`, `EXIT_STATUS`; and `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, the startup tokens `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`, atuin's per-shell `ATUIN_SESSION`, `ATUIN_HISTORY_ID`, `ATUIN_SHLVL`); termd's own controls (`G3D_TERMD_*`). Applies to both bases. Unlisted variables ride along | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history; Rex's `REX_SESSION`/`REX_BLOCK` name its tab and block). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested, and its `CLAUDE_CODE_MESSAGING_TOKEN` is a live IPC credential; a leaked `ATUIN_SESSION` makes every shell share the creator's history session (atuin's settings, `ATUIN_CONFIG_DIR` and the like, are the person's and ride along); a leaked `COLUMNS` overrides the real size; a startup token is single-use; `SSH_TTY` names the creator's terminal, and `GPG_TTY` sends pinentry there. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. A convenience, not the safety mechanism (the no-caller allowlist is): tmux and screen remove only their own markers and pass the rest. The list is a constant in code (`SCRUB` in `env.rs`); `--env-scrub` adds names and `termd.toml`'s `pass` exempts them (a name, or a prefix ending in `*`). A request's `env` may set any name but layer 6's |
+| 3. Fill | where the base has none (empty is none): `HOME`, `USER`, `LOGNAME` from `getpwuid` (via `passwd`); `PATH` as `login(1)` sets it (via `login`); `LANG` when no locale is set ([Locale](#locale); via `locale`). And `SHELL`, always: the shell chosen ([below](#the-shell-and-login-or-not); via `passwd`, `setting`, `base` or `default`) | What `login(1)` provides. A caller's own `HOME` or `PATH` is its subshell's and stays; a creator with none gets passwd's whatever the daemon's starter had (a test harness's overridden `HOME` would send every login shell to the wrong dotfiles) |
+| 4. File | `termd.toml`'s `[env.set]` ([below](#the-config-file-termdtoml)) | A person's own names for every terminal, without a profile |
+| 5. Request | the `create` request's `env` (validated, below); `null` removes; `g3d new -e` | The caller knows what this terminal is for |
+| 6. termd's own | `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`, `G3D_TERMD_SOCKET=<socket>`, `PWD=<cwd>` | They describe this terminal, so nothing else may set them |
 
 `g3d` run inside a termd terminal reaches that terminal's daemon through `G3D_TERMD_SOCKET` when no
 `--ns`/`--socket` is given, as tmux's client finds its server through `TMUX`.
 
 **Running shells are never rewritten.** No mechanism pushes new values into live terminals, and
-termd keeps no per-namespace environment that `create` mutates. tmux's `update-environment` is the
+termd keeps no per-namespace environment that `create` mutates (each terminal's tagged record is
+what it started with, for `env`, never a source for the next). tmux's `update-environment` is the
 convention rejected here: it changes the next window's environment, not the running ones, and the
 fix it needs (a prompt hook that re-reads `show-environment`) is the workaround. A fresh base per
 `create` makes new terminals right, and a running shell's environment is its own, as hexe says.
+
+### The config file, termd.toml
+
+`$XDG_CONFIG_HOME/g3d/termd.toml`, with `XDG_CONFIG_HOME` the session source's when it is an
+absolute path (the XDG base directory spec ignores a relative one), else `~/.config` with the home
+from passwd: never the daemon's starter's environment. Resolved once per brain; `--config PATH`
+(`G3D_TERMD_CONFIG`) names another. Parsed with the `toml` crate:
+
+```toml
+[env]
+pass = ["EDITOR", "MY_*"]   # add to the no-caller allowlist; also exempt from the scrub
+drop = ["TMPDIR"]           # take off the no-caller allowlist
+[env.set]                   # every terminal, layer 4
+GOPATH = "${HOME}/go"
+```
+
+- `pass` and `drop` take a `NAME` or a `PREFIX*` (`*` alone is refused: it would make the daemon's
+  start environment the base). They adjust the allowlist only, so a caller's base is untouched
+  (but for `pass`'s scrub exemption). On macOS a prefix passes the names the daemon's start
+  environment holds: `launchctl getenv` takes exact names.
+- `set` values take `${NAME}` and nothing else (no shell, no `$NAME`, no defaults), each from the
+  environment as layers 1 to 3 left it; an unset name is empty (environment.d's rule). A layer-6
+  name is refused.
+- **Re-read on `create` when it changes** (its mtime, size or inode), so an edit reaches the next
+  terminal without restarting anything; read nowhere else.
+- **A bad file fails the create loudly**: `spawn_failed`, naming the file and the line (`termd.toml
+  <path>: line 4: set TERM: termd's to set, …`), every `create` until it is fixed. A broken policy
+  silently ignored would hand out environments the person didn't ask for; the status document's
+  `daemon.env.config` (`state: "error"`, the `error`) and a warning say it until then.
+- **termd logs its policy once at brain start**: the allowlist after the file, the source, the
+  extra scrub, and the file (`none at <path>`, what it sets, or its error); and the file again
+  whenever a `create` re-reads it.
+
+### Seeing it: g3d env
+
+`g3d env <id>` (the protocol's `env` op) prints the environment the terminal's program started
+with, each variable tagged with its layer: `caller`, `session` (via `systemd-user`, `launchd` or
+`daemon`), `fill` (via `passwd`, `login`, `locale`, …), `file`, `request`, `termd`. termd keeps
+that tagged list per terminal (a few KB, in the holder's record so it outlives a brain restart).
+The status document's `daemon.env` says the policy's live state: the source, the config file and
+the warnings.
 
 ### The shell, and login or not
 
@@ -1060,7 +1171,8 @@ starter's (`ghostty`, `vscode`), whose features the browser may not have.
 
 ### Locale
 
-`LANG`, `LANGUAGE` and `LC_*` come from the session base and the client's `env`. When the
+`LANG`, `LANGUAGE` and `LC_*` come from the base (a caller's, or the session's allowlist), the
+config file and the client's `env`. When the
 composed environment sets **none** of `LC_ALL`, `LC_CTYPE` and `LANG`, termd fills `LANG`:
 
 - macOS: `<language>_<region>.UTF-8` from the user's locale (the `AppleLocale` preference, as
@@ -1070,12 +1182,13 @@ composed environment sets **none** of `LC_ALL`, `LC_CTYPE` and `LANG`, termd fil
 The brain checks at start that the value loads (`newlocale(LC_CTYPE_MASK, …)`); if it doesn't, it
 fills nothing and says so. `C.UTF-8` is built into glibc since 2.35, into musl, and into this
 macOS (whose own `/etc/zprofile` sets it), so it is a locale the system has, not an invented one.
-Filling matters for programs given as `argv` (no profile runs) and for `env_base: "none"`; without
+Filling matters for programs given as `argv` (no profile runs) and for a base with no locale (a
+session source without one, a caller started from `env -i`); without
 it the C locale is ASCII, and for a terminal that draws glyphs, an ASCII locale is the worst
 default (zsh shows typed non-ASCII as `<…>` escapes; measured on the M2).
 
-"Set" means non-empty, and a request whose `env` names `LC_ALL`, `LC_CTYPE` or `LANG` (even to
-remove it) has chosen, so nothing is filled.
+"Set" means non-empty, and a request whose `env` (or `termd.toml`'s `set`) names `LC_ALL`,
+`LC_CTYPE` or `LANG` (even to remove it) has chosen, so nothing is filled.
 
 A locale that **is** set is the person's choice and is never changed, even when it isn't UTF-8:
 the terminal starts, and the status stream carries an environment warning. mosh refuses to start
@@ -1085,26 +1198,25 @@ in that case; a terminal that refuses to open is worse. `fill_locale = true` is 
 
 On a systemd desktop, `SSH_AUTH_SOCK` (when an agent runs), `DISPLAY`, `WAYLAND_DISPLAY` and
 `DBUS_SESSION_BUS_ADDRESS` (`unix:path=$XDG_RUNTIME_DIR/bus`) are stable per login and come from
-the session base, fresh at each `create`. The staleness tmux users hit comes from a server that
-outlives the session it captured; here only running shells can hold old values, and they are
-theirs. Agent forwarding: `g3d new` run inside a live SSH login forwards its own `SSH_AUTH_SOCK`,
-`SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_ASKPASS`, `KRB5CCNAME`, `DISPLAY`,
-`WAYLAND_DISPLAY` and `XAUTHORITY` in the request's `env`, and removes the ones it lacks (tmux's
-`update-environment` default and rule, less `MSYSTEM`, which is Windows', `WINDOWID`, which names
-the outer terminal's own window, and the `XDG_*` desktop names, which the base has, plus
-`SSH_CLIENT`). "Live" is `SSH_CONNECTION` set and this process on the login's own terminal
-(`SSH_TTY`) or on none (`ssh host cmd`), not merely below an old login (as built, above). `g3d new --forward-env LIST` changes the list; `--forward-env ''` sends none.
-A forwarded agent socket dies with its SSH session, as in tmux; shpool's per-session symlink is the
-known remedy and is not built while termd serves a local desktop.
+the session source, fresh at each no-caller `create`. The staleness tmux users hit comes from a
+server that outlives the session it captured; here only running shells can hold old values, and
+they are theirs.
 
-Platform note, macOS: there is no user manager, so the base is the holder's environment. launchd's
-`SSH_AUTH_SOCK` lives as long as the GUI login and is inherited; the login keychain is reachable
-from a daemon inside the GUI session (measured). A daemon first started from an SSH login lives in
-that login's audit session, where the keychain is locked (reported, not measured). termd is
-therefore started inside the GUI session: by the relay or a Terminal shell today, and by a
-LaunchAgent in `gui/<uid>` (shpool's Homebrew service is one) if it ever has to start on its own.
-The scrub (layer 2) is what keeps a Terminal-started daemon from handing out Terminal.app's
-identity.
+A caller's terminal has the caller's own: `g3d new` from an SSH login hands the terminal that
+login's agent socket, `DISPLAY` and `SSH_CONNECTION`, as `screen` or tmux's first session would,
+and from a tmux pane below an old login, that pane's (possibly dead) ones, as a subshell there
+would have. `g3d new --clean` is the way to the session's fresh values. A forwarded agent socket
+dies with its SSH session, as in tmux; shpool's per-session symlink is the known remedy and is not
+built while termd serves a local desktop.
+
+Platform note, macOS: there is no user manager; launchd is the session source (`launchctl getenv`
+per name, the macOS branch proves it). launchd's `SSH_AUTH_SOCK` lives as long as the GUI login;
+the login keychain is reachable from a daemon inside the GUI session (measured). A daemon first
+started from an SSH login lives in that login's audit session, where the keychain is locked
+(reported, not measured). termd is therefore started inside the GUI session: by the relay or a
+Terminal shell today, and by a LaunchAgent in `gui/<uid>` (shpool's Homebrew service is one) if it
+ever has to start on its own. Neither the start environment (never a base) nor the scrub lets a
+Terminal-started daemon hand out Terminal.app's identity.
 
 ### Working directory
 
@@ -1128,25 +1240,37 @@ macOS's bundled ncurses describes `xterm-256color` backspace as `^H`; the macOS 
 
 - `env`: names match `[A-Za-z_][A-Za-z0-9_]*`; values contain no NUL and are at most 128 KiB each
   (Linux's `MAX_ARG_STRLEN`); argv plus environment total at most 1 MiB. A violation is
-  `bad_request` (or `too_large`) naming the variable. The layer-5 names are reserved: setting or
+  `bad_request` (or `too_large`) naming the variable. The layer-6 names are reserved: setting or
   removing one is `bad_request` (the terminal's type and identity are termd's to state).
-- `env_base`: `"session"` (default, layers 1–5) or `"none"` (layers 3–5 only: an `env -i`-like
-  terminal, for hermetic tests and agents that want nothing inherited).
+- `env_base`: the caller's environment, `{name: value}`, under the same name and size rules (its
+  own `TERM` or `PWD` may be there; layer 6 replaces them). Absent: the creator has none, and the
+  base is the session's. `{}`: an `env -i`-like terminal (the fill and termd's own only), for
+  hermetic tests and agents that want nothing inherited.
 - `cwd`, `argv` as above. The `create` reply reports the `argv` actually run (the resolved path
   first), `login` (whether it was started as a login shell) and the `cwd`.
 
-Tests always use `env_base: "none"` or a daemon with `env_source = "daemon"`, so a test terminal
-never picks up the real desktop session's environment.
+Tests always use a caller's `env_base`, a daemon with `--env-source daemon`, or the session
+stand-in (a test hook), and a scratch `--config`, so a test terminal never picks up the real
+desktop session's environment or the person's `termd.toml` (one read-only test reads the real user
+manager, into a terminal running `sleep`).
 
 ### Rejected, and why
 
 - **Inheriting the starter's environment** (S1): the environment of whatever started the daemon
-  is an accident, and it stays for the daemon's whole life.
+  is an accident, and it stays for the daemon's whole life. Not even as a fallback base: only an
+  allowlisted name the session source lacks takes its start value.
+- **The session's base for a caller, with SSH variables forwarded only from a live login** (the
+  termd-ready build's `g3d::forward`: `SSH_CONNECTION` set and fds 0 to 2 on the login's own
+  `SSH_TTY`): a heuristic about which of the caller's variables are fresh, where the multiplexers'
+  convention is that a new session from a shell is that shell's. The caller's environment is the
+  base; `--clean` is the explicit way to the session's.
+- **`--env-keep` beside `termd.toml`'s `pass`**: two ways to name the same allowlist addition.
 - **`update-environment`-style session environments**: they make the next window right and the
   running ones silently wrong, and need a shell-hook workaround.
 - **A non-login default shell**: what Linux desktop terminals do, because their session already
-  ran the profile. termd's base doesn't always have (launchd, a headless host, `env_base:
-  "none"`), and the result is a missing `PATH` and an ASCII locale (both measured on the M2).
+  ran the profile. termd's base doesn't always have (launchd, a headless host, a no-caller base's
+  login(1) `PATH`, an empty caller), and the result is a missing `PATH` and an ASCII locale (both
+  measured on the M2).
 - **`login -flp` from a daemon**: opens a login session (utmp, `setlogin`, PAM, a banner) for
   something that isn't one; argv0 `-<shell>` is the daemons' form.
 - **`$SHELL` before passwd**: a daemon's `$SHELL` is its starter's, and outlives a `chsh`.
@@ -1282,11 +1406,13 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | snapshot interval | 2 s, terminals with new output only, LZ4 (`--snapshot-interval-ms`, 0 = never) | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
 | upgrade deadline | 10 s for the candidate to report ready | **new** | |
 | client reconnect | 100 ms doubling to 2 s, for 30 s (the relay: `serve --termd-reconnect`) | **new** | covers a crash restart plus the first crash-loop retries |
-| environment source | `auto` (the user manager on Linux, the holder's own otherwise); `--env-source auto\|daemon`, `G3D_TERMD_ENV_SOURCE` | **new** | [Environment](#environment) |
-| user manager wait | 1 s per `create` (`--env-manager-timeout-ms`), then the daemon's own, logged | **new** | the D-Bus call takes 11 ms here; a manager that hangs must not hang a `create` for long |
+| environment base | a caller's own (`create.env_base`; `g3d new` sends its environment, `--clean` none); for a creator with none, the session's allowlist, each name fresh from the session source, else the daemon's start value for that name | **new** | screen, dtach/abduco, zellij and tmux's first session start a session from the asking shell's environment; `login(1)`, `sshd` and sudo's `env_reset` build one from a known set; [Environment](#environment) |
+| session source | `auto` (the systemd user manager on Linux, launchd on macOS); `--env-source auto\|daemon`, `G3D_TERMD_ENV_SOURCE` | **new** | [Environment](#environment) |
+| session source wait | 1 s per no-caller `create` (`--env-manager-timeout-ms`), then the daemon's start values, logged | **new** | the D-Bus call takes 11 ms here; a source that hangs must not hang a `create` for long |
+| config file | `$XDG_CONFIG_HOME/g3d/termd.toml` (`--config`, `G3D_TERMD_CONFIG`), `[env]` `pass`/`drop`/`set`; re-read on change; a bad file fails creates | **new** | the XDG base directory spec (tmux's `~/.config/tmux/tmux.conf`, zellij's `~/.config/zellij`); environment.d's `${NAME}`; [The config file](#the-config-file-termdtoml) |
 | default program | the passwd shell, as a login shell (argv0 `-<basename>`); `--shell`, `--login-shell true` | **change** (S1: the daemon's `$SHELL`, non-login; the relay sent its own `$SHELL`) | tmux, WezTerm's mux and shpool; [The shell, and login or not](#the-shell-and-login-or-not) |
 | locale fill | `LANG=C.UTF-8` (macOS: the user's locale) only when no locale is set and it loads; `--fill-locale true` | **new** | Ghostty, iTerm2, Terminal.app, and this macOS's own `/etc/zprofile`; [Locale](#locale) |
-| environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, launcher and parent-shell variables; `--env-scrub` / `--env-keep` | **new** | [The policy](#the-policy) |
+| environment scrub | Ghostty's, WezTerm's and the multiplexers' identity, the creator's tab and process, launcher and parent-shell variables; `--env-scrub` adds, `termd.toml` `pass` exempts | **new** | [The policy](#the-policy) |
 | `TERM_PROGRAM` | `g3d-termd` + `TERM_PROGRAM_VERSION` | **new** (S1 left the starter's) | tmux, WezTerm, Ghostty each name themselves; [TERM and friends](#term-and-friends) |
 | default cwd | the account's home | **change** (S1: the daemon's, `/`) | [Environment](#environment) |
 | status interval | 1 s (a follower may ask for 250 ms to 60 s: `--status-interval-ms`, `--status-min-interval-ms`, `--status-max-interval-ms`); keepalive 30 s (`--status-keepalive-ms`) | **new** | one push a second is what `top` and `htop` refresh at by default and what a person reads; 250 ms bounds a follower's cost at four documents a second; a 30 s keepalive is the relay's adapters' ride window and keeps gauges from going stale. [Status](#status) |
@@ -1639,14 +1765,18 @@ holder.
   nothing listening, the relay reports `lost`.
 - **Environment.** A child's environment: scrubbed names absent, reserved names refused at
   `create`, `PWD` = `cwd`, the default cwd is home, the default program the passwd shell with
-  argv0 `-<basename>` (a `$SHELL` naming another shell is ignored), `LANG=C.UTF-8` under
-  `env_base: "none"` and an existing non-UTF-8 `LANG` left alone, `TERM_PROGRAM=g3d-termd` with a
+  argv0 `-<basename>` (a `$SHELL` naming another shell is ignored), `LANG=C.UTF-8` under an empty
+  caller environment and an existing non-UTF-8 `LANG` left alone, `TERM_PROGRAM=g3d-termd` with a
   starter's `TERM_PROGRAM=Apple_Terminal` and `TERM_SESSION_ID` gone,
   `IUTF8` set, ignored signals reset (a holder with `SIGINT` ignored still gives its shell a
-  working Ctrl-C), the soft fd limit restored. With a user manager present, the session source is
-  read per `create` (a value changed with `systemctl --user set-environment` reaches the next
-  terminal, not a running one). Built as `tests/env.rs`; the per-create read is driven through a
-  file standing in for the manager (a test hook), so no test changes the person's session.
+  working Ctrl-C), the soft fd limit restored. A caller's odd environment (a stale `DISPLAY`, a
+  fake `REX_SESSION`, a custom `FOO`) arrives but its markers; with `--clean` the session's fresh
+  `DISPLAY` wins; a stripped creator (the relay's case) gets the session's handles; `g3d env` tags
+  each source. With a user manager present, the session source is read per `create` (a value
+  changed with `systemctl --user set-environment` reaches the next terminal, not a running one).
+  Built as `tests/env.rs` and `crates/g3d/tests/attach.rs`; the per-create read is driven through
+  a file standing in for the manager (a test hook), so no test changes the person's session. The
+  macOS lookup (`launchctl getenv`) and the Rex case on a Mac are the M2 agent's to prove.
 - **cgroup scopes** (Linux, when a user manager answers): holder, brain and each program in their
   own scopes; with the manager unreachable, spawns still succeed and the status says why.
 - **Status.** The document's shape against a golden file (keys and types); a quiet daemon sends

@@ -12,8 +12,9 @@ The protocol is public and versioned. Nothing in it is specific to glyph3d.
 Version 1.1 is the first release. What is marked **(1.1)** is new in it. The daemon on branch
 `termd` speaks all of 1.1 and announces `proto` `[1, 1]`: the restarts (`WELCOME.instance`,
 `generation` and `holder`, `ERROR` `restart` and `brain_failed`, the `busy` code, `upgrade` with
-its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and reply fields, and the
-status document (`status`, `status_follow`, `status_unfollow`, the `status` event).
+its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and reply fields, the
+`env` op, and the status document (`status`, `status_follow`, `status_unfollow`, the `status`
+event).
 
 ## At a glance
 
@@ -169,7 +170,7 @@ The daemon replies `WELCOME`:
 {"proto": [1, 1], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -182,7 +183,7 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade` (1.1), `cells` (packed cells, reserved).
+  `upgrade`, `env` (1.1), `cells` (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -248,58 +249,71 @@ Starts a program on a new PTY.
 | `cols`, `rows` | required | initial size, 1 to 4096 each |
 | `cwd` | the user's home directory (`/` if it doesn't exist, as `login(1)` does) | an absolute path to an existing directory the user can search; anything else is `bad_request`, naming why. It is used as given (`PWD` keeps a symlink's name), except that a path with a `.` or `..` component, which POSIX forbids in `PWD`, becomes the directory's real path (in `PWD` and the reply's `cwd`) |
 | `env` | `{}` | added to the environment (below); a `null` value removes a variable |
-| `env_base` | `"session"` | (1.1) `"session"`: start from the user's session environment (below). `"none"`: start from nothing but the account variables and termd's own |
+| `env_base` | absent | (1.1) the caller's own environment, `{"NAME": "value", …}`, which the program's starts from (below). A client run from a shell sends its whole environment here, as a multiplexer's new session starts from the shell that asked; one with no shell of its own (a display, a relay, an agent) sends none and the program gets the desktop session's. `{}` is a caller with an empty environment: the program starts from the fill alone |
 | `if_exists` | `"error"` | `"adopt"` returns the live terminal with this id instead of failing |
 | `scrollback_bytes` | daemon default (10,000,000) | primary-screen history cap, in bytes of the emulator's memory (not of output: 10,000,000 holds roughly 14,000 rows of 80 columns, whatever their text); the daemon clamps it to its own maximum |
 | `colors` | daemon defaults | the default foreground, background and cursor colours termd reports when the program asks (OSC 10/11/12). Set them to what your renderer draws |
 | `cell_px` | `[8, 16]` | cell size in pixels, reported to programs that ask for the window size in pixels (`CSI 14 t`, `CSI 16 t`) |
 
-**The program's environment (1.1)** is built for each `create`, later layers winning:
+**The program's environment (1.1)** is built for each `create`, later layers winning. In one
+line: **a new terminal carries its creator's environment; a creator with none gets the desktop
+session's.**
 
-1. the user's session environment: on Linux with a systemd user manager, that manager's
-   environment as it is now (what a terminal opened from the desktop gets); otherwise the
-   session's variables of the environment the daemon started with: the account and its paths
-   (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `MAIL`, `TMPDIR`, `TZ`), the locale (`LANG`,
-   `LANGUAGE`, `LC_*`), the desktop session (`XDG_*`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
-   `DBUS_SESSION_BUS_ADDRESS`), the credential agents (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`,
-   `GPG_AGENT_INFO`, `KRB5CCNAME`), the network proxies (`http_proxy` and its kin, both cases),
-   `TERMINFO_DIRS`, and macOS's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; a daemon setting
-   adds names. Nothing else the daemon's starter carried. Skipped with `env_base: "none"`;
-2. minus what describes some other process: another terminal, multiplexer, editor or agent
-   (`TMUX`, `STY`, `VTE_VERSION`, `KITTY_*`, `VSCODE_*`, `NVIM`, `CLAUDECODE`, …), the launcher or
-   service unit (`INVOCATION_ID`, `NOTIFY_SOCKET`, `LISTEN_*`, `MEMORY_PRESSURE_*`, …) and the
-   parent shell (`SHLVL`, `OLDPWD`, `COLUMNS`, `LINES`, …). The full list is `SCRUB` in
-   `crates/g3d-termd/src/env.rs`, and DESIGN.md's policy table; it is the daemon's to extend, so
-   a client relies on its shape (identity of other processes goes), not its exact contents;
-3. the account, from the user database (passwd) whatever the base said, as `login(1)` sets them:
-   `HOME`, `USER`, `LOGNAME`, and `SHELL` (below), for every program, an explicit `argv` included;
-4. the request's `env`;
-5. termd's own, which describe this terminal: `TERM=xterm-256color`, `COLORTERM=truecolor`,
+1. **The base.** With `env_base`, the caller's environment, as sent. Without it, the desktop
+   session's: an allowlist of names, each looked up at this `create` in the platform's session
+   source (Linux: the systemd user manager's environment; macOS: `launchctl getenv`), and a name
+   the source lacks takes the value the daemon started with, for that name only. The allowlist
+   is the locale (`LANG`, `LANGUAGE`, `LC_*`), the desktop session (`DISPLAY`, `WAYLAND_DISPLAY`,
+   `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_*`), the credential agents (`SSH_AUTH_SOCK`,
+   `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `KRB5CCNAME`), `TMPDIR`, `TZ`, the network proxies
+   (`http_proxy` and its kin, both cases), `TERMINFO_DIRS`, and macOS's `__CF_USER_TEXT_ENCODING`
+   and `COMMAND_MODE` (`SESSION` in `crates/g3d-termd/src/env.rs`); the daemon's config file
+   adjusts it. Nothing else of the daemon's own environment is ever a base;
+2. minus what points back at the creator's tab or process: another terminal, multiplexer,
+   editor or agent (`TMUX`, `STY`, `TERM_SESSION_ID`, `REX_*`, `KITTY_*`, `VSCODE_*`, `NVIM`,
+   `CLAUDECODE`, …), the launcher or service unit (`INVOCATION_ID`, `NOTIFY_SOCKET`, `LISTEN_*`,
+   `MEMORY_PRESSURE_*`, …) and the parent shell (`SHLVL`, `OLDPWD`, `COLUMNS`, `LINES`, …). Best
+   effort: an unlisted variable rides along, as in tmux and screen. The full list is `SCRUB` in
+   `env.rs` and DESIGN.md's policy table; it is the daemon's to extend, so a client relies on its
+   shape (identity of other processes goes), not its exact contents;
+3. the fill, what `login(1)` sets, where the base has none (an empty value is none): `HOME`,
+   `USER`, `LOGNAME` from the user database (passwd); `PATH` as `login(1)` sets it; `LANG` when no
+   locale is set (below); and `SHELL`, the account's shell (below), always;
+4. the daemon's config file, `termd.toml` (`[env] set`), for every terminal;
+5. the request's `env`;
+6. termd's own, which describe this terminal: `TERM=xterm-256color`, `COLORTERM=truecolor`,
    `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`,
    `G3D_TERMD_SOCKET=<socket path>`, `PWD=<cwd>`.
 
-`env` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL, each `NAME=value`
-with its terminating NUL is at most 128 KiB (Linux's `MAX_ARG_STRLEN`, which counts the whole
-string), and `argv` plus the environment total at most 1 MiB, counted as `execve` counts them
-(each string with its NUL, plus a pointer for each) (`bad_request` or `too_large`, naming the
-variable). The names in layer 5 are reserved: setting or removing one is
-`bad_request`. Any other name may be set, including one layer 2 removes: the request knows what
+[`env`](#env-11) answers which layer set each variable.
+
+`env` and `env_base` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL, each
+`NAME=value` with its terminating NUL is at most 128 KiB (Linux's `MAX_ARG_STRLEN`, which counts
+the whole string), and `argv` plus the environment total at most 1 MiB, counted as `execve` counts
+them (each string with its NUL, plus a pointer for each) (`bad_request` or `too_large`, naming the
+variable). A client sending its own environment leaves out what can't pass (bash's exported
+functions, `BASH_FUNC_f%%`; a name or value that isn't UTF-8). The names in layer 6 are reserved
+in `env`: setting or removing one is `bad_request` (in `env_base` they may appear, and layer 6
+replaces them). Any other name may be set, including one layer 2 removes: the request knows what
 its terminal is for.
+
+A config file that doesn't parse fails every `create` with `spawn_failed`, its message naming the
+file and the line, until it is fixed (the status document's `daemon.env.config` says so too).
 
 With no `argv`, the program is a shell: the request's `env` `SHELL` when it gives one (an absolute
 path to an executable, else `bad_request`: `SHELL` names the shell that runs, as `login(1)` and
 tmux mean it), else the account's shell from the user database (passwd), else the base's `SHELL`
 when it names an executable, else `/bin/sh`. `SHELL` is set to the account's choice for every
 program, an explicit `argv` included (as `login(1)` sets it whatever runs); a request's own
-`SHELL` wins there, as any layer-4 value does. It starts as a login shell (its `argv[0]` is `-` and the shell's name,
+`SHELL` wins there, as any layer-5 value does. It starts as a login shell (its `argv[0]` is `-` and the shell's name,
 as `login(1)` and tmux start shells), on every platform, so the system's and the user's profile
 run. Daemon settings can change the shell and turn login off. An explicit `argv` runs exactly as
 given, never as a login shell.
 
 When the environment sets none of `LC_ALL`, `LC_CTYPE` and `LANG` (an empty value is unset), the
 daemon sets `LANG` to a UTF-8 locale the system has (`C.UTF-8`; on macOS the user's own locale
-when installed). A locale that is set is left alone, and so is a request whose `env` names any of
-the three, even to remove it. One that is set but doesn't load or isn't UTF-8 still starts; the
+when installed). A locale that is set is left alone, and so is a request whose `env` (or the
+config file's `set`) names any of the three, even to remove it. One that is set but doesn't load or isn't UTF-8 still starts; the
 status document's `daemon.env.warnings` names it (the last such terminal) and the log says it.
 
 Reply:
@@ -313,6 +327,31 @@ Reply:
 `rows` are its current size, not the requested one. (1.1) `argv` is what actually runs (its
 first element the resolved path), `login` whether it was started as a login shell, and `cwd`
 where. `create` does not subscribe.
+
+### `env` (1.1)
+
+Feature `env`. A terminal's environment as its program started with it, each variable with the
+layer that set it ([`create`](#create)).
+
+```json
+{"req": 3, "op": "env", "id": "t1"}
+```
+
+```json
+{"req": 3, "ok": true, "id": "t1", "env": [
+  {"name": "DISPLAY", "value": ":0", "source": "session", "via": "systemd-user"},
+  {"name": "EDITOR", "value": "vim", "source": "caller"},
+  {"name": "HOME", "value": "/home/user", "source": "fill", "via": "passwd"},
+  {"name": "TERM", "value": "xterm-256color", "source": "termd"}]}
+```
+
+Sorted by name. `source` is `caller` (`env_base`), `session` (the desktop session's, for a
+creator with none), `fill`, `file` (`termd.toml`), `request` (`env`) or `termd`. `via`, when
+present, says where within it: a `session` variable's `systemd-user`, `launchd` or `daemon` (the
+daemon's start value, which the session source lacked); a `fill`'s `passwd`, `login` (`PATH`),
+`locale`, or for `SHELL` `setting`, `base` or `default` (below). It is what the program started
+with: what it changed since in its own process isn't here. A terminal restored from a brain that
+kept no record answers an empty `env`. An unknown id is `no_terminal`.
 
 ### `list`
 
@@ -537,7 +576,8 @@ Unix epoch milliseconds, sizes are bytes):
              "last_start": {"reason": "crash", "at": 1794519100000, "exit": {"signal": "SEGV"},
                             "restored": {"exact": 0, "snapshot": 3, "blank": 0}, "unseen": 512}},
    "snapshots": {"interval_ms": 2000, "bytes": 1835008},
-   "env": {"source": "systemd-user", "warnings": []}},
+   "env": {"source": "systemd-user",
+           "config": {"path": "/home/user/.config/g3d/termd.toml", "state": "loaded"}, "warnings": []}},
  "terminals": [
    {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src",
     "pwd": "/srv/src/app", "title": "~/src/app", "cols": 120, "rows": 40, "alt": false,
@@ -565,7 +605,7 @@ Unix epoch milliseconds, sizes are bytes):
 | `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
-| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale to fill, the user manager unreachable while it is, the last terminal whose set locale doesn't load or isn't UTF-8) |
+| `env` | `source`: where a terminal whose creator sends no environment looks the session's names up (`"systemd-user"`, `"launchd"`, or `"daemon"`: the daemon's start values, when no session source answers or the daemon is set so); `config`: the daemon's `termd.toml`, its `path`, its `state` (`"absent"`, `"loaded"`, `"error"`) and, while it is bad, its `error` (naming the line); `warnings` (strings: no UTF-8 locale to fill, the session source unreachable while it is, a bad config file, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
 Each of `terminals` (one per live terminal; the count is the array's length):
 
@@ -1001,10 +1041,11 @@ writes, and send keystrokes as `INPUT`.
 - **1.1** (the first release): `status`, `status_follow`, `status_unfollow`, `upgrade`; the
   `status` event; `WELCOME.instance`, `generation`, `holder`; `ERROR` `restart` and
   `brain_failed`; the `busy` code; `create.env_base` and the `argv`/`login`/`cwd` reply fields;
-  [Restarts](#restarts-11). Before any release, `create`'s defaults changed: `argv` was the
+  the `env` op; [Restarts](#restarts-11). Before any release, `create`'s defaults changed: `argv` was the
   daemon's `$SHELL` as a non-login shell, `cwd` the daemon's working directory, `scrollback_bytes`
   2 MiB, the socket directory `$XDG_RUNTIME_DIR/g3d` else `$TMPDIR/g3d-<uid>`, and the
   environment the daemon's own whole plus termd's variables (without `TERM_PROGRAM`), with only
   `TMUX`/`TMUX_PANE` removed and no reserved names; a status terminal had no `unseen`, and a
-  failed namespace closed before reading `HELLO`. No released client depends on those.
+  failed namespace closed before reading `HELLO`; and `env_base` was a string, `"session"` (the
+  default) or `"none"`. No released client depends on those.
 - **1.0**: the branch-only first cut: the core above, without what is marked (1.1).

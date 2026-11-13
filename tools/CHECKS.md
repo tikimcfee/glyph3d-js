@@ -900,10 +900,16 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   environment with a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's state,
   `SIGINT` ignored, a low fd limit, a Claude Code shell's, atuin's and a unit's variables and a
   scratch `HOME`; its programs' `/proc` environ, argv, cwd, signal masks and limits match the
-  policy: only the session's variables of the starter (`--env-keep` adds one), the account from
-  passwd, a set non-UTF-8 locale kept and named in the status document, the passwd shell as `-<name>`, home, the locale filled only when none is
-  set, reserved names and bad cwds refused, the session source re-read per create (a file standing
-  in for the user manager), and the real user manager beating a stale starter when one answers);
+  policy, and the `env` op's tags match `/proc`: a no-caller base of only the allowlisted names,
+  each from the session source else the starter's value for that name, the account and `PATH`
+  from the fill, a set non-UTF-8 locale kept and named in the status document, the passwd shell
+  as `-<name>`, home, the locale filled only when none is set, reserved names, a malformed
+  `env_base` and bad cwds refused, a caller's odd environment (stale `DISPLAY`, `REX_SESSION`,
+  `FOO`) as the base minus its markers beside a no-caller terminal's fresh session `DISPLAY`, a
+  stripped creator getting the session's handles, `termd.toml`'s `pass`/`drop`/`set`, a bad file
+  failing creates naming its line and the status saying so, the session source re-read per create
+  (a file standing in for the user manager), and the real user manager beating a stale starter
+  when one answers);
   the status document (`tests/status.rs`: its keys and types against
   `tests/fixtures/status-shape.json`, and PROTOCOL.md's example parsed field for field in
   `g3d-wire`; `status_follow`'s throttling — at once, then on change no sooner than the interval,
@@ -912,16 +918,18 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   gets its `exiting` document, by which time the socket is gone and a new daemon can take the name; `stop`'s last document; a
   crash and an upgrade counted in the next brain's document);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
-  the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` forwarding the
-  SSH variables only from a live SSH login (not a pane below an old one; what the login lacks
-  removed), and the socket path the same from `env -i` as from a desktop environment. Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
+  the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` sending its
+  environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
+  `--clean` taking the session's fresh `DISPLAY`) and `g3d env`'s tags, and the socket path the
+  same from `env -i` as from a desktop environment. Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
   tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
   cargo test --workspace --features g3d-termd/test-hooks
   ```
 - **`termd-relay-check.mjs`** (tier full) — the relay on termd with a simulated display: spawn +
   typing, a spawn with no argv from a relay carrying another terminal's identity (the account's
-  shell as a login shell in the served root, termd's `TERM_PROGRAM`, none of the relay's identity), `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
+  shell as a login shell in the served root, termd's `TERM_PROGRAM`, none of the relay's identity,
+  and `g3d env` tagging nothing `caller`: the relay sends no environment), `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
   screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
   the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a

@@ -23,8 +23,24 @@ impl Daemon {
         Self::start_env(&[])
     }
 
-    /// A daemon whose own environment (its base, with `--env-source daemon`) adds `env`.
+    /// A daemon whose own environment (the start values, with `--env-source daemon`) adds `env`.
     fn start_env(env: &[(&str, &str)]) -> Self {
+        Self::spawn(&["--env-source", "daemon"], |cmd, _| {
+            cmd.envs(env.iter().copied());
+        })
+    }
+
+    /// A daemon whose session source (the user manager) is the test hook's file holding `vars`.
+    fn start_session(vars: &[&str]) -> Self {
+        let data: Vec<String> = vars.iter().map(|v| format!("{v:?}")).collect();
+        Self::spawn(&["--env-source", "auto"], |cmd, dir| {
+            let f = dir.join("manager.json");
+            std::fs::write(&f, format!(r#"{{"type":"as","data":[{}]}}"#, data.join(","))).unwrap();
+            cmd.env("G3D_TERMD_TEST_HOOKS", "1").env("G3D_TERMD_TEST_SESSION_ENV_FILE", f);
+        })
+    }
+
+    fn spawn(args: &[&str], setup: impl FnOnce(&mut Command, &std::path::Path)) -> Self {
         let g3d = PathBuf::from(env!("CARGO_BIN_EXE_g3d"));
         let termd = g3d.with_file_name("g3d-termd");
         assert!(termd.is_file(), "no {} — run `cargo test --workspace` so the daemon is built", termd.display());
@@ -34,14 +50,11 @@ impl Daemon {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("termd-attach.sock");
-        let child = Command::new(termd)
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--idle-exit", "0", "--env-source", "daemon"])
-            .envs(env.iter().copied())
-            .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap())
-            .spawn()
-            .unwrap();
+        let mut cmd = Command::new(termd);
+        // Never the person's own termd.toml.
+        cmd.arg("--socket").arg(&socket).args(["--idle-exit", "0", "--config"]).arg(dir.join("termd.toml")).args(args);
+        setup(&mut cmd, &dir);
+        let child = cmd.stderr(std::fs::File::create(dir.join("daemon.log")).unwrap()).spawn().unwrap();
         let until = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(&socket).is_err() {
             assert!(Instant::now() < until, "daemon did not start");
@@ -370,69 +383,70 @@ fn environ(pid: u32) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-/// `g3d new` forwards the SSH agent, display and the rest only from a live SSH login: a shell
-/// below an old one (a tmux pane whose server SSH started keeps SSH_CONNECTION, and a dead agent
-/// socket and display) forwards nothing and the terminal gets the session's fresh values. Inside a
-/// live login, a listed name the login lacks is removed, as tmux's update-environment does.
+/// `g3d new` from a shell with an odd environment (a stale DISPLAY, a Rex tab's marker, a custom
+/// FOO): its environment is the terminal's base, so FOO and even the stale DISPLAY arrive and the
+/// marker doesn't; `--clean` sends none and the terminal gets the session's fresh DISPLAY; `-e`
+/// sets or passes a name; `g3d env` tags every variable with its source. The session is the
+/// daemon's test hook (a file standing in for the user manager): run with
+/// `--features g3d-termd/test-hooks`, as tools/CHECKS.md says.
 #[cfg(target_os = "linux")]
 #[test]
-fn new_forwards_only_from_a_live_ssh_login() {
-    // The session's own values, as the daemon's base has them.
-    let d = Daemon::start_env(&[("DISPLAY", ":0"), ("XAUTHORITY", "/run/user/0/xauth_session")]);
-    let stale = |cmd: &mut Command| {
-        cmd.env("SSH_CONNECTION", "10.0.0.1 5 10.0.0.2 22")
-            .env("SSH_CLIENT", "10.0.0.1 5 22")
+fn new_sends_its_environment_and_clean_takes_the_sessions() {
+    let d = Daemon::start_session(&["DISPLAY=:0", "XAUTHORITY=/run/user/0/xauth_session"]);
+    let odd = |cmd: &mut Command| {
+        cmd.env_clear()
+            .env("PATH", "/usr/bin:/bin")
             .env("DISPLAY", ":99")
-            .env("SSH_AUTH_SOCK", "/nonexistent/dead-agent.sock")
-            .env_remove("XAUTHORITY")
-            .env_remove("WAYLAND_DISPLAY");
+            .env("REX_SESSION", "rex-tab-3")
+            .env("FOO", "custom")
+            .env("HERE", "passed")
+            .env("TERM_PROGRAM", "Apple_Terminal");
+    };
+    let g3d = |args: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
+        cmd.arg("--socket").arg(&d.socket).args(args);
+        odd(&mut cmd);
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "g3d {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
     };
     let pid_of = |id: &str| list(&d.socket).into_iter().find(|t| t.id == id).map(|t| t.pid).unwrap();
-    let created = |o: &mut Outer, id: &str| {
-        o.expect(format!("{id} handle").as_bytes(), 10);
-        assert!(o.wait_exit(5).success());
-    };
 
-    // A tmux pane below an old login: this terminal is not the login's (SSH_TTY names another).
-    let mut o = Outer::spawn_with(&d.socket, &["new", "pane", "--", "sleep", "600"], 80, 24, |cmd, _| {
-        stale(cmd);
-        cmd.env("SSH_TTY", "/dev/null");
-    });
-    created(&mut o, "pane");
-    let e = environ(pid_of("pane"));
-    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":0"), "a stale DISPLAY was forwarded");
-    assert_eq!(e.get("XAUTHORITY").map(String::as_str), Some("/run/user/0/xauth_session"));
-    assert_eq!(e.get("SSH_AUTH_SOCK"), None, "a dead agent socket was forwarded");
-    assert_eq!(e.get("SSH_CONNECTION"), None);
-
-    // The login's own terminal: its values, and what it lacks removed (no X forwarding here).
-    let mut o = Outer::spawn_with(&d.socket, &["new", "login", "--", "sleep", "600"], 80, 24, |cmd, pty| {
-        stale(cmd);
-        cmd.env("SSH_TTY", pty);
-    });
-    created(&mut o, "login");
-    let e = environ(pid_of("login"));
-    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":99"));
-    assert_eq!(e.get("SSH_AUTH_SOCK").map(String::as_str), Some("/nonexistent/dead-agent.sock"));
-    assert_eq!(e.get("XAUTHORITY"), None, "the session's X cookie stayed beside the login's display");
-    assert_eq!(e.get("SSH_CLIENT").map(String::as_str), Some("10.0.0.1 5 22"));
-
-    // `ssh host cmd`: no terminal at all.
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
-    cmd.arg("--socket").arg(&d.socket).args(["new", "notty", "--", "sleep", "600"]);
-    stale(&mut cmd);
-    cmd.env_remove("SSH_TTY").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    unsafe {
-        cmd.pre_exec(|| {
-            rustix::process::setsid()?;
-            Ok(())
-        });
+    g3d(&["new", "sub", "-e", "BAR=asked", "-e", "HERE", "--", "sleep", "600"]);
+    let e = environ(pid_of("sub"));
+    let get = |k: &str| e.get(k).map(String::as_str);
+    assert_eq!(get("FOO"), Some("custom"));
+    assert_eq!(get("DISPLAY"), Some(":99"), "the caller's DISPLAY is its subshell's");
+    assert_eq!(get("XAUTHORITY"), None, "the session's mixed into a caller's base");
+    assert_eq!(get("REX_SESSION"), None, "the caller's tab marker reached the terminal");
+    assert_eq!((get("BAR"), get("HERE")), (Some("asked"), Some("passed")));
+    assert_eq!(get("TERM_PROGRAM"), Some("g3d-termd"));
+    let shown = g3d(&["env", "sub"]);
+    for line in ["caller ", "FOO=custom", "request ", "BAR=asked", "termd ", "TERM_PROGRAM=g3d-termd", "fill (passwd) "]
+    {
+        assert!(shown.contains(line), "g3d env lacks {line:?}:\n{shown}");
     }
-    let out = cmd.output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let e = environ(pid_of("notty"));
-    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":99"));
-    assert_eq!(e.get("SSH_CONNECTION").map(String::as_str), Some("10.0.0.1 5 10.0.0.2 22"));
+    let tag = |out: &str, name: &str| {
+        out.lines().find(|l| l.contains(&format!(" {name}="))).map(|l| l.split("  ").next().unwrap().trim().to_owned())
+    };
+    assert_eq!(tag(&shown, "DISPLAY").as_deref(), Some("caller"));
+    let json: serde_json::Value = serde_json::from_str(&g3d(&["env", "sub", "--json"])).unwrap();
+    assert!(json["env"].as_array().unwrap().iter().any(|v| v["name"] == "FOO" && v["source"] == "caller"), "{json}");
+
+    // --clean: the session's DISPLAY, fresh; none of the caller's.
+    g3d(&["new", "clean", "--clean", "-e", "HERE", "--", "sleep", "600"]);
+    let e = environ(pid_of("clean"));
+    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":0"), "the stale DISPLAY won over the session's");
+    assert_eq!(
+        e.get("XAUTHORITY").map(String::as_str),
+        Some("/run/user/0/xauth_session"),
+        "not the test hook's session: run `cargo test --workspace --features g3d-termd/test-hooks`"
+    );
+    assert_eq!((e.get("FOO"), e.get("REX_SESSION")), (None, None));
+    assert_eq!(e.get("HERE").map(String::as_str), Some("passed"));
+    let shown = g3d(&["env", "clean"]);
+    assert_eq!(tag(&shown, "DISPLAY").as_deref(), Some("session (systemd-user)"), "{shown}");
+    assert!(!shown.lines().any(|l| l.starts_with("caller")), "{shown}");
 }
 
 /// The socket a namespace lives at doesn't depend on the starter's environment: a relay or daemon

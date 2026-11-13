@@ -34,3 +34,25 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+// The relay creates as a creator with no shell: no env_base and no env, so its terminals start
+// from the desktop session's environment, never the relay's own.
+func TestTermdCreateSendsNoEnvironment(t *testing.T) {
+	for _, cfg := range []terminalConfig{
+		{id: "t1", cols: 80, rows: 24},
+		{id: "t2", cols: 80, rows: 24, cmdArgs: []string{"htop"}, cwd: "/srv"},
+	} {
+		c := termdCreate(cfg)
+		for _, k := range []string{"env_base", "env"} {
+			if _, ok := c[k]; ok {
+				t.Errorf("%s: create carries %s: %v", cfg.id, k, c)
+			}
+		}
+		if c["if_exists"] != "adopt" || c["id"] != cfg.id {
+			t.Errorf("%s: %v", cfg.id, c)
+		}
+	}
+	if _, ok := termdCreate(terminalConfig{id: "t3", cols: 1, rows: 1})["argv"]; ok {
+		t.Error("no command, yet an argv: termd chooses the account's shell")
+	}
+}

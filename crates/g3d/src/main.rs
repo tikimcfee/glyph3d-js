@@ -2,7 +2,8 @@
 //! one, list, create, kill, stop (docs/termd/DESIGN.md, "`g3d`: attach from any terminal").
 //!
 //!   g3d [--ns NS | --socket PATH] ls
-//!   g3d new <id> [--cols N --rows N] [--cwd DIR] [--forward-env LIST] [-- cmd...]
+//!   g3d new <id> [--cols N --rows N] [--cwd DIR] [--clean] [-e NAME[=VALUE]]... [-- cmd...]
+//!   g3d env <id> [--json]
 //!   g3d attach <id> [--take] [--detach-key ^\]
 //!   g3d watch <id>
 //!   g3d capture <id> [--history N] [--vt]
@@ -56,15 +57,26 @@ enum Cmd {
         /// Where it starts (default: this directory, as `tmux new` does).
         #[arg(long)]
         cwd: Option<String>,
-        /// Run inside a live SSH login (this terminal is the login's own, or there is none at all): the
-        /// variables of this shell the terminal gets, comma-separated; one unset here is removed
-        /// (default: the SSH agent's, the display's and Kerberos', tmux's update-environment). ''
-        /// sends none. Outside SSH, and below an old login (a tmux pane), nothing: the session's are fresh.
-        #[arg(long, default_value = g3d::forward::FORWARD_ENV)]
-        forward_env: String,
+        /// Send none of this shell's environment: the terminal starts from the desktop session's,
+        /// as one the wall opens does (default: this shell's environment is the base, as a
+        /// multiplexer's new session's is).
+        #[arg(long)]
+        clean: bool,
+        /// NAME=VALUE sets a variable; NAME alone passes this shell's NAME (or removes it when
+        /// this shell has none). Repeatable; wins over everything but termd's own.
+        #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+        env: Vec<String>,
         /// The program and its arguments (default: the account's shell, as a login shell).
         #[arg(last = true)]
         argv: Vec<String>,
+    },
+    /// A terminal's environment as its program started with it, each variable with its source
+    /// (caller, session, fill, file, request or termd).
+    Env {
+        id: String,
+        /// The reply as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Attach this terminal: see the screen, type into it.
     Attach {
@@ -175,10 +187,22 @@ fn main() {
                 );
             }
         }
-        Cmd::New { id, cols, rows, cwd, forward_env, argv } => {
+        Cmd::New { id, cols, rows, cwd, clean, env, argv } => {
+            let env = g3d::env::request_env(&env, |k| std::env::var(k).ok()).unwrap_or_else(|e| die(e));
+            let env_base = if clean {
+                None
+            } else {
+                let (base, skipped) = g3d::env::caller_env(std::env::vars_os());
+                if !skipped.is_empty() {
+                    eprintln!(
+                        "g3d: not sent (the protocol carries [A-Za-z_][A-Za-z0-9_]* names and UTF-8 values): {}",
+                        skipped.join(" ")
+                    );
+                }
+                Some(base)
+            };
             let mut c = start::connect_or_start(&target, "g3d", None).unwrap_or_else(|e| die(e));
             let cwd = cwd.or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string()));
-            let env = g3d::forward::forwarded(&forward_env, g3d::forward::in_ssh_login(), |k| std::env::var(k).ok());
             let r: CreateReply = c
                 .request(Op::Create(Create {
                     id,
@@ -187,6 +211,7 @@ fn main() {
                     rows,
                     cwd,
                     env: if env.is_empty() { None } else { Some(env) },
+                    env_base,
                     ..Default::default()
                 }))
                 .unwrap_or_else(|e| die(e));
@@ -201,6 +226,19 @@ fn main() {
                 if r.login { " (login shell)" } else { "" },
                 r.cwd
             );
+        }
+        Cmd::Env { id, json } => {
+            let mut c = connect(&target);
+            let raw = c.request_raw(Op::Env(EnvQuery { id: id.clone() })).unwrap_or_else(|e| die(e));
+            if json {
+                println!("{}", String::from_utf8_lossy(&raw));
+                return;
+            }
+            let r: EnvReply = serde_json::from_slice(&raw).unwrap_or_else(|e| die(format!("env: {e}")));
+            if r.env.is_empty() {
+                println!("{id}: no record of its environment (started under an older termd)");
+            }
+            print!("{}", g3d::env::render(&r.env));
         }
         Cmd::Capture { id, history, vt } => {
             let mut c = connect(&target);

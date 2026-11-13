@@ -71,7 +71,8 @@ impl Daemon {
     }
 
     /// A daemon whose command `setup` shapes first (its environment, its start state), given
-    /// the scratch directory. `--env-source daemon` unless `args` names a source.
+    /// the scratch directory. `--env-source daemon` unless `args` names a source, and
+    /// `--config <scratch>/termd.toml` (absent until a test writes it) unless `args` names one.
     pub fn start_cmd(args: &[&str], setup: impl FnOnce(&mut Command, &std::path::Path)) -> Self {
         Self::spawn_cmd(Self::fresh_dir(), args, setup)
     }
@@ -85,6 +86,10 @@ impl Daemon {
         // The daemon's own environment, never the desktop session's (DESIGN.md, "Environment").
         if !args.contains(&"--env-source") {
             cmd.args(["--env-source", "daemon"]);
+        }
+        // Never the person's own termd.toml.
+        if !args.contains(&"--config") {
+            cmd.arg("--config").arg(dir.join("termd.toml"));
         }
         cmd.args(args)
             .env("G3D_TERMD_TEST_HOOKS", "1")

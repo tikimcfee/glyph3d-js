@@ -154,6 +154,8 @@ pub struct TermRef {
     pub handle: u32,
     /// Started as a login shell (the `create` reply's `login`).
     pub login: bool,
+    /// Its environment as it started, each variable with its source (`env`).
+    pub env: Vec<EnvVar>,
     tx: mpsc::Sender<Cmd>,
     wake: Arc<Wake>,
     pub info: Mutex<TermInfo>,
@@ -250,7 +252,8 @@ pub struct CreateSpec {
     pub argv: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub env: Option<BTreeMap<String, Option<String>>>,
-    pub env_base: EnvBase,
+    /// The caller's environment; `None`: the creator has none (the session's is the base).
+    pub env_base: Option<BTreeMap<String, String>>,
     pub cols: u16,
     pub rows: u16,
     pub scrollback: u64,
@@ -270,6 +273,9 @@ impl CreateSpec {
         if let Some(e) = &c.env {
             env::check_request_env(e)?;
         }
+        if let Some(b) = &c.env_base {
+            env::check_base_env(b)?;
+        }
         let colors = c.colors.unwrap_or_default();
         for v in [&colors.fg, &colors.bg, &colors.cursor].into_iter().flatten() {
             if parse_hex(v).is_none() {
@@ -285,7 +291,7 @@ impl CreateSpec {
             argv: c.argv,
             cwd: c.cwd,
             env: c.env,
-            env_base: c.env_base.unwrap_or_default(),
+            env_base: c.env_base,
             cols: c.cols,
             rows: c.rows,
             scrollback: c.scrollback_bytes.unwrap_or(cfg.default_scrollback).min(cfg.max_scrollback),
@@ -311,6 +317,10 @@ pub struct Meta {
     pub scrollback: u64,
     pub colors: Colors,
     pub cell_px: [u32; 2],
+    /// Its environment as it started, each variable with its source (what `env` answers). Empty
+    /// in a record an older brain wrote.
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
 }
 
 fn default_term() -> String {
@@ -342,9 +352,15 @@ pub enum Restored {
 pub async fn create(reg: &Arc<Registry>, spec: CreateSpec) -> Result<(Arc<TermRef>, u32), WireError> {
     let policy = reg.cfg.env.clone();
     let (id, argv, cwd, envs, base) =
-        (spec.id.clone(), spec.argv.clone(), spec.cwd.clone(), spec.env.clone(), spec.env_base);
+        (spec.id.clone(), spec.argv.clone(), spec.cwd.clone(), spec.env.clone(), spec.env_base.clone());
     let plan = tokio::task::spawn_blocking(move || {
-        policy.plan(base, &env::Request { id: &id, argv: argv.as_deref(), cwd: cwd.as_deref(), env: envs.as_ref() })
+        policy.plan(&env::Request {
+            id: &id,
+            argv: argv.as_deref(),
+            cwd: cwd.as_deref(),
+            env: envs.as_ref(),
+            base: base.as_ref(),
+        })
     })
     .await
     .map_err(|e| WireError::new(code::SPAWN_FAILED, format!("composing the environment: {e}")))??;
@@ -357,6 +373,7 @@ pub async fn create(reg: &Arc<Registry>, spec: CreateSpec) -> Result<(Arc<TermRe
         scrollback: spec.scrollback,
         colors: spec.colors.clone(),
         cell_px: spec.cell_px,
+        env: plan.tagged.clone(),
     };
     let req = json!({"id": spec.id, "path": plan.path, "argv": plan.argv, "env": plan.env, "cwd": plan.cwd,
         "cols": spec.cols, "rows": spec.rows, "meta": meta});
@@ -443,6 +460,7 @@ fn start_owner(
         id: held.id.clone(),
         handle: held.handle,
         login: meta.login,
+        env: meta.env.clone(),
         tx,
         wake: wake.clone(),
         info: Mutex::new(TermInfo {
