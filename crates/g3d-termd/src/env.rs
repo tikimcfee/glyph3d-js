@@ -765,7 +765,8 @@ struct Stamp {
 
 /// The file's last reading: its stamp (`None`: absent) and what it said.
 struct Loaded {
-    stamp: Option<Stamp>,
+    /// `Ok(None)`: absent; `Err`: it couldn't be looked at (said once, until that changes).
+    stamp: Result<Option<Stamp>, String>,
     result: Result<FileEnv, String>,
 }
 
@@ -894,21 +895,15 @@ impl Policy {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{e}")),
         };
-        let fresh = match (&stamp, cur.as_ref()) {
-            (Ok(s), Some(l)) => l.stamp != *s,
-            _ => true,
-        };
-        if fresh {
-            let (stamp, result) = match stamp {
-                Ok(None) => (None, Ok(FileEnv::default())),
-                Ok(Some(s)) => {
-                    (Some(s), std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse_config(&t)))
-                }
-                Err(e) => (None, Err(e)),
+        if cur.as_ref().is_none_or(|l| l.stamp != stamp) {
+            let result = match &stamp {
+                Ok(None) => Ok(FileEnv::default()),
+                Ok(Some(_)) => std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| parse_config(&t)),
+                Err(e) => Err(e.clone()),
             };
             let shown = path.display();
             let note = match (&stamp, &result) {
-                (None, Ok(_)) => format!("termd.toml: none at {shown}"),
+                (Ok(None), Ok(_)) => format!("termd.toml: none at {shown}"),
                 (_, Ok(f)) => format!("termd.toml {shown}: {}", f.describe()),
                 (_, Err(e)) => format!("termd.toml {shown}: {e}: every create fails until it is fixed"),
             };
@@ -919,8 +914,8 @@ impl Policy {
                     path: shown.to_string(),
                     state: match (&stamp, &result) {
                         (_, Err(_)) => "error",
-                        (None, _) => "absent",
-                        (Some(_), Ok(_)) => "loaded",
+                        (Ok(None), _) => "absent",
+                        (_, Ok(_)) => "loaded",
                     }
                     .into(),
                     error: result.as_ref().err().cloned(),
