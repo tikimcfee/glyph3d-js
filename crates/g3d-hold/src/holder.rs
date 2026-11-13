@@ -80,6 +80,23 @@ fn ensure_private_dir(dir: &Path) {
     }
 }
 
+/// The socket's directory must be ours and closed to writers but us: under the shared `/tmp`
+/// another user could have made it first, and a writer could swap the socket (tmux checks the
+/// same of `/tmp/tmux-<uid>`).
+fn check_socket_dir(dir: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir).unwrap_or_else(|e| die(&format!("stat {}: {e}", dir.display())));
+    let uid = rustix::process::getuid().as_raw();
+    if !m.is_dir() || m.uid() != uid || m.mode() & 0o022 != 0 {
+        die(&format!(
+            "{} must be a directory owned by uid {uid} that only it can write (it is owned by uid {}, mode {:o})",
+            dir.display(),
+            m.uid(),
+            m.mode() & 0o7777
+        ));
+    }
+}
+
 fn take_lock(socket: &Path) -> std::fs::File {
     use rustix::fs::{FlockOperation, Mode, OFlags};
     let path = PathBuf::from(format!("{}.lock", socket.display()));
@@ -387,6 +404,7 @@ pub fn run(cfg: Config) -> ! {
 
     if let Some(dir) = cfg.socket.parent() {
         ensure_private_dir(dir);
+        check_socket_dir(dir);
     }
     if cfg.socket.as_os_str().len() > 100 {
         die(&format!("socket path {} is too long for a Unix socket", cfg.socket.display()));

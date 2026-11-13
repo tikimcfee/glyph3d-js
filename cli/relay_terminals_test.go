@@ -67,7 +67,13 @@ func privateTermd(t *testing.T) {
 	}
 	dir := os.Getenv("G3D_TEST_RUN_DIR")
 	if dir == "" {
-		dir = t.TempDir()
+		// Not t.TempDir(): on macOS that is under $TMPDIR (/var/folders/…, 49 bytes) plus the
+		// test's name, past a sockaddr's 104 bytes.
+		var err error
+		if dir, err = os.MkdirTemp("/tmp", "g3dgo"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
 	} else {
 		testDirs++ // short: the socket path inside must fit a sockaddr
 		dir = filepath.Join(dir, fmt.Sprintf("go%d-%d", os.Getpid(), testDirs))
