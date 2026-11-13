@@ -46,6 +46,8 @@ pub struct SlowStats {
     pub memory: TermMemory,
     /// How it came back at this brain's start; `None` when it started under this brain.
     pub restored: Option<&'static str>,
+    /// With `restored`: its output the previous brain read and never saved.
+    pub unseen: u64,
     pub subs: Vec<SubStat>,
 }
 
@@ -237,8 +239,10 @@ impl Hub {
         self.followers.lock().unwrap().remove(&conn).is_some()
     }
 
-    /// Takes one rate sample of every terminal and forgets the ones gone.
-    fn sample(&self, reg: &Registry) {
+    /// Takes one rate sample of every terminal and forgets the ones gone. Returns whether any
+    /// terminal produced output or took input since the last sample.
+    fn sample(&self, reg: &Registry) -> bool {
+        let mut moved = false;
         let now = Instant::now();
         let window = self.settings.rate_window;
         let mut r = self.rates.lock().unwrap();
@@ -262,11 +266,15 @@ impl Hub {
                 }
             }
             q.push_back((now, seq, input));
+            if let [.., a, b] = q.make_contiguous() {
+                moved |= a.1 != b.1 || a.2 != b.2;
+            }
             // Keep one sample at or past the window's start, so the rate spans the whole window.
             while q.len() > 2 && now.duration_since(q[1].0) >= window {
                 q.pop_front();
             }
         }
+        moved
     }
 
     /// Bytes per second over the window: `(out, in)`. Zero exactly when nothing moved in it.
@@ -318,6 +326,7 @@ impl Hub {
                     scrollback_rows: slow.scrollback_rows,
                     memory: slow.memory,
                     restored: slow.restored.map(Into::into),
+                    unseen: slow.restored.map(|_| slow.unseen),
                     subscribers: slow
                         .subs
                         .iter()
@@ -380,14 +389,16 @@ impl Hub {
     /// One status tick: sample the rates, and when anyone follows, build the document and push
     /// it to every follower that is due. Returns how long until the next tick.
     pub fn tick(&self, reg: &Registry, connections: u64, env: impl FnOnce() -> StatusEnv) -> Duration {
-        self.sample(reg);
+        // Output or input since the last tick: an interval in which a terminal produced output or
+        // took input counts as a change (its rate moved). A rate still decaying over its window
+        // after the bytes stopped doesn't; its crossing to zero is a change of the key.
+        let active = self.sample(reg);
         let mut f = self.followers.lock().unwrap();
         if f.is_empty() {
             return self.settings.interval;
         }
         let doc = self.build(reg, connections, env(), false);
         let key = change_key(&doc);
-        let active = doc.terminals.iter().any(|t| t.out_bps > 0 || t.in_bps > 0);
         let now = Instant::now();
         let mut bytes: Option<Arc<[u8]>> = None;
         for x in f.values_mut() {

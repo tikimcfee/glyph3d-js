@@ -109,7 +109,7 @@ function notes(t) {
   if (t.subscribers.some((s) => s.lagging)) loud.push('lagging');
   if (t.input_queued > 0) loud.push(`${bytes(t.input_queued)} input queued`);
   if (t.alt) quiet.push('alt');
-  if (t.restored) quiet.push(`restored: ${t.restored}`);
+  if (t.restored) quiet.push(t.unseen > 0 ? `restored: ${t.restored}, ${bytes(t.unseen)} unseen` : `restored: ${t.restored}`);
   return { loud, quiet };
 }
 

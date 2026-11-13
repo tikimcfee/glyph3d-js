@@ -60,13 +60,17 @@ impl Server {
     }
 }
 
-/// Leaves: status followers get their last document (`exiting`), then the holder ends the
-/// namespace (removing the socket) once this brain has gone.
+/// Leaves: the holder gives the namespace's name up at once (the socket goes, the lock is
+/// released), status followers get their last document (`exiting`), and the holder ends the rest
+/// once this brain has gone.
 async fn end_namespace(srv: &Server, why: &str) -> ! {
     crate::log(&format!("exiting: {why}"));
     // Nothing new is served by a namespace that is leaving: a connection made now waits in the
     // backlog and sees the end, never a terminal created in a namespace about to go.
     let _ = srv.accepting.send(false);
+    // The holder removes the socket and releases the namespace now, not when this brain has gone:
+    // a client after this point finds nothing (ENOENT) and may start a new daemon at once.
+    srv.hold.send(&json!({"m": "exit_namespace", "why": why}), &[]);
     if srv.hub.has_followers() {
         srv.hub.farewell(&srv.reg, srv.conns.load(SeqCst) as u64, srv.env.status());
         let until = Instant::now() + Duration::from_secs(1);
@@ -74,7 +78,6 @@ async fn end_namespace(srv: &Server, why: &str) -> ! {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    srv.hold.send(&json!({"m": "exit_namespace", "why": why}), &[]);
     std::process::exit(0);
 }
 

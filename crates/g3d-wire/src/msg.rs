@@ -314,6 +314,10 @@ pub struct StatusTerminal {
     /// it started under this brain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<String>,
+    /// With `restored`: the bytes of this terminal's output the previous brain read and never
+    /// saved (0 when exact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unseen: Option<u64>,
     pub subscribers: Vec<StatusSubscriber>,
 }
 

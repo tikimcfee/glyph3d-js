@@ -130,7 +130,9 @@ A terminal has two names:
 - **`id`**: a string chosen by whoever creates it (`term-3`, `gx-alice`). 1 to 64 bytes
   of `[A-Za-z0-9._-]`. Requests name terminals by `id`.
 - **`handle`**: a `u32` the daemon assigns at creation, never 0 and never reused within
-  one daemon's lifetime. Data frames and events carry it in `stream`, so a client routes
+  one namespace's lifetime (its holder's: (1.1) a terminal keeps its handle across restarts of
+  the engine, crashes and upgrades alike, so a client that re-subscribes gets the same one; it
+  still reads the handle from the `subscribe` reply rather than assuming it). Data frames and events carry it in `stream`, so a client routes
   them without parsing.
 
 ### `seq`: the output cursor
@@ -508,8 +510,10 @@ Reply: `{"req": 13, "ok": true, "status": {…}}`, the document below.
 then sends an `EVENT` `status` on stream 0 at once, and again whenever the document has changed,
 no sooner than the interval after the previous one. Changes are any field except the sampled
 gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates), or
-a rate crossing zero; while any terminal produces output or takes input, every interval counts as
-a change, so its rate stays current. With nothing changing, a keepalive arrives every 30 s with
+a rate crossing zero; an interval in which any terminal produced output or took input counts as a
+change, so a moving rate stays current. A rate still decaying over its 5 s window after the bytes
+stopped is not a change until it reaches zero (one burst of output costs a document or two, not
+one per interval for 5 s). With nothing changing, a keepalive arrives every 30 s with
 fresh gauges. A status event is dropped, not queued, when the connection is behind on its earlier
 ones: the next one replaces it. `status_follow` again changes the interval; `status_unfollow`
 stops them; closing the connection does too. A connection that only follows status (and pings)
@@ -555,11 +559,11 @@ Unix epoch milliseconds, sizes are bytes):
 |---|---|
 | `version`, `engine`, `proto`, `ns`, `instance` | as in `WELCOME` |
 | `socket`, `log` | where the daemon listens and logs (absolute paths) |
-| `exiting` | `true` only in the last document a follower gets before an idle daemon exits; the connection then closes and nothing listens. An empty namespace leaving, not a failure |
+| `exiting` | `true` only in the last document a follower gets before the namespace leaves (idle exit, `stop`, the holder's `SIGTERM`); the connection then closes. The socket is already gone by then: a `connect` finds nothing (`ENOENT`), and a new daemon can take the name at once. An empty namespace leaving, not a failure |
 | `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
 | `connections` | client connections open now, status followers included |
 | `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
-| `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade) |
+| `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
 | `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale to fill, the user manager unreachable while it is, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
@@ -572,11 +576,12 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `pwd` | the directory the program last reported (OSC 7), absent if none |
 | `cols`, `rows` | the size now |
 | `out_bps`, `in_bps` | output and input bytes per second over the last 5 s |
-| `last_output_at` | when output last arrived |
+| `last_output_at` | when output last arrived; absent until this brain has seen output from the terminal (one with no output yet, or one restored after a restart and quiet since: the time is not carried across a restart) |
 | `flow` | `"live"` (termd reads the program's output as it comes), `"blocked"` (a `block` owner is behind and termd has stopped reading; the program waits), `"paused"` (an upgrade's cut) |
 | `input_queued` | input bytes waiting for the program to read them |
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
-| `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain) |
+| `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain). A terminal restored from a snapshot saves a new one at the next interval even while quiet, so a second crash restores it exact |
+| `unseen` | with `restored`: this terminal's output the previous brain read and never saved (0 when `exact`) |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
 `errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,
@@ -771,7 +776,8 @@ the socket does not. A client that wants to ride a restart:
    willing to wait (the glyph3d relay waits 30 s).
 2. **What `connect` says.** While the holder lives, `connect` succeeds even before a brain is
    accepting; `HELLO` is answered when one is. `ENOENT` or `ECONNREFUSED` means no holder: the
-   namespace and every terminal in it are gone. `ERROR` `brain_failed` means the holder is alive
+   namespace and every terminal in it are gone; so is `ECONNRESET` on a connection that raced in
+   just as the namespace left (its socket is removed first, so this window is milliseconds). `ERROR` `brain_failed` means the holder is alive
    (so are the programs, frozen once they fill their output buffers) but no brain is running; its
    `message` says why. It may arrive before your `HELLO` is read ([Handshake](#handshake)): read
    it even if writing `HELLO` failed, and don't count it as a dropped connection. Retry slowly
@@ -996,7 +1002,8 @@ writes, and send keystrokes as `INPUT`.
   `brain_failed`; the `busy` code; `create.env_base` and the `argv`/`login`/`cwd` reply fields;
   [Restarts](#restarts-11). Before any release, `create`'s defaults changed: `argv` was the
   daemon's `$SHELL` as a non-login shell, `cwd` the daemon's working directory, `scrollback_bytes`
-  2 MiB, the socket fallback `$TMPDIR/g3d-<uid>`, and the environment the daemon's own
-  plus termd's variables (without `TERM_PROGRAM`), with only `TMUX`/`TMUX_PANE` removed and no
-  reserved names. No released client depends on those.
+  2 MiB, the socket directory `$XDG_RUNTIME_DIR/g3d` else `$TMPDIR/g3d-<uid>`, and the
+  environment the daemon's own whole plus termd's variables (without `TERM_PROGRAM`), with only
+  `TMUX`/`TMUX_PANE` removed and no reserved names; a status terminal had no `unseen`, and a
+  failed namespace closed before reading `HELLO`. No released client depends on those.
 - **1.0**: the branch-only first cut: the core above, without what is marked (1.1).

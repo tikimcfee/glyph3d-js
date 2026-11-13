@@ -328,7 +328,8 @@ struct Holder {
     cfg: Config,
     exe: PathBuf,
     listener: OwnedFd,
-    lock: std::fs::File,
+    /// The namespace's lock, held until the namespace leaves ([`Holder::leave_path`]).
+    lock: Option<std::fs::File>,
     marks: OwnedFd,
     sig: OwnedFd,
     nofile: libc::rlim_t,
@@ -417,7 +418,7 @@ pub fn run(cfg: Config) -> ! {
     let mut h = Holder {
         exe,
         listener,
-        lock,
+        lock: Some(lock),
         marks,
         sig,
         nofile,
@@ -606,7 +607,7 @@ impl Holder {
                 *escalated = true;
             }
         }
-        if now.duration_since(self.restamped) >= Duration::from_secs(3600) {
+        if now.duration_since(self.restamped) >= Duration::from_secs(3600) && self.lock.is_some() {
             self.restamped = now;
             for p in [self.cfg.socket.clone(), PathBuf::from(format!("{}.lock", self.cfg.socket.display()))] {
                 if let Ok(c) = CString::new(p.as_os_str().as_bytes()) {
@@ -653,6 +654,7 @@ impl Holder {
                         continue;
                     }
                     log(&format!("SIGTERM: ending the namespace ({} terminal(s))", self.terms.len()));
+                    self.leave_path();
                     match &mut self.brain {
                         Some(b) if b.hello => {
                             b.queue(json!({"m": "shutdown"}), vec![]);
@@ -1051,6 +1053,7 @@ impl Holder {
             }
             "exit_namespace" if w == Who::Brain => {
                 let why = m.get("why").and_then(Value::as_str).unwrap_or("?").to_owned();
+                self.leave_path();
                 self.exiting = Some(why);
             }
             other => log(&format!(
@@ -1282,6 +1285,7 @@ impl Holder {
     /// candidate are killed, the socket is removed.
     fn finish(&mut self, why: &str) -> ! {
         log(&format!("exiting: {why}"));
+        self.leave_path();
         let mut groups = Vec::new();
         for t in self.terms.values_mut() {
             if t.exit.is_none() {
@@ -1316,8 +1320,21 @@ impl Holder {
             // SAFETY: as above.
             unsafe { libc::kill(-*g, libc::SIGKILL) };
         }
-        let _ = std::fs::remove_file(&self.cfg.socket);
-        let _ = &self.lock;
         std::process::exit(0);
+    }
+
+    /// The namespace is leaving: its name goes at once, before the shells are hung up and the
+    /// brain has gone. The socket file is removed (a connect now finds nothing: `ENOENT`, the
+    /// namespace is gone) and the lock released, so a client that wants a terminal can start a
+    /// new daemon on the same name right away instead of meeting a socket that hangs and resets,
+    /// and a start that says "another g3d-termd serves". What was already accepted finishes.
+    fn leave_path(&mut self) {
+        if self.lock.is_none() {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.cfg.socket);
+        // Dropping the file closes it, which releases the flock; the lock file stays (a new
+        // holder may already have opened it).
+        self.lock = None;
     }
 }

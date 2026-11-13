@@ -124,7 +124,10 @@ pub fn notes(t: &StatusTerminal) -> (Vec<String>, Vec<String>) {
         quiet.push("alt".to_owned());
     }
     if let Some(r) = &t.restored {
-        quiet.push(format!("restored: {r}"));
+        match t.unseen.filter(|&n| n > 0) {
+            Some(n) => quiet.push(format!("restored: {r}, {} unseen", bytes(n))),
+            None => quiet.push(format!("restored: {r}")),
+        }
     }
     (loud, quiet)
 }

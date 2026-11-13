@@ -802,7 +802,10 @@ impl Owner {
             eof: false,
             last_output: Instant::now(),
             compress_pending: restored != Restored::Blank,
-            snap_seq: seq,
+            // What a restore from an old snapshot (or a blank one) shows is not saved anywhere at
+            // this seq: save it at the next interval even if the terminal stays quiet, or every
+            // later crash restores the same stale snapshot and reports the same loss again.
+            snap_seq: if fresh || restored == Restored::Exact { seq } else { u64::MAX },
             last_snap: Instant::now(),
             cut: false,
             killing: None,
@@ -819,6 +822,7 @@ impl Owner {
             st.snapshot_bytes.store(snap_sizes.iter().sum(), SeqCst);
             let mut slow = st.slow.lock().unwrap();
             slow.pwd.clone_from(&o.pwd);
+            slow.unseen = unseen;
             slow.restored = (!fresh).then_some(match restored {
                 Restored::Exact => "exact",
                 Restored::Snapshot => "snapshot",

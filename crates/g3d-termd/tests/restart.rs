@@ -251,6 +251,42 @@ fn brain_crash_under_a_flood_keeps_every_shell_and_restores_screens() {
     assert!(screen.contains("FLOOD-2-"), "{screen}");
 }
 
+/// A terminal restored from an older snapshot saves a new one of what it now shows, even while
+/// quiet: the next crash restores that (exact), and the loss is reported once, not at every crash.
+#[test]
+fn a_terminal_restored_from_a_snapshot_snapshots_again() {
+    let d = Daemon::start_with(&["--idle-exit", "0", "--snapshot-interval-ms", "1500"]);
+    let mut c = d.client();
+    let instance = c.welcome.instance.clone().unwrap();
+    create(&mut c, "cat", &["cat"], 40, 5);
+    let s = subscribe(&mut c, "cat", Role::Attach, None);
+    c.input(s.handle, b"first\n").unwrap();
+    let mut seen = Seen::default();
+    read_until(&mut c, &mut seen, 10, |s| tail_contains(&s.output, b"first\r\nfirst"));
+    // Its snapshot lands (1.5 s), then more output and a crash before the next one.
+    std::thread::sleep(Duration::from_millis(2000));
+    c.input(s.handle, b"second\n").unwrap();
+    read_until(&mut c, &mut seen, 10, |s| tail_contains(&s.output, b"second\r\nsecond"));
+    kill(c.welcome.pid.unwrap(), libc::SIGKILL);
+    let mut c = d.reconnect(&instance);
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    let t = st.status.terminals.iter().find(|t| t.id == "cat").unwrap();
+    assert_eq!(t.restored.as_deref(), Some("snapshot"));
+    assert!(st.status.daemon.brain.last_start.unseen > 0);
+    // The loss is the terminal's own, too (its only terminal: the namespace's total).
+    assert_eq!(t.unseen, Some(st.status.daemon.brain.last_start.unseen));
+    // Quiet now; past an interval the restored screen is saved, so the next crash loses nothing.
+    std::thread::sleep(Duration::from_millis(2500));
+    kill(c.welcome.pid.unwrap(), libc::SIGKILL);
+    let mut c = d.reconnect(&instance);
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    let t = st.status.terminals.iter().find(|t| t.id == "cat").unwrap();
+    assert_eq!(t.restored.as_deref(), Some("exact"), "the stale snapshot was restored again\n{}", d.log());
+    assert_eq!(st.status.daemon.brain.last_start.unseen, 0);
+    assert_eq!(t.unseen, Some(0));
+    assert_eq!(d.log().matches("terminal cat: restored from a snapshot").count(), 1, "{}", d.log());
+}
+
 #[test]
 fn upgrade_under_a_flood_loses_no_byte() {
     let d = Daemon::start_with(&FLOOD_ARGS);

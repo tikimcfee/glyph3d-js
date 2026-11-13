@@ -354,15 +354,17 @@ daemon announces `proto` `[1, 1]` and the feature `status`.
   `--status-rate-window-ms` (5,000), and when anyone follows, builds the document once, serializes
   it once (`Arc<[u8]>`) and queues it to each follower that is due. A follower is due at once after
   `status_follow`; then when the change key moved (the document hashed with `at`, RSS, memory,
-  `snapshots.bytes`, subscribers' `queued` zeroed and each rate reduced to zero-or-not) or any rate
-  was non-zero since its last push, no sooner than its interval; and at the keepalive regardless.
+  `snapshots.bytes`, subscribers' `queued` zeroed and each rate reduced to zero-or-not) or any
+  terminal's `seq` or input count moved between two samples since its last push (not "any rate is
+  non-zero", which held for a whole rate window after one byte: an `echo` cost 20 documents at
+  250 ms), no sooner than its interval; and at the keepalive regardless.
   A follower whose previous document is still queued is skipped (dropped, not queued). With no
   followers the tick only samples, once per `--status-interval-ms`. A terminal created under this
   brain gets a zero sample at its `created_at`, so a burst before the first tick counts in its rate.
 - The holder tells each brain, in `welcome` (hold protocol 2.1, an additive minor), `restarts`
   (brains replaced by crash, watchdog, upgrade) and `last_start` (`first`/`crash`/`watchdog`/
   `upgrade`, when, and the dead brain's exit). The brain adds what came back how and the unseen
-  bytes. A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
+  bytes, in total and per terminal (`terminals[].unseen`, beside `restored`). A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
 - RSS: `/proc/<pid>/statm` on Linux, `proc_pidinfo(PROC_PIDTASKINFO)` on macOS (`status::rss`, the
   cfg seam; the macOS branch verifies it); absent where it can't be measured.
 - Recent errors: the last `--status-errors` (32) distinct `(code, terminal)`, newest first, from
@@ -568,7 +570,11 @@ There is no tmux fallback.
 
 - **Idle exit.** When the namespace has no terminals and the brain has had no connections for
   `idle_exit` (default 300 s; 0 = never), the holder removes the socket and exits, and the brain
-  with it. A connection that only follows status (or pings) does not count: the relay keeps a
+  with it. The name goes first: as the namespace starts leaving (idle exit, `stop`, `SIGTERM`)
+  the holder removes the socket and releases the lock at once, before the followers' farewell,
+  the shells' hangup grace and the brain's exit, so a client finds nothing (`ENOENT`) and may start
+  a new daemon on the name right away (it used to meet, for about a second, a socket that accepted,
+  hung and reset, and a start that failed with "another g3d-termd serves"). A connection that only follows status (or pings) does not count: the relay keeps a
   status connection to every namespace it serves ([Status](#status)), and an empty daemon must
   still be able to leave. Followers get a last `status` event with `daemon.exiting: true`, then
   the close. The next relay operation starts a fresh namespace. An empty daemon exiting is also the
@@ -686,6 +692,11 @@ The brain saves each terminal while it runs, so a restarted brain can bring the 
   redraws its prompt line. Output from the unseen bytes is missing from the screen and history.
   The status stream reports, per terminal, how it came back (`snapshot` or `blank`) and the
   unseen byte count.
+- **Saved again.** A terminal restored from a snapshot or blank shows a screen no stored blob
+  holds at its `seq`, so its owner saves one at the next interval even if the program stays quiet
+  (the "new output since its last save" test alone would never fire). Without it every later crash
+  restored the same stale snapshot and reported the same loss again (the verifier's 20 crashes
+  counted one terminal's 950,706 lost bytes as 1,240,548).
 
 ### Screens after an upgrade: `g3d upgrade`
 

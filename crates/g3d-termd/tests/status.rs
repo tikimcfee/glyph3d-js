@@ -199,6 +199,24 @@ fn status_follow_pushes_on_change_no_sooner_than_its_interval_and_keeps_alive() 
     let _ = zero;
 }
 
+/// One burst of output counts as a change for the interval it lands in, not for the whole rate
+/// window after it (PROTOCOL.md: "while any terminal produces output or takes input").
+#[test]
+fn a_burst_of_output_is_one_change_not_a_window_of_them() {
+    let d =
+        Daemon::start_with(&["--idle-exit", "0", "--status-keepalive-ms", "60000", "--status-rate-window-ms", "5000"]);
+    let mut c = d.client();
+    let mut f = d.client();
+    assert_eq!(follow(&mut f, Some(250)), 250);
+    let _ = next_status(&mut f);
+    assert!(statuses_for(&mut f, 1.0).is_empty(), "an empty, quiet daemon pushed");
+    create(&mut c, "hi", &["sh", "-c", "echo hi; exec sleep 100"], 80, 24);
+    // The terminal appearing, and its one burst: a few documents, then quiet while the 5 s rate
+    // decays (the old rule pushed every 250 ms until it reached zero: about 20).
+    let docs = statuses_for(&mut f, 4.0);
+    assert!(!docs.is_empty() && docs.len() <= 4, "{} documents for one burst of output", docs.len());
+}
+
 #[test]
 fn status_followers_dont_keep_an_empty_daemon_and_hear_it_leave() {
     let d = Daemon::start_with(&["--idle-exit", "1"]);
@@ -216,8 +234,45 @@ fn status_followers_dont_keep_an_empty_daemon_and_hear_it_leave() {
         }
     };
     assert!(last.terminals.is_empty());
+    // The name goes with the last document: a connect finds nothing (never a socket that accepts,
+    // hangs and resets), and a new daemon can take the name at once.
+    let left = Instant::now();
+    loop {
+        match std::os::unix::net::UnixStream::connect(&d.socket) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            r => assert!(
+                left.elapsed() < Duration::from_millis(300),
+                "the socket outlived the last document: {r:?}\n{}",
+                d.log()
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut next = std::process::Command::new(bin())
+        .arg("--socket")
+        .arg(&d.socket)
+        .args(["--idle-exit", "0", "--env-source", "daemon"])
+        .stderr(std::fs::File::create(d.dir.join("next.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let up = (|| {
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if let Some(st) = next.try_wait().unwrap() {
+                return Err(format!("{st}: {}", std::fs::read_to_string(d.dir.join("next.log")).unwrap_or_default()));
+            }
+            if let Ok(c) = Client::connect(&d.socket, "test") {
+                return Ok(c.welcome.instance);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("no answer".into())
+    })();
+    unsafe { libc::kill(next.id() as i32, libc::SIGTERM) };
+    let _ = next.wait();
+    let instance = up.expect("a new daemon could not take the name right after the namespace left");
+    assert_ne!(instance.as_deref(), Some(first.daemon.instance.as_str()), "the old namespace answered");
     assert!(f.next_frame().is_err(), "the connection closes after the last document");
-    wait_for(5, "the socket to go", || std::os::unix::net::UnixStream::connect(&d.socket).is_err());
 }
 
 #[test]
