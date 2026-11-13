@@ -919,7 +919,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   base minus its markers beside a no-caller terminal's fresh session `DISPLAY`, a stripped creator
   getting the session's handles, `termd.toml`'s `pass`/`drop`/`set`, a bad file failing creates
   naming its line and the status saying so, the session source re-read per create (a file standing
-  in for the user manager), and the real user manager beating a stale starter when one answers);
+  in for the platform's source), and the real source beating a stale starter when one answers (the
+  systemd user manager; on macOS launchd in a GUI session: its agent socket, `TMPDIR` and the
+  `AppleLocale` locale, skipped outside one));
   the status document (`tests/status.rs`: its keys and types against
   `tests/fixtures/status-shape.json`, and PROTOCOL.md's example parsed field for field in
   `g3d-wire`; `status_follow`'s throttling — at once, then on change no sooner than the interval,
@@ -968,7 +970,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   stale `DISPLAY` and bus address, `XDG_RUNTIME_DIR=/nonexistent`, another terminal's identity,
   `TZ`, a scratch `XDG_CONFIG_HOME`, `LC_ALL=C`) whose daemon asks the session source: its terminal
   gets the systemd user manager's handles (read-only; tagged `session (systemd-user)`) and none of
-  the rest, or, with no manager answering, the relay's `DISPLAY` by name.
+  the rest, or, with no manager answering, the relay's `DISPLAY` by name; on macOS (a stale
+  `SSH_AUTH_SOCK` too) launchd's agent socket and `TMPDIR` (tagged `session (launchd)`), the
+  relay's `DISPLAY` by name, and no `LC_ALL`, the environment read from `g3d env`.
 - **`termd-fidelity-check.mjs`** (tier full) — the 29 vt conformance snippets
   (`tools/fixtures/vt-conf`) through termd: raw output byte-exact, and a late subscriber's repaint
   parsed by xterm equal to xterm fed the snippet (28/29; invalid UTF-8 differs because libghostty

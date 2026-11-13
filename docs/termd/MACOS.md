@@ -64,31 +64,79 @@ Tests make their scratch directories under `/tmp` for the same 104 bytes: `t.Tem
 
 ## The environment a terminal gets
 
-As built (DESIGN.md, "Environment"), proven here by `tests/env.rs` and `termd-relay-check`:
+DESIGN.md, "Environment", is the rule: **a new terminal carries its creator's environment; a
+creator with none gets the desktop session's.** On macOS only the session source differs, and
+what it answers. Proven by `tests/env.rs`, `tests/attach.rs`, `termd-relay-check` and by hand.
 
 - **The default program is the passwd shell as a login shell**, argv0 `-zsh`, in the caller's
   directory or home. A login zsh runs `/etc/zprofile`, which on this macOS runs `path_helper`
   (`/etc/paths`, `/etc/paths.d`) and sets `LANG=C.UTF-8` when it is unset, then `~/.zprofile`
   (Homebrew's `shellenv`). A non-login shell got neither: a bare `PATH` and an ASCII locale.
-- **The base is the session's variables of the holder's own environment** (no user manager on
-  macOS): the account, `PATH`, `TMPDIR`, the locale, `SSH_AUTH_SOCK`, and launchd's
-  `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`, which every process of a GUI session carries. A
-  launching app's `XPC_SERVICE_NAME`, `XPC_FLAGS` and `OSLogRateLimit` don't pass. Then termd's
-  own: `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION`, `TERM`, `COLORTERM`, `G3D_TERMD_*`.
-- **The locale when none is set** is the user's: the `AppleLocale` preference (`en_US`) as
-  `en_US.UTF-8`, as Terminal.app, iTerm2 and Ghostty read it; `C.UTF-8` when it has no region
-  or doesn't load.
-- **What it keeps out**, measured before the policy existed:
-  - The starter's terminal identity. A termd started from Terminal.app gave every shell
-    `TERM_PROGRAM=Apple_Terminal`, so Apple's `/etc/zshrc` sourced `/etc/zshrc_Apple_Terminal`
-    and installed Terminal.app's OSC 7 hook, and with `TERM_SESSION_ID` one tab's
-    `~/.zsh_sessions` history would be shared by every terminal.
-  - Live handles of another terminal. A shell in Rex (a GUI terminal) carries `REX_SERVER`,
-    `REX_SESSION` and `REX_BLOCK`, handles on Rex's server and on that tab. No denylist names
-    every terminal's own variables, which is why the base is a known set and not "the starter's
-    minus a list".
-- **ssh-agent and Keychain** work from a daemon in the GUI session: launchd's `SSH_AUTH_SOCK` is
-  inherited, and a terminal's `security` reaches the unlocked login keychain.
+- **A caller with a shell** (`g3d new`) sends its whole environment; the scrub takes out what
+  points back at its tab or process. Measured from a Rex tab and from Terminal.app:
+  - Rex: `REX_SESSION`, `REX_BLOCK`, `REX_SERVER`, `REX_BIN_DIR` and `XPC_SERVICE_NAME` are gone,
+    `TERM_PROGRAM=rex` became `g3d-termd`, and the rest (Homebrew's, the tab's `PATH`, `LANG`,
+    `SSH_AUTH_SOCK`, `TMPDIR`, Rex's `__CF_USER_TEXT_ENCODING=0x0:0:0`) rode along.
+  - Terminal.app: `TERM_PROGRAM=Apple_Terminal`, `TERM_PROGRAM_VERSION`, `TERM_SESSION_ID` and
+    `__CFBundleIdentifier` are gone.
+  - Unlisted names ride along, as in tmux: `XPC_FLAGS` and `OSLogRateLimit` (any app's child
+    has them), and whatever the caller's own starter left. The Terminal.app here was evidently
+    started from an agent's shell (its windows have `TMUX` and `CLAUDE_CODE_*`): they carry `AGENT_NAME`, `AGENT_HOST` (gomuxai's),
+    `GIT_EDITOR=true` and `COREPACK_ENABLE_AUTO_PIN` (Claude Code's) and `SSH_CONNECTION`, and so
+    did the terminal it created; `CLAUDE_CODE_*`, `CLAUDECODE`, `TMUX` and `TMUX_PANE` were
+    scrubbed. That is the caller rule working as specified; whether those names belong on the
+    scrub list is the lead's call.
+- **`g3d new --clean`, the wall and the relay** get the session's: the allowlist, each name looked
+  up at every create, then the fill (`HOME`, `USER`, `LOGNAME`, `SHELL` from passwd; `PATH` is
+  macOS `login(1)`'s `/usr/bin:/bin`, which `path_helper` extends).
+- **The session source is launchd**, one `/bin/sh` per create running `launchctl getenv` for each
+  allowlisted name (about 90 ms for the 20 names here; `launchctl export` no longer exists, and
+  `launchctl print`'s output is documented as not an API). It answers what was `launchctl
+  setenv`'d and the agents' sockets (`SSH_AUTH_SOCK`), and nothing else here. Two names a Mac
+  session has that `getenv` never answers come from where launchd and terminals take them:
+  - `TMPDIR`: launchd gives each job `confstr(_CS_DARWIN_USER_TEMP_DIR)`, `/var/folders/…/T/`.
+    Without it a daemon started stripped gave its terminals no `TMPDIR`, and programs used
+    `/tmp`.
+  - The locale: no Mac session sets one, so the starter's own (`LC_ALL=C` from a stripped relay)
+    stood in for every no-caller terminal's. A terminal on a Mac makes `LANG` from the user's
+    `AppleLocale` (`en_US` gives `en_US.UTF-8`), as Terminal.app, iTerm2 and Ghostty do, read per
+    create (`defaults`, under 10 ms); the locale group rule then keeps the starter's out.
+
+  `g3d env` tags them `session (launchd)` and `session (AppleLocale)`. A name the session lacks
+  (`DISPLAY`) falls back to the daemon's start value for that name, tagged `session (daemon)`.
+- **Proven by hand**, from a daemon started with `env -i HOME=… PATH=/usr/bin:/bin` and a stale
+  `SSH_AUTH_SOCK`: the agent's socket and `TMPDIR` come back fresh; `DISPLAY=:42` and a passed
+  `FOO` from the daemon are tagged `session (daemon)`; with `pass = ["FOO"]` in termd.toml,
+  `launchctl setenv FOO bar` reached the next create with no restart (`session (launchd)`), the
+  running terminal kept its value, and after `launchctl unsetenv FOO` the next one fell back to
+  the daemon's. `tests/env.rs` gates the read-only part in a GUI (Aqua) session and skips,
+  saying so, outside one (an ssh login, where `launchctl managername` is not `Aqua`); the
+  `setenv` case stays by hand because a test would write to the person's session.
+- **`__CF_USER_TEXT_ENCODING` and `COMMAND_MODE` stay off the allowlist** (measured, below).
+- **ssh-agent and Keychain** work from a daemon in the GUI session: launchd's `SSH_AUTH_SOCK`, and
+  a terminal's `security` reaches the unlocked login keychain.
+
+### Why `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE` aren't needed
+
+launchd gives every GUI process `__CF_USER_TEXT_ENCODING=0x1F5:0x0:0x0` (uid, encoding, region)
+and `COMMAND_MODE=unix2003`. A no-caller terminal has neither. Measured on this Mac, with each
+unset and with launchd's value:
+
+- CoreFoundation sets `__CF_USER_TEXT_ENCODING` itself when a program loads it, from the uid and
+  `~/.CFUserTextEncoding` (`0x0:0x0`): a CF program removed from it by `env -u` reads
+  `0x1F5:0x0:0x0` before `main`, the same value. `CFStringGetSystemEncoding` (Mac Roman, `0x0`)
+  and `CFStringGetFileSystemRepresentation` of `café` are identical. A program without CF never
+  reads it.
+- `pbcopy` → `pbpaste` of `café ☃ 日` (on a private pasteboard), `defaults read` of a non-ASCII
+  value, `defaults read -g AppleLocale` and `open`'s error naming a non-ASCII path: byte-identical,
+  with `LANG=en_US.UTF-8` and with no locale at all.
+- `COMMAND_MODE`: compat(5) says unset behaves as `unix2003`. `ls -n` (long), `ps -l`'s columns,
+  `pr -i` and `mv dir/afile dir` (exit 2) are identical unset and `unix2003`; `legacy` changes
+  all but `pr` (`ls -n` short, the 10.3 `ps -l` columns, `mv` exiting 0), so the battery sees
+  the variable when it matters.
+- What terminals hand their shells: Rex gives `__CF_USER_TEXT_ENCODING=0x0:0:0` (its own value)
+  and no `COMMAND_MODE`; the agent-started Terminal.app here gives neither. Shells run fine
+  without them.
 
 What other terminals and daemons do on macOS (from source, 2026-11-12):
 
@@ -102,9 +150,42 @@ What other terminals and daemons do on macOS (from source, 2026-11-12):
 | shpool | argv0 `-<shell>` | `getpwuid` | starts from `env_clear()`: `HOME PATH SHELL USER` + `TERM` | forwards the client's |
 
 termd follows the daemons (argv0 `-<shell>`, no `login(1)`, which wants a login session a daemon
-is not) and the GUI terminals' locale. Coming next: a terminal inherits its caller's environment
-(`g3d new` sends it), and a creator with no shell gets the allowlist with the session's handles
-read fresh from `launchctl getenv`.
+is not) and the GUI terminals' locale.
+
+## Keys and paste
+
+termd encodes the `key` op with libghostty's encoder against the program's live modes (DESIGN.md,
+"Input"). Measured on macOS with `g3d key` and `g3d paste`:
+
+| Into | Shift+Enter | Enter | Alt+A | Ctrl+C |
+|---|---|---|---|---|
+| a Kitty-keyboard program (`CSI > 1 u`) | `CSI 13;2u` | `\r` | `CSI 97;3u` | `CSI 99;5u` |
+| a plain program | `\r` | `\r` | `ESC a` | `0x03` |
+| zsh at its prompt | runs the line | runs the line | | |
+
+Paste: bracketed (`ESC[200~ … ESC[201~`) when the program asked for it (zsh's prompt, the Kitty
+program), plain otherwise; refused (`unsafe_paste`) when it holds a line break the program would
+read as Enter, or the bracket's end; `--unsafe` sends it (a line break as `\r`).
+
+**Option on a Mac.** Chrome and Safari report Option+A on a US layout as `key: "å"`, `code:
+"KeyA"`, `altKey: true`, and the wall sends exactly that (`text: "å"`, `mods: ["Alt"]`). termd
+counts Alt as having made the text and sets its encoder's `macos-option-as-alt` to true, so an
+Alt whose text is the key's own character (`g3d key alt+a`, a Linux browser) is Alt. For the
+Option character, compared with Ghostty's default (`macos-option-as-alt = false`, the same
+encoder with that option):
+
+| Program's mode | termd | Ghostty's default |
+|---|---|---|
+| legacy | `å` | `å` |
+| Kitty, disambiguate (flags 1) | `å` | `å` |
+| Kitty, all keys + text (flags 31) | `CSI 97;3u` (the `å` is lost) | `CSI 97;3;229u` |
+| modifyOtherKeys 2 | `CSI 27;3;229~` | `å` |
+
+So the wall on a Mac types the Option character as Ghostty does in the modes most programs use,
+and differs in the two fuller ones. Ghostty's option set to false for every event would make a
+real Alt (`g3d key alt+a`) a bare `a`, so a fix would choose it per event (false when Alt is
+consumed by the text). Not changed: the lead's and Ivan's call. Unit test: `keys::tests::
+a_macos_option_character_is_its_text_and_alt_as_alt_is_alt` (the agreed rows).
 
 ## Testing without `/proc`
 
@@ -116,7 +197,12 @@ read fresh from `launchctl getenv`.
   **macOS withholds the environment of Apple platform binaries** (`/bin/sleep`, `/bin/zsh`) from
   every other process, `ps -E` included; ours it shows. So a test that reads a terminal's
   environment runs this test binary as the terminal's program, and the reader fails loud on a
-  withheld one. The login shell's `SHELL` is read from the shell itself.
+  withheld one. The login shell's `SHELL` is read from the shell itself. `KERN_PROCARGS2` puts the
+  kernel's strings for dyld (`ptr_munge=`, `main_stack=`, `executable_file=`, …) right after the
+  environment, with NUL padding between them only sometimes, so the reader ends the environment
+  at the first all-lowercase name.
+- **The relay check reads a platform shell's environment from `g3d env`** on macOS (termd's own
+  account; `tests/env.rs` holds it to the kernel's), and argv and cwd from `ps` and `lsof`.
 - **Signal masks and fd limits** of another process can't be read on macOS: `ps -o sigmask` is
   always 0, and there is no limits file. `tests/env.rs`'s `probe` runs as the terminal's program
   and reports its own blocked and ignored signals and soft fd limit, on both platforms. It fails
@@ -135,10 +221,14 @@ macOS-specific.
 
 ## Not verified here
 
-- That an sshd session lacks `$TMPDIR` (the rule doesn't depend on it).
+- That an sshd session lacks `$TMPDIR`, and `tests/env.rs`'s launchd test skipping in an ssh
+  login (`launchctl managername` there was not measured).
 - Keychain access from a daemon first started over ssh, whose audit session's keychain is
   locked. The normal practice for a daemon that must outlive logins is a LaunchAgent in
   `gui/<uid>`.
-- The real Terminal.app's environment: driving it with `osascript` waits on an Automation consent
-  prompt, so its launch was rebuilt with `login -pfl`.
+- What a Terminal.app started from the Dock hands its shells: the one here was evidently started
+  from an agent's shell (above), and scripting a fresh one needs Automation consent. `SHELL_SESSION_ID`
+  was empty in its window, so its scrub is proven by the tests' stand-in only.
+- Shift+Enter into Claude Code itself: the Kitty-mode stand-in prints the bytes instead
+  (wall-e2e and `termd-relay-check` do the same).
 - darwin-amd64.
