@@ -390,6 +390,24 @@ mod tests {
         Keyboard::new().unwrap().encode(&t, &spec(k).unwrap()).unwrap()
     }
 
+    /// What a macOS browser sends for Option+A on a US layout (Chrome and Safari alike: `key` is
+    /// the character Option typed, `altKey` set) reaches a legacy or Kitty-disambiguate program as
+    /// that character, as Ghostty's default `macos-option-as-alt = false` types it; an Alt whose
+    /// text is the key's own character (`g3d key alt+a`, a Linux browser) is Alt. Kitty's
+    /// all-keys mode and modifyOtherKeys 2 differ from Ghostty's default for the Option character
+    /// (MACOS.md, "Keys"): not asserted here, the lead's to decide.
+    #[test]
+    fn a_macos_option_character_is_its_text_and_alt_as_alt_is_alt() {
+        let opt_a = w("KeyA", "å", &["Alt"], "å");
+        assert_eq!(enc(b"", &opt_a), "å".as_bytes());
+        assert_eq!(enc(b"\x1b[>1u", &opt_a), "å".as_bytes());
+        let alt_a = w("KeyA", "a", &["Alt"], "a");
+        assert_eq!(enc(b"", &alt_a), b"\x1ba");
+        assert_eq!(enc(b"\x1b[>1u", &alt_a), b"\x1b[97;3u");
+        // A dead key (Option+E) types nothing; the next key's text is the composed character.
+        assert_eq!(enc(b"", &w("KeyE", "é", &[], "é")), "é".as_bytes());
+    }
+
     #[test]
     fn the_w3c_code_table_covers_the_keys_a_browser_sends() {
         for (code, key) in [
