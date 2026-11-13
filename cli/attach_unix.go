@@ -311,6 +311,17 @@ func runTerminal(cfg terminalConfig) {
 						log.Printf("[attach] input: %v", err)
 					}
 				},
+				key: func(k termdKey) {
+					s := sess.Load()
+					send("key", k.fields(s.handle))
+				},
+				// The display's paste is the person's own (a paste chord in a focused terminal),
+				// and the display has no confirmation dialog: it pastes as xterm and WezTerm do
+				// (allow_unsafe), with termd's Ghostty encoding still making control bytes spaces.
+				paste: func(text string) {
+					s := sess.Load()
+					send("paste", map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true})
+				},
 				resize:   onResize,
 				scroll:   scroll,
 				refresh:  repaint,
@@ -544,6 +555,8 @@ func encodeOutputFrame(id string, cols, rows int, payload []byte) []byte {
 // inboundHandlers are what an adapter does with each relay push.
 type inboundHandlers struct {
 	bytes    func([]byte)
+	key      func(termdKey)
+	paste    func(text string)
 	resize   func(cols, rows int)
 	scroll   func(lines int)
 	refresh  func()
@@ -551,9 +564,32 @@ type inboundHandlers struct {
 	recreate func()
 }
 
+// termdKey is a display's key event, termd's `key` op as is (W3C KeyboardEvent semantics:
+// docs/termd/PROTOCOL.md, "`key`"); termd encodes it in the program's live keyboard modes.
+type termdKey struct {
+	Code   string   `json:"code,omitempty"`
+	Key    string   `json:"key,omitempty"`
+	Mods   []string `json:"mods,omitempty"`
+	Text   string   `json:"text,omitempty"`
+	Action string   `json:"action,omitempty"`
+}
+
+// fields is the `key` op's request fields for terminal handle h.
+func (k termdKey) fields(h uint32) map[string]any {
+	f := map[string]any{"handle": h, "code": k.Code, "key": k.Key, "text": k.Text}
+	if len(k.Mods) > 0 {
+		f["mods"] = k.Mods
+	}
+	if k.Action != "" {
+		f["action"] = k.Action
+	}
+	return f
+}
+
 // handleInbound dispatches a relay message to this adapter. Events (display → controller
-// push): terminal.bytes (input), terminal.resize, terminal.scroll, terminal.refresh (repaint),
-// terminal.shutdown (kill). Command responses also land here; an "ERR: no terminal" reply (to
+// push): terminal.key (a key event) and terminal.paste (pasted text), which termd encodes for
+// the program; terminal.bytes (raw input, as given); terminal.resize, terminal.scroll,
+// terminal.refresh (repaint), terminal.shutdown (kill). Command responses also land here; an "ERR: no terminal" reply (to
 // our liveness ping) means the display reloaded → re-adopt.
 func handleInbound(msg []byte, termID string, h inboundHandlers) {
 	var ev struct {
@@ -564,6 +600,9 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			Cols       int    `json:"cols"`
 			Rows       int    `json:"rows"`
 			Lines      int    `json:"lines"`
+			// A key event's fields; its `text` is a paste's too (one field: a second `text` here
+			// would shadow the key's and drop every key's text).
+			termdKey
 		} `json:"data"`
 	}
 	if json.Unmarshal(msg, &ev) == nil && ev.Event != "" {
@@ -575,6 +614,10 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			if b, derr := base64.StdEncoding.DecodeString(ev.Data.B64); derr == nil {
 				h.bytes(b)
 			}
+		case "terminal.key":
+			h.key(ev.Data.termdKey)
+		case "terminal.paste":
+			h.paste(ev.Data.Text)
 		case "terminal.resize":
 			h.resize(ev.Data.Cols, ev.Data.Rows)
 		case "terminal.scroll":

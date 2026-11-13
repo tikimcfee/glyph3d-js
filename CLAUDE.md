@@ -197,7 +197,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `gestureResolver`) is the one capture-phase listener: an ordered, composable tier list
   (entity typing → Esc/context pop → nav keymap; camera WASD is the bubble fallthrough).
   The first tier to claim a key consumes it; it yields wholesale when a DOM input is focused.
-  Terminal/grid byte+edit translation comes from `keyEncoding` (`services/interaction`).
+  A terminal's keys leave as W3C key events from `keyEncoding` (`services/interaction`) and its
+  pastes as text; termd encodes both in the program's live modes (docs/termd/PROTOCOL.md `key`,
+  `paste`).
 - **HUD is one-way state→view** — it reflects attention/registry/edit state and issues
   verbs; it owns no behavior.
 

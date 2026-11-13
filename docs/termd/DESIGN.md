@@ -342,7 +342,8 @@ next line in the new file.
 ## Status as built (2026-11-12)
 
 What the branch has of [Status](#status), and where it departs from it. Protocol 1.1 is whole: the
-daemon announces `proto` `[1, 1]` and the feature `status`.
+daemon announces `proto` `[1, 2]` (1.2 adds [keys and paste](#keys-and-paste-protocol-12)) and the
+feature `status`.
 
 **The daemon** (`crates/g3d-termd/src/status.rs`, the types in `g3d-wire`'s `Status`):
 
@@ -489,12 +490,12 @@ update to vt-1.0.1" commit), built with Zig 0.17.0 and Rust 1.98.1.
 - **phux** (Rust, libghostty-rs, the closest relative). Taken:
   - the `!Send` terminal owned by one task;
   - a bootstrap profile that is "synthesized VT, then raw PTY bytes", cut at an inclusive `base_seq` (our `seq`);
+  - structured key input encoded server-side, for the clients that have keys but no terminal (the browser; [Keys and paste](#keys-and-paste-protocol-12)), beside raw bytes for the ones that have one;
   - the server answering each terminal query once while clients suppress replica replies;
   - versioning where only a major refuses, minors add fields that old peers skip and features are announced;
   - fence-and-recut instead of an unbounded backlog for a lagging consumer.
 
   Its hot upgrade (hand the listening socket and PTY fds to the new image, a frozen upgrade blob the candidate parses first) shapes `g3d upgrade` ([Holder and brain](#holder-and-brain)). Not taken:
-  - structured key input encoded server-side (our input is the bytes a keyboard sends; that is what a tty attach client has, and what the browser's `keyEncoding` already produces);
   - its "smallest view wins" size rule;
   - a single current-thread runtime for every terminal (a flood in one would stall the rest; the spike's load is 14 terminals flooding at once).
 - **zmx** (Zig, one daemon per session, libghostty). Taken:
@@ -1394,6 +1395,69 @@ quiet, with every number from the document.
   dismissed or a terminal is spawned. A planned upgrade, or a crash restart within 5 s, shows only
   the amber chip.
 
+## Keys and paste (protocol 1.2)
+
+Two kinds of client, two input shapes; not a dual path:
+
+- **A client that is a terminal** (`g3d attach` in Ghostty, kitty, WezTerm, tmux) sends the bytes
+  its own keyboard encoding made: `INPUT`. It shows the program's raw output, so it sees `CSI > 1 u`,
+  `CSI > 4 ; 2 m`, DECCKM and mode 2004 as the program sets them and encodes keys and pastes to
+  match. Shift+Enter in Claude Code through `g3d attach` works because Ghostty sends what the program
+  asked for.
+- **A client with keys and no terminal** (the browser: the wall and the IDE) can't know those
+  modes when a key is pressed: its emulator learns them a relay hop and a frame later, and a mode
+  read there is stale by the time the bytes land. It sends what it does know, the key event
+  ([`key`](./PROTOCOL.md#key-12)) and the pasted text ([`paste`](./PROTOCOL.md#paste-12)), and termd
+  encodes them on the terminal's owner thread, against the `Terminal` that has parsed every byte
+  the program wrote before the key arrived.
+
+Prior art: WezTerm's multiplexer protocol sends key events from the GUI to the mux server, which
+encodes them against the remote pane's modes (`SendKeyDown`), not bytes; phux keeps key input
+structured to its server for the same reason; xterm, Ghostty and kitty are the encoders a program
+expects, and termd uses Ghostty's.
+
+**Keys.** A key event carries W3C `KeyboardEvent` semantics (`code`, `key`, modifiers, the text it
+typed, press/repeat/release), the model Ghostty's own apprts hand its core (`KeyEvent`: the
+physical key, mods, consumed mods, UTF-8, the unshifted codepoint, src/input/key.zig) and whose
+physical keys Ghostty names by W3C `code` values. termd builds libghostty's `KeyEvent` from it and
+encodes it with libghostty's `KeyEncoder` after `set_options_from_terminal` (Kitty flags,
+modifyOtherKeys 2, DECCKM, DECKPAM, 1035, 1036, DECBKM), in `crates/g3d-termd/src/keys.rs`. The
+client resolves what its OS knows and termd doesn't: the layout, dead keys, the input method,
+Option-as-character (all into `text`), so termd encodes Alt as Alt on a macOS daemon too
+(`macos_option_as_alt` true). termd derives what the W3C event leaves implicit: the unshifted
+character (the client's `key` when it is unshifted, a shifted letter lowercased, else the US
+layout's character for `code`, Ghostty's `Key.codepoint()` table) and the consumed modifiers (Shift
+when it changed the text, Alt when it made another character). What comes out is Ghostty's byte for
+byte, including where that departs from xterm's defaults: Shift+Enter to a program that set no mode
+is `CSI 27;2;13~` (Ghostty's function-key table sends xterm's modified-key form for every modified
+Enter whatever modifyOtherKeys says), and Ctrl+Backspace is `^H`. PROTOCOL.md's table of keys is
+checked against the encoder by a unit test.
+
+**Paste.** `paste` runs libghostty's `Terminal::paste`: bracketed in `ESC[200~`…`ESC[201~` when
+mode 2004 is on, else each `\n` as `\r` (xterm); xterm's strip list (NUL, BS, ENQ, EOT, ESC, DEL
+and the tty's control characters) made spaces in both, so pasted text can't close its bracket
+early or carry an escape sequence. Text that could run commands (a line break without bracketed
+paste; the bracket end with it) is refused with `unsafe_paste` unless `allow_unsafe`: Ghostty's
+`clipboard-paste-protection` rule, with the confirmation left to the client. `g3d paste` refuses
+it and says `--unsafe`; the browser's paste is the person's own paste chord in a focused terminal
+and the display has no confirmation dialog, so the adapter sends `allow_unsafe` (as xterm and
+WezTerm paste: the stripped bytes still protect the bracket). termd installs no clipboard-read
+callback, so a program's Kitty paste events (mode 5522) are never offered: a paste is text.
+
+**The browser.** `keyEncoding.js` (core, `services/interaction`) maps a `KeyboardEvent` to a key
+event (`keyEventFor`) and encodes nothing: modifiers held, `text` the one character `key` names,
+null for a bare modifier, a dead key's own keydown, an IME keystroke and the paste chord (so the
+browser's `paste` event fires). `TerminalGrid.sendKey` and `TerminalGrid.paste` hand them to the
+grid's owner route, the relay pushes `terminal.key` / `terminal.paste`, and the adapter
+(`cli/attach_unix.go`) sends `key` / `paste` on its termd connection. The wall (`WallKeys`) and the
+IDE (`keyboardRouter`'s terminal tier and paste tier) both take this path: they share the core
+grid and its owner route, so there is one. The wall also sends the release of a key whose press
+it sent, to the terminal that got the press (Kitty's event reporting reads releases); the IDE's
+chain is keydown-only and sends none. Raw bytes stay for clients that encode their own keys: the
+IDE's 2D xterm companion (`TerminalView`, xterm.js's `onData`), the wheel's mouse reports from
+the adapter, and scripted `sendInput`. The canvas has no editable element, so an input method's
+composition never starts there (dead keys do resolve); a hidden text input for IME is not built.
+
 ## The Go adapter moves to termd (S1)
 
 `glyph3d-cli attach` stays a forked adapter (S2 dissolves it into the relay). It stops
@@ -1409,6 +1473,7 @@ browser and the relay protocol are untouched: the same `terminal.create` /
 | PTY reader → 16 ms coalescer → `0x01` frames | `OUTPUT` payloads (bytes after `seq`) → the same coalescer → the same `0x01` frames |
 | Size stamped on frames, `resizeCh` drain on resize | Each frame is stamped with the size from the last `size` event. termd places that event at the exact byte, so the old-size/new-size boundary is exact with no drain |
 | `terminal.bytes` → PTY write; `exitScroll` first | `INPUT`; termd snaps a scrolled view to live itself |
+| — | `terminal.key` → `key`, `terminal.paste` → `paste` (protocol 1.2): termd encodes them ([Keys and paste](#keys-and-paste-protocol-12)) |
 | `terminal.resize` → `pty.Setsize` | `resize` |
 | `terminal.refresh` → OSC 2 from `#{pane_title}` + `refresh-client -t <our client>` | `repaint` (the title is part of every repaint). The adapter writes the `REPAINT` bytes into the `0x01` stream at the repaint's size |
 | `terminal.scroll` → copy-mode `scroll-up`/`scroll-down`, cancel at bottom | `view {delta}`; the browser gets the viewed rows as repaint bytes, as copy-mode's redraw did. Alt screen: unchanged `forwardWheelToApp`, deciding from the last `modes` event instead of `display-message` |
@@ -1433,8 +1498,8 @@ Two browser-visible consequences of raw bytes, handled in S1:
   adapter asks termd for a `repaint` on every `size` event, so the grid follows even while a
   long command runs.
 - **Paste.** tmux stripped bracketed-paste markers for programs that hadn't enabled mode
-  2004; termd writes input as is. `TerminalGrid.paste` frames only when the program asked
-  (its own emulator's `bracketedPasteMode`) and otherwise sends newlines as CR, as xterm does.
+  2004; termd writes `INPUT` as is. A paste is termd's `paste` op, which frames it by the
+  program's mode at the moment it lands ([Keys and paste](#keys-and-paste-protocol-12)).
 
 Relay changes in the same commit (no dual path, no flag):
 
@@ -1512,7 +1577,15 @@ agent's own terminal, and could even take input.
   terminal ended meanwhile (`no_terminal`), and with a message when the namespace is gone or no
   engine answers within `--reconnect-window` (30 s, `G3D_RECONNECT_WINDOW`);
 - `g3d ls`, `g3d new <id> -- cmd...`, `g3d kill <id>`, `g3d stop` are thin wrappers over
-  the ops.
+  the ops;
+- `g3d send <id> [text]` types bytes as given (stdin when no text: tmux's `send-keys -l`),
+  `g3d key <id> <chord>...` presses keys (`shift+enter`, `ctrl+c`, `alt+left`, `F5`, `a`; Ghostty's
+  keybind syntax: `shift`, `ctrl`/`control`, `alt`/`opt`/`option`, `super`/`cmd`/`command`, `+`
+  alone the plus key; a chord stands for a US keyboard, so `shift+1` is `!`) through the `key` op,
+  and `g3d paste <id> [text]` (stdin when no text) pastes through the `paste` op, refusing what
+  could run commands unless `--unsafe`. Each takes an input-only subscription (`mode: "none"`,
+  `attach`) and ends with `unsubscribe`, whose reply means termd took the input (an `error` event
+  about it arrives first, and `g3d` exits 1 with it).
 
 Run inside a tmux pane, `g3d attach` gives tmux users tmux back with no tmux server of
 ours.
@@ -1652,6 +1725,16 @@ holder.
 - **Status.** The document's shape against a golden file (keys and types); a quiet daemon sends
   only keepalives; a flood pushes at the interval with live rates; 100 followers get one
   serialization per tick.
+- **Keys and paste** (`tests/keys.rs`, `src/keys.rs`, `crates/g3d/tests/input.rs`). A program
+  that sets a mode and prints every byte it reads in hex: Shift+Enter is `CSI 13;2u` after
+  `CSI > 1 u` and `CSI 27;2;13~` without it; Ctrl+P is `CSI 27;5;112~` under modifyOtherKeys 2;
+  ArrowUp is `ESC O A` under DECCKM; a paste is bracketed exactly when mode 2004 is on, a line
+  break without it is refused (`unsafe_paste`) and with `allow_unsafe` arrives as `\r`, and a
+  pasted `ESC [201~` arrives as ` [201~` inside one bracket; `key` and `paste` need a writing
+  subscription. PROTOCOL.md's key table equals the encoder's output. `g3d send`/`key`/`paste`
+  against a private daemon. Through the relay (`termd-relay-check.mjs`): `terminal.key` Shift+Enter
+  and Ctrl+C into a Kitty-mode program, `terminal.paste` bracketed with its `ESC` a space. In the
+  browser (`wall-e2e.mjs`): a real Shift+Enter into a Kitty-mode program and a real paste event.
 - **Relay and wall.** `termd/status` reaches a simulated display with each `relay.state`
   (`absent` → `ok` → `restarting` → `ok`, then `lost` after a holder kill); the wall's chip,
   window and notice render in `tools/wall-e2e.mjs` (the operator judges the look on the live display).

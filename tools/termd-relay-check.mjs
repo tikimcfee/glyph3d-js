@@ -143,6 +143,11 @@ const relayEvent = async (msg, event, ms = 8000) => {
 };
 const type = (id, text) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.bytes', data: { terminalId: id, b64: Buffer.from(text).toString('base64') } }));
 const screenHas = (id, s, ms = 8000) => waitFor(() => term(id).text.includes(s), ms, `"${s}" on ${id}`).then(() => true, () => false);
+/** A display's key event and paste, as the wall's keyboard and clipboard push them. */
+const press = (id, key) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.key', data: { terminalId: id, action: 'press', ...key } }));
+const pasteText = (id, text) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.paste', data: { terminalId: id, text } }));
+/** What a program read, as the hex echo below prints it. */
+const hexOf = (s) => [...Buffer.from(s)].map((b) => `[${b.toString(16).padStart(2, '0')}]`).join('');
 const wheel = (id, lines) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.scroll', data: { terminalId: id, lines } }));
 /** The pid of the adapter process serving terminal `id` on this relay. */
 const adapterPid = (id) => {
@@ -150,6 +155,10 @@ const adapterPid = (id) => {
     const line = ps.split('\n').find((l) => l.includes(` attach ${id} --port ${PORT} `));
     return line ? Number(line.trim().split(/\s+/)[0]) : null;
 };
+// A program that pushed Kitty keyboard flags (CSI > 1 u) and asked for bracketed paste, echoing each
+// byte it reads in hex.
+const KITTY_HEX = ['sh', '-c', "stty raw -echo; printf '\\033[>1u\\033[?2004hKEYS-%s\\n' READY; " +
+    "while :; do b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); printf '[%s]' \"$b\"; done"];
 // A program on the alternate screen that asked for SGR mouse reports, echoing what it reads.
 const ALT_MOUSE = ['sh', '-c', "printf '\\033[?1049h\\033[?1000h\\033[?1006hALT-READY'; stty raw -echo; exec cat -v"];
 
@@ -222,6 +231,25 @@ try {
     ok(inOrder, `seq 1 300000 arrived whole and in order through termd → adapter → relay (${nums.length} lines)`);
     if (!inOrder) info(`flood starts ${JSON.stringify(flood.slice(0, 120))} … ends ${JSON.stringify(flood.slice(-120))}`);
 
+    // ── key events and paste: termd encodes them in the program's own modes ──
+    {
+        const sk = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: KITTY_HEX }, 'terminal.spawning');
+        await waitFor(() => term(sk.id).owner, 8000, 'the Kitty-keyboard terminal');
+        ok(await screenHas(sk.id, 'KEYS-READY'), 'the Kitty-keyboard program is up');
+        press(sk.id, { code: 'Enter', key: 'Enter', mods: ['Shift'], text: '' });
+        ok(await screenHas(sk.id, hexOf('\x1b[13;2u')), 'terminal.key Shift+Enter reaches a Kitty-keyboard program as CSI 13;2u');
+        press(sk.id, { code: 'KeyA', key: 'a', mods: [], text: 'a' });
+        ok(await screenHas(sk.id, hexOf('\x1b[13;2ua')), "terminal.key a types its text, a (Kitty's CSI 97u would mean the text was lost)");
+        press(sk.id, { code: 'KeyC', key: 'c', mods: ['Control'], text: 'c' });
+        ok(await screenHas(sk.id, hexOf('a\x1b[99;5u')), 'terminal.key Ctrl+C reaches it as CSI 99;5u, not a SIGINT byte');
+        pasteText(sk.id, 'hi\x1b[201~x');
+        ok(await screenHas(sk.id, hexOf('\x1b[200~hi [201~x\x1b[201~')),
+            'terminal.paste is bracketed, and an ESC inside it is a space: the bracket ends once');
+        display.send(JSON.stringify({ to: term(sk.id).owner, event: 'terminal.shutdown', data: { terminalId: sk.id } }));
+        await waitFor(() => !execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' }).includes(`${sk.id} `),
+            8000, `${sk.id} to end`);
+    }
+
     // ── the wheel over a mouse-reporting alt-screen program goes to the program ──
     const sw = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: ALT_MOUSE }, 'terminal.spawning');
     const W = sw.id;
@@ -259,8 +287,9 @@ try {
     ok(await screenHas(W, '^[[<65;'), 'after re-adoption the wheel still reaches the alt-screen program (the adapter knows its modes)');
     type(A, 'echo after-$((2+3))\r');
     ok(await screenHas(A, 'after-5'), 'typing reaches the re-adopted shell');
+    const lastId = Math.max(...[...terms.keys()].map((id) => Number(/^term-(\d+)$/.exec(id)?.[1] ?? 0)));
     const s2 = await relayEvent({ relay: 'terminal.spawn', cols: 60, rows: 10, argv: ['sh'] }, 'terminal.spawning');
-    ok(s2.id === 'term-4', `a spawn after the restart mints a fresh id (${s2.id})`);
+    ok(s2.id === `term-${lastId + 1}`, `a spawn after the restart mints a fresh id, past every one before it (${s2.id})`);
     await waitFor(() => term(s2.id).owner, 8000, 'the second terminal');
 
     // ── an adapter dies under a live relay: the relay re-adopts its terminal ──

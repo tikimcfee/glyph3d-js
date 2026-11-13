@@ -64,6 +64,15 @@ test('a re-create from a new adapter takes the grid: owner, input, repaint, resi
     expect(pushed[0]).toMatchObject({ to: 'ctrl-1', event: 'terminal.bytes', data: { terminalId: 'term-3' } });
     expect(Buffer.from(pushed[0].data.b64, 'base64').toString()).toBe('ls\r');
 
+    // A key event and a paste ride their own pushes to the same owner, for termd to encode.
+    pushed.length = 0;
+    grid.sendKey({ code: 'Enter', key: 'Enter', mods: ['Shift'], text: '', action: 'press' });
+    grid.paste('one\ntwo');
+    expect(pushed).toEqual([
+        { to: 'ctrl-1', event: 'terminal.key', data: { terminalId: 'term-3', code: 'Enter', key: 'Enter', mods: ['Shift'], text: '', action: 'press' } },
+        { to: 'ctrl-1', event: 'terminal.paste', data: { terminalId: 'term-3', text: 'one\ntwo' } },
+    ]);
+
     pushed.length = 0;
     await router.execute('terminal.resize term-3 30 8');
     await router.execute('terminal.kill term-3');

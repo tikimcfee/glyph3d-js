@@ -42,7 +42,7 @@
  * is the one key it won't see. Soft focus (not captured) keeps Esc for the host's context pop.
  */
 
-import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncoding.js';
+import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { resolveGesture } from './gestureResolver.js';
 import { resolveKeyBinding } from './keymap.js';
 
@@ -74,13 +74,14 @@ function captureToggle(e, env) {
 
 // ---- Entity-typing tier: deliver to whatever holds the 'key' slot ----
 
-/** Terminal: KeyboardEvent → ANSI bytes → grid.sendInput (the canvas→shell leg). When `captured`,
- *  the encoder also sends Esc (otherwise Esc returns null here and falls to the context tier). */
+/** Terminal: KeyboardEvent → key event → grid.sendKey (the canvas→shell leg; termd encodes it in
+ *  the program's modes). When `captured`, Esc goes too (otherwise it maps to null here and falls
+ *  to the context tier). */
 function terminalKeyHandler(e, grid, captured) {
-    if (!grid || typeof grid.sendInput !== 'function') return false;
-    const bytes = keyToTerminalBytes(e, { captureEscape: captured });
-    if (bytes == null) return false;
-    return grid.sendInput(bytes);
+    if (!grid || typeof grid.sendKey !== 'function') return false;
+    const key = keyEventFor(e, { captureEscape: captured });
+    if (!key) return false;
+    return grid.sendKey(key);
 }
 
 /** Grid in edit mode: printable / navigation / editing keys → CodeGrid L2 edit ops. Bails on
@@ -124,7 +125,8 @@ const ENTITY_HANDLERS = {
 /**
  * PASTE delivery, the same dispatch shape one tier up: clipboard TEXT → whichever entity holds
  * the 'key' slot. Each entry hands the text to the entity and lets IT decide the encoding — the
- * terminal frames a bracketed-paste burst, the grid runs edit ops. This chain never speaks VT.
+ * terminal sends a paste (termd frames it per the program's mode), the grid runs edit ops. This
+ * chain never speaks VT.
  */
 const PASTE_HANDLERS = {
     terminal: (text, entity) => entity.grid?.paste?.(text) === true,

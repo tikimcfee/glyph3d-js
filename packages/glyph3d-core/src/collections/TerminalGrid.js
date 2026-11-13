@@ -65,13 +65,6 @@ export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
 // same band CodeGrid's caret uses. A compositing constant, not a taste knob, so it stays baked.
 const CURSOR_RENDER_ORDER = 5;
 
-// Bracketed-paste framing (DECSET 2004). A pasted burst arrives wrapped in these so the
-// receiving application can tell "the human pasted this" from "the human typed this" — which
-// is how a shell declines to execute a multi-line paste and an editor declines to auto-indent
-// it. See TerminalGrid.paste().
-const PASTE_START = '\x1b[200~';
-const PASTE_END   = '\x1b[201~';
-
 export default class TerminalGrid extends FramedGlyphField {
     static CONTROL_SPEC = TERMINAL_CONTROL_SPEC;
 
@@ -98,7 +91,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
         // This terminal's id — the one the registry, the WorkspaceModel surface record and the
         // owning adapter all know it by. Held here so INPUT the grid emits carries its own
-        // identity: callers say WHAT to send, never WHO is sending (see onInput / paste).
+        // identity: callers say WHAT to send, never WHO is sending (see onInput).
         // NOT `this.id`: Object3D defines that as a non-writable numeric instance id
         // (Object.defineProperty, writable:false), so assigning it throws in strict mode.
         this.terminalId = options.id ?? null;
@@ -170,11 +163,15 @@ export default class TerminalGrid extends FramedGlyphField {
 
         /**
          * Input callback -- set by the owning agent or process. When set, every input this
-         * terminal emits (keystroke bytes from the responder chain, `terminal.input`, paste)
-         * leaves through here, bound for the owning adapter's PTY.
-         * Signature: (bytes: string, terminalId: string) => void — the id is THIS grid's
+         * terminal emits leaves through here, bound for the owning adapter and termd. Three
+         * shapes, one per kind of input (sendInput / sendKey / paste):
+         *   { bytes: string }   raw bytes, written as given (an emulator that encodes its own
+         *                       keys: a 2D xterm companion)
+         *   { key: TerminalKeyEvent }  a key event, which termd encodes in the program's modes
+         *   { paste: string }   pasted text, which termd frames per the program's paste mode
+         * Signature: (input, terminalId: string) => void — the id is THIS grid's
          * `this.terminalId`, supplied by the grid, not by the caller.
-         * @type {Function|null}
+         * @type {((input: {bytes?: string, key?: import('../services/interaction/keyEncoding.js').TerminalKeyEvent, paste?: string}, terminalId: string) => void)|null}
          */
         this.onInput = null;
 
@@ -660,44 +657,47 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * INPUT entry — the twin of writeBytes. Hand the terminal bytes and it emits them through
-     * its owner's callback, stamped with its own id. Every input surface (the keyboard
-     * responder chain, a 2D companion xterm, the `terminal.input` verb) funnels through here,
-     * so identity is the grid's business and callers only decide WHAT to send.
+     * INPUT entry for raw bytes — the twin of writeBytes. Hand the terminal bytes and it emits
+     * them through its owner's callback, stamped with its own id, to be written to the program as
+     * given. For a surface that encodes its own keys (a 2D companion xterm) and for scripted
+     * input; the keyboard sends key events (sendKey) and the clipboard pastes (paste).
      *
      * @param {string} bytes - raw terminal input bytes
      * @returns {boolean} true if an owner was listening and took them
      */
     sendInput(bytes) {
         if (typeof this.onInput !== 'function' || !bytes) return false;
-        this.onInput(bytes, this.terminalId);
+        this.onInput({ bytes }, this.terminalId);
         return true;
     }
 
     /**
-     * Paste text as a single bracketed-paste burst. Terminal semantics live HERE, not in the
-     * app shell: callers pass plain clipboard text and the grid frames it.
+     * A key event (keyEncoding.keyEventFor) for the program. termd encodes it in the program's
+     * live keyboard modes (Kitty keyboard, modifyOtherKeys, application cursor keys) — the grid
+     * never turns keys into bytes itself, because only termd knows those modes when it matters.
      *
-     * Input goes to the program's PTY unchanged (g3d-termd writes it as typed), so the grid does
-     * what a terminal does: when the program has asked for bracketed paste (DECSET 2004, read
-     * from this terminal's own emulator, which parses the same bytes the program wrote) the text
-     * is framed in `ESC [ 200 ~` … `ESC [ 201 ~` with its newlines intact; when it hasn't, the
-     * text goes bare with each newline sent as CR, the Enter key, as xterm does. No emulator yet
-     * (nothing parsed) frames, the safe side: a shell that never asked shows the markers once
-     * rather than running each line.
-     *
-     * Either way the end-marker is stripped from the text: clipboard text containing
-     * `ESC [ 201 ~` would otherwise close the bracket early and let its remainder run as
-     * keystrokes (paste injection).
+     * @param {import('../services/interaction/keyEncoding.js').TerminalKeyEvent} key
+     * @returns {boolean} true if an owner was listening and took it
+     */
+    sendKey(key) {
+        if (typeof this.onInput !== 'function' || !key) return false;
+        this.onInput({ key }, this.terminalId);
+        return true;
+    }
+
+    /**
+     * Paste text. termd frames it as Ghostty does: in `ESC [ 200 ~` … `ESC [ 201 ~` when the
+     * program asked for bracketed paste (mode 2004), else with each newline sent as CR, the Enter
+     * key; either way with ESC and the other control bytes xterm strips made spaces, so pasted
+     * text can't close the bracket early and run its remainder as keystrokes.
      *
      * @param {string} text - plain clipboard text
      * @returns {boolean} true if it was sent
      */
     paste(text) {
-        if (typeof text !== 'string' || text === '') return false;
-        const clean = text.replaceAll(PASTE_END, '');
-        if (this._emulator && !this._emulator.bracketedPaste) return this.sendInput(clean.replace(/\r?\n/g, '\r'));
-        return this.sendInput(PASTE_START + clean + PASTE_END);
+        if (typeof this.onInput !== 'function' || typeof text !== 'string' || text === '') return false;
+        this.onInput({ paste: text }, this.terminalId);
+        return true;
     }
 
     /**

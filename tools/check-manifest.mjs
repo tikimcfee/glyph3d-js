@@ -223,7 +223,7 @@ export const CHECKS = [
     // ── terminal / relay wires ───────────────────────────────────────────────────────────────
     h('terminal-depth.test.mjs', ['terminal'], 'scrollback-into-depth: scroll detection, row capture, fade, synced into a real slot buffer', 'a real program\'s byte stream through termd'),
     h('terminal-text-path.test.mjs', ['terminal'], 'only changes: a random walk of screens against a reference model, exact written slots + upload ranges, zero allocation per update, parse → update → render order', 'xterm\'s internals moving (the emulator throws at construction)'),
-    h('terminal-paste.test.mjs', ['terminal'], 'keyEncoding declines the paste chord; TerminalGrid.paste frames one bracketed burst', 'the browser clipboard'),
+    h('terminal-input.test.mjs', ['terminal'], 'keyEventFor maps browser keys to W3C key events (Shift+Enter stays Shift+Enter, dead keys and IME type nothing yet) and declines the paste chord; the grid hands keys, pastes and bytes on whole, stamped with its id', 'the browser clipboard; the encoding (termd\'s: crates/g3d-termd/tests/keys.rs)'),
     h('terminal-emulator-resize-check.mjs', ['terminal'], 'TerminalEmulator under a write+resize storm: coalesced, uncorrupted, correct final screen', 'a real PTY'),
     h('terminal-dock-sync-check.mjs', ['terminal', 'desk'], 'the Terminals-panel activation guard is timing-proof', 'dockview\'s real event timing'),
     h('terminal-spawn-dock-check.mjs', ['terminal', 'desk'], 'terminal.spawn awaits its own terminal, then docks + focuses it', 'the relay'),
@@ -236,7 +236,7 @@ export const CHECKS = [
     {
         name: 'termd-relay-check', cmd: ['bun', 'tools/termd-relay-check.mjs', '--relay', '{port}'], tier: 'full', scope: ['terminal', 'relay'],
         needs: ['own-relay', 'termd'], apart: ['*'], timeoutMs: 180_000,
-        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd brain crash and a `g3d upgrade` ridden by every adapter (no grid closes, the repaint brings the screen back, recover mid-restart never answers empty), the holder dying (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon), and termd/status reaching the display through each state (absent, ok, restarting, lost) with the request and the CLI\'s termd.status',
+        compare: 'the relay on g3d-termd with a simulated display: spawn + typing, terminal.key Shift+Enter and Ctrl+C into a Kitty-keyboard program and terminal.paste bracketed with its ESC made a space, a 300k-line flood whole and in order, a relay restart (terminal survives, recover re-adopts, the repaint carries the old screen), a termd brain crash and a `g3d upgrade` ridden by every adapter (no grid closes, the repaint brings the screen back, recover mid-restart never answers empty), the holder dying (adapters close their grids, the relay log says LOST termd, the next spawn starts a fresh daemon), and termd/status reaching the display through each state (absent, ok, restarting, lost) with the request and the CLI\'s termd.status',
         blind: 'the browser (wall-e2e drives the same paths with pixels)',
     },
     h('bridge-binary.test.mjs', ['relay'], 'the RPC binary result plane: frame parse, header + payload, pending resolution', 'the Go encoder'),
@@ -259,7 +259,7 @@ export const CHECKS = [
     bt('wall-store.test.mjs', ['wall'], "the wall's per-relay names, spots, hidden terminals, groups, sidebar and termd status window: scoped keys, round-trip, one group per terminal, pruned against the live set (groups lose dead members, go when empty), kill forgets", 'localStorage in a real browser'),
     bt('wall-panels.test.mjs', ['wall'], "the wall's two side panels: where the sidebar and the status window dock (one edge holds both, side by side; the topbar clears them), and the status window's knobs checked as wall.config's", 'the DOM and pixels (wall-e2e covers them)'),
     bt('wall-groups.test.mjs', ['wall'], "the wall's groups on a stand-in wall: tile from where gathered, re-tile on columns/hide/show, move whole, drop into the nearest tile, freeform keeps spots, refusals say why", 'three, pixels and input (wall-e2e covers them)'),
-    bt('terminal-readopt.test.mjs', ['terminal'], 'a terminal.create for a grid already shown re-adopts it: owner, input route, repaint go to the sender', 'a live relay restart (wall-e2e covers it)'),
+    bt('terminal-readopt.test.mjs', ['terminal'], 'a terminal.create for a grid already shown re-adopts it: owner, input route (bytes, key events, pastes), repaint go to the sender', 'a live relay restart (wall-e2e covers it)'),
 
     // ── form / corpus ────────────────────────────────────────────────────────────────────────
     {
@@ -339,7 +339,7 @@ export const CHECKS = [
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
-        compare: 'the wall end to end in a real-GPU browser: spawn, typing, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal, the sidebar and status window docked on one edge, a status row revealing a hidden terminal',
+        compare: 'the wall end to end in a real-GPU browser: spawn, typing, Shift+Enter into a Kitty-keyboard program as CSI 13;2u and a paste bracketed as it asked, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal, the sidebar and status window docked on one edge, a status row revealing a hidden terminal',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
     },
     {
