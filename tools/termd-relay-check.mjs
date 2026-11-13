@@ -9,7 +9,8 @@
  *   - spawn: the relay starts termd, an adapter creates and owns the terminal, typing echoes back;
  *   - a spawn with no argv, from a relay whose environment carries another terminal's identity and
  *     a parent shell's state: termd starts the account's shell as a login shell in the relay's
- *     served root, with termd's own TERM_PROGRAM and none of the relay's identity (Linux: /proc);
+ *     served root, with termd's own TERM_PROGRAM and none of the relay's identity (the
+ *     environment from /proc on Linux; on macOS, which withholds a platform shell's, from `g3d env`);
  *     the relay sends no environment of its own, so `g3d env` tags nothing `caller`;
  *   - flood: `seq 1 300000` through termd → adapter → relay → display arrives whole, in order;
  *   - relay restart: the terminal survives, terminal.recover re-adopts it, the adoption repaint
@@ -34,6 +35,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brainPid, g3dBeside, privateTermd, stopTermd, stopTermdSync, termdBeside, termdPid } from './lib/termd.mjs';
@@ -205,27 +207,37 @@ try {
     const ls = execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' });
     const line = ls.split('\n').find((l) => l.startsWith(`${sd.id} `)) ?? '';
     const shellPid = Number(/ pid (\d+)/.exec(line)?.[1]);
-    const passwdShell = execFileSync('getent', ['passwd', String(process.getuid())], { encoding: 'utf8' }).trim().split(':')[6];
+    const passwdShell = os.userInfo().shell; // getpwuid, as termd reads it
     ok(line.includes(` ${passwdShell}`), `with no argv the relay's terminal runs the account's shell (${line.trim()})`);
-    if (existsSync(`/proc/${shellPid}`)) {
-        const argv0 = readFileSync(`/proc/${shellPid}/cmdline`, 'utf8').split('\0')[0];
-        ok(argv0 === `-${path.basename(passwdShell)}`, `...as a login shell (argv[0] ${JSON.stringify(argv0)})`);
-        ok(readlinkSync(`/proc/${shellPid}/cwd`) === root, `...in the relay's served root (${readlinkSync(`/proc/${shellPid}/cwd`)})`);
-        const env = Object.fromEntries(readFileSync(`/proc/${shellPid}/environ`, 'utf8').split('\0').filter(Boolean)
-            .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
-        ok(env.TERM_PROGRAM === 'g3d-termd' && env.TERM === 'xterm-256color' && env.PWD === root && env.G3D_TERMD_ID === sd.id,
-            `...with termd's own variables (TERM_PROGRAM ${env.TERM_PROGRAM}, TERM ${env.TERM}, PWD ${env.PWD})`);
-        const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE'].filter((k) => k in env);
-        ok(leaked.length === 0, `...and none of the relay's identity or shell state (leaked: ${leaked.join(' ') || 'none'})`);
-        // The relay is a creator with no shell: no env_base, so the session's names, never its own.
-        let tags = [];
-        try {
-            tags = JSON.parse(execFileSync(g3dBeside(BIN), ['--ns', NS, 'env', sd.id, '--json'], { env: termd.env, encoding: 'utf8' })).env ?? [];
-        } catch (e) { info(`g3d env: ${e.message}`); }
-        const callers = tags.filter((v) => v.source === 'caller').map((v) => v.name);
-        ok(tags.length === Object.keys(env).length && callers.length === 0,
-            `...the relay sent no environment of its own: g3d env tags ${tags.length} variables, none caller (${callers.join(' ') || 'none'})`);
-    } else info(`no /proc/${shellPid}: the environment checks are Linux-only here`);
+    // argv[0] and the cwd: /proc on Linux; ps and lsof elsewhere (macOS has no /proc).
+    const linux = existsSync(`/proc/${shellPid}`);
+    const argv0 = linux
+        ? readFileSync(`/proc/${shellPid}/cmdline`, 'utf8').split('\0')[0]
+        : execFileSync('ps', ['-o', 'args=', '-p', String(shellPid)], { encoding: 'utf8' }).trim().split(/\s+/)[0];
+    const cwd = linux
+        ? readlinkSync(`/proc/${shellPid}/cwd`)
+        : execFileSync('lsof', ['-a', '-p', String(shellPid), '-d', 'cwd', '-Fn'], { encoding: 'utf8' }).split('\n').find((l) => l.startsWith('n'))?.slice(1);
+    ok(argv0 === `-${path.basename(passwdShell)}`, `...as a login shell (argv[0] ${JSON.stringify(argv0)})`);
+    ok(cwd === root, `...in the relay's served root (${cwd})`);
+    // The relay is a creator with no shell: no env_base, so the session's names, never its own.
+    let tags = [];
+    try {
+        tags = JSON.parse(execFileSync(g3dBeside(BIN), ['--ns', NS, 'env', sd.id, '--json'], { env: termd.env, encoding: 'utf8' })).env ?? [];
+    } catch (e) { info(`g3d env: ${e.message}`); }
+    // The kernel's view on Linux; macOS withholds a platform binary's environment (zsh's) from
+    // other processes, so there the environment checks read termd's own account of it.
+    const env = linux
+        ? Object.fromEntries(readFileSync(`/proc/${shellPid}/environ`, 'utf8').split('\0').filter(Boolean)
+            .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]))
+        : Object.fromEntries(tags.map((v) => [v.name, v.value]));
+    if (!linux) info('the login shell\'s environment as `g3d env` reports it (macOS withholds a platform binary\'s; cargo test\'s tests/env.rs reads the kernel\'s)');
+    ok(env.TERM_PROGRAM === 'g3d-termd' && env.TERM === 'xterm-256color' && env.PWD === root && env.G3D_TERMD_ID === sd.id,
+        `...with termd's own variables (TERM_PROGRAM ${env.TERM_PROGRAM}, TERM ${env.TERM}, PWD ${env.PWD})`);
+    const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE'].filter((k) => k in env);
+    ok(leaked.length === 0, `...and none of the relay's identity or shell state (leaked: ${leaked.join(' ') || 'none'})`);
+    const callers = tags.filter((v) => v.source === 'caller').map((v) => v.name);
+    ok(tags.length === Object.keys(env).length && callers.length === 0,
+        `...the relay sent no environment of its own: g3d env tags ${tags.length} variables, none caller (${callers.join(' ') || 'none'})`);
     // Ended as the display ends one (terminal.kill → terminal.shutdown), so later counts hold.
     display.send(JSON.stringify({ to: term(sd.id).owner, event: 'terminal.shutdown', data: { terminalId: sd.id } }));
     await waitFor(() => !execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' }).includes(`${sd.id} `),

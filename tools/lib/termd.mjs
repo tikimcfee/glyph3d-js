@@ -47,11 +47,10 @@ export function termdPid(dir, ns) {
     try { pid = Number(readFileSync(path.join(dir, `termd-${ns}.sock.lock`), 'utf8').trim()); } catch { return null; }
     if (!Number.isInteger(pid) || pid <= 0) return null;
     try { process.kill(pid, 0); } catch { return null; }
-    if (existsSync('/proc')) {
-        try {
-            if (!readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('g3d-termd')) return null;
-        } catch { return null; }
-    }
+    try {
+        // ps, not /proc: macOS has none.
+        if (!execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).includes('g3d-termd')) return null;
+    } catch { return null; }
     return pid;
 }
 
