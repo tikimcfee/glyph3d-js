@@ -224,8 +224,9 @@ impl Var {
 /// An environment as it is composed: each name with its value and source.
 pub type Env = BTreeMap<String, Var>;
 
-/// A session source's answer: its variables, and its name (`via`).
-pub type SourceAnswer = (Vec<(String, String)>, &'static str);
+/// A session source's answer: its variables, each with where it was read (`via`, as `env` tags
+/// it), and the source's own name (the status document's `daemon.env.source`).
+pub type SourceAnswer = (Vec<(String, String, &'static str)>, &'static str);
 
 /// The account, as `login(1)` knows it.
 #[derive(Clone, Debug)]
@@ -427,18 +428,16 @@ fn choose_shell(s: &Settings, account: &Account, env_shell: Option<&str>) -> (St
 }
 
 /// The no-caller base (layer 1): each name `allowed` lets through, from the session source's
-/// answer (`found`: its variables and its name), else the daemon's start value for that name;
-/// the locale as one group ([`LOCALE_GROUP`]).
+/// answer (`found`: its variables, each with where it was read), else the daemon's start value
+/// for that name; the locale as one group ([`LOCALE_GROUP`]).
 pub fn session_base(
     allowed: &dyn Fn(&str) -> bool,
-    found: Option<(&[(String, String)], &'static str)>,
+    found: Option<&[(String, String, &'static str)]>,
     start: &[(String, String)],
 ) -> Env {
     let mut env = Env::new();
-    if let Some((vars, via)) = found {
-        for (k, v) in vars.iter().filter(|(k, _)| allowed(k)) {
-            env.insert(k.clone(), Var::new(v, EnvSource::Session, Some(via)));
-        }
+    for (k, v, via) in found.unwrap_or_default().iter().filter(|(k, _, _)| allowed(k)) {
+        env.insert(k.clone(), Var::new(v, EnvSource::Session, Some(via)));
     }
     let session_locale = env.keys().any(|k| any_match(LOCALE_GROUP, k));
     for (k, v) in start.iter().filter(|(k, _)| allowed(k)) {
@@ -872,7 +871,8 @@ impl Policy {
         if let Some(f) = &self.manager_file {
             let s = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
             // It stands in for the platform's session source, under that source's name.
-            return Ok((parse_manager_env(&s)?, platform::SOURCE.unwrap_or("hook")));
+            let via = platform::SOURCE.unwrap_or("hook");
+            return Ok((parse_manager_env(&s)?.into_iter().map(|(k, v)| (k, v, via)).collect(), via));
         }
         platform::session_env(names, &self.start_env, self.manager_timeout)
     }
@@ -889,7 +889,7 @@ impl Policy {
                 SessionSource::Auto => self
                     .source_env(&["XDG_CONFIG_HOME".to_owned()])
                     .ok()
-                    .and_then(|(v, _)| v.into_iter().find(|(k, _)| k == "XDG_CONFIG_HOME").map(|(_, v)| v)),
+                    .and_then(|(v, _)| v.into_iter().find(|(k, _, _)| k == "XDG_CONFIG_HOME").map(|(_, v, _)| v)),
             };
             let home = account().map(|a| a.home).unwrap_or_default();
             default_config_path(xdg.as_deref(), &home)
@@ -997,7 +997,7 @@ impl Policy {
             }
         }
         let found = found.ok();
-        session_base(&|k| file.allowed(k), found.as_ref().map(|(v, via)| (v.as_slice(), *via)), &self.start_env)
+        session_base(&|k| file.allowed(k), found.as_ref().map(|(v, _)| v.as_slice()), &self.start_env)
     }
 
     /// A whole plan for one `create`: the file, the base and the account read now.
@@ -1136,22 +1136,25 @@ pub fn locale_problem(env: &[(String, String)]) -> Option<String> {
     }
 }
 
+/// Whether locale `name` loads here (`newlocale` of its character type).
+fn locale_loads(name: &str) -> bool {
+    let Ok(c) = std::ffi::CString::new(name) else { return false };
+    // SAFETY: newlocale with a NUL-terminated name and no base; freed at once.
+    let l = unsafe { libc::newlocale(libc::LC_CTYPE_MASK, c.as_ptr(), std::ptr::null_mut()) };
+    if l.is_null() {
+        return false;
+    }
+    unsafe { libc::freelocale(l) };
+    true
+}
+
 /// The locale to fill when none is set, if it loads here (`newlocale`); else `None`, said once.
 pub fn locale_fill(enabled: bool) -> Option<String> {
     if !enabled {
         return None;
     }
     let want = platform::default_locale();
-    let loads = |name: &str| {
-        let Ok(c) = std::ffi::CString::new(name) else { return false };
-        // SAFETY: newlocale with a NUL-terminated name and no base; freed at once.
-        let l = unsafe { libc::newlocale(libc::LC_CTYPE_MASK, c.as_ptr(), std::ptr::null_mut()) };
-        if l.is_null() {
-            return false;
-        }
-        unsafe { libc::freelocale(l) };
-        true
-    };
+    let loads = locale_loads;
     if loads(&want) {
         return Some(want);
     }
@@ -1233,7 +1236,8 @@ mod platform {
         let out = super::run_bounded(cmd, &busctl.display().to_string(), timeout)
             .map_err(|e| e.replace("did not answer", "(the user manager) did not answer"))?;
         let out = String::from_utf8(out).map_err(|_| "busctl printed something that is not UTF-8".to_owned())?;
-        Ok((super::parse_manager_env(&out)?, "systemd-user"))
+        let vars = super::parse_manager_env(&out)?;
+        Ok((vars.into_iter().map(|(k, v)| (k, v, "systemd-user")).collect(), "systemd-user"))
     }
 }
 
@@ -1247,18 +1251,9 @@ mod platform {
 
     /// macOS: the user's own locale (the `AppleLocale` preference, as Terminal.app, iTerm2 and
     /// Ghostty read it) as `<language>_<region>.UTF-8`; `C.UTF-8` when it has no region. The
-    /// caller checks that it loads. Unverified here: the macOS branch proves it.
+    /// caller checks that it loads.
     pub fn default_locale() -> String {
-        if let Ok(out) = Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLocale"]).output()
-            && out.status.success()
-        {
-            let s = String::from_utf8_lossy(&out.stdout);
-            let tag = s.trim().split('@').next().unwrap_or("");
-            if tag.contains('_') && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                return format!("{tag}.UTF-8");
-            }
-        }
-        "C.UTF-8".into()
+        apple_locale().unwrap_or_else(|| "C.UTF-8".into())
     }
 
     /// macOS `login(1)`'s `PATH` (`_PATH_DEFPATH`); `/etc/zprofile`'s `path_helper` builds the
@@ -1267,11 +1262,14 @@ mod platform {
         "/usr/bin:/bin".into()
     }
 
-    /// launchd's value for each of `names` (`launchctl getenv`, one `sh` for all of them), as the
-    /// GUI session holds them now. `TMPDIR` is not among what `getenv` answers (that is what was
-    /// `setenv`'d, and the agents' sockets): launchd gives each job the per-user directory
-    /// `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, so that is the session's `TMPDIR` unless
-    /// `launchctl setenv` set one.
+    /// The GUI session's value for each of `names`, as it holds them now: launchd's
+    /// (`launchctl getenv`, one `sh` for all of them), which holds what was `launchctl setenv`'d
+    /// and the agents' sockets (`SSH_AUTH_SOCK`), and two that `getenv` never answers:
+    /// - `TMPDIR`: launchd gives each job the per-user directory
+    ///   `confstr(_CS_DARWIN_USER_TEMP_DIR)` names (tagged `launchd`);
+    /// - the locale: no Mac session sets one (apps get none); a terminal makes `LANG` from the
+    ///   user's `AppleLocale`, as Terminal.app, iTerm2 and Ghostty do (tagged `AppleLocale`), so
+    ///   a starter's own locale (`LC_ALL=C`) never stands in for the session's.
     pub fn session_env(
         names: &[String],
         _start: &[(String, String)],
@@ -1280,14 +1278,31 @@ mod platform {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(super::launchd::SCRIPT).arg("sh").args(names);
         let out = super::run_bounded(cmd, "launchctl getenv", timeout)?;
-        let mut vars = super::launchd::parse(&out, names)?;
-        if names.iter().any(|n| n == "TMPDIR")
-            && !vars.iter().any(|(k, _)| k == "TMPDIR")
+        let mut vars: Vec<(String, String, &'static str)> =
+            super::launchd::parse(&out, names)?.into_iter().map(|(k, v)| (k, v, "launchd")).collect();
+        let asked = |n: &str| names.iter().any(|a| a == n);
+        if asked("TMPDIR")
+            && !vars.iter().any(|(k, _, _)| k == "TMPDIR")
             && let Some(dir) = user_temp_dir()
         {
-            vars.push(("TMPDIR".into(), dir));
+            vars.push(("TMPDIR".into(), dir, "launchd"));
+        }
+        if asked("LANG")
+            && !vars.iter().any(|(k, _, _)| super::any_match(super::LOCALE_GROUP, k))
+            && let Some(lang) = apple_locale().filter(|l| super::locale_loads(l))
+        {
+            vars.push(("LANG".into(), lang, "AppleLocale"));
         }
         Ok((vars, "launchd"))
+    }
+
+    /// The user's `AppleLocale` as `<language>_<region>.UTF-8`, when it names a region.
+    fn apple_locale() -> Option<String> {
+        let out = Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLocale"]).output().ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let tag = s.trim().split('@').next().unwrap_or("");
+        (out.status.success() && tag.contains('_') && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .then(|| format!("{tag}.UTF-8"))
     }
 
     /// `confstr(_CS_DARWIN_USER_TEMP_DIR)`: this user's temporary directory, as launchd sets
@@ -1348,6 +1363,11 @@ mod tests {
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// A session source's answer: every variable read via `via`.
+    fn via(vars: &[(String, String)], via: &'static str) -> Vec<(String, String, &'static str)> {
+        vars.iter().map(|(k, v)| (k.clone(), v.clone(), via)).collect()
     }
 
     /// A caller's environment as a base.
@@ -1577,7 +1597,7 @@ mod tests {
             ("FOO", "x"),
         ]);
         let file = FileEnv::default();
-        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        let b = session_base(&|k| file.allowed(k), Some(&via(&source, "systemd-user")), &start);
         let names: Vec<&str> = b.keys().map(String::as_str).collect();
         assert_eq!(
             names,
@@ -1597,14 +1617,14 @@ mod tests {
             drop: vec!["DISPLAY".into(), "LC_*".into()],
             ..Default::default()
         };
-        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        let b = session_base(&|k| file.allowed(k), Some(&via(&source, "systemd-user")), &start);
         assert_eq!(b.get("MY_TOOL").map(|v| v.value.as_str()), Some("from-session"));
         assert_eq!(b.get("FOO").map(|v| (v.value.as_str(), v.via)), Some(("x", Some("daemon"))));
         assert!(!b.contains_key("DISPLAY") && !b.contains_key("LC_TIME"));
         // And through compose: the account and PATH are the fill's, never a source's.
         let t = sleep();
         let file = FileEnv::default();
-        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        let b = session_base(&|k| file.allowed(k), Some(&via(&source, "systemd-user")), &start);
         let p = compose0(b, &req(Some(&t), None)).unwrap();
         assert_eq!(get(&p, "HOME"), Some("/"));
         assert_eq!(get(&p, "PATH"), Some("/usr/local/bin:/usr/bin:/bin"));
@@ -1657,11 +1677,11 @@ mod tests {
         let file = FileEnv::default();
         let start = kv(&[("LC_ALL", "C"), ("LC_TIME", "C"), ("LANG", "C"), ("DISPLAY", ":99")]);
         let source = kv(&[("LANG", "en_US.UTF-8")]);
-        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        let b = session_base(&|k| file.allowed(k), Some(&via(&source, "systemd-user")), &start);
         assert_eq!(b.keys().map(String::as_str).collect::<Vec<_>>(), ["DISPLAY", "LANG"]);
         assert_eq!(b["LANG"].value, "en_US.UTF-8");
         let source = kv(&[("DISPLAY", ":0")]);
-        let b = session_base(&|k| file.allowed(k), Some((&source, "systemd-user")), &start);
+        let b = session_base(&|k| file.allowed(k), Some(&via(&source, "systemd-user")), &start);
         assert_eq!(b.keys().map(String::as_str).collect::<Vec<_>>(), ["DISPLAY", "LANG", "LC_ALL", "LC_TIME"]);
         assert_eq!(b["LC_ALL"].via, Some("daemon"));
     }

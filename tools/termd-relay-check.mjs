@@ -392,8 +392,9 @@ try {
     // ── a relay started from a stripped environment, its daemon asking the session source ──
     // The environment's gate: a relay-created terminal from a stripped relay environment gets the session's
     // handles. The relay carries a stale DISPLAY, a stale bus address, a missing runtime directory,
-    // another terminal's identity and names that are no session's; its daemon (namespace "tra", no
-    // G3D_TERMD_ENV_SOURCE) asks the systemd user manager, read-only, as a person's would.
+    // another terminal's identity and names that are no session's (on macOS a stale SSH agent socket
+    // too, and no TMPDIR); its daemon (namespace "tra", no G3D_TERMD_ENV_SOURCE) asks the session
+    // source, read-only, as a person's would: the systemd user manager, or launchd.
     display.close();
     await stopRelay();
     terms.clear();
@@ -405,33 +406,62 @@ try {
         DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', XDG_RUNTIME_DIR: '/nonexistent',
         TERM_PROGRAM: 'Apple_Terminal', REX_SESSION: 'rex-tab-3', SECRET_LEAK: 'leak',
         XDG_CONFIG_HOME: path.join(autoTermd.dir, 'scratch-cfg'), TZ: 'UTC', LC_ALL: 'C',
+        ...(process.platform === 'darwin' ? { SSH_AUTH_SOCK: '/nonexistent/stale-agent' } : {}),
     };
     await startRelay(strippedEnv, AUTO_NS, PORT2);
     await connectDisplay(PORT2);
     const sa = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: ['sleep', '300'] }, 'terminal.spawning');
     await waitFor(() => term(sa.id).owner, 8000, 'the stripped relay\'s terminal');
     const g3dAuto = (...args) => execFileSync(g3dBeside(BIN), ['--ns', AUTO_NS, ...args], { env: { ...process.env, G3D_TERMD_DIR: autoTermd.dir }, encoding: 'utf8' });
-    const autoPid = Number(/ pid (\d+)/.exec(g3dAuto('ls').split('\n').find((l) => l.startsWith(`${sa.id} `)) ?? '')?.[1]);
-    let manager = null;
-    try {
-        const out = execFileSync('busctl', ['--user', '--json=short', 'get-property', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
-            'org.freedesktop.systemd1.Manager', 'Environment'], { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` }, encoding: 'utf8', timeout: 5000 });
-        manager = Object.fromEntries(JSON.parse(out).data.map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
-    } catch (e) { info(`no systemd user manager answers here (${e.message.split('\n')[0]}): the handles fall back to the relay's start values`); }
-    if (existsSync(`/proc/${autoPid}`)) {
-        const env = Object.fromEntries(readFileSync(`/proc/${autoPid}/environ`, 'utf8').split('\0').filter(Boolean)
-            .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
-        const tags = Object.fromEntries((JSON.parse(g3dAuto('env', sa.id, '--json')).env ?? []).map((v) => [v.name, `${v.source}${v.via ? ` (${v.via})` : ''}`]));
+    {
+        // The display's grid comes first; the adapter's create reaches termd after it (on macOS
+        // the brain's first launchd lookup is ~0.1 s), so wait for termd to list it.
+        let autoLs = '';
+        await waitFor(() => (autoLs = g3dAuto('ls')).split('\n').some((l) => l.startsWith(`${sa.id} `)), 8000, `${sa.id} in termd`).catch(() => {});
+        const autoPid = Number(/ pid (\d+)/.exec(autoLs.split('\n').find((l) => l.startsWith(`${sa.id} `)) ?? '')?.[1]);
+        if (!autoPid) info(`no pid for ${sa.id} in g3d ls:\n${autoLs}`);
+        const tags = Object.fromEntries((JSON.parse(g3dAuto('env', sa.id, '--json')).env ?? []).map((v) => [v.name, { value: v.value, tag: `${v.source}${v.via ? ` (${v.via})` : ''}` }]));
+        // The program's environment: the kernel's on Linux; on macOS, which withholds a platform
+        // binary's (sleep's), termd's own account of it.
+        const linuxEnv = existsSync(`/proc/${autoPid}`);
+        const env = linuxEnv
+            ? Object.fromEntries(readFileSync(`/proc/${autoPid}/environ`, 'utf8').split('\0').filter(Boolean)
+                .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]))
+            : Object.fromEntries(Object.entries(tags).map(([k, v]) => [k, v.value]));
+        const tag = (k) => tags[k]?.tag;
         const leaked = ['REX_SESSION', 'SECRET_LEAK', 'TZ', 'XDG_CONFIG_HOME', 'LC_ALL'].filter((k) => k in env && env[k] === strippedEnv[k]);
         ok(env.TERM_PROGRAM === 'g3d-termd' && leaked.length === 0, `the stripped relay's terminal carries none of its creator's (leaked: ${leaked.join(' ') || 'none'})`);
-        const handles = ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS'].filter((k) => manager?.[k]);
-        if (handles.length) {
-            const wrong = handles.filter((k) => env[k] !== manager[k] || tags[k] !== 'session (systemd-user)');
-            ok(wrong.length === 0, `...and the session's handles, fresh from the user manager: ${handles.map((k) => `${k}=${env[k]} [${tags[k]}]`).join(', ')}`);
+        if (process.platform === 'darwin') {
+            // launchd's: what launchctl getenv holds (the agent's socket), and the per-user TMPDIR it
+            // gives every job. Outside a GUI session (an ssh login) there is none to read.
+            const launchctl = (...a) => { try { return execFileSync('/bin/launchctl', a, { encoding: 'utf8' }).trim(); } catch { return ''; } };
+            if (launchctl('managername') !== 'Aqua') info(`launchctl managername is ${JSON.stringify(launchctl('managername'))}, not Aqua: no GUI session's handles to check`);
+            else {
+                const want = {
+                    TMPDIR: launchctl('getenv', 'TMPDIR') || execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8' }).trim(),
+                    SSH_AUTH_SOCK: launchctl('getenv', 'SSH_AUTH_SOCK'),
+                };
+                const handles = Object.keys(want).filter((k) => want[k]);
+                const wrong = handles.filter((k) => env[k] !== want[k] || tag(k) !== 'session (launchd)');
+                ok(wrong.length === 0, `...and the session's handles, fresh from launchd: ${handles.map((k) => `${k}=${env[k]} [${tag(k)}]`).join(', ')}`);
+                ok(env.DISPLAY === ':99' && tag('DISPLAY') === 'session (daemon)', `...and, launchd holding no DISPLAY, the relay's by name (${env.DISPLAY} [${tag('DISPLAY')}])`);
+            }
         } else {
-            ok(env.DISPLAY === ':99' && tags.DISPLAY === 'session (daemon)', `...and, with no user manager holding the handles, the relay's DISPLAY by name (${env.DISPLAY} [${tags.DISPLAY}])`);
+            let manager = null;
+            try {
+                const out = execFileSync('busctl', ['--user', '--json=short', 'get-property', 'org.freedesktop.systemd1', '/org/freedesktop/systemd1',
+                    'org.freedesktop.systemd1.Manager', 'Environment'], { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` }, encoding: 'utf8', timeout: 5000 });
+                manager = Object.fromEntries(JSON.parse(out).data.map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
+            } catch (e) { info(`no systemd user manager answers here (${e.message.split('\n')[0]}): the handles fall back to the relay's start values`); }
+            const handles = ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS'].filter((k) => manager?.[k]);
+            if (handles.length) {
+                const wrong = handles.filter((k) => env[k] !== manager[k] || tag(k) !== 'session (systemd-user)');
+                ok(wrong.length === 0, `...and the session's handles, fresh from the user manager: ${handles.map((k) => `${k}=${env[k]} [${tag(k)}]`).join(', ')}`);
+            } else {
+                ok(env.DISPLAY === ':99' && tag('DISPLAY') === 'session (daemon)', `...and, with no user manager holding the handles, the relay's DISPLAY by name (${env.DISPLAY} [${tag('DISPLAY')}])`);
+            }
         }
-    } else info(`no /proc/${autoPid}: the stripped-relay checks are Linux-only here`);
+    }
 } catch (e) {
     failures++;
     console.log(`FAIL  ${e.message}`);

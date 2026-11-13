@@ -682,10 +682,10 @@ fn the_user_manager_wins_over_a_stale_starter_when_it_answers() {
     assert!(d.log().contains("terminal environment: the session's from the systemd user manager"), "{}", d.log());
 }
 
-/// launchd, in a GUI (Aqua) session: a starter's stale SSH agent and temporary directory never
-/// win over the session's own (`launchctl getenv`; `TMPDIR` is the per-user directory launchd
-/// gives its jobs), a name launchd lacks keeps the starter's value, tagged so, and `env` names
-/// the source. Read only (nothing is set in the session): `launchctl setenv` reaching the next
+/// launchd, in a GUI (Aqua) session: a starter's stale SSH agent, temporary directory and
+/// locale never win over the session's own (`launchctl getenv`; `TMPDIR` is the per-user
+/// directory launchd gives its jobs; the locale is the user's `AppleLocale`), a name launchd
+/// lacks keeps the starter's value, tagged so, and `env` names the source. Read only (nothing is set in the session): `launchctl setenv` reaching the next
 /// create is checked by hand (MACOS.md).
 #[cfg(target_os = "macos")]
 #[test]
@@ -709,7 +709,7 @@ fn launchd_wins_over_a_stale_starter_in_a_gui_session() {
     assert!(tmpdir.starts_with('/'), "no per-user temporary directory: {tmpdir:?}");
     let d = odd_daemon_with(
         &["--idle-exit", "0", "--env-source", "auto"],
-        &[("SSH_AUTH_SOCK", "/nonexistent/stale-agent"), ("TMPDIR", "/nonexistent/stale-tmp/")],
+        &[("SSH_AUTH_SOCK", "/nonexistent/stale-agent"), ("TMPDIR", "/nonexistent/stale-tmp/"), ("LC_ALL", "C")],
     );
     let mut c = d.client();
     let r = create_with(&mut c, "ld", |cr| cr.argv = probe_argv()).unwrap();
@@ -726,6 +726,12 @@ fn launchd_wins_over_a_stale_starter_in_a_gui_session() {
     // No X server in launchd's session: the starter's DISPLAY, for that name only, said so.
     if launchctl(&["getenv", "DISPLAY"]).is_empty() {
         assert_eq!(t["DISPLAY"], daemon(":99"));
+    }
+    // No locale in launchd's session: the user's AppleLocale, and none of the starter's
+    // (LANG=en_US.ISO-8859-1, LC_ALL=C).
+    if launchctl(&["getenv", "LANG"]).is_empty() && launchctl(&["getenv", "LC_ALL"]).is_empty() {
+        assert_eq!(t["LANG"], (default_locale(), EnvSource::Session, Some("AppleLocale".to_owned())));
+        assert_eq!(env.get("LC_ALL"), None, "the starter's LC_ALL stood in for the session's locale");
     }
     assert_eq!(env.get("KEEP_ME"), None, "the starter's environment leaked");
     assert!(d.log().contains(SOURCE_SAID), "{}", d.log());
