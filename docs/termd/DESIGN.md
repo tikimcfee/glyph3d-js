@@ -271,9 +271,16 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
 - **A missing home** starts the program in `/`, as `login(1)` does ("No home directory, logging in
   with HOME=/"), rather than failing the `create`.
 - **`g3d new`** sends its own working directory unless `--cwd` (tmux's `new-session` starts in the
-  client's directory too); it forwards the `--forward-env` list only when run inside an SSH session
-  (`SSH_CONNECTION` set): outside one, the session base already has fresh values and forwarding a
-  long-lived shell's `DISPLAY` would bring back the staleness the base removes. `g3d` inside a
+  client's directory too); it forwards the `--forward-env` list only when run inside a **live** SSH
+  login (`g3d::forward`): `SSH_CONNECTION` set, and either one of fds 0 to 2 is the login's own
+  terminal (`SSH_TTY`, compared by device) or there is no terminal at all (`ssh host cmd`: no
+  controlling terminal). `SSH_CONNECTION` alone isn't enough: a tmux server started from SSH keeps
+  it in every pane long after that login, its agent socket and its display are gone, and
+  forwarding a pane's would bring back the staleness the session base removes. A process with a
+  controlling terminal but fds 0 to 2 redirected can't be told and forwards nothing. Inside a live
+  login, a listed name the login lacks is sent as a removal (tmux's `update-environment` rule), so
+  an SSH session without X forwarding doesn't get the desktop's `DISPLAY` and `XAUTHORITY`; the
+  list carries `SSH_CLIENT` beside `SSH_CONNECTION`, so "am I remote" checks agree. `g3d` inside a
   termd terminal reaches that terminal's daemon through `G3D_TERMD_SOCKET` when given neither
   `--ns` nor `--socket`. The detach key also reads `G3D_DETACH_KEY`.
 - **The relay** sends no `argv` for a plain new terminal and passes its served root as `cwd`
@@ -1043,11 +1050,13 @@ On a systemd desktop, `SSH_AUTH_SOCK` (when an agent runs), `DISPLAY`, `WAYLAND_
 `DBUS_SESSION_BUS_ADDRESS` (`unix:path=$XDG_RUNTIME_DIR/bus`) are stable per login and come from
 the session base, fresh at each `create`. The staleness tmux users hit comes from a server that
 outlives the session it captured; here only running shells can hold old values, and they are
-theirs. Agent forwarding: `g3d new` run inside an SSH session forwards its own `SSH_AUTH_SOCK`,
-`SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_ASKPASS`, `KRB5CCNAME`, `DISPLAY`, `WAYLAND_DISPLAY` and
-`XAUTHORITY` in the request's `env` (tmux's `update-environment` default, less `MSYSTEM`, which is
-Windows', `WINDOWID`, which names the outer terminal's own window, and the `XDG_*` desktop names,
-which the base has). `g3d new --forward-env LIST` changes the list; `--forward-env ''` sends none.
+theirs. Agent forwarding: `g3d new` run inside a live SSH login forwards its own `SSH_AUTH_SOCK`,
+`SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, `SSH_ASKPASS`, `KRB5CCNAME`, `DISPLAY`,
+`WAYLAND_DISPLAY` and `XAUTHORITY` in the request's `env`, and removes the ones it lacks (tmux's
+`update-environment` default and rule, less `MSYSTEM`, which is Windows', `WINDOWID`, which names
+the outer terminal's own window, and the `XDG_*` desktop names, which the base has, plus
+`SSH_CLIENT`). "Live" is `SSH_CONNECTION` set and this process on the login's own terminal
+(`SSH_TTY`) or on none (`ssh host cmd`), not merely below an old login (as built, above). `g3d new --forward-env LIST` changes the list; `--forward-env ''` sends none.
 A forwarded agent socket dies with its SSH session, as in tmux; shpool's per-session symlink is the
 known remedy and is not built while termd serves a local desktop.
 

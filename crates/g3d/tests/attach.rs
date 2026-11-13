@@ -20,6 +20,11 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_env(&[])
+    }
+
+    /// A daemon whose own environment (its base, with `--env-source daemon`) adds `env`.
+    fn start_env(env: &[(&str, &str)]) -> Self {
         let g3d = PathBuf::from(env!("CARGO_BIN_EXE_g3d"));
         let termd = g3d.with_file_name("g3d-termd");
         assert!(termd.is_file(), "no {} — run `cargo test --workspace` so the daemon is built", termd.display());
@@ -33,6 +38,7 @@ impl Daemon {
             .arg("--socket")
             .arg(&socket)
             .args(["--idle-exit", "0", "--env-source", "daemon"])
+            .envs(env.iter().copied())
             .stderr(std::fs::File::create(dir.join("daemon.log")).unwrap())
             .spawn()
             .unwrap();
@@ -70,6 +76,17 @@ struct Outer {
 
 impl Outer {
     fn spawn(socket: &std::path::Path, args: &[&str], cols: u16, rows: u16) -> Self {
+        Self::spawn_with(socket, args, cols, rows, |_, _| {})
+    }
+
+    /// `setup` shapes g3d's command (its environment), given the PTY's name.
+    fn spawn_with(
+        socket: &std::path::Path,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+        setup: impl FnOnce(&mut Command, &str),
+    ) -> Self {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
         grantpt(&master).unwrap();
         unlockpt(&master).unwrap();
@@ -87,6 +104,7 @@ impl Outer {
         .unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
         cmd.arg("--socket").arg(socket).args(args);
+        setup(&mut cmd, &name.to_string_lossy());
         cmd.stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave));
@@ -338,4 +356,81 @@ fn attach_and_watch_ride_an_upgrade_and_a_crash() {
     assert!(a.wait_exit(10).success());
     a.expect(b"[r exited]", 2);
     assert!(w.wait_exit(10).success());
+}
+
+/// A process's environment as it was exec'd (Linux's /proc; the macOS branch reads it with `ps`).
+fn environ(pid: u32) -> std::collections::BTreeMap<String, String> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    raw.split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|kv| {
+            let s = String::from_utf8_lossy(kv);
+            s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned()))
+        })
+        .collect()
+}
+
+/// `g3d new` forwards the SSH agent, display and the rest only from a live SSH login: a shell
+/// below an old one (a tmux pane whose server SSH started keeps SSH_CONNECTION, and a dead agent
+/// socket and display) forwards nothing and the terminal gets the session's fresh values. Inside a
+/// live login, a listed name the login lacks is removed, as tmux's update-environment does.
+#[cfg(target_os = "linux")]
+#[test]
+fn new_forwards_only_from_a_live_ssh_login() {
+    // The session's own values, as the daemon's base has them.
+    let d = Daemon::start_env(&[("DISPLAY", ":0"), ("XAUTHORITY", "/run/user/0/xauth_session")]);
+    let stale = |cmd: &mut Command| {
+        cmd.env("SSH_CONNECTION", "10.0.0.1 5 10.0.0.2 22")
+            .env("SSH_CLIENT", "10.0.0.1 5 22")
+            .env("DISPLAY", ":99")
+            .env("SSH_AUTH_SOCK", "/nonexistent/dead-agent.sock")
+            .env_remove("XAUTHORITY")
+            .env_remove("WAYLAND_DISPLAY");
+    };
+    let pid_of = |id: &str| list(&d.socket).into_iter().find(|t| t.id == id).map(|t| t.pid).unwrap();
+    let created = |o: &mut Outer, id: &str| {
+        o.expect(format!("{id} handle").as_bytes(), 10);
+        assert!(o.wait_exit(5).success());
+    };
+
+    // A tmux pane below an old login: this terminal is not the login's (SSH_TTY names another).
+    let mut o = Outer::spawn_with(&d.socket, &["new", "pane", "--", "sleep", "600"], 80, 24, |cmd, _| {
+        stale(cmd);
+        cmd.env("SSH_TTY", "/dev/null");
+    });
+    created(&mut o, "pane");
+    let e = environ(pid_of("pane"));
+    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":0"), "a stale DISPLAY was forwarded");
+    assert_eq!(e.get("XAUTHORITY").map(String::as_str), Some("/run/user/0/xauth_session"));
+    assert_eq!(e.get("SSH_AUTH_SOCK"), None, "a dead agent socket was forwarded");
+    assert_eq!(e.get("SSH_CONNECTION"), None);
+
+    // The login's own terminal: its values, and what it lacks removed (no X forwarding here).
+    let mut o = Outer::spawn_with(&d.socket, &["new", "login", "--", "sleep", "600"], 80, 24, |cmd, pty| {
+        stale(cmd);
+        cmd.env("SSH_TTY", pty);
+    });
+    created(&mut o, "login");
+    let e = environ(pid_of("login"));
+    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":99"));
+    assert_eq!(e.get("SSH_AUTH_SOCK").map(String::as_str), Some("/nonexistent/dead-agent.sock"));
+    assert_eq!(e.get("XAUTHORITY"), None, "the session's X cookie stayed beside the login's display");
+    assert_eq!(e.get("SSH_CLIENT").map(String::as_str), Some("10.0.0.1 5 22"));
+
+    // `ssh host cmd`: no terminal at all.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
+    cmd.arg("--socket").arg(&d.socket).args(["new", "notty", "--", "sleep", "600"]);
+    stale(&mut cmd);
+    cmd.env_remove("SSH_TTY").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    unsafe {
+        cmd.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let e = environ(pid_of("notty"));
+    assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":99"));
+    assert_eq!(e.get("SSH_CONNECTION").map(String::as_str), Some("10.0.0.1 5 10.0.0.2 22"));
 }

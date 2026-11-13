@@ -56,10 +56,11 @@ enum Cmd {
         /// Where it starts (default: this directory, as `tmux new` does).
         #[arg(long)]
         cwd: Option<String>,
-        /// Run inside an SSH session: the variables of this shell the terminal gets, comma-separated,
-        /// when set here (default: the SSH agent's, the display's and Kerberos', tmux's
-        /// update-environment). '' sends none. Outside SSH nothing is sent: the session's are fresh.
-        #[arg(long, default_value = FORWARD_ENV)]
+        /// Run inside a live SSH login (this terminal is the login's own, or there is none at all): the
+        /// variables of this shell the terminal gets, comma-separated; one unset here is removed
+        /// (default: the SSH agent's, the display's and Kerberos', tmux's update-environment). ''
+        /// sends none. Outside SSH, and below an old login (a tmux pane), nothing: the session's are fresh.
+        #[arg(long, default_value = g3d::forward::FORWARD_ENV)]
         forward_env: String,
         /// The program and its arguments (default: the account's shell, as a login shell).
         #[arg(last = true)]
@@ -120,12 +121,6 @@ enum Cmd {
     },
 }
 
-/// What `g3d new` forwards from the shell it runs in (DESIGN.md, "SSH agent, display and bus
-/// variables"): tmux's `update-environment` default, less `MSYSTEM` (Windows'), `WINDOWID` (the
-/// outer terminal's own window) and the `XDG_*` desktop names (the session has them).
-const FORWARD_ENV: &str =
-    "SSH_AUTH_SOCK,SSH_AGENT_PID,SSH_CONNECTION,SSH_ASKPASS,KRB5CCNAME,DISPLAY,WAYLAND_DISPLAY,XAUTHORITY";
-
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("g3d: {msg}");
     std::process::exit(1);
@@ -183,14 +178,7 @@ fn main() {
         Cmd::New { id, cols, rows, cwd, forward_env, argv } => {
             let mut c = start::connect_or_start(&target, "g3d", None).unwrap_or_else(|e| die(e));
             let cwd = cwd.or_else(|| std::env::current_dir().ok().map(|d| d.display().to_string()));
-            let in_ssh = std::env::var_os("SSH_CONNECTION").is_some_and(|v| !v.is_empty());
-            let env: std::collections::BTreeMap<String, Option<String>> = forward_env
-                .split(',')
-                .filter(|_| in_ssh)
-                .map(str::trim)
-                .filter(|k| !k.is_empty())
-                .filter_map(|k| Some((k.to_owned(), Some(std::env::var(k).ok().filter(|v| !v.is_empty())?))))
-                .collect();
+            let env = g3d::forward::forwarded(&forward_env, g3d::forward::in_ssh_login(), |k| std::env::var(k).ok());
             let r: CreateReply = c
                 .request(Op::Create(Create {
                     id,
