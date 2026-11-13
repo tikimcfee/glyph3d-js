@@ -880,15 +880,20 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   hooks exist only in a `test-hooks` build, so a release binary has none; without the feature the
   daemon's test binaries fail loud saying so): `g3d-wire` decodes and re-encodes
   PROTOCOL.md's hex examples byte for byte (read straight out of the spec) and filters terminal
-  queries split at every byte; 25 daemon tests each on a private socket (`CARGO_TARGET_TMPDIR`):
+  queries split at every byte; `g3d-hold`'s units (no fd of the holder's reaches a program, with
+  close-on-exec or without; a shared-memory object reads back what was written); the daemon tests
+  each on a private socket (`CARGO_TARGET_TMPDIR`; process state and RSS read with `ps`, so they
+  measure on macOS too):
   repaints replayed into a fresh libghostty equal the live screen (primary and alternate, modes,
-  cursor, title), a subscribe cut mid-escape-sequence, the resize event's exact seq, queries
+  cursor, title), one `INPUT` of 256 KiB reaching a raw program whole (past the kernel's PTY input
+  queue), a subscribe cut mid-escape-sequence, the resize event's exact seq, queries
   answered once, `view` anchoring, history rows, a lossy subscriber resynced (one `lagged`, its
   repaint, the state), two stalled clients beside a BEL+title flood (daemon RSS bounded, the
   terminal keeps its pace), `take` freeing a wedged blocking owner (and the frame order of `take`
   and subscribe-as-own), a late subscriber told `modes` and the title, a blocking owner and
   a 4-terminal `seq 1 300000` flood with no seq gaps under an RSS ceiling (the brain's), a
-  HUP-ignoring child, a panicking owner thread, the namespace lock, idle exit, stop, a daemonized
+  HUP-ignoring child, a panicking owner thread, the namespace lock, idle exit (also with an
+  unwritable log), stop, a daemonized
   log rotating with the brain following it; the holder and
   brain (`tests/restart.rs`): a brain SIGKILLed under a flood (shells and handles kept, a quiet
   screen back exactly, the flood's history whole up to the snapshot and from the high-water mark,
@@ -901,18 +906,20 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   a new one while quiet (the next crash restores it exact), the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
   the environment (`src/env.rs` unit tests, and `tests/env.rs`: a daemon started from a stripped
   environment with a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's state,
-  `SIGINT` ignored, a low fd limit, a Claude Code shell's, atuin's and a unit's variables and a
-  scratch `HOME`; its programs' `/proc` environ, argv, cwd, signal masks and limits match the
-  policy, and the `env` op's tags match `/proc`: a no-caller base of only the allowlisted names,
-  each from the session source else the starter's value for that name, the account and `PATH`
-  from the fill, a set non-UTF-8 locale kept and named in the status document, the passwd shell
-  as `-<name>`, home, the locale filled only when none is set, reserved names, a malformed
-  `env_base` and bad cwds refused, a caller's odd environment (stale `DISPLAY`, `REX_SESSION`,
-  `FOO`) as the base minus its markers beside a no-caller terminal's fresh session `DISPLAY`, a
-  stripped creator getting the session's handles, `termd.toml`'s `pass`/`drop`/`set`, a bad file
-  failing creates naming its line and the status saying so, the session source re-read per create
-  (a file standing in for the user manager), and the real user manager beating a stale starter
-  when one answers);
+  `SIGINT` ignored, a low fd limit, a Claude Code shell's, atuin's, a unit's and launchd's variables
+  and a scratch `HOME`; its programs' environ, argv and cwd (`tests/common/procinfo.rs`: `/proc` on
+  Linux, `KERN_PROCARGS2` and `proc_pidinfo` on macOS, which withholds a platform binary's
+  environment, so the program is the test binary itself), the signal masks and fd limit the
+  program reports itself (`probe`: macOS can't show them from outside), and the `env` op's tags
+  match the policy: a no-caller base of only the allowlisted names, each from the session source
+  else the starter's value for that name (an app's `XPC_*` never), the account and `PATH` from the
+  fill, a set non-UTF-8 locale kept and named in the status document, the passwd shell as
+  `-<name>`, home, the locale filled only when none is set, reserved names, a malformed `env_base`
+  and bad cwds refused, a caller's odd environment (stale `DISPLAY`, `REX_SESSION`, `FOO`) as the
+  base minus its markers beside a no-caller terminal's fresh session `DISPLAY`, a stripped creator
+  getting the session's handles, `termd.toml`'s `pass`/`drop`/`set`, a bad file failing creates
+  naming its line and the status saying so, the session source re-read per create (a file standing
+  in for the user manager), and the real user manager beating a stale starter when one answers);
   the status document (`tests/status.rs`: its keys and types against
   `tests/fixtures/status-shape.json`, and PROTOCOL.md's example parsed field for field in
   `g3d-wire`; `status_follow`'s throttling — at once, then on change no sooner than the interval,

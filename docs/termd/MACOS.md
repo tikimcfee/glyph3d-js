@@ -1,269 +1,144 @@
 # g3d-termd on macOS
 
-What macOS does differently from Linux under termd, what was changed for it, and what the
-child environment should be. Measured on 2026-11-12 on an Apple Silicon Mac (arm64), macOS
-27.2, Rust 1.98.0 (Homebrew), Zig 0.17.0, libghostty-vt 1.0.1.
+What macOS does differently from Linux under termd, and how termd meets it. darwin-arm64 builds
+natively and passes every gate: `cargo test --workspace --features g3d-termd/test-hooks`, clippy,
+`go test ./...`, `termd-relay-check` and `wall-e2e`. Measured on an Apple Silicon Mac (the M2),
+macOS 27.2, Rust 1.98.0 (Homebrew), Zig 0.17.0, libghostty-vt 1.0.1. The platform seams are listed
+in DESIGN.md, "Linux and macOS"; this file has the why and the measurements behind them.
 
 ## Building
 
 - `tools/termd-vendor.sh DIR` fetches the macOS Zig (`zig-aarch64-macos-0.17.0`) and the same
   libghostty tarballs. `minisign` comes from Homebrew. Every download is checked against its
-  minisign signature **and** a pinned SHA-256. Zig's SHA-256s (from ziglang.org's
-  `index.json`) are now pinned per host beside the Ghostty ones.
-- The script's SHA-256 fallback was dead code: `sha256sum … | cut || shasum …` takes the
-  pipeline's status, which is `cut`'s, so a Mac without `sha256sum` (before macOS 15, or a
-  `PATH` without `/sbin`) compared an empty hash and failed. The script now picks
-  `sha256sum`, else `shasum -a 256`, up front.
-- `cargo build --workspace`: a cold build takes about 2 minutes, mostly libghostty's Zig build.
-  `make build` (and `make termd`) build `g3d-termd` and `g3d` natively on darwin, as on Linux.
-  `make darwin-arm64` puts them in `dist/` when run on an arm64 Mac.
-- **Not done: darwin-amd64.** Homebrew's Rust has no other targets. It needs rustup's
-  `x86_64-apple-darwin` target (Zig can cross-compile libghostty to x86_64-macos) or a build on
-  an Intel Mac.
+  minisign signature **and** a pinned SHA-256 (Zig's are pinned per host, from ziglang.org's
+  `index.json`). The script uses `sha256sum`, else `shasum -a 256`, whichever is on `PATH`.
+- `make termd` (and `make build`) builds `g3d-termd` and `g3d` natively. A cold build takes about
+  2 minutes, mostly libghostty's Zig build. `g3d-termd` links only libSystem and libiconv.
+- `make darwin-arm64` puts both in `dist/` beside the CLI, and `make release` ships them when they
+  are there.
+- **darwin-amd64 is not built.** `make darwin-amd64` builds the pair only on an Intel Mac.
+  Homebrew's Rust has no other targets; rustup's `x86_64-apple-darwin` (Zig can cross-compile
+  libghostty to x86_64-macos) would do it on an arm64 Mac, and isn't wired.
 
 ## What macOS does differently
 
-| | macOS | Linux | What termd does now |
+| | macOS | Linux | What termd does |
 |---|---|---|---|
-| Close-on-exec at creation | No `pipe2`, `accept4`, `SOCK_CLOEXEC`, or `O_CLOEXEC` for `posix_openpt`. std, tokio and termd create these fds first and set the flag after. | Atomic everywhere | The wake pipe and PTY master set `FD_CLOEXEC` right after creation. The child, before `exec`, closes every fd above 2 that lacks `FD_CLOEXEC` (`spawn::close_inherited`; gated by `spawn::tests`, which fails with the sweep removed). Those are exactly the fds another owner thread's fork could catch mid-creation: another terminal's PTY master (whose shell would then never get its hangup), a client socket, a wake pipe. std's own exec-error pipe is close-on-exec, so it survives. tmux does `closefrom` here for the same reason. Cost: one `fcntl` per possible fd, about 9 ms per spawn at an fd limit of 61,440 and next to nothing at launchd's default of 256. `proc_pidinfo(PROC_PIDLISTFDS)` would list only the open ones if that ever matters. |
-| `TIOCSWINSZ` on a PTY master | `ENOTTY` until the slave has been opened | Works at once | The daemon already opened the slave first. The attach test didn't, and now does. Both say why. |
-| `/proc` | None | Present | The daemon never used it. Its tests did, for process state (`wait_dead`) and RSS. On macOS those reads failed **silently**: "dead" at once and RSS 0, so the kill and memory-ceiling gates passed without measuring anything. They now read `ps -o stat=` / `ps -o rss=`, which work the same on both, and fail loud if `ps` can't measure. Measured here: 16 MiB peak for the 4-terminal flood, 6 → 35 MiB under the events flood. |
-| Canonical-mode line length (`MAX_CANON`) | 1024: a line over 1023 bytes loses its excess. The tty echoes BEL for each lost byte (`IMAXBEL`), and the line's end is lost too, so the reader keeps waiting. | 4095 | Nothing to change: it's the kernel's line discipline, and termd writes the bytes it was given. It only bites a program reading in canonical mode (`read`, `head -n1`, Python's `input()`). Shells' line editors, vim and Claude Code run raw. Raw-mode input of any size arrives whole: termd keeps what the PTY refuses and writes it on `POLLOUT`. A new daemon test sends one 256 KiB `INPUT`. This is the limit gomuxai hit. |
-| Parent-death signal | None (`PR_SET_PDEATHSIG` is Linux-only) | `prctl` | termd uses none by design: it outlives its starter, and its children die with their PTY. The relay's `agent` children (children.go) are covered only by its SIGINT/SIGTERM handler here, as documented there. kqueue's `EVFILT_PROC`/`NOTE_EXIT` on the parent is the macOS equivalent if that ever matters. |
-| `eventfd` | None | Present | The wake fd was already a pipe off Linux. Only its creation changed (row 1). |
-| `setsid` + `TIOCSCTTY` | Works unchanged | | |
-| Unix socket path | `sun_path` is 104 bytes | 108 | termd refuses a path over 100 bytes at start, unchanged. |
-| `$XDG_RUNTIME_DIR` | Never set | Set by logind | See the next section. |
+| Bytes queued on a PTY master | `FIONREAD` answers **0** whatever is queued; `TIOCOUTQ` on the master answers the slave's output queue, exactly what a read takes (700 queued, 700 read) | `FIONREAD` | The brain bounds each PTY read by the queued count, so its high-water mark (what a crash loses) is exact. With `FIONREAD`, every read on macOS took one byte and every `OUTPUT` frame carried one: floods ran about 50× slower and every flood, query and restart gate timed out. It asks `TIOCOUTQ` on macOS. |
+| Shared memory (snapshots, handoffs, `seq_marks`) | No `memfd`. A `shm_open` object can be sized once, refuses `pwrite`/`pread` (`ESPIPE`), and reads back its size rounded up to a page (16 KiB) | `memfd_create`, sealed | `shm_open` of a random name, `shm_unlink` at once, `ftruncate` once. Bytes go in and out through a mapping (`shm::create_from`, `shm::read`), and a blob's length is the one in its header. No seals: nothing else holds the fd. |
+| Close-on-exec at creation | No `pipe2`, `accept4`, `SOCK_CLOEXEC`, `MSG_CMSG_CLOEXEC`, or `O_CLOEXEC` for `posix_openpt` | Atomic everywhere | Set right after creation (`g3d_hold::pipe`, the PTY master, every fd the hold link receives). The holder is one thread, so nothing forks in between. The brain starts one program, `defaults` (the locale), once at start, before its other threads exist and after the handoff's fds are close-on-exec. |
+| Closing fds in a child | No `close_range` | `close_range` | The holder lists its open fds (`/dev/fd`) just before the fork and the child closes them: exact, because the holder is one thread. Gate: `g3d-hold` `spawn::tests`, a pipe without close-on-exec and one with it, both closed in the program. |
+| errno in a forked child | `__error` | `__errno_location` | A cfg seam in `g3d-hold`'s spawn. An exec failure comes back as `spawn_failed` naming it (`tests/status.rs`). |
+| Process RSS (status document) | No `/proc` | `/proc/<pid>/statm` | `proc_pidinfo(PROC_PIDTASKINFO)`; `tests/status.rs` reads it nonzero for holder and brain. |
+| Peer credentials | `getpeereid` answers `ENOTCONN` once the client has closed | `SO_PEERCRED` still answers | Such a connection is dropped without a log line (a readiness probe that only connects did this on every test). |
+| `TIOCSWINSZ` on a fresh master | `ENOTTY` until the slave has been opened | Works at once | The slave is opened first, on both. |
+| PTY buffer with no reader | 1,024 bytes (the slave's write blocks past it) | 13.8 KB | Nothing to change; it's why the queued count matters above. |
+| Canonical-mode line length (`MAX_CANON`) | 1,023 bytes. A longer line loses its excess with a BEL per byte (`IMAXBEL`), and its line end too, so the reader keeps waiting | 4,095 | Nothing to change: it's the kernel's line discipline, and termd writes the bytes it was given, unsplit. It bites only a program reading in canonical mode (`read`, `head -n1`, Python's `input()`). Shells' line editors, vim and Claude Code run raw, and raw input of any size arrives whole (a daemon test sends one 256 KiB `INPUT`). This is the limit gomuxai hit. |
+| Parent-death signal | None | `prctl` | termd uses none: the brain sees the hold link close, and shells see their PTY hang up. The relay's `agent` children are covered only by its signal handler off Linux (children.go). |
+| `$XDG_RUNTIME_DIR`, `/run/user/<uid>` | Neither exists | logind's | The socket lives in `/tmp/g3d-<uid>` (next section). |
+| Unix socket path | `sun_path` is 104 bytes | 108 | termd refuses a path over 100 bytes, on both. |
 
-## The socket directory when `$XDG_RUNTIME_DIR` is unset
+## The socket directory: `/tmp/g3d-<uid>`
 
-The rule's last step was `<temp dir>/g3d-<uid>`, where the temp dir was "`$TMPDIR`, else
-`/tmp`". On macOS that broke in two ways:
+macOS has no `/run/user/<uid>`, so the socket rule ([PROTOCOL.md](PROTOCOL.md)) always lands on
+`/tmp/g3d-<uid>`, tmux's rule (`/tmp/tmux-<uid>`). It never reads `$TMPDIR`:
 
-- **Rust and Go disagree when `$TMPDIR` is unset**, as under `env -i` and, by wide report, in
-  ssh sessions (not verified here). Rust's `std::env::temp_dir()` then answers the per-user
-  `confstr(_CS_DARWIN_USER_TEMP_DIR)` directory, `/var/folders/…/T/`. Go's `os.TempDir()`
-  answers `/tmp`. Measured: the relay (Go) would look in one place while the daemon it started
-  (Rust) bound in the other.
-- **Path length.** `$TMPDIR` is 49 bytes here, which leaves about 32 bytes for a namespace
-  under the 100-byte cap, though names may be 64. zellij uses `$TMPDIR` and carries a
-  hard-coded 104-byte guard for this reason.
+- **Rust and Go disagree when `$TMPDIR` is unset** (`env -i`, cron). Rust's `temp_dir()` answers
+  the per-user `confstr(_CS_DARWIN_USER_TEMP_DIR)` directory, `/var/folders/…/T/`, and Go's
+  `os.TempDir()` answers `/tmp`. Measured: a relay would look where the daemon it started didn't
+  bind.
+- **Length.** `$TMPDIR` is 49 bytes, which leaves about 32 bytes of the 100-byte cap for a
+  namespace of up to 64. `/tmp/g3d-<uid>/termd-<ns>.sock` fits any name.
 
-The rule's last step is now **`/tmp/g3d-<uid>`**, tmux's rule (`/tmp/tmux-<uid>`). It ignores
-`$TMPDIR`, so every session agrees, and it is short: 19 bytes + name + 5, so a 64-byte name fits.
-`/tmp` is shared, so two things come with it:
+`/tmp` is shared and cleaned, so:
 
-- **Ownership.** The daemon refuses a socket directory that is not a directory, is owned by
-  another user, or that group or others can write (tmux checks the same). The check applies
-  to every directory it serves from, including `$G3D_TERMD_DIR` and `$XDG_RUNTIME_DIR/g3d`.
-- **Saying which rule chose it.** The daemon's start line names the step: `(from
-  $XDG_RUNTIME_DIR)`, `(from /tmp/g3d-<uid>: no $G3D_TERMD_DIR or $XDG_RUNTIME_DIR)`, or
-  `(from --socket)`. A fallback never happens silently.
-- **Cleaners.** macOS runs `/usr/libexec/tmp_cleaner` daily. It deletes regular files under
-  `/tmp` that haven't been accessed, modified or changed for 3 days, and empty directories.
-  Sockets survive it. The namespace's `.lock` (a regular file) would not. A second daemon
-  would then create a new lock, take it, unlink the live daemon's socket and bind its own: two
-  daemons, the first one's terminals unreachable. dirhelper cleans `/var/folders` on the same
-  3-day rule, so `$TMPDIR` was no safer. The daemon now re-stamps its socket and lock
-  (`utimes`) every hour. systemd-tmpfiles' `/tmp` rule on Linux is the same hazard at 10 days.
+- **The holder refuses** a socket directory that is not a directory, is another user's, or that
+  group or others can write, saying whose it is and its mode.
+- **It re-stamps its socket and lock every hour** (`utimes`). macOS's `/usr/libexec/tmp_cleaner`
+  deletes regular files under `/tmp` untouched for 3 days. The socket would survive it; the
+  namespace's `.lock` would not, and a second daemon could then take the namespace and unlink
+  the live one's socket.
 
-The log stays at `~/.local/state/g3d/termd-<ns>.log` (`$XDG_STATE_HOME`). macOS's own place
-would be `~/Library/Logs`, but one rule on both systems is worth more.
+Tests make their scratch directories under `/tmp` for the same 104 bytes: `t.TempDir()` and
+`$TMPDIR`-based paths don't fit a socket.
 
 ## The environment a terminal gets
 
-The task: what is the normal practice for a daemon that spawns shells on macOS, and what does a
-termd terminal get today?
+As built (DESIGN.md, "Environment"), proven here by `tests/env.rs` and `termd-relay-check`:
 
-### What termd does today
+- **The default program is the passwd shell as a login shell**, argv0 `-zsh`, in the caller's
+  directory or home. A login zsh runs `/etc/zprofile`, which on this macOS runs `path_helper`
+  (`/etc/paths`, `/etc/paths.d`) and sets `LANG=C.UTF-8` when it is unset, then `~/.zprofile`
+  (Homebrew's `shellenv`). A non-login shell got neither: a bare `PATH` and an ASCII locale.
+- **The base is the session's variables of the holder's own environment** (no user manager on
+  macOS): the account, `PATH`, `TMPDIR`, the locale, `SSH_AUTH_SOCK`, and launchd's
+  `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`, which every process of a GUI session carries. A
+  launching app's `XPC_SERVICE_NAME`, `XPC_FLAGS` and `OSLogRateLimit` don't pass. Then termd's
+  own: `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION`, `TERM`, `COLORTERM`, `G3D_TERMD_*`.
+- **The locale when none is set** is the user's: the `AppleLocale` preference (`en_US`) as
+  `en_US.UTF-8`, as Terminal.app, iTerm2 and Ghostty read it; `C.UTF-8` when it has no region
+  or doesn't load.
+- **What it keeps out**, measured before the policy existed:
+  - The starter's terminal identity. A termd started from Terminal.app gave every shell
+    `TERM_PROGRAM=Apple_Terminal`, so Apple's `/etc/zshrc` sourced `/etc/zshrc_Apple_Terminal`
+    and installed Terminal.app's OSC 7 hook, and with `TERM_SESSION_ID` one tab's
+    `~/.zsh_sessions` history would be shared by every terminal.
+  - Live handles of another terminal. A shell in Rex (a GUI terminal) carries `REX_SERVER`,
+    `REX_SESSION` and `REX_BLOCK`, handles on Rex's server and on that tab. No denylist names
+    every terminal's own variables, which is why the base is a known set and not "the starter's
+    minus a list".
+- **ssh-agent and Keychain** work from a daemon in the GUI session: launchd's `SSH_AUTH_SOCK` is
+  inherited, and a terminal's `security` reaches the unlocked login keychain.
 
-The program's environment is the daemon's own, plus `TERM=xterm-256color`,
-`COLORTERM=truecolor`, `G3D_TERMD_ID` and `G3D_TERMD_SOCKET`, minus `TMUX`/`TMUX_PANE`. The
-default program is `$SHELL` with no arguments, a **non-login** shell. The relay's default
-(`cli/attach.go`) is the same.
-
-### Measured
-
-Three environments, each captured from an interactive `zsh` running `env` (names only; values
-were masked):
-
-- **T**: Terminal.app's launch, rebuilt without the GUI: launchd's user environment, then
-  `login -pfl <user> /bin/zsh -c 'exec -a -zsh /bin/zsh -i'`, which is the shape Terminal.app
-  uses. Terminal.app's own additions (`TERM_PROGRAM_VERSION`, `TERM_SESSION_ID`, its `LANG`
-  setting) are not in it.
-- **L**: a termd terminal whose daemon was started with launchd's user environment: `PATH`
-  (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR` and
-  `SSH_AUTH_SOCK`. This is a LaunchAgent, or anything a GUI app starts.
-- **S**: a termd terminal whose daemon was started from shell T, as when the operator runs
-  `tools/dev.sh` in Terminal.
-
-| | T (Terminal.app) | L (termd, launchd env) | S (termd, started from a Terminal shell) |
-|---|---|---|---|
-| Shell | login, interactive | non-login, interactive | non-login, interactive |
-| `PATH` | `path_helper` (`/etc/paths`, `/etc/paths.d`) + `~/.zprofile` (Homebrew's `shellenv`) + `~/.zshrc` | `/usr/bin:/bin:/usr/sbin:/sbin` + what `~/.zshrc` adds: **no Homebrew, no `/usr/local/bin`, no `paths.d`** | T's, with `~/.zshrc`'s entries added twice |
-| `LANG` | `C.UTF-8`, from `/etc/zprofile`, new in this macOS: `[ -z "$LANG" ] && export LANG=C.UTF-8` | **unset**: `locale charmap` is `US-ASCII`, so zsh shows typed non-ASCII as `<…>` escapes | inherited `C.UTF-8` |
-| `HOMEBREW_*`, `INFOPATH`, `FPATH` | set (`~/.zprofile`) | missing | inherited |
-| `TERM_PROGRAM` | `Apple_Terminal` | unset | **`Apple_Terminal`, inherited from the starter** |
-| `SSH_AUTH_SOCK` | launchd's agent socket | launchd's agent socket; `ssh-add -l` works | same |
-| Keychain | | login keychain unlocked; `security add/find-generic-password` work | |
-| `SHELL` | `/bin/zsh` (= `dscl . -read /Users/<user> UserShell`) | `/bin/zsh` | `/bin/zsh` |
-
-Three defects come out of this:
-
-1. **A non-login shell skips the system's login setup.** `/etc/zprofile` is what runs
-   `path_helper` and, on this macOS, defaults `LANG`; `~/.zprofile` is where Homebrew puts its
-   `shellenv`. A termd started by anything but a login shell gives its shells a bare `PATH`
-   and an ASCII locale. For a glyph renderer, the ASCII locale is the worse of the two.
-2. **The starter's terminal identity leaks into every terminal.** S's shells carry
-   `TERM_PROGRAM=Apple_Terminal`. Apple's `/etc/zshrc` sources `/etc/zshrc_$TERM_PROGRAM`, so
-   every termd shell installs Terminal.app's integration:
-   - an OSC 7 `precmd` hook;
-   - with Terminal.app's `TERM_SESSION_ID`, which a real Terminal.app start also carries,
-     per-session history under `~/.zsh_sessions` keyed on one Terminal tab's id, shared by
-     every termd terminal.
-
-   Programs that gate features on `TERM_PROGRAM` (image protocols, keyboard setups) believe
-   they're in Terminal.app, iTerm2 or Ghostty, whichever started the relay. The same holds on
-   Linux.
-3. **The daemon's environment is frozen at its start.** That is tmux's model too, and fine,
-   but it makes defects 1 and 2 depend on who happened to start the daemon.
-
-### A real GUI terminal: Rex
-
-The environment of a shell in Rex, a GUI terminal on this Mac, compared with T. Only the names
-matter here:
-
-- **What Rex adds:**
-  - `TERM_PROGRAM=rex` and `TERM_PROGRAM_VERSION`;
-  - `REX_SERVER`, `REX_SESSION`, `REX_BLOCK`, `REX_BIN_DIR`: a handle on Rex's server socket and
-    on *this* tab's session and block;
-  - its own directories, appended to `PATH`;
-  - `LANG=en_US.UTF-8`: the user's locale, as GUI terminals set it, which wins over
-    `/etc/zprofile`'s `C.UTF-8`.
-- **What a launchd-started GUI app carries:** `XPC_FLAGS`, `XPC_SERVICE_NAME`,
-  `OSLogRateLimit`, `__CF_USER_TEXT_ENCODING`, `DBUS_LAUNCHD_SESSION_BUS_SOCKET`.
-
-A termd first started from a Rex tab would hand every terminal that tab's `REX_SESSION` and
-`REX_BLOCK`, which are live handles: a program in any termd terminal could address Rex about the
-wrong tab. No list of terminals' variables names `REX_*`, and the next terminal will bring its
-own. A denylist can't keep up (recommendation 3 below).
-
-### What others do
-
-From source, at the HEADs current on 2026-11-12:
+What other terminals and daemons do on macOS (from source, 2026-11-12):
 
 | | Login shell | Which shell | Identity it sets | `LANG` when unset |
 |---|---|---|---|---|
 | Terminal.app | `login -pfl <user> … exec -la <shell>` | passwd (via login) | `TERM_PROGRAM=Apple_Terminal`, `TERM_SESSION_ID` | its own setting, on by default |
-| Ghostty | `/usr/bin/login -flp <user> /bin/bash --noprofile --norc -c "exec -l $SHELL"` (`src/termio/Exec.zig`) | `getpwuid`, or `$SHELL` only when launched from a CLI | `TERM_PROGRAM=ghostty` + version; removes `VTE_VERSION` | from `NSLocale`, `<ll>_<CC>.UTF-8`, else `en_US.UTF-8` |
-| iTerm2 | `login -fpl <user> ShellLauncher` → argv0 `-<shell>` | `$SHELL` (set by login) | `TERM_PROGRAM=iTerm.app`, `LC_TERMINAL`, session ids; drops `SHLVL` | "Set locale variables automatically" (default on) |
-| WezTerm mux server | argv0 `-<shell>` (no login(1)) | `getpwuid`; drops `$SHELL` as possibly stale | `TERM_PROGRAM=WezTerm` + version; removes `OLDPWD PWD SHLVL` and, by default, `SSH_AUTH_SOCK SSH_CLIENT SSH_CONNECTION` (`mux_env_remove`) | from `NSLocale` |
-| tmux | argv0 `-<shell>` | `$SHELL` if it's a real shell, else `getpwuid` | `TERM_PROGRAM=tmux` + version, `TMUX`, `TMUX_PANE`; refreshes `SSH_AUTH_SOCK` etc. on attach (`update-environment`) | doesn't set it |
-| shpool | argv0 `-<shell>` | `getpwuid` | starts from `env_clear()`: `HOME PATH SHELL USER` + `TERM`; `PATH=/usr/bin:/bin:/usr/sbin:/sbin` | forwards the client's |
+| Ghostty | `/usr/bin/login -flp <user> /bin/bash --noprofile --norc -c "exec -l $SHELL"` | `getpwuid`, or `$SHELL` when launched from a CLI | `TERM_PROGRAM=ghostty` + version | from `NSLocale`, else `en_US.UTF-8` |
+| iTerm2 | `login -fpl <user> ShellLauncher` → argv0 `-<shell>` | `$SHELL` (set by login) | `TERM_PROGRAM=iTerm.app`, `LC_TERMINAL`, session ids | "Set locale variables automatically" |
+| WezTerm mux server | argv0 `-<shell>` | `getpwuid` | `TERM_PROGRAM=WezTerm` + version; removes `OLDPWD PWD SHLVL` and, by default, the SSH variables | from `NSLocale` |
+| tmux | argv0 `-<shell>` | `$SHELL` if a real shell, else `getpwuid` | `TERM_PROGRAM=tmux`, `TMUX`, `TMUX_PANE`; `update-environment` on attach | doesn't set it |
+| shpool | argv0 `-<shell>` | `getpwuid` | starts from `env_clear()`: `HOME PATH SHELL USER` + `TERM` | forwards the client's |
 
-The common practice:
+termd follows the daemons (argv0 `-<shell>`, no `login(1)`, which wants a login session a daemon
+is not) and the GUI terminals' locale. Coming next: a terminal inherits its caller's environment
+(`g3d new` sends it), and a creator with no shell gets the allowlist with the session's handles
+read fresh from `launchctl getenv`.
 
-- every macOS terminal and multiplexer starts the default shell as a **login shell**;
-- daemons do it with an argv0 of `-<shell>`; GUI terminals go through `login(1)` for utmp,
-  `setlogin` and the PAM launchd session;
-- they take the shell from the passwd entry;
-- they set their own `TERM_PROGRAM` / `TERM_PROGRAM_VERSION`;
-- they remove their own nesting variables.
+## Testing without `/proc`
 
-### Recommendations (not implemented: the Linux environment work owns this)
+- **Process state and RSS** come from `ps -o stat=` / `ps -o rss=` on both platforms. Before
+  that, the daemon tests' kill and memory-ceiling gates read `/proc`, failed silently on macOS,
+  and passed without measuring.
+- **Another process's exec'd environment, argv and cwd** come from `tests/common/procinfo.rs`:
+  `/proc` on Linux, `sysctl(KERN_PROCARGS2)` and `proc_pidinfo(PROC_PIDVNODEPATHINFO)` on macOS.
+  **macOS withholds the environment of Apple platform binaries** (`/bin/sleep`, `/bin/zsh`) from
+  every other process, `ps -E` included; ours it shows. So a test that reads a terminal's
+  environment runs this test binary as the terminal's program, and the reader fails loud on a
+  withheld one. The login shell's `SHELL` is read from the shell itself.
+- **Signal masks and fd limits** of another process can't be read on macOS: `ps -o sigmask` is
+  always 0, and there is no limits file. `tests/env.rs`'s `probe` runs as the terminal's program
+  and reports its own blocked and ignored signals and soft fd limit, on both platforms. It fails
+  when the holder leaves the starter's ignored `SIGINT` in place (checked).
+- **The passwd entry** comes from `getpwuid` (Node's `os.userInfo()` in the relay check): macOS
+  has no `getent`.
 
-1. **The default program is a login shell: argv0 `-<basename>`.** That is the practice of
-   tmux, WezTerm's mux and shpool, the daemons, rather than the GUI terminals' `login -pfl`,
-   which wants a login session (utmp, `setlogin`) that a daemon is not. It alone fixes
-   `PATH` (path_helper, `/etc/paths.d`, Homebrew's `shellenv`) and, on current macOS, `LANG`,
-   through the system's own files. One place: termd's default `argv`; the relay should send
-   none rather than `$SHELL`. An explicit `argv` stays run as given.
-2. **The shell comes from the passwd entry** (`getpwuid`, which reads the directory service:
-   what `dscl … UserShell` shows), with `$SHELL` only as the fallback. Set `SHELL` to it in the
-   child, as login(1) and tmux do. `chsh` then takes effect without restarting the daemon.
-3. **termd states its own identity, and a terminal's environment is explicit, not whatever
-   the starter had.** Set `TERM_PROGRAM=g3d-termd` and `TERM_PROGRAM_VERSION=<version>`.
-   Removing the starter's identity by name (`TERM_SESSION_ID`, `ITERM_*`, `LC_TERMINAL*`,
-   `GHOSTTY_*`, `KITTY_*`, `WEZTERM_*`, `VTE_VERSION`, `WINDOWID`, `COLORFGBG`,
-   `SHELL_SESSION_ID`, `SHLVL`, `PWD`, `OLDPWD`) is the tmux/WezTerm way, but the Rex sample
-   above shows it never finishes. The deterministic choice is shpool's:
-   - start the child from a stated allowlist of the daemon's environment: `HOME`, `USER`,
-     `LOGNAME`, `PATH`, `TMPDIR`, `SSH_AUTH_SOCK`, `LANG`/`LC_*`, `TZ`, plus termd's own
-     variables;
-   - let the login shell (recommendation 1) build the rest from the user's files;
-   - anything else reaches a terminal only through `create.env`.
-
-   Whatever the daemon drops, it says so once at start (in its log), not silently. This
-   matters on Linux as much.
-4. **`LANG`, when the daemon's environment has none and no `LC_ALL`/`LC_CTYPE`:** set
-   `LANG=<ll>_<CC>.UTF-8` from the user's locale (macOS: the `AppleLocale` default, here
-   `en_US`), else `C.UTF-8`. That is what Ghostty, WezTerm and iTerm2 do for a launchd-started
-   process. It covers what (1) doesn't: a program given as `argv` runs no profile.
-5. **Leave `PATH` to the login shell.** Don't run `path_helper` in the daemon or invent a
-   `PATH`. A program given as `argv` gets the daemon's `PATH` (PROTOCOL.md says so), and a
-   caller that wants more passes `env`.
-6. **`SSH_AUTH_SOCK`: keep inheriting it.** launchd's agent socket lives as long as the GUI
-   login session. The stable-symlink scheme (WezTerm, shpool), re-pointed by the client that
-   attached last, matters only when clients arrive over ssh with forwarded agents. Revisit then.
-7. **Keychain: start the daemon inside the user's GUI session.** Measured here, from a daemon
-   in the GUI session, a terminal's `security` reaches the unlocked login keychain. A daemon
-   first started from an ssh login is in that login's audit session, and its children would
-   see a locked keychain (not verified here). tmux moves its server into the per-user
-   bootstrap namespace after daemonizing (`compat/daemon-darwin.c`) for the related clipboard
-   case. The normal practice for a daemon that must outlive logins is a LaunchAgent in
-   `gui/<uid>` (shpool's Homebrew service is one). For now, start it from a Terminal shell or
-   from the relay, which is how the dev loop runs.
-
-### Sketch: the explicit environment (agreed in direction with Ivan, 2026-11-12; not built)
-
-- **Built-in allowlist** (in code, listed in PROTOCOL.md):
-  - `HOME USER LOGNAME SHELL PATH TMPDIR TZ LANG LC_* SSH_AUTH_SOCK`;
-  - plus the Linux desktop session: `XDG_* DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY`.
-    Clipboard tools and GUI launches need these.
-
-  With the login shell building the rest, most users never need a config file.
-- **Optional exceptions**, `$XDG_CONFIG_HOME/g3d/termd.toml` (else `~/.config/g3d/termd.toml`):
-
-  ```toml
-  [env]
-  pass = ["AWS_PROFILE", "NIX_*"]       # add to the built-in list (patterns)
-  drop = ["SSH_AUTH_SOCK"]              # take out of it
-  [env.set]
-  EDITOR = "nvim"
-  PATH   = "${HOME}/.local/bin:${PATH}" # ${VAR} only, from the daemon's own environment
-  ```
-
-  Expansion is `${VAR}` and nothing else: no `~`, no `$(…)`, no shell.
-- **Order:** the built-in list, then the file's `pass`/`drop`, then termd's own variables
-  (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `G3D_*`), then the file's `set`, then `create.env`.
-  The caller's explicit request wins.
-- **When it's read:** on every `create`, re-parsed only when the file's modification time
-  changes, so an edit needs no daemon restart. A file that doesn't parse fails that `create`
-  with an error naming the line. It never falls back to passing everything.
-- **Observability:**
-  - The daemon logs its policy once at start: the file used, and the names of the variables it
-    dropped.
-  - A `g3d env [<id>]` command (a protocol op) prints a terminal's effective environment, each
-    variable tagged with its source: built-in, file, termd, `set`, or request.
-- **Left out:** per-terminal sections (that is `create.env`), and re-reading the daemon's own
-  environment, which stays fixed at start, as tmux's does. `SSH_AUTH_SOCK` changing on an ssh
-  reconnect gets a stable symlink later, if it's ever needed.
-
-## Found along the way: a daemon that wouldn't stop
+## A daemon an unwritable log can't stop
 
 `log()` used `eprintln!`, which panics when stderr can't be written: a full disk under the log
-file, or a closed pipe. The panic ended whichever task logged, such as the SIGTERM handler or
-the idle-exit timer. The result was a daemon that ignored SIGTERM and never idle-exited, or one
-that died at its first log line. A failed log write is now dropped. Gate:
-`an_unwritable_log_does_not_wedge_the_daemon`, which fails on the old `log()`. Not macOS-specific.
+file, or a closed pipe (found here: a daemon started under `| head -1` ignored SIGTERM). In the
+brain the panic ended whichever task logged, such as the SIGTERM handler or the idle-exit timer.
+In the holder, whose panic hook aborts, it would hang up every shell. A failed log write is now
+dropped. Gate: `an_unwritable_log_does_not_wedge_the_daemon`, which fails with `eprintln!`. Not
+macOS-specific.
 
 ## Not verified here
 
-- That an sshd session lacks `$TMPDIR`. It is widely reported, but not tested here. The rule no
-  longer depends on it.
-- Whether dirhelper removes sockets under `/var/folders/…/T`. Moot now.
-- Keychain access from a daemon first started over ssh.
-- The real Terminal.app's environment. Driving it with `osascript` waits on a macOS
-  Automation consent prompt, so T was rebuilt as described above. The real GUI sample is a
-  Rex shell's (above), which shows what a GUI terminal adds. Terminal.app's own additions
-  (`TERM_SESSION_ID`, its `LANG`) come from its documentation, not a capture.
+- That an sshd session lacks `$TMPDIR` (the rule doesn't depend on it).
+- Keychain access from a daemon first started over ssh, whose audit session's keychain is
+  locked. The normal practice for a daemon that must outlive logins is a LaunchAgent in
+  `gui/<uid>`.
+- The real Terminal.app's environment: driving it with `osascript` waits on an Automation consent
+  prompt, so its launch was rebuilt with `login -pfl`.
+- darwin-amd64.

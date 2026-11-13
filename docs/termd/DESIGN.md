@@ -64,13 +64,11 @@ What exists on branch `termd`, and where it departs from the plan below:
 - **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)),
   and so are the environment policy and the defaults audit's decisions
   ([below](#environment-and-defaults-as-built-2026-11-12)), and so is protocol 1.1's status stream
-  with everything that renders it ([below](#status-as-built-2026-11-12)). Not built yet: the socket
-  fallback change (the macOS branch's), the config file and `g3d config`, the cgroup scopes.
-- **On branch `termd-macos`, to be merged:** darwin-arm64 builds and passes every gate; close-on-exec
-  set after creation where macOS has no atomic form; the slave opened before `TIOCSWINSZ`; tests
-  measure processes with `ps` instead of `/proc`; the socket fallback `/tmp/g3d-<uid>` with its
-  directory checks and hourly re-stamp. Its findings are folded into this design (environment,
-  platform seams, defaults); the code lands with the merge.
+  with everything that renders it ([below](#status-as-built-2026-11-12)). Not built yet: the config
+  file and `g3d config`, the cgroup scopes.
+- **macOS (darwin-arm64)** builds and passes every gate on branch `termd-macos`, which is this design
+  plus its platform seams ([Linux and macOS](#linux-and-macos); MACOS.md has what macOS does
+  differently). The code lands with the merge.
 
 ## Holder and brain as built (2026-11-12)
 
@@ -294,7 +292,7 @@ daemon.
 - **Locale.** "Set" means non-empty (POSIX treats an empty value as unset). A request whose `env`
   names `LANG`, `LC_ALL` or `LC_CTYPE`, even to remove it (`null`), gets no fill: it chose. The fill
   is checked once at brain start with `newlocale(LC_CTYPE_MASK, …)`; macOS asks
-  `defaults read -g AppleLocale` (unverified here; the macOS branch owns it), falling back to
+  `defaults read -g AppleLocale` (on the M2, `en_US` gives `en_US.UTF-8`), falling back to
   `C.UTF-8` when the user's locale doesn't load.
 - **A missing home** starts the program in `/`, as `login(1)` does ("No home directory, logging in
   with HOME=/"), rather than failing the `create`.
@@ -334,8 +332,9 @@ the status interval and recent errors). The socket directory is found
 from the uid on both sides (`g3d::paths::socket_dir`, `cli/termd.go` `termdSocketDir`):
 `/run/user/<uid>/g3d`, else `/tmp/g3d-<uid>`, ignoring `$XDG_RUNTIME_DIR` and `$TMPDIR`
 (`tests/attach.rs` and `cli/termd_paths_test.go` check that `env -i` and a desktop environment
-find the same socket). Not applied: the directory checks (owner, mode) on `/tmp/g3d-<uid>`, which
-the macOS branch carries; the cgroup scopes.
+find the same socket). The holder refuses a socket directory that is not a directory, is another
+user's, or is writable by group or others (tmux's check of `/tmp/tmux-<uid>`). Not applied: the
+cgroup scopes.
 
 **The test hooks are compiled out** of every build but the tests': the cargo feature `test-hooks`
 gates the magic `INPUT`s, the failing brain, the named engine and the user-manager stand-in, and
@@ -348,8 +347,9 @@ binary was checked to hold none of the hooks' strings.
 with cargo-zigbuild when installed (it isn't on the build machine today, so the 2026-11-12 arm64
 proof under qemu stands as the last one). A missing `vendor/` stops the build with what the vendor
 step is and the command (`tools/termd-vendor.sh [DIR]`). `make release` ships the linux-amd64 pair
-and requires it, and the linux-arm64 pair when it was built. Darwin is a `TODO(macOS)` in the
-Makefile for the macOS branch, not a target that pretends. A bare `cargo build` with no `vendor/`
+and requires it, and the linux-arm64 and darwin pairs when they were built. `make darwin-arm64` and
+`make darwin-amd64` build their pair natively on a Mac of that architecture (arm64 proven on the M2);
+no other host builds them. A bare `cargo build` with no `vendor/`
 still fails inside libghostty-vt-sys's build script ("GHOSTTY_SOURCE_DIR does not contain
 build.zig"), whose message we don't control; `.cargo/config.toml` says where that comes from.
 
@@ -418,7 +418,7 @@ feature `status`.
   carried until a brain is welcomed) and opens its errors with `brain_failed`, so the outage is on
   record once it is over. A crash or watchdog start opens the errors with `brain_crash`/`brain_watchdog`.
 - RSS: `/proc/<pid>/statm` on Linux, `proc_pidinfo(PROC_PIDTASKINFO)` on macOS (`status::rss`, the
-  cfg seam; the macOS branch verifies it); absent where it can't be measured.
+  cfg seam; `tests/status.rs` reads it for the holder and the brain on both); absent where it can't be measured.
 - Recent errors: the last `--status-errors` (32) distinct `(code, terminal)`, newest first, from
   `spawn_failed`, `input_full`, `panic`, `lagged`, `restore`, `upgrade_failed`. **Departure:** the
   ring is the current brain's: a restart starts it over (with the reason for the restart). Keeping
@@ -720,7 +720,7 @@ The brain saves each terminal while it runs, so a restarted brain can bring the 
   last save encodes a libghostty snapshot on its owner thread, compresses it with LZ4 and writes it
   into a new anonymous shared-memory object sized to fit (Linux: a `memfd`, then sealed against
   writes and growth; macOS: `shm_open` of a random name, `shm_unlink` at once, sized once, which is
-  all macOS allows). It sends that fd to the holder, which keeps the newest two per terminal and
+  all macOS allows, and written and read through a mapping). It sends that fd to the holder, which keeps the newest two per terminal and
   closes the older. The object is complete before it is sent, so a crash mid-encode leaves the
   previous one whole; there are no slots to tear. Its header carries a magic, the engine
   (`libghostty-vt/1.0.1` plus the snapshot format version), the terminal's id, the `seq` the
@@ -922,14 +922,15 @@ program outlives it. Resize (`TIOCSWINSZ`) and I/O stay in the brain, on its own
 
 ### Linux and macOS
 
-One design; the platform seams are `cfg`-gated modules with one interface each, so the macOS work
-(branch `termd-macos`) slots in without touching the rest.
+One design; the platform seams are `cfg`-gated modules with one interface each. The macOS column is
+proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-relay-check` and
+`wall-e2e` pass there.
 
-| Seam | Linux | macOS (owned by the macOS agent) |
+| Seam | Linux | macOS |
 |---|---|---|
 | socket directory | `/run/user/<uid>/g3d` when that is the user's, else `/tmp/g3d-<uid>`: from the uid, never the environment | `/tmp/g3d-<uid>` (there is no `/run/user`); one rule, no `cfg` |
-| shared memory for snapshots, records and `seq_marks` | `memfd_create(MFD_CLOEXEC \| MFD_ALLOW_SEALING)`, sealed after writing | `shm_open` of a random name + `shm_unlink` at once, `ftruncate` once (macOS sizes a shm object only once), then `FD_CLOEXEC` |
-| close-on-exec at creation | atomic everywhere (`pipe2`, `accept4`, `SOCK_CLOEXEC`, `MSG_CMSG_CLOEXEC`) | none of those: set right after creation. Safe in the holder (one thread); in the brain the race is harmless because the brain never forks |
+| shared memory for snapshots, records and `seq_marks` | `memfd_create(MFD_CLOEXEC \| MFD_ALLOW_SEALING)`, sealed after writing | `shm_open` of a random name + `shm_unlink` at once, `ftruncate` once (macOS sizes a shm object only once), then `FD_CLOEXEC`. Bytes go in and out through a mapping: macOS refuses `pwrite`/`pread` on a shm object (`ESPIPE`). Its size reads back rounded up to a page (16 KiB), so a blob's length is its header's (`blob::read`) |
+| close-on-exec at creation | atomic everywhere (`pipe2`, `accept4`, `SOCK_CLOEXEC`, `MSG_CMSG_CLOEXEC`) | none of those: set right after creation (`g3d_hold::pipe`, the PTY master, the hold link). Exact in the holder (one thread). The brain starts one program, `defaults` (the locale), once at start, while it is one thread and after the handoff's fds are close-on-exec, and no other |
 | closing fds in a child | `close_range` | the pre-fork list ([Spawning a terminal](#spawning-a-terminal)) |
 | `TIOCSWINSZ` on a fresh master | works at once | `ENOTTY` until the slave is opened: open the slave first, on both |
 | process RSS (status) | `/proc/<pid>/statm` | `proc_pidinfo(PROC_PIDTASKINFO)`; tests use `ps -o rss=` on both and fail loud when it can't measure |
@@ -937,9 +938,11 @@ One design; the platform seams are `cfg`-gated modules with one interface each, 
 | OOM preference | brain raises `oom_score_adj` | none |
 | process names | `PR_SET_NAME` | none (no `prctl`) |
 | parent death | not used: the brain sees the hold link close; shells see their PTY hang up | the same, so nothing to port |
-| `SCM_RIGHTS` receive | `MSG_CMSG_CLOEXEC` | no `MSG_CMSG_CLOEXEC`: the holder (one thread, so no race) sets `FD_CLOEXEC` right after `recvmsg`; the brain never execs |
-| peer credentials | `SO_PEERCRED` | `getpeereid` |
-| PTY buffer with no reader | 13.8 KB (measured) | to measure |
+| `SCM_RIGHTS` receive | `MSG_CMSG_CLOEXEC` | no `MSG_CMSG_CLOEXEC`: the hold link sets `FD_CLOEXEC` right after `recvmsg`, in the holder and in the brain (no race: the row above) |
+| peer credentials | `SO_PEERCRED` | `getpeereid`, which answers `ENOTCONN` once the client has closed (Linux still answers): such a connection is dropped without a log line |
+| bytes queued on a PTY master (a read's bound, so the high-water mark is exact) | `FIONREAD` | `TIOCOUTQ` on the master: `FIONREAD` there answers 0 whatever is queued, which made every read and every `OUTPUT` frame one byte (floods about 50× slower; found on the M2) |
+| errno in a forked child | `__errno_location` | `__error` |
+| PTY buffer with no reader | 13.8 KB (measured) | 1,024 bytes (measured: the slave's write blocks past it) |
 | canonical-mode line limit (`MAX_CANON`) | 4,095 bytes | 1,023 bytes: the excess and the line's end are lost (BEL per byte), so a canonical reader (`read`, `head -n1`, Python's `input()`) waits. Kernel line discipline: termd writes what it was given, documents the limit, and does not split. Raw-mode programs (line editors, vim, Claude Code) take input of any size (the M2's 256 KiB `INPUT` gate) |
 | the session source (a creator with no environment) | the systemd user manager's environment, filtered to the allowlist | `launchctl getenv <name>` per allowlisted name (unverified here; the macOS branch proves it); either falls back per name to the daemon's start value; see [Environment](#environment) |
 | `PATH` when the base has none | `/etc/login.defs`' `ENV_PATH`, else `/usr/local/bin:/bin:/usr/bin` (util-linux `login`) | `/usr/bin:/bin` (`login`'s `_PATH_DEFPATH`) |
@@ -1791,10 +1794,10 @@ ours.
   90 s, and the arm64 daemon, run under qemu-aarch64, created a terminal, answered `list` and
   `capture` (styles intact) and stopped cleanly. Not yet run on arm64 hardware. TODO, in order:
   1. linux-arm64 on real hardware (and a glibc build if a target needs one);
-  2. macOS (darwin-arm64, then darwin-amd64): a native build on the Mac (the vendor script
-     fetches the macOS Zig);
+  2. macOS darwin-amd64 (darwin-arm64 is done: built natively on the M2, every gate; MACOS.md):
+     an Intel Mac, or rustup's `x86_64-apple-darwin` target on an arm64 one;
   3. `make release` shipping `g3d-termd`/`g3d` beside each `glyph3d-cli`: done for linux-amd64
-     (required) and linux-arm64 (when built); darwin with item 2;
+     (required), and linux-arm64 and darwin when built;
   4. Windows: none (no PTYs; the relay has no terminals there).
 
 ## Workspace layout (D10)
