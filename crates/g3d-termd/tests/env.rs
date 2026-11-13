@@ -52,6 +52,13 @@ const ODD: &[(&str, &str)] = &[
     ("LANG", "en_US.ISO-8859-1"),
     ("G3D_TERMD_DIR", "/nonexistent/termd"),
     ("KEEP_ME", "kept"),
+    // What launchd gives every process of a macOS GUI session: its text encoding and Unix
+    // conformance, and the launching app's XPC identity and log setting (which never pass).
+    ("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0"),
+    ("COMMAND_MODE", "unix2003"),
+    ("XPC_SERVICE_NAME", "application.com.example.Term.1234"),
+    ("XPC_FLAGS", "0x0"),
+    ("OSLogRateLimit", "64"),
 ];
 
 fn odd_daemon(args: &[&str]) -> Daemon {
@@ -205,6 +212,9 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
         "INVOCATION_ID",
         "G3D_TERMD_DIR",
         "G3D_TERMD_TEST_HOOKS",
+        "XPC_SERVICE_NAME",
+        "XPC_FLAGS",
+        "OSLogRateLimit",
     ] {
         assert!(!env.contains_key(gone), "{gone} leaked: {:?}", env.get(gone));
     }
