@@ -188,14 +188,20 @@ ifeq ($(HOST_OS),linux)
 	else echo "  g3d-termd-linux-arm64: skipped (needs cargo-zigbuild and the aarch64-unknown-linux-musl rustup target)"; fi
 endif
 
-# TODO(macOS): g3d-termd-darwin-* and g3d-darwin-* beside these, built natively on a Mac by the
-# macOS branch (see the termd target above); a Linux host cannot build them.
+# g3d-termd-darwin-* and g3d-darwin-* are built natively, beside the CLI, on a Mac of that
+# architecture (the termd target above); no other host builds them (docs/termd/MACOS.md).
 darwin-amd64: prep
 	@mkdir -p $(OUT_DIR)
 	cd $(CLI_DIR) && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath \
 		-ldflags='-s -w -X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -X main.Platform=darwin-amd64' \
 		-o ../$(OUT_DIR)/$(BINARY)-darwin-amd64 .
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-amd64"
+ifeq ($(HOST_PLATFORM),darwin-amd64)
+	$(MAKE) termd
+	cp ./g3d-termd $(OUT_DIR)/g3d-termd-darwin-amd64
+	cp ./g3d $(OUT_DIR)/g3d-darwin-amd64
+	@echo "  → $(OUT_DIR)/g3d-termd-darwin-amd64 $(OUT_DIR)/g3d-darwin-amd64"
+endif
 
 darwin-arm64: prep
 	@mkdir -p $(OUT_DIR)
@@ -227,9 +233,11 @@ windows-amd64: prep
 # exactly what was built and inspected, or nothing.
 
 # The terminal daemon ships for linux-amd64 always, linux-arm64 when it was built (cargo-zigbuild),
-# darwin once the macOS branch builds it (TODO(macOS)).
+# and darwin-arm64 / darwin-amd64 when a Mac of that architecture built them into dist/.
 TERMD_DIST = $(OUT_DIR)/g3d-termd-linux-amd64 $(OUT_DIR)/g3d-linux-amd64 \
-	$(wildcard $(OUT_DIR)/g3d-termd-linux-arm64 $(OUT_DIR)/g3d-linux-arm64)
+	$(wildcard $(OUT_DIR)/g3d-termd-linux-arm64 $(OUT_DIR)/g3d-linux-arm64) \
+	$(wildcard $(OUT_DIR)/g3d-termd-darwin-arm64 $(OUT_DIR)/g3d-darwin-arm64) \
+	$(wildcard $(OUT_DIR)/g3d-termd-darwin-amd64 $(OUT_DIR)/g3d-darwin-amd64)
 
 release:
 	@for p in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64.exe; do \
@@ -239,6 +247,9 @@ release:
 		test -f $$f || { echo "missing $$f — run make all on a linux-amd64 host"; exit 1; }; \
 	done
 	@test -f $(OUT_DIR)/g3d-termd-linux-arm64 || echo "note: no g3d-termd-linux-arm64 (needs cargo-zigbuild); releasing without it"
+	@for p in darwin-arm64 darwin-amd64; do \
+		test -f $(OUT_DIR)/g3d-termd-$$p || echo "note: no g3d-termd-$$p (built only on a Mac of that architecture); releasing without it"; \
+	done
 	@got=$$($(OUT_DIR)/$(BINARY)-$(HOST_PLATFORM) version | head -1 | awk '{print $$2}'); \
 	test "$$got" = "$(VERSION)" || { echo "dist/ is stale: built $$got, releasing $(VERSION) — run: make all VERSION=$(VERSION)"; exit 1; }
 	@echo ""
