@@ -198,3 +198,47 @@ unsafe fn errno_ptr() -> *mut i32 {
 unsafe fn errno_ptr() -> *mut i32 {
     unsafe { libc::__error() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Runs `script` under `/bin/sh` on a PTY and returns what it printed.
+    fn run(script: &str) -> String {
+        let argv = ["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+        let plan = Plan::new("/bin/sh", &argv, &[("PATH".into(), "/usr/bin:/bin".into())], None, 80, 24).unwrap();
+        let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: getrlimit into a struct we own.
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+        let (master, pid) = spawn(&plan, rl.rlim_cur).unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            match rustix::io::read(&master, &mut buf) {
+                Ok(0) | Err(_) => break, // EIO: the program is gone
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+        let mut status = 0;
+        // SAFETY: reaping the child we started.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// No fd of the holder's reaches a program: one without close-on-exec (another terminal's
+    /// handed-over master, a client's socket) is closed in the child, one with it by exec.
+    #[test]
+    fn no_fd_of_the_holder_reaches_the_program() {
+        let (leak, _w) = rustix::pipe::pipe().unwrap();
+        let (kept, _w2) = rustix::pipe::pipe().unwrap();
+        rustix::io::fcntl_setfd(&kept, rustix::io::FdFlags::CLOEXEC).unwrap();
+        let (l, k) = (leak.as_raw_fd(), kept.as_raw_fd());
+        let out = run(&format!(
+            "for fd in {l} {k}; do if [ -e /dev/fd/$fd ]; then echo \"fd $fd LEAKED\"; else echo \"fd $fd closed\"; fi; done"
+        ));
+        assert!(out.contains(&format!("fd {l} closed")), "{out:?}");
+        assert!(out.contains(&format!("fd {k} closed")), "{out:?}");
+    }
+}

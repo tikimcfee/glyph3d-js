@@ -659,6 +659,38 @@ fn idle_exit_removes_the_socket() {
     assert!(!d.socket.exists());
 }
 
+/// A log that can't be written (a full disk, a closed pipe) doesn't stop the daemon from
+/// stopping: its idle exit still runs, and logs on the way out.
+#[test]
+fn an_unwritable_log_does_not_wedge_the_daemon() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ulog{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("t.sock");
+    let mut child = std::process::Command::new(bin())
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--idle-exit", "1"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take()); // every later log write fails with EPIPE
+    let until = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            panic!("the daemon did not idle-exit with its log unwritable");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn stop_kills_every_terminal_and_exits() {
     let mut d = Daemon::start();

@@ -105,8 +105,13 @@ pub fn now_rfc3339() -> String {
     )
 }
 
-/// One line on stderr (the namespace's log once daemonized).
+/// One line on stderr (the namespace's log once daemonized). A failed write is dropped:
+/// `eprintln!` panics when stderr can't be written (a full disk, a closed pipe), which would
+/// abort the holder (its panic hook) and take the brain's calling task with it, such as the
+/// SIGTERM handler or the idle exit, leaving a daemon that won't stop.
 pub fn log(msg: &str) {
+    use std::io::Write;
     follow();
-    eprintln!("{} {}[{}] {msg}", now_rfc3339(), ROLE.get().copied().unwrap_or("termd"), std::process::id());
+    let line = format!("{} {}[{}] {msg}\n", now_rfc3339(), ROLE.get().copied().unwrap_or("termd"), std::process::id());
+    let _ = std::io::stderr().write_all(line.as_bytes());
 }

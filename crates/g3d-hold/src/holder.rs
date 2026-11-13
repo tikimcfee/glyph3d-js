@@ -59,7 +59,8 @@ pub struct Config {
 }
 
 fn die(msg: &str) -> ! {
-    eprintln!("g3d-termd: {msg}");
+    // Not eprintln!: it panics on an unwritable stderr, and the exit below must happen.
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("g3d-termd: {msg}\n").as_bytes());
     std::process::exit(1);
 }
 
