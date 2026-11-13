@@ -1,8 +1,11 @@
 //! Where a namespace's socket and log live (docs/termd/DESIGN.md, "One daemon per
 //! namespace"). The glyph3d relay (cli/termd.go) follows the same rule.
 //!
-//! - socket: `$G3D_TERMD_DIR/termd-<ns>.sock`, else `$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`,
-//!   else `<temp>/g3d-<uid>/termd-<ns>.sock`
+//! - socket: `$G3D_TERMD_DIR/termd-<ns>.sock`, else `/run/user/<uid>/g3d/termd-<ns>.sock` when
+//!   that runtime directory is the user's, else `/tmp/g3d-<uid>/termd-<ns>.sock`. Found from the
+//!   uid, never from `$XDG_RUNTIME_DIR` or `$TMPDIR`: a relay or daemon started from a stripped
+//!   environment (`env -i`, cron, a service manager) must find the socket the desktop's `g3d`
+//!   finds, as tmux's `/tmp/tmux-<uid>` doesn't vary with the session either.
 //! - log: `$G3D_TERMD_DIR/termd-<ns>.log`, else `$XDG_STATE_HOME/g3d/termd-<ns>.log`, else
 //!   `~/.local/state/g3d/termd-<ns>.log`
 //!
@@ -36,15 +39,15 @@ pub fn user_runtime_dir() -> Option<PathBuf> {
     (m.is_dir() && m.uid() == uid && m.permissions().mode() & 0o077 == 0).then_some(dir)
 }
 
-/// The directory sockets live in.
+/// The directory sockets live in: `$G3D_TERMD_DIR` (an explicit choice, as tmux's
+/// `TMUX_TMPDIR`), else [`socket_dir_for`] this user.
 pub fn socket_dir() -> PathBuf {
-    if let Some(d) = env_dir("G3D_TERMD_DIR") {
-        return d;
-    }
-    if let Some(d) = env_dir("XDG_RUNTIME_DIR") {
-        return d.join("g3d");
-    }
-    std::env::temp_dir().join(format!("g3d-{}", rustix::process::getuid().as_raw()))
+    env_dir("G3D_TERMD_DIR").unwrap_or_else(|| socket_dir_for(user_runtime_dir(), rustix::process::getuid().as_raw()))
+}
+
+/// The rule without the override: the user's runtime directory's `g3d`, else `/tmp/g3d-<uid>`.
+pub fn socket_dir_for(runtime: Option<PathBuf>, uid: u32) -> PathBuf {
+    runtime.map(|d| d.join("g3d")).unwrap_or_else(|| PathBuf::from(format!("/tmp/g3d-{uid}")))
 }
 
 /// The socket of namespace `ns`.
@@ -59,4 +62,15 @@ pub fn log_path(ns: &str) -> PathBuf {
         .or_else(|| env_dir("HOME").map(|h| h.join(".local/state/g3d")))
         .unwrap_or_else(socket_dir);
     dir.join(format!("termd-{ns}.log"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_socket_directory_comes_from_the_uid() {
+        assert_eq!(socket_dir_for(Some("/run/user/1000".into()), 1000), PathBuf::from("/run/user/1000/g3d"));
+        assert_eq!(socket_dir_for(None, 501), PathBuf::from("/tmp/g3d-501"));
+    }
 }

@@ -44,10 +44,14 @@ second relays use their own). A namespace's socket is `termd-<namespace>.sock` i
 first of these directories that applies:
 
 1. `$G3D_TERMD_DIR`, when set and not empty;
-2. `$XDG_RUNTIME_DIR/g3d`, when `XDG_RUNTIME_DIR` is set and not empty;
-3. `/tmp/g3d-<uid>` otherwise (always on macOS), with the numeric user id. `$TMPDIR` is not
-   consulted: different runtimes resolve an unset `$TMPDIR` differently, and every client must
-   find the same socket.
+2. `/run/user/<uid>/g3d`, when `/run/user/<uid>` (logind's per-user runtime directory, with the
+   numeric user id) is a directory the user owns that group and others can't access;
+3. `/tmp/g3d-<uid>` otherwise (always on macOS).
+
+Only the uid decides between 2 and 3: neither `$XDG_RUNTIME_DIR` nor `$TMPDIR` is consulted,
+because a client started from a stripped environment (`env -i`, cron, a service manager) must
+find the socket a desktop shell's client finds, and different runtimes resolve an unset
+`$TMPDIR` differently.
 
 A namespace's name is 1 to 64 bytes of `[A-Za-z0-9._-]`. A daemon can also serve an
 explicit socket path instead (`g3d-termd --socket <path>`); it then has no namespace.

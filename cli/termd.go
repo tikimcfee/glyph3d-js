@@ -8,7 +8,7 @@ package main
 //
 // The socket and log follow the daemon's rule (crates/g3d/src/paths.rs):
 //
-//	socket: $G3D_TERMD_DIR/termd-<ns>.sock | $XDG_RUNTIME_DIR/g3d/… | <tmp>/g3d-<uid>/…
+//	socket: $G3D_TERMD_DIR/termd-<ns>.sock | /run/user/<uid>/g3d/… (when it is the user's) | /tmp/g3d-<uid>/…
 //	log:    $G3D_TERMD_DIR/termd-<ns>.log  | $XDG_STATE_HOME/g3d/…  | ~/.local/state/g3d/…
 
 import (
@@ -58,14 +58,23 @@ const (
 	termdMaxFrame = 16 << 20
 )
 
+// termdSocketDir is $G3D_TERMD_DIR (an explicit choice, as tmux's TMUX_TMPDIR), else the rule
+// below. Never $XDG_RUNTIME_DIR or $TMPDIR: a relay started from a stripped environment (env -i,
+// cron, a service manager) must find the socket a desktop shell's g3d finds.
 func termdSocketDir() string {
 	if d := os.Getenv("G3D_TERMD_DIR"); d != "" {
 		return d
 	}
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		return filepath.Join(d, "g3d")
+	return termdSocketDirFor(userRuntimeDir(), os.Getuid())
+}
+
+// termdSocketDirFor is the rule found from the uid: the user's runtime directory's g3d, else
+// /tmp/g3d-<uid> (crates/g3d/src/paths.rs, socket_dir_for).
+func termdSocketDirFor(runtime string, uid int) string {
+	if runtime != "" {
+		return filepath.Join(runtime, "g3d")
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("g3d-%d", os.Getuid()))
+	return fmt.Sprintf("/tmp/g3d-%d", uid)
 }
 
 func termdSocketPath(ns string) string {

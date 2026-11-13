@@ -296,8 +296,12 @@ brain, which shares the file, sees the path name another file before its next li
 RFC 3339 lines with the role and pid, values printed as values (`ended: code 0`); the default
 program, cwd, `TERM_PROGRAM`, locale fill and scrub as above. **Idle exit stays 300 s** ("keep"),
 and status followers don't count toward it ([Status as built](#status-as-built-2026-11-12), with
-the status interval and recent errors). Not applied: the socket fallback (`/tmp/g3d-<uid>`,
-ignoring `$TMPDIR`), which the macOS branch carries with its directory checks; the cgroup scopes.
+the status interval and recent errors). The socket directory is found
+from the uid on both sides (`g3d::paths::socket_dir`, `cli/termd.go` `termdSocketDir`):
+`/run/user/<uid>/g3d`, else `/tmp/g3d-<uid>`, ignoring `$XDG_RUNTIME_DIR` and `$TMPDIR`
+(`tests/attach.rs` and `cli/termd_paths_test.go` check that `env -i` and a desktop environment
+find the same socket). Not applied: the directory checks (owner, mode) on `/tmp/g3d-<uid>`, which
+the macOS branch carries; the cgroup scopes.
 
 **The test hooks are compiled out** of every build but the tests': the cargo feature `test-hooks`
 gates the magic `INPUT`s, the failing brain, the named engine and the user-manager stand-in, and
@@ -501,16 +505,24 @@ update to vt-1.0.1" commit), built with Zig 0.17.0 and Rust 1.98.1.
 ### One daemon per namespace
 
 A namespace is a name (`default`, a test's random name). Its socket is
-`$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`. When that variable is unset (always on macOS; on Linux
-without logind, as in some containers) it is `/tmp/g3d-<uid>/termd-<ns>.sock`, tmux's rule
-(`/tmp/tmux-<uid>`). It ignores `$TMPDIR` on purpose: with `$TMPDIR` unset, Rust's `temp_dir()`
+`/run/user/<uid>/g3d/termd-<ns>.sock` when logind's runtime directory `/run/user/<uid>` exists
+and is the user's alone (owned, `0700`). Otherwise (always on macOS; on Linux without logind, as in
+some containers) it is `/tmp/g3d-<uid>/termd-<ns>.sock`, tmux's rule (`/tmp/tmux-<uid>`). Both are
+found **from the uid, never from the environment**: not `$XDG_RUNTIME_DIR`, which a relay or
+daemon started from `env -i`, cron or a service manager doesn't have, so it would serve
+`default` at `/tmp/g3d-<uid>` while the desktop's `g3d` looks in `/run/user/<uid>/g3d` (two
+`default` daemons, and the relay's terminals invisible from the desktop; found by the verifier).
+`$G3D_TERMD_DIR` is the one override, an explicit choice like tmux's `TMUX_TMPDIR`. Known limit:
+a daemon started before the user's first login on a host without lingering (no
+`/run/user/<uid>` yet) serves from `/tmp/g3d-<uid>`, and a later desktop client looks in
+`/run/user/<uid>/g3d`. It ignores `$TMPDIR` on purpose: with `$TMPDIR` unset, Rust's `temp_dir()`
 answers macOS's per-user `/var/folders/…/T/` while Go's `os.TempDir()` answers `/tmp`, so a relay
 and the daemon it started would look in different places (measured on the M2); and macOS's
 `$TMPDIR` is 49 bytes, which leaves too little of `sun_path`'s 104 for a 64-byte namespace (zellij
 carries a hard-coded guard for the same reason). `g3d-termd --ns <name>` or `--socket <path>`
 picks it.
 
-Every directory the daemon serves from (`$G3D_TERMD_DIR`, `$XDG_RUNTIME_DIR/g3d`, `/tmp/g3d-<uid>`)
+Every directory the daemon serves from (`$G3D_TERMD_DIR`, `/run/user/<uid>/g3d`, `/tmp/g3d-<uid>`)
 is created `0700` and refused, loudly, when it is not a directory, is owned by another user, or is
 writable by group or others (tmux's check). Because `/tmp` is cleaned (macOS's `tmp_cleaner` deletes
 regular files untouched for 3 days, systemd-tmpfiles' `/tmp` rule after 10), the holder re-stamps
@@ -844,7 +856,7 @@ One design; the platform seams are `cfg`-gated modules with one interface each, 
 
 | Seam | Linux | macOS (owned by the macOS agent) |
 |---|---|---|
-| socket directory | `$XDG_RUNTIME_DIR/g3d`, else `/tmp/g3d-<uid>` | `/tmp/g3d-<uid>` (`$XDG_RUNTIME_DIR` is never set); one rule, no `cfg` |
+| socket directory | `/run/user/<uid>/g3d` when that is the user's, else `/tmp/g3d-<uid>`: from the uid, never the environment | `/tmp/g3d-<uid>` (there is no `/run/user`); one rule, no `cfg` |
 | shared memory for snapshots, records and `seq_marks` | `memfd_create(MFD_CLOEXEC \| MFD_ALLOW_SEALING)`, sealed after writing | `shm_open` of a random name + `shm_unlink` at once, `ftruncate` once (macOS sizes a shm object only once), then `FD_CLOEXEC` |
 | close-on-exec at creation | atomic everywhere (`pipe2`, `accept4`, `SOCK_CLOEXEC`, `MSG_CMSG_CLOEXEC`) | none of those: set right after creation. Safe in the holder (one thread); in the brain the race is harmless because the brain never forks |
 | closing fds in a child | `close_range` | the pre-fork list ([Spawning a terminal](#spawning-a-terminal)) |
@@ -1216,7 +1228,7 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | Setting | Default | Decision | Reason and prior art |
 |---|---|---|---|
 | namespace | `default` | keep | tmux's socket name is `default` |
-| socket | `$XDG_RUNTIME_DIR/g3d/termd-<ns>.sock`; else `/tmp/g3d-<uid>/termd-<ns>.sock`; `G3D_TERMD_DIR` overrides; directories checked (owner, `0700`) | **change** (S1: `$TMPDIR`, else `/tmp`; the macOS branch makes the change) | the XDG base-directory spec puts sockets in `XDG_RUNTIME_DIR` (shpool, hexe, zmx do); the fallback is tmux's `/tmp/tmux-<uid>` and its ownership check. `$TMPDIR` made Rust and Go disagree and was too long for `sun_path` on macOS ([One daemon per namespace](#one-daemon-per-namespace)) |
+| socket | `/run/user/<uid>/g3d/termd-<ns>.sock` when that runtime directory is the user's; else `/tmp/g3d-<uid>/termd-<ns>.sock`; found from the uid, never `$XDG_RUNTIME_DIR` or `$TMPDIR`; `G3D_TERMD_DIR` overrides; directories checked (owner, `0700`) | **change** (built for the path; the directory checks are the macOS branch's) | the XDG base-directory spec puts sockets in the runtime directory (shpool, hexe, zmx do), which logind makes `/run/user/<uid>`; read from the uid rather than `$XDG_RUNTIME_DIR` because a starter without that variable must find the same socket (tmux's rule doesn't vary with the session either); the fallback is tmux's `/tmp/tmux-<uid>` and its ownership check. `$TMPDIR` made Rust and Go disagree and was too long for `sun_path` on macOS ([One daemon per namespace](#one-daemon-per-namespace)) |
 | socket and lock re-stamp | every hour (`utimes`), by the holder | **new** (from the macOS branch) | `/tmp` cleaners (macOS `tmp_cleaner`, 3 days; systemd-tmpfiles, 10 days) delete untouched regular files, and a lost lock means two daemons on one namespace. tmux survives the same cleaners because its socket's mtime moves with activity |
 | lock | `<socket>.lock`, left in place after exit | keep | a lock file outliving its holder is harmless with `flock`; it now holds the holder's pid |
 | log | `$XDG_STATE_HOME/g3d/termd-<ns>.log` (`~/.local/state/…`), on Linux and macOS | keep | XDG puts logs in state. `~/Library/Logs` (where Console looks) was considered for macOS; one rule on both systems is worth more, as the macOS agent argued and as Ghostty keeps `~/.config` on macOS. The status document and `g3d status` print the path, so nobody has to know it |

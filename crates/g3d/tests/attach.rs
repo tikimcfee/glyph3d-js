@@ -434,3 +434,26 @@ fn new_forwards_only_from_a_live_ssh_login() {
     assert_eq!(e.get("DISPLAY").map(String::as_str), Some(":99"));
     assert_eq!(e.get("SSH_CONNECTION").map(String::as_str), Some("10.0.0.1 5 10.0.0.2 22"));
 }
+
+/// The socket a namespace lives at doesn't depend on the starter's environment: a relay or daemon
+/// started from `env -i` (or cron, or a service manager) and a desktop shell find the same one.
+#[test]
+fn the_socket_path_does_not_depend_on_the_environment() {
+    let ns = format!("probe-{}", std::process::id());
+    let ls = |setup: &dyn Fn(&mut Command)| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_g3d"));
+        cmd.args(["--ns", &ns, "ls"]);
+        setup(&mut cmd);
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "a daemon answered for {ns}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let stripped = ls(&|c| {
+        c.env_clear();
+    });
+    let desktop = ls(&|c| {
+        c.env_remove("G3D_TERMD_DIR").env("XDG_RUNTIME_DIR", "/nonexistent/runtime").env("TMPDIR", "/nonexistent/tmp");
+    });
+    assert!(stripped.contains("no daemon at /"), "{stripped}");
+    assert_eq!(stripped, desktop);
+}
