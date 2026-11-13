@@ -17,7 +17,8 @@
  * started and that namespace's termd daemon.
  * On macOS the browser launches headed (headless is a software renderer there) — a window opens.
  *
- * Covers: spawn, typing, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
+ * Covers: spawn, typing, Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
+ * browser's key events in the program's modes) and a paste bracketed as it asked, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
  * border resize, title-bar drag vs body press, ⌥-drag on the body, top-edge resize, names (shell
  * title → name, palette rename, clear, a long name whole in its bar or handed to its map label, never
  * cut), a second display refused with the reason on its chip, a page reload (names, spots and shell
@@ -115,7 +116,30 @@ try {
     await page.keyboard.type('echo wall-e2e-typed');
     await page.keyboard.press('Enter');
     await settle(900);
-    ok(await screenHas(A, 'wall-e2e-typed'), 'typing reaches the focused shell');
+    const typedOk = await screenHas(A, 'wall-e2e-typed');
+    ok(typedOk, `typing reaches the focused shell${typedOk ? '' : ` (screen: ${JSON.stringify((await W((i) => window.__wall.terminal(i).readText().filter((l) => l.trim()), A)).slice(-4))})`}`);
+
+    // ── key events and paste: termd encodes them in the program's own modes ──
+    // A program that pushes Kitty keyboard flags (CSI > 1 u) and bracketed paste, then echoes in hex
+    // the bytes it reads: the 7 of Shift+Enter, then the 14 of a bracketed "hi". A real Shift+Enter
+    // from the browser's keyboard; a real paste event.
+    {
+        const screen = (i) => W((id) => window.__wall.terminal(id).readText().join(''), i);
+        const hexOf = (str) => [...Buffer.from(str)].map((b) => `[${b.toString(16).padStart(2, '0')}]`).join('');
+        const prog = (setup, n) => `clear; sh -c 'stty raw -echo; printf "${setup}KEYS-%s" READY; n=0; while [ $n -lt ${n} ]; do `
+            + 'b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d " \\n"); printf "[%s]" "$b"; n=$((n+1)); done; '
+            + `printf "\\033[<u\\033[?2004l"; stty sane; echo; echo KEYS-$((2+3))'\r`;
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, prog('\\033[>1u\\033[?2004h', 7 + 14)]);
+        ok(!!await until((i) => window.__wall.terminal(i).readText().join('').includes('KEYS-READY'), A, 10000), 'a Kitty-keyboard program is up in the focused terminal');
+        await page.keyboard.press('Shift+Enter');
+        const kitty = hexOf('\x1b[13;2u');
+        ok(!!await until(([i, h]) => window.__wall.terminal(i).readText().join('').includes(h), [A, kitty], 8000),
+            `Shift+Enter reaches a Kitty-keyboard program as CSI 13;2u (${(await screen(A)).slice(-60)})`);
+        await W(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'hi'); document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true })); });
+        ok(!!await until(([i, h]) => window.__wall.terminal(i).readText().join('').includes(h), [A, kitty + hexOf('\x1b[200~hi\x1b[201~')], 8000),
+            'a paste reaches it bracketed, as it asked');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'KEYS-5'), A, 8000), 'the program read exactly those bytes and ended');
+    }
 
     // ── termd's status: the chip, the window, a brain restart ─────────────
     {
@@ -236,10 +260,12 @@ try {
     // Typed up to the action label's quote: a shell prompt (a path with "worktrees" in it) can
     // fuzzy-match a bare 'rename' and rank a terminal above the action.
     await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('rename "'); await page.keyboard.press('Enter');
-    await page.keyboard.type('e2e scratch'); await page.keyboard.press('Enter'); await settle(300);
-    ok((await W((i) => window.__wall.nameOf(i), B)) === 'e2e scratch', 'the palette renames the focused terminal');
+    // A name no path holds: the other terminals' titles are their cwd, and a checkout under a
+    // directory named like the search ("…-scratch/…") would match it too.
+    await page.keyboard.type('e2e quokka'); await page.keyboard.press('Enter'); await settle(300);
+    ok((await W((i) => window.__wall.nameOf(i), B)) === 'e2e quokka', 'the palette renames the focused terminal');
     await W(() => window.__wall.focus(null));
-    await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('scratch'); await page.keyboard.press('Enter'); await settle(300);
+    await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('quokka'); await page.keyboard.press('Enter'); await settle(300);
     ok((await W(() => window.__wall.focusedId)) === B, 'the palette finds it by name');
     await W((i) => window.__wall.rename(i, ''), B);
     ok((await W((i) => window.__wall.nameOf(i), B)) === '/tmp', 'an empty name falls back to the shell title');

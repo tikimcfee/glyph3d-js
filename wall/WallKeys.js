@@ -1,4 +1,4 @@
-import { keyToTerminalBytes } from '@glyph3d/core/services/interaction/keyEncoding.js';
+import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
 
 /**
@@ -9,11 +9,14 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * over closeHoldMs; let go early and it's kept), G gathers the selection (or the focused terminal)
  * into a group, Shift+G dissolves the focused terminal's group, B opens or closes the sidebar, S
  * opens or closes the termd status window (K belongs to the DOM palette). Each runs a wall verb.
- * Everything else goes to the focused terminal as terminal bytes — Esc included (vim and readline
- * need it), Ctrl alone too (it's the shell's); click empty canvas to drop focus. With nothing
- * focused, Esc clears the selection. On macOS any other ⌘ key stays with the browser (⌘C, ⌘V);
- * elsewhere any other Ctrl+Alt key is the shell's. A focused DOM input (the palette) keeps its own
- * keys. Paste goes to the focused terminal as one bracketed burst.
+ * Everything else goes to the focused terminal as key events (keyEncoding.keyEventFor) that termd
+ * encodes in the program's own keyboard modes, so Shift+Enter reaches a Kitty-keyboard program as
+ * Shift+Enter — Esc included (vim and readline need it), Ctrl alone too (it's the shell's), and the
+ * key's release goes to the terminal its press went to (Kitty's event reporting reads it); click
+ * empty canvas to drop focus. With nothing focused, Esc clears the selection. On macOS any other ⌘
+ * key stays with the browser (⌘C, ⌘V); elsewhere any other Ctrl+Alt key is the shell's. A focused
+ * DOM input (the palette) keeps its own keys. Paste goes to the focused terminal as a paste, which
+ * termd brackets when the program asked for bracketed paste.
  */
 export default class WallKeys {
     /** @param {import('./TerminalWall.js').default} wall */
@@ -24,6 +27,8 @@ export default class WallKeys {
         this._onKey = (e) => this._key(e);
         this._onKeyUp = (e) => this._keyUp(e);
         this._onPaste = (e) => this._paste(e);
+        /** Physical keys whose press went to a terminal → that terminal: where the release goes. */
+        this._down = new Map();
     }
 
     install() {
@@ -38,9 +43,15 @@ export default class WallKeys {
         document.removeEventListener('paste', this._onPaste);
     }
 
-    /** The held close chord ends when X or the chord comes up (or the window loses the keys). */
+    /** The held close chord ends when X or the chord comes up (or the window loses the keys). A
+     *  key whose press a terminal got sends that terminal its release. */
     _keyUp(e) {
         if (e.code === 'KeyX' || !isChord(e)) this.wall.barButtons?.releaseKey();
+        const id = this._down.get(e.code);
+        if (id === undefined) return;
+        this._down.delete(e.code);
+        const key = keyEventFor(e, { captureEscape: true });
+        if (key) this.wall.terminal(id)?.sendKey(key);
     }
 
     _key(e) {
@@ -74,11 +85,11 @@ export default class WallKeys {
             if (e.key === 'Escape' && wall.selection.size) { e.preventDefault(); wall.run(['wall.select', 'none']); }
             return;
         }
-        const bytes = keyToTerminalBytes(e, { captureEscape: true });
-        if (bytes == null) return;
+        const key = keyEventFor(e, { captureEscape: true });
+        if (!key) return;
         e.preventDefault();
         e.stopPropagation();
-        grid.sendInput(bytes);
+        if (grid.sendKey(key) && key.code) this._down.set(key.code, wall.focusedId);
     }
 
     _paste(e) {

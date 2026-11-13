@@ -187,6 +187,11 @@ impl Client {
         serde_json::from_slice(&payload).map_err(|e| ClientError::Protocol(format!("reply body: {e}")))
     }
 
+    /// The frames requests have set aside so far, without reading the socket.
+    pub fn take_backlog(&mut self) -> Vec<Frame> {
+        self.backlog.drain(..).collect()
+    }
+
     /// Sends `INPUT` for `handle`.
     pub fn input(&mut self, handle: u32, bytes: &[u8]) -> io::Result<()> {
         self.sock.write_all(&frame::encode(ty::INPUT, handle, bytes))

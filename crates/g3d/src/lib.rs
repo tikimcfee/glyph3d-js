@@ -2,6 +2,7 @@
 //! that speaks docs/termd/PROTOCOL.md, and starting the daemon when none is running.
 //! `g3d` (the binary) is built on it; so are the daemon's own tests.
 
+pub mod chord;
 pub mod client;
 pub mod env;
 pub mod paths;

@@ -2,7 +2,8 @@
  * Terminal commands — the CONTROL plane for terminal viewports. The byte DATA plane
  * is separate: OUTPUT arrives as binary frames (WebSocketBridge.onBinaryFrame →
  * grid.writeBytes → the headless VT emulator); INPUT enters via grid.sendInput/paste and
- * leaves through the grid's onInput hook as a terminal.bytes push to the owning adapter.
+ * leaves through the grid's onInput hook as a terminal.key / terminal.paste / terminal.bytes push to the
+ * owning adapter.
  * These verbs manage lifecycle + layout.
  *
  * Control verbs:
@@ -105,9 +106,22 @@ function getTerminals(ctx) {
 }
 
 /**
- * Route a grid's INPUT to its owning adapter: raw ANSI bytes (from the keyboard) → the adapter's
- * PTY, base64 in a JSON push (keystrokes are sparse; the binary lane is the high-volume OUTPUT
- * direction's). No owner, or no relay, leaves the grid with no input route.
+ * A grid's input as the push its owning adapter reads: a key event (`terminal.key`) and a paste
+ * (`terminal.paste`), which the adapter hands to termd's `key` and `paste` ops, or raw bytes
+ * (`terminal.bytes`, base64), written to the program as given. JSON pushes: input is sparse; the
+ * binary lane is the high-volume OUTPUT direction's.
+ * @param {{bytes?: string, key?: Object, paste?: string}} input - TerminalGrid.onInput's shapes
+ * @param {string} terminalId
+ */
+function inputPush(input, terminalId) {
+    if (input.key) return { event: 'terminal.key', data: { terminalId, ...input.key } };
+    if (input.paste != null) return { event: 'terminal.paste', data: { terminalId, text: input.paste } };
+    return { event: 'terminal.bytes', data: { terminalId, b64: encodeBase64(input.bytes) } };
+}
+
+/**
+ * Route a grid's INPUT to its owning adapter. No owner, or no relay, leaves the grid with no
+ * input route.
  * @param {TerminalContext} ctx
  * @param {TerminalGrid} grid
  * @param {string|null} owner - the adapter's controller id
@@ -115,7 +129,7 @@ function getTerminals(ctx) {
 function bindOwner(ctx, grid, owner) {
     const bridge = ctx.wsbridge;
     grid.onInput = owner && bridge?.connected
-        ? (bytes, termId) => bridge.push(owner, { event: 'terminal.bytes', data: { terminalId: termId, b64: encodeBase64(bytes) } })
+        ? (input, termId) => bridge.push(owner, inputPush(input, termId))
         : null;
 }
 

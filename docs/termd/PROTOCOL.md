@@ -1,4 +1,4 @@
-# The termd wire, version 1.1
+# The termd wire, version 1.2
 
 `g3d-termd` keeps terminals alive: it owns each terminal's pseudo-terminal (PTY), its
 process and a libghostty-vt emulator holding the terminal's screen and scrollback.
@@ -9,12 +9,13 @@ disagree, the daemon has a bug.
 
 The protocol is public and versioned. Nothing in it is specific to glyph3d.
 
-Version 1.1 is the first release. What is marked **(1.1)** is new in it. The daemon on branch
-`termd` speaks all of 1.1 and announces `proto` `[1, 1]`: the restarts (`WELCOME.instance`,
-`generation` and `holder`, `ERROR` `restart` and `brain_failed`, the `busy` code, `upgrade` with
-its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and reply fields, the
-`env` op, and the status document (`status`, `status_follow`, `status_unfollow`, the `status`
-event).
+Version 1.1 is the first release. What is marked **(1.1)** is new in it: the restarts
+(`WELCOME.instance`, `generation` and `holder`, `ERROR` `restart` and `brain_failed`, the `busy`
+code, `upgrade` with its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and
+reply fields, the `env` op, and the status document (`status`, `status_follow`, `status_unfollow`,
+the `status` event). What is marked **(1.2)** is new in 1.2: key events and paste (`key`, `paste`,
+the features of the same names, the `unsafe_paste` code). The daemon on branch `termd` speaks all
+of 1.2 and announces `proto` `[1, 2]`.
 
 ## At a glance
 
@@ -32,6 +33,10 @@ event).
   answers.
 - One subscriber at a time **owns** a terminal's size. Everyone else sees the size the
   owner picked.
+- Input is either the bytes a keyboard already encoded (`INPUT`, what a real terminal attached to
+  termd sends) or a key event and pasted text that termd encodes for the program's live modes
+  ([`key`](#key-12), [`paste`](#paste-12)), for a client that has keys but no terminal of its own
+  to encode them, such as a browser. (1.2)
 - The daemon can restart its engine without ending any terminal. Connections close and clients
   reconnect ([Restarts](#restarts-11)). (1.1)
 - One request follows the daemon's whole state as a document pushed on change
@@ -167,10 +172,10 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 1], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+{"proto": [1, 2], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade", "env"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -183,7 +188,7 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade`, `env` (1.1), `cells` (packed cells, reserved).
+  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `cells` (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -229,7 +234,8 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
-| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill` during the handoff) |
+| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste`, during the handoff) |
+| `unsafe_paste` | (1.2) a `paste` whose text could run commands, sent without `allow_unsafe` ([`paste`](#paste-12)) |
 
 ### `create`
 
@@ -514,6 +520,89 @@ styles). `unwrap: true` joins rows the terminal soft-wrapped. Reply:
 `{"req": 10, "ok": true, "text": "...", "rows": 124}`. The text is limited by
 `max_frame`; ask for fewer rows if you get `too_large`.
 
+### `key` (1.2)
+
+Feature `key`. One key event, which termd encodes for the program as a terminal's keyboard would,
+in the terminal's modes at that moment: the Kitty keyboard flags the program pushed (`CSI > u`),
+xterm's modifyOtherKeys (`CSI > 4 ; 2 m`), application cursor and keypad keys (DECCKM, DECKPAM),
+alt-sends-escape and backarrow (modes 1036, 67). The encoder is libghostty's, Ghostty's own, so a
+key reaches a program through termd exactly as it would through Ghostty. Use it when the client
+has key events but no terminal of its own that tracks those modes (a browser); a real terminal
+attached to termd sees the program's mode changes in the raw output and encodes its own keys, so
+it sends `INPUT`.
+
+```json
+{"req": 17, "op": "key", "handle": 7, "code": "Enter", "key": "Enter", "mods": ["Shift"], "text": "", "action": "press"}
+```
+
+The fields mean what the W3C UI Events `KeyboardEvent` fields of the same names mean:
+
+| field | default | meaning |
+|---|---|---|
+| `handle` | required | the terminal; this connection must hold an `attach` or `own` subscription to it (`mode: "none"` counts), as for `INPUT` |
+| `code` | `""` | the physical key, a `KeyboardEvent.code` value: `"KeyA"`, `"Digit1"`, `"Enter"`, `"ArrowLeft"`, `"NumpadEnter"`, `"F5"`. Empty or unknown: termd takes the key from `key` (a named key value, or a one-character `key` on a US layout), else the key is unidentified |
+| `key` | `""` | the logical key, a `KeyboardEvent.key` value: `"a"`, `"A"`, `"!"`, `"Enter"`, `"ArrowLeft"` |
+| `mods` | `[]` | the modifiers held, by their W3C names: `"Shift"`, `"Control"`, `"Alt"`, `"Meta"` (`"Super"` is the same), `"CapsLock"`, `"NumLock"`. `"AltGraph"`, `"Fn"`, `"FnLock"`, `"Hyper"`, `"ScrollLock"`, `"Symbol"` and `"SymbolLock"` are accepted and ignored: they only shape `text`. Any other name is `bad_request` |
+| `text` | `""` | what the key typed, in the client's layout, after Shift, AltGr, Caps Lock, a dead key, an input method or macOS Option-as-character: `"a"`, `"A"`, `"é"`, `"å"`. Empty when it typed nothing (Enter, Tab, an arrow, a function key). With Control held it is the character without Control's change (`"c"` for Ctrl+C: the `0x03` is termd's to make). At most 4,096 bytes (`too_large`) and no control characters (`bad_request`: send the key that makes one) |
+| `action` | `"press"` | `"press"`, `"repeat"` (the key held) or `"release"`. Programs see a release only when they asked for Kitty's event reporting (flag 2) |
+
+Layouts, dead keys, input methods and Option-as-character are the client's to resolve: its OS
+knows them and termd doesn't. termd works out what the W3C event doesn't carry: the key's
+unshifted character, which the Kitty protocol reports (`key` when no Shift or Alt is held, a
+letter lowercased, else the US layout's character for `code`), and which modifiers went into
+`text` (Shift when the text isn't the unshifted character; Alt when it is another character, as
+macOS Option makes one), which the encoder must not report a second time. An Alt that did not go
+into `text` is Alt, on every daemon platform. A key event needs a key: one with neither a known
+`code` or `key` nor `text` is `bad_request`.
+
+What some keys become (the bytes the program reads):
+
+| key | no mode set | Kitty flags 1 | modifyOtherKeys 2 | DECCKM on |
+|---|---|---|---|---|
+| Enter | `\r` | `\r` | `\r` | `\r` |
+| Shift+Enter | `CSI 27 ; 2 ; 13 ~` | `CSI 13 ; 2 u` | `CSI 27 ; 2 ; 13 ~` | `CSI 27 ; 2 ; 13 ~` |
+| Ctrl+C (`text` `"c"`) | `0x03` | `CSI 99 ; 5 u` | `CSI 27 ; 5 ; 99 ~` | `0x03` |
+| Alt+B (`text` `"b"`) | `ESC b` | `CSI 98 ; 3 u` | `CSI 27 ; 3 ; 98 ~` | `ESC b` |
+| ArrowUp | `CSI A` | `CSI A` | `CSI A` | `ESC O A` |
+| Alt+ArrowLeft | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` | `CSI 1 ; 3 D` |
+
+(Shift+Enter with no mode set is xterm's modified-key form, which Ghostty sends there too; Enter
+alone is always `\r`.)
+
+Reply: `{"req": 17, "ok": true, "written": 7}`, the bytes written for the program (0: the key
+encodes to nothing in these modes, as a release does outside Kitty's event reporting). The bytes
+join the program's input exactly as an `INPUT` frame's do: in order with this connection's other
+input, after a scrolled-back `view` returns to live, refused whole with `input_full` when the input
+buffer is full. Errors are replies (`not_subscribed`, `read_only`, `no_terminal`, `busy`), not
+`error` events.
+
+### `paste` (1.2)
+
+Feature `paste`. Text pasted into the terminal, framed as a terminal frames a paste: inside
+`ESC [ 200 ~` … `ESC [ 201 ~` when the program asked for bracketed paste (mode 2004), else with
+each line feed sent as `\r`, the Enter key. Either way the control characters xterm strips from
+pasted text become spaces: NUL, BS, ENQ, EOT, ESC, DEL, and the ones a tty acts on (Ctrl+C, \, U,
+Z, Q, S, W, V, R, O). So a paste never carries its own escape sequences, and can't end its bracket
+early. This is Ghostty's paste encoding, run by libghostty.
+
+```json
+{"req": 18, "op": "paste", "handle": 7, "text": "one\ntwo", "allow_unsafe": false}
+```
+
+| field | default | meaning |
+|---|---|---|
+| `handle` | required | as for `key` |
+| `text` | required | the text, as the clipboard held it |
+| `allow_unsafe` | `false` | paste text that could run commands: a line break (`\n` or `\r`) the program would read as Enter because it hasn't asked for bracketed paste, or the bracketed-paste end (`ESC [ 201 ~`) when it has. Without it, such text is refused with `unsafe_paste` and nothing is written |
+
+`allow_unsafe` is the client's answer to the question Ghostty asks with its paste confirmation
+dialog (`clipboard-paste-protection`): a client with a person to ask asks after `unsafe_paste` and
+sends again, one whose paste is the person's own deliberate act may send it at once, and a
+script decides for itself. The bracket can't be broken either way, since the `ESC` is a space.
+
+Reply: `{"req": 18, "ok": true, "written": 14}`. The bytes join the program's input as `key`'s do,
+and the errors are the same, plus `unsafe_paste`.
+
 ### `ping`
 
 `{"req": 11, "op": "ping"}` → `{"req": 11, "ok": true}`. The daemon never pings; a
@@ -566,7 +655,7 @@ Unix epoch milliseconds, sizes are bytes):
 ```json
 {"at": 1794519127407,
  "daemon": {
-   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 1],
+   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 2],
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
@@ -665,7 +754,9 @@ Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it will use t
 ### `INPUT` (client → daemon)
 
 `stream` is the handle; the payload is bytes to write to the PTY, as a keyboard would
-send them. The connection must hold an `attach` or `own` subscription to that handle
+send them, encoded by the client for the program's modes (a terminal attached to termd does that
+from the raw output it shows). A client with no terminal of its own sends [`key`](#key-12) and
+[`paste`](#paste-12) instead, and termd encodes them. (1.2) The connection must hold an `attach` or `own` subscription to that handle
 (`mode: "none"` counts). Otherwise the daemon sends an `EVENT` `error` with code
 `not_subscribed` or `read_only` and drops the bytes. `INPUT` has no reply.
 
@@ -1038,6 +1129,8 @@ writes, and send keystrokes as `INPUT`.
 
 ## Versions
 
+- **1.2**: key events and paste: the `key` and `paste` ops, the features of the same names,
+  and the `unsafe_paste` code. Additive: a 1.1 client is served as before.
 - **1.1** (the first release): `status`, `status_follow`, `status_unfollow`, `upgrade`; the
   `status` event; `WELCOME.instance`, `generation`, `holder`; `ERROR` `restart` and
   `brain_failed`; the `busy` code; `create.env_base` and the `argv`/`login`/`cwd` reply fields;

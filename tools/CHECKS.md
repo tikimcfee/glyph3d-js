@@ -840,7 +840,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs
   ```
-- **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, ⌘[ ⌘]
+- **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing, a real
+  Shift+Enter into a Kitty-keyboard program arriving as `CSI 13;2u` and a real paste event arriving
+  bracketed (termd encodes the browser's key events), ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under
   the wheel, wheel zoom about the pointer, pinch zoom, map labels, the core terminal verbs,
   termd's status (the chip, the window by chord listing the wall's terminals, a brain restart held
@@ -917,6 +919,12 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   output one change (not a window of them); a status-only follower doesn't hold an idle daemon and
   gets its `exiting` document, by which time the socket is gone and a new daemon can take the name; `stop`'s last document; a
   crash and an upgrade counted in the next brain's document);
+  keys and paste (`src/keys.rs` unit tests and `tests/keys.rs`: a program that sets a keyboard or
+  paste mode and prints what it reads in hex gets Shift+Enter as `CSI 13;2u` under Kitty flags and
+  `CSI 27;2;13~` without, modifyOtherKeys and DECCKM honoured, a paste bracketed exactly under mode
+  2004, a line break without it refused unless `allow_unsafe`, a pasted `ESC [201~` unable to close
+  the bracket; PROTOCOL.md's key table equal to the encoder's output);
+  `g3d send`/`key`/`paste` against a private daemon (`crates/g3d/tests/input.rs`);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
   the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` sending its
   environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
@@ -932,6 +940,8 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   and `g3d env` tagging nothing `caller`: the relay sends no environment), `seq 1 300000` through termd → adapter → relay → display whole and in order, a relay
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
   screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
+  `terminal.key` Shift+Enter and Ctrl+C reaching a Kitty-keyboard program as `CSI 13;2u` and
+  `CSI 99;5u`, `terminal.paste` bracketed with an embedded `ESC` made a space,
   the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a
   SIGKILLed adapter (the relay re-adopts its terminal, typing works), a SIGKILLed termd brain and
   a `g3d upgrade` (every adapter rides them: no grid closes, no `LOST termd`, the repaint brings the

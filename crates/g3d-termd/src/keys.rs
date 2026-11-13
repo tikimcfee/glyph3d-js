@@ -1,0 +1,417 @@
+//! The `key` op (PROTOCOL.md, "`key`"): a key event as the client's OS resolved it (W3C
+//! `KeyboardEvent` semantics), made a libghostty key event and encoded by libghostty's
+//! `KeyEncoder` against the terminal's live keyboard modes: Kitty keyboard flags, modifyOtherKeys,
+//! application cursor and keypad keys, alt-sends-escape. That is Ghostty's own key path
+//! (src/input/key_encode.zig), with the client standing in for Ghostty's apprt: the client says
+//! which physical key (`code`), which logical key (`key`), the modifiers and the text the key
+//! made; termd says what bytes those are in this terminal, now. It runs on the terminal's owner
+//! thread, the one that holds its `Terminal`.
+
+use g3d_wire::code;
+use g3d_wire::msg::{Key as WireKey, KeyAction};
+use libghostty_vt::Terminal;
+use libghostty_vt::key::{Action, Encoder, Event, Key, Mods, OptionAsAlt};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// The most `text` one key event carries (an IME's committed phrase fits; pasted text goes by
+/// `paste`).
+pub const TEXT_MAX: usize = 4096;
+
+/// A `key` request, checked: what libghostty's key event gets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spec {
+    pub key: Key,
+    pub mods: Mods,
+    /// The modifiers that went into making `text` (Shift for `A`, Option for `å`), which an
+    /// encoder must not report again.
+    pub consumed: Mods,
+    pub text: Option<String>,
+    /// The key's character with no modifiers, which the Kitty protocol reports.
+    pub unshifted: Option<char>,
+    pub action: Action,
+}
+
+/// Ghostty's key enum is named by W3C `KeyboardEvent.code` values (src/input/key.zig), the
+/// letter keys as `A`..`Z` where the W3C says `KeyA`..`KeyZ`; this is that table by W3C name.
+fn by_code() -> &'static HashMap<String, Key> {
+    static TABLE: OnceLock<HashMap<String, Key>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        (1..1024)
+            .filter_map(|i| Key::try_from(i).ok())
+            .map(|k| {
+                let name = format!("{k:?}");
+                let w3c = if name.len() == 1 { format!("Key{name}") } else { name };
+                (w3c, k)
+            })
+            .collect()
+    })
+}
+
+/// Ghostty's `Key.codepoint()` (src/input/key.zig `codepoint_map`): the character a key makes on
+/// a US layout, the fallback for the unshifted character when the client's `key` can't give it.
+const US: &[(char, Key)] = &[
+    ('a', Key::A),
+    ('b', Key::B),
+    ('c', Key::C),
+    ('d', Key::D),
+    ('e', Key::E),
+    ('f', Key::F),
+    ('g', Key::G),
+    ('h', Key::H),
+    ('i', Key::I),
+    ('j', Key::J),
+    ('k', Key::K),
+    ('l', Key::L),
+    ('m', Key::M),
+    ('n', Key::N),
+    ('o', Key::O),
+    ('p', Key::P),
+    ('q', Key::Q),
+    ('r', Key::R),
+    ('s', Key::S),
+    ('t', Key::T),
+    ('u', Key::U),
+    ('v', Key::V),
+    ('w', Key::W),
+    ('x', Key::X),
+    ('y', Key::Y),
+    ('z', Key::Z),
+    ('0', Key::Digit0),
+    ('1', Key::Digit1),
+    ('2', Key::Digit2),
+    ('3', Key::Digit3),
+    ('4', Key::Digit4),
+    ('5', Key::Digit5),
+    ('6', Key::Digit6),
+    ('7', Key::Digit7),
+    ('8', Key::Digit8),
+    ('9', Key::Digit9),
+    (';', Key::Semicolon),
+    (' ', Key::Space),
+    ('\'', Key::Quote),
+    (',', Key::Comma),
+    ('`', Key::Backquote),
+    ('.', Key::Period),
+    ('/', Key::Slash),
+    ('-', Key::Minus),
+    ('=', Key::Equal),
+    ('[', Key::BracketLeft),
+    (']', Key::BracketRight),
+    ('\\', Key::Backslash),
+    ('\t', Key::Tab),
+    ('0', Key::Numpad0),
+    ('1', Key::Numpad1),
+    ('2', Key::Numpad2),
+    ('3', Key::Numpad3),
+    ('4', Key::Numpad4),
+    ('5', Key::Numpad5),
+    ('6', Key::Numpad6),
+    ('7', Key::Numpad7),
+    ('8', Key::Numpad8),
+    ('9', Key::Numpad9),
+    ('.', Key::NumpadDecimal),
+    ('/', Key::NumpadDivide),
+    ('*', Key::NumpadMultiply),
+    ('-', Key::NumpadSubtract),
+    ('+', Key::NumpadAdd),
+    ('=', Key::NumpadEqual),
+];
+
+fn us_char(k: Key) -> Option<char> {
+    US.iter().find(|(_, key)| *key == k).map(|(c, _)| *c)
+}
+
+fn us_key(c: char) -> Option<Key> {
+    US.iter().find(|(ch, _)| *ch == c).map(|(_, k)| *k)
+}
+
+/// The one character of `s`, if it is exactly one.
+fn one_char(s: &str) -> Option<char> {
+    let mut it = s.chars();
+    let c = it.next()?;
+    it.next().is_none().then_some(c)
+}
+
+/// `c` lowercased when that is one character (`A` → `a`, `Ф` → `ф`), else `c`.
+fn lower(c: char) -> char {
+    let mut it = c.to_lowercase();
+    match (it.next(), it.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
+/// W3C modifier key names (UI Events KeyboardEvent key values, "Modifier keys") → libghostty's.
+/// The ones a terminal has no bit for (`AltGraph`, `Fn`, the lock keys but Caps and Num) are
+/// accepted and dropped: they only ever shaped `text`, which the client resolved.
+fn modifier(name: &str) -> Result<Mods, String> {
+    Ok(match name {
+        "Shift" => Mods::SHIFT,
+        "Control" => Mods::CTRL,
+        "Alt" => Mods::ALT,
+        "Meta" | "Super" => Mods::SUPER,
+        "CapsLock" => Mods::CAPS_LOCK,
+        "NumLock" => Mods::NUM_LOCK,
+        "AltGraph" | "Fn" | "FnLock" | "Hyper" | "ScrollLock" | "Symbol" | "SymbolLock" => Mods::empty(),
+        other => {
+            return Err(format!(
+                "unknown modifier {other:?}: give W3C names (Shift, Control, Alt, Meta, CapsLock, NumLock)"
+            ));
+        }
+    })
+}
+
+/// Checks a `key` request and works out what libghostty's event needs that the W3C event
+/// doesn't carry directly: the physical key when `code` is missing, the unshifted character and
+/// the consumed modifiers. Errors are `(code, message)` for the reply.
+pub fn spec(k: &WireKey) -> Result<Spec, (&'static str, String)> {
+    let bad = |m: String| (code::BAD_REQUEST, m);
+    if k.text.len() > TEXT_MAX {
+        return Err((
+            code::TOO_LARGE,
+            format!("{} B of text in one key event (at most {TEXT_MAX}); paste it", k.text.len()),
+        ));
+    }
+    if let Some(c) = k.text.chars().find(|c| c.is_control()) {
+        return Err(bad(format!(
+            "text holds the control character U+{:04X}: send the key that makes it (code, key, mods) and no text",
+            u32::from(c)
+        )));
+    }
+    let mut mods = Mods::empty();
+    for m in &k.mods {
+        mods |= modifier(m).map_err(bad)?;
+    }
+    let one = one_char(&k.key);
+    // The physical key: `code`; else a named `key` (W3C named key values and codes agree for
+    // Enter, Tab, Escape, the arrows, F1..F24, …); else the US key of a one-character `key`.
+    let table = by_code();
+    let key = table
+        .get(k.code.as_str())
+        .or_else(|| table.get(k.key.as_str()))
+        .copied()
+        .or_else(|| one.and_then(|c| us_key(lower(c))))
+        .unwrap_or(Key::Unidentified);
+    if key == Key::Unidentified && k.text.is_empty() {
+        return Err(bad(format!("key names no key: code {:?}, key {:?} and no text", k.code, k.key)));
+    }
+    let shift = mods.contains(Mods::SHIFT);
+    let alt = mods.contains(Mods::ALT);
+    // The unshifted character: the client's own `key` when no modifier that changes characters
+    // is held (its layout, not ours); a shifted letter lowercased; else the US layout's, as
+    // Ghostty's `Key.codepoint()` gives it; else the key's own character.
+    let unshifted = match one {
+        Some(c) if !shift && !alt => Some(lower(c)),
+        Some(c) if !alt && lower(c) != c => Some(lower(c)),
+        _ => None,
+    }
+    .or_else(|| us_char(key))
+    .or(one)
+    .filter(|c| !c.is_control() || *c == '\t');
+    let text = (!k.text.is_empty()).then(|| k.text.clone());
+    let mut consumed = Mods::empty();
+    if let Some(t) = &text {
+        let base = unshifted.map(String::from);
+        if shift && base.as_deref() != Some(t.as_str()) {
+            consumed |= Mods::SHIFT;
+        }
+        if alt && base.as_deref() != Some(t.to_lowercase().as_str()) {
+            consumed |= Mods::ALT;
+        }
+    }
+    let action = match k.action.unwrap_or_default() {
+        KeyAction::Press => Action::Press,
+        KeyAction::Repeat => Action::Repeat,
+        KeyAction::Release => Action::Release,
+    };
+    Ok(Spec { key, mods, consumed, text, unshifted, action })
+}
+
+/// One terminal's key encoder and the event it reuses, on its owner thread.
+pub struct Keyboard {
+    enc: Encoder<'static>,
+    ev: Event<'static>,
+}
+
+impl Keyboard {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            enc: Encoder::new().map_err(|e| format!("key encoder: {e}"))?,
+            ev: Event::new().map_err(|e| format!("key event: {e}"))?,
+        })
+    }
+
+    /// The bytes `s` is in `term`'s current modes (empty: it encodes to nothing, as a bare
+    /// modifier or a release does outside Kitty's event reporting).
+    pub fn encode(&mut self, term: &Terminal<'_, '_>, s: &Spec) -> Result<Vec<u8>, String> {
+        // Option-as-character is the client's to resolve (into `text`); an Alt that reaches
+        // termd is Alt, on a macOS daemon too.
+        self.enc.set_options_from_terminal(term).set_macos_option_as_alt(OptionAsAlt::True);
+        self.ev
+            .set_action(s.action)
+            .set_key(s.key)
+            .set_mods(s.mods)
+            .set_consumed_mods(s.consumed)
+            .set_composing(false)
+            .set_utf8(s.text.clone())
+            .set_unshifted_codepoint(s.unshifted.unwrap_or('\0'));
+        let mut out = Vec::new();
+        self.enc.encode_to_vec(&self.ev, &mut out).map_err(|e| format!("key encoding: {e}"))?;
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(code: &str, key: &str, mods: &[&str], text: &str) -> WireKey {
+        WireKey {
+            handle: 1,
+            code: code.into(),
+            key: key.into(),
+            mods: mods.iter().map(|m| m.to_string()).collect(),
+            text: text.into(),
+            action: None,
+        }
+    }
+
+    /// Encodes `k` in a fresh terminal that has read `setup`.
+    fn enc(setup: &[u8], k: &WireKey) -> Vec<u8> {
+        let mut t = Terminal::new(80, 24).unwrap();
+        t.vt_write(setup);
+        Keyboard::new().unwrap().encode(&t, &spec(k).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_w3c_code_table_covers_the_keys_a_browser_sends() {
+        for (code, key) in [
+            ("KeyA", Key::A),
+            ("KeyZ", Key::Z),
+            ("Digit1", Key::Digit1),
+            ("Enter", Key::Enter),
+            ("ArrowLeft", Key::ArrowLeft),
+            ("ShiftLeft", Key::ShiftLeft),
+            ("NumpadEnter", Key::NumpadEnter),
+            ("F12", Key::F12),
+            ("Backquote", Key::Backquote),
+        ] {
+            assert_eq!(by_code().get(code), Some(&key), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_key_is_found_by_code_then_by_name_then_by_character() {
+        assert_eq!(spec(&w("KeyQ", "a", &[], "a")).unwrap().key, Key::Q, "the physical key wins (AZERTY)");
+        assert_eq!(spec(&w("", "Enter", &[], "")).unwrap().key, Key::Enter);
+        assert_eq!(spec(&w("", "/", &[], "/")).unwrap().key, Key::Slash);
+        assert_eq!(spec(&w("", "é", &[], "é")).unwrap().key, Key::Unidentified);
+        assert_eq!(spec(&w("", "", &[], "")).unwrap_err().0, code::BAD_REQUEST);
+        assert_eq!(spec(&w("KeyA", "a", &["Hyperdrive"], "a")).unwrap_err().0, code::BAD_REQUEST);
+        assert_eq!(spec(&w("KeyC", "c", &["Control"], "\x03")).unwrap_err().0, code::BAD_REQUEST);
+        let long = "x".repeat(TEXT_MAX + 1);
+        assert_eq!(spec(&w("", "", &[], &long)).unwrap_err().0, code::TOO_LARGE);
+    }
+
+    #[test]
+    fn the_unshifted_character_and_what_made_the_text() {
+        let s = spec(&w("KeyA", "A", &["Shift"], "A")).unwrap();
+        assert_eq!((s.unshifted, s.consumed), (Some('a'), Mods::SHIFT));
+        let s = spec(&w("Digit1", "!", &["Shift"], "!")).unwrap();
+        assert_eq!((s.unshifted, s.consumed), (Some('1'), Mods::SHIFT));
+        // A Russian layout's letter: its own character, not the US one.
+        let s = spec(&w("KeyA", "Ф", &["Shift"], "Ф")).unwrap();
+        assert_eq!(s.unshifted, Some('ф'));
+        // Option-as-character on macOS: the text is the client's, and Option made it.
+        let s = spec(&w("KeyA", "å", &["Alt"], "å")).unwrap();
+        assert_eq!((s.unshifted, s.consumed), (Some('a'), Mods::ALT));
+        // Alt as Alt: nothing consumed.
+        let s = spec(&w("KeyA", "a", &["Alt"], "a")).unwrap();
+        assert_eq!((s.unshifted, s.consumed), (Some('a'), Mods::empty()));
+        let s = spec(&w("Enter", "Enter", &["Shift"], "")).unwrap();
+        assert_eq!((s.unshifted, s.consumed, s.text), (None, Mods::empty(), None));
+    }
+
+    /// Shift+Enter is `CSI 13;2u` to a program that pushed Kitty flags, and Ghostty's legacy
+    /// encoding to one that didn't: xterm's `CSI 27;2;13~` (src/input/function_keys.zig), which
+    /// Ghostty sends whatever modifyOtherKeys says. Enter alone is `\r` either way.
+    #[test]
+    fn shift_enter_is_csi_u_under_kitty_flags_and_ghosttys_legacy_without() {
+        let k = w("Enter", "Enter", &["Shift"], "");
+        let enter = w("Enter", "Enter", &[], "");
+        assert_eq!(enc(b"", &k), b"\x1b[27;2;13~");
+        assert_eq!(enc(b"", &enter), b"\r");
+        assert_eq!(enc(b"\x1b[>1u", &k), b"\x1b[13;2u");
+        assert_eq!(enc(b"\x1b[>1u", &enter), b"\r");
+        // The flags are a stack: popping them is legacy again.
+        assert_eq!(enc(b"\x1b[>1u\x1b[<u", &k), b"\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn modify_other_keys_and_control_chords() {
+        let k = w("KeyP", "p", &["Control"], "p");
+        assert_eq!(enc(b"", &k), b"\x10");
+        assert_eq!(enc(b"\x1b[>4;2m", &k), b"\x1b[27;5;112~");
+        assert_eq!(enc(b"\x1b[>1u", &k), b"\x1b[112;5u");
+    }
+
+    #[test]
+    fn cursor_keys_follow_application_mode() {
+        let left = w("ArrowLeft", "ArrowLeft", &[], "");
+        assert_eq!(enc(b"", &left), b"\x1b[D");
+        assert_eq!(enc(b"\x1b[?1h", &left), b"\x1bOD");
+        assert_eq!(enc(b"\x1b[?1h", &w("ArrowLeft", "ArrowLeft", &["Alt"], "")), b"\x1b[1;3D");
+    }
+
+    /// PROTOCOL.md's "What some keys become" table, cell for cell: the spec and the encoder can't
+    /// drift apart.
+    #[test]
+    fn protocol_md_key_table_is_what_termd_sends() {
+        let spec = include_str!("../../../docs/termd/PROTOCOL.md");
+        let start = spec.find("| key | no mode set |").expect("the key table");
+        let rows: Vec<&str> = spec[start..].lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 6, "{rows:?}");
+        let modes: [&[u8]; 4] = [b"", b"\x1b[>1u", b"\x1b[>4;2m", b"\x1b[?1h"];
+        for row in rows {
+            let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+            let name = cells[0].split(' ').next().unwrap();
+            let k = match name {
+                "Enter" => w("Enter", "Enter", &[], ""),
+                "Shift+Enter" => w("Enter", "Enter", &["Shift"], ""),
+                "Ctrl+C" => w("KeyC", "c", &["Control"], "c"),
+                "Alt+B" => w("KeyB", "b", &["Alt"], "b"),
+                "ArrowUp" => w("ArrowUp", "ArrowUp", &[], ""),
+                "Alt+ArrowLeft" => w("ArrowLeft", "ArrowLeft", &["Alt"], ""),
+                other => panic!("a key the test doesn't know: {other}"),
+            };
+            for (cell, mode) in cells[1..].iter().zip(modes) {
+                let want: Vec<u8> = cell
+                    .trim_matches('`')
+                    .split(' ')
+                    .flat_map(|t| match t {
+                        "CSI" => b"\x1b[".to_vec(),
+                        "ESC" => b"\x1b".to_vec(),
+                        "\\r" => b"\r".to_vec(),
+                        "0x03" => vec![3],
+                        t => t.as_bytes().to_vec(),
+                    })
+                    .collect();
+                assert_eq!(enc(mode, &k), want, "{name} after {mode:?}: the table says {cell}");
+            }
+        }
+    }
+
+    #[test]
+    fn text_alt_and_release() {
+        assert_eq!(enc(b"", &w("KeyA", "a", &[], "a")), b"a");
+        assert_eq!(enc(b"", &w("KeyA", "A", &["Shift"], "A")), b"A");
+        assert_eq!(enc(b"", &w("KeyB", "b", &["Alt"], "b")), b"\x1bb");
+        assert_eq!(enc(b"", &w("", "é", &[], "é")), "é".as_bytes());
+        let mut rel = w("KeyA", "a", &[], "a");
+        rel.action = Some(KeyAction::Release);
+        assert_eq!(enc(b"", &rel), b"");
+        // Kitty with event reporting (1 | 2): the release is reported.
+        assert_eq!(enc(b"\x1b[>3u", &rel), b"\x1b[97;1:3u");
+    }
+}
