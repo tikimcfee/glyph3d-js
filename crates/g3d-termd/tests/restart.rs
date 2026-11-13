@@ -415,6 +415,42 @@ fn an_upgrade_to_another_engine_hands_over_by_repaint() {
     read_until(&mut c, &mut seen, 10, |s| contains(&s.output, b"again-4"));
 }
 
+/// The candidate dies after the running brain was told to commit: the brain hands over and
+/// exits, as told, and the next brain restores every terminal exactly from the handoff. The log
+/// says that, not "upgrade FAILED; the running brain carries on" nor "exited without a handoff".
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_candidate_that_dies_after_the_commit_leaves_a_handoff_to_restore() {
+    let d = Daemon::start_env(&["--idle-exit", "0"], &[("G3D_TERMD_TEST_CANDIDATE_DIES_FILE", "candidate-dies")]);
+    std::fs::write(d.dir.join("candidate-dies"), "").unwrap();
+    let mut c = d.client();
+    let instance = c.welcome.instance.clone().unwrap();
+    create(&mut c, "cat", &["cat"], 40, 5);
+    let s = subscribe(&mut c, "cat", Role::Attach, None);
+    c.input(s.handle, b"handed\n").unwrap();
+    let mut seen = Seen::default();
+    read_until(&mut c, &mut seen, 10, |s| tail_contains(&s.output, b"handed\r\nhanded"));
+    // `c` stays connected and unread: the committing brain waits for it (up to 1 s) before it
+    // exits, so the candidate's death lands between the commit and the old brain's exit.
+    let mut u = d.client();
+    let _: UpgradeReply = u.request(Op::Upgrade(Upgrade { binary: None, holder: None })).unwrap();
+    let mut n = d.reconnect(&instance);
+    wait_until(15, "a brain after the upgrade", || {
+        n = d.reconnect(&instance);
+        n.welcome.generation > Some(1)
+    });
+    let st: StatusReply = n.request(Op::Status).unwrap();
+    let log = d.log();
+    assert!(log.contains("died") && log.contains("after the running brain committed"), "{log}");
+    assert!(log.contains("handed over and exited"), "{log}");
+    assert!(!log.contains("upgrade FAILED"), "{log}");
+    assert!(!log.contains("exited without a handoff"), "{log}");
+    let t = st.status.terminals.iter().find(|t| t.id == "cat").unwrap();
+    assert_eq!(t.restored.as_deref(), Some("exact"), "{log}");
+    assert_eq!(st.status.daemon.brain.last_start.reason, "crash");
+    drop(c);
+}
+
 #[cfg(feature = "test-hooks")]
 #[test]
 fn a_brain_that_never_returns_leaves_the_shells_frozen_and_says_so() {

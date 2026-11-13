@@ -359,6 +359,10 @@ struct Holder {
     last_exit: String,
     /// The brain asked to end the namespace (idle exit, `stop`).
     exiting: Option<String>,
+    /// The candidate died after the running brain committed its handoff: how it ended (its text
+    /// and wait status). The brain exits having handed over, and the next brain starts from the
+    /// handoff as after a crash.
+    candidate_lost: Option<(String, i32)>,
     /// SIGTERM: the brain was asked to shut down; past this, the holder does it itself.
     shutdown_at: Option<Instant>,
     /// When the namespace last had no brain and no terminals.
@@ -440,6 +444,7 @@ pub fn run(cfg: Config) -> ! {
         backoff: cfg.failed_backoff,
         last_exit: String::new(),
         exiting: None,
+        candidate_lost: None,
         shutdown_at: None,
         idle_since: None,
         restamped: Instant::now(),
@@ -1197,7 +1202,17 @@ impl Holder {
                 self.brain_exited(&text, status);
             } else if self.candidate.as_ref().is_some_and(|c| c.pid == pid) {
                 self.candidate = None;
-                if self.upgrade.is_some() {
+                if self.upgrade.as_ref().is_some_and(|u| u.stage == Stage::Committing) {
+                    // Past the point of no return: the running brain was told to commit and is
+                    // handing over. Nothing to abort; once it has gone, a brain starts from the
+                    // handoff it left.
+                    self.upgrade = None;
+                    log(&format!(
+                        "upgrade: the candidate pid {pid} died ({text}) after the running brain committed; \
+                         a new brain starts from the handoff once it has gone"
+                    ));
+                    self.candidate_lost = Some((text, status));
+                } else if self.upgrade.is_some() {
                     self.abort_upgrade(&format!("the candidate exited ({text})"));
                 } else {
                     log(&format!("upgrade: candidate pid {pid} ended ({text})"));
@@ -1249,19 +1264,31 @@ impl Holder {
             self.finish("SIGTERM");
         }
         let watchdog = old.aborted.is_some();
-        self.last_exit = format!(
-            "pid {} (generation {generation}) {}{text}",
-            old.pid,
-            if watchdog { "killed by the watchdog: " } else { "exited without a handoff: " }
-        );
-        log(&format!("brain CRASHED: {}; the shells keep running", self.last_exit));
-        if watchdog {
-            self.restarts.watchdog += 1;
-        } else {
+        if let Some((cand, cand_status)) = self.candidate_lost.take() {
+            // It handed over and exited, as told; its successor is what crashed.
+            self.last_exit = format!("the upgrade's candidate died after the handoff ({cand})");
+            log(&format!(
+                "upgrade: brain pid {} (generation {generation}) handed over and exited ({text}); its candidate died, \
+                 so the next brain restores from the handoff",
+                old.pid
+            ));
             self.restarts.crash += 1;
+            self.next_start = json!({"reason": "crash", "exit": describe_status(cand_status).0});
+        } else {
+            self.last_exit = format!(
+                "pid {} (generation {generation}) {}{text}",
+                old.pid,
+                if watchdog { "killed by the watchdog: " } else { "exited without a handoff: " }
+            );
+            log(&format!("brain CRASHED: {}; the shells keep running", self.last_exit));
+            if watchdog {
+                self.restarts.watchdog += 1;
+            } else {
+                self.restarts.crash += 1;
+            }
+            self.next_start =
+                json!({"reason": if watchdog { "watchdog" } else { "crash" }, "exit": describe_status(status).0});
         }
-        self.next_start =
-            json!({"reason": if watchdog { "watchdog" } else { "crash" }, "exit": describe_status(status).0});
         if self.upgrade.is_some() {
             self.upgrade = None;
             if let Some(c) = self.candidate.take() {

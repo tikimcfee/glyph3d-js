@@ -33,7 +33,8 @@ What exists on branch `termd`, and where it departs from the plan below:
   the brain's heartbeat (the watchdog test); `G3D_TERMD_TEST_BRAIN_FAIL_FILE` makes a brain exit at
   start while that file exists (the crash-loop test); `G3D_TERMD_TEST_ENGINE_FILE` names the engine
   a brain reports (the cross-engine handoff test); `G3D_TERMD_TEST_SESSION_ENV_FILE` stands in for
-  the user manager (the environment test). The scrub removes these from programs' environments.
+  the user manager (the environment test); `G3D_TERMD_TEST_CANDIDATE_DIES_FILE` makes an upgrade's
+  candidate die 100 ms after it says `ready` (the died-after-commit test). The scrub removes these from programs' environments.
   `exit` carries a signal by name. `on_xtversion` answers `g3d-termd <version>`.
 - **Client** (`crates/g3d`): `attach` (raw tty, query filter, `Ctrl-\` twice to detach,
   `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
@@ -151,8 +152,11 @@ the handoff did not carry is not kept). The candidate checks that every live ter
 exact and says `ready`, or `upgrade_abort` with the reason. After `commit` the old brain queues
 `ERROR restart` behind everything already queued to each connection (so a subscriber's stream
 ends exactly at the cut), gives the writers up to 1 s, and exits; the holder sends the candidate
-`go` once it has reaped the old one. On failure the asker gets an `upgrade_failed` event on stream
-0. `g3d upgrade [--binary PATH]` prints the new generation, or the failure; with the brain failed
+`go` once it has reaped the old one. `commit` is the point of no return: a candidate that dies
+after it is not a failed upgrade (the old brain has handed over and exits anyway) but a crash of
+the next brain, which the holder restarts from the handoff blobs (every terminal exact); the log
+says that, and `last_start` reads `crash` with the candidate's exit. On failure the asker gets an
+`upgrade_failed` event on stream 0. `g3d upgrade [--binary PATH]` prints the new generation, or the failure; with the brain failed
 it sends the holder `SIGHUP` instead and waits for a brain. The holder records for
 `g3d upgrade --holder` are not built (`holder: true` answers `unsupported`).
 
