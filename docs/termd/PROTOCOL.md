@@ -235,11 +235,11 @@ Starts a program on a new PTY.
 | `id` | required | the terminal's name |
 | `argv` | the user's shell, started as below | program and arguments, run directly (no shell). `argv[0]` without a `/` is looked up in the program's own `PATH` (the system's default search path when it has none), not the daemon's; not found is `spawn_failed` |
 | `cols`, `rows` | required | initial size, 1 to 4096 each |
-| `cwd` | the user's home directory (`/` if it doesn't exist, as `login(1)` does) | an absolute path to an existing directory the user can search; anything else is `bad_request`, naming why. It is used as given (`PWD` keeps a symlink's name) |
+| `cwd` | the user's home directory (`/` if it doesn't exist, as `login(1)` does) | an absolute path to an existing directory the user can search; anything else is `bad_request`, naming why. It is used as given (`PWD` keeps a symlink's name), except that a path with a `.` or `..` component, which POSIX forbids in `PWD`, becomes the directory's real path (in `PWD` and the reply's `cwd`) |
 | `env` | `{}` | added to the environment (below); a `null` value removes a variable |
 | `env_base` | `"session"` | (1.1) `"session"`: start from the user's session environment (below). `"none"`: start from nothing but the account variables and termd's own |
 | `if_exists` | `"error"` | `"adopt"` returns the live terminal with this id instead of failing |
-| `scrollback_bytes` | daemon default (10,000,000) | primary-screen history cap; the daemon clamps it to its own maximum |
+| `scrollback_bytes` | daemon default (10,000,000) | primary-screen history cap, in bytes of the emulator's memory (not of output: 10,000,000 holds roughly 14,000 rows of 80 columns, whatever their text); the daemon clamps it to its own maximum |
 | `colors` | daemon defaults | the default foreground, background and cursor colours termd reports when the program asks (OSC 10/11/12). Set them to what your renderer draws |
 | `cell_px` | `[8, 16]` | cell size in pixels, reported to programs that ask for the window size in pixels (`CSI 14 t`, `CSI 16 t`) |
 
@@ -247,26 +247,40 @@ Starts a program on a new PTY.
 
 1. the user's session environment: on Linux with a systemd user manager, that manager's
    environment as it is now (what a terminal opened from the desktop gets); otherwise the
-   environment the daemon started with. Skipped with `env_base: "none"`;
+   session's variables of the environment the daemon started with: the account and its paths
+   (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `MAIL`, `TMPDIR`, `TZ`), the locale (`LANG`,
+   `LANGUAGE`, `LC_*`), the desktop session (`XDG_*`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
+   `DBUS_SESSION_BUS_ADDRESS`), the credential agents (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`,
+   `GPG_AGENT_INFO`, `KRB5CCNAME`), the network proxies (`http_proxy` and its kin, both cases),
+   `TERMINFO_DIRS`, and macOS's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; a daemon setting
+   adds names. Nothing else the daemon's starter carried. Skipped with `env_base: "none"`;
 2. minus what describes some other process: another terminal, multiplexer, editor or agent
-   (`TMUX`, `STY`, `VTE_VERSION`, `KITTY_*`, `VSCODE_*`, `NVIM`, …), the launcher (`INVOCATION_ID`,
-   `NOTIFY_SOCKET`, `LISTEN_*`, …) and the parent shell (`SHLVL`, `OLDPWD`, `COLUMNS`, `LINES`, …);
-   the daemon's documentation lists them all;
-3. `HOME`, `USER`, `LOGNAME` from the account when missing;
+   (`TMUX`, `STY`, `VTE_VERSION`, `KITTY_*`, `VSCODE_*`, `NVIM`, `CLAUDECODE`, …), the launcher or
+   service unit (`INVOCATION_ID`, `NOTIFY_SOCKET`, `LISTEN_*`, `MEMORY_PRESSURE_*`, …) and the
+   parent shell (`SHLVL`, `OLDPWD`, `COLUMNS`, `LINES`, …). The full list is `SCRUB` in
+   `crates/g3d-termd/src/env.rs`, and DESIGN.md's policy table; it is the daemon's to extend, so
+   a client relies on its shape (identity of other processes goes), not its exact contents;
+3. the account, from the user database (passwd) whatever the base said, as `login(1)` sets them:
+   `HOME`, `USER`, `LOGNAME`, and `SHELL` (below), for every program, an explicit `argv` included;
 4. the request's `env`;
 5. termd's own, which describe this terminal: `TERM=xterm-256color`, `COLORTERM=truecolor`,
    `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`,
    `G3D_TERMD_SOCKET=<socket path>`, `PWD=<cwd>`.
 
-`env` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL and are at most
-128 KiB each, and `argv` plus the environment total at most 1 MiB (`bad_request` or
-`too_large`, naming the variable). The names in layer 5 are reserved: setting or removing one is
+`env` names must match `[A-Za-z_][A-Za-z0-9_]*`, values may not contain NUL, each `NAME=value`
+with its terminating NUL is at most 128 KiB (Linux's `MAX_ARG_STRLEN`, which counts the whole
+string), and `argv` plus the environment total at most 1 MiB, counted as `execve` counts them
+(each string with its NUL, plus a pointer for each) (`bad_request` or `too_large`, naming the
+variable). The names in layer 5 are reserved: setting or removing one is
 `bad_request`. Any other name may be set, including one layer 2 removes: the request knows what
 its terminal is for.
 
-With no `argv`, the program is the user's shell: the account's shell from the user database
-(passwd), else the environment's `SHELL` when it names an executable, else `/bin/sh`, and `SHELL`
-is set to the one chosen. It starts as a login shell (its `argv[0]` is `-` and the shell's name,
+With no `argv`, the program is a shell: the request's `env` `SHELL` when it gives one (an absolute
+path to an executable, else `bad_request`: `SHELL` names the shell that runs, as `login(1)` and
+tmux mean it), else the account's shell from the user database (passwd), else the base's `SHELL`
+when it names an executable, else `/bin/sh`. `SHELL` is set to the account's choice for every
+program, an explicit `argv` included (as `login(1)` sets it whatever runs); a request's own
+`SHELL` wins there, as any layer-4 value does. It starts as a login shell (its `argv[0]` is `-` and the shell's name,
 as `login(1)` and tmux start shells), on every platform, so the system's and the user's profile
 run. Daemon settings can change the shell and turn login off. An explicit `argv` runs exactly as
 given, never as a login shell.
@@ -274,7 +288,8 @@ given, never as a login shell.
 When the environment sets none of `LC_ALL`, `LC_CTYPE` and `LANG` (an empty value is unset), the
 daemon sets `LANG` to a UTF-8 locale the system has (`C.UTF-8`; on macOS the user's own locale
 when installed). A locale that is set is left alone, and so is a request whose `env` names any of
-the three, even to remove it.
+the three, even to remove it. One that is set but doesn't load or isn't UTF-8 still starts; the
+status document's `daemon.env.warnings` names it (the last such terminal) and the log says it.
 
 Reply:
 
@@ -537,7 +552,7 @@ Unix epoch milliseconds, sizes are bytes):
 | `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade) |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
-| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale, the user manager unreachable while it is) |
+| `env` | `source` of the session environment new terminals start from (`"systemd-user"`, `"daemon"`), and `warnings` (strings: no UTF-8 locale to fill, the user manager unreachable while it is, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
 Each of `terminals` (one per live terminal; the count is the array's length):
 

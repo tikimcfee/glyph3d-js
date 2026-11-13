@@ -24,6 +24,18 @@ pub fn validate_name(what: &str, name: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("{what} {name:?} must be 1 to 64 bytes of [A-Za-z0-9._-]")) }
 }
 
+/// logind's (pam_systemd's) runtime directory for this user, `/run/user/<uid>`, when it exists and
+/// is this user's alone (owned, nothing for group or others): found from the uid, never from
+/// `$XDG_RUNTIME_DIR`, so a client or daemon started from a stripped environment (`env -i`, cron,
+/// a service manager) finds what the desktop's do.
+pub fn user_runtime_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let uid = rustix::process::getuid().as_raw();
+    let dir = PathBuf::from(format!("/run/user/{uid}"));
+    let m = std::fs::metadata(&dir).ok()?;
+    (m.is_dir() && m.uid() == uid && m.permissions().mode() & 0o077 == 0).then_some(dir)
+}
+
 /// The directory sockets live in.
 pub fn socket_dir() -> PathBuf {
     if let Some(d) = env_dir("G3D_TERMD_DIR") {

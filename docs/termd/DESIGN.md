@@ -218,7 +218,8 @@ in the `upgrade_failed` it sends.
 **Settings** (flags on `g3d-termd`, passed to every brain; the config file is not built):
 `--env-source auto|daemon` (also `G3D_TERMD_ENV_SOURCE`, so a relay's tests and the check tools set
 it through the environment the relay hands the daemon), `--env-manager-timeout-ms` 1000,
-`--env-scrub NAME|PREFIX*` and `--env-keep NAME|PREFIX*` (repeatable), `--shell PATH` (refused at
+`--env-scrub NAME|PREFIX*` and `--env-keep NAME|PREFIX*` (repeatable; keep exempts from the
+scrub and adds to the session variables a base from the daemon's own environment keeps), `--shell PATH` (refused at
 start unless an absolute path to an executable), `--login-shell true`, `--fill-locale true`,
 `--term xterm-256color` (also the terminfo name the emulator answers with, stored per terminal).
 
@@ -227,24 +228,41 @@ start unless an absolute path to an executable), `--login-shell true`, `--fill-l
 - **The scrub's last group is `G3D_TERMD_*`**, a prefix, rather than `G3D_TERMD_DIR` and
   `G3D_TERMD_TEST_HOOKS` by name: it also covers `G3D_TERMD_ENV_SOURCE` and every test hook's file
   variable. `G3D_TERMD_ID` and `G3D_TERMD_SOCKET` are layer 5's and set again after it.
-- **Reaching the user manager from a stripped environment.** `busctl --user` needs
+- **Reaching the user manager from any starter.** `busctl --user` needs
   `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`; a daemon started without either (a relay run
-  from `env -i`, cron) would never reach the manager and fall back to its own thin environment,
-  which is the case the policy exists for. So when both are missing termd gives `busctl`
-  `XDG_RUNTIME_DIR=/run/user/<uid>` (where `pam_systemd` puts the user bus), only when that
-  directory exists and is the user's. `busctl` is found in the daemon's `PATH`, then `/usr/bin`,
+  from `env -i`, cron) would never reach the manager, and one started with a stale address (a
+  bus from an earlier login) would fail to, and both fall back to the daemon's own environment,
+  which is the case the policy exists for. So termd finds the user bus from the uid, where
+  `pam_systemd` puts it: when `/run/user/<uid>` exists and is the user's alone
+  (`g3d::paths::user_runtime_dir`, which the socket rule shares), `busctl` gets
+  `XDG_RUNTIME_DIR=/run/user/<uid>` and no `DBUS_SESSION_BUS_ADDRESS`; only without that
+  directory does the starter's address count. `busctl` is found in the daemon's `PATH`, then `/usr/bin`,
   `/bin`. Measured here: `env -i busctl --user …` fails with "$DBUS_SESSION_BUS_ADDRESS and
   $XDG_RUNTIME_DIR not defined"; with `XDG_RUNTIME_DIR=/run/user/<uid>` it answers.
 - **Which source a `create` used is logged when it changes** (`terminal environment: the systemd
   user manager's` / `the daemon's own: <why>`), and the status document's `daemon.env` names it
   (with a warning while the user manager is unreachable). A manager that stops answering costs each
   `create` up to the timeout, then falls back.
-- **`SHELL`.** The shell is chosen as designed (`--shell`, else the passwd entry's when it is an
-  executable, else `$SHELL` when it is an absolute path to an executable, else `/bin/sh`); the
-  `$SHELL` it considers is the request's `env` value when it gives one, else the base's. The chosen
-  shell becomes `SHELL` for every terminal, an explicit `argv` included (`login(1)` sets it
-  regardless of what runs, and `vim`'s `:sh` reads it). A request's own `SHELL` still wins, as any
-  layer-4 value does.
+- **`SHELL`.** With no `argv`, a request's `env` `SHELL` is the shell that runs (an absolute path
+  to an executable, else `bad_request`), so `$SHELL` names the running shell as `login(1)` and tmux
+  mean it (vim's `:sh` and scripts read it). Otherwise the shell is chosen as designed (`--shell`,
+  else the passwd entry's when it is an executable, else the base's `$SHELL` when it is an absolute
+  path to an executable, else `/bin/sh`). The chosen shell becomes `SHELL` for every terminal, an
+  explicit `argv` included (`login(1)` sets it regardless of what runs); with an `argv`, a
+  request's own `SHELL` is only the variable, as any layer-4 value.
+- **The account** (`HOME`, `USER`, `LOGNAME`) always comes from the user database, over the
+  base, as `login(1)` sets it; a request's `env` can still set them.
+- **The working directory.** A `cwd` with a `.` or `..` component (POSIX forbids them in `PWD`,
+  and a shell that finds them discards `PWD`) becomes the directory's real path, in `PWD` and in
+  the reply; any other keeps its spelling, so a symlink's name stays.
+- **Limits** are counted as the kernel counts them: a value's limit (`MAX_ARG_STRLEN`, 128 KiB)
+  is on the whole `NAME=value` string and its NUL, and the 1 MiB total adds a pointer per string
+  and per list end, as `ARG_MAX` counts them (on macOS too). A value one byte under the old
+  documented maximum used to pass the check and fail at `execve` with `E2BIG`.
+- **A set locale that doesn't give UTF-8** (it doesn't load, or its charset isn't UTF-8: checked
+  per `create` with `newlocale` and `nl_langinfo(CODESET)`) starts as asked, and is said: in the
+  log when the problem changes, and in the status document's `daemon.env.warnings` while it is
+  the last terminal's.
 - **Locale.** "Set" means non-empty (POSIX treats an empty value as unset). A request whose `env`
   names `LANG`, `LC_ALL` or `LC_CTYPE`, even to remove it (`null`), gets no fill: it chose. The fill
   is checked once at brain start with `newlocale(LC_CTYPE_MASK, …)`; macOS asks
@@ -924,9 +942,9 @@ A terminal's environment is built per `create`, in this order (later wins):
 
 | Layer | What | Why |
 |---|---|---|
-| 1. Session base | **Linux with a user manager:** the systemd user manager's environment, read at each `create` (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, 1 s timeout). **Otherwise** (no user manager: macOS, containers, hosts without logind): the holder's own environment as it started | What a terminal launched from the desktop gets. On a host reached only by SSH, logind still starts a user manager, but nothing imports a profile into it, so its environment is thin (`PATH` is systemd's default); the login shell ([below](#the-shell-and-login-or-not)) supplies the profile there. Reading it at every create means a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK`: the desktop re-imports them at each login. The fallback is the starter's environment, scrubbed (layer 2); the status stream names the source |
-| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (`INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`); termd's own controls (`G3D_TERMD_*`: `G3D_TERMD_DIR`, `G3D_TERMD_ENV_SOURCE`, the test hooks) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code (`SCRUB` in `env.rs`) with `--env-scrub` / `--env-keep` to extend or exempt (a name, or a prefix ending in `*`). It applies to the base only: a request's `env` may set any name but layer 5's |
-| 3. Account | `HOME`, `USER`, `LOGNAME` from `getpwuid` when the base lacks them; `SHELL` set to the shell chosen ([below](#the-shell-and-login-or-not)); `LANG` filled when no locale is set ([Locale](#locale)) | What `login(1)` provides |
+| 1. Session base | **Linux with a user manager:** the systemd user manager's environment, read at each `create` (`busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment`, 1 s timeout). **Otherwise** (no user manager: macOS, containers, hosts without logind): the session's variables of the holder's own environment as it started (`SESSION` in `env.rs`: the account and its paths, the locale, `XDG_*` and the display, the session bus, the credential agents, the proxies, `TERMINFO_DIRS`, launchd's `__CF_USER_TEXT_ENCODING` and `COMMAND_MODE`; `--env-keep` adds names), nothing else | What a terminal launched from the desktop gets. On a host reached only by SSH, logind still starts a user manager, but nothing imports a profile into it, so its environment is thin (`PATH` is systemd's default); the login shell ([below](#the-shell-and-login-or-not)) supplies the profile there. Reading it at every create means a new terminal never carries a stale `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` or `SSH_AUTH_SOCK`: the desktop re-imports them at each login. The fallback is the starter's environment, which is an accident (an agent's shell carries `GIT_EDITOR=true`, an IPC token and its session ids; a shell tool its session id; a unit its cgroup's pressure file), and no denylist names everything a starter may carry: so the fallback keeps a known set, as `login(1)` (which clears all but `TERM`), `sshd` and sudo's `env_reset` build a session, and the login shell's profile brings back what a person exports. Then the scrub (layer 2). The status stream names the source |
+| 2. Scrub | remove what describes some other process: another terminal, multiplexer, editor or agent (`TMUX`, `TMUX_PANE`, `STY`, `WINDOW`, `ZELLIJ*`, `VTE_VERSION`, `KONSOLE_*`, `ITERM_*`, `TERM_SESSION_ID`, `KITTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `GHOSTTY_*`, `WT_SESSION`, `TERMINAL_EMULATOR`, `VSCODE_*`, `NVIM`, `INSIDE_EMACS`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, `CLAUDE_EFFORT`, `AI_AGENT`, `TERM`, `COLORTERM`, `TERM_PROGRAM*`, `TERMINFO`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `COLORFGBG`, `WINDOWID`, `SHELL_SESSION_ID`); launcher and unit state (systemd.exec(5)'s list: `INVOCATION_ID`, `JOURNAL_STREAM`, `NOTIFY_SOCKET`, `LISTEN_*`, `MANAGERPID`, `MANAGERPIDFDID`, `MAINPID`, `SYSTEMD_EXEC_PID`, `WATCHDOG_*`, `MEMORY_PRESSURE_*`, the `*_DIRECTORY` names, `FDSTORE`, `PIDFILE`, `TRIGGER_*`, `MONITOR_*`, `SERVICE_RESULT`, `EXIT_CODE`, `EXIT_STATUS`; and `DBUS_STARTER_*`, `GIO_LAUNCHED_DESKTOP_FILE*`, `DESKTOP_STARTUP_ID`, `XDG_ACTIVATION_TOKEN`); the parent shell's own state (`SHLVL`, `OLDPWD`, `PWD`, `_`, `COLUMNS`, `LINES`, atuin's `ATUIN_SESSION`, `ATUIN_HISTORY_ID`, `ATUIN_SHLVL`); termd's own controls (`G3D_TERMD_*`: `G3D_TERMD_DIR`, `G3D_TERMD_ENV_SOURCE`, the test hooks) | Ghostty's and WezTerm's lists plus the multiplexers' and editors' own markers, and the macOS agent's (iTerm2's `LC_TERMINAL*` is named `LC_` so that `ssh`'s `SendEnv LC_*` carries it; Terminal.app's `SHELL_SESSION_ID` keys its per-tab history). A leaked `TERM_PROGRAM` makes Apple's `/etc/zshrc` install another terminal's integration (measured). A leaked `TMUX` makes programs talk to a tmux that isn't theirs; a leaked `VSCODE_IPC_HOOK_CLI` or `NVIM` points `code`/`nvim` at a dead socket; a leaked `CLAUDECODE` makes Claude Code think it is nested, and its `CLAUDE_CODE_MESSAGING_TOKEN` is a live IPC credential; a leaked `ATUIN_SESSION` makes every shell share the starter's history session; a leaked `COLUMNS` overrides the real size; a startup token is single-use. `TERMINFO` is set by kitty and Ghostty for their own children; a user's own terminfo goes in `~/.terminfo` or `TERMINFO_DIRS`, which pass. The list is a constant in code (`SCRUB` in `env.rs`) with `--env-scrub` / `--env-keep` to extend or exempt (a name, or a prefix ending in `*`). It applies to the base only: a request's `env` may set any name but layer 5's. It matters most for the user manager's base, which holds whatever someone imported into it (an argument-less `systemctl --user import-environment` from a terminal imports that terminal's everything) |
+| 3. Account | `HOME`, `USER`, `LOGNAME` from `getpwuid`, whatever the base says (as `login(1)` and `sshd` set them: a starter with an overridden `HOME`, as test harnesses have, would send every login shell to the wrong dotfiles); `SHELL` set to the shell chosen ([below](#the-shell-and-login-or-not)); `LANG` filled when no locale is set ([Locale](#locale)) | What `login(1)` provides |
 | 4. Client `env` | the `create` request's `env` (validated, below); `null` removes | The caller knows what this terminal is for |
 | 5. termd's own | `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM=g3d-termd`, `TERM_PROGRAM_VERSION=<version>`, `G3D_TERMD_ID=<id>`, `G3D_TERMD_SOCKET=<socket>`, `PWD=<cwd>` | They describe this terminal, so nothing else may set them |
 

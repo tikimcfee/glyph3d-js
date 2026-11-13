@@ -36,6 +36,10 @@ pub const SCRUB: &[&str] = &[
     "NVIM",
     "INSIDE_EMACS",
     "CLAUDECODE",
+    "CLAUDE_CODE_*",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
     "TERM",
     "COLORTERM",
     "TERM_PROGRAM*",
@@ -45,14 +49,30 @@ pub const SCRUB: &[&str] = &[
     "COLORFGBG",
     "WINDOWID",
     "SHELL_SESSION_ID",
-    // The launcher and the unit.
+    // The launcher and the unit (systemd.exec(5), "Environment Variables in Spawned Processes").
     "INVOCATION_ID",
     "JOURNAL_STREAM",
     "NOTIFY_SOCKET",
     "LISTEN_*",
     "MANAGERPID",
+    "MANAGERPIDFDID",
+    "MAINPID",
     "SYSTEMD_EXEC_PID",
     "WATCHDOG_*",
+    "MEMORY_PRESSURE_*",
+    "CREDENTIALS_DIRECTORY",
+    "RUNTIME_DIRECTORY",
+    "STATE_DIRECTORY",
+    "CACHE_DIRECTORY",
+    "LOGS_DIRECTORY",
+    "CONFIGURATION_DIRECTORY",
+    "FDSTORE",
+    "PIDFILE",
+    "TRIGGER_*",
+    "MONITOR_*",
+    "SERVICE_RESULT",
+    "EXIT_CODE",
+    "EXIT_STATUS",
     "DBUS_STARTER_*",
     "GIO_LAUNCHED_DESKTOP_FILE*",
     "DESKTOP_STARTUP_ID",
@@ -64,17 +84,72 @@ pub const SCRUB: &[&str] = &[
     "_",
     "COLUMNS",
     "LINES",
+    "ATUIN_SESSION",
+    "ATUIN_HISTORY_ID",
+    "ATUIN_SHLVL",
     // termd's own controls (G3D_TERMD_DIR, G3D_TERMD_ENV_SOURCE, the test hooks).
     "G3D_TERMD_*",
+];
+
+/// What a base taken from the daemon's own environment keeps: the variables a login session is
+/// made of (DESIGN.md, "The policy", layer 1). The daemon's environment is its starter's, which
+/// may be an agent's shell, a unit or another terminal; a denylist can't name everything such a
+/// starter carries (`GIT_EDITOR=true`, an IPC token, a shell tool's session id), so this base
+/// keeps only these, as `login(1)`, `sshd` and sudo's `env_reset` build a session from a known
+/// set. `--env-keep` adds to it; the scrub still applies after it (`LC_TERMINAL` is an `LC_*`).
+/// The login shell's profile brings back what a person exports there.
+pub const SESSION: &[&str] = &[
+    // The account and its paths.
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "MAIL",
+    "TMPDIR",
+    "TZ",
+    // The locale.
+    "LANG",
+    "LANGUAGE",
+    "LC_*",
+    // The desktop session: pam_systemd's runtime directory, the display server, the session bus.
+    "XDG_*",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    // The session's credential agents.
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "KRB5CCNAME",
+    // The host's network proxies (curl's and wget's names, both cases).
+    "http_proxy",
+    "https_proxy",
+    "ftp_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "FTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    // The user's own terminfo directories.
+    "TERMINFO_DIRS",
+    // macOS: what launchd gives every process of the GUI session.
+    "__CF_USER_TEXT_ENCODING",
+    "COMMAND_MODE",
 ];
 
 /// Layer 5: they describe this terminal, so a request may neither set nor remove them.
 pub const RESERVED: &[&str] =
     &["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "G3D_TERMD_ID", "G3D_TERMD_SOCKET", "PWD"];
 
-/// One value's limit (Linux's `MAX_ARG_STRLEN`, 32 pages).
+/// One environment string's limit, `NAME=value` and its NUL as `execve` counts it (Linux's
+/// `MAX_ARG_STRLEN`, 32 pages).
 pub const VALUE_MAX: usize = 128 << 10;
-/// argv plus the environment, in bytes as `execve` counts them (each string and its NUL).
+/// argv plus the environment, as `execve` counts them against `ARG_MAX`: each string and its NUL,
+/// and a pointer for each (and for each list's terminating null).
 pub const EXEC_MAX: usize = 1 << 20;
 
 /// Where layer 1 comes from (`--env-source`).
@@ -84,6 +159,12 @@ pub enum EnvSource {
     Auto,
     /// The environment the daemon started with: hermetic, for tests and hosts without a session.
     Daemon,
+}
+
+/// The session's variables of an environment: the names [`SESSION`] or `keep` match.
+pub fn session_vars(env: &[(String, String)], keep: &[String]) -> Vec<(String, String)> {
+    let pass = |k: &str| SESSION.iter().any(|p| matches(p, k)) || keep.iter().any(|p| matches(p, k));
+    env.iter().filter(|(k, _)| pass(k)).cloned().collect()
 }
 
 /// Matches `NAME` exactly, or `PREFIX*` as a prefix.
@@ -210,10 +291,11 @@ pub fn check_request_env(env: &BTreeMap<String, Option<String>>) -> Result<(), W
             if v.contains('\0') {
                 return Err(bad(format!("env {k} contains NUL")));
             }
-            if v.len() > VALUE_MAX {
+            let n = k.len() + 1 + v.len() + 1;
+            if n > VALUE_MAX {
                 return Err(WireError::new(
                     code::TOO_LARGE,
-                    format!("env {k} is {} bytes; the most is {VALUE_MAX}", v.len()),
+                    format!("env {k} is {n} bytes as NAME=value and its NUL; the most is {VALUE_MAX}"),
                 ));
             }
         }
@@ -235,9 +317,9 @@ fn check_cwd(cwd: &str) -> Result<(), WireError> {
     rustix::fs::access(p, rustix::fs::Access::EXEC_OK).map_err(|e| bad(format!("cwd {cwd:?}: {e}")))
 }
 
-/// The shell a terminal with no `argv` runs, and that `SHELL` names: the `--shell` setting,
-/// else the passwd entry's when it is an executable, else `$SHELL` when it is an absolute path
-/// to one, else `/bin/sh`.
+/// The account's shell, which a terminal with no `argv` runs (unless the request names one) and
+/// `SHELL` names: the `--shell` setting, else the passwd entry's when it is an executable, else
+/// the base's `$SHELL` when it is an absolute path to one, else `/bin/sh`.
 fn choose_shell(s: &Settings, account: &Account, env_shell: Option<&str>) -> String {
     if let Some(sh) = &s.shell {
         return sh.clone();
@@ -275,7 +357,17 @@ pub fn compose(
     let cwd = match req.cwd {
         Some(c) => {
             check_cwd(c)?;
-            c.to_owned()
+            // PWD may not hold `.` or `..` (POSIX; a shell that finds them recomputes it): such a
+            // path becomes the directory's real one. Any other keeps its spelling (a symlink's name).
+            if c.split('/').any(|seg| seg == "." || seg == "..") {
+                std::fs::canonicalize(c)
+                    .map_err(|e| bad(format!("cwd {c:?}: {e}")))?
+                    .to_str()
+                    .ok_or_else(|| bad(format!("cwd {c:?} is not UTF-8 once resolved")))?
+                    .to_owned()
+            } else {
+                c.to_owned()
+            }
         }
         None if !account.home.is_empty() && Path::new(&account.home).is_dir() => account.home.clone(),
         None => "/".into(),
@@ -286,17 +378,23 @@ pub fn compose(
         .into_iter()
         .filter(|(k, _)| !s.scrub.iter().any(|p| matches(p, k)) || s.keep.iter().any(|p| matches(p, k)))
         .collect();
-    // 3: the account.
+    // 3: the account, from the user database whatever the base says, as login(1) sets them.
     for (k, v) in [("HOME", &account.home), ("USER", &account.name), ("LOGNAME", &account.name)] {
-        if !env.contains_key(k) && !v.is_empty() {
+        if !v.is_empty() {
             env.insert(k.into(), v.clone());
         }
     }
-    let env_shell = match client.get("SHELL") {
-        Some(v) => v.clone(),
-        None => env.get("SHELL").cloned(),
+    // With no argv the program is a shell: the request's SHELL when it names one (it must be an
+    // absolute path to an executable: SHELL names the shell that runs), else the account's.
+    let shell = match (req.argv, client.get("SHELL")) {
+        (None, Some(Some(sh))) => {
+            if !(sh.starts_with('/') && is_executable(Path::new(sh))) {
+                return Err(bad(format!("env SHELL {sh:?} is not an absolute path to an executable")));
+            }
+            sh.clone()
+        }
+        _ => choose_shell(s, account, env.get("SHELL").map(String::as_str)),
     };
-    let shell = choose_shell(s, account, env_shell.as_deref());
     env.insert("SHELL".into(), shell.clone());
     // 4: the request's.
     for (k, v) in client {
@@ -343,8 +441,10 @@ pub fn compose(
         }
     };
     let env: Vec<(String, String)> = env.into_iter().collect();
-    let total: usize =
-        argv.iter().map(|a| a.len() + 1).sum::<usize>() + env.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>();
+    let ptr = std::mem::size_of::<usize>();
+    let total: usize = argv.iter().map(|a| a.len() + 1 + ptr).sum::<usize>()
+        + env.iter().map(|(k, v)| k.len() + v.len() + 2 + ptr).sum::<usize>()
+        + 2 * ptr;
     if total > EXEC_MAX {
         return Err(WireError::new(
             code::TOO_LARGE,
@@ -387,6 +487,9 @@ pub fn parse_manager_env(json: &str) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
+/// The user manager's warning, and the last terminal's locale problem (its id and the problem).
+type LiveWarnings = (Option<String>, Option<(String, String)>);
+
 /// Layer 1's source, the settings, and the environment the daemon started with.
 pub struct Policy {
     pub source: EnvSource,
@@ -401,9 +504,13 @@ pub struct Policy {
     /// What the last `create` used, logged when it changes.
     last: Mutex<String>,
     /// The status document's `env`: the source the last base came from, and the warnings (fixed
-    /// ones from the start, plus the user manager being unreachable while it is).
+    /// ones from the start, the user manager being unreachable while it is, and the last
+    /// terminal's locale when it doesn't give UTF-8).
     shown: Mutex<g3d_wire::StatusEnv>,
     fixed_warnings: Vec<String>,
+    /// The two warnings that come and go: the user manager's, and the last terminal's locale (its
+    /// id and the problem).
+    live_warnings: Mutex<LiveWarnings>,
 }
 
 impl Policy {
@@ -429,7 +536,21 @@ impl Policy {
                 .filter(|_| crate::test_hooks_armed())
                 .map(Into::into),
             last: Mutex::new(String::new()),
+            live_warnings: Mutex::new((None, None)),
         }
+    }
+
+    /// Recomputes the status document's warnings after one of the live ones changed.
+    fn show_warnings(&self, live: &LiveWarnings) {
+        let locale = live.1.as_ref().map(|(id, p)| format!("terminal {id}: {p}"));
+        let mut shown = self.shown.lock().unwrap();
+        shown.warnings = self.fixed_warnings.iter().cloned().chain(live.0.iter().cloned()).chain(locale).collect();
+    }
+
+    /// The base the daemon's own environment gives: only the session's variables ([`SESSION`],
+    /// plus `--env-keep`).
+    fn own_base(&self) -> Vec<(String, String)> {
+        session_vars(&self.daemon_env, &self.settings.keep)
     }
 
     /// Layer 1 for `env_base`, read now. Blocking (it may ask the user manager).
@@ -454,9 +575,7 @@ impl Policy {
     fn session_base(&self) -> Vec<(String, String)> {
         let mut warning = None;
         let (env, note, source) = match self.source {
-            EnvSource::Daemon => {
-                (self.daemon_env.clone(), "the daemon's own (--env-source daemon)".to_owned(), "daemon")
-            }
+            EnvSource::Daemon => (self.own_base(), "the daemon's own (--env-source daemon)".to_owned(), "daemon"),
             EnvSource::Auto => match self.manager_env() {
                 Ok(env) => (env, "the systemd user manager's".to_owned(), "systemd-user"),
                 Err(why) => {
@@ -466,14 +585,15 @@ impl Policy {
                             "the systemd user manager is unreachable ({why}): new terminals start from the daemon's own environment"
                         ));
                     }
-                    (self.daemon_env.clone(), format!("the daemon's own: {why}"), "daemon")
+                    (self.own_base(), format!("the daemon's own: {why}"), "daemon")
                 }
             },
         };
+        self.shown.lock().unwrap().source = source.into();
         {
-            let mut shown = self.shown.lock().unwrap();
-            shown.source = source.into();
-            shown.warnings = self.fixed_warnings.iter().cloned().chain(warning).collect();
+            let mut live = self.live_warnings.lock().unwrap();
+            live.0 = warning;
+            self.show_warnings(&live);
         }
         let mut last = self.last.lock().unwrap();
         if *last != note {
@@ -495,7 +615,45 @@ impl Policy {
     /// A whole plan for one `create`: the base read now, the account read now.
     pub fn plan(&self, base: EnvBase, req: &Request) -> Result<Plan, WireError> {
         let account = account().map_err(|e| WireError::new(code::SPAWN_FAILED, format!("the account: {e}")))?;
-        compose(&self.settings, self.base(base), &account, req)
+        let plan = compose(&self.settings, self.base(base), &account, req)?;
+        // A locale that is set is the person's and is never changed; one that doesn't give UTF-8
+        // is said (DESIGN.md, "Locale"): in the log when it changes, and in the status document.
+        let problem = locale_problem(&plan.env);
+        let mut live = self.live_warnings.lock().unwrap();
+        if let Some(p) = &problem
+            && live.1.as_ref().is_none_or(|(_, was)| was != p)
+        {
+            crate::log(&format!("terminal {}: {p}", req.id));
+        }
+        live.1 = problem.map(|p| (req.id.to_owned(), p));
+        self.show_warnings(&live);
+        Ok(plan)
+    }
+}
+
+/// What is wrong with the locale a program starts with, if anything: the `LC_CTYPE` it gets
+/// (`LC_ALL`, else `LC_CTYPE`, else `LANG`) doesn't load, or isn't UTF-8. `None` when it is fine
+/// or no locale is set (the fill's own check covers that).
+pub fn locale_problem(env: &[(String, String)]) -> Option<String> {
+    let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str()).filter(|v| !v.is_empty());
+    let (var, name) = ["LC_ALL", "LC_CTYPE", "LANG"].into_iter().find_map(|k| Some((k, get(k)?)))?;
+    let Ok(c) = std::ffi::CString::new(name) else { return Some(format!("{var}={name:?} is not a locale name")) };
+    // SAFETY: newlocale with a NUL-terminated name and no base; the locale is used on this thread
+    // only between the two uselocale calls, then freed.
+    unsafe {
+        let l = libc::newlocale(libc::LC_CTYPE_MASK, c.as_ptr(), std::ptr::null_mut());
+        if l.is_null() {
+            return Some(format!(
+                "{var}={name} does not load here (not installed?): its programs run in the C locale, ASCII only"
+            ));
+        }
+        let old = libc::uselocale(l);
+        let p = libc::nl_langinfo(libc::CODESET);
+        let set = if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() };
+        libc::uselocale(old);
+        libc::freelocale(l);
+        let utf8 = set.eq_ignore_ascii_case("UTF-8") || set.eq_ignore_ascii_case("utf8");
+        (!utf8).then(|| format!("{var}={name} is not UTF-8 (its charset is {set}): non-ASCII text shows wrong"))
     }
 }
 
@@ -564,16 +722,21 @@ mod platform {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-        if get("DBUS_SESSION_BUS_ADDRESS").is_none() && get("XDG_RUNTIME_DIR").is_none() {
-            let uid = rustix::process::getuid().as_raw();
-            let dir = format!("/run/user/{uid}");
-            use std::os::unix::fs::MetadataExt;
-            match std::fs::metadata(&dir) {
-                Ok(m) if m.is_dir() && m.uid() == uid => {
-                    cmd.env("XDG_RUNTIME_DIR", &dir);
-                }
-                _ => return Err(format!("no bus address and no {dir}")),
+        // The user bus is where pam_systemd puts it for this uid, `/run/user/<uid>/bus`, whatever
+        // the starter said: a starter's DBUS_SESSION_BUS_ADDRESS can name a bus from an earlier
+        // login, and a stripped starter has none. Only without that directory is the starter's
+        // address (or XDG_RUNTIME_DIR) all there is.
+        match g3d::paths::user_runtime_dir() {
+            Some(dir) => {
+                cmd.env_remove("DBUS_SESSION_BUS_ADDRESS").env("XDG_RUNTIME_DIR", dir);
             }
+            None if get("DBUS_SESSION_BUS_ADDRESS").is_none() && get("XDG_RUNTIME_DIR").is_none() => {
+                return Err(format!(
+                    "no bus address and no /run/user/{} of this user's",
+                    rustix::process::getuid().as_raw()
+                ));
+            }
+            None => {}
         }
         let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", busctl.display()))?;
         let until = Instant::now() + timeout;
@@ -674,6 +837,12 @@ mod tests {
             ("KITTY_WINDOW_ID", "3"),
             ("ZELLIJ", "0"),
             ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
+            ("CLAUDE_PID", "42"),
+            ("AI_AGENT", "claude-code"),
+            ("ATUIN_SESSION", "0190"),
+            ("MEMORY_PRESSURE_WATCH", "/sys/fs/cgroup/x/memory.pressure"),
+            ("MANAGERPIDFDID", "7"),
             ("SHLVL", "3"),
             ("PWD", "/somewhere"),
             ("OLDPWD", "/else"),
@@ -699,6 +868,12 @@ mod tests {
             "KITTY_WINDOW_ID",
             "ZELLIJ",
             "CLAUDECODE",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_PID",
+            "AI_AGENT",
+            "ATUIN_SESSION",
+            "MEMORY_PRESSURE_WATCH",
+            "MANAGERPIDFDID",
             "SHLVL",
             "OLDPWD",
             "COLUMNS",
@@ -743,12 +918,62 @@ mod tests {
     }
 
     #[test]
-    fn account_fills_only_what_is_missing() {
-        let p =
-            compose(&settings(), Some(kv(&[("USER", "bob")])), &account(), &req(Some(&["true".into()]), None)).unwrap();
-        assert_eq!(get(&p, "USER"), Some("bob"));
+    fn the_account_comes_from_the_user_database_whatever_the_base_says() {
+        // login(1) sets them from passwd: a starter's overridden HOME (a scratch harness's) would
+        // otherwise send every login shell to the wrong dotfiles.
+        let base = kv(&[("USER", "bob"), ("HOME", "/scratch/home"), ("LOGNAME", "bob")]);
+        let p = compose(&settings(), Some(base), &account(), &req(Some(&["true".into()]), None)).unwrap();
+        assert_eq!(get(&p, "USER"), Some("alice"));
         assert_eq!(get(&p, "LOGNAME"), Some("alice"));
         assert_eq!(get(&p, "HOME"), Some("/"));
+        // A request that names one meant it.
+        let env = BTreeMap::from([("HOME".to_string(), Some("/tmp".to_string()))]);
+        let p = compose(&settings(), None, &account(), &req(Some(&["true".into()]), Some(&env))).unwrap();
+        assert_eq!(get(&p, "HOME"), Some("/tmp"));
+    }
+
+    #[test]
+    fn a_base_from_the_daemon_keeps_only_the_session_variables() {
+        let starter = kv(&[
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/a"),
+            ("LANG", "C.UTF-8"),
+            ("LC_TIME", "C"),
+            ("XDG_RUNTIME_DIR", "/run/user/1"),
+            ("DISPLAY", ":0"),
+            ("SSH_AUTH_SOCK", "/run/agent"),
+            ("https_proxy", "http://proxy:3128"),
+            // A Claude Code shell's, a shell tool's, a unit's and a dev shell's: none a session's.
+            ("GIT_EDITOR", "true"),
+            ("CLAUDE_CODE_SESSION_ID", "s"),
+            ("COREPACK_ENABLE_AUTO_PIN", "0"),
+            ("ATUIN_HISTORY_ID", "h"),
+            ("MEMORY_PRESSURE_WRITE", "c29tZQ=="),
+            ("VIRTUAL_ENV", "/proj/.venv"),
+            ("SSH_CONNECTION", "10.0.0.1 5 10.0.0.2 22"),
+            ("MY_TOOL", "x"),
+        ]);
+        let got = session_vars(&starter, &[]);
+        let names: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            ["PATH", "HOME", "LANG", "LC_TIME", "XDG_RUNTIME_DIR", "DISPLAY", "SSH_AUTH_SOCK", "https_proxy"]
+        );
+        // --env-keep adds a name or a prefix.
+        let got = session_vars(&starter, &["MY_*".into()]);
+        assert!(got.iter().any(|(k, _)| k == "MY_TOOL"));
+    }
+
+    #[test]
+    fn a_locale_that_does_not_give_utf8_is_named() {
+        assert_eq!(locale_problem(&kv(&[("LANG", "C.UTF-8")])), None);
+        assert_eq!(locale_problem(&kv(&[])), None);
+        // LC_ALL wins over LANG.
+        assert_eq!(locale_problem(&kv(&[("LANG", "C"), ("LC_ALL", "C.UTF-8")])), None);
+        let p = locale_problem(&kv(&[("LANG", "C")])).unwrap();
+        assert!(p.contains("LANG=C is not UTF-8"), "{p}");
+        let p = locale_problem(&kv(&[("LC_CTYPE", "xx_NOWHERE.ISO-8859-1")])).unwrap();
+        assert!(p.contains("does not load"), "{p}");
     }
 
     #[test]
@@ -775,6 +1000,20 @@ mod tests {
         assert_eq!(p.path, "/usr/bin/env");
         let p = compose(&settings(), Some(kv(&[("SHELL", "env")])), &a, &req(None, None)).unwrap();
         assert_eq!(p.path, "/bin/sh");
+
+        // A request's SHELL, with no argv, is the shell that runs (as login(1) and tmux mean it);
+        // one that isn't an absolute executable is refused. With an argv it is only the variable.
+        let env = BTreeMap::from([("SHELL".to_string(), Some("/usr/bin/env".to_string()))]);
+        let p = compose(&settings(), None, &account(), &req(None, Some(&env))).unwrap();
+        assert_eq!(
+            (p.path.as_str(), p.argv[0].as_str(), get(&p, "SHELL")),
+            ("/usr/bin/env", "-env", Some("/usr/bin/env"))
+        );
+        let t: Vec<String> = vec!["true".into()];
+        let p = compose(&settings(), None, &account(), &req(Some(&t), Some(&env))).unwrap();
+        assert_eq!((p.argv[0].as_str(), get(&p, "SHELL")), ("true", Some("/usr/bin/env")));
+        let env = BTreeMap::from([("SHELL".to_string(), Some("zsh".to_string()))]);
+        assert_eq!(compose(&settings(), None, &account(), &req(None, Some(&env))).unwrap_err().code, code::BAD_REQUEST);
 
         // The --shell setting replaces the passwd entry.
         let mut s = settings();
@@ -858,6 +1097,12 @@ mod tests {
         let e = compose(&settings(), None, &account(), &req(Some(&t), Some(&env))).unwrap_err();
         assert_eq!(e.code, code::TOO_LARGE);
         assert!(e.message.contains("BIG"), "{}", e.message);
+        // The limit is on `NAME=value` and its NUL, as execve counts it: X= plus the NUL is 3.
+        let env = BTreeMap::from([("X".to_string(), Some("a".repeat(VALUE_MAX - 3)))]);
+        compose(&settings(), None, &account(), &req(Some(&t), Some(&env))).unwrap();
+        let env = BTreeMap::from([("X".to_string(), Some("a".repeat(VALUE_MAX - 2)))]);
+        let e = compose(&settings(), None, &account(), &req(Some(&t), Some(&env))).unwrap_err();
+        assert_eq!(e.code, code::TOO_LARGE);
         let env: BTreeMap<_, _> = (0..10).map(|i| (format!("V{i}"), Some("x".repeat(VALUE_MAX - 10)))).collect();
         let e = compose(&settings(), None, &account(), &req(Some(&t), Some(&env))).unwrap_err();
         assert_eq!(e.code, code::TOO_LARGE);
@@ -870,6 +1115,14 @@ mod tests {
         r.cwd = Some("/");
         let p = compose(&settings(), None, &account(), &r).unwrap();
         assert_eq!((p.cwd.as_str(), get(&p, "PWD")), ("/", Some("/")));
+        // PWD may hold no `.` or `..`: such a cwd becomes the directory's real path.
+        for given in ["/usr/../usr", "/usr/./", "/proc/self/../"] {
+            let mut r = req(Some(&t), None);
+            r.cwd = Some(given);
+            let p = compose(&settings(), None, &account(), &r).unwrap();
+            let real = std::fs::canonicalize(given).unwrap().display().to_string();
+            assert_eq!((p.cwd.as_str(), get(&p, "PWD")), (real.as_str(), Some(real.as_str())), "{given}");
+        }
         for bad in ["relative/dir", "/nonexistent/dir", "/bin/sh"] {
             let mut r = req(Some(&t), None);
             r.cwd = Some(bad);

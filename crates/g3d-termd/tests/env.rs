@@ -27,6 +27,19 @@ const ODD: &[(&str, &str)] = &[
     ("SHELL_SESSION_ID", "abc"),
     ("VSCODE_IPC_HOOK_CLI", "/nonexistent/vscode.sock"),
     ("CLAUDECODE", "1"),
+    // A Claude Code shell in Ghostty (as a relay started by an agent has): its session, its IPC
+    // token, its editor stub, a shell tool's session and the window unit's cgroup state.
+    ("CLAUDE_CODE_SESSION_ID", "11111111-2222"),
+    ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
+    ("CLAUDE_PID", "4242"),
+    ("AI_AGENT", "claude-code_test"),
+    ("GIT_EDITOR", "true"),
+    ("COREPACK_ENABLE_AUTO_PIN", "0"),
+    ("ATUIN_SESSION", "0190abcd"),
+    ("ATUIN_HISTORY_ID", "0190ef"),
+    ("MEMORY_PRESSURE_WATCH", "/sys/fs/cgroup/app.slice/x.service/memory.pressure"),
+    ("MANAGERPIDFDID", "1234"),
+    ("HOME", "/nonexistent/scratch-home"),
     ("SHLVL", "4"),
     ("PWD", "/nonexistent"),
     ("OLDPWD", "/nonexistent/old"),
@@ -113,6 +126,17 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
         "SHELL_SESSION_ID",
         "VSCODE_IPC_HOOK_CLI",
         "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_PID",
+        "AI_AGENT",
+        "GIT_EDITOR",
+        "COREPACK_ENABLE_AUTO_PIN",
+        "ATUIN_SESSION",
+        "ATUIN_HISTORY_ID",
+        "MEMORY_PRESSURE_WATCH",
+        "MANAGERPIDFDID",
+        "KEEP_ME",
         "SHLVL",
         "OLDPWD",
         "COLUMNS",
@@ -131,17 +155,23 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     assert_eq!(get("TERM_PROGRAM_VERSION"), Some(env!("CARGO_PKG_VERSION")));
     assert_eq!(get("G3D_TERMD_ID"), Some("e1"));
     assert_eq!(get("G3D_TERMD_SOCKET"), d.socket.to_str());
-    // The account fills what the starter lacked; SHELL is the account's, not the starter's.
+    // The account is the user database's, not the starter's (whose HOME is a scratch one); SHELL
+    // is the account's too.
     assert_eq!(get("HOME"), Some(home.as_str()));
     assert_eq!(get("USER"), Some(user.as_str()));
     assert_eq!(get("LOGNAME"), Some(user.as_str()));
     assert_eq!(get("SHELL"), Some(shell.as_str()));
-    // With --env-source daemon the starter's environment is the base: its own values pass.
+    // With --env-source daemon the starter's environment is the base, its session variables only:
+    // its DISPLAY passes, its own tool's variable (KEEP_ME) does not.
     assert_eq!(get("DISPLAY"), Some(":99"));
-    assert_eq!(get("KEEP_ME"), Some("kept"));
     assert_eq!(get("PATH"), Some("/usr/bin:/bin"));
-    // A set locale is the person's, even when it isn't UTF-8.
+    // A set locale is the person's, even when it isn't UTF-8; the status document and the log say
+    // what it costs.
     assert_eq!(get("LANG"), Some("en_US.ISO-8859-1"));
+    let st: StatusReply = c.request(Op::Status).unwrap();
+    let w = st.status.daemon.env.warnings.join("\n");
+    assert!(w.contains("terminal e1: LANG=en_US.ISO-8859-1"), "no locale warning: {w:?}");
+    assert!(d.log().contains("terminal e1: LANG=en_US.ISO-8859-1"), "{}", d.log());
     // The default directory is home, and PWD says so.
     assert_eq!(r.cwd, home);
     assert_eq!(get("PWD"), Some(home.as_str()));
@@ -152,6 +182,16 @@ fn a_terminal_from_an_odd_starter_gets_the_policy_environment() {
     let limits = std::fs::read_to_string(format!("/proc/{}/limits", r.pid)).unwrap();
     let nofile = limits.lines().find(|l| l.starts_with("Max open files")).unwrap();
     assert_eq!(nofile.split_whitespace().nth(3), Some("1000"), "{nofile}");
+}
+
+#[test]
+fn env_keep_passes_a_starter_variable_the_session_lacks() {
+    let d = odd_daemon(&["--idle-exit", "0", "--env-keep", "KEEP_*"]);
+    let mut c = d.client();
+    let r = create_with(&mut c, "k", |cr| cr.argv = Some(vec!["/bin/sleep".into(), "60".into()])).unwrap();
+    let env = environ(r.pid);
+    assert_eq!(env.get("KEEP_ME").map(String::as_str), Some("kept"));
+    assert_eq!(env.get("GIT_EDITOR"), None);
 }
 
 #[test]
@@ -257,13 +297,14 @@ fn create_refuses_reserved_names_bad_values_and_a_bad_cwd() {
     }
     let e = create_with(&mut c, "r", |cr| cr.argv = Some(vec!["no-such-program-here".into()])).unwrap_err();
     assert!(e.to_string().contains("spawn_failed") && e.to_string().contains("not found in PATH"), "{e}");
-    // A given cwd is used as given, and PWD keeps its spelling.
+    // A given cwd keeps its spelling in PWD unless that holds `.` or `..` (POSIX forbids them
+    // there): then PWD and the reply name the real directory.
     let r = create_with(&mut c, "r", |cr| {
         cr.argv = sleep();
         cr.cwd = Some("/usr/../usr".into());
     })
     .unwrap();
-    assert_eq!(environ(r.pid).get("PWD").map(String::as_str), Some("/usr/../usr"));
+    assert_eq!((r.cwd.as_str(), environ(r.pid).get("PWD").map(String::as_str)), ("/usr", Some("/usr")));
 }
 
 /// The session source is read at every create: a value the session changes reaches the next

@@ -68,7 +68,8 @@ pub struct Args {
     /// Also remove these variables (NAME, or PREFIX*) from the base environment. Repeatable.
     #[arg(long, value_name = "NAME")]
     pub env_scrub: Vec<String>,
-    /// Keep these variables (NAME, or PREFIX*) though the scrub names them. Repeatable.
+    /// Keep these variables (NAME, or PREFIX*): though the scrub names them, and, in a base taken
+    /// from the daemon's own environment, though they aren't session variables. Repeatable.
     #[arg(long, value_name = "NAME")]
     pub env_keep: Vec<String>,
     /// The shell a terminal with no argv runs, for every terminal (default: the passwd entry's).
