@@ -38,15 +38,31 @@ export function deriveCharSize(shaper, fontSize) {
 }
 
 /**
- * World-space cell metrics from the atlas char size + world scale.
+ * A cell dimension rounded to 10 significant bits (it moves by under 0.1 %). Cell edges are then
+ * EXACT in the float32 the GPU poses quads in: column k's right edge (k·w + w) and column k+1's
+ * left edge ((k+1)·w) are the same number for every k below 16384, and so are a row's bottom
+ * and the next row's top — neighbours share their edge to the bit, and the rasterizer gives every
+ * pixel on it to exactly one of them. No crack, no overlap, at any zoom.
+ * @param {number} v  a world-space cell width or height (> 0)
+ * @returns {number}
+ */
+export function snapCellDimension(v) {
+    if (!(v > 0) || !Number.isFinite(v)) return v;
+    const q = 2 ** (Math.floor(Math.log2(v)) - 9);
+    return Math.round(v / q) * q;
+}
+
+/**
+ * World-space cell metrics from the atlas char size + world scale. The cell's width and height
+ * are snapped (snapCellDimension), so every cell edge laid out as a multiple of them is exact.
  * @param {{width:number, height:number}} charSize - atlas.getCharSize()
  * @param {number} worldScale
  * @returns {{ charWidth:number, charHeight:number, lineSpacing:number, letterSpacing:number,
  *             pixelWidth:number, pixelHeight:number }}
  */
 export function computeCellMetrics(charSize, worldScale) {
-    const charWidth  = charSize.width  * worldScale;
-    const charHeight = charSize.height * worldScale;
+    const charWidth  = snapCellDimension(charSize.width  * worldScale);
+    const charHeight = snapCellDimension(charSize.height * worldScale);
     return {
         charWidth,
         charHeight,

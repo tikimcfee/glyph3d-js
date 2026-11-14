@@ -8,7 +8,9 @@
  * 0..11           vec3<f32> pos         World-space pen origin (left edge, cell-vertical center)
  * 12..15          f32       glyph_id    FontChain global glyph slot (keys glyphmap texture)
  * 16..19          f32       color       Packed RGB888 value (sRGB display color, r in the low byte)
- * 20..23          f32       group_id    Index into group table (pose/clipping/alpha)
+ * 20..23          f32       group_id    Index into group table (pose/clipping/alpha) in the low
+ *                                       GROUP_ID_BITS bits; above them the cell's STYLE BYTE
+ *                                       (core/cellAttrs.js: dim, strike, overline, underline)
  * 24..27          f32       advance     Cell advance / width in world units
  * 28..31          f32       height      Cell height in world units
  *
@@ -16,6 +18,11 @@
  * and group_id hold integer VALUES in f32 lanes, exact up to 2^24 — not u32 bit patterns
  * as in slot.rs. Alpha lives in the group table, not the slot. Write lanes through the
  * setters below; there is no integer view.
+ *
+ * The group lane carries two things in its 24 exact bits: the group row (16 bits — a group
+ * table is a texture's height, 16384 rows at most on the GPUs we draw on) and, above it, the
+ * 8-bit style byte. A slot with no style holds its bare group row, as every field wrote it before
+ * styles existed; readers take the row with `groupOf` (the shaders mask the same bits).
  */
 
 import * as THREE from 'three';
@@ -31,6 +38,30 @@ export const LANE_COLOR = 4;
 export const LANE_GROUP_ID = 5;
 export const LANE_ADVANCE = 6;
 export const LANE_HEIGHT = 7;
+
+/** Bits of the group lane that hold the group row; the style byte sits above them. */
+export const GROUP_ID_BITS = 16;
+const GROUP_ID_MASK = (1 << GROUP_ID_BITS) - 1;
+
+/**
+ * A group lane's value: the group row with the cell's style byte above it.
+ * @param {number} groupId  0 … 65535
+ * @param {number} style    0 … 255 (core/cellAttrs.js `cellStyle`)
+ * @returns {number} an integer below 2^24 (exact in the f32 lane)
+ */
+export function packGroupStyle(groupId, style) {
+    return groupId + style * (GROUP_ID_MASK + 1);
+}
+
+/** The group row of a group lane's value. @param {number} lane @returns {number} */
+export function groupOf(lane) {
+    return Math.round(lane) & GROUP_ID_MASK;
+}
+
+/** The style byte of a group lane's value. @param {number} lane @returns {number} */
+export function styleOf(lane) {
+    return Math.round(lane) >> GROUP_ID_BITS;
+}
 
 export const OFFSET_POS = 0;      // 0 bytes
 export const OFFSET_GLYPH_ID = 12; // 12 bytes
@@ -189,7 +220,7 @@ export class InstancedSlotBuffer {
     /**
      * Read a slot as a plain object (for tests/debugging).
      * @param {number} index
-     * @returns {{ pos: [number, number, number], glyphId: number, color: number, groupId: number, advance: number, height: number }}
+     * @returns {{ pos: [number, number, number], glyphId: number, color: number, groupId: number, style: number, advance: number, height: number }}
      */
     getSlot(index) {
         const base = index * SLOT_FLOATS;
@@ -199,7 +230,8 @@ export class InstancedSlotBuffer {
             pos: [this.f32[base + LANE_POS_X], this.f32[base + LANE_POS_Y], this.f32[base + LANE_POS_Z]],
             glyphId: Math.round(this.f32[base + LANE_GLYPH_ID]),
             color: color,
-            groupId: Math.round(this.f32[base + LANE_GROUP_ID]),
+            groupId: groupOf(this.f32[base + LANE_GROUP_ID]),
+            style: styleOf(this.f32[base + LANE_GROUP_ID]),
             advance: this.f32[base + LANE_ADVANCE],
             height: this.f32[base + LANE_HEIGHT],
         };

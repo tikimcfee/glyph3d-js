@@ -8,9 +8,9 @@
 
 import * as THREE from 'three';
 import {
-    InstancedSlotBuffer, packRgba8, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID,
+    InstancedSlotBuffer, packRgba8, groupOf, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID, GROUP_ID_BITS,
 } from '../core/InstancedSlotBuffer.js';
-import { createGlyphMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
+import { createGlyphMaterial, createGlyphFillMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
@@ -102,6 +102,90 @@ class UploadRanges {
     }
 }
 
+/** Texels across a per-slot texture (the shaders index it by gl_InstanceID % 1024). */
+const SLOT_TEXELS_WIDTH = 1024;
+
+/**
+ * One RGBA8 texel per slot, in a DataTexture SLOT_TEXELS_WIDTH wide that grows by rows — the
+ * field's highlight texels (a cell's fill or tint) and its decoration texels (an underline's own
+ * colour). Made on first use; a writer stores a slot's texel as one little-endian word (`words`)
+ * and marks what it wrote; only those texel rows upload.
+ */
+class SlotTexels {
+    constructor() {
+        /** @type {THREE.DataTexture|null} */ this.texture = null;
+        /** slots the texture holds */ this.size = 0;
+        /** @private @type {Uint32Array|null} */ this._words = null;
+        this.uploads = new UploadRanges((tex) => {
+            const row = tex.image.width * 4;
+            for (let o = 0; o < tex.image.data.length; o += row) tex.addUpdateRange(o, row);
+        });
+    }
+
+    /**
+     * Hold at least `count` slots: the first call makes the texture, a later one that needs more
+     * rows makes a taller one with the old texels copied in (the old one disposed).
+     * @param {number} count
+     * @returns {boolean} whether the texture object is new (its users must rebind it)
+     */
+    ensure(count) {
+        if (this.texture && this.size >= count) return false;
+        const W = SLOT_TEXELS_WIDTH;
+        const n = Math.max(count, 1);
+        const height = Math.ceil(n / W);
+        const data = new Uint8Array(W * height * 4);
+        if (this.texture) {
+            const old = this.texture.image.data;
+            data.set(old.subarray(0, Math.min(old.length, data.length)));
+            this.texture.dispose();
+        }
+        const tex = new THREE.DataTexture(data, W, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        this.texture = tex;
+        this.size = n;
+        this._words = null;
+        this.uploads.track(tex, (cb) => { tex.onUpdate = cb; });
+        return true;
+    }
+
+    /** The texels as one little-endian RGBA8 word each (r in the low byte) — a view of the texture's data. */
+    get words() {
+        if (!LITTLE_ENDIAN) throw new Error('[InstancedField] per-slot texels are packed as little-endian RGBA8 words; this platform is big-endian');
+        const data = this.texture.image.data;
+        if (!this._words || this._words.buffer !== data.buffer) {
+            this._words = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
+        }
+        return this._words;
+    }
+
+    /**
+     * Upload texels the caller wrote: slots [first, first + count), or with no arguments the whole
+     * texture. A ranged upload goes up a texture row at a time (three uploads each range as one row
+     * strip), so a span crossing a row edge is split there.
+     */
+    markDirty(first, count) {
+        if (!this.texture) return;
+        if (first === undefined) { this.uploads.all(); return; }
+        const W = SLOT_TEXELS_WIDTH;
+        const end = first + count;
+        for (let s = first; s < end;) {
+            const rowEnd = Math.min(end, (Math.floor(s / W) + 1) * W);
+            this.uploads.add(s * 4, (rowEnd - s) * 4);
+            s = rowEnd;
+        }
+    }
+
+    dispose() {
+        this.texture?.dispose();
+        this.texture = null;
+        this.size = 0;
+        this._words = null;
+    }
+}
+
 export default class InstancedField {
     /**
      * @param {THREE.Scene} scene
@@ -130,6 +214,7 @@ export default class InstancedField {
         // The group table's live rows (its texture height — the shaders clamp to it). Most fields only
         // ever use group 0, so a table starts at the rows asked for and grows on demand.
         this.maxGroups = Math.max(1, options.maxGroups || 1);
+        this._groupCap = 0;
         this.groupCap = Math.max(this.maxGroups, options.groupCap || 4096);
         this._defaultColor = options.defaultColor || { r: 0.0, g: 1.0, b: 0.0 };
 
@@ -155,23 +240,20 @@ export default class InstancedField {
         this._initGroupDefaults();
         this._groupTexture = makeGroupTexture(this._groupData, this.maxGroups);
 
-        // Highlight texture (RGBA8 DataTexture, 1024 wide, wrapped)
-        this._highlightTexture = null;
-        this._highlightSize = 0;
-        this._highlightTexWidth = 1024;
-        /** @private the highlight texels as one RGBA8 word each (a view of the texture's data) */
-        this._highlightWords = null;
+        // Per-slot texels (RGBA8, made on first use): the highlight — a cell's fill, or an additive
+        // tint — and the decoration colour, an underline's own.
+        /** @private */ this._highlight = new SlotTexels();
+        /** @private */ this._decor = new SlotTexels();
 
-        // Partial uploads: the slot buffer by float range, the highlight texture by texel rows.
+        // Partial uploads: the slot buffer by float range (the per-slot textures by texel rows).
         this._slotUploads = new UploadRanges((ib) => ib.addUpdateRange(0, ib.array.length));
-        this._highlightUploads = new UploadRanges((tex) => {
-            const row = tex.image.width * 4;
-            for (let o = 0; o < tex.image.data.length; o += row) tex.addUpdateRange(o, row);
-        });
 
-        // Create Three.js geometry and mesh
+        // Create Three.js geometry and mesh. `material` is the INK pass; the FILL pass's material
+        // is made with the first highlight texel (_ensureFillPass) — most fields never fill a cell.
         this.geometry = this._createGeometry();
         this.material = this._createMaterial();
+        /** @type {THREE.ShaderMaterial|null} the fill pass's material, once a cell can have a fill */
+        this.fillMaterial = null;
 
         this.instanceMesh = new THREE.Mesh(this.geometry, this.material);
         this.instanceMesh.userData.glyphField = this;
@@ -200,6 +282,16 @@ export default class InstancedField {
             this.setSlugData(this.atlas._slugData, this._shaper);
         }
     }
+
+    /** The most rows the group table may grow to. A slot's group lane holds its row in GROUP_ID_BITS bits. */
+    get groupCap() { return this._groupCap; }
+    set groupCap(rows) {
+        if (!(rows >= 1) || rows > (1 << GROUP_ID_BITS)) throw new Error(`InstancedField: groupCap ${rows} — a slot's group lane holds a row below ${1 << GROUP_ID_BITS}`);
+        this._groupCap = rows;
+    }
+
+    /** @private the highlight texture (null until a slot is highlighted) */
+    get _highlightTexture() { return this._highlight.texture; }
 
     /** @private */
     _initGroupDefaults() {
@@ -473,8 +565,8 @@ export default class InstancedField {
             const o = s * SLOT_FLOATS;
             const h = f32[o + LANE_HEIGHT];
             if (!(h > 0)) continue;                                 // height 0 draws nothing
-            const row = Math.round(f32[o + LANE_GROUP_ID]);
-            if (row < 0 || row >= this.maxGroups) continue;
+            const row = groupOf(f32[o + LANE_GROUP_ID]);
+            if (row >= this.maxGroups) continue;
             const gb = row * gs;
             const ga = G[gb + 11];
             if (ga <= 0.01) continue;                               // the vertex stage culls these
@@ -581,8 +673,9 @@ export default class InstancedField {
         const tex = makeGroupTexture(this._groupData, rows);
         this._groupTexture.dispose();
         this._groupTexture = tex;
-        const u = this.material?.uniforms;
-        if (u) { u.groupTexture.value = tex; u.maxGroups.value = rows; }
+        for (const m of [this.material, this.fillMaterial]) {
+            if (m) { m.uniforms.groupTexture.value = tex; m.uniforms.maxGroups.value = rows; }
+        }
     }
 
     /**
@@ -712,35 +805,44 @@ export default class InstancedField {
 
     // ── Highlight API ────────────────────────────────────────────────────────
 
-    /** @private */
+    /** @private Hold highlight texels for `instanceCount` slots, and the fill pass that draws their fills. */
     _ensureHighlightTexture(instanceCount) {
-        if (this._highlightTexture && this._highlightSize >= instanceCount) return;
-
-        const W = this._highlightTexWidth;
-        const count = Math.max(instanceCount, 1);
-        const height = Math.ceil(count / W);
-        const data = new Uint8Array(W * height * 4);
-
-        if (this._highlightTexture) {
-            const old = this._highlightTexture.image.data;
-            data.set(old.subarray(0, Math.min(old.length, data.length)));
-            this._highlightTexture.dispose();
-        }
-
-        const tex = new THREE.DataTexture(data, W, height, THREE.RGBAFormat, THREE.UnsignedByteType);
-        tex.minFilter = THREE.NearestFilter;
-        tex.magFilter = THREE.NearestFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-
-        this._highlightTexture = tex;
-        this._highlightSize = count;
-        this._highlightWords = null;
-        this._highlightUploads.track(tex, (cb) => { tex.onUpdate = cb; });
-
-        if (this.material && this.material.uniforms) {
+        if (this._highlight.ensure(instanceCount)) {
+            const tex = this._highlight.texture;
             this.material.uniforms.highlightTexture.value = tex;
+            if (this.fillMaterial) this.fillMaterial.uniforms.highlightTexture.value = tex;
         }
+        this._ensureFillPass();
+    }
+
+    /**
+     * @private The fill pass: the same mesh, geometry and buffers drawn once more, FIRST, by the
+     * fill material — the mesh's material becomes [fill, ink] over two geometry groups that both
+     * span the quad, which three draws in that order (same object: same sort key, in group order).
+     */
+    _ensureFillPass() {
+        if (this.fillMaterial) return;
+        this.fillMaterial = createGlyphFillMaterial({
+            groupTexture: this._groupTexture,
+            maxGroups: this.maxGroups,
+            highlightTexture: this._highlight.texture,
+        });
+        this.geometry.clearGroups();
+        this.geometry.addGroup(0, Infinity, 0);
+        this.geometry.addGroup(0, Infinity, 1);
+        this.instanceMesh.material = [this.fillMaterial, this.material];
+    }
+
+    /**
+     * Whether any slot has a fill: while false the fill pass is not drawn at all (its material is
+     * hidden — three skips the draw; no scene visibility changes). setGlyphHighlight turns it on
+     * with the first fill it writes; a writer of highlightWords says so itself.
+     * @type {boolean}
+     */
+    get fillsActive() { return !!this.fillMaterial?.visible; }
+    set fillsActive(on) {
+        if (on) this._ensureFillPass();
+        if (this.fillMaterial) this.fillMaterial.visible = !!on;
     }
 
     /**
@@ -759,16 +861,21 @@ export default class InstancedField {
             data[base + 1] = Math.round((color.g ?? 0) * 255);
             data[base + 2] = Math.round((color.b ?? 0) * 255);
             data[base + 3] = Math.round(fillOpacity * 255);
+            if (data[base + 3] > 0) this.fillsActive = true;
         } else {
             data[base + 0] = 0;
             data[base + 1] = 0;
             data[base + 2] = 0;
             data[base + 3] = 0;
         }
-        this._highlightUploads.all();
-        if (this.material && this.material.uniforms) {
-            this.material.uniforms.hasHighlight.value = 1;
-        }
+        this._highlight.uploads.all();
+        this._showHighlight();
+    }
+
+    /** @private Both passes read the highlight texture from now on. */
+    _showHighlight() {
+        this.material.uniforms.hasHighlight.value = 1;
+        if (this.fillMaterial) this.fillMaterial.uniforms.hasHighlight.value = 1;
     }
 
     // ── Per-Slot Editing / Transcoding API ───────────────────────────────────
@@ -930,7 +1037,7 @@ export default class InstancedField {
         if (this._highlightTexture) {
             const hl = this._highlightTexture.image.data;
             hl.copyWithin(dstSlot * 4, srcSlot * 4, (srcSlot + count) * 4);
-            this._highlightUploads.all();
+            this._highlight.uploads.all();
         }
     }
 
@@ -958,40 +1065,52 @@ export default class InstancedField {
     /**
      * The highlight texels as one little-endian RGBA8 word per slot (r in the low byte, fill alpha
      * in the high byte) — a view of the texture's own data, so a writer stores a slot's texel in one
-     * write. Mark what was written with markHighlightDirty.
+     * write. Mark what was written with markHighlightDirty, and say whether any slot has a fill
+     * (`fillsActive`): the fill pass draws only while one does.
      * @param {number} count  slots the texture must hold
      * @returns {Uint32Array}
      */
     highlightWords(count) {
-        if (!LITTLE_ENDIAN) throw new Error('[InstancedField] highlightWords packs RGBA8 as little-endian words; this platform is big-endian');
         this._ensureHighlightTexture(count);
-        const data = this._highlightTexture.image.data;
-        if (!this._highlightWords || this._highlightWords.buffer !== data.buffer) {
-            this._highlightWords = new Uint32Array(data.buffer, data.byteOffset, data.length >> 2);
-        }
-        return this._highlightWords;
+        return this._highlight.words;
     }
 
     /**
      * Upload highlight texels the caller wrote: slots [first, first + count), or with no arguments
-     * the whole texture. A ranged upload goes up a texture row at a time (three uploads each range
-     * as one row strip), so a span crossing a row edge is split there.
+     * the whole texture.
      * @param {number} [first]
      * @param {number} [count]
      */
     markHighlightDirty(first, count) {
         if (!this._highlightTexture) return;
-        if (this.material && this.material.uniforms) {
-            this.material.uniforms.hasHighlight.value = 1;
+        this._showHighlight();
+        this._highlight.markDirty(first, count);
+    }
+
+    /**
+     * The decoration texels as one little-endian RGBA8 word per slot: the colour a slot's
+     * underline draws in when its style byte says it has its own (cellAttrs STYLE_UNDERLINE_COLOR;
+     * r in the low byte, the high byte unused). Made on first call. Mark what was written with
+     * markDecorDirty.
+     * @param {number} count  slots the texture must hold
+     * @returns {Uint32Array}
+     */
+    decorWords(count) {
+        if (this._decor.ensure(count)) {
+            this.material.uniforms.decorTexture.value = this._decor.texture;
+            this.material.uniforms.hasDecor.value = 1;
         }
-        if (first === undefined) { this._highlightUploads.all(); return; }
-        const W = this._highlightTexWidth;
-        const end = first + count;
-        for (let s = first; s < end;) {
-            const rowEnd = Math.min(end, (Math.floor(s / W) + 1) * W);
-            this._highlightUploads.add(s * 4, (rowEnd - s) * 4);
-            s = rowEnd;
-        }
+        return this._decor.words;
+    }
+
+    /**
+     * Upload decoration texels the caller wrote: slots [first, first + count), or with no
+     * arguments the whole texture.
+     * @param {number} [first]
+     * @param {number} [count]
+     */
+    markDecorDirty(first, count) {
+        this._decor.markDirty(first, count);
     }
 
     setFrameTexture(tex, cols, rows) {
@@ -1204,7 +1323,9 @@ export default class InstancedField {
         }
         this.geometry?.dispose();
         this.material?.dispose();
+        this.fillMaterial?.dispose();
         this._groupTexture?.dispose();
-        this._highlightTexture?.dispose();
+        this._highlight.dispose();
+        this._decor.dispose();
     }
 }

@@ -16,16 +16,25 @@
  *
  * The read allocates nothing: it fills one reused TerminalScreen (typed arrays, sized to the
  * reader's cols × rows) from xterm's buffer lines through one reused cell. Colors arrive
- * PACKED the way the slot buffer's color lane holds them (RGB888, red in the low byte), bold
- * already brightened, so the renderer compares and copies integers.
+ * PACKED the way the slot buffer's color lane holds them (RGB888, red in the low byte), as
+ * DRAWN — bold already brightened, inverse already swapped — so the renderer compares and
+ * copies integers.
  *
  * TerminalScreen (what readScreen fills and applyScreen consumes):
  *   { cols, rows,
  *     cp: Uint32Array  — the codepoint per cell, row-major; 0 (empty, a wide char's trailing
- *                        slot) reads as 32, a space,
- *     fg: Uint32Array  — the packed foreground (RGB888, r low byte), bold ×1.4 clamped,
+ *                        slot) reads as 32, a space, and so does a concealed cell (SGR 8),
+ *     fg: Uint32Array  — the packed colour the text draws in (RGB888, r low byte): the
+ *                        foreground, bold ×1.4 clamped; under inverse (SGR 7) the background
+ *                        (the terminal's own, setDefaultBackground, where the cell names none),
  *     bg: Uint32Array  — 0 for the DEFAULT background (no per-cell fill), else BG_SET | the packed
- *                        RGB888 of an explicit ANSI background,
+ *                        RGB888 the cell fills with: an explicit ANSI background, or under
+ *                        inverse the foreground,
+ *     at: Uint16Array  — the cell's attributes, core/cellAttrs.js's flags word (bold, dim,
+ *                        italic, blink, inverse, conceal, strike, overline, the underline style,
+ *                        whether the underline has its own colour) — as the program set them,
+ *     ul: Uint32Array  — the underline's own colour, packed like fg (SGR 58; meaningful where
+ *                        `at` has CELL_UNDERLINE_COLOR, else 0),
  *     alt: boolean     — the alternate screen is active (full-screen TUIs),
  *     cursorX, cursorY — the VIEWPORT-relative cell the terminal would draw its caret on }
  */
@@ -36,6 +45,10 @@
 // entry and exports { Terminal }. Do NOT "simplify" this back to '@xterm/headless'.
 import { Terminal } from '@xterm/headless/lib-headless/xterm-headless.mjs';
 import { RESET_FG, ansi256toRGB } from './terminalPalette.js';
+import {
+    CELL_BOLD, CELL_DIM, CELL_ITALIC, CELL_BLINK, CELL_INVERSE, CELL_CONCEAL, CELL_STRIKE, CELL_OVERLINE,
+    CELL_UNDERLINE_SHIFT, CELL_UNDERLINE_COLOR, UNDERLINE,
+} from '../core/cellAttrs.js';
 
 /** Marks a TerminalScreen bg word as an explicit background (the low 24 bits are its RGB888). */
 export const BG_SET = 0x1000000;
@@ -81,6 +94,8 @@ export function createTerminalScreen(cols, rows) {
         cp: new Uint32Array(n).fill(32),
         fg: new Uint32Array(n).fill(RESET),
         bg: new Uint32Array(n),
+        at: new Uint16Array(n),
+        ul: new Uint32Array(n),
         alt: false,
         cursorX: 0,
         cursorY: 0,
@@ -104,6 +119,8 @@ export default class TerminalEmulator {
         /** @type {ReturnType<typeof createTerminalScreen>|null} the one screen readScreen refills */
         this._screen = null;
         this._cell = undefined; // reusable CellData, filled by the line's loadCell
+        /** @private the terminal's own background, packed: what inverse text draws in over a default background */
+        this._defaultBg = 0;
 
         // scrollback 0: we mirror the visible screen only (termd owns scrollback and sends a
         // scrolled-back view as a repaint), so the active buffer == the viewport.
@@ -126,6 +143,26 @@ export default class TerminalEmulator {
             throw new Error('[TerminalEmulator] xterm\'s buffer internals moved (buffer.active._buffer.lines.get(y).loadCell): the zero-allocation screen read needs them — check the @xterm/headless version');
         }
         this._cell = view.getLine(0).getCell(0);   // a CellData; loadCell refills it
+        // The attribute reads below are xterm's AttributeData methods; one that moved would read
+        // as "never set", so check them here too.
+        for (const m of ['isInverse', 'isDim', 'isItalic', 'isBlink', 'isInvisible', 'isStrikethrough', 'isOverline',
+            'isUnderline', 'getUnderlineStyle', 'isUnderlineColorDefault', 'isUnderlineColorRGB', 'isUnderlineColorPalette', 'getUnderlineColor']) {
+            if (typeof this._cell[m] !== 'function') throw new Error(`[TerminalEmulator] xterm's cell has no ${m}(): the attribute read needs it — check the @xterm/headless version`);
+        }
+    }
+
+    /**
+     * The terminal's own background colour (its panel's), packed RGB888 with red in the low byte:
+     * what inverse text over a DEFAULT background draws in. A change marks the screen dirty.
+     * @param {number} packed
+     */
+    setDefaultBackground(packed) {
+        packed &= 0xffffff;
+        if (packed === this._defaultBg) return;
+        this._defaultBg = packed;
+        if (this._disposed) return;
+        this.dirty = true;
+        this._onDirty?.();
     }
 
     /** Whether the program asked for bracketed paste (DECSET 2004) in the bytes parsed so far. */
@@ -227,7 +264,8 @@ export default class TerminalEmulator {
         const base = view.baseY;          // 0 with scrollback off; general either way
         const termRows = term.rows;
         const cell = this._cell;
-        const CP = s.cp, FG = s.fg, BG = s.bg;
+        const CP = s.cp, FG = s.fg, BG = s.bg, AT = s.at, UL = s.ul;
+        const defaultBg = this._defaultBg;
         // Alt-screen apps (vim/htop/less) repaint the whole pane each frame, not a line-shift — so
         // depth-history capture must NOT treat their redraws as scroll. TerminalGrid reads this.
         s.alt = view.type === 'alternate';
@@ -241,29 +279,61 @@ export default class TerminalEmulator {
                 // getCode() is the cell's codepoint (0 = empty / a wide char's trailing slot → a
                 // space; the wide glyph's own quad covers it).
                 const code = cell.getCode();
-                CP[i] = code === 0 ? 32 : code;
                 const bold = cell.isBold();
-                if (cell.isFgDefault()) {
-                    FG[i] = bold ? RESET_BOLD : RESET;
-                } else if (cell.isFgRGB()) {
+                let fg, bg;
+                if (cell.isFgRGB()) {
                     const c = cell.getFgColor();
-                    FG[i] = bold
+                    fg = bold
                         ? BOLD_BYTE[(c >> 16) & 0xff] | (BOLD_BYTE[(c >> 8) & 0xff] << 8) | (BOLD_BYTE[c & 0xff] << 16)
                         : rgbOf(c);
                 } else if (cell.isFgPalette()) {
-                    FG[i] = (bold ? PALETTE_BOLD : PALETTE)[cell.getFgColor() & 0xff];
+                    fg = (bold ? PALETTE_BOLD : PALETTE)[cell.getFgColor() & 0xff];
                 } else {
-                    FG[i] = bold ? RESET_BOLD : RESET;
+                    fg = bold ? RESET_BOLD : RESET;
                 }
                 // The background: 0 for the default (no per-cell fill — the terminal's own panel
                 // shows); only an explicit ANSI background (git-diff bars, ls --color, selections)
                 // paints a cell fill.
-                if (cell.isBgDefault()) BG[i] = 0;
-                else if (cell.isBgRGB()) BG[i] = BG_SET | rgbOf(cell.getBgColor());
-                else if (cell.isBgPalette()) BG[i] = BG_SET | PALETTE[cell.getBgColor() & 0xff];
-                else BG[i] = 0;
+                if (cell.isBgRGB()) bg = BG_SET | rgbOf(cell.getBgColor());
+                else if (cell.isBgPalette()) bg = BG_SET | PALETTE[cell.getBgColor() & 0xff];
+                else bg = 0;
+
+                // The attributes, as one flags word (core/cellAttrs.js). The is*() reads are bit
+                // tests on the cell's fg/bg words; the underline's style and colour sit in the
+                // cell's extended attributes, which xterm keeps only where one was set.
+                let at = (bold ? CELL_BOLD : 0)
+                    | (cell.isDim() ? CELL_DIM : 0)
+                    | (cell.isItalic() ? CELL_ITALIC : 0)
+                    | (cell.isBlink() ? CELL_BLINK : 0)
+                    | (cell.isInverse() ? CELL_INVERSE : 0)
+                    | (cell.isInvisible() ? CELL_CONCEAL : 0)
+                    | (cell.isStrikethrough() ? CELL_STRIKE : 0)
+                    | (cell.isOverline() ? CELL_OVERLINE : 0);
+                let ul = 0;
+                if (cell.isUnderline()) {
+                    const style = cell.getUnderlineStyle();
+                    at |= (style >= UNDERLINE.SINGLE && style <= UNDERLINE.DASHED ? style : UNDERLINE.SINGLE) << CELL_UNDERLINE_SHIFT;
+                    if (!cell.isUnderlineColorDefault()) {
+                        if (cell.isUnderlineColorRGB()) { at |= CELL_UNDERLINE_COLOR; ul = rgbOf(cell.getUnderlineColor()); }
+                        else if (cell.isUnderlineColorPalette()) { at |= CELL_UNDERLINE_COLOR; ul = PALETTE[cell.getUnderlineColor() & 0xff]; }
+                    }
+                }
+
+                // Inverse swaps what is drawn: the text takes the background's colour (the
+                // terminal's own where the cell names none), the cell fills with the foreground's.
+                if (at & CELL_INVERSE) {
+                    const text = bg ? bg & 0xffffff : defaultBg;
+                    bg = BG_SET | fg;
+                    fg = text;
+                }
+                // Concealed text is not drawn: its cell reads as a space (its fill and lines stay).
+                CP[i] = code === 0 || (at & CELL_CONCEAL) ? 32 : code;
+                FG[i] = fg;
+                BG[i] = bg;
+                AT[i] = at;
+                UL[i] = ul;
             }
-            for (let x = n; x < cols; x++, i++) { CP[i] = 32; FG[i] = RESET; BG[i] = 0; }
+            for (let x = n; x < cols; x++, i++) { CP[i] = 32; FG[i] = RESET; BG[i] = 0; AT[i] = 0; UL[i] = 0; }
         }
         // Cursor cell. xterm's cursorY is already viewport-relative (0..rows-1), so it maps
         // straight to our row index; cursorX is the column. (DECTCEM show/hide isn't on the

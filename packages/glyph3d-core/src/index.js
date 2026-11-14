@@ -19,6 +19,9 @@ export {
     setGlyphGreekPx,
     getGlyphGreekPx,
     GLYPH_GREEK_PX_DEFAULT,
+    setGlyphLineStyle,
+    getGlyphLineStyle,
+    GLYPH_LINE_DEFAULTS,
 } from './core/glyphMaterial.js';
 
 // Collections - batched text abstractions

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, useGridRegistry } from '@glyph3d/r3f';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import italicUrl from '@glyph3d/core/fonts/Cousine-Italic.ttf?url';
 import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import TerminalWall from './TerminalWall.js';
@@ -15,7 +16,7 @@ import { dockLayout } from './Panel.jsx';
 import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL } from './chord.js';
 
 const FONT_CHAIN = [
-  { url: fontUrl, name: 'Cousine' },
+  { url: fontUrl, name: 'Cousine', italic: { url: italicUrl } },
   { url: mesloUrl, name: 'MesloLGS NF Mono' },
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];

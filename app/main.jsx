@@ -17,11 +17,12 @@ import { stateController } from '@glyph3d/core/services/state';
 // that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
 // braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import italicUrl from '@glyph3d/core/fonts/Cousine-Italic.ttf?url';
 import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 
 const FONT_CHAIN = [
-  { url: fontUrl,   name: 'Cousine' },
+  { url: fontUrl,   name: 'Cousine', italic: { url: italicUrl } },
   { url: mesloUrl,  name: 'MesloLGS NF Mono' },
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];

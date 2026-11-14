@@ -40,6 +40,7 @@
  */
 
 import { SlugBuffer, SLUG_BUFFER_FORMAT } from './slugData.js';
+import { SPRITE_VERSION } from './cellSprites.js';
 import { CURVE_U32_PER_CURVE } from './slug-constants.js';
 import { blobStore } from '../services/state/index.js';
 
@@ -58,6 +59,20 @@ const GROWTH_HEADER_U32 = 6;
 const FONT_CHAIN_VERSION = 2;
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/**
+ * A font chain's identity: its fonts' names in chain order — the upright fonts, then their italic
+ * faces (FontChain loads them in that order; a font's index is its place here).
+ * @param {Array<{url?:string, name?:string, italic?:Object}>} [fonts]
+ * @returns {string[]}
+ */
+function chainNames(fonts) {
+    const list = fonts || [];
+    return [
+        ...list.map((f) => f.name || f.url),
+        ...list.filter((f) => f.italic).map((f) => `${f.name || f.url} Italic`),
+    ];
+}
 
 // Last cache outcome (boot or runtime), surfaced by the `atlas.cache` verb. Boot's
 // hit/miss logs fire before the relay WebSocket connects, so they never reach the log
@@ -80,10 +95,11 @@ let _lastGrowthEvent = null;
  */
 export function slugCoreKey({ fonts, encodeRanges }) {
     const canonical = JSON.stringify({
-        fonts: (fonts || []).map((f) => f.name || f.url),
+        fonts: chainNames(fonts),
         ranges: encodeRanges,
         fmt: SLUG_BUFFER_FORMAT,
         fontVer: FONT_CHAIN_VERSION,
+        sprites: SPRITE_VERSION,   // the core holds the cell sprites' curves
     });
     return `${NS}.${cyrb53(canonical).toString(36)}`;
 }
@@ -98,7 +114,7 @@ export function slugCoreKey({ fonts, encodeRanges }) {
  */
 export function slugGrowthKey({ fonts }) {
     const canonical = JSON.stringify({
-        fonts: (fonts || []).map((f) => f.name || f.url),
+        fonts: chainNames(fonts),
         fmt: SLUG_BUFFER_FORMAT,
         fontVer: FONT_CHAIN_VERSION,
         growthEnv: GROWTH_ENVELOPE_VERSION,

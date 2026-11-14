@@ -11,6 +11,9 @@ export {
     setGlyphGreekPx,
     getGlyphGreekPx,
     GLYPH_GREEK_PX_DEFAULT,
+    setGlyphLineStyle,
+    getGlyphLineStyle,
+    GLYPH_LINE_DEFAULTS,
 } from './glyphMaterial.js';
 export { computeCellMetrics, deriveCharSize, LINE_PITCH, LETTER_SPACING } from './cellMetrics.js';
 export { RENDER_ORDER } from './renderOrder.js';

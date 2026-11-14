@@ -11,6 +11,7 @@ import { useThree } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, CodeGrid, ViewerCamera, useGlyphAtlas } from '@glyph3d/r3f';
 import { CodeGrid as CodeGridCore } from '@glyph3d/core/collections';
 import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
+import italicUrl from '@glyph3d/core/fonts/Cousine-Italic.ttf?url';
 import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
 import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
 import { encode, pack, unpack, decodeSource, sizes } from '../_experiments/glyph-encoding/codec.js';
@@ -22,7 +23,7 @@ import harfbuzzSrc from '../packages/glyph3d-core/src/shaping/HarfBuzzShaper.js?
 import instancedFieldSrc from '../packages/glyph3d-core/src/collections/InstancedField.js?raw';
 
 const FONT_CHAIN = [
-  { url: fontUrl, name: 'Cousine' },
+  { url: fontUrl, name: 'Cousine', italic: { url: italicUrl } },
   { url: mesloUrl, name: 'MesloLGS NF Mono' },
   { url: dejavuUrl, name: 'DejaVu Sans' },
 ];

@@ -24,9 +24,23 @@
  * advance is forced to the PRIMARY font's monospace advance for every glyph, so
  * columns stay aligned no matter which font actually drew the glyph; curve
  * normalization still uses each glyph's own font metrics (see slugData).
+ *
+ * Two glyph sources come before any font's cmap:
+ *   - SPRITES: the codepoints a terminal draws itself (box drawing, blocks, braille, legacy
+ *     computing, powerline — cellSprites.isSpriteCodepoint) get a sprite slot, whose outline is
+ *     generated to the cell (LiveSlugAtlas lands it), whatever the fonts hold for them.
+ *   - color emoji (below).
+ *
+ * A font may bring an ITALIC face (`{ url, name, italic: { url } }`): it is loaded as one more
+ * font of the chain (its own index, after every upright font, so the upright indices never
+ * move) but takes no part in routing — `lookupItalic(cp)` answers the italic face's glyph for a
+ * codepoint its upright font routes, and the upright glyph for everything else (a fallback
+ * font's glyph, a sprite, an emoji: no face to slant with, and none is synthesized).
  */
 
 import HarfBuzzShaper from './HarfBuzzShaper.js';
+import { isSpriteCodepoint } from './cellSprites.js';
+import { readFontLines } from './fontTables.js';
 
 /** Slot 0 is the blank cell — a codepoint no font in the chain covers. */
 export const BLANK_SLOT = 0;
@@ -39,6 +53,12 @@ const BITMAP_KEY_BASE = 0x7F000000;
 
 /** Sentinel fontIdx for a bitmap slot in slotMeta (no outline font). */
 const BITMAP_FONT = -2;
+
+/** Slot-key base for sprite slots — disjoint from the font and bitmap keyspaces. */
+const SPRITE_KEY_BASE = 0x7D000000;
+
+/** Sentinel fontIdx for a sprite slot in slotMeta (its gid is the codepoint). */
+const SPRITE_FONT = -3;
 
 /**
  * Codepoints we let fall through to the color-emoji bitmap atlas when NO outline
@@ -57,8 +77,10 @@ function isEmojiCodepoint(cp) {
 
 export default class FontChain {
     constructor() {
-        /** @private @type {Array<{shaper: HarfBuzzShaper, coverage: Set<number>, name: string, bytes: ArrayBuffer}>} */
+        /** @private @type {Array<{shaper: HarfBuzzShaper, coverage: Set<number>, name: string, bytes: ArrayBuffer, italicIdx?: number}>} */
         this._fonts = [];
+        /** @private how many of _fonts are upright (routed); the italic faces follow them */
+        this._routed = 0;
         /** @private slot → {fontIdx, gid}. Index 0 is the blank cell. */
         this._slotMeta = [{ fontIdx: -1, gid: 0 }];
         /** @private (fontIdx*STRIDE+gid) → slot */
@@ -89,7 +111,7 @@ export default class FontChain {
     /** @returns {number} primary font units-per-em (the layout reference) */
     get upem() { return this._fonts[0]?.shaper.upem || 2048; }
 
-    /** @returns {number} number of fonts in the chain */
+    /** @returns {number} number of fonts in the chain (upright fonts, then their italic faces) */
     get fontCount() { return this._fonts.length; }
 
     /** @returns {number} number of slots allocated (incl. the blank slot) */
@@ -99,16 +121,24 @@ export default class FontChain {
      * Fetch + initialize every font in the chain. The first font's WASM module
      * is reused for the rest (one HarfBuzz instance, many faces).
      *
-     * @param {Array<{url: string, name?: string}>} fontSpecs - In priority order.
+     * @param {Array<{url?: string, buffer?: ArrayBuffer|Uint8Array, name?: string, italic?: {url?: string, buffer?: ArrayBuffer|Uint8Array}}>} fontSpecs
+     *   In priority order; `italic` names that font's italic face.
      * @param {Object} [options]
      * @param {string} [options.wasmUrl] - Override hb.wasm path.
      * @returns {Promise<void>}
      */
     async init(fontSpecs, options = {}) {
         let sharedHb = null;
-        for (let i = 0; i < fontSpecs.length; i++) {
-            const spec = fontSpecs[i];
-            const name = spec.name || `font${i}`;
+        // Every upright font first, then the italic faces: an upright font's index is its place
+        // in the list whether or not any font has an italic.
+        const specs = fontSpecs.map((spec, i) => ({ spec, name: spec.name || `font${i}`, italicOf: -1 }));
+        for (const [i, spec] of fontSpecs.entries()) {
+            if (spec.italic) specs.push({ spec: spec.italic, name: `${spec.name || `font${i}`} Italic`, italicOf: i });
+        }
+        /** @type {number[]} fontSpecs index → _fonts index (-1: failed to load) */
+        const loadedAt = fontSpecs.map(() => -1);
+        for (let i = 0; i < specs.length; i++) {
+            const { spec, name, italicOf } = specs[i];
             let buffer;
             try {
                 if (spec.buffer || spec.data || spec.arrayBuffer) {
@@ -135,10 +165,23 @@ export default class FontChain {
             if (!sharedHb) sharedHb = shaper.hb;
 
             const coverage = new Set(shaper.collectUnicodes());
+            const idx = this._fonts.length;
+            if (italicOf >= 0) {
+                const upright = loadedAt[italicOf];
+                if (upright < 0) {
+                    console.warn(`[FontChain] skipping "${name}": its upright font didn't load`);
+                    shaper.destroy();
+                    continue;
+                }
+                this._fonts[upright].italicIdx = idx;
+            } else {
+                loadedAt[i] = idx;
+                this._routed = idx + 1;
+            }
             this._fonts.push({ shaper, coverage, name, bytes: buffer });
-            console.log(`[FontChain] [${this._fonts.length - 1}] ${name}: ${coverage.size} codepoints`);
+            console.log(`[FontChain] [${idx}] ${name}: ${coverage.size} codepoints${italicOf >= 0 ? ` (the italic of [${loadedAt[italicOf]}])` : ''}`);
         }
-        if (this._fonts.length === 0) {
+        if (this._routed === 0) {
             throw new Error('FontChain.init: no fonts loaded');
         }
         this._ready = true;
@@ -156,7 +199,7 @@ export default class FontChain {
         const cached = this._routeCache.get(codepoint);
         if (cached !== undefined) return cached;
         let idx = -1;
-        for (let i = 0; i < this._fonts.length; i++) {
+        for (let i = 0; i < this._routed; i++) {
             if (this._fonts[i].coverage.has(codepoint)) { idx = i; break; }
         }
         this._routeCache.set(codepoint, idx);
@@ -236,6 +279,81 @@ export default class FontChain {
         return slot;
     }
 
+    /**
+     * Allocate (or reuse) the sprite slot for a codepoint the terminal draws itself.
+     * @private
+     * @param {number} cp
+     * @returns {number} slot
+     */
+    _spriteSlotFor(cp) {
+        const key = SPRITE_KEY_BASE + cp;
+        let slot = this._slotByKey.get(key);
+        if (slot === undefined) {
+            slot = this._slotMeta.length;
+            this._slotMeta.push({ fontIdx: SPRITE_FONT, gid: cp });
+            this._slotByKey.set(key, slot);
+        }
+        return slot;
+    }
+
+    /** @param {number} slot @returns {boolean} true if this slot's outline is generated to the cell (cellSprites) */
+    isSpriteSlot(slot) {
+        return this._resolve(slot).fontIdx === SPRITE_FONT;
+    }
+
+    /** @param {number} slot @returns {number} the codepoint a sprite slot draws (-1 if not a sprite slot) */
+    spriteCodepointOf(slot) {
+        const m = this._resolve(slot);
+        return m.fontIdx === SPRITE_FONT ? m.gid : -1;
+    }
+
+    /**
+     * What a sprite is drawn to: the cell's aspect (the primary font's advance over its vertical
+     * em — the cell every glyph is normalized to) and the font's own line weights, as fractions of
+     * the cell's height. Light is the thickness of the primary font's ─ (else its underline's);
+     * heavy its ━'s (else twice light).
+     * @returns {import('./cellSprites.js').SpriteMetrics}
+     */
+    spriteMetrics() {
+        if (!this._spriteMetrics) {
+            const s = this._fonts[0].shaper, ext = s.fontExtents(), em = ext.ascender - ext.descender;
+            const thickness = (ch) => {
+                if (!this._fonts[0].coverage.has(ch.codePointAt(0))) return 0;
+                const shaped = s.shape(ch);
+                let lo = Infinity, hi = -Infinity;
+                for (const seg of (shaped.length ? s.glyphOutline(shaped[0].g) : [])) {
+                    for (let i = 1; i < seg.values.length; i += 2) { lo = Math.min(lo, seg.values[i]); hi = Math.max(hi, seg.values[i]); }
+                }
+                return hi > lo ? hi - lo : 0;
+            };
+            const light = thickness('─') || readFontLines(this._fonts[0].bytes).underlineThickness;
+            if (!(light > 0) || !(em > 0)) throw new Error(`FontChain.spriteMetrics: the primary font "${this._fonts[0].name}" gives no line weight (─ ${thickness('─')}, em ${em})`);
+            this._spriteMetrics = { aspect: this._primaryAx() / em, light: light / em, heavy: (thickness('━') || 2 * light) / em };
+        }
+        return this._spriteMetrics;
+    }
+
+    /**
+     * Where the primary font draws its lines, in cell units (y up from the cell's bottom, 1 = the
+     * cell's height — the range every glyph is normalized to): the centre of its underline (post
+     * table), the centre of its strikethrough (OS/2; else half its x-height) and their thickness
+     * (the underline's).
+     * @returns {{ underlineY: number, strikeY: number, thickness: number }}
+     */
+    lineMetrics() {
+        const f = this._fonts[0], ext = f.shaper.fontExtents(), em = ext.ascender - ext.descender;
+        const L = readFontLines(f.bytes);
+        const y = (units) => (units - ext.descender) / em;
+        const strike = L.strikeoutTop != null && L.strikeoutSize > 0 ? L.strikeoutTop - L.strikeoutSize / 2
+            : L.xHeight != null ? L.xHeight / 2 : ext.ascender * 0.3;
+        if (!(L.underlineThickness > 0)) throw new Error(`FontChain.lineMetrics: the primary font "${f.name}" names no underline thickness (post table: ${L.underlineThickness})`);
+        return {
+            underlineY: Math.min(1, Math.max(0, y(L.underlineTop - L.underlineThickness / 2))),
+            strikeY: Math.min(1, Math.max(0, y(strike))),
+            thickness: L.underlineThickness / em,
+        };
+    }
+
     /** @param {number} slot @returns {boolean} true if this slot is a color-emoji bitmap */
     isBitmapSlot(slot) {
         return this._resolve(slot).fontIdx === BITMAP_FONT;
@@ -273,8 +391,14 @@ export default class FontChain {
         for (let i = 0, len = text.length; i < len;) {
             const cp = text.codePointAt(i);
             const step = cp > 0xFFFF ? 2 : 1;
-            const fontIdx = this.routeCodepoint(cp);
             let slot = BLANK_SLOT;
+            // What a terminal draws itself comes from no font: a sprite, generated to the cell.
+            if (isSpriteCodepoint(cp)) {
+                out.push({ g: this._spriteSlotFor(cp), cl: i, ax: cellAx, ay: 0, dx: 0, dy: 0, flags: 0 });
+                i += step;
+                continue;
+            }
+            const fontIdx = this.routeCodepoint(cp);
             // Codepoints in the emoji planes (U+1F000+) are Emoji_Presentation=Yes —
             // pictographic emoji that should be COLOR even when a fallback font happens
             // to carry a monochrome outline (DejaVu has a mono ☺, but 😀 should be the
@@ -314,6 +438,25 @@ export default class FontChain {
         return (shaped && shaped.length > 0)
             ? { g: shaped[0].g, ax: shaped[0].ax }
             : { g: BLANK_SLOT, ax: this._primaryAx() };
+    }
+
+    /**
+     * The ITALIC glyph for a codepoint: its font's italic face's, where that font has one and the
+     * face covers it; else the upright glyph (`lookup`) — a fallback font's glyph, a sprite and an
+     * emoji have no italic, and none is synthesized.
+     * @param {number} codepoint
+     * @returns {{ g: number, ax: number }}
+     */
+    lookupItalic(codepoint) {
+        if (!isSpriteCodepoint(codepoint) && !(this._emojiAtlas && codepoint >= 0x1F000)) {
+            const fontIdx = this.routeCodepoint(codepoint);
+            const it = fontIdx >= 0 ? this._fonts[fontIdx].italicIdx : undefined;
+            if (it !== undefined && this._fonts[it].coverage.has(codepoint)) {
+                const shaped = this._fonts[it].shaper.shape(String.fromCodePoint(codepoint));
+                if (shaped.length && shaped[0].g) return { g: this.slotFor(it, shaped[0].g), ax: this._primaryAx() };
+            }
+        }
+        return this.lookup(codepoint);
     }
 
     /**
@@ -374,6 +517,7 @@ export default class FontChain {
     describeSlot(slot) {
         const m = this._resolve(slot);
         if (m.fontIdx === BITMAP_FONT) return { font: '<emoji-atlas>', gid: m.gid, name: `cell ${m.cell}` };
+        if (m.fontIdx === SPRITE_FONT) return { font: '<cell-sprite>', gid: m.gid, name: `U+${m.gid.toString(16).toUpperCase()}` };
         const f = this._fonts[m.fontIdx];
         if (!f) return { font: `#${m.fontIdx}`, gid: m.gid, name: '.blank' };
         return { font: f.name, gid: m.gid, name: f.shaper.glyphName(m.gid) };

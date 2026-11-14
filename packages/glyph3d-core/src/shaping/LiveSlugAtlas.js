@@ -26,6 +26,10 @@
  *   5. `onGlyphsReady(cb)` fires once per landed batch (outlines encoded, or emoji pixels
  *      rasterized) with { slots, codepoints, version } — for callers that cache anything per
  *      glyph or render on demand. Nothing needs it to draw correctly.
+ *   6. A SPRITE slot (a codepoint the terminal draws itself: FontChain.isSpriteSlot) is never in
+ *      flight: its outline is generated to the cell right here (cellSprites — a few rectangles)
+ *      and lands in the same textures before ensure*() returns. It is not persisted as growth
+ *      (it is regenerated; the core cache holds the core's).
  *
  * A texture is REBORN only when its array doubles (it fills its capacity): then every
  * registered field gets setSlugData() with the new pair — rare and amortized, never per glyph —
@@ -39,7 +43,11 @@
 
 import SlugTextures from './SlugTextures.js';
 import { CURVE_U32_PER_CURVE } from './slug-constants.js';
+import { encodeSprites } from './cellSprites.js';
 import { loadStats } from '../core/loadStats.js';
+
+/** The glyph-map mode a cell sprite draws in (core/glyphMaterial.js GLYPH_MODE.SPRITE; shaping imports no three). */
+const SPRITE_MODE = 3;
 
 /** Growth tuning, born configurable (LiveSlugAtlas options override). */
 export const ATLAS_GROWTH = Object.freeze({
@@ -188,10 +196,11 @@ export default class LiveSlugAtlas {
      */
     ensureGlyphsEncoded(glyphIds, provenance) {
         const buf = this._textures.buffer;
-        let emoji = null, queued = 0;
+        let emoji = null, sprites = null, queued = 0;
         for (const id of glyphIds) {
             if (id <= 0 || buf.has(id) || this._inFlight.has(id)) continue;
             if (this._shaper.isBitmapSlot(id)) { (emoji ?? (emoji = [])).push(id); continue; }
+            if (this._shaper.isSpriteSlot?.(id)) { (sprites ?? (sprites = [])).push(id); continue; }
             this._inFlight.add(id);
             this._queue.push(id);
             const cp = provenance?.get(id);
@@ -206,6 +215,7 @@ export default class LiveSlugAtlas {
             queued += res.added;
             if (res.added) this._debugEmoji(res.addedIds, provenance);
         }
+        if (sprites) queued += this._landSprites(sprites);
         if (queued) this._sync();
         if (this._queue.length && !this._flushScheduled) {
             this._flushScheduled = true;
@@ -244,14 +254,17 @@ export default class LiveSlugAtlas {
         const t0 = performance.now();
         const buf = this._textures.buffer;
         const emoji = [];
+        const sprites = [];
         const items = [];
         for (const id of glyphIds) {
             if (id <= 0 || buf.has(id)) continue;
             if (this._shaper.isBitmapSlot(id)) { emoji.push(id); continue; }
+            if (this._shaper.isSpriteSlot?.(id)) { sprites.push(id); continue; }
             const src = this._shaper.slotSource(id);
             if (src) items.push(id, src.fontIdx, src.gid);
         }
         buf.addBitmapSlots(this._shaper, emoji);
+        this._landSprites(sprites);
         const { batch, ms } = await this._encoder.encode(Uint32Array.from(items));
         buf.appendEncoded(batch);
         this._sync();
@@ -322,6 +335,19 @@ export default class LiveSlugAtlas {
     }
 
     // ── internals ───────────────────────────────────────────────────────────────────────
+
+    /**
+     * @private Generate sprite slots' outlines to the cell and append them (the caller syncs the
+     * textures). Synchronous: a sprite is a few rectangles.
+     * @param {number[]} slots  sprite slots not yet encoded
+     * @returns {number} sprites added
+     */
+    _landSprites(slots) {
+        if (!slots.length) return 0;
+        const items = slots.map((slot) => ({ slot, cp: this._shaper.spriteCodepointOf(slot) }));
+        const { added } = this._textures.buffer.appendEncoded(encodeSprites(items, this._shaper.spriteMetrics(), SPRITE_MODE));
+        return added;
+    }
 
     /** @private send this task's queue to the worker as one batch */
     _flush() {

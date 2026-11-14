@@ -120,6 +120,12 @@ export const CHECKS = [
     h('field-label.test.mjs', ['render'],
         "FieldLabel's synchronous measure, anchor transform, plate styling, Tab3D states, Book tab diffing",
         'pixels'),
+    h('cell-sprites.test.mjs', ['render', 'terminal'],
+        'the glyphs a terminal draws itself, as generated outlines: every sprite codepoint in the cell and wound as a font outline is; block areas and sides; box-drawing arms reaching their cell edges, light/heavy/double joins, rounded corners, dashes, diagonals; every braille and sextant pattern; wedge complements; powerline; sprites landing in the Slug atlas synchronously in mode 3 with their ink alpha; the italic face\'s routing; the font\'s line metrics; the cell lattice (neighbouring edges equal in float32, with teeth)',
+        'pixels: coverage at cell edges is the shader\'s (wall-cells-check)'),
+    h('glyph-fill-pass.test.mjs', ['render'],
+        'the background pass: none for a field with no fill; the first fill gives the mesh [fill, ink] materials over two whole-quad geometry groups on the same geometry and buffers; fillsActive hides it without a scene visibility change; table and texture growth rebind both materials; the line/dim knobs reach live materials',
+        'pixels (wall-cells-check)'),
     h('emoji-render.test.mjs', ['render'],
         'the emoji path: shader uniforms/varyings, InstancedField with the emoji + slug atlases, LayoutGenerator mapping, CodeGrid with an emoji fixture',
         'the rendered emoji (no GPU)'),
@@ -222,7 +228,8 @@ export const CHECKS = [
 
     // ── terminal / relay wires ───────────────────────────────────────────────────────────────
     h('terminal-depth.test.mjs', ['terminal'], 'scrollback-into-depth: scroll detection, row capture, fade, synced into a real slot buffer', 'a real program\'s byte stream through termd'),
-    h('terminal-text-path.test.mjs', ['terminal'], 'only changes: a random walk of screens against a reference model, exact written slots + upload ranges, zero allocation per update, parse → update → render order', 'xterm\'s internals moving (the emulator throws at construction)'),
+    h('terminal-text-path.test.mjs', ['terminal'], 'only changes: a random walk of screens (text, colours, backgrounds, attributes, underline colours) against a reference model of what the GPU draws (glyph, colour, fill, style byte, italic face, decoration texel), exact written slots + upload ranges, the fill pass on only while a cell has a background, zero allocation per update, parse → update → render order', 'xterm\'s internals moving (the emulator throws at construction)'),
+    h('cell-attrs.test.mjs', ['terminal', 'render'], 'a cell\'s attributes: the flags word\'s bit layout, the style byte and its round trip through the slot\'s group lane (float32), and TerminalEmulator reading every SGR attribute xterm holds — dim, italic, blink, strike, overline, each underline style, underline colours (true colour, palette), inverse swapped, conceal blanked — into the same typed arrays read after read', 'how the attributes look (wall-cells-check reads pixels)'),
     h('terminal-input.test.mjs', ['terminal'], 'keyEventFor maps browser keys to W3C key events (Shift+Enter stays Shift+Enter, AltGr\'s Ctrl+Alt made the character, dead keys and IME type nothing yet) carrying the Option-as-Alt setting, and declines the paste chord; the grid hands keys, pastes and bytes on whole, stamped with its id', 'the browser clipboard; the encoding (termd\'s: crates/g3d-termd/tests/keys.rs)'),
     h('terminal-emulator-resize-check.mjs', ['terminal'], 'TerminalEmulator under a write+resize storm: coalesced, uncorrupted, correct final screen', 'a real PTY'),
     h('terminal-dock-sync-check.mjs', ['terminal', 'desk'], 'the Terminals-panel activation guard is timing-proof', 'dockview\'s real event timing'),
@@ -345,6 +352,12 @@ export const CHECKS = [
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
         compare: 'the wall end to end in a real-GPU browser: spawn, typing (Enter runs the line), colour read from the page\'s pixels at its cells (pure white, bold or 38;2, is near white; magenta is magenta; the default grey shows; then the specified colour itself, within ±2 a channel, in solid runs of the default grey, a true colour, a 256-palette colour, pure white and a cell background, on the terminal\'s panel and on the focused title bar\'s strip), Shift+Enter running a line in a plain shell and into a Kitty-keyboard program as CSI 13;2u and a paste bracketed as it asked, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal, the sidebar and status window docked on one edge, a status row revealing a hidden terminal, the drafting grid (a title-bar drag landing on a crossing, border drags on or inside a line in whole cells, Ctrl held and snap off moving by exactly the pointer\'s travel, the lines in the pixels where the rule puts them ±2, the minor level gone below gridMinPx, none with the grid off, the background knob ±2) and the settings panel (its chord takes the keys, a search shows exactly the matching knobs, marked; ↓ + Enter flips a switch; a field edit sets its knob through wall.config)',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
+    },
+    {
+        name: 'wall-cells-check', cmd: ['bun', 'tools/wall-cells-check.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal', 'render'],
+        needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
+        compare: 'what a terminal draws itself, in the wall\'s pixels at two fractional zooms: █ cells joined across and down show no seam (the darkest pixel inside the block is the ink), a ─ run is continuous along its own pixel row, an underline and a strikethrough run unbroken under blank cells, inverse swaps fill and ink, dim is darker than plain and still drawn, a wide emoji on a cell background keeps its right half',
+        blind: 'the shapes themselves beyond those cases (tools/term-test-pattern.sh + term-test-shots.mjs are for the eye); HiDPI',
     },
     {
         name: 'wall-gpu-attribution', cmd: ['bun', 'tools/wall-gpu-attribution.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'render'],

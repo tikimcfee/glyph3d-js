@@ -13,6 +13,7 @@ import { HEADLESS_ATLAS } from './headless-atlas.mjs';
 import FieldLabel from '../packages/glyph3d-core/src/collections/FieldLabel.js';
 import Tab3D from '../packages/glyph3d-core/src/components/Tab3D.js';
 import InstancedField from '../packages/glyph3d-core/src/collections/InstancedField.js';
+import { computeCellMetrics } from '../packages/glyph3d-core/src/core/cellMetrics.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -20,6 +21,10 @@ const near = (a, b, msg) => ok(Math.abs(a - b) < 1e-6, `${msg} (got ${a}, want $
 
 // lineHeight 3 → text scale 3/0.4 = 7.5 → 1.5 world units per char (mono fallback)
 const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
+// The field's own cell (the atlas's 8 × 16 px at the label's world scale, snapped to the cell
+// lattice — core/cellMetrics.js): what the anchor-local numbers below are made of.
+const CELL = computeCellMetrics(HEADLESS_ATLAS.getCharSize(), 0.025);
+const CW = CELL.charWidth, CH = CELL.lineSpacing;
 
 // ── measure contract & construction ──
 {
@@ -53,21 +58,21 @@ const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
     ok(l._anchor.children.includes(l._plateMesh), 'plate mesh rides anchor');
 
     // Anchor: centers text block
-    near(l._anchor.scale.x, 7.5, 'anchor scales metrics pitch → lineHeight');
+    near(l._anchor.scale.x, LH / CH, 'anchor scales metrics pitch → lineHeight');
     near(l._anchor.position.x, -3.75, 'anchor centers the block (x)');
     near(l._anchor.position.y, 1.5, 'anchor centers the block (y)');
     near(l._anchor.position.y + l._plateMesh.position.y * l._anchor.scale.y, 0, 'plate centered at y=0');
     near(l._instancedField.instanceMesh.position.z * l._anchor.scale.z, 1.0, 'text sits +1 unit in front of plate');
 
     // Plate geometry
-    near(l._plateMesh.scale.x, 1.576, 'plate width');
-    near(l._plateMesh.scale.y, 0.736, 'plate height');
+    near(l._plateMesh.scale.x, 5 * CW + 2 * 0.72 * CH, 'plate width');
+    near(l._plateMesh.scale.y, CH + 2 * 0.42 * CH, 'plate height');
     near(l._plateAlpha, 0.8, 'plate initial opacity');
 
     // setText restages in place
     l.setText('hi');
     ok(l.text === 'hi', 'text updated');
-    near(l._plateMesh.scale.x, 0.976, 'plate width shrunk for shorter text');
+    near(l._plateMesh.scale.x, 2 * CW + 2 * 0.72 * CH, 'plate width shrunk for shorter text');
 
     // setOpacity fades text and plate
     l.setOpacity(0.4);
@@ -84,7 +89,7 @@ const LH = 3, CHAR = 1.5, PAD_X = 0.72 * LH * 2, PAD_Y = 0.42 * LH * 2;
     // Empty text clears field, keeps min-width plate
     l.setText('');
     ok(l._instancedField.getGlyphCount() === 0, 'empty text clears glyphs');
-    near(l._plateMesh.scale.x, Math.max(2 * 0.72 * 0.4, 0.4), 'empty pill keeps min width');
+    near(l._plateMesh.scale.x, Math.max(2 * 0.72 * CH, CH), 'empty pill keeps min width');
 
     // Dispose
     l.dispose();

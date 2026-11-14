@@ -11,10 +11,17 @@
  * Per screen update (pulled once a frame, before the render — see TerminalScreenQueue):
  *   - the emulator fills one reused TerminalScreen (typed arrays, packed colors);
  *   - a detected scroll moves the ring's head and re-poses the group rows;
- *   - the live rows are compared cell by cell with what their slots hold (canonical _cp/_fg/_bg
- *     per physical cell): only the cells that differ are written, and only their per-row spans
- *     are uploaded (InstancedField.markSlotsDirty / markHighlightDirty);
+ *   - the live rows are compared cell by cell with what their slots hold (canonical
+ *     _cp/_fg/_bg/_at/_ul per physical cell): only the cells that differ are written, and only
+ *     their per-row spans are uploaded (InstancedField.markSlotsDirty / markHighlightDirty /
+ *     markDecorDirty);
  *   - nothing is allocated in steady state.
+ *
+ * What a cell draws (docs/architecture/terminals.md "Cells"): its glyph — the italic face's under
+ * SGR 3, a cell sprite for what a terminal draws itself — in the colour lane; its attributes'
+ * style byte (dim, strike, overline, the underline style) in the spare bits of its group lane; an
+ * underline's own colour in the field's decoration texel; its background as the highlight texel's
+ * fill, which the field's fill pass draws under every cell's ink.
  *
  * Differs from CodeGrid:
  *   - No line-buffer history, no ANSI stripping
@@ -31,7 +38,8 @@ import {
     ROW_LAYOUT_STRIDE,
     computeTerminalGlyphExtent,
 } from './terminalDepthHistory.js';
-import { SLOT_FLOATS, LANE_GLYPH_ID, LANE_COLOR } from '../core/InstancedSlotBuffer.js';
+import { SLOT_FLOATS, LANE_GLYPH_ID, LANE_COLOR, LANE_GROUP_ID, packGroupStyle } from '../core/InstancedSlotBuffer.js';
+import { CELL_ITALIC, CELL_UNDERLINE_COLOR, cellStyle } from '../core/cellAttrs.js';
 import {
     computeCellGridLayout,
     GridChrome,
@@ -46,6 +54,7 @@ import { createPanelMaterial } from './panelMaterial.js';
 import { enrollPanel } from './PanelBatch.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
+const _packColor = new THREE.Color();          // scratch for _packedBackground
 
 /**
  * Terminal cursor defaults — the block that marks where typing lands. Born configurable
@@ -142,23 +151,32 @@ export default class TerminalGrid extends FramedGlyphField {
         // time order; it lives in a ring of `rows + depthMax` physical rows whose head
         // (_ringStart: the physical row of sequence index 0) a scroll moves. Canonical state per
         // PHYSICAL cell — slot index = physical row × cols + column — in TerminalScreen's
-        // encoding: codepoint, packed fg, bg word (0 = no fill). The slot buffer and the
-        // highlight texture are its projection; every write goes through _writeSpans /
-        // _writeSeqRows / _pushAll, which upload what they wrote.
+        // encoding: codepoint, packed fg, bg word (0 = no fill), attrs word, underline colour.
+        // The slot buffer, the highlight texture and the decoration texture are its projection;
+        // every write goes through _writeSpans / _writeSeqRows / _pushAll, which upload what
+        // they wrote.
         this._ringStart = 0;
         this._scrollBase = false;  // the live rows hold the last screen applied (a scroll may be diffed against them)
         /** @type {Uint32Array} */ this._cp = null;
         /** @type {Uint32Array} */ this._fg = null;
         /** @type {Uint32Array} */ this._bg = null;
+        /** @type {Uint16Array} core/cellAttrs.js flags */ this._at = null;
+        /** @type {Uint32Array} an underline's own colour */ this._ul = null;
         /** @type {Uint8Array} per physical row: some cell has a background */ this._rowHasBg = null;
+        /** physical rows with a background: the field's fill pass draws while there is one */ this._bgRows = 0;
+        /** some cell has named its underline's colour: the decoration texels exist */ this._hasDecor = false;
         /** @type {Int32Array} per physical row: its group-table row */ this._rowGroups = new Int32Array(0);
         /** @type {Float32Array} per sequence index: y, z, fade (layoutTerminalRows) */ this._rowLayout = null;
         /** @type {Int32Array} per live row: its first cell's physical index */ this._liveRowBase = null;
         // Per live row, this update's changed spans (first/last column; last < first = none):
-        // glyph or color, and background. Scratch, reused every update.
-        this._spanLo = this._spanHi = this._bgLo = this._bgHi = null;
+        // glyph, color or style; background; underline colour. Scratch, reused every update.
+        this._spanLo = this._spanHi = this._bgLo = this._bgHi = this._ulLo = this._ulHi = null;
         /** @type {number[]} codepoints first seen this update (empty in steady state) */
         this._fresh = [];
+        /** @type {number[]} codepoints first seen ITALIC this update */
+        this._freshItalic = [];
+        /** codepoints whose italic glyph the live atlas has been asked for */
+        this._italicEnsured = new Set();
         this._screenQueued = false;   // waiting in the scene's TerminalScreenQueue
 
         /**
@@ -262,6 +280,7 @@ export default class TerminalGrid extends FramedGlyphField {
         // before it renders (applyPendingScreen). TerminalGrid stays a pure cell renderer; the
         // emulator is one source feeding it (file-slice / graphics are others, later).
         this._emulator = new TerminalEmulator(this.cols, this.rows, () => this._screenChanged());
+        this._emulator.setDefaultBackground(this._packedBackground());
 
         /**
          * The window title the terminal's program last set (OSC 0/2: the shell's prompt path or the
@@ -311,7 +330,9 @@ export default class TerminalGrid extends FramedGlyphField {
 
         this._diffLive(screen);
         if (this._fresh.length) this._ensureAtlasCodepoints(this._fresh);
+        if (this._freshItalic.length) this._ensureAtlasItalics(this._freshItalic);
         this._writeSpans();
+        this._showFills();
         if (repose) this._poseRows();
         this._scrollBase = true;
 
@@ -372,6 +393,7 @@ export default class TerminalGrid extends FramedGlyphField {
             this._highlightWords().fill(0, base, base + cols);
             this._renderer.markHighlightDirty(base, cols);
             this._rowHasBg[p] = 0;
+            this._bgRows--;
         }
         this._ringStart = (this._ringStart + k) % P;
         this._indexLiveRows();
@@ -385,28 +407,33 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Compare the screen with the live rows' canonical cells, copy what differs, and record each
-     * row's changed span (glyph/color, background). New codepoints go to _fresh for the atlas.
+     * row's changed span (glyph/color/style, background, underline colour). New codepoints go to
+     * _fresh (and those first seen italic to _freshItalic) for the atlas.
      * @private
      */
     _diffLive(screen) {
         const cols = this.cols, rows = this.rows;
-        const CP = this._cp, FG = this._fg, BG = this._bg;
-        const sCP = screen.cp, sFG = screen.fg, sBG = screen.bg;
-        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi;
-        const seen = this._liveEnsured;
-        const fresh = this._fresh;
+        const CP = this._cp, FG = this._fg, BG = this._bg, AT = this._at, UL = this._ul;
+        const sCP = screen.cp, sFG = screen.fg, sBG = screen.bg, sAT = screen.at, sUL = screen.ul;
+        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi, ulo = this._ulLo, uhi = this._ulHi;
+        const seen = this._liveEnsured, seenItalic = this._italicEnsured;
+        const fresh = this._fresh, freshItalic = this._freshItalic;
         fresh.length = 0;
+        freshItalic.length = 0;
         const ensure = !!(this.atlas && this.atlas._live && this._shapeCache);
         for (let y = 0; y < rows; y++) {
             const base = this._liveRowBase[y];
-            let l = cols, h = -1, bl = cols, bh = -1, anyBg = 0;
+            let l = cols, h = -1, bl = cols, bh = -1, ul = cols, uh = -1, anyBg = 0;
             for (let x = 0, si = y * cols, i = base; x < cols; x++, si++, i++) {
-                const c = sCP[si], f = sFG[si], b = sBG[si];
-                if (c !== CP[i]) {
-                    CP[i] = c; FG[i] = f;
+                const c = sCP[si], f = sFG[si], b = sBG[si], a = sAT[si];
+                if (c !== CP[i] || a !== AT[i]) {
+                    CP[i] = c; FG[i] = f; AT[i] = a;
                     if (l === cols) l = x;
                     h = x;
-                    if (ensure && c > 32 && !seen.has(c)) { seen.add(c); fresh.push(c); }
+                    if (ensure && c > 32) {
+                        if (a & CELL_ITALIC) { if (!seenItalic.has(c)) { seenItalic.add(c); freshItalic.push(c); } }
+                        else if (!seen.has(c)) { seen.add(c); fresh.push(c); }
+                    }
                 } else if (f !== FG[i]) {
                     FG[i] = f;
                     if (l === cols) l = x;
@@ -418,32 +445,44 @@ export default class TerminalGrid extends FramedGlyphField {
                     bh = x;
                 }
                 if (b !== 0) anyBg = 1;
+                if ((a & CELL_UNDERLINE_COLOR) && sUL[si] !== UL[i]) {
+                    UL[i] = sUL[si];
+                    if (ul === cols) ul = x;
+                    uh = x;
+                }
             }
-            lo[y] = l; hi[y] = h; blo[y] = bl; bhi[y] = bh;
-            this._rowHasBg[base / cols] = anyBg;
+            lo[y] = l; hi[y] = h; blo[y] = bl; bhi[y] = bh; ulo[y] = ul; uhi[y] = uh;
+            const p = base / cols;
+            this._bgRows += anyBg - this._rowHasBg[p];
+            this._rowHasBg[p] = anyBg;
         }
     }
 
     /**
-     * Write the live rows' changed spans into the slot buffer (glyph id + color) and the highlight
-     * texture (the cell background as a fill), and mark exactly those spans for upload.
+     * Write the live rows' changed spans into the slot buffer (glyph id, color, style), the
+     * highlight texture (the cell background as a fill) and the decoration texture (an underline's
+     * own colour), and mark exactly those spans for upload.
      * @private
      */
     _writeSpans() {
-        const rows = this.rows;
+        const rows = this.rows, cols = this.cols;
         const field = this._renderer;
         const f32 = field.slotBuffer.f32;
-        const CP = this._cp, FG = this._fg, BG = this._bg;
-        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi;
-        let words = null, fill = 0;
+        const CP = this._cp, FG = this._fg, BG = this._bg, AT = this._at;
+        const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi, ulo = this._ulLo, uhi = this._ulHi;
+        let words = null, fill = 0, decor = null;
         for (let y = 0; y < rows; y++) {
             const base = this._liveRowBase[y];
             const l = lo[y], h = hi[y];
             if (h >= l) {
+                const group = this._rowGroups[base / cols];
                 for (let i = base + l, end = base + h; i <= end; i++) {
-                    const o = i * SLOT_FLOATS;
-                    f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i]);
+                    const o = i * SLOT_FLOATS, a = AT[i];
+                    f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i], a);
                     f32[o + LANE_COLOR] = FG[i];
+                    f32[o + LANE_GROUP_ID] = a === 0 ? group : packGroupStyle(group, cellStyle(a));
+                    // The first cell to name an underline colour (even one equal to a blank texel's).
+                    if ((a & CELL_UNDERLINE_COLOR) && !this._hasDecor) decor = this._decorWords();
                 }
                 field.markSlotsDirty(base + l, h - l + 1);
             }
@@ -456,7 +495,34 @@ export default class TerminalGrid extends FramedGlyphField {
                 }
                 field.markHighlightDirty(base + bl, bh - bl + 1);
             }
+            const ul = ulo[y], uh = uhi[y];
+            if (uh >= ul) {
+                if (!decor) { decor = this._decorWords(); }
+                for (let i = base + ul, end = base + uh; i <= end; i++) decor[i] = this._ul[i];
+                field.markDecorDirty(base + ul, uh - ul + 1);
+            }
         }
+    }
+
+    /**
+     * @private The decoration texels (an underline's own colour), one RGBA8 word per slot. Made
+     * the first time a cell names an underline colour: every texel is then written from the
+     * canonical cells, so they stay each other's mirror.
+     */
+    _decorWords() {
+        const words = this._renderer.decorWords(this._totalCount);
+        if (!this._hasDecor) {
+            this._hasDecor = true;
+            words.set(this._ul.subarray(0, this._totalCount));
+            words.fill(0, this._totalCount);
+            this._renderer.markDecorDirty();
+        }
+        return words;
+    }
+
+    /** @private The field's fill pass draws while some row has a background (and fills are on). */
+    _showFills() {
+        this._renderer.fillsActive = this._bgRows > 0 && this._bgFillOpacity > 0;
     }
 
     /** @private The highlight texels, one RGBA8 word per slot. */
@@ -498,15 +564,17 @@ export default class TerminalGrid extends FramedGlyphField {
     _writeSeqRows(s0, n) {
         const cols = this.cols, P = this.rows + this._depthMax;
         const field = this._renderer, f32 = field.slotBuffer.f32;
-        const CP = this._cp, FG = this._fg;
+        const CP = this._cp, FG = this._fg, AT = this._at;
         let runStart = -1, runEnd = -1;
         for (let s = s0; s < s0 + n; s++) {
             const p = (this._ringStart + s) % P;
             const base = p * cols;
+            const group = this._rowGroups[p];
             for (let i = base; i < base + cols; i++) {
-                const o = i * SLOT_FLOATS;
-                f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i]);
+                const o = i * SLOT_FLOATS, a = AT[i];
+                f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i], a);
                 f32[o + LANE_COLOR] = FG[i];
+                f32[o + LANE_GROUP_ID] = a === 0 ? group : packGroupStyle(group, cellStyle(a));
             }
             if (base === runEnd) { runEnd += cols; continue; }
             if (runStart >= 0) field.markSlotsDirty(runStart, runEnd - runStart);
@@ -541,6 +609,7 @@ export default class TerminalGrid extends FramedGlyphField {
             const base = ((this._ringStart + s) % P) * cols;
             this._cp.fill(32, base, base + cols);
             this._fg.fill(DEFAULT_FG, base, base + cols);
+            this._at.fill(0, base, base + cols);
         }
         this._writeSeqRows(0, D);
     }
@@ -615,6 +684,7 @@ export default class TerminalGrid extends FramedGlyphField {
             const base = ((this._ringStart + D - 1 - h) % P) * cols;
             this._cp.fill(32, base, base + cols);
             this._fg.fill(DEFAULT_FG, base, base + cols);
+            this._at.fill(0, base, base + cols);
             if (h >= n) continue;
             let x = 0;
             for (const ch of lines[h] || '') {   // iterate by code point (surrogate-safe)
@@ -993,8 +1063,7 @@ export default class TerminalGrid extends FramedGlyphField {
             this._chrome?.unregisterPicking(this._pickingSystem);
         }
         if (this._renderer) {
-            this._renderer.instanceMesh.geometry.dispose();
-            this._renderer.instanceMesh.material.dispose();
+            this._renderer.dispose();   // its mesh, both passes' materials, its tables and textures; off the live-field lists
             this._renderer = null;
         }
         if (this._cursorBlock) {
@@ -1031,19 +1100,22 @@ export default class TerminalGrid extends FramedGlyphField {
      * The cells in SEQUENCE order (history oldest first, then the live rows), unrotated, with the
      * shape they were held at — what a reallocation restores from.
      * @private
-     * @returns {{cols:number, rows:number, depthMax:number, cp:Uint32Array, fg:Uint32Array, bg:Uint32Array}|null}
+     * @returns {{cols:number, rows:number, depthMax:number, cp:Uint32Array, fg:Uint32Array, bg:Uint32Array, at:Uint16Array, ul:Uint32Array}|null}
      */
     _sequenceSnapshot() {
         if (!this._cp) return null;
         const cols = this.cols, rows = this.rows, D = this._depthMax, P = rows + D;
         const cp = new Uint32Array(P * cols), fg = new Uint32Array(P * cols), bg = new Uint32Array(P * cols);
+        const at = new Uint16Array(P * cols), ul = new Uint32Array(P * cols);
         for (let s = 0; s < P; s++) {
             const from = ((this._ringStart + s) % P) * cols;
             cp.set(this._cp.subarray(from, from + cols), s * cols);
             fg.set(this._fg.subarray(from, from + cols), s * cols);
             bg.set(this._bg.subarray(from, from + cols), s * cols);
+            at.set(this._at.subarray(from, from + cols), s * cols);
+            ul.set(this._ul.subarray(from, from + cols), s * cols);
         }
-        return { cols, rows, depthMax: D, cp, fg, bg };
+        return { cols, rows, depthMax: D, cp, fg, bg, at, ul };
     }
 
     /**
@@ -1059,13 +1131,19 @@ export default class TerminalGrid extends FramedGlyphField {
         this._cp = new Uint32Array(n).fill(32);
         this._fg = new Uint32Array(n).fill(DEFAULT_FG);
         this._bg = new Uint32Array(n);
+        this._at = new Uint16Array(n);
+        this._ul = new Uint32Array(n);
         this._rowHasBg = new Uint8Array(P);
+        this._bgRows = 0;
+        this._hasDecor = false;   // _pushAll rewrites the decoration texels if any cell needs them
         this._ringStart = 0;
         this._liveRowBase = new Int32Array(rows);
         this._spanLo = new Int32Array(rows);
         this._spanHi = new Int32Array(rows);
         this._bgLo = new Int32Array(rows);
         this._bgHi = new Int32Array(rows);
+        this._ulLo = new Int32Array(rows);
+        this._ulHi = new Int32Array(rows);
         this._indexLiveRows();
 
         // One group-table row per physical row: grow or release to match.
@@ -1083,9 +1161,11 @@ export default class TerminalGrid extends FramedGlyphField {
             const from = fromSeq * keep.cols, to = toSeq * cols;   // head is 0: seq index = physical row
             this._cp.set(keep.cp.subarray(from, from + w), to);
             this._fg.set(keep.fg.subarray(from, from + w), to);
+            this._at.set(keep.at.subarray(from, from + w), to);
+            this._ul.set(keep.ul.subarray(from, from + w), to);
             if (!withBg) return;
             this._bg.set(keep.bg.subarray(from, from + w), to);
-            for (let x = 0; x < w; x++) if (this._bg[to + x]) { this._rowHasBg[toSeq] = 1; break; }
+            for (let x = 0; x < w; x++) if (this._bg[to + x]) { this._rowHasBg[toSeq] = 1; this._bgRows++; break; }
         };
         for (let h = 0; h < Math.min(D, keep.depthMax); h++) copyRow(keep.depthMax - 1 - h, D - 1 - h, false);
         for (let y = 0; y < Math.min(rows, keep.rows); y++) copyRow(keep.depthMax + y, D + y, true);
@@ -1189,7 +1269,9 @@ export default class TerminalGrid extends FramedGlyphField {
         for (let p = 0; p < P; p++) {
             const g = this._rowGroups[p];
             for (let x = 0, i = p * cols; x < cols; x++, i++) {
-                sb.setSlot(i, x * strideX, 0, 0, this._glyphId(this._cp[i]), this._fg[i], g, m.charWidth, m.charHeight);
+                const a = this._at[i];
+                sb.setSlot(i, x * strideX, 0, 0, this._glyphId(this._cp[i], a), this._fg[i],
+                    a === 0 ? g : packGroupStyle(g, cellStyle(a)), m.charWidth, m.charHeight);
             }
         }
         field.setSlots(sb, count);
@@ -1203,6 +1285,11 @@ export default class TerminalGrid extends FramedGlyphField {
         }
         words.fill(0, count);
         field.markHighlightDirty();
+        this._showFills();
+        // The decoration texels, where some cell names its underline's colour.
+        for (let i = 0; i < count; i++) {
+            if (this._at[i] & CELL_UNDERLINE_COLOR) { this._decorWords(); break; }
+        }
 
         this._poseRows();
         // State the cull box. A terminal is a uniform cell grid plus a page-quantized history
@@ -1234,13 +1321,15 @@ export default class TerminalGrid extends FramedGlyphField {
      * Uses the primed shape cache (O(1), HarfBuzz fallback on miss). Without a
      * shaper (e.g. degraded boot), falls back to the codepoint so output is at
      * least stable rather than crashing.
+     * An italic cell (SGR 3) takes its font's italic face's glyph, where the chain has one.
      * @private
      * @param {number} codepoint
+     * @param {number} [attrs=0]  the cell's attrs word (core/cellAttrs.js)
      * @returns {number}
      */
-    _glyphId(codepoint) {
+    _glyphId(codepoint, attrs = 0) {
         if (this._shapeCache) {
-            const entry = this._shapeCache.lookup(codepoint);
+            const entry = (attrs & CELL_ITALIC) ? this._shapeCache.lookupItalic(codepoint) : this._shapeCache.lookup(codepoint);
             if (entry) return entry.g;
         }
         return codepoint;
@@ -1269,9 +1358,33 @@ export default class TerminalGrid extends FramedGlyphField {
         live.ensureCodepoints(codepoints.slice(), this._shapeCache);
     }
 
+    /**
+     * The same for codepoints this terminal is about to draw ITALIC for the first time: their
+     * italic face's glyphs (the upright one's where the chain has no italic for it).
+     * @private
+     * @param {number[]} codepoints  codepoints first seen italic (> 32)
+     */
+    _ensureAtlasItalics(codepoints) {
+        const live = this.atlas && this.atlas._live;
+        if (!live || !this._shapeCache) return;
+        const gids = [], provenance = new Map();
+        for (const cp of codepoints) {
+            const g = this._shapeCache.lookupItalic(cp).g;
+            if (g > 0) { gids.push(g); if (!provenance.has(g)) provenance.set(g, cp); }
+        }
+        live.ensureGlyphsEncoded(gids, provenance);
+    }
+
     // ================================================================
     // Private: Background
     // ================================================================
+
+    /** @private The panel's colour, packed as the slot colour lane holds one (RGB888, red in the low byte). */
+    _packedBackground() {
+        _packColor.set(this._bgColor);
+        const h = _packColor.getHex(THREE.SRGBColorSpace);
+        return ((h >> 16) & 0xff) | (h & 0xff00) | ((h & 0xff) << 16);
+    }
 
     /**
      * Create a dark background plane behind the terminal for readability.
@@ -1320,7 +1433,10 @@ export default class TerminalGrid extends FramedGlyphField {
      * @param {{ color?: number|string, opacity?: number, cellBgFillOpacity?: number }} style
      */
     setBackgroundStyle({ color, opacity, cellBgFillOpacity } = {}) {
-        if (color != null) this._bgColor = color;
+        if (color != null) {
+            this._bgColor = color;
+            this._emulator?.setDefaultBackground(this._packedBackground());   // what inverse text draws in
+        }
         if (opacity != null) this._bgOpacity = opacity;
         if (cellBgFillOpacity != null && cellBgFillOpacity !== this._bgFillOpacity) {
             this._bgFillOpacity = cellBgFillOpacity;
@@ -1341,6 +1457,7 @@ export default class TerminalGrid extends FramedGlyphField {
             }
             this._renderer.markHighlightDirty(base, cols);
         }
+        this._showFills();
     }
 
     /**

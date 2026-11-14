@@ -6,6 +6,7 @@ import GlyphAtlas from './GlyphAtlas.js';
 import EmojiAtlas from './EmojiAtlas.js';
 import TextureUploads from './core/TextureUploads.js';
 import { deriveCharSize } from './core/cellMetrics.js';
+import { setGlyphLineMetrics } from './core/glyphMaterial.js';
 import {
   MonospaceShapeCache,
   shapeText,
@@ -30,7 +31,8 @@ export { LARGE_CORE_RANGES };
 /**
  * @typedef {Object} GlyphEngineOptions
  * @property {string}   [fontUrl]    - URL to the PRIMARY .ttf/.otf font.
- * @property {Array<{url?:string, buffer?:ArrayBuffer|Uint8Array, name?:string}>} [fonts] - Full font-fallback chain.
+ * @property {Array<{url?:string, buffer?:ArrayBuffer|Uint8Array, name?:string, italic?:{url?:string, buffer?:ArrayBuffer|Uint8Array}}>} [fonts]
+ *   - Full font-fallback chain; a font's `italic` is its italic face (FontChain).
  * @property {string}   [wasmUrl]    - URL to hb.wasm override.
  * @property {ArrayBuffer|Uint8Array} [wasmBinary] - Raw WASM bytes for offline/embedded usage.
  * @property {string}   [fontFamily] - CSS font stack for the Canvas2D atlas.
@@ -106,6 +108,9 @@ export async function bootGlyphEngine(options = {}) {
   stage('slug');
   atlas._shaper = shaper;
   atlas._charSize = deriveCharSize(shaper, opts.fontSize);
+  // Where the cell's own lines (underline, strikethrough) sit and how thick they are: the
+  // primary font's, in the cell every glyph is normalized to.
+  setGlyphLineMetrics(shaper.lineMetrics());
   atlas._shapeCache = shapeCache;
   atlas._emojiAtlas = emojiAtlas;
   atlas._textureUploads = uploads;

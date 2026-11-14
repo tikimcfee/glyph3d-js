@@ -30,6 +30,7 @@
 
 import * as THREE from 'three';
 import FlatRenderRoot, { unwatchLayers } from '../collections/FlatRenderRoot.js';
+import { GROUP_ID_BITS } from '../core/InstancedSlotBuffer.js';
 
 // Built-in channels. Each gets a distinct THREE render layer so the picking
 // camera can isolate it (renders ONLY that layer → the ID buffer is free of
@@ -103,7 +104,8 @@ void main() {
     float quadW = (vMode == 1) ? aExtent.y : aExtent.x;
     vec3 aligned = vec3(uv.x * quadW, (uv.y - 0.5) * aExtent.y, 0.0) + aPos;
 
-    int grow = int(aGroupId + 0.5);
+    // The group row is the lane's low bits; a cell's style byte rides above them (InstancedSlotBuffer).
+    int grow = int(round(aGroupId)) & ${(1 << GROUP_ID_BITS) - 1};
     if (grow < 0 || grow >= maxGroups) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;

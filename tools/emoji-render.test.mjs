@@ -36,16 +36,17 @@ console.log('Testing Emoji WebGL2 Pipeline...');
     assert(mat.uniforms.emojiRows?.value === 16, 'emojiRows uniform is 16');
 
     // Check vertex shader
-    assert(mat.vertexShader.includes('flat out int vEmojiCell;'), 'vertex shader exports vEmojiCell varying');
-    assert(mat.vertexShader.includes('vEmojiCell  = int(info.w);'), 'vertex shader extracts emoji cell from glyphMapTexture');
+    assert(mat.vertexShader.includes('flat out int vGlyphArg;'), 'vertex shader exports the glyph-map argument (the emoji cell, for a bitmap)');
+    assert(mat.vertexShader.includes('vGlyphArg   = int(info.w);'), 'vertex shader extracts it from glyphMapTexture');
     assert(mat.vertexShader.includes('float quadW = (vMode == 1) ? aExtent.y : aExtent.x;'), 'vertex shader uses square quad for emoji');
 
     // Check fragment shader
     assert(mat.fragmentShader.includes('uniform sampler2D emojiTexture;'), 'fragment shader declares emojiTexture');
-    assert(mat.fragmentShader.includes('flat in int vEmojiCell;'), 'fragment shader declares vEmojiCell varying');
+    assert(mat.fragmentShader.includes('flat in int vGlyphArg;'), 'fragment shader declares the glyph-map argument');
+    assert(mat.fragmentShader.includes('float fcell = float(vGlyphArg);'), 'and reads the emoji cell from it');
     assert(mat.fragmentShader.includes('if (vMode == 1) {'), 'fragment shader contains vMode == 1 emoji branch');
     assert(mat.fragmentShader.includes('texture(emojiTexture, atlasUV)'), 'fragment shader samples emojiTexture at atlasUV');
-    assert(mat.fragmentShader.includes('if (vCurveCount == 0 && vFillAmount <= 0.0 && vBgColor.a <= 0.0) discard;'), '0-curve discard only applies to vector branch');
+    assert(mat.vertexShader.includes('bool hasInk = vMode == 1 || (vMode != 2 && vCurveCount > 0);'), 'a bitmap cell always has ink; a 0-curve vector cell has none (the vertex stage drops it)');
 
     mat.dispose();
 }

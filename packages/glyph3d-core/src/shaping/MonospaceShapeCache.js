@@ -27,6 +27,8 @@ export default class MonospaceShapeCache {
     constructor(shaper = null) {
         /** @private @type {Map<number, {g: number, ax: number}>} codepoint → {glyphId, xAdvance} */
         this._map = new Map();
+        /** @private @type {Map<number, {g: number, ax: number}>} codepoint → its ITALIC glyph */
+        this._italic = new Map();
         /** @private — null in worker-side instances (no WASM available there) */
         this._shaper = shaper;
         /** @private — miss fallback advance when there's no shaper (worker side) */
@@ -92,6 +94,20 @@ export default class MonospaceShapeCache {
             entry = { g: 0, ax: this._defaultAdvance };
         }
         this._map.set(codepoint, entry);
+        return entry;
+    }
+
+    /**
+     * Look up a codepoint's ITALIC glyph (SGR 3): the italic face's, where the shaper has one for
+     * it (FontChain.lookupItalic); else its upright glyph. Cached like `lookup`.
+     * @param {number} codepoint
+     * @returns {{g: number, ax: number}}
+     */
+    lookupItalic(codepoint) {
+        let entry = this._italic.get(codepoint);
+        if (entry !== undefined) return entry;
+        entry = typeof this._shaper?.lookupItalic === 'function' ? this._shaper.lookupItalic(codepoint) : this.lookup(codepoint);
+        this._italic.set(codepoint, entry);
         return entry;
     }
 
@@ -181,5 +197,6 @@ export default class MonospaceShapeCache {
      */
     invalidate() {
         this._map.clear();
+        this._italic.clear();
     }
 }

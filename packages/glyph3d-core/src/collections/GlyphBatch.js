@@ -32,7 +32,7 @@ import * as THREE from 'three';
 import { rootOf, isShown, isTracked } from './SceneTransforms.js';
 import InstancedField from './InstancedField.js';
 import { GROUP_STRIDE } from '../core/glyphMaterial.js';
-import { SLOT_FLOATS, LANE_GROUP_ID } from '../core/InstancedSlotBuffer.js';
+import { SLOT_FLOATS, LANE_GROUP_ID, groupOf } from '../core/InstancedSlotBuffer.js';
 
 /** The view camera renders layer 0; an enrolled field's mesh leaves it while a batch draws it. */
 const VIEW_LAYER = 0;
@@ -86,7 +86,12 @@ function refusal(f) {
     if (G[4] !== 0 || G[5] !== 0 || G[6] !== 0 || G[7] !== 1) return 'its group 0 is rotated';
     if (G[12] !== 1 || G[13] !== 1 || G[14] !== 1) return 'its group 0 is scaled';
     const f32 = f.slotBuffer.f32, n = f.getGlyphCount();
-    for (let i = 0; i < n; i++) if (f32[i * SLOT_FLOATS + LANE_GROUP_ID] !== 0) return `glyph ${i} is in group ${f32[i * SLOT_FLOATS + LANE_GROUP_ID]}`;
+    for (let i = 0; i < n; i++) {
+        const lane = f32[i * SLOT_FLOATS + LANE_GROUP_ID];
+        if (lane === 0) continue;
+        // The arena rewrites the lane to the label's row: a styled glyph would lose its style byte.
+        return groupOf(lane) !== 0 ? `glyph ${i} is in group ${groupOf(lane)}` : `glyph ${i} carries a cell style`;
+    }
     return null;
 }
 

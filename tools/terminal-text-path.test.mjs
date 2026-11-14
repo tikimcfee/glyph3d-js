@@ -5,8 +5,10 @@
 //   bun tools/terminal-text-path.test.mjs
 //
 // Ground truth is what the GPU would draw, read back implementation-blind: every slot through its
-// group-table row (offset, tint, alpha) and its highlight texel, gathered into rows by where they
-// land. A random walk of screens (scrolls, edits, recolors, backgrounds, alt-screen, clears,
+// group-table row (offset, tint, alpha), its style byte (the group lane's high bits), its
+// highlight texel and its decoration texel, gathered into rows by where they land. A random walk
+// of screens (scrolls, edits, recolors, backgrounds, attributes — italic, dim, strike, overline,
+// every underline style, underline colours —, alt-screen, clears,
 // depth toggles, seeds, depth and size changes) is checked against a reference model of the
 // terminal's documented semantics after every step. Uploads are observed the way three takes
 // them: this file plays the renderer (reads the pending ranges, empties them, fires the upload
@@ -19,22 +21,28 @@ const { createTerminalScreen, DEFAULT_FG, BG_SET } = await import('../packages/g
 const { default: TerminalScreenQueue } = await import('../packages/glyph3d-core/src/collections/TerminalScreenQueue.js');
 const { default: SceneSystems } = await import('../packages/glyph3d-core/src/collections/SceneSystems.js');
 const { default: InstancedField } = await import('../packages/glyph3d-core/src/collections/InstancedField.js');
-const { SLOT_FLOATS } = await import('../packages/glyph3d-core/src/core/InstancedSlotBuffer.js');
+const { SLOT_FLOATS, groupOf, styleOf } = await import('../packages/glyph3d-core/src/core/InstancedSlotBuffer.js');
+const { CELL_ITALIC, CELL_DIM, CELL_STRIKE, CELL_OVERLINE, CELL_UNDERLINE_SHIFT, CELL_UNDERLINE_COLOR, CELL_BOLD, CELL_INVERSE,
+    STYLE_UNDERLINE_COLOR, cellStyle } = await import('../packages/glyph3d-core/src/core/cellAttrs.js');
 const { GROUP_STRIDE } = await import('../packages/glyph3d-core/src/core/glyphMaterial.js');
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
 const eq = (a, b, msg) => ok(a === b, `${msg} — got ${a}, want ${b}`);
 
-// An atlas with a shape cache (glyph id = codepoint + GID) and a live atlas that records what it
-// is asked to encode.
-const GID = 10000;
-const ensured = [];
+// An atlas with a shape cache (glyph id = codepoint + GID; its italic face's = that + ITALIC) and
+// a live atlas that records what it is asked to encode.
+const GID = 10000, ITALIC = 500000;
+const ensured = [], ensuredItalic = [];
 const atlas = {
     getCharSize: () => ({ width: 8, height: 16 }),
     _shaper: null, _slugData: null,
-    _shapeCache: { lookup: (cp) => ({ g: cp + GID, ax: 8 }) },
-    _live: { ensureCodepoints(cps) { ensured.push(...cps); }, registerField() {}, unregisterField() {} },
+    _shapeCache: { lookup: (cp) => ({ g: cp + GID, ax: 8 }), lookupItalic: (cp) => ({ g: cp + GID + ITALIC, ax: 8 }) },
+    _live: {
+        ensureCodepoints(cps) { ensured.push(...cps); },
+        ensureGlyphsEncoded(gids) { ensuredItalic.push(...gids); },
+        registerField() {}, unregisterField() {},
+    },
     _textureUploads: { flush() {} },   // SceneSystems flushes it at the renderer seam; nothing queued here
 };
 
@@ -43,7 +51,7 @@ const atlas = {
 // (or, with none, the whole thing), empties them and fires its upload callback.
 const seen = new WeakMap();
 function upload(field) {
-    const out = { slotBytes: 0, slotRanges: [], hlBytes: 0, hlRanges: [], groupBytes: 0 };
+    const out = { slotBytes: 0, slotRanges: [], hlBytes: 0, hlRanges: [], decorBytes: 0, decorRanges: [], groupBytes: 0 };
     const ib = field._interleavedBuffer;
     if (seen.get(ib) !== ib.version) {
         seen.set(ib, ib.version);
@@ -60,6 +68,14 @@ function upload(field) {
         tex.clearUpdateRanges();
         tex.onUpdate?.(tex);
     }
+    const dt = field._decor.texture;
+    if (dt && seen.get(dt) !== dt.version) {
+        seen.set(dt, dt.version);
+        if (dt.updateRanges.length) { for (const r of dt.updateRanges) { out.decorRanges.push([r.start, r.count]); out.decorBytes += r.count; } }
+        else out.decorBytes = dt.image.data.length;
+        dt.clearUpdateRanges();
+        dt.onUpdate?.(dt);
+    }
     const gt = field._groupTexture;
     if (seen.get(gt) !== gt.version) { seen.set(gt, gt.version); out.groupBytes = gt.image.data.byteLength; }
     return out;
@@ -67,25 +83,31 @@ function upload(field) {
 
 // ── what the GPU would draw ──────────────────────────────────────────────────────────────────
 // Every slot whose group row is shown, placed by its group's offset, gathered into rows keyed by
-// where they land. Each cell: codepoint (glyph id − GID), effective color bytes (slot color × group
-// tint) and its highlight word.
+// where they land. Each cell: codepoint (glyph id − GID) and whether its glyph is the italic
+// face's, effective color bytes (slot color × group tint), its highlight word, its style byte and,
+// where the style says the underline has its own colour, its decoration word.
 const key = (y, z) => `${Math.round(y * 1000)}|${Math.round(z * 1000)}`;
 function drawn(grid) {
     const f = grid._renderer, f32 = f.slotBuffer.f32, G = f._groupData, gs = GROUP_STRIDE * 4;
     const words = f._highlightTexture ? new Uint32Array(f._highlightTexture.image.data.buffer) : null;
+    const decor = f._decor.texture ? new Uint32Array(f._decor.texture.image.data.buffer) : null;
     const strideX = grid._metrics.charWidth + grid._metrics.letterSpacing;
     const rows = new Map();
     for (let i = 0; i < f.slotBuffer.count; i++) {
-        const o = i * SLOT_FLOATS, g = Math.round(f32[o + 5]) * gs;
+        const o = i * SLOT_FLOATS, g = groupOf(f32[o + 5]) * gs, style = styleOf(f32[o + 5]);
         if (G[g + 11] <= 0.01) continue;
         const k = key(f32[o + 1] + G[g + 1], f32[o + 2] + G[g + 2]);
         let r = rows.get(k);
-        if (!r) rows.set(k, r = { cp: [], rgb: [], bg: [] });
+        if (!r) rows.set(k, r = { cp: [], italic: [], rgb: [], bg: [], style: [], ul: [] });
         const col = Math.round((f32[o] + G[g]) / strideX);
         const c = Math.round(f32[o + 4]), t = G[g + 8];
-        r.cp[col] = Math.round(f32[o + 3]) - GID;
+        const gid = Math.round(f32[o + 3]) - GID;
+        r.italic[col] = gid >= ITALIC;
+        r.cp[col] = gid % ITALIC;
         r.rgb[col] = [(c & 0xff) * t, ((c >> 8) & 0xff) * t, ((c >> 16) & 0xff) * t];
         r.bg[col] = words ? words[i] : 0;
+        r.style[col] = style;
+        r.ul[col] = (style & STYLE_UNDERLINE_COLOR) ? (decor ? decor[i] : -1) : null;
     }
     return rows;
 }
@@ -97,16 +119,20 @@ function drawn(grid) {
 // screen isn't the alternate one — and pushes the k rows that left the top onto the history,
 // newest first, at most depthMax. History draws behind in pages (rows lines each), page p one
 // pitch further back and faded per page; hidden while off or in the alt screen; it keeps no
-// background. Colors are bytes; a faded history cell is its bytes × the page's fade.
+// background, but keeps its attributes (a struck-through line is still struck through in history).
+// A cell's attributes draw as its style byte (cellStyle), its italic bit as the italic face's
+// glyph, and an underline's own colour as its decoration texel. Colors are bytes; a faded history
+// cell is its bytes × the page's fade.
 class Ref {
     constructor(cols, rows, depthMax, metrics, zFactor, fadeMin) {
         Object.assign(this, { cols, rows, depthMax, metrics, zFactor, fadeMin });
         this.history = []; this.prev = null; this.enabled = true; this.alt = false; this.screen = null;
     }
-    static blank(cols) { return { cp: Array(cols).fill(32), fg: Array(cols).fill(DEFAULT_FG), bg: Array(cols).fill(0) }; }
+    static blank(cols) { return { cp: Array(cols).fill(32), fg: Array(cols).fill(DEFAULT_FG), bg: Array(cols).fill(0), at: Array(cols).fill(0), ul: Array(cols).fill(0) }; }
     rowsOf(s) {
         const out = [];
-        for (let y = 0; y < s.rows; y++) out.push({ cp: [...s.cp.subarray(y * s.cols, (y + 1) * s.cols)], fg: [...s.fg.subarray(y * s.cols, (y + 1) * s.cols)], bg: [...s.bg.subarray(y * s.cols, (y + 1) * s.cols)] });
+        const cut = (a, y) => [...a.subarray(y * s.cols, (y + 1) * s.cols)];
+        for (let y = 0; y < s.rows; y++) out.push({ cp: cut(s.cp, y), fg: cut(s.fg, y), bg: cut(s.bg, y), at: cut(s.at, y), ul: cut(s.ul, y) });
         return out;
     }
     detect(cur) {
@@ -131,7 +157,7 @@ class Ref {
         if (this.enabled && !this.alt && this.prev) {
             const k = this.detect(cur);
             if (k > 0) {
-                this.history.unshift(...this.prev.slice(0, k).reverse().map((r) => ({ cp: r.cp, fg: r.fg, bg: r.bg.map(() => 0) })));
+                this.history.unshift(...this.prev.slice(0, k).reverse().map((r) => ({ cp: r.cp, fg: r.fg, bg: r.bg.map(() => 0), at: r.at, ul: r.ul })));
                 this.history.length = Math.min(this.history.length, this.depthMax);
             }
         }
@@ -169,6 +195,10 @@ function compare(grid, ref, label) {
             }
             const wantBg = w.bg[x] ? ((w.bg[x] & 0xffffff) | (255 << 24)) >>> 0 : 0;
             if (g.bg[x] !== wantBg) { problems.push(`${k} col ${x}: bg ${g.bg[x]?.toString(16)} ≠ ${wantBg.toString(16)}`); break; }
+            const at = w.at[x];
+            if (g.style[x] !== cellStyle(at)) { problems.push(`${k} col ${x}: style ${g.style[x]} ≠ ${cellStyle(at)} (attrs ${at.toString(2)})`); break; }
+            if (g.italic[x] !== !!(at & CELL_ITALIC)) { problems.push(`${k} col ${x}: italic glyph ${g.italic[x]} for attrs ${at.toString(2)}`); break; }
+            if ((at & CELL_UNDERLINE_COLOR) && (at >> CELL_UNDERLINE_SHIFT & 7) && g.ul[x] !== w.ul[x]) { problems.push(`${k} col ${x}: underline colour ${g.ul[x]?.toString(16)} ≠ ${w.ul[x].toString(16)}`); break; }
         }
     }
     ok(problems.length === 0, `${label}: drawn ≠ reference — ${problems.slice(0, 4).join('; ')}`);
@@ -184,14 +214,23 @@ const color = () => (ri(256)) | (ri(256) << 8) | (ri(256) << 16);
 
 function screenFrom(prev, cols, rows) {
     const s = createTerminalScreen(cols, rows);
-    if (prev && prev.cols === cols && prev.rows === rows) { s.cp.set(prev.cp); s.fg.set(prev.fg); s.bg.set(prev.bg); s.alt = prev.alt; }
+    if (prev && prev.cols === cols && prev.rows === rows) { s.cp.set(prev.cp); s.fg.set(prev.fg); s.bg.set(prev.bg); s.at.set(prev.at); s.ul.set(prev.ul); s.alt = prev.alt; }
     return s;
+}
+/** Random attributes a renderer draws: any of italic, dim, strike, overline, an underline style, its colour. */
+function attrs() {
+    const ul = rnd() < 0.5 ? 1 + ri(5) : 0;
+    return (rnd() < 0.3 ? CELL_ITALIC : 0) | (rnd() < 0.3 ? CELL_DIM : 0) | (rnd() < 0.3 ? CELL_STRIKE : 0) | (rnd() < 0.3 ? CELL_OVERLINE : 0)
+        | (rnd() < 0.2 ? CELL_BOLD : 0) | (rnd() < 0.2 ? CELL_INVERSE : 0)   // already in the colours: they must not reach the style byte
+        | (ul << CELL_UNDERLINE_SHIFT) | (ul && rnd() < 0.5 ? CELL_UNDERLINE_COLOR : 0);
 }
 function randomLine(s, y, blankTail = true) {
     const n = blankTail ? ri(s.cols + 1) : s.cols;
     for (let x = 0; x < s.cols; x++) {
         const i = y * s.cols + x;
         s.cp[i] = x < n ? letter() : 32; s.fg[i] = rnd() < 0.7 ? DEFAULT_FG : color(); s.bg[i] = rnd() < 0.1 ? (BG_SET | color()) : 0;
+        s.at[i] = rnd() < 0.15 ? attrs() : 0;
+        s.ul[i] = (s.at[i] & CELL_UNDERLINE_COLOR) ? (rnd() < 0.2 ? 0 : color()) : 0;   // black too: a colour equal to a blank texel
     }
 }
 
@@ -207,22 +246,29 @@ console.log('random walk vs the reference');
     for (let y = 0; y < rows - 1; y++) randomLine(s, y);
     grid.applyScreen(s); ref.apply(s); upload(grid._renderer);
     compare(grid, ref, 'first screen');
-    let steps = 0, scrolls = 0, good = true;
+    let steps = 0, scrolls = 0, good = true, deepest = 0;
     for (let step = 0; step < 1500 && good; step++) {
         const kind = rnd();
         let next = screenFrom(s, cols, rows);
         if (kind < 0.40) {                               // scroll by k, new lines below, cursor line blank
             const k = 1 + ri(Math.min(3, rows - 1));
             next.cp.copyWithin(0, k * cols); next.fg.copyWithin(0, k * cols); next.bg.copyWithin(0, k * cols);
+            next.at.copyWithin(0, k * cols); next.ul.copyWithin(0, k * cols);
             for (let y = rows - k; y < rows; y++) randomLine(next, y);
-            if (rnd() < 0.5) { const b = (rows - 1) * cols; next.cp.fill(32, b); next.bg.fill(0, b); }
+            if (rnd() < 0.5) { const b = (rows - 1) * cols; next.cp.fill(32, b); next.bg.fill(0, b); next.at.fill(0, b); next.ul.fill(0, b); }
             scrolls++;
         } else if (kind < 0.55) {                        // edit a few cells
             for (let n = 1 + ri(4); n > 0; n--) next.cp[ri(cols * rows)] = letter();
         } else if (kind < 0.62) {                        // recolor
             for (let n = 1 + ri(6); n > 0; n--) next.fg[ri(cols * rows)] = color();
-        } else if (kind < 0.70) {                        // backgrounds on/off
+        } else if (kind < 0.66) {                        // backgrounds on/off
             for (let n = 1 + ri(6); n > 0; n--) next.bg[ri(cols * rows)] = rnd() < 0.5 ? 0 : (BG_SET | color());
+        } else if (kind < 0.70) {                        // attributes on/off, underline colours
+            for (let n = 1 + ri(6); n > 0; n--) {
+                const i = ri(cols * rows);
+                next.at[i] = rnd() < 0.3 ? 0 : attrs();
+                next.ul[i] = (next.at[i] & CELL_UNDERLINE_COLOR) ? color() : 0;
+            }
         } else if (kind < 0.76) {                        // alt screen toggles with a full repaint
             next.alt = !next.alt;
             for (let y = 0; y < rows; y++) randomLine(next, y);
@@ -241,7 +287,7 @@ console.log('random walk vs the reference');
         } else if (kind < 0.84) {                        // resize: history clipped / padded, no scroll across it
             const nc = 4 + ri(8), nr = 3 + ri(5);
             grid.resize(nc, nr);
-            ref.history = ref.history.map((r) => { const b = Ref.blank(nc); for (let x = 0; x < Math.min(nc, cols); x++) { b.cp[x] = r.cp[x]; b.fg[x] = r.fg[x]; } return b; });
+            ref.history = ref.history.map((r) => { const b = Ref.blank(nc); for (let x = 0; x < Math.min(nc, cols); x++) { b.cp[x] = r.cp[x]; b.fg[x] = r.fg[x]; b.at[x] = r.at[x]; b.ul[x] = r.ul[x]; } return b; });
             ref.cols = nc; ref.rows = nr; ref.prev = null;
             cols = nc; rows = nr;
             next = createTerminalScreen(cols, rows); next.alt = s.alt;
@@ -250,10 +296,12 @@ console.log('random walk vs the reference');
         s = next;
         grid.applyScreen(s); ref.apply(s); upload(grid._renderer);
         good = compare(grid, ref, `step ${step}`);
+        deepest = Math.max(deepest, ref.history.length);
         steps++;
     }
     ok(scrolls > 300 && steps === 1500, `the walk ran (${steps} steps, ${scrolls} scrolls)`);
-    ok(ref.history.length > 0, 'the walk built history (the comparison has teeth)');
+    ok(deepest > 5, `the walk built history (${deepest} lines at its deepest: the comparison has teeth)`);
+    ok(grid._renderer._decor.texture !== null, 'the walk named underline colours (the decoration texels exist)');
     grid.dispose();
 }
 
@@ -304,10 +352,77 @@ console.log('only changed cells are written and uploaded');
     eq(up3.slotBytes, 0, 'a background change writes no slot');
     ok(up3.hlBytes === 8 && up3.hlRanges[0][0] === (grid._liveRowBase[3] + 40) * 4, `and uploads its two texels (${up3.hlBytes} B)`);
 
+    // The fill pass draws only while some cell has a background.
+    ok(f.fillMaterial && f.fillsActive, 'a cell with a background turns the fill pass on');
+    ok(Array.isArray(f.instanceMesh.material) && f.instanceMesh.material[0] === f.fillMaterial && f.instanceMesh.material[1] === f.material,
+        'the field\'s mesh draws the fill material first, then the ink material');
+    const nb = screenFrom(n3, cols, rows);
+    nb.bg.fill(0);
+    grid.applyScreen(nb); upload(f);
+    ok(!f.fillsActive && f.fillMaterial.visible === false, 'with no background left the fill pass is not drawn at all');
+    grid.applyScreen(n3);
+    const upb = upload(f);
+    ok(f.fillsActive && upb.hlBytes > 0, 'and it comes back with the next background');
+
+    // An attribute on one cell: its slot (the style byte rides the group lane), nothing else.
+    const na = screenFrom(n3, cols, rows);
+    na.at[7 * cols + 20] = CELL_STRIKE | (3 << CELL_UNDERLINE_SHIFT);
+    const preA = f.slotBuffer.f32.slice();
+    grid.applyScreen(na);
+    const slotA = grid._liveRowBase[7] + 20;
+    const diffA = [];
+    for (let i = 0; i < preA.length; i++) if (preA[i] !== f.slotBuffer.f32[i]) diffA.push(i);
+    ok(diffA.length === 1 && diffA[0] === slotA * SLOT_FLOATS + 5, `an attribute change writes one lane of one slot: the group lane (${diffA.length} floats changed)`);
+    eq(styleOf(f.slotBuffer.f32[slotA * SLOT_FLOATS + 5]), cellStyle(na.at[7 * cols + 20]), 'which now carries the cell\'s style byte');
+    eq(groupOf(f.slotBuffer.f32[slotA * SLOT_FLOATS + 5]), grid._rowGroups[grid._liveRowBase[7] / cols], 'above its row\'s group');
+    const upA = upload(f);
+    ok(upA.slotBytes === SLOT_FLOATS * 4 && upA.hlBytes === 0 && upA.decorBytes === 0, `and uploads that one slot (${upA.slotBytes} B), no texel`);
+
+    // An underline colour: the decoration texels are made on the first one (even a black one — a
+    // colour equal to a blank texel), then upload by span.
+    {
+        const plainGrid = new TerminalGrid(scene, atlas, { id: 'decor', cols: 10, rows: 3, depthMax: 4 });
+        const pf = plainGrid._renderer;
+        const p0 = createTerminalScreen(10, 3);
+        p0.cp[3] = 0x41; p0.at[3] = (1 << CELL_UNDERLINE_SHIFT) | CELL_STRIKE;
+        plainGrid.applyScreen(p0);
+        ok(pf._decor.texture === null && pf.material.uniforms.hasDecor.value === 0, 'no decoration texture while no cell names an underline colour');
+        const p1 = screenFrom(p0, 10, 3);
+        p1.at[3] |= CELL_UNDERLINE_COLOR; p1.ul[3] = 0;
+        plainGrid.applyScreen(p1);
+        ok(pf._decor.texture !== null && pf.material.uniforms.hasDecor.value === 1 && pf.material.uniforms.decorTexture.value === pf._decor.texture,
+            'the first one — black — makes it and binds it to the ink material');
+        plainGrid.dispose();
+    }
+    const nu = screenFrom(na, cols, rows);
+    nu.at[8 * cols + 5] = (1 << CELL_UNDERLINE_SHIFT) | CELL_UNDERLINE_COLOR; nu.ul[8 * cols + 5] = 0x3050ff;
+    grid.applyScreen(nu);
+    upload(f);
+    const nu2 = screenFrom(nu, cols, rows);
+    nu2.ul[8 * cols + 5] = 0x00ff00;
+    grid.applyScreen(nu2);
+    const upU = upload(f);
+    ok(upU.decorBytes === 4 && upU.decorRanges[0][0] === (grid._liveRowBase[8] + 5) * 4 && upU.slotBytes === 0, `a changed underline colour uploads its one texel (${upU.decorBytes} B) and no slot`);
+
+    // Italic: the italic face's glyph, asked of the atlas once.
+    ensuredItalic.length = 0;
+    const ni = screenFrom(nu2, cols, rows);
+    ni.cp[9 * cols + 1] = 0x51; ni.at[9 * cols + 1] = CELL_ITALIC;
+    grid.applyScreen(ni);
+    eq(Math.round(f.slotBuffer.f32[(grid._liveRowBase[9] + 1) * SLOT_FLOATS + 3]), 0x51 + GID + ITALIC, 'an italic cell takes the italic face\'s glyph');
+    ok(ensuredItalic.length === 1 && ensuredItalic[0] === 0x51 + GID + ITALIC, 'which the atlas is asked for');
+    const ni2 = screenFrom(ni, cols, rows);
+    ni2.cp[9 * cols + 2] = 0x51; ni2.at[9 * cols + 2] = CELL_ITALIC;
+    grid.applyScreen(ni2);
+    eq(ensuredItalic.length, 1, 'once');
+    upload(f);
+    s = n3;
+
     // A scroll by one: the ring moves; the cells written are the new bottom row's only.
+    grid.applyScreen(n3); upload(f);
     const n4 = screenFrom(n3, cols, rows);
-    n4.cp.copyWithin(0, cols); n4.fg.copyWithin(0, cols); n4.bg.copyWithin(0, cols);
-    randomLine(n4, rows - 2, false); n4.cp.fill(32, (rows - 1) * cols); n4.bg.fill(0, (rows - 1) * cols);
+    n4.cp.copyWithin(0, cols); n4.fg.copyWithin(0, cols); n4.bg.copyWithin(0, cols); n4.at.copyWithin(0, cols); n4.ul.copyWithin(0, cols);
+    randomLine(n4, rows - 2, false); n4.cp.fill(32, (rows - 1) * cols); n4.bg.fill(0, (rows - 1) * cols); n4.at.fill(0, (rows - 1) * cols);
     const pre = f.slotBuffer.f32.slice();
     const start = grid._ringStart;
     grid.applyScreen(n4);
@@ -367,13 +482,15 @@ console.log('zero allocation per steady-state update');
     const feed = async (bytes) => { grid.writeBytes(bytes); await parsed(); queue.flush(); upload(f); };
     // The workload: typing, colored output, scrolling. Warm it once (every glyph seen, the ring
     // wrapped, the range pool at the most this workload ever holds pending), then run it again.
-    const work = async () => { for (let i = 0; i < 300; i++) await feed(i % 3 ? 'x' : `line ${i % 10} \x1b[3${i % 8}mcolor\x1b[0m\r\n`); };
+    const work = async () => { for (let i = 0; i < 300; i++) await feed(i % 3 ? 'x' : `line ${i % 10} \x1b[3${i % 8}mcolor\x1b[0m \x1b[3;4:3;58:2::255:${i % 200}:0;9;4${i % 8}mstyled\x1b[0m\r\n`); };
     await work();
     ensured.length = 0;
-    const ids = () => [emu._screen, emu._screen.cp, emu._screen.fg, emu._screen.bg, grid._cp, grid._fg, grid._bg,
-        grid._liveRowBase, grid._spanLo, grid._spanHi, grid._bgLo, grid._bgHi, grid._rowGroups, grid._rowLayout,
-        f.slotBuffer.f32, f._interleavedBuffer, f._highlightTexture, f.highlightWords(grid._totalCount)];
-    const pool = () => f._slotUploads._pool.length + f._highlightUploads._pool.length;
+    const ids = () => [emu._screen, emu._screen.cp, emu._screen.fg, emu._screen.bg, emu._screen.at, emu._screen.ul,
+        grid._cp, grid._fg, grid._bg, grid._at, grid._ul,
+        grid._liveRowBase, grid._spanLo, grid._spanHi, grid._bgLo, grid._bgHi, grid._ulLo, grid._ulHi, grid._rowGroups, grid._rowLayout,
+        f.slotBuffer.f32, f._interleavedBuffer, f._highlightTexture, f.highlightWords(grid._totalCount),
+        f._decor.texture, f.decorWords(grid._totalCount), f.fillMaterial, f.instanceMesh.material];
+    const pool = () => f._slotUploads._pool.length + f._highlight.uploads._pool.length + f._decor.uploads._pool.length;
     const id0 = ids(), pool0 = pool();
     await work();
     const id1 = ids();
@@ -381,6 +498,7 @@ console.log('zero allocation per steady-state update');
     eq(pool(), pool0, 'the upload-range pool did not grow (ranges are reused, not made)');
     eq(getLines, 0, 'the screen read never builds xterm line views');
     eq(ensured.length, 0, 'no glyph is handed to the atlas once seen');
+    ok(f._decor.texture !== null && f.fillsActive, 'the workload drew styled text: underline colours and backgrounds (the check has teeth)');
     ok(grid.readText()[22].startsWith('line') || grid.readText().some((l) => l.includes('line')), 'the emulator really ran');
     grid.dispose();
 }
