@@ -1,4 +1,5 @@
 import { checkConfig } from './wallConfig.js';
+import { searchSettings, SECTIONS } from './wallSettings.js';
 
 /**
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
@@ -22,7 +23,10 @@ import { checkConfig } from './wallConfig.js';
  *   wall.sidebar [toggle|open|close|left|right|float [x y]] · wall.sidebar.collapse <gid> [toggle|on|off]
  *   wall.status [toggle|open|close|left|right|float [x y]]   the termd status window
  *   wall.status.dismiss                        put away the termd-lost notice
- *   wall.config [<knob> [value]]
+ *   wall.config [<knob> [value|default]]       read or set a knob (remembered per relay); default hands it back
+ *   wall.config.find <words…>                  the knobs whose label, key, description or section hold every word
+ *   wall.snap [toggle|on|off] · wall.grid [toggle|on|off]   snapping to the grid · drawing it
+ *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
  *
  * termd's state itself comes from the relay (`./glyph3d-cli termd.status` answers page-less); the
  * status verbs only show it.
@@ -210,7 +214,57 @@ export default function registerWallCommands(router, wall) {
     verb('wall.config', '[<knob> [value]]', "Read or set the wall's knobs", (args) => {
         const [key, value] = args;
         if (!key) return { text: Object.entries(wall.config).map(([k, v]) => `${k} ${v}`).join('\n'), data: { ...wall.config } };
-        const v = value == null ? (checkConfig(key, wall.config[key]), wall.config[key]) : wall.setConfig(key, checkConfig(key, value));
+        const v = value == null ? (checkConfig(key, wall.config[key]), wall.config[key])
+            : value === 'default' ? (checkConfig(key, wall.config[key]), wall.resetConfig(key))
+                : wall.setConfig(key, checkConfig(key, value));
         return OK(`${key} ${v}`, { [key]: v });
+    });
+
+    // ── the canvas: snapping, the grid, the settings panel ──────────────────
+    /** A knob that's on or off, flipped or set by `toggle|on|off`. */
+    const onOff = (key, how = 'toggle') => {
+        if (how !== 'toggle' && how !== 'on' && how !== 'off') throw new Error(`takes toggle|on|off, not '${how}'`);
+        return wall.setConfig(key, how === 'toggle' ? !wall.config[key] : how === 'on');
+    };
+    verb('wall.snap', '[toggle|on|off]', 'Snap moves and resizes to the grid, or not', (args) => {
+        const on = onOff('snap', args[0]);
+        return OK(`snap ${on ? 'on' : 'off'}`, { snap: on });
+    });
+    verb('wall.grid', '[toggle|on|off]', 'Draw the drafting grid on the canvas, or not', (args) => {
+        const on = onOff('gridShow', args[0]);
+        return OK(`grid ${on ? 'shown' : 'hidden'}`, { gridShow: on });
+    });
+    verb('wall.config.find', '<words…>', "The knobs whose label, key, description or section hold every word", (args) => {
+        const found = searchSettings(args.join(' '));
+        const out = [];
+        for (const g of found) {
+            out.push(g.section.title);
+            for (const it of g.items) out.push(`  ${it.key} ${wall.config[it.key]}  — ${it.def.label}`);
+        }
+        return { text: out.join('\n') || `(no knob matches '${args.join(' ')}')`, data: { sections: found.map((g) => ({ id: g.section.id, keys: g.items.map((it) => it.key) })) } };
+    });
+    verb('wall.settings', '[toggle|open|close|left|right|float [x y]]', 'Open, close or place the settings panel', (args) => {
+        const [what = 'toggle', x, y] = args;
+        const s = wall.store.settingsPanel();
+        if (what === 'toggle') wall.setSettingsPanel({ open: !s.open });
+        else if (what === 'open' || what === 'close') wall.setSettingsPanel({ open: what === 'open' });
+        else if (what === 'left' || what === 'right') wall.setSettingsPanel({ open: true, side: what });
+        else if (what === 'float') {
+            const patch = { open: true, side: 'float' };
+            if (x != null) patch.float = { x: numArg(x, 'x'), y: numArg(y, 'y') };
+            wall.setSettingsPanel(patch);
+        } else throw new Error(`the settings panel takes toggle|open|close|left|right|float, not '${what}'`);
+        const now = wall.store.settingsPanel();
+        return OK(`settings ${now.open ? `open, ${now.side}` : 'closed'}`, { panel: now });
+    });
+    verb('wall.settings.collapse', '<section> [toggle|on|off]', 'Fold or unfold a section of the settings panel', (args) => {
+        const [id, how = 'toggle'] = args;
+        if (!SECTIONS.some((x) => x.id === id)) throw new Error(`no section '${id}' (sections: ${SECTIONS.map((x) => x.id).join(', ')})`);
+        const set = new Set(wall.store.settingsPanel().collapsed);
+        const on = how === 'toggle' ? !set.has(id) : how === 'on' ? true : how === 'off' ? false : null;
+        if (on == null) throw new Error(`collapse takes toggle|on|off, not '${how}'`);
+        if (on) set.add(id); else set.delete(id);
+        wall.setSettingsPanel({ collapsed: [...set] });
+        return OK(`${id} ${on ? 'folded' : 'unfolded'}`, { section: id, collapsed: on });
     });
 }

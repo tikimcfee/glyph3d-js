@@ -8,7 +8,9 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * terminal, 0 fits all, - hides the focused terminal, X HELD closes it (the bar's close ring fills
  * over closeHoldMs; let go early and it's kept), G gathers the selection (or the focused terminal)
  * into a group, Shift+G dissolves the focused terminal's group, B opens or closes the sidebar, S
- * opens or closes the termd status window (K belongs to the DOM palette). Each runs a wall verb.
+ * opens or closes the termd status window, ' turns snapping to the grid on or off and Shift+' the
+ * grid itself, `,` opens or closes the settings panel (K belongs to the DOM palette). Each runs a
+ * wall verb.
  * Everything else goes to the focused terminal as key events (keyEncoding.keyEventFor) that termd
  * encodes in the program's own keyboard modes, so Shift+Enter reaches a Kitty-keyboard program as
  * Shift+Enter — Esc included (vim and readline need it), Ctrl alone too (it's the shell's), and the
@@ -77,6 +79,8 @@ export default class WallKeys {
                 }
                 case 'KeyB': claim(); wall.run(['wall.sidebar', 'toggle']); return;
                 case 'KeyS': claim(); wall.run(['wall.status', 'toggle']); return;
+                case 'Quote': claim(); wall.run([e.shiftKey ? 'wall.grid' : 'wall.snap', 'toggle']); return;
+                case 'Comma': claim(); wall.run(['wall.settings', 'toggle']); return;
                 case 'KeyK': return;   // the palette's (main.jsx)
                 default: if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
             }

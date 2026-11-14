@@ -44,7 +44,14 @@
  * alone, a killed member leaves its group), the sidebar (lists groups and members, folds, docks,
  * persists across a reload, toggles on its chord) and the two panels together (docked on one edge
  * side by side, the topbar clear of both; the status window's row reveals a hidden terminal; its
- * knobs are wall.config's). Exit 1 on any FAIL.
+ * knobs are wall.config's); then the drafting grid and the settings panel — a title-bar drag lands the
+ * body's top-left on a grid crossing, a right / bottom border drag lands that edge on or inside a line
+ * in whole cells, a drag with Ctrl held and a drag with snap off (its chord) move by exactly the
+ * pointer's travel, the grid's lines in the page's pixels (each where the shader's rule puts it, in
+ * its colour ±2, the background between ±2; the minor level gone below gridMinPx; none with the grid
+ * off), the background knob reaching the canvas ±2, and the settings panel (its chord puts the keys
+ * in its search; a search shows exactly the matching knobs, marked; Enter flips a switch; a field
+ * edit sets the knob through wall.config). Exit 1 on any FAIL.
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -53,6 +60,8 @@ import { privateRelay } from './lib/wall-relay.mjs';
 import { dialRelay } from './lib/relay.mjs';
 import { brainPid, termdPid } from './lib/termd.mjs';
 import { tileLayout, BAR_ROOM } from '../wall/wallLayout.js';
+import { snapStep, snapTo } from '../wall/wallSnap.js';
+import { searchSettings, KNOBS } from '../wall/wallSettings.js';
 import { RESET_FG, ansi256toRGB } from '../packages/glyph3d-core/src/collections/terminalPalette.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -830,6 +839,166 @@ try {
         const revealed = await W((i) => ({ hidden: window.__wall.store.hidden(i), shown: window.__wall.terminal(i).visible, focused: window.__wall.focusedId === i }), target);
         ok(!revealed.hidden && revealed.shown && revealed.focused, `a status row's click reveals its hidden terminal: shown and focused (${JSON.stringify(revealed)})`);
         await W(() => window.__wall.run(['wall.sidebar', 'close']).then(() => window.__wall.run(['wall.status', 'close'])));
+    }
+
+    // ── the drafting grid, snapping, the settings panel ────────────────────
+    {
+        const [S] = await park(1);
+        const knob = (k) => W((key) => window.__wall.config[key], k);
+        const run = (cmd) => W((c) => window.__wall.run(c).then((r) => r.text), cmd);
+        const rectOf = (i) => W((id) => window.__wall.terminalRect(id), i);
+        const onGrid = (v, step) => Math.abs(v - snapTo(v, step)) < 1e-6;
+        // Off the grid to start with, framed so its bar is easy to grab.
+        await W((i) => { const w = window.__wall, g = w.terminal(i); g.position.x += 1.3; g.position.y -= 0.7; w.rememberPosition(i); w.frame(i); }, S);
+        await until(() => !window.__wall.viewport.moving, null, 8000);
+        await page.mouse.move(2, 2);
+        const cfg = await W(() => ({ ...window.__wall.config, zoom: window.__wall.viewport.zoom }));
+        const step = snapStep(cfg, cfg.zoom);
+        const stride = await W((i) => window.__wall.terminal(i).cellStride, S);
+        info(`snap step ${step} world units at zoom ${cfg.zoom.toFixed(2)}; a cell is ${stride.x.toFixed(3)} × ${stride.y.toFixed(3)}`);
+        const barAt = async () => { const b = await geo(S); return { x: (b.left + b.right) / 2 - 60, y: (b.top + b.barTop) / 2 }; };
+
+        let a = await barAt();
+        await drag(a.x, a.y, a.x + 37, a.y + 23);
+        let r = await rectOf(S);
+        ok(cfg.snap && onGrid(r.minX, step) && onGrid(r.maxY, step), `a title-bar drag lands the body's top-left on a grid crossing (${r.minX.toFixed(3)}, ${r.maxY.toFixed(3)}; step ${step})`);
+
+        // The right border: the edge on its line or inside it by less than a cell; the left edge stays.
+        let g = await geo(S);
+        await drag(g.right, (g.top + g.bottom) / 2, g.right + 53, (g.top + g.bottom) / 2);
+        await until(([i, c]) => window.__wall.terminal(i).cols !== c, [S, g.cols], 8000);
+        const rr = await rectOf(S);
+        const lineR = Math.ceil(rr.maxX / step - 1e-9) * step;
+        ok(rr.minX === r.minX && lineR - rr.maxX < stride.x - 1e-9 && (await geo(S)).cols > g.cols,
+            `a right-border drag lands the edge on or inside a grid line in whole cells (${g.cols} → ${(await geo(S)).cols} cols; ${(lineR - rr.maxX).toFixed(3)} inside the line at ${lineR}, a cell is ${stride.x.toFixed(3)})`);
+        g = await geo(S);
+        await drag((g.left + g.right) / 2 + 40, g.bottom, (g.left + g.right) / 2 + 40, g.bottom + 47);
+        await until(([i, n]) => window.__wall.terminal(i).rows !== n, [S, g.rows], 8000);
+        const rb = await rectOf(S);
+        const lineB = Math.floor(rb.minY / step + 1e-9) * step;
+        ok(rb.maxY === rr.maxY && rb.minY - lineB < stride.y - 1e-9 && (await geo(S)).rows > g.rows,
+            `a bottom-border drag lands the edge on or inside a grid line (${g.rows} → ${(await geo(S)).rows} rows; ${(rb.minY - lineB).toFixed(3)} inside the line at ${lineB})`);
+
+        // Ctrl held while dragging: free — the terminal moves by exactly the pointer's travel.
+        const freeDrag = async (mods) => {
+            const p0 = await pos(S), z = await W(() => window.__wall.viewport.zoom);
+            a = await barAt();
+            await page.mouse.move(a.x, a.y); await page.mouse.down();
+            for (const m of mods) await page.keyboard.down(m);
+            await page.mouse.move(a.x + 29, a.y + 17, { steps: 8 });
+            await page.mouse.up();
+            for (const m of mods) await page.keyboard.up(m);
+            const p1 = await pos(S);
+            return { dx: p1.x - p0.x - 29 / z, dy: p1.y - p0.y + 17 / z, r: await rectOf(S) };
+        };
+        let f = await freeDrag(['Control']);
+        ok(Math.abs(f.dx) < 1e-6 && Math.abs(f.dy) < 1e-6 && !(onGrid(f.r.minX, step) && onGrid(f.r.maxY, step)),
+            `a drag with Ctrl held doesn't snap: it moves by exactly the pointer's travel (off by ${f.dx.toExponential(1)}, ${f.dy.toExponential(1)})`);
+        await page.keyboard.press(`${CHORD}+Quote`);
+        const snapOff = await until(() => window.__wall.config.snap === false, null, 4000);
+        f = await freeDrag([]);
+        ok(!!snapOff && Math.abs(f.dx) < 1e-6 && Math.abs(f.dy) < 1e-6, `${CHORD}+' turns snapping off, and a drag then moves by exactly the pointer's travel`);
+        const snapOn = await run(['wall.snap', 'on']);
+        a = await barAt();
+        await drag(a.x, a.y, a.x + 11, a.y - 31);
+        r = await rectOf(S);
+        ok(snapOn === 'OK: snap on' && onGrid(r.minX, step) && onGrid(r.maxY, step), `wall.snap on: the next drag snaps again (${snapOn})`);
+
+        // The grid in the pixels: one row of the canvas, far from every terminal, against the rule.
+        const BG = (h) => [1, 3, 5].map((k) => parseInt(h.slice(k, k + 2), 16));
+        const row = async (camX, camY, zoom) => {
+            await W(([x, y, z]) => { const v = window.__wall.viewport; v.moveTo(x, y); v.camera.zoom = z; v.camera.updateProjectionMatrix(); }, [camX, camY, zoom]);
+            await W(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
+            const vp = page.viewportSize();
+            const png = await page.screenshot({ clip: { x: 0, y: Math.floor(vp.height / 2), width: vp.width, height: 1 } });
+            return W(async (b64) => {
+                const img = new Image();
+                img.src = `data:image/png;base64,${b64}`;
+                await img.decode();
+                const cv = new OffscreenCanvas(img.width, img.height), cx = cv.getContext('2d');
+                cx.drawImage(img, 0, 0);
+                const d = cx.getImageData(0, 0, img.width, 1).data, out = [];
+                for (let i = 0; i < img.width; i++) out.push([d[4 * i], d[4 * i + 1], d[4 * i + 2]]);
+                return { px: out, dpr: devicePixelRatio, w: innerWidth };
+            }, png.toString('base64'));
+        };
+        /** Each pixel of the row: which line the shader's rule puts there (major / minor / none), checked against its colour. */
+        const readGrid = async (zoom, c) => {
+            const camX = -5000.37, camY = -5002;          // the row's world y sits between lines
+            const { px, dpr, w } = await row(camX, camY, zoom);
+            const zd = zoom * dpr, h = Math.max(1, Math.round(c.gridLinePx * dpr)) / 2 / zd;
+            const M = c.gridMinor * c.gridMajorEvery;
+            const on = (x, sp) => Math.floor((x - h) / sp) !== Math.floor((x + h) / sp);
+            const lv = { minor: c.gridMinor * zoom >= c.gridMinPx && c.gridMajorEvery > 1, major: M * zoom >= c.gridMinPx };
+            const tally = { major: 0, minor: 0, none: 0, wrong: [] };
+            px.forEach((p, i) => {
+                const x = camX + (i + 0.5 - (w * dpr) / 2) / zd;
+                const kind = !c.gridShow ? 'none' : lv.major && on(x, M) ? 'major' : lv.minor && on(x, c.gridMinor) ? 'minor' : 'none';
+                const want = BG(kind === 'major' ? c.gridMajorColor : kind === 'minor' ? c.gridMinorColor : c.background);
+                tally[kind]++;
+                if (Math.max(...want.map((v, k) => Math.abs(v - p[k]))) > 2 && tally.wrong.length < 4) tally.wrong.push({ i, kind, want, got: p });
+            });
+            return tally;
+        };
+        const base = await W(() => ({ ...window.__wall.config }));
+        let t = await readGrid(4, base);
+        ok(t.major > 0 && t.minor > 0 && !t.wrong.length, `at zoom 4 the grid's lines are in the pixels where the rule puts them, each colour ±2 (${t.major} major px, ${t.minor} minor, ${t.none} background; wrong: ${JSON.stringify(t.wrong)})`);
+        t = await readGrid(1, base);
+        ok(t.major > 0 && t.minor === 0 && !t.wrong.length, `at zoom 1 (minor lines ${base.gridMinor} px apart, under gridMinPx ${base.gridMinPx}) only the major lines draw (${t.major} major px; wrong: ${JSON.stringify(t.wrong)})`);
+        const off = await run(['wall.grid', 'off']);
+        t = await readGrid(4, { ...base, gridShow: false });
+        ok(off === 'OK: grid hidden' && t.none === t.major + t.minor + t.none && !t.wrong.length, `wall.grid off: no line in the pixels, only the background (wrong: ${JSON.stringify(t.wrong)})`);
+        const bg = await run(['wall.config', 'background', '#203040']);
+        t = await readGrid(4, { ...base, gridShow: false, background: '#203040' });
+        ok(bg.startsWith('OK') && !t.wrong.length, `the background knob reaches the canvas: #203040 reads as specified ±2 (${bg}; wrong: ${JSON.stringify(t.wrong)})`);
+        await run(['wall.config', 'background', 'default']);
+        await run(['wall.grid', 'on']);
+        const sr = await rectOf(S);
+        for (const z of [1, 4, 12]) {
+            await W(([x, y, zz]) => { const v = window.__wall.viewport; v.moveTo(x, y); v.camera.zoom = zz; v.camera.updateProjectionMatrix(); }, [sr.minX + 30, sr.maxY - 20, z]);
+            await W(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
+            await shot(`grid-zoom-${z}`);
+        }
+
+        // The settings panel: its chord puts the keys in the search; a search shows exactly what matches.
+        await W(() => window.__wall.focus(null));
+        await page.keyboard.press(`${CHORD}+Comma`);
+        const opened = await until(() => document.activeElement?.hasAttribute('data-settings-search'), null, 4000);
+        ok(!!opened, `${CHORD}+, opens the settings panel with the keys in its search box`);
+        await page.keyboard.type('major');
+        const want = searchSettings('major').flatMap((x) => x.items.map((it) => it.key));
+        const shown = await until((w) => {
+            const got = [...document.querySelectorAll('[data-settings] [data-setting]')].map((el) => el.dataset.setting);
+            return JSON.stringify(got) === JSON.stringify(w) ? { got, sections: [...document.querySelectorAll('[data-settings] [data-section]')].map((el) => el.dataset.section), marks: document.querySelectorAll('[data-settings] [data-hit]').length } : null;
+        }, want, 4000);
+        ok(!!shown && shown.sections.join() === 'canvas' && shown.marks >= want.length && want.length < Object.keys(KNOBS).length,
+            `searching "major" shows exactly the matching knobs (${shown?.got.join(', ')}), in their one section, the word marked (${shown?.marks} marks)`);
+        await shot('settings-search');
+        /** Search, then ↓ to `key` (where the search lists it), checking the panel's choice follows. */
+        const choose = async (q, key) => {
+            await page.keyboard.press('Control+A'); await page.keyboard.type(q);
+            const order = searchSettings(q).flatMap((x) => x.items.map((it) => it.key));
+            for (let k = 0; k < order.indexOf(key); k++) await page.keyboard.press('ArrowDown');
+            return until((want) => document.querySelector('[data-settings] [data-setting][data-active]')?.dataset.setting === want, key, 4000);
+        };
+        const chose = await choose('snap to grid', 'snap');
+        await page.keyboard.press('Enter');
+        const flipped = await until(() => window.__wall.config.snap === false, null, 4000);
+        const said = await run(['wall.config', 'snap']);
+        ok(!!chose && !!flipped && said === 'OK: snap false', `↓ chooses "Snap to grid" and Enter flips it; wall.config says so (${said})`);
+        await choose('grid spacing', 'gridMinor');
+        await page.keyboard.press('Enter');
+        const inField = await until(() => document.activeElement?.dataset.field === 'gridMinor', null, 4000);
+        await page.keyboard.type('5'); await page.keyboard.press('Enter');
+        const set5 = await until(() => window.__wall.config.gridMinor === 5, null, 4000);
+        const said5 = await run(['wall.config', 'gridMinor']);
+        const back = await W(() => document.activeElement?.hasAttribute('data-settings-search'));
+        ok(!!inField && !!set5 && said5 === 'OK: gridMinor 5' && back, `Enter on "Grid spacing" puts the keys in its field; 5 + Enter sets it through wall.config (${said5}) and the keys come back to the search`);
+        await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+        const closed = await until(() => !document.querySelector('[data-settings]'), null, 4000);
+        ok(!!closed, 'Escape clears the search, then closes the panel');
+        await run(['wall.config', 'gridMinor', 'default']);
+        await run(['wall.snap', 'on']);
     }
 
     if (app.errors.length) { failures++; console.log('FAIL  page errors:', app.errors.slice(0, 3)); }

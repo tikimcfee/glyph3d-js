@@ -1,5 +1,7 @@
 import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
-import { edgeCursor, resizeFromDrag, lassoTouches } from './wallLayout.js';
+import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
+import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
+import { invertsSnap } from './chord.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
 const DRAG_SLOP_PX = 4;
@@ -27,6 +29,12 @@ const PINCH_MAX_DELTA = 50;
  *   a terminal's body            focus                         — (the body never drags…)
  *   ⌥ + anywhere on a terminal   focus                         move  (…unless ⌥ is held: drawing-canvas move)
  *   a group's header             select the group's members    move the whole group
+ *
+ * Moves, resizes and group drags snap to the drafting grid while the `snap` knob is on (wallSnap.js
+ * has the rule: a moved body's top-left lands on a crossing, a dragged edge on or just inside a
+ * line); Ctrl (⌃) held while dragging inverts it, read as the drag goes — pressing or letting go of
+ * it mid-drag re-places what's held. A tiled member's spot is its tile's: its drag and resize
+ * don't snap (the group's header drag does, by the group's corner).
  *
  * A group's backdrop is canvas (it pans and lassoes). A title bar's hide / close buttons and the
  * selection's group button are DOM over the canvas and never reach here.
@@ -57,7 +65,10 @@ export default class WallPointer {
             up: (e) => this._onUp(e),
             cancel: (e) => this._onCancel(e),
             dbl: (e) => this._onDouble(e),
-            key: (e) => { if ((e.key === 'Alt' || e.key === 'Shift') && !this._drag && this._last) this._hover({ ...this._last, altKey: e.altKey, shiftKey: e.shiftKey }); },
+            key: (e) => {
+                if ((e.key === 'Alt' || e.key === 'Shift') && !this._drag && this._last) this._hover({ ...this._last, altKey: e.altKey, shiftKey: e.shiftKey });
+                this._snapKey(e);
+            },
         };
     }
 
@@ -184,16 +195,21 @@ export default class WallPointer {
         const dx = p.x - d.startWorld.x, dy = p.y - d.startWorld.y;
         if (d.kind === 'group') {
             if (!this.wall.store.group(d.group)) { this._end(); return; }   // the group went mid-drag
-            if (d.moved) this.wall.groups.dragTo(d.groupDrag, dx, dy);
+            if (d.moved) { const s = this._snapGroup(d, dx, dy, e); this.wall.groups.dragTo(d.groupDrag, s.x, s.y); }
             return;
         }
         const grid = this.wall.terminal(d.id);
         if (!grid) { this._end(); return; }   // its terminal went away mid-drag
         if (d.kind === 'press' && d.moved) {
-            grid.position.x = d.startPos.x + dx;
-            grid.position.y = d.startPos.y + dy;
+            const s = this._snapPress(d, dx, dy, e);
+            grid.position.x = d.startPos.x + dx + s.x;
+            grid.position.y = d.startPos.y + dy + s.y;
         } else if (d.kind === 'resize') {
-            const r = resizeFromDrag(d.edges, d.start, d.stride, dx, dy, MIN_SIZE);
+            const step = this._snapStep(d, e);
+            d.startRect ??= this.wall.terminalRect(d.id);   // first move: nothing has resized yet
+            if (step && !d.moved) return;   // a snapped edge jumps to its line: not for a click's wobble
+            const r = step ? snapResize(d.edges, d.startRect, d.start, d.stride, dx, dy, MIN_SIZE, step)
+                : resizeFromDrag(d.edges, d.start, d.stride, dx, dy, MIN_SIZE);
             if (r.cols !== d.last.cols || r.rows !== d.last.rows) {
                 d.last = { cols: r.cols, rows: r.rows };
                 this.wall.router.execute(['terminal.resize', d.id, String(r.cols), String(r.rows)]);
@@ -276,5 +292,44 @@ export default class WallPointer {
             : e.shiftKey ? 'copy'
             : e.altKey || hit.part === 'title' ? 'move'
             : hit.part === 'edge' ? edgeCursor(hit.edges) : 'text';
+    }
+
+    // ── snapping ──────────────────────────────────────────────────────────────
+
+    /**
+     * The grid step this drag snaps to now, or 0 when it doesn't: the `snap` knob, inverted while the
+     * snap modifier is held; never for a tiled member (its spot is its tile's).
+     * @param {{ kind: string, id?: string }} d @param {{ ctrlKey: boolean }} e
+     */
+    _snapStep(d, e) {
+        if (this.wall.config.snap === invertsSnap(e)) return 0;
+        if (d.id && this.wall.groups.tiles(d.id)) return 0;
+        return snapStep(this.wall.config, this.camera.zoom);
+    }
+
+    /** The extra shift that puts a moved body's top-left on the grid ({0, 0} when not snapping). */
+    _snapPress(d, dx, dy, e) {
+        d.startRect ??= this.wall.terminalRect(d.id);   // first move: the terminal is still where it started
+        const step = this._snapStep(d, e);
+        if (!step) return { x: 0, y: 0 };
+        const r = d.startRect;
+        return snapMove({ minX: r.minX + dx, maxX: r.maxX + dx, minY: r.minY + dy, maxY: r.maxY + dy }, step);
+    }
+
+    /** A group drag's delta, snapped so the group's top-left body corner (its shown members') lands on the grid. */
+    _snapGroup(d, dx, dy, e) {
+        if (d.groupCorner === undefined) {   // first move: the members are still where they started
+            const u = unionRect(this.wall.groups.shownMembers(d.group).map((id) => this.wall.terminalRect(id)));
+            d.groupCorner = u ? { x: u.minX, y: u.maxY } : null;
+        }
+        const step = this._snapStep(d, e), c = d.groupCorner;
+        return step && c ? { x: snapTo(c.x + dx, step) - c.x, y: snapTo(c.y + dy, step) - c.y } : { x: dx, y: dy };
+    }
+
+    /** The snap modifier went down or up mid-drag: re-place what's held as if the pointer moved. */
+    _snapKey(e) {
+        const d = this._drag;
+        if (e.key !== 'Control' || !d || !this._last || !(d.kind === 'press' || d.kind === 'resize' || d.kind === 'group')) return;
+        this._onMove(/** @type {PointerEvent} */ ({ ...this._last, ctrlKey: e.ctrlKey }));
     }
 }

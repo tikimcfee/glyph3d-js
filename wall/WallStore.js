@@ -10,6 +10,9 @@
  * the relay's live terminals on every (re)connect: an entry outlives a detach (a closed grid whose
  * session runs on is re-adopted under the same id) but not its session. A group loses the members
  * that are pruned or forgotten, and goes when it has none left.
+ *
+ * The knobs the person dialled (`wall.config`) and the settings panel's place persist here too, per
+ * relay like the rest, and are never pruned: a knob is the wall's, not a terminal's.
  */
 
 /**
@@ -36,6 +39,15 @@ const SIDEBAR_DEFAULT = Object.freeze({ open: false, side: 'right', float: Objec
 /** @type {StatusWindowState} */
 const STATUS_WINDOW_DEFAULT = Object.freeze({ open: false, side: 'float', float: null });
 
+/**
+ * The settings panel: open or not, floating or stuck to an edge, where it floats (null: its default
+ * spot), which sections are folded.
+ * @typedef {{ open: boolean, side: 'left'|'right'|'float', float: { x: number, y: number }|null, collapsed: string[] }} SettingsPanelState
+ */
+
+/** @type {SettingsPanelState} */
+const SETTINGS_PANEL_DEFAULT = Object.freeze({ open: false, side: 'float', float: null, collapsed: Object.freeze([]) });
+
 /** @param {string} key @param {any} fallback */
 function read(key, fallback) {
     try { const v = JSON.parse(localStorage.getItem(key) || 'null'); return v ?? fallback; }
@@ -51,7 +63,10 @@ export default class WallStore {
     constructor(relayPort) {
         const k = (what) => `glyph3d.wall.relay-${relayPort}.${what}`;
         /** The localStorage keys — the e2e reads them. */
-        this.keys = { positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status') };
+        this.keys = {
+            positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status'),
+            config: k('config'), settings: k('settings'),
+        };
         this._positions = read(this.keys.positions, {});
         this._names = read(this.keys.names, {});
         /** @type {Set<string>} */
@@ -62,6 +77,10 @@ export default class WallStore {
         this._sidebar = { ...SIDEBAR_DEFAULT, ...read(this.keys.sidebar, {}) };
         /** @type {StatusWindowState} */
         this._status = { ...STATUS_WINDOW_DEFAULT, ...read(this.keys.status, {}) };
+        /** @type {Record<string, any>} */
+        this._config = read(this.keys.config, {});
+        /** @type {SettingsPanelState} */
+        this._settings = { ...SETTINGS_PANEL_DEFAULT, ...read(this.keys.settings, {}) };
     }
 
     // ── terminals ─────────────────────────────────────────────────────────────
@@ -193,5 +212,32 @@ export default class WallStore {
     setStatusWindow(patch) {
         this._status = { ...this._status, ...patch };
         write(this.keys.status, this._status);
+    }
+
+    // ── the knobs and the settings panel ──────────────────────────────────────
+
+    /** The knobs the person set, key → value (checked by the wall as it reads them). @returns {Record<string, any>} */
+    config() { return this._config; }
+
+    /** Remember a knob the person set. @param {string} key @param {any} value */
+    setConfig(key, value) {
+        this._config[key] = value;
+        write(this.keys.config, this._config);
+    }
+
+    /** Forget a knob the person set: it is born again with the wall. @param {string} key */
+    clearConfig(key) {
+        if (!(key in this._config)) return;
+        delete this._config[key];
+        write(this.keys.config, this._config);
+    }
+
+    /** @returns {SettingsPanelState} */
+    settingsPanel() { return this._settings; }
+
+    /** @param {Partial<SettingsPanelState>} patch */
+    setSettingsPanel(patch) {
+        this._settings = { ...this._settings, ...patch };
+        write(this.keys.settings, this._settings);
     }
 }

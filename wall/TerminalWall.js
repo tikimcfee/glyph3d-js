@@ -14,8 +14,9 @@ import WallKeys from './WallKeys.js';
 import WallGroups from './WallGroups.js';
 import BarButtons from './BarButtons.js';
 import SelectionOverlay from './SelectionOverlay.js';
+import WallPaper from './WallPaper.js';
 import registerWallCommands from './wallCommands.js';
-import { WALL_CONFIG } from './wallConfig.js';
+import { WALL_CONFIG, checkConfig } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
@@ -25,6 +26,11 @@ const FRAME_MAX_LINE_PX = 28;
 const BORDER_STYLE = { color: 0x3b4352, width: 1.5, intensity: 1 };
 /** How long the wall waits for the relay's terminal.recovered reply before giving up on pruning. */
 const RECOVER_REPLY_MS = 15000;
+/**
+ * What a terminal on the wall is born with (the TerminalHost's theme, over TerminalGrid's defaults):
+ * an opaque panel, so the canvas's grid never shows through a terminal.
+ */
+const TERMINAL_THEME = Object.freeze({ backgroundOpacity: 1 });
 
 /**
  * A terminal's world rect, from its own pose — position + local bounds × scale. Wall terminals sit
@@ -81,6 +87,7 @@ function shortTitle(title) {
  *                against the relay's live terminals on every connect)
  *   verbs        the wall's own (wallCommands: wall.hide/show/close/select/group…/sidebar/config) on
  *                the same router — the buttons, sidebar, palette and chords all run them (run())
+ *   canvas       WallPaper (the canvas colour + the drafting grid; wallSnap: where drags snap)
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
  *                map labels), WallGroups (groups: tiling, header drags, frames), BarButtons (a hovered
  *                bar's hide + hold-to-close), SelectionOverlay (lasso, outlines, the group button),
@@ -98,7 +105,8 @@ export default class TerminalWall {
     /**
      * @param {{ scene: import('three').Scene, camera: import('three').OrthographicCamera, gl: any,
      *           atlas: any, registry: any, relayPort: number, config?: Partial<import('./wallConfig.js').WallConfig> }} deps
-     *   config: knobs over WALL_CONFIG (also dialable live: wall.config)
+     *   config: knobs over WALL_CONFIG (also dialable live: wall.config); what the person dialled
+     *   (WallStore, per relay) wins over both
      */
     constructor({ scene, camera, gl, atlas, registry, relayPort, config = {} }) {
         /** Terminal ids in arrival order — the order cycling walks. @type {string[]} */
@@ -109,12 +117,14 @@ export default class TerminalWall {
         this.hoveredId = null;
         /** Selected terminals (shown ones only) — what wall.group gathers. @type {Set<string>} */
         this.selection = new Set();
-        /** @type {import('./wallConfig.js').WallConfig} */
-        this.config = { ...WALL_CONFIG, ...config };
         /** @type {RelayState} */
         this.relay = { state: 'offline', reason: '' };
         this._listeners = new Set();
         this.store = new WallStore(relayPort);
+        /** The knobs as the wall was born with them — what `wall.config <knob> default` hands back. */
+        this._born = Object.freeze({ ...WALL_CONFIG, ...config });
+        /** @type {import('./wallConfig.js').WallConfig} */
+        this.config = { ...this._born, ...this._dialled() };
         this.viewport = new WallCamera(camera, gl.domElement);
 
         /** @type {WallContext} */
@@ -144,6 +154,7 @@ export default class TerminalWall {
         this.ctx.sceneSystems = new SceneSystems(scene, atlas, renderer);
         this.pointer = new WallPointer(this, this.viewport);
         this.keys = new WallKeys(this);
+        this.paper = new WallPaper(scene, renderer);
         const host = this.viewport.canvas.parentElement;
         this.names = new WallNames({
             atlas, host, camera: this.viewport,
@@ -197,6 +208,8 @@ export default class TerminalWall {
         this.barButtons = null;
         this.selectionOverlay.dispose();
         this.selectionOverlay = null;
+        this.paper.dispose();
+        this.paper = null;
         this.ctx.sceneSystems.dispose();  // hands the scene's hooks back to three
         this.ctx.sceneSystems = null;
     }
@@ -213,6 +226,7 @@ export default class TerminalWall {
             nameOf: (id) => this.nameOf(id), windowRect: (id) => this.windowRect(id),
         });
         this.groups.update(this.viewport.zoom, this.focusedId);
+        this.paper.update(this.viewport, this.config);
         this._tickChrome();
         this.ctx.sceneSystems.update(this.viewport.camera, size.height);
     }
@@ -421,14 +435,50 @@ export default class TerminalWall {
     // ── knobs, the sidebar and the status window ────────────────────────────
 
     /**
-     * Set one knob (already checked: wallConfig.checkConfig) and let the chrome redraw with it.
+     * Set one knob (already checked: wallConfig.checkConfig), remember it (per relay) and let the
+     * chrome redraw with it.
      * @template {keyof import('./wallConfig.js').WallConfig} K
      * @param {K} key @param {import('./wallConfig.js').WallConfig[K]} value @returns {import('./wallConfig.js').WallConfig[K]}
      */
     setConfig(key, value) {
         this.config[key] = value;
+        this.store.setConfig(key, value);
         this._emit();
         return value;
+    }
+
+    /**
+     * Hand a knob back to what the wall was born with, and forget the person's value.
+     * @param {keyof import('./wallConfig.js').WallConfig} key
+     */
+    resetConfig(key) {
+        this.config[key] = this._born[key];
+        this.store.clearConfig(key);
+        this._emit();
+        return this.config[key];
+    }
+
+    /**
+     * The knobs the person dialled (WallStore), each checked as wall.config checks it. One that no
+     * longer passes (an old value, a knob since renamed) is dropped from the store, loudly.
+     * @returns {Partial<import('./wallConfig.js').WallConfig>}
+     */
+    _dialled() {
+        const out = {};
+        for (const [key, value] of Object.entries(this.store.config())) {
+            try { out[key] = checkConfig(key, value); }
+            catch (e) {
+                console.warn(`[wall] the remembered knob ${key} = ${JSON.stringify(value)} is refused (${e.message}) — forgotten; it is born again`);
+                this.store.clearConfig(key);
+            }
+        }
+        return out;
+    }
+
+    /** @param {Partial<import('./WallStore.js').SettingsPanelState>} patch */
+    setSettingsPanel(patch) {
+        this.store.setSettingsPanel(patch);
+        this._emit();
     }
 
     /** @param {Partial<import('./WallStore.js').SidebarState>} patch */
@@ -447,6 +497,8 @@ export default class TerminalWall {
      * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null, selection: string[],
      *   sidebar: import('./WallStore.js').SidebarState,
      *   statusWindow: import('./WallStore.js').StatusWindowState,
+     *   settingsPanel: import('./WallStore.js').SettingsPanelState,
+     *   config: import('./wallConfig.js').WallConfig, dialled: string[],
      *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null}[],
      *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform', columns:number, gap:number, members:string[]}[] }}
      *   a group lists only its members on the wall
@@ -459,6 +511,9 @@ export default class TerminalWall {
             selection: [...this.selection],
             sidebar: this.store.sidebar(),
             statusWindow: this.store.statusWindow(),
+            settingsPanel: this.store.settingsPanel(),
+            config: { ...this.config },
+            dialled: Object.keys(this.store.config()),
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
                 const lines = g.readText();
@@ -614,7 +669,7 @@ export default class TerminalWall {
      */
     _terminalHost() {
         return {
-            theme: () => ({}),
+            theme: () => ({ ...TERMINAL_THEME }),
             place: (grid) => this._place(grid),
             landed: (id) => { this.focus(id, { frame: true }); return 'focused + framed'; },
             focus: (id) => ({ ok: this.focus(id) }),

@@ -1,32 +1,35 @@
 import { useState } from 'react';
 
 /**
- * The parts the wall's two side panels share — the sidebar (Sidebar.jsx) and the termd status window
- * (StatusWindow.jsx): a button that never takes the keyboard, the head's dock buttons, the floating
- * head's drag, and where each panel docks. Each panel floats (drag its head) or sticks to the left or
- * right edge; when both stick to the same edge the sidebar keeps the edge and the status window sits
- * beside it, and the topbar and hint line make room for whatever is docked.
+ * The parts the wall's side panels share — the sidebar (Sidebar.jsx), the termd status window
+ * (StatusWindow.jsx) and the settings panel (SettingsPanel.jsx): a button that never takes the
+ * keyboard, the head's dock buttons, the floating head's drag, and where each panel docks. Each panel
+ * floats (drag its head) or sticks to the left or right edge; panels stuck to the same edge sit side
+ * by side — the sidebar at the edge, then the status window, then the settings — and the topbar and
+ * hint line make room for whatever is docked.
  */
 
 /** A docked panel's width, CSS px. */
-export const DOCK_WIDTHS = Object.freeze({ sidebar: 248, status: 440 });
+export const DOCK_WIDTHS = Object.freeze({ sidebar: 248, status: 440, settings: 380 });
 
 /** The gap the topbar and hint keep from the canvas edge (or from a docked panel), CSS px. */
 const EDGE = 12;
 
 /**
  * Where the docked panels sit: each one's offset from its edge, and how far the topbar and hint stay
- * in from each edge.
- * @param {{ sidebar: { open: boolean, side: string }, statusWindow: { open: boolean, side: string } }} state
- * @returns {{ sidebar: number, status: number, inset: { left: number, right: number } }}
+ * in from each edge. (A state without a settings panel has it closed.)
+ * @param {{ sidebar: { open: boolean, side: string }, statusWindow: { open: boolean, side: string },
+ *           settingsPanel?: { open: boolean, side: string } }} state
+ * @returns {{ sidebar: number, status: number, settings: number, inset: { left: number, right: number } }}
  */
 export function dockLayout(state) {
   const docked = (p) => p.open && (p.side === 'left' || p.side === 'right');
   const used = { left: 0, right: 0 };
-  let sidebar = 0, status = 0;
+  let sidebar = 0, status = 0, settings = 0;
   if (docked(state.sidebar)) { sidebar = used[state.sidebar.side]; used[state.sidebar.side] += DOCK_WIDTHS.sidebar; }
   if (docked(state.statusWindow)) { status = used[state.statusWindow.side]; used[state.statusWindow.side] += DOCK_WIDTHS.status; }
-  return { sidebar, status, inset: { left: used.left + EDGE, right: used.right + EDGE } };
+  if (state.settingsPanel && docked(state.settingsPanel)) { settings = used[state.settingsPanel.side]; used[state.settingsPanel.side] += DOCK_WIDTHS.settings; }
+  return { sidebar, status, settings, inset: { left: used.left + EDGE, right: used.right + EDGE } };
 }
 
 /** A small button that never takes the keyboard (keys stay with the focused terminal). */

@@ -22,6 +22,9 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`); per-relay state in
   `WallStore`; `TerminalWall` is the composition root (start/stop symmetric). Gate:
   `bun tools/wall-e2e.mjs` (own relay, termd namespace and terminals; `--reuse-relay`).
+  The canvas is drafting paper (`WallPaper`; moves and resizes snap to it: `wallSnap`, chord+' /
+  Ctrl held mid-drag inverts), and every knob is searchable in the settings panel (chord+,; one
+  schema, `wallSettings`; dialled knobs persist per relay).
   Details: `docs/architecture/wall.md`.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.

@@ -1,10 +1,12 @@
-import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js';
+import { KNOBS, checkKnob } from './wallSettings.js';
 
 /**
  * wallConfig — the wall's knobs for hiding, closing, selecting and grouping, the termd status
- * window's and the keyboard's, born configurable: `new TerminalWall({ …, config })` overrides any of them, and
- * `wall.config <key> <value>` dials one live (a group's own columns and gap live on the group; these
- * are what a new group is born with).
+ * window's and the keyboard's, the canvas's (its colour, the drafting grid, snapping), born
+ * configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
+ * <value>` dials one live and remembers it per relay (WallStore; `wall.config <key> default` hands it
+ * back). A group's own columns and gap live on the group; these are what a new group is born with.
+ * What each knob is — its type, range, section and description — is wallSettings.KNOBS.
  */
 export const WALL_CONFIG = Object.freeze({
     /** How long the close button (or the close chord, X) must be held before the terminal is killed, ms. */
@@ -34,7 +36,30 @@ export const WALL_CONFIG = Object.freeze({
      * Read per key: a change takes the next key.
      */
     optionAsAlt: 'auto',
+
+    // ── the canvas: its colour, the drafting grid, snapping (wallSnap.js, WallPaper.js) ──
+    /** The canvas colour, sRGB. */
+    background: '#07080b',
+    /** Draw the grid. */
+    gridShow: true,
+    /** World units between minor lines — the snap step. */
+    gridMinor: 4,
+    /** Every Nth minor line is a major line (1: every line is major). */
+    gridMajorEvery: 5,
+    /** A level whose lines would be closer than this on screen (CSS px) is not drawn — a hard switch. */
+    gridMinPx: 6,
+    /** A grid line's width on screen, CSS px. */
+    gridLinePx: 1,
+    /** Minor line colour, sRGB. */
+    gridMinorColor: '#0f1219',
+    /** Major line colour, sRGB. */
+    gridMajorColor: '#181c26',
+    /** Moves and resizes snap to the grid (a held Ctrl / ⌃ inverts it for that drag: chord.js). */
+    snap: true,
 });
+
+for (const key of Object.keys(WALL_CONFIG)) if (!(key in KNOBS)) throw new Error(`[wall] knob '${key}' has no definition in wallSettings.KNOBS`);
+for (const key of Object.keys(KNOBS)) if (!(key in WALL_CONFIG)) throw new Error(`[wall] wallSettings.KNOBS defines '${key}', which WALL_CONFIG lacks`);
 
 /** @typedef {{ -readonly [K in keyof typeof WALL_CONFIG]: (typeof WALL_CONFIG)[K] }} WallConfig */
 
@@ -44,17 +69,5 @@ export const WALL_CONFIG = Object.freeze({
  */
 export function checkConfig(key, value) {
     if (!(key in WALL_CONFIG)) throw new Error(`unknown wall knob '${key}' (knobs: ${Object.keys(WALL_CONFIG).join(', ')})`);
-    if (key === 'groupLayout') {
-        if (value !== 'tile' && value !== 'freeform') throw new Error(`groupLayout is 'tile' or 'freeform', not '${value}'`);
-        return value;
-    }
-    if (key === 'optionAsAlt') {
-        const v = String(value);
-        if (!OPTION_AS_ALT.includes(v)) throw new Error(`optionAsAlt is ${OPTION_AS_ALT.join(', ')}, not '${value}'`);
-        return v;
-    }
-    const n = Number(value);
-    if (!Number.isFinite(n) || n < 0) throw new Error(`${key} takes a number ≥ 0, not '${value}'`);
-    if ((key === 'groupColumns' || key === 'errorsShown') && !Number.isInteger(n)) throw new Error(`${key} takes a whole number, not '${value}'`);
-    return n;
+    return checkKnob(key, KNOBS[key], value);
 }

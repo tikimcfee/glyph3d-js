@@ -22,9 +22,9 @@ const layoutText = (g) => (g.layout === 'tile' ? `tile · ${g.columns} col${g.co
  * (marked), under its group: with no query, as the tree (each group, then its members, then the
  * terminals in no group); typing filters terminals (by name, id, group and last screen line) and
  * groups (by name), best first. ↑/↓ choose, Enter: a terminal is revealed (shown if hidden, focused,
- * framed), a group framed. Actions ride along — new terminal, fit all, the sidebar, and for the
- * focused terminal and the selection: hide, close, rename, group, add to / take out of a group,
- * ungroup, tile columns, layout. RENAME mode edits the name of the terminal or group that rename
+ * framed), a group framed. Actions ride along — new terminal, fit all, the sidebar, the settings,
+ * snapping and the grid, and for the focused terminal and the selection: hide, close, rename, group,
+ * add to / take out of a group, ungroup, tile columns, layout. RENAME mode edits the name of the terminal or group that rename
  * began on (focus may move meanwhile) — Enter saves, an empty name goes back to the default; if it
  * goes away, rename mode ends. Every choice runs a wall verb.
  */
@@ -83,6 +83,9 @@ export default function Palette({ wall, state, onClose }) {
       { id: 'spawn', label: '+ new terminal', detail: chordLabel(['↵'], { shift: true }), run: () => { wall.spawn(); onClose(); } },
       { id: 'fit', label: 'fit all', detail: chordLabel(['0']), run: () => { wall.fitAll(); onClose(); } },
       { id: 'sidebar', label: state.sidebar.open ? 'close the sidebar' : 'open the sidebar', detail: chordLabel(['B']), run: run(['wall.sidebar', 'toggle']) },
+      { id: 'settings', label: state.settingsPanel.open ? 'close the settings' : 'open the settings', detail: chordLabel([',']), run: run(['wall.settings', 'toggle']) },
+      { id: 'snap', label: state.config.snap ? 'stop snapping to the grid' : 'snap to the grid', detail: chordLabel(["'"]), run: run(['wall.snap', 'toggle']) },
+      { id: 'grid', label: state.config.gridShow ? 'hide the grid' : 'show the grid', detail: chordLabel(["'"], { shift: true }), run: run(['wall.grid', 'toggle']) },
       sel.length > 0 && { id: 'group-sel', label: `group the selection (${sel.length})`, detail: chordLabel(['G']), run: run(['wall.group']) },
       ...(sel.length > 0 ? state.groups.map((g) => ({ id: `add-sel:${g.id}`, label: `add the selection to "${g.name}"`, detail: g.id, run: run(['wall.group.add', g.id, ...sel]) })) : []),
       focused && {
