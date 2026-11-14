@@ -3,10 +3,10 @@
  *
  *   bun tools/wall-e2e.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay] [--shots DIR]
  *
- * --shots DIR saves screenshots of the status window (as it reads normally, restarting and
- * unreachable), the bar buttons, a close being held, a lasso in progress, the selection, a tiled
- * group, a freeform group, the sidebar docked left, and the sidebar and status window docked on one
- * edge (for a person to judge the look; the checks never read them).
+ * --shots DIR saves screenshots of the coloured words, the status window (as it reads normally,
+ * restarting and unreachable), the bar buttons, a close being held, a lasso in progress, the
+ * selection, a tiled group, a freeform group, the sidebar docked left, and the sidebar and status
+ * window docked on one edge (for a person to judge the look; the checks never read them).
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
  * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` in the termd namespace `glyph-wall-e2e`, no
@@ -17,7 +17,9 @@
  * started and that namespace's termd daemon.
  * On macOS the browser launches headed (headless is a software renderer there) — a window opens.
  *
- * Covers: spawn, typing, Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
+ * Covers: spawn, typing, coloured text in the page's pixels (white, bold default or 38;2, is near
+ * white; magenta is magenta; the default grey shows over the panel — each read where the grid's own
+ * metrics and pose put its cells), Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
  * browser's key events in the program's modes) and a paste bracketed as it asked, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
  * border resize, title-bar drag vs body press, ⌥-drag on the body, top-edge resize, names (shell
  * title → name, palette rename, clear, a long name whole in its bar or handed to its map label, never
@@ -125,6 +127,91 @@ try {
     await page.keyboard.press('Shift+Enter');
     const shiftOk = !!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'shift-2'), A, 8000);
     ok(shiftOk, `Shift+Enter runs the line in a plain shell${shiftOk ? '' : ` (screen: ${await lastLines(A)})`}`);
+
+    // ── coloured text reaches the pixels ────────────────────────────────────
+    // Pure white is the colour lane's top value (0xFFFFFF: bold default text, the default grey
+    // brightened; an explicit 38;2;255;255;255, as Claude Code's ● bullet). A shader that decodes
+    // the lane with int(x + 0.5) rounds it to 0x1000000 — black ink on the dark panel. Magenta
+    // (red 255, blue ≥ 128) rounds to blue the same way. Each word gets its own line; its cells'
+    // screen rect comes from the grid's own metrics and pose, and the page's pixels there are read.
+    {
+        const words = [
+            { word: 'BOLDWHITE', sgr: '1', want: 'white' },
+            { word: 'RGBWHITE', sgr: '38;2;255;255;255', want: 'white' },
+            { word: 'RGBMAGENTA', sgr: '38;2;255;0;255', want: 'magenta' },
+            { word: 'PLAINGREY', sgr: null, want: 'ink' },
+        ];
+        const fmt = words.map(({ word, sgr }) => (sgr ? `\\033[${sgr}m${word}\\033[0m` : word)).join('\\n');
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, `clear; printf '${fmt}\\n'\r`]);
+        const shown = await until(([i, ws]) => { const l = window.__wall.terminal(i).readText().map((x) => x.trim()); return ws.every((w) => l.includes(w)); }, [A, words.map((w) => w.word)], 8000);
+        ok(!!shown, `the coloured words are on ${A}'s screen${shown ? '' : ` (screen: ${await lastLines(A)})`}`);
+        if (shown) {
+            await W((i) => window.__wall.focus(i, { frame: true }), A);
+            await until(() => !window.__wall.viewport.moving, null, 8000);
+            // Drawn: the frame after the text applies its screen and asks the atlas for new glyphs; once
+            // their outlines land, two more frames upload and draw them.
+            await W(async () => {
+                const frames = (n) => new Promise((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
+                await frames(2);
+                await window.__wall.ctx.atlas._live?.whenIdle();
+                await frames(2);
+            });
+            // Each word's cells and, as the panel's own colour, ten blank cells two to the right of it.
+            const cells = await W(([i, ws]) => {
+                const w = window.__wall, g = w.terminal(i), m = g._metrics, v = w.viewport, cr = v.canvas.getBoundingClientRect();
+                const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing, p = g.position, s = g.scale;
+                const lines = g.readText();
+                const box = (row, c0, n) => {
+                    const b = v.toScreenBox({
+                        minX: p.x + c0 * sx * s.x, maxX: p.x + ((c0 + n - 1) * sx + m.charWidth) * s.x,
+                        minY: p.y + (-row * sy - m.charHeight / 2) * s.y, maxY: p.y + (-row * sy + m.charHeight / 2) * s.y,
+                    });
+                    return { l: cr.left + b.left, r: cr.left + b.right, t: cr.top + b.top, b: cr.top + b.bottom };
+                };
+                return ws.map((word) => {
+                    const row = lines.findIndex((x) => x.trim() === word), col = lines[row].indexOf(word);
+                    return { word, ink: box(row, col, word.length), panel: box(row, col + word.length + 2, 10) };
+                });
+            }, [A, words.map((w) => w.word)]);
+            const all = cells.flatMap((c) => [c.ink, c.panel]);
+            const clip = { x: Math.floor(Math.min(...all.map((r) => r.l))), y: Math.floor(Math.min(...all.map((r) => r.t))) };
+            clip.width = Math.ceil(Math.max(...all.map((r) => r.r))) - clip.x;
+            clip.height = Math.ceil(Math.max(...all.map((r) => r.b))) - clip.y;
+            const png = await page.screenshot({ clip, scale: 'css' });
+            // Per rect: its brightest pixel (by channel sum) and how many pixels it read.
+            const px = await W(async ([b64, o, rects]) => {
+                const img = new Image();
+                img.src = `data:image/png;base64,${b64}`;
+                await img.decode();
+                const cv = new OffscreenCanvas(img.width, img.height), cx = cv.getContext('2d');
+                cx.drawImage(img, 0, 0);
+                const d = cx.getImageData(0, 0, img.width, img.height).data;
+                return rects.map((r) => {
+                    const x0 = Math.max(0, Math.round(r.l - o.x)), x1 = Math.min(img.width, Math.round(r.r - o.x));
+                    const y0 = Math.max(0, Math.round(r.t - o.y)), y1 = Math.min(img.height, Math.round(r.b - o.y));
+                    let best = [0, 0, 0], n = 0;
+                    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+                        const k = (y * img.width + x) * 4, c = [d[k], d[k + 1], d[k + 2]];
+                        if (c[0] + c[1] + c[2] > best[0] + best[1] + best[2]) best = c;
+                        n++;
+                    }
+                    return { best, n };
+                });
+            }, [png.toString('base64'), clip, all]);
+            const rgb = (c) => `rgb(${c.join(',')})`;
+            words.forEach(({ word, want }, k) => {
+                const ink = px[2 * k], panel = px[2 * k + 1];
+                const [r, gr, b] = ink.best, bg = panel.best;
+                const lift = (r + gr + b) - (bg[0] + bg[1] + bg[2]);
+                const pass = want === 'white' ? Math.min(r, gr, b) >= 200
+                    : want === 'magenta' ? r >= 200 && b >= 200 && gr <= 0.4 * Math.min(r, b)
+                        : lift >= 240;
+                const says = want === 'white' ? 'is near white' : want === 'magenta' ? 'reads magenta' : 'shows over the panel';
+                ok(pass && ink.n > 0, `${word}'s ink ${says}: brightest ${rgb(ink.best)} over ${ink.n} px, the panel beside it ${rgb(bg)}`);
+            });
+            await shot('coloured-text');
+        }
+    }
 
     // ── key events and paste: termd encodes them in the program's own modes ──
     // A program that pushes Kitty keyboard flags (CSI > 1 u) and bracketed paste, then echoes in hex

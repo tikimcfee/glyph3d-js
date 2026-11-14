@@ -340,7 +340,7 @@ export const CHECKS = [
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
-        compare: 'the wall end to end in a real-GPU browser: spawn, typing (Enter runs the line), Shift+Enter running a line in a plain shell and into a Kitty-keyboard program as CSI 13;2u and a paste bracketed as it asked, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal, the sidebar and status window docked on one edge, a status row revealing a hidden terminal',
+        compare: 'the wall end to end in a real-GPU browser: spawn, typing (Enter runs the line), coloured text read from the page\'s pixels at its cells (pure white, bold or 38;2, is near white; magenta is magenta; the default grey shows), Shift+Enter running a line in a plain shell and into a Kitty-keyboard program as CSI 13;2u and a paste bracketed as it asked, cycling, resize, drag, names, scrollback, zoom, map labels, the core terminal verbs, termd\'s status window and its restarting / unreachable notices across a brain restart, hover buttons, hide/show across a reload, hold-to-close, lasso + groups (tile, header drag), the sidebar, the palette revealing a hidden terminal, the sidebar and status window docked on one edge, a status row revealing a hidden terminal',
         blind: 'feel (latency, smoothness); real keyboards and trackpads',
     },
     {
