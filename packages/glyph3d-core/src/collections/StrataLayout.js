@@ -45,6 +45,7 @@ export const STRATA_PARAMS = { ...STRATA_DEFAULTS };
 
 /** Active instances, so a param change can re-apply to every on-screen strata view. */
 const _activeInstances = new Set();
+const _linear = new THREE.Color();   // scratch: a box colour in the working space
 
 /** Push a single live dial. boxOpacity rides a material uniform (instant, no re-arrange);
  *  everything else re-derives positions/boxes on the active grids. */
@@ -265,7 +266,8 @@ export class StrataLayout {
             const x1 = bb.max.x + pad, y1 = bb.max.y + pad;
             const z = b.z;
             const c = DEPTH_COLORS[b.depth % DEPTH_COLORS.length];
-            const cr = c[0] * bright, cg = c[1] * bright, cb = c[2] * bright;
+            // DEPTH_COLORS are sRGB; three reads a vertex-colour attribute as linear.
+            const { r: cr, g: cg, b: cb } = _linear.setRGB(c[0] * bright, c[1] * bright, c[2] * bright, THREE.SRGBColorSpace);
             // edges: bottom, right, top, left
             const e = [x0,y0, x1,y0,  x1,y0, x1,y1,  x1,y1, x0,y1,  x0,y1, x0,y0];
             for (let k = 0; k < 8; k++) {

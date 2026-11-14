@@ -41,11 +41,14 @@ export const CLOUD_VIEW_DEFAULTS = {
 export const CLOUD_LAYERS = ['hand', 'arm', 'fly', 'other', 'bg', 'palm', 'hole', 'tips', 'fit', 'raw', 'vision', 'normal', 'sensor'];
 const LAYER_DEFAULTS = { hand: true, arm: true, fly: true, other: true, bg: false, palm: true, hole: true, tips: true, fit: true, raw: false, vision: false, normal: true, sensor: true };
 
+/** A point class's colour, given in sRGB, as the vertex-colour attribute holds it (linear). */
+const vertexColor = (r, g, b) => new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace).toArray();
 const COLORS = {
-    [CLS.HAND]: [0.35, 0.75, 0.95], [CLS.ARM]: [0.62, 0.45, 0.85], [CLS.FLY]: [0.95, 0.3, 0.25],
-    [CLS.OTHER]: [0.95, 0.6, 0.2], [CLS.BG]: [0.3, 0.33, 0.4], [CLS.NONE]: [0, 0, 0],
-    palm: [1.0, 0.85, 0.3], hole: [1.0, 0.3, 0.85],
+    [CLS.HAND]: vertexColor(0.35, 0.75, 0.95), [CLS.ARM]: vertexColor(0.62, 0.45, 0.85), [CLS.FLY]: vertexColor(0.95, 0.3, 0.25),
+    [CLS.OTHER]: vertexColor(0.95, 0.6, 0.2), [CLS.BG]: vertexColor(0.3, 0.33, 0.4), [CLS.NONE]: vertexColor(0, 0, 0),
+    palm: vertexColor(1.0, 0.85, 0.3), hole: vertexColor(1.0, 0.3, 0.85),
 };
+const TIP_COLORS = { clipped: vertexColor(0.5, 0.5, 0.5), joint: vertexColor(0.2, 1, 0.6), free: vertexColor(1, 1, 1) };
 const CLS_LAYER = { [CLS.HAND]: 'hand', [CLS.ARM]: 'arm', [CLS.FLY]: 'fly', [CLS.OTHER]: 'other', [CLS.BG]: 'bg' };
 const SOURCE_COLOR = { cloud: 0x33ff99, vision: 0x5599ff, prior: 0x888888 };
 const BACKDROP = 0x0b0e14;
@@ -282,9 +285,9 @@ export default class CloudView {
                 let rgb = COLORS[c];
                 if (mark[i] === 1) rgb = COLORS.palm;
                 else if (c === CLS.HAND && this.place.colorBy === 'geo' && geo && maxGeo > 0 && geo[i] !== Infinity) {
-                    this._c.setHSL(0.66 * (1 - geo[i] / maxGeo), 0.9, 0.55); rgb = [this._c.r, this._c.g, this._c.b];
+                    this._c.setHSL(0.66 * (1 - geo[i] / maxGeo), 0.9, 0.55, THREE.SRGBColorSpace); rgb = [this._c.r, this._c.g, this._c.b];
                 } else if (this.place.colorBy === 'depth' && c !== CLS.BG) {
-                    this._c.setHSL(Math.max(0, Math.min(0.8, (xyz[3 * i + 2] - 0.1) * 2)), 0.9, 0.55); rgb = [this._c.r, this._c.g, this._c.b];
+                    this._c.setHSL(Math.max(0, Math.min(0.8, (xyz[3 * i + 2] - 0.1) * 2)), 0.9, 0.55, THREE.SRGBColorSpace); rgb = [this._c.r, this._c.g, this._c.b];
                 }
                 put(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2], rgb[0], rgb[1], rgb[2]);
             }
@@ -310,7 +313,7 @@ export default class CloudView {
         const pos = this.tipGeom.attributes.position.array, col = this.tipGeom.attributes.color.array;
         tips.forEach((t, k) => {
             pos[3 * k] = t.p.x; pos[3 * k + 1] = t.p.y; pos[3 * k + 2] = t.p.z;
-            const rgb = t.clipped ? [0.5, 0.5, 0.5] : t.joint != null ? [0.2, 1, 0.6] : [1, 1, 1];
+            const rgb = t.clipped ? TIP_COLORS.clipped : t.joint != null ? TIP_COLORS.joint : TIP_COLORS.free;
             col[3 * k] = rgb[0]; col[3 * k + 1] = rgb[1]; col[3 * k + 2] = rgb[2];
         });
         this.tipGeom.setDrawRange(0, tips.length);

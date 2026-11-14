@@ -119,7 +119,8 @@ try {
                 }
             }
 
-            const lin = new Float64Array(256).map((_, k) => Math.pow(k / 255, 2.2));
+            // the canvas holds sRGB: a byte's light is its sRGB decode
+            const lin = new Float64Array(256).map((_, k) => { const c = k / 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); });
             const meanLin = (px, m = band) => {
                 let s = 0, n = 0;
                 for (let i = 0; i < m.length; i++) if (m[i]) { const o = i * 4; s += lin[px[o]] + lin[px[o + 1]] + lin[px[o + 2]]; n++; }

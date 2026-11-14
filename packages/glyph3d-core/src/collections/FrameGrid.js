@@ -224,7 +224,7 @@ class FrameGrid extends FramedGlyphField {
     }
 
     /**
-     * Decode raw image bytes → a WebGPU-ready texture (filterable RGBA, SRGB, no mipmaps). The
+     * Decode raw image bytes → a frame texture (filterable RGBA, sRGB-tagged, no mipmaps). The
      * single home for "image bytes → a frame texture", shared by file.open's image path AND the
      * agent trail's image snapshots — the decode dials live in ONE place. Returns the texture plus
      * the source pixel dims (for aspect + registry type metadata).
@@ -239,7 +239,7 @@ class FrameGrid extends FramedGlyphField {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        texture.colorSpace = THREE.SRGBColorSpace;   // matches the VideoTexture capture path
+        texture.colorSpace = THREE.SRGBColorSpace;   // image bytes are sRGB; the sampler decodes
         texture.needsUpdate = true;
         return { texture, width: bitmap.width, height: bitmap.height };
     }

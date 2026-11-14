@@ -135,7 +135,7 @@ void main() {
     vec3 finalColor = mix(vFill.rgb, borderCol, rim);
     float finalAlpha = max(vFill.a, rim);
 
-    fragColor = vec4(finalColor, finalAlpha);
+    fragColor = linearToOutputTexel(vec4(finalColor, finalAlpha));
 }
 `;
 

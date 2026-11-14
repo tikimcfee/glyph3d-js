@@ -295,8 +295,9 @@ export default class ContentTreeLabels {
 
         const maxDepth = items.reduce((m, it) => Math.max(m, it.depth), 1);
         const cA = new THREE.Color(o.colorA), cB = new THREE.Color(o.colorB), c = new THREE.Color();
-        const pc = new THREE.Color(o.plateColor);
-        const plateFill = { color: { r: pc.r, g: pc.g, b: pc.b }, opacity: o.plateOpacity };
+        // Glyph lanes take sRGB: a THREE.Color (linear inside) is read back out in sRGB.
+        const srgb = (col) => col.getRGB({ r: 0, g: 0, b: 0 }, THREE.SRGBColorSpace);
+        const plateFill = { color: srgb(new THREE.Color(o.plateColor)), opacity: o.plateOpacity };
         const rowH = cm.charHeight;
         const batch = [];
         for (const it of items) {
@@ -308,8 +309,7 @@ export default class ContentTreeLabels {
             field.setGroupOffset(it.groupId, { x: it.x, y: it.y, z: it.z });
             field.setGroupAlpha(it.groupId, o.opacity);
             const t = maxDepth > 1 ? (it.depth - 1) / (maxDepth - 1) : 0;
-            c.lerpColors(cA, cB, t);
-            const color = { r: c.r, g: c.g, b: c.b };
+            const color = srgb(c.lerpColors(cA, cB, t));   // the markers' gradient (ContentTreeMarkers), as they mix it
             if (o.plate) {
                 // The backplate: one fill-cell quad in the SAME group, sized over the text
                 // block (mono advance ≈ charW — the label font is monospace), padded, pushed

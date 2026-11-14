@@ -7,6 +7,7 @@ const MAX_CONNECTIONS = 256;
 const VERTS_PER_CONNECTION = 6; // shaft(2) + arrowL(2) + arrowR(2)
 const ARROW_HALF_ANGLE = Math.PI / 7;  // ~25 degrees
 const ARROW_LENGTH_RATIO = 0.12;       // arrowhead = 12% of connection length
+const _linear = new THREE.Color();     // scratch: a connection's sRGB colour in the working space
 
 /**
  * @typedef {{ object: import('three').Object3D, local?: { x, y, z } }} Anchor
@@ -326,8 +327,9 @@ export default class ConnectionRenderer {
         p[ar + 4] = to.y + arrowLen * (-uy * cosA - py * sinA);
         p[ar + 5] = to.z + arrowLen * (-uz * cosA - pz * sinA);
 
-        // Colors: all 6 vertices same color
-        const { r, g, b } = color;
+        // Colors: all 6 vertices same color. `color` is plain sRGB; three reads a vertex-colour
+        // attribute as linear.
+        const { r, g, b } = _linear.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
         for (let v = 0; v < VERTS_PER_CONNECTION; v++) {
             c[base + v * 3]     = r;
             c[base + v * 3 + 1] = g;

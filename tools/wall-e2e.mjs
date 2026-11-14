@@ -19,7 +19,9 @@
  *
  * Covers: spawn, typing, coloured text in the page's pixels (white, bold default or 38;2, is near
  * white; magenta is magenta; the default grey shows over the panel — each read where the grid's own
- * metrics and pose put its cells), Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
+ * metrics and pose put its cells), the specified colours themselves (CLAUDE.md "Colour": solid runs
+ * of the default grey, a true colour, a 256-palette colour, pure white and a cell background, the
+ * terminal's panel and the focused title bar's strip, each within ±2 a channel), Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
  * browser's key events in the program's modes) and a paste bracketed as it asked, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
  * border resize, title-bar drag vs body press, ⌥-drag on the body, top-edge resize, names (shell
  * title → name, palette rename, clear, a long name whole in its bar or handed to its map label, never
@@ -51,6 +53,7 @@ import { privateRelay } from './lib/wall-relay.mjs';
 import { dialRelay } from './lib/relay.mjs';
 import { brainPid, termdPid } from './lib/termd.mjs';
 import { tileLayout, BAR_ROOM } from '../wall/wallLayout.js';
+import { RESET_FG, ansi256toRGB } from '../packages/glyph3d-core/src/collections/terminalPalette.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL_ = arg('--url', 'http://localhost:5180/');
@@ -134,6 +137,12 @@ try {
     // the lane with int(x + 0.5) rounds it to 0x1000000 — black ink on the dark panel. Magenta
     // (red 255, blue ≥ 128) rounds to blue the same way. Each word gets its own line; its cells'
     // screen rect comes from the grid's own metrics and pose, and the page's pixels there are read.
+    //
+    // Then the colours themselves (CLAUDE.md "Colour"): what a program or a setting specifies is what
+    // the canvas holds. A run of █ is solid ink and a run of background-coloured spaces a solid fill,
+    // so the median pixel inside each run must be the specified sRGB colour to within ±2 a channel —
+    // the default grey, a mid-tone true colour, a 256-palette colour, pure white, an explicit cell
+    // background — and so must the terminal's own panel and its title bar's strip.
     {
         const words = [
             { word: 'BOLDWHITE', sgr: '1', want: 'white' },
@@ -141,12 +150,26 @@ try {
             { word: 'RGBMAGENTA', sgr: '38;2;255;0;255', want: 'magenta' },
             { word: 'PLAINGREY', sgr: null, want: 'ink' },
         ];
-        const fmt = words.map(({ word, sgr }) => (sgr ? `\\033[${sgr}m${word}\\033[0m` : word)).join('\\n');
+        const bytes = (c) => [Math.round(c.r * 255), Math.round(c.g * 255), Math.round(c.b * 255)];
+        const RUN = 8;   // cells per solid run; the outer two are left out of the read
+        const runs = [
+            { label: 'INKGREY', sgr: null, cell: '█', want: bytes(RESET_FG), what: 'the default text grey' },
+            { label: 'INKRGB', sgr: '38;2;128;64;200', cell: '█', want: [128, 64, 200], what: 'true colour 38;2;128;64;200' },
+            { label: 'INKPAL', sgr: '38;5;67', cell: '█', want: bytes(ansi256toRGB(67)), what: '256-palette colour 67' },
+            { label: 'INKWHITE', sgr: '38;2;255;255;255', cell: '█', want: [255, 255, 255], what: 'pure white' },
+            { label: 'CELLBG', sgr: '48;2;40;90;160', cell: ' ', want: [40, 90, 160], what: 'cell background 48;2;40;90;160' },
+        ];
+        const fmt = [
+            ...words.map(({ word, sgr }) => (sgr ? `\\033[${sgr}m${word}\\033[0m` : word)),
+            ...runs.map(({ label, sgr, cell }) => `${label} ${sgr ? `\\033[${sgr}m` : ''}${cell.repeat(RUN)}\\033[0m`),
+        ].join('\\n');
         await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, `clear; printf '${fmt}\\n'\r`]);
-        const shown = await until(([i, ws]) => { const l = window.__wall.terminal(i).readText().map((x) => x.trim()); return ws.every((w) => l.includes(w)); }, [A, words.map((w) => w.word)], 8000);
-        ok(!!shown, `the coloured words are on ${A}'s screen${shown ? '' : ` (screen: ${await lastLines(A)})`}`);
+        const marks = [...words.map((w) => w.word), ...runs.map((r) => r.label)];
+        const shown = await until(([i, ws]) => { const l = window.__wall.terminal(i).readText().map((x) => x.trim().split(' ')[0]); return ws.every((w) => l.includes(w)); }, [A, marks], 8000);
+        ok(!!shown, `the coloured words and runs are on ${A}'s screen${shown ? '' : ` (screen: ${await lastLines(A)})`}`);
         if (shown) {
             await W((i) => window.__wall.focus(i, { frame: true }), A);
+            await page.mouse.move(2, 2);   // off every bar: a hovered bar shows its buttons
             await until(() => !window.__wall.viewport.moving, null, 8000);
             // Drawn: the frame after the text applies its screen and asks the atlas for new glyphs; once
             // their outlines land, two more frames upload and draw them.
@@ -156,29 +179,42 @@ try {
                 await window.__wall.ctx.atlas._live?.whenIdle();
                 await frames(2);
             });
-            // Each word's cells and, as the panel's own colour, ten blank cells two to the right of it.
-            const cells = await W(([i, ws]) => {
+            // Each word's cells and, as the panel's own colour, ten blank cells two to the right of
+            // it; each run's inner cells, the middle half of their height; a stretch of the title
+            // bar's strip right of its name; and what the panel and the strip are specified as.
+            const cells = await W(([i, ws, rs, RUN]) => {
                 const w = window.__wall, g = w.terminal(i), m = g._metrics, v = w.viewport, cr = v.canvas.getBoundingClientRect();
                 const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing, p = g.position, s = g.scale;
                 const lines = g.readText();
-                const box = (row, c0, n) => {
-                    const b = v.toScreenBox({
-                        minX: p.x + c0 * sx * s.x, maxX: p.x + ((c0 + n - 1) * sx + m.charWidth) * s.x,
-                        minY: p.y + (-row * sy - m.charHeight / 2) * s.y, maxY: p.y + (-row * sy + m.charHeight / 2) * s.y,
-                    });
-                    return { l: cr.left + b.left, r: cr.left + b.right, t: cr.top + b.top, b: cr.top + b.bottom };
+                const screen = (b) => ({ l: cr.left + b.left, r: cr.left + b.right, t: cr.top + b.top, b: cr.top + b.bottom });
+                const box = (row, c0, n, inset = 0) => screen(v.toScreenBox({
+                    minX: p.x + c0 * sx * s.x, maxX: p.x + ((c0 + n - 1) * sx + m.charWidth) * s.x,
+                    minY: p.y + (-row * sy - m.charHeight / 2 * (1 - inset)) * s.y, maxY: p.y + (-row * sy + m.charHeight / 2 * (1 - inset)) * s.y,
+                }));
+                const hexBytes = (c) => { const h = typeof c === 'string' ? parseInt(c.replace('#', ''), 16) : c; return [(h >> 16) & 255, (h >> 8) & 255, h & 255]; };
+                const bar = w.names._bars.get(i);
+                const win = screen(v.toScreenBox(w.windowRect(i))), body = screen(v.toScreenBox(w.terminalRect(i)));
+                const bw = win.r - win.l, bh = body.t - win.t;
+                return {
+                    words: ws.map((word) => {
+                        const row = lines.findIndex((x) => x.trim() === word), col = lines[row].indexOf(word);
+                        return { ink: box(row, col, word.length), panel: box(row, col + word.length + 2, 10) };
+                    }),
+                    runs: rs.map((label) => box(lines.findIndex((x) => x.startsWith(`${label} `)), label.length + 2, RUN - 2, 0.5)),
+                    panel: { rect: box(lines.findIndex((x) => x.trim() === ws[0]), ws[0].length + 2, 10, 0.5), want: hexBytes(g._bgColor) },
+                    bar: {
+                        rect: { l: win.l + bw * 0.6, r: win.l + bw * 0.8, t: win.t + bh * 0.25, b: win.t + bh * 0.75 },
+                        want: hexBytes(bar.style.fill.focused), name: bar.label.text, px: bh,
+                    },
                 };
-                return ws.map((word) => {
-                    const row = lines.findIndex((x) => x.trim() === word), col = lines[row].indexOf(word);
-                    return { word, ink: box(row, col, word.length), panel: box(row, col + word.length + 2, 10) };
-                });
-            }, [A, words.map((w) => w.word)]);
-            const all = cells.flatMap((c) => [c.ink, c.panel]);
+            }, [A, words.map((w) => w.word), runs.map((r) => r.label), RUN]);
+            const all = [...cells.words.flatMap((c) => [c.ink, c.panel]), ...cells.runs, cells.panel.rect, cells.bar.rect];
             const clip = { x: Math.floor(Math.min(...all.map((r) => r.l))), y: Math.floor(Math.min(...all.map((r) => r.t))) };
             clip.width = Math.ceil(Math.max(...all.map((r) => r.r))) - clip.x;
             clip.height = Math.ceil(Math.max(...all.map((r) => r.b))) - clip.y;
             const png = await page.screenshot({ clip, scale: 'css' });
-            // Per rect: its brightest pixel (by channel sum) and how many pixels it read.
+            // Per rect: its brightest pixel (by channel sum), its median pixel (per channel) and how
+            // many pixels it read.
             const px = await W(async ([b64, o, rects]) => {
                 const img = new Image();
                 img.src = `data:image/png;base64,${b64}`;
@@ -190,12 +226,15 @@ try {
                     const x0 = Math.max(0, Math.round(r.l - o.x)), x1 = Math.min(img.width, Math.round(r.r - o.x));
                     const y0 = Math.max(0, Math.round(r.t - o.y)), y1 = Math.min(img.height, Math.round(r.b - o.y));
                     let best = [0, 0, 0], n = 0;
+                    const ch = [[], [], []];
                     for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
                         const k = (y * img.width + x) * 4, c = [d[k], d[k + 1], d[k + 2]];
                         if (c[0] + c[1] + c[2] > best[0] + best[1] + best[2]) best = c;
+                        for (let j = 0; j < 3; j++) ch[j].push(c[j]);
                         n++;
                     }
-                    return { best, n };
+                    const med = ch.map((a) => (a.sort((p, q) => p - q), a.length ? a[a.length >> 1] : -1));
+                    return { best, med, n };
                 });
             }, [png.toString('base64'), clip, all]);
             const rgb = (c) => `rgb(${c.join(',')})`;
@@ -209,6 +248,16 @@ try {
                 const says = want === 'white' ? 'is near white' : want === 'magenta' ? 'reads magenta' : 'shows over the panel';
                 ok(pass && ink.n > 0, `${word}'s ink ${says}: brightest ${rgb(ink.best)} over ${ink.n} px, the panel beside it ${rgb(bg)}`);
             });
+            /** The specified colour is on the canvas: the rect's median pixel within ±2 a channel. */
+            const TRUE_WITHIN = 2;
+            const isTrue = (read, want, what) => {
+                const off = Math.max(...want.map((v, j) => Math.abs(read.med[j] - v)));
+                ok(read.n > 0 && off <= TRUE_WITHIN, `${what} draws as specified: ${rgb(want)} reads ${rgb(read.med)} (off by ${off}, ±${TRUE_WITHIN} allowed; median of ${read.n} px)`);
+            };
+            const first = 2 * words.length;
+            runs.forEach(({ want, what }, k) => isTrue(px[first + k], want, what));
+            isTrue(px[first + runs.length], cells.panel.want, `the terminal panel's background`);
+            isTrue(px[first + runs.length + 1], cells.bar.want, `the focused title bar's strip (${cells.bar.px.toFixed(0)} px tall, name "${cells.bar.name}")`);
             await shot('coloured-text');
         }
     }

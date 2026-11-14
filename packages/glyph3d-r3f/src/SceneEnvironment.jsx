@@ -43,6 +43,7 @@ void main() {
     float alpha = max(lines, max(xAxis, zAxis)) * fade;
     if (alpha <= 0.0) discard;
     gl_FragColor = vec4(rgb, alpha);
+    #include <colorspace_fragment>
 }
 `;
 

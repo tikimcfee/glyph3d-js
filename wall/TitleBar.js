@@ -19,17 +19,7 @@ const TEXT_INSET = 0.45;
 /** A name that went to the map label comes back only once it fits this much above the floor —
  *  hysteresis, so a zoom resting at the floor can't flip it back and forth. */
 const FIT_HYSTERESIS = 1.1;
-/**
- * The strip colour AS DISPLAYED. The panel material is a raw ShaderMaterial: it writes its fill
- * uniform without three's output colour conversion, while `new THREE.Color(hex)` converts sRGB →
- * linear — so a hex fill displays darker than its hex (true engine-wide). Handing it a colour
- * already marked linear, holding the display values, writes exactly what's meant.
- * @param {number} hex @returns {THREE.Color}
- */
-export function displayColor(hex) {
-    return new THREE.Color().setRGB(((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255, THREE.LinearSRGBColorSpace);
-}
-/** A terminal's bar: the strip and name colours, idle and focused (hex, as displayed). */
+/** A terminal's bar: the strip and name colours, idle and focused (sRGB hex). */
 const TERMINAL_BAR_STYLE = Object.freeze({
     fill: Object.freeze({ idle: 0x1f2633, focused: 0x16402c }),
     text: Object.freeze({ idle: 0xc4ccd8, focused: 0x8ef0b8 }),
@@ -63,13 +53,13 @@ export default class TitleBar extends THREE.Object3D {
         this._maxWorldHeight = maxWorldHeight;
         this._minTextPx = minTextPx;
         this._reserve = reserveBars;
-        this._fill = { idle: displayColor(style.fill.idle), focused: displayColor(style.fill.focused) };
-        this._text = style.text;
-        this._panel = createPanelMaterial({ color: this._fill.idle, opacity: 1, depthWrite: true });
+        /** The strip and name colours this bar wears (sRGB hex, idle and focused). */
+        this.style = style;
+        this._panel = createPanelMaterial({ color: style.fill.idle, opacity: 1, depthWrite: true });
         this.strip = enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._panel.material));
         this.strip.renderOrder = RENDER_ORDER.GRID_BACKGROUND;
         this.add(this.strip);
-        this.label = new FieldLabel({ atlas, text: '', lineHeight: 1, textColor: this._text.idle });
+        this.label = new FieldLabel({ atlas, text: '', lineHeight: 1, textColor: style.text.idle });
         this.add(this.label);
         this._name = '';
         this._focused = false;
@@ -100,8 +90,9 @@ export default class TitleBar extends THREE.Object3D {
     setFocused(on) {
         if (on === this._focused) return;
         this._focused = on;
-        this._panel.setFill(on ? this._fill.focused : this._fill.idle, 1);
-        this.label.setTextColor(on ? this._text.focused : this._text.idle);
+        const state = on ? 'focused' : 'idle';
+        this._panel.setFill(this.style.fill[state], 1);
+        this.label.setTextColor(this.style.text[state]);
     }
 
     /**

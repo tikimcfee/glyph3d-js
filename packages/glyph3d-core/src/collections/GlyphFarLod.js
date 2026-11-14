@@ -6,7 +6,7 @@
  * Below about a pixel per row, glyphs are raster-lottery sub-pixel blobs; what they add up
  * to on screen is a wash of their mean ink colour over the box they fill. The backdrop draws
  * exactly that: the field's laid-out box, in its own frame, tinted by `InstancedField.farTint()`
- * (mean linear ink colour; alpha = ink cover × `backdropGain`). Every backdrop is one draw.
+ * (the mean ink colour as drawn; alpha = ink cover × `backdropGain`). Every backdrop is one draw.
  *
  * The test is the size of the field's TALLEST row at its box's nearest DEPTH along the view
  * direction, not its centre — a long file a camera stands at the end of keeps its glyphs (no
@@ -42,13 +42,9 @@ export const FAR_LOD_DEFAULTS = Object.freeze({
 /** The view camera renders layer 0; a far field leaves it. */
 const VIEW_LAYER = 0;
 
+// three's ShaderMaterial prefix declares position, instanceMatrix and the camera matrices.
 const BACKDROP_VS = `
-precision highp float;
-in vec3 position;
-in mat4 instanceMatrix;
 in vec4 aTint;
-uniform mat4 modelViewMatrix;
-uniform mat4 projectionMatrix;
 uniform float uGain;
 out vec4 vTint;
 void main() {
@@ -57,15 +53,17 @@ void main() {
 }
 `;
 
-// Linear colour, premultiplied — the material says so (premultipliedAlpha), so three blends
-// it ONE, ONE_MINUS_SRC_ALPHA: the page behind keeps (1 − a) and the tint adds rgb × a.
+// The tint is an sRGB lane like the glyphs' own (glyphMaterial's laneOut): to the renderer's
+// output encoding through three's colour management, then premultiplied — the material says so
+// (premultipliedAlpha), so three blends it ONE, ONE_MINUS_SRC_ALPHA: the page behind keeps
+// (1 − a) and the tint adds rgb × a.
 const BACKDROP_FS = `
-precision highp float;
 in vec4 vTint;
 out vec4 fragColor;
 void main() {
     if (vTint.a <= 0.0) discard;
-    fragColor = vec4(vTint.rgb * vTint.a, vTint.a);
+    vec3 rgb = linearToOutputTexel(sRGBTransferEOTF(vec4(vTint.rgb, 1.0))).rgb;
+    fragColor = vec4(rgb * vTint.a, vTint.a);
 }
 `;
 
@@ -86,7 +84,7 @@ export default class GlyphFarLod {
         this.params = { ...FAR_LOD_DEFAULTS };
         this.scene = scene;
         this._geometry = new THREE.PlaneGeometry(1, 1).translate(0.5, 0.5, 0);
-        this._material = new THREE.RawShaderMaterial({
+        this._material = new THREE.ShaderMaterial({
             glslVersion: THREE.GLSL3,
             vertexShader: BACKDROP_VS,
             fragmentShader: BACKDROP_FS,

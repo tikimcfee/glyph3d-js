@@ -267,11 +267,11 @@ export default class EmojiAtlas {
     _makeTexture() {
         const THREE = this._THREE;
         const t = new THREE.DataTexture(this._pixels, this.widthPx, this.heightPx, THREE.RGBAFormat, THREE.UnsignedByteType);
-        // colorSpace unmanaged: the pixels are sRGB-encoded display values, and the glyph
-        // fragment decodes to linear by hand (pow 2.2) exactly like the Slug path. Row 0 of the
-        // pixels is the cell grid's top row, read at v = 0 (flipY off), the top-left origin the
-        // rest of the glyph pipeline assumes. The pixels are straight (not premultiplied) alpha.
-        t.colorSpace = THREE.NoColorSpace;
+        // The pixels are sRGB, straight (not premultiplied) alpha: tagged so, the sampler hands
+        // the glyph fragment linear colour (filtered in linear). Row 0 of the pixels is the cell
+        // grid's top row, read at v = 0 (flipY off), the top-left origin the rest of the glyph
+        // pipeline assumes.
+        t.colorSpace = THREE.SRGBColorSpace;
         t.minFilter = THREE.LinearFilter;
         t.magFilter = THREE.LinearFilter;
         t.generateMipmaps = false;

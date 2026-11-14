@@ -27,8 +27,7 @@ export function bakePillCanvas(w, h, color) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, w, h);
     const r = Math.min(h * 0.34, 22);
-    const col = new THREE.Color(color);
-    ctx.fillStyle = `rgb(${(col.r * 255) | 0},${(col.g * 255) | 0},${(col.b * 255) | 0})`;
+    ctx.fillStyle = `#${new THREE.Color(color).getHexString()}`;   // the canvas takes sRGB
     roundRectPath(ctx, 1.5, 1.5, w - 3, h - 3, r); ctx.fill();
     ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,0.22)';
     roundRectPath(ctx, 1.5, 1.5, w - 3, h - 3, r); ctx.stroke();

@@ -130,6 +130,7 @@ class SpiralLayoutManager {
         const T = THREE_MODULE;
         const positions = [];
         const colors = [];
+        const shade = new T.Color();
 
         // Generate a smooth spiral path between placement points
         const { initialRadius } = this.options;
@@ -145,9 +146,10 @@ class SpiralLayoutManager {
                 this.origin.y + r * Math.sin(t),
                 this.origin.z - 1 // slightly behind grids
             );
-            // Subtle white, fading outward
+            // Subtle white, fading outward (given in sRGB; three reads a vertex colour as linear)
             const fade = 1 - (i / steps) * 0.7;
-            colors.push(fade * 0.15, fade * 0.15, fade * 0.2);
+            shade.setRGB(fade * 0.15, fade * 0.15, fade * 0.2, T.SRGBColorSpace);
+            colors.push(shade.r, shade.g, shade.b);
         }
 
         const geometry = new T.BufferGeometry();

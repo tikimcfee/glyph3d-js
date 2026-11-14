@@ -166,7 +166,9 @@ export function createPanelMaterial({ color = 0x000000, opacity = 1,
                 vec3 finalColor = mix(uFill, borderCol, rim);
                 float finalAlpha = max(uOpacity, rim);
 
-                fragColor = vec4(finalColor, finalAlpha);
+                // The colours are THREE.Colors (the linear working space): out through three's
+                // output conversion, as its own materials end.
+                fragColor = linearToOutputTexel(vec4(finalColor, finalAlpha));
             }
         `,
         transparent: opacity < 1,

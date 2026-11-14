@@ -18,7 +18,7 @@ A practical guide for embedding `@glyph3d/core` into external Three.js applicati
 │  CodeGrid (extends BoundedObject3D -> THREE.Group)           │
 │       │                                                      │
 │       ├── Background Panel (MeshBasicMaterial)               │
-│       ├── InstancedField (InstancedMesh, RawShaderMaterial)  │
+│       ├── InstancedField (InstancedMesh, ShaderMaterial)     │
 │       │        └── InstancedSlotBuffer (32-byte slots)       │
 │       └── MemoryEdges (LineSegments + InstancedMesh Cones)   │
 └──────────────────────────────────────────────────────────────┘
@@ -354,3 +354,4 @@ export class ProcessInspectionCard extends THREE.Group {
 3. **Renderer Compatibility**:
    - Standard `THREE.WebGLRenderer` with `antialias: true` and `powerPreference: "high-performance"` works out of the box.
    - The instanced shaders require no extra render-loop passes. Normal `renderer.render(scene, camera)` will draw the grid.
+   - Colour is three's standard colour management, left at its defaults (`ColorManagement.enabled`, `outputColorSpace = SRGBColorSpace`): colours you hand the engine are sRGB and draw as given; every engine shader ends in three's output conversion, so a render target in another colour space is honoured too. Leave tone mapping off (`NoToneMapping`; under react-three-fiber pass `flat`, or use `GlyphCanvas`) — the engine's built-in materials are interface colours, and a tone curve bends them.

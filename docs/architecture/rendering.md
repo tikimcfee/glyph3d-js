@@ -61,6 +61,28 @@ drawable whose own onBeforeRender may read the scene, or a shadow-casting light,
 loudly (named) until the scene changes. `render.flatRoot` (on) is the A/B; `scene.render [time n]`
 reports it and checks it against a fresh walk. Gates: `tools/flat-root.test.mjs`, `tools/flat-root-check.mjs`.
 
+## Colour
+
+**Colour** is three's standard colour management end to end — its defaults, nothing bypassed.
+A colour is SPECIFIED in sRGB (a hex, a `{ r, g, b }`, a glyph lane's packed RGB, a program's
+SGR, an emoji's or a frame's pixels), and where it is drawn at full coverage the canvas holds
+that value (`wall-e2e` reads it back, ±2). Between the two, three's working space is linear: a
+`THREE.Color` and an sRGB-tagged texture (`colorSpace = SRGBColorSpace` — the emoji atlas,
+frames, label plates; the sampler decodes) hold linear colour, and every shader ends in three's
+output conversion (`linearToOutputTexel` / `<colorspace_fragment>`: panels, the cursor, the grid
+floor, the built-ins). The glyph and far-LOD shaders' lanes (slot, group, highlight, tint) stay
+sRGB and reach the output through the same two transfer functions (`laneOut`,
+`core/glyphMaterial.js`). No tone mapping: `GlyphCanvas` is r3f-`flat` (r3f otherwise switches
+ACES on after the renderer is made). Coverage and opacity apply to the ENCODED colour — WebGL
+blends the canvas that way, so the glyph shader composites a cell's own fill that way too, and
+an edge weighs the same over a fill as over the panel behind it (gamma-space blending, a
+terminal's native look); a far backdrop's tint is the mean of its ink's sRGB for the same
+reason. Where plain sRGB meets three, the crossing is three's own: into a `THREE.Color` or a
+vertex-colour attribute by `setRGB(r, g, b, SRGBColorSpace)`, out to a glyph lane or a 2D
+canvas by `getRGB(…, SRGBColorSpace)` / `getHexString()`, HSL as CSS means it
+(`setHSL(…, SRGBColorSpace)`). A grid's or terminal's background opacity is its panel's alone:
+ink and cell fills stay opaque.
+
 ## Glyph tiers
 
 **Glyph tiers** by on-screen size, nothing in between: exact Slug coverage (counted once,

@@ -9,6 +9,14 @@
  * - Greeking: under GLYPH_GREEK_PX_DEFAULT px tall a glyph is a bar where its ink would be.
  * - Full rigid TRS group transforms (offset, quaternion rotation, scale, clip).
  * - Deterministic, flicker-free rendering in standard WebGL2 (THREE.ShaderMaterial).
+ *
+ * Colour (CLAUDE.md "Colour"): the lanes — slot colour, group colour and background, highlight —
+ * hold sRGB, what a program, a theme or a setting specifies; the emoji atlas is an sRGB texture.
+ * The fragment takes each to the renderer's output encoding through three's colour management
+ * (`laneOut`; the sampler and `linearToOutputTexel` for an emoji) and applies tint, fill and
+ * coverage to the encoded colour — the space WebGL blends the canvas in, so a glyph's edge weighs
+ * the same over its own cell fill as over the panel behind it. At full coverage the canvas holds
+ * the specified colour.
  */
 
 import * as THREE from 'three';
@@ -16,23 +24,14 @@ import { TEXTURE_WIDTH } from '../shaping/slug-constants.js';
 
 export const GROUP_STRIDE = 6; // vec4s per group row: [offset, quat, color, scale, clip, bg_color]
 
+// three's ShaderMaterial prefix declares the base quad's position / uv and the camera matrices.
 const VERTEX_SHADER = `
-precision highp float;
-precision highp int;
-
-// Base quad geometry (unit plane)
-in vec3 position;
-in vec2 uv;
-
 // 32-byte RenderSlot instanced attributes
 in vec3 aPos;       // lanes 0..2: world pen origin (left edge, cell vertical center)
 in float aGlyphId;  // lane 3: global slot index into glyphMapTexture
 in float aColor;    // lane 4: packed RGB888 value (alpha comes from the group table)
 in float aGroupId;  // lane 5: group table row
 in vec2 aExtent;    // lanes 6..7: advance, height (world units)
-
-uniform mat4 modelViewMatrix;
-uniform mat4 projectionMatrix;
 
 uniform highp usampler2D glyphMapTexture;
 uniform int glyphMapWidth;
@@ -141,9 +140,6 @@ void main() {
 `;
 
 const FRAGMENT_SHADER = `
-precision highp float;
-precision highp int;
-
 #define MAX_CURVES 256
 #define GREEK_BAR_LO 0.27
 #define GREEK_BAR_HI 0.47
@@ -234,12 +230,25 @@ float computeCoverage(float invDiameter, vec2 p0, vec2 p1, vec2 p2) {
     return result;
 }
 
+// A colour lane's value (sRGB, as specified) in the renderer's output encoding, through three's
+// colour management: sRGB → the linear working space → the output. On the sRGB canvas that is
+// the value it was given.
+vec3 laneOut(vec3 srgb) {
+    return linearToOutputTexel(sRGBTransferEOTF(vec4(srgb, 1.0))).rgb;
+}
+
 void main() {
+    vec2 fw = fwidth(vGlyphUV);   // before any branch: a derivative is defined only in uniform control flow
+
     // Mode 2: blank cell
     if (vMode == 2) discard;
 
-    // ── Bitmap / emoji branch (vMode == 1) ──────────────────────────
+    bool isFill = vFillAmount > 0.0;
+    vec3 ink;    // the glyph's own colour, output-encoded, straight
+    float cov;   // how much of this pixel the glyph covers
+
     if (vMode == 1) {
+        // ── Bitmap / emoji branch ───────────────────────────────────
         float cols = float(emojiCols > 0 ? emojiCols : 16);
         float rows = float(emojiRows > 0 ? emojiRows : 16);
         float fcell = float(vEmojiCell);
@@ -249,102 +258,68 @@ void main() {
             (col + vGlyphUV.x) / cols,
             (row + (1.0 - vGlyphUV.y)) / rows
         );
+        // An sRGB texture: the sampler hands back linear colour, straight alpha.
         vec4 texel = texture(emojiTexture, atlasUV);
-        if (texel.a < 0.01) {
-            if (vBgColor.a <= 0.0 && vFillAmount <= 0.0) discard;
-            float bgAlpha = max(vFillAmount, vBgColor.a) * vGroupAlpha;
-            if (bgAlpha <= 0.0) discard;
-            vec3 fillRgb = vFillAmount > 0.0 ? vAddedColor : vBgColor.rgb;
-            fragColor = vec4(pow(fillRgb, vec3(2.2)) * bgAlpha, bgAlpha);
-            return;
-        }
-
-        vec3 rgb = texel.rgb;
-        if (vFillAmount > 0.0) {
-            rgb = mix(rgb, vAddedColor, vFillAmount);
-        } else if (length(vAddedColor) > 0.0) {
-            rgb = clamp(rgb + vAddedColor, 0.0, 1.0);
-        }
-        vec3 linearRgb = pow(rgb, vec3(2.2));
-        float outAlpha = texel.a * vGroupAlpha;
-
-        if (vBgColor.a <= 0.0 && vFillAmount <= 0.0) {
-            fragColor = vec4(linearRgb * outAlpha, outAlpha);
-            return;
-        }
-
-        float bgAlpha = max(vBgColor.a, vFillAmount) * vGroupAlpha;
-        vec3 bgRgb = pow(vFillAmount > 0.0 ? vAddedColor : vBgColor.rgb, vec3(2.2)) * bgAlpha;
-        float finalAlpha = outAlpha + bgAlpha * (1.0 - outAlpha);
-        vec3 finalRgb = (linearRgb * outAlpha) + bgRgb * (1.0 - outAlpha);
-        fragColor = vec4(finalRgb, finalAlpha);
-        return;
-    }
-
-    // ── Slug vector outline branch (vMode == 0) ─────────────────────
-    if (vCurveCount == 0 && vFillAmount <= 0.0 && vBgColor.a <= 0.0) discard;
-
-    vec2 fw = fwidth(vGlyphUV);
-
-    // The tiers: under uGreekPx tall on screen a glyph is a bar where its ink would be (continuous
-    // across a word, the full cell wide); above it, exact coverage. The bar is a band through the
-    // x-height, GREEK_BAR_LO..HI of the cell — as much ink as code text carries, so the swap
-    // keeps the page's brightness.
-    bool greek = uGreekPx > 0.0 && 1.0 / max(fw.y, 1e-4) < uGreekPx;
-
-    float cov = 0.0;
-    if (greek) {
-        float dy = max(fw.y, 1e-4);
-        float yCov = clamp((vGlyphUV.y - GREEK_BAR_LO) / dy + 0.5, 0.0, 1.0)
-                   - clamp((vGlyphUV.y - GREEK_BAR_HI) / dy + 0.5, 0.0, 1.0);
-        float dx = max(fw.x, 1e-4);
-        float xCov = clamp((vGlyphUV.x - 0.0) / dx + 0.5, 0.0, 1.0)
-                   - clamp((vGlyphUV.x - 1.0) / dx + 0.5, 0.0, 1.0);
-        cov = clamp(xCov * yCov, 0.0, 1.0);
+        ink = linearToOutputTexel(texel).rgb;
+        cov = texel.a;
     } else {
-        // Fractional winding along +X and +Y rays, each scaled to one pixel's footprint.
-        vec2 invD = vec2(1.0) / fw;
-        float coverage = 0.0;
-        int n = min(vCurveCount, MAX_CURVES);
-        for (int i = 0; i < n; i++) {
-            int ci = (vCurveStart + i) * 2;
-            uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
-            uvec4 t1 = texelFetch(curveTexture, ivec2((ci + 1) % 1024, (ci + 1) / 1024), 0);
+        // ── Slug vector outline branch ──────────────────────────────
+        if (vCurveCount == 0 && vFillAmount <= 0.0 && vBgColor.a <= 0.0) discard;
 
-            vec2 p0 = vec2(float(t0.x), float(t0.y)) / 65535.0 - vGlyphUV;
-            vec2 p1 = vec2(float(t0.z), float(t0.w)) / 65535.0 - vGlyphUV;
-            vec2 p2 = vec2(float(t1.x), float(t1.y)) / 65535.0 - vGlyphUV;
+        // The tiers: under uGreekPx tall on screen a glyph is a bar where its ink would be (continuous
+        // across a word, the full cell wide); above it, exact coverage. The bar is a band through the
+        // x-height, GREEK_BAR_LO..HI of the cell — as much ink as code text carries, so the swap
+        // keeps the page's brightness.
+        bool greek = uGreekPx > 0.0 && 1.0 / max(fw.y, 1e-4) < uGreekPx;
 
-            coverage += computeCoverage(invD.x, p0, p1, p2);
-            coverage += computeCoverage(invD.y, rot90(p0), rot90(p1), rot90(p2));
+        if (greek) {
+            float dy = max(fw.y, 1e-4);
+            float yCov = clamp((vGlyphUV.y - GREEK_BAR_LO) / dy + 0.5, 0.0, 1.0)
+                       - clamp((vGlyphUV.y - GREEK_BAR_HI) / dy + 0.5, 0.0, 1.0);
+            float dx = max(fw.x, 1e-4);
+            float xCov = clamp((vGlyphUV.x - 0.0) / dx + 0.5, 0.0, 1.0)
+                       - clamp((vGlyphUV.x - 1.0) / dx + 0.5, 0.0, 1.0);
+            cov = clamp(xCov * yCov, 0.0, 1.0);
+        } else {
+            // Fractional winding along +X and +Y rays, each scaled to one pixel's footprint.
+            vec2 invD = vec2(1.0) / fw;
+            float coverage = 0.0;
+            int n = min(vCurveCount, MAX_CURVES);
+            for (int i = 0; i < n; i++) {
+                int ci = (vCurveStart + i) * 2;
+                uvec4 t0 = texelFetch(curveTexture, ivec2(ci % 1024, ci / 1024), 0);
+                uvec4 t1 = texelFetch(curveTexture, ivec2((ci + 1) % 1024, (ci + 1) / 1024), 0);
+
+                vec2 p0 = vec2(float(t0.x), float(t0.y)) / 65535.0 - vGlyphUV;
+                vec2 p1 = vec2(float(t0.z), float(t0.w)) / 65535.0 - vGlyphUV;
+                vec2 p2 = vec2(float(t1.x), float(t1.y)) / 65535.0 - vGlyphUV;
+
+                coverage += computeCoverage(invD.x, p0, p1, p2);
+                coverage += computeCoverage(invD.y, rot90(p0), rot90(p1), rot90(p2));
+            }
+            cov = clamp(coverage * 0.5, 0.0, 1.0);
         }
-        cov = clamp(coverage * 0.5, 0.0, 1.0);
+        ink = laneOut(vColor);
     }
+
+    // The highlight lane: a fill (the ink over the fill colour, by coverage) or, with no fill, an
+    // additive tint. Coverage enters ONCE more, as alpha, below.
+    vec3 rgb = ink;
+    if (isFill) rgb = mix(laneOut(vAddedColor), ink, cov);
+    else if (vAddedColor != vec3(0.0)) rgb = min(ink + laneOut(vAddedColor), vec3(1.0));
 
     float outAlpha = max(cov, vFillAmount) * vGroupAlpha;
-    if (outAlpha <= 0.0 && vBgColor.a <= 0.0) discard;
-
-    // Highlight composition, in straight colour: the ink plus its additive tint, or (a fill)
-    // the ink over the fill colour by coverage. Coverage enters ONCE, as alpha, below.
-    bool isFill = vFillAmount > 0.0;
-    vec3 compositeRgb = isFill ? mix(vAddedColor, vColor, cov) : clamp(vColor + vAddedColor, 0.0, 1.0);
-
-    // Linear sRGB decode, premultiplied (the material blends ONE, ONE_MINUS_SRC_ALPHA)
-    vec3 rgb = pow(compositeRgb, vec3(2.2)) * outAlpha;
-
-    if (vBgColor.a <= 0.0) {
-        fragColor = vec4(rgb, outAlpha);
-        return;
-    }
-
-    // Background color composition
     float bgAlpha = vBgColor.a * vGroupAlpha;
     if (outAlpha <= 0.0 && bgAlpha <= 0.0) discard;
 
-    vec3 bgRgb = pow(vBgColor.rgb, vec3(2.2)) * bgAlpha;
-    float finalAlpha = outAlpha + bgAlpha * (1.0 - outAlpha);
-    vec3 finalRgb = rgb + bgRgb * (1.0 - outAlpha);
-    fragColor = vec4(finalRgb, finalAlpha);
+    // Premultiplied (the material blends ONE, ONE_MINUS_SRC_ALPHA), over the group's background
+    // colour where it has one.
+    vec3 pre = rgb * outAlpha;
+    if (bgAlpha <= 0.0) {
+        fragColor = vec4(pre, outAlpha);
+        return;
+    }
+    fragColor = vec4(pre + laneOut(vBgColor.rgb) * bgAlpha * (1.0 - outAlpha), outAlpha + bgAlpha * (1.0 - outAlpha));
 }
 `;
 
@@ -419,7 +394,7 @@ export function getGlyphGreekPx() {
  * @param {THREE.DataTexture} [options.glyphMapTexture]
  * @param {THREE.DataTexture} [options.groupTexture]
  * @param {number} [options.maxGroups=1]  the group table's rows (its texture height)
- * @returns {THREE.RawShaderMaterial}
+ * @returns {THREE.ShaderMaterial}
  */
 export function createGlyphMaterial(options = {}) {
     const curveTex = options.curveTexture || glyphPlaceholderUint();
@@ -441,13 +416,13 @@ export function createGlyphMaterial(options = {}) {
         uGreekPx: { value: _greekPx },
     };
 
-    const material = new THREE.RawShaderMaterial({
+    const material = new THREE.ShaderMaterial({
         glslVersion: THREE.GLSL3,
         uniforms,
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,
         transparent: true,
-        premultipliedAlpha: true,   // the fragment writes linear rgb × alpha
+        premultipliedAlpha: true,   // the fragment writes output-encoded rgb × alpha
         depthWrite: true,
         depthTest: true,
         side: THREE.DoubleSide,

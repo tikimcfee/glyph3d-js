@@ -26,9 +26,6 @@ export function liveInstancedFields() {
 /** Whether a Uint32 over RGBA8 bytes holds r in its low byte (highlightWords' packing). */
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
-/** sRGB byte → linear, the shader's pow(c, 2.2) decode. */
-const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, k) => Math.pow(k / 255, 2.2));
-
 /**
  * A group table's texture: GROUP_STRIDE texels across, one row per group, float RGBA, nearest.
  * @param {Float32Array} data @param {number} rows @returns {THREE.DataTexture}
@@ -456,11 +453,11 @@ export default class InstancedField {
 
     /**
      * What this field's glyphs average to from far away — the far-LOD backdrop's tint
-     * (glyph3d-rs `seg_tint`): the mean LINEAR ink colour of the drawn glyphs (each slot's
-     * colour through its group's tint, decoded as the shader does) and the ink cover, the
-     * share of the laid-out box their cells fill × the mean group alpha. Cached until the
-     * slots or the group table change (their buffer versions — every writer bumps them, or
-     * the GPU wouldn't see the write either).
+     * (glyph3d-rs `seg_tint`): the mean ink colour of the drawn glyphs as the shader draws them
+     * (each slot's colour through its group's tint — sRGB, the lanes' own encoding and the one
+     * the canvas blends sub-pixel glyphs in) and the ink cover, the share of the laid-out box
+     * their cells fill × the mean group alpha. Cached until the slots or the group table change
+     * (their buffer versions — every writer bumps them, or the GPU wouldn't see the write either).
      * @returns {{ r: number, g: number, b: number, cover: number }|null} null before layout
      */
     farTint() {
@@ -482,15 +479,12 @@ export default class InstancedField {
             const ga = G[gb + 11];
             if (ga <= 0.01) continue;                               // the vertex stage culls these
             const v = Math.round(f32[o + LANE_COLOR]);
+            // vColor = mix(iColor·g, g, blend), as the vertex stage computes it
             const gr = G[gb + 8], gg = G[gb + 9], gB = G[gb + 10], blend = G[gb + 15];
-            if (gr === 1 && gg === 1 && gB === 1 && blend === 0) {
-                r += SRGB_TO_LINEAR[v & 0xff]; g += SRGB_TO_LINEAR[(v >> 8) & 0xff]; b += SRGB_TO_LINEAR[(v >> 16) & 0xff];
-            } else {                                                 // vColor = mix(iColor·g, g, blend)
-                const cr = (v & 0xff) / 255 * gr, cg = ((v >> 8) & 0xff) / 255 * gg, cb = ((v >> 16) & 0xff) / 255 * gB;
-                r += Math.pow(cr + (gr - cr) * blend, 2.2);
-                g += Math.pow(cg + (gg - cg) * blend, 2.2);
-                b += Math.pow(cb + (gB - cb) * blend, 2.2);
-            }
+            const cr = (v & 0xff) / 255 * gr, cg = ((v >> 8) & 0xff) / 255 * gg, cb = ((v >> 16) & 0xff) / 255 * gB;
+            r += cr + (gr - cr) * blend;
+            g += cg + (gg - cg) * blend;
+            b += cb + (gB - cb) * blend;
             cells++;
             area += f32[o + LANE_ADVANCE] * h;
             alpha += ga;

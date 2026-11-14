@@ -8,7 +8,7 @@
 //   - off-axis: a field at the view's edge measures as it projects (depth, not distance)
 //   - far: the view layer leaves the mesh, `visible` is untouched, one backdrop quad is staged
 //     over the laid-out box through the field's world matrix
-//   - the tint: mean LINEAR ink colour (the shader's decode, through the group tint), ink cover
+//   - the tint: mean ink colour as drawn (the lanes' sRGB, through the group tint), ink cover
 //     × group alpha; cached until the slot or group buffer version moves
 //   - opt-outs (frustumCulled false), hidden ancestors, a grow past capacity, dispose
 
@@ -136,7 +136,7 @@ const cx = (L.min.x + L.max.x) / 2, cy = (L.min.y + L.max.y) / 2;
     const n = field.getGlyphCount();
     for (let s = 0; s < n; s++) field.writeColor(s, packRgba8(1, 0, 0, 1));
     let t = field.farTint();
-    close(t.r, 1, 'all-red ink: mean linear r = 1'); close(t.g, 0, 'g = 0'); close(t.b, 0, 'b = 0');
+    close(t.r, 1, 'all-red ink: mean r = 1'); close(t.g, 0, 'g = 0'); close(t.b, 0, 'b = 0');
     // cover = Σ advance·height / box area
     const f32 = field.slotBuffer.f32; let area = 0;
     for (let s = 0; s < n; s++) area += f32[s * 8 + 6] * f32[s * 8 + 7];
@@ -145,12 +145,21 @@ const cx = (L.min.x + L.max.x) / 2, cy = (L.min.y + L.max.y) / 2;
 
     field.writeColor(0, packRgba8(0, 0, 1, 1));      // writeColor bumps the slot buffer version
     t = field.farTint();
-    close(t.b, 1 / n, 'one blue glyph of n: b = 1/n (linear mean)', 1e-9);
+    close(t.b, 1 / n, 'one blue glyph of n: b = 1/n', 1e-9);
     close(t.r, (n - 1) / n, 'r = (n-1)/n', 1e-9);
 
-    const half = 128 / 255;                          // sRGB 128 → the shader's pow(c, 2.2)
+    // The tint is the lanes' own sRGB (CLAUDE.md "Colour"): what every glyph is, the tint is.
+    const half = 128 / 255;
     for (let s = 0; s < n; s++) field.writeColor(s, packRgba8(half, half, half, 1));
-    close(field.farTint().r, Math.pow(128 / 255, 2.2), 'mid grey averages in LINEAR (pow 2.2), not sRGB', 1e-9);
+    close(field.farTint().r, half, 'all mid-grey ink: the tint is that grey, as specified (sRGB 128)', 1e-9);
+    // … through the group tint, as the vertex stage mixes it: colour × group, then toward the group by blend
+    field.setGroupColor(0, { r: 0.5, g: 1, b: 0.25 });
+    t = field.farTint();
+    close(t.r, half * 0.5, 'group colour multiplies the ink: r × 0.5', 1e-9); close(t.b, half * 0.25, 'b × 0.25', 1e-9);
+    field.setGroupScale(0, 1, 1);
+    close(field.farTint().g, 1, 'colour blend 1: the tint is the group colour', 1e-9);
+    field.setGroupScale(0, 1, 0);
+    field.setGroupColor(0, { r: 1, g: 1, b: 1 });
 
     field.setGroupAlpha?.(0, 0.5);
     if (field.setGroupAlpha) close(field.farTint().cover, area / ((L.max.x - L.min.x) * (L.max.y - L.min.y)) * 0.5, 'group alpha 0.5 halves the cover');

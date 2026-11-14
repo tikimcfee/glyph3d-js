@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { createPanelMaterial, BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
 import { enrollPanel } from '@glyph3d/core/collections/PanelBatch.js';
 import { RENDER_ORDER } from '@glyph3d/core/core/renderOrder.js';
-import TitleBar, { displayColor } from './TitleBar.js';
+import TitleBar from './TitleBar.js';
 import { BAR_ROOM } from './wallLayout.js';
 
 /** A group's backdrop: a shade lighter than the canvas, with a hairline. */
@@ -28,7 +28,7 @@ export default class GroupFrame extends THREE.Object3D {
         super();
         this.name = 'GroupFrame';
         this.position.z = GROUP_Z;
-        this._panel = createPanelMaterial({ color: displayColor(BACKDROP.fill), opacity: 1, depthWrite: true });
+        this._panel = createPanelMaterial({ color: BACKDROP.fill, opacity: 1, depthWrite: true });
         this._panel.setBorder(BACKDROP.border);
         this._panel.setBorderFlag(BORDER_FLAGS.EDGE, true);
         this.backdrop = enrollPanel(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this._panel.material));

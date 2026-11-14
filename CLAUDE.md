@@ -148,7 +148,8 @@ that subsystem.
   layout through the `LayoutDescription` seam (`core/LayoutGenerator.js`, `core/foldGeometry.js`);
   GPU picking (`picking/`, multi-channel ID pass, async readback); frustum culling on stated
   extents (`InstancedField.setLayoutExtent`); the flat render root
-  (`collections/FlatRenderRoot.js`); glyph tiers (Slug → greek bars → far-LOD box,
+  (`collections/FlatRenderRoot.js`); colour (three's colour management end to end: the
+  specified sRGB is what the canvas holds, ink opaque); glyph tiers (Slug → greek bars → far-LOD box,
   `collections/GlyphFarLod.js`); panel batching (`collections/PanelBatch.js`); glyph batching
   (`collections/GlyphBatch.js`); scene transforms (`collections/SceneTransforms.js`, installed
   with the flat root as one `SceneSystems`); incremental atlas texture uploads

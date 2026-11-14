@@ -187,7 +187,7 @@ export function createCaretMesh(options = {}) {
     const c = options.color || CARET_COLOR;
     const geo = new THREE.PlaneGeometry(1, 1);
     const mat = new THREE.MeshBasicMaterial({
-        color: new THREE.Color(c.r, c.g, c.b),
+        color: new THREE.Color().setRGB(c.r, c.g, c.b, THREE.SRGBColorSpace),
         transparent: true,
         opacity: options.opacity ?? 0.85,
         side: THREE.DoubleSide,

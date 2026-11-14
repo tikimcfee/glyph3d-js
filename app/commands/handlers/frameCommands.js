@@ -76,9 +76,7 @@ export default function registerFrameCommands(router) {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        // SRGBColorSpace is three's documented WebGPU VideoTexture path: the texture
-        // node linearizes on sample, and the frame branch does NOT manually pow(). See
-        // the colorspace dial note in GlyphField's frame branch if this looks off.
+        // Video frames are sRGB: tagged so, a sampler hands a shader linear colour (CLAUDE.md "Colour").
         texture.colorSpace = THREE.SRGBColorSpace;
 
         const grid = new FrameGrid(ctx.scene, ctx.atlas, { name, cols, rows, aspect });

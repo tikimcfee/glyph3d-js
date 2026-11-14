@@ -273,7 +273,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 - **`glyph-far-lod.test.mjs`** (headless) — GlyphFarLod's near/far decision exactly at the
   threshold (perspective + orthographic, world scale), the nearest-point rule (a long file you
   stand at the end of keeps its glyphs), the backdrop quad over the laid-out box, the tint
-  (mean LINEAR ink through the group tint, cover × group alpha, cached on buffer versions),
+  (the mean ink colour through the group tint, in the lanes' sRGB; cover × group alpha, cached on buffer versions),
   opt-outs, hidden ancestors, a grow past capacity, dispose.
 
 - **`far-lod-check.mjs`** — does a far file SHOW as its backdrop, and does nothing else move?
@@ -842,7 +842,10 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs tools/wall-keys.test.mjs
   ```
 - **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing (Enter runs the
-  line: the shell's output, not its echo), a real Shift+Enter running a line in a plain shell and
+  line: the shell's output, not its echo), colour read from the page's pixels (white and magenta
+  words; then, each within ±2 a channel of what was specified, the median pixel of a solid run of
+  █ in the default grey, a true colour, a 256-palette colour and pure white, of a cell background,
+  of the terminal's panel and of the focused title bar's strip), a real Shift+Enter running a line in a plain shell and
   reaching a Kitty-keyboard program as `CSI 13;2u`, and a real paste event arriving
   bracketed (termd encodes the browser's key events), ⌘[ ⌘]
   cycling, border and top-edge resize, title-bar drag vs body press, names, scrollback under

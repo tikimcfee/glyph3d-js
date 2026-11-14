@@ -27,14 +27,6 @@ import * as THREE from 'three';
 export const CURSOR_BORDER_WIDTH = 1.5;
 
 const VERTEX_SHADER = `
-precision highp float;
-
-in vec3 position;
-in vec2 uv;
-
-uniform mat4 modelViewMatrix;
-uniform mat4 projectionMatrix;
-
 out vec2 vUv;
 
 void main() {
@@ -44,9 +36,6 @@ void main() {
 `;
 
 const FRAGMENT_SHADER = `
-precision highp float;
-precision highp int;
-
 in vec2 vUv;
 out vec4 fragColor;
 
@@ -65,7 +54,8 @@ void main() {
 
     float alpha = max(uFill, band * uBorder);
     if (alpha <= 0.0) discard;
-    fragColor = vec4(uColor, alpha);
+    // uColor is a THREE.Color (the linear working space): out through three's output conversion.
+    fragColor = linearToOutputTexel(vec4(uColor, alpha));
 }
 `;
 
@@ -88,7 +78,7 @@ export function createCursorMaterial({ color = 0x6ee7a0, fillOpacity = 0.5,
         uBorderW: { value: borderWidth },
     };
 
-    const material = new THREE.RawShaderMaterial({
+    const material = new THREE.ShaderMaterial({
         glslVersion: THREE.GLSL3,
         vertexShader: VERTEX_SHADER,
         fragmentShader: FRAGMENT_SHADER,

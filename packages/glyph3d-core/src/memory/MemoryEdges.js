@@ -35,7 +35,7 @@ export class MemoryEdges {
         this.grid = grid;
         this._max = opts.max ?? 1024;
         const c = opts.color ?? { r: 0.3, g: 0.85, b: 1.0 };
-        const color = new THREE.Color(c.r, c.g, c.b);
+        const color = new THREE.Color().setRGB(c.r, c.g, c.b, THREE.SRGBColorSpace);
 
         // --- shafts: one LineSegments, 2 verts/edge ---
         this._shaftPos = new Float32Array(this._max * 2 * 3);

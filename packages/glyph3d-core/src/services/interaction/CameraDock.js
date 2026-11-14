@@ -446,7 +446,7 @@ export class CameraDock extends THREE.Object3D {
      */
     _identityColor(i) {
         const hue = (IDENTITY_HUE0 + i * IDENTITY_GOLDEN) % 1;
-        return new THREE.Color().setHSL(hue, IDENTITY_SAT, IDENTITY_LIGHT).getHex();
+        return new THREE.Color().setHSL(hue, IDENTITY_SAT, IDENTITY_LIGHT, THREE.SRGBColorSpace).getHex();
     }
 
     /**
