@@ -2,7 +2,8 @@
 // the flags word's layout (core/cellAttrs.js — the layout a packed wire cell maps onto), the
 // style byte the shader draws and its home in the slot's group lane, and TerminalEmulator reading
 // every attribute xterm holds into the screen's typed arrays (inverse and conceal resolved, the
-// underline's style and colour, nothing allocated).
+// underline's style and colour, nothing allocated), and the cell widths (a wide codepoint takes
+// two cells, as termd and the programs count).
 //
 //   bun tools/cell-attrs.test.mjs
 
@@ -148,6 +149,30 @@ console.log('TerminalEmulator.readScreen');
     // Cells past xterm's grid (the reader resized ahead of it) read blank, attributes included.
     const wide = emu.readScreen(70, 8);
     ok(wide.at[69] === 0 && wide.ul[69] === 0 && wide.cp[69] === 32 && wide.at[7 * 70] === 0, 'cells outside xterm\'s grid read blank with no attributes');
+    emu.dispose();
+}
+
+// ── 5. cell widths: a wide codepoint takes two cells, as termd and the programs count ───────
+console.log('wide cells');
+{
+    const { isWideCodepoint } = await import('../packages/glyph3d-core/src/collections/terminalWidths.js');
+    ok(isWideCodepoint(0x1F600) && isWideCodepoint(0x1F680) && isWideCodepoint(0x2705) && isWideCodepoint(0x4E00) && isWideCodepoint(0xFF21) && isWideCodepoint(0x1100) && isWideCodepoint(0x3FFFD),
+        'emoji with an emoji presentation, CJK and fullwidth forms are wide (the table\'s first and last entries too)');
+    ok(!isWideCodepoint(0x41) && !isWideCodepoint(0x2764) && !isWideCodepoint(0x2713) && !isWideCodepoint(0x2588) && !isWideCodepoint(0x2500) && !isWideCodepoint(0x1FB00)
+        && !isWideCodepoint(0xE0B0) && !isWideCodepoint(0x10FF) && !isWideCodepoint(0x3FFFE) && !isWideCodepoint(0x1F1E6),
+        'letters, text-default symbols (❤ ✓), blocks, box drawing, sextants and powerline are one cell');
+
+    const emu = new TerminalEmulator(20, 2, () => {});
+    const write = (s) => new Promise((r) => emu._term.write(s, r));
+    await write('\x1b[44m😀\x1b[0ma一b❤c');
+    const s = emu.readScreen(20, 2);
+    const row = [...s.cp.subarray(0, 8)].map((c) => String.fromCodePoint(c)).join('');
+    eq(row, '😀 a一 b❤c', 'an emoji and a CJK character each take their cell and the next (which reads as a space); ❤ takes one');
+    ok(s.bg[0] !== 0 && s.bg[1] === s.bg[0] && s.bg[2] === 0, 'the wide glyph\'s second cell carries its background (the fill pass draws it under the glyph\'s right half)');
+    eq(emu.readText()[0], '😀a一b❤c', 'the text itself is unchanged');
+    // The cursor sits where the program's own count puts it.
+    await write('\r\n🚀🚀x');
+    eq(emu._term.buffer.active.cursorX, 5, 'two emoji and a letter leave the cursor at column 5');
     emu.dispose();
 }
 

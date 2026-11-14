@@ -45,7 +45,7 @@ printf '%s\n' "sextants 🬀🬁🬂🬃🬄🬅🬆🬇🬈🬉🬊🬋🬌🬍
 printf '%s\n' "wedges 🬼🬽🬾🬿🭀🭁🭂🭃🭄🭅🭆🭇🭈🭉🭊🭋🭌🭍🭎🭏🭐🭑🭒🭓🭔🭕🭖🭗🭘🭙🭚🭛🭜🭝🭞🭟🭠🭡🭢🭣🭤🭥🭦🭧🭨🭩🭪🭫🭬🭭🭮🭯 ${e}[48;5;31;38;5;231m main ${e}[48;5;240;38;5;31m${P0}${e}[38;5;252m src ${e}[49;38;5;240m${P0}${r} ${e}[38;5;240m${P2}${e}[48;5;240;38;5;252m ok ${r}"
 
 # 16: powerline, the rest (rounded, slanted, thin); a wide emoji on a coloured background
-printf '%s\n' "${e}[38;5;31m${P6}${e}[48;5;31;38;5;231m rounded ${e}[49;38;5;31m${P4}${r} ${e}[38;5;166m${PA}${e}[48;5;166;38;5;231m slant ${e}[49;38;5;166m${P8}${r} ${e}[38;5;71m${PE}${e}[48;5;71;38;5;231m back ${e}[49;38;5;71m${PC}${r} thin ${P1}${P3}${P5}${P7}${P9}${PB}${PD}${PF} ${e}[48;5;24m 😀 emoji 🚀 on 🎉 a fill ${r} ${e}[44m😀${e}[45m🚀${e}[46m🎉${r}"
+printf '%s\n' "${e}[38;5;31m${P6}${e}[48;5;31;38;5;231m rounded ${e}[49;38;5;31m${P4}${r} ${e}[38;5;166m${PA}${e}[48;5;166;38;5;231m slant ${e}[49;38;5;166m${P8}${r} ${e}[38;5;71m${PE}${e}[48;5;71;38;5;231m back ${e}[49;38;5;71m${PC}${r} ${P1} ${P3} ${P5} ${P7} ${P9} ${PB} ${PD} ${PF} ${e}[48;5;24m 😀 emoji 🚀 fill 🎉 ${r} ${e}[44m😀${e}[45m🚀${e}[46m🎉${r}"
 
 # 17: every style, alone
 printf '%s\n' "plain ${e}[1mbold${r} ${e}[2mdim${r} ${e}[3mitalic${r} ${e}[4munderline${r} ${e}[4:2mdouble${r} ${e}[4:3mcurly${r} ${e}[4:4mdotted${r} ${e}[4:5mdashed${r} ${e}[9mstrike${r} ${e}[53moverline${r}"

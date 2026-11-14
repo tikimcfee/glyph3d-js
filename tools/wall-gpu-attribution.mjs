@@ -4,6 +4,9 @@
  *
  *   bun tools/wall-gpu-attribution.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *                                      [--terminals 14] [--width 3024 --height 1964] [--frames 120]
+ *                                      [--fill 'cmd']   (what each terminal runs to fill its screen;
+ *                                                        default `ls -la /usr/bin | head -60`. For cell
+ *                                                        fills and styles: --fill 'sh tools/term-test-pattern.sh')
  *
  * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
  * (tools/lib/wall-relay.mjs: termd namespace `glyph-wall-gpu`, no gomuxai; stopped with its termd daemon at the
@@ -26,6 +29,7 @@ const RELAY = Number(arg('--relay', 8099));   // a PRIVATE relay — never the o
 const TERMINALS = Number(arg('--terminals', 14));
 const W = Number(arg('--width', 3024)), H = Number(arg('--height', 1964));
 const FRAMES = Number(arg('--frames', 120));
+const FILL = arg('--fill', 'ls -la /usr/bin | head -60');
 const OUT = arg('--json');
 const rows = [];
 
@@ -56,14 +60,14 @@ try {
     if (!gpu.timer) throw new Error('no EXT_disjoint_timer_query_webgl2 — cannot time the GPU');
 
     // Fill this tool's terminals with text so glyph cost is real, then settle.
-    const n = await app.evalPage(async (ids) => {
+    const n = await app.evalPage(async ([ids, fill]) => {
         const w = window.__wall;
         window.__gpuOwn = ids;
-        for (const id of ids) w.terminal(id).sendInput('clear; ls -la /usr/bin | head -60\r');
+        for (const id of ids) w.terminal(id).sendInput(`clear; ${fill}\r`);
         await new Promise((r) => setTimeout(r, 2500));
         return w.order.length;
-    }, own);
-    console.log(`[wall] ${n} terminals on the wall (${own.length} of them this tool's)`);
+    }, [own, FILL]);
+    console.log(`[wall] ${n} terminals on the wall (${own.length} of them this tool's), each filled by: ${FILL}`);
 
     // Install the timer + layer toggles once.
     await app.evalPage(() => {
@@ -104,10 +108,10 @@ try {
             const s = [...st.samples].sort((a, b) => a - b);
             const q = (p) => +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(2);
             const w = window.__wall;
-            return { p50: q(0.5), p95: q(0.95), n: s.length, zoom: +w.viewport.zoom.toFixed(2), framed: w.focusedId };
+            return { p50: q(0.5), p95: q(0.95), n: s.length, zoom: +w.viewport.zoom.toFixed(2), framed: w.focusedId, draws: window.__glyphClient.ctx.renderer.info.render.calls };
         }, FRAMES);
         rows.push({ label, ...r, state });
-        console.log(`${label.padEnd(34)} gpu p50 ${String(r.p50).padStart(6)} ms  p95 ${String(r.p95).padStart(6)} ms  (n=${r.n}, zoom ${r.zoom}, focus ${r.framed ?? '-'}) ${state ? JSON.stringify(state) : ''}`);
+        console.log(`${label.padEnd(34)} gpu p50 ${String(r.p50).padStart(6)} ms  p95 ${String(r.p95).padStart(6)} ms  ${String(r.draws).padStart(3)} draws  (n=${r.n}, zoom ${r.zoom}, focus ${r.framed ?? '-'}) ${state ? JSON.stringify(state) : ''}`);
     };
     const restore = () => { window.__layers.glyphs(true); window.__layers.panels(true); window.__layers.depth(true); };
 

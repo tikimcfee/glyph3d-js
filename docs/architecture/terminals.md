@@ -67,7 +67,13 @@ SGR 58 named its colour (true colour or palette; 59 or none: the text's). Two ar
 read: inverse swaps the drawn colours (the text takes the cell's background, or the terminal's
 own panel colour where it names none — `setDefaultBackground`; the cell fills with the
 foreground), and a concealed cell reads as a space (its fill and lines stay; `readText` still
-has the text). Bold brightens the foreground there too.
+has the text). Bold brightens the foreground there too. Most cells carry no attribute at all
+and are read by one test.
+
+Cell WIDTHS are termd's and the programs': xterm's own table (Unicode 6, every emoji one cell)
+sits under a provider that answers two cells for East Asian Wide codepoints — every emoji with
+an emoji presentation among them (`collections/terminalWidths.js`, Unicode 16). A wide glyph's
+second cell reads as a space carrying the glyph's background; the glyph's quad lies over both.
 
 `TerminalGrid` keeps those five per physical cell and writes what differs: the glyph (the italic
 face's under SGR 3; a cell sprite for what a terminal draws itself), the colour and the style

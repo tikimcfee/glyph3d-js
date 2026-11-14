@@ -45,6 +45,7 @@
 // entry and exports { Terminal }. Do NOT "simplify" this back to '@xterm/headless'.
 import { Terminal } from '@xterm/headless/lib-headless/xterm-headless.mjs';
 import { RESET_FG, ansi256toRGB } from './terminalPalette.js';
+import { isWideCodepoint } from './terminalWidths.js';
 import {
     CELL_BOLD, CELL_DIM, CELL_ITALIC, CELL_BLINK, CELL_INVERSE, CELL_CONCEAL, CELL_STRIKE, CELL_OVERLINE,
     CELL_UNDERLINE_SHIFT, CELL_UNDERLINE_COLOR, UNDERLINE,
@@ -126,6 +127,7 @@ export default class TerminalEmulator {
         // scrolled-back view as a repaint), so the active buffer == the viewport.
         // allowProposedApi: the buffer API (buffer.active, its cursor and type) is gated behind it.
         this._term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
+        this._useWideWidths();
 
         // The write callback, made once (a closure per write is garbage per write).
         this._parsed = () => {
@@ -145,7 +147,7 @@ export default class TerminalEmulator {
         this._cell = view.getLine(0).getCell(0);   // a CellData; loadCell refills it
         // The attribute reads below are xterm's AttributeData methods; one that moved would read
         // as "never set", so check them here too.
-        for (const m of ['isInverse', 'isDim', 'isItalic', 'isBlink', 'isInvisible', 'isStrikethrough', 'isOverline',
+        for (const m of ['isAttributeDefault', 'isInverse', 'isDim', 'isItalic', 'isBlink', 'isInvisible', 'isStrikethrough', 'isOverline',
             'isUnderline', 'getUnderlineStyle', 'isUnderlineColorDefault', 'isUnderlineColorRGB', 'isUnderlineColorPalette', 'getUnderlineColor']) {
             if (typeof this._cell[m] !== 'function') throw new Error(`[TerminalEmulator] xterm's cell has no ${m}(): the attribute read needs it — check the @xterm/headless version`);
         }
@@ -163,6 +165,30 @@ export default class TerminalEmulator {
         if (this._disposed) return;
         this.dirty = true;
         this._onDirty?.();
+    }
+
+    /**
+     * Cell widths as termd and the programs count them: xterm's own table (Unicode 6) under a
+     * provider that answers two cells for East Asian Wide codepoints — every default-presentation
+     * emoji among them (terminalWidths.js). Without it a line with an emoji sits a column left of
+     * where the program put it. The provider wraps xterm's active one (an internal: checked here).
+     * @private
+     */
+    _useWideWidths() {
+        const base = this._term._core?.unicodeService?._activeProvider;
+        const unicode = this._term.unicode;
+        if (typeof base?.wcwidth !== 'function' || typeof base?.charProperties !== 'function' || typeof unicode?.register !== 'function') {
+            throw new Error('[TerminalEmulator] xterm\'s unicode service moved (_core.unicodeService._activeProvider, term.unicode.register): the wide-cell widths need them — check the @xterm/headless version');
+        }
+        // What xterm stores for "two cells, joins nothing": asked of xterm itself (一 is wide in every table).
+        const wide = base.charProperties(0x4E00, 0);
+        if (base.wcwidth(0x4E00) !== 2) throw new Error('[TerminalEmulator] xterm\'s width table no longer counts U+4E00 as two cells: the wide-cell provider can\'t learn its encoding');
+        unicode.register({
+            version: 'g3d-wide',
+            wcwidth: (cp) => (isWideCodepoint(cp) ? 2 : base.wcwidth(cp)),
+            charProperties: (cp, preceding) => (isWideCodepoint(cp) ? wide : base.charProperties(cp, preceding)),
+        });
+        unicode.activeVersion = 'g3d-wide';
     }
 
     /** Whether the program asked for bracketed paste (DECSET 2004) in the bytes parsed so far. */
@@ -279,6 +305,12 @@ export default class TerminalEmulator {
                 // getCode() is the cell's codepoint (0 = empty / a wide char's trailing slot → a
                 // space; the wide glyph's own quad covers it).
                 const code = cell.getCode();
+                // Most cells carry nothing: the default colours, no attribute. One test, and done.
+                if (cell.isAttributeDefault()) {
+                    CP[i] = code === 0 ? 32 : code;
+                    FG[i] = RESET; BG[i] = 0; AT[i] = 0; UL[i] = 0;
+                    continue;
+                }
                 const bold = cell.isBold();
                 let fg, bg;
                 if (cell.isFgRGB()) {
