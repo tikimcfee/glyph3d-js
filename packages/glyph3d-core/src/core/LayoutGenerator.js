@@ -121,14 +121,16 @@ export function generateLayout(text, options = {}) {
     }
 
     const tabWidth = Math.max(1, Math.trunc(options.tabWidth ?? D.tabWidth));
-    let spaceGid = null;
-    const spaceGlyphId = () => {
-        if (spaceGid === null) {
+    let space = null;
+    /** The space glyph's shape: its id is a tab's glyph, its advance the shaper's ONE-CELL advance. */
+    const spaceShape = () => {
+        if (space === null) {
             const s = shaper?.lookup ? shaper.lookup(32) : shaper?.shape ? shaper.shape(' ')?.[0] : null;
-            spaceGid = s ? s.g : 32;
+            space = { g: s ? s.g : 32, ax: s && s.ax > 0 ? s.ax : upem * 0.6 };
         }
-        return spaceGid;
+        return space;
     };
+    const spaceGlyphId = () => spaceShape().g;
 
     // Each slot's screen row, kept for the page fold (which needs the FINAL widest row).
     const slotRows = fold.pageHeight > 0 ? new Int32Array(approxTotalGlyphs) : null;
@@ -176,7 +178,11 @@ export function generateLayout(text, options = {}) {
                 }
                 if (shape) {
                     glyphId = shape.g;
-                    advance = (shape.ax / upem) * (charHeight / 1.15); // preserve font em proportion
+                    // A glyph's advance is CELLS × the cell's width: its shaped advance over the
+                    // shaper's one-cell advance (a monospace chain forces 1, or 2 for a wide glyph)
+                    // times metrics.charWidth — the same cell every grid, caret and panel measures
+                    // by (core/cellMetrics.js), and exact on its lattice.
+                    advance = (shape.ax / spaceShape().ax) * charWidth;
                 } else {
                     glyphId = cp;
                 }
