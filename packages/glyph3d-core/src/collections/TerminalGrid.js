@@ -215,10 +215,11 @@ export default class TerminalGrid extends FramedGlyphField {
         // Per-cell ANSI background fill opacity (git-diff bars, ls --color, selections). Solid by
         // default — a colored cell reads as an opaque block like a real terminal; tunable live.
         this._bgFillOpacity = options.cellBgFillOpacity ?? 1.0;
-        this._visible = true; // setVisible state — folded with the fade (shared alpha slot)
+        this._visible = true; // setVisible state — the row poses' alpha
 
-        // The cells, blank, and every slot pushed. The glyphs draw at the panel's opacity (the row
-        // poses carry it), so a translucent tile reads as one sheet, not opaque text over glass.
+        // The cells, blank, and every slot pushed. The glyphs and cell fills are opaque ink in the
+        // colours the program gave, whatever the panel's opacity (a terminal's background opacity
+        // is its background's).
         this._allocateCells(null);
         this._pushAll();
         this._initBackground();
@@ -473,14 +474,14 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Pose every physical row through its group-table row: where its sequence index sits
-     * (_rowLayout), its fade, and its alpha — the panel's opacity, 0 while hidden, and for
-     * history also 0 while depth history is off or an alt-screen app has the terminal.
+     * (_rowLayout), its fade, and its alpha — 1, 0 while hidden, and for history also 0 while
+     * depth history is off or an alt-screen app has the terminal.
      * @private
      */
     _poseRows() {
         const field = this._renderer, L = this._rowLayout, G = this._rowGroups;
         const D = this._depthMax, P = this.rows + D, start = this._ringStart;
-        const shown = this._visible ? this._bgOpacity : 0;
+        const shown = this._visible ? 1 : 0;
         const historyAlpha = this._depthEnabled && !this._altActive ? shown : 0;
         for (let s = 0; s < P; s++) {
             const o = s * ROW_LAYOUT_STRIDE;
@@ -759,7 +760,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Show or hide the terminal: the row poses' alpha (0 culls a row's glyphs in the vertex
-     * stage). Visibility and the panel-matched fade share that one alpha, folded in _poseRows.
+     * stage), folded in _poseRows.
      *
      * @param {boolean} visible
      */
@@ -1318,7 +1319,6 @@ export default class TerminalGrid extends FramedGlyphField {
         }
         if (!this._panel) return;
         this._panel.setFill(color, opacity);
-        if (opacity != null) this._poseRows();
     }
 
     /** @private Rewrite every live cell's background fill (the fill opacity changed). */

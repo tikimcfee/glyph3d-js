@@ -1091,7 +1091,6 @@ class CodeGrid extends FramedGlyphField {
             defaultColor: this.config.textColor,
         });
         this._rendererGroup.add(this._renderer.instanceMesh);
-        this._applyGlyphAlpha();
         if (this._pickingSystem && this._renderer?.instanceMesh) {
             try {
                 this._pickingSystem.register?.('glyph', this._renderer.instanceMesh, this._renderer, {
@@ -1124,7 +1123,8 @@ class CodeGrid extends FramedGlyphField {
     /**
      * Live-restyle the background panel — color (hex int or '#rrggbb' string)
      * and/or opacity (0–1). Drives the configurable color scheme; readability of
-     * stacked tiles in a dock comes down to this opacity. Either field optional.
+     * stacked tiles in a dock comes down to this opacity. The opacity is the panel's alone: the
+     * text over it stays opaque ink, in the colours it was given. Either field optional.
      * @param {{ color?: number|string, opacity?: number }} style
      */
     setBackgroundStyle({ color, opacity } = {}) {
@@ -1132,7 +1132,6 @@ class CodeGrid extends FramedGlyphField {
         if (opacity != null) this.config.backgroundOpacity = opacity;
         if (!this._panel) return;
         this._panel.setFill(color, opacity);
-        if (opacity != null) this._applyGlyphAlpha();
     }
 
     /**
@@ -1145,16 +1144,6 @@ class CodeGrid extends FramedGlyphField {
         if (!this._background) return;
         this._background.position.z += (this._bgGap ?? 0) - gap;
         this._bgGap = gap;
-    }
-
-    /**
-     * Fade this grid's glyphs (group 0 holds them all) to match the panel opacity,
-     * so a translucent grid reads as one coherent sheet (text + bg together) rather
-     * than opaque text over glass. No-op until the renderer exists.
-     * @private
-     */
-    _applyGlyphAlpha() {
-        this._renderer?.setGroupAlpha(0, this.config.backgroundOpacity);
     }
 
     /**
