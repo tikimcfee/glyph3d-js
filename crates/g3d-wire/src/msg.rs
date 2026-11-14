@@ -6,12 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 2];
+pub const PROTO: [u32; 2] = [1, 3];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
 /// The features this daemon announces: the core plus `status`, `upgrade` and `env` (1.1), `key`
-/// and `paste` (1.2).
-pub const DAEMON_FEATURES: [&str; 8] = ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste"];
+/// and `paste` (1.2), `option_as_alt` (1.3).
+pub const DAEMON_FEATURES: [&str; 9] =
+    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +191,84 @@ pub struct Key {
     /// `press` (the default), `repeat` or `release`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<KeyAction>,
+    /// (1.3, feature `option_as_alt`) Whether Alt is Alt when it also made `text` (macOS Option).
+    #[serde(default, skip_serializing_if = "OptionAsAlt::is_auto")]
+    pub option_as_alt: OptionAsAlt,
+}
+
+/// (1.3) `key.option_as_alt`: Ghostty's `macos-option-as-alt`, chosen per key event. On the wire
+/// `"auto"` (the default), `true` or `false`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptionAsAlt {
+    /// Alt is Alt unless it made `text` (Option typed a character): then the character wins, as
+    /// with Ghostty's default (`false`).
+    #[default]
+    Auto,
+    /// Alt is Alt: the program gets Alt and the key's own character, never Option's.
+    True,
+    /// Alt is a character modifier (Ghostty's default): no ESC prefix, not counted by
+    /// modifyOtherKeys, and Kitty's associated text kept.
+    False,
+}
+
+impl OptionAsAlt {
+    pub fn is_auto(&self) -> bool {
+        *self == OptionAsAlt::Auto
+    }
+}
+
+impl std::fmt::Display for OptionAsAlt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            OptionAsAlt::Auto => "auto",
+            OptionAsAlt::True => "true",
+            OptionAsAlt::False => "false",
+        })
+    }
+}
+
+impl std::str::FromStr for OptionAsAlt {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "auto" => Ok(OptionAsAlt::Auto),
+            "true" => Ok(OptionAsAlt::True),
+            "false" => Ok(OptionAsAlt::False),
+            _ => Err(format!("option_as_alt is auto, true or false, not {s:?}")),
+        }
+    }
+}
+
+impl Serialize for OptionAsAlt {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OptionAsAlt::Auto => s.serialize_str("auto"),
+            OptionAsAlt::True => s.serialize_bool(true),
+            OptionAsAlt::False => s.serialize_bool(false),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionAsAlt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = OptionAsAlt;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(r#""auto", true or false"#)
+            }
+            fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<OptionAsAlt, E> {
+                Ok(if b { OptionAsAlt::True } else { OptionAsAlt::False })
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<OptionAsAlt, E> {
+                match s {
+                    "auto" => Ok(OptionAsAlt::Auto),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(s), &self)),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 /// (1.2) `key.action`.

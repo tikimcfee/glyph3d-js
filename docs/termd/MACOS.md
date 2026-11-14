@@ -168,24 +168,25 @@ program), plain otherwise; refused (`unsafe_paste`) when it holds a line break t
 read as Enter, or the bracket's end; `--unsafe` sends it (a line break as `\r`).
 
 **Option on a Mac.** Chrome and Safari report Option+A on a US layout as `key: "å"`, `code:
-"KeyA"`, `altKey: true`, and the wall sends exactly that (`text: "å"`, `mods: ["Alt"]`). termd
-counts Alt as having made the text and sets its encoder's `macos-option-as-alt` to true, so an
-Alt whose text is the key's own character (`g3d key alt+a`, a Linux browser) is Alt. For the
-Option character, compared with Ghostty's default (`macos-option-as-alt = false`, the same
-encoder with that option):
+"KeyA"`, `altKey: true`, and the wall sends exactly that (`text: "å"`, `mods: ["Alt"]`) with its
+`optionAsAlt` setting (`option_as_alt`, protocol 1.3). Under `auto`, the default, an Alt that typed
+another character than the key's own is Option typing it, encoded as Ghostty's default
+(`macos-option-as-alt = false`); an Alt whose text is the key's own character (`g3d key alt+a`, a
+Linux browser) is Alt:
 
-| Program's mode | termd | Ghostty's default |
+| Program's mode | Option+A (`å`) | Alt+A (`a`) |
 |---|---|---|
-| legacy | `å` | `å` |
-| Kitty, disambiguate (flags 1) | `å` | `å` |
-| Kitty, all keys + text (flags 31) | `CSI 97;3u` (the `å` is lost) | `CSI 97;3;229u` |
-| modifyOtherKeys 2 | `CSI 27;3;229~` | `å` |
+| legacy | `å` | `ESC a` |
+| Kitty, disambiguate (flags 1) | `å` | `CSI 97;3u` |
+| Kitty, all keys + text (flags 31) | `CSI 97;3;229u` | `CSI 97;3u` |
+| modifyOtherKeys 2 | `å` | `CSI 27;3;97~` |
 
-So the wall on a Mac types the Option character as Ghostty does in the modes most programs use,
-and differs in the two fuller ones. Ghostty's option set to false for every event would make a
-real Alt (`g3d key alt+a`) a bare `a`, so a fix would choose it per event (false when Alt is
-consumed by the text). Not changed: the lead's and Ivan's call. Unit test: `keys::tests::
-a_macos_option_character_is_its_text_and_alt_as_alt_is_alt` (the agreed rows).
+`wall.config optionAsAlt true` makes Option Alt (Option+A is the Alt+A column: Emacs and readline
+Meta keys), `false` makes every Alt a character modifier (even Alt+A types `a`); the next key takes
+it. The IDE's is Settings ▸ Terminals ▸ Option as Alt. libghostty reads its own option only in a
+macOS build, so termd makes `false` itself and a Linux daemon serving a Mac browser encodes the
+same bytes (DESIGN.md, "Option as Alt"). Unit tests: `keys::tests::
+a_macos_option_character_is_its_text_and_alt_as_alt_is_alt` and the forced `true` / `false` ones.
 
 ## Testing without `/proc`
 

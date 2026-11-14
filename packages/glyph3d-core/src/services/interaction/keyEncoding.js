@@ -9,7 +9,8 @@
  * encodes: the physical key (`code`), the logical key (`key`), the modifiers held, the text the
  * key typed, press / repeat / release. Layouts, dead keys and Option-as-character resolve in the
  * browser into `key`, which is the text; a dead key's own keydown (`Dead`) and an IME's (`Process`,
- * isComposing) type nothing yet and map to null.
+ * isComposing) type nothing yet and map to null. Whether Alt that typed a character is still Alt
+ * (macOS Option) is a setting each event carries (`option_as_alt`), for termd to apply.
  *
  * Pure and framework-agnostic: a KeyboardEvent in, a plain object (or null) out.
  */
@@ -22,7 +23,28 @@
  *   "Meta", "CapsLock", "NumLock")
  * @property {string} text   - what the key typed ("" for Enter, the arrows, F-keys)
  * @property {'press'|'repeat'|'release'} action
+ * @property {'auto'|boolean} option_as_alt - whether Alt is Alt when it made the text (macOS
+ *   Option): "auto" (Alt unless it typed a character, then the character), true, false (Ghostty's
+ *   `macos-option-as-alt`, per key event; termd reads it from protocol 1.3)
  */
+
+/**
+ * The Option-as-Alt setting's values, as the wall's knob (`optionAsAlt`) and the IDE's setting
+ * (`terminal.optionAsAlt`) hold them.
+ *
+ *   auto  — Option that typed a character (å) sends the character; Alt that didn't is Alt.
+ *   true  — Option is Alt: Option+A is Alt+A (ESC a), never å.
+ *   false — Option is a character modifier, as Ghostty's default: even Alt+A types a.
+ */
+export const OPTION_AS_ALT = Object.freeze(['auto', 'true', 'false']);
+
+/** The `key` op's `option_as_alt` for a setting value (OPTION_AS_ALT). Throws naming a bad one. */
+export function optionAsAltField(value) {
+    if (value === 'auto') return 'auto';
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    throw new Error(`Option as Alt is ${OPTION_AS_ALT.join(', ')}, not '${value}'`);
+}
 
 /** The W3C modifier names termd reads, each with the state that says it's held. */
 const MODS = [
@@ -64,9 +86,11 @@ export function isPasteChord(e) {
  * @param {boolean} [opts.captureEscape=false] - when true, Escape goes to the terminal so a
  *   captured terminal can drive vim/readline; when false it returns null so the host's Esc-LIFO
  *   releases focus (the soft-focus default). This is the ONE key capture changes.
+ * @param {string} [opts.optionAsAlt='auto'] - the Option-as-Alt setting (OPTION_AS_ALT), read
+ *   per key so a change takes the next key
  * @returns {TerminalKeyEvent|null}
  */
-export function keyEventFor(e, { captureEscape = false } = {}) {
+export function keyEventFor(e, { captureEscape = false, optionAsAlt = 'auto' } = {}) {
     const k = e.key;
     if (!k || NOTHING_YET.has(k) || e.isComposing) return null;
 
@@ -88,5 +112,5 @@ export function keyEventFor(e, { captureEscape = false } = {}) {
     // character ("c" for Ctrl+C), which is what termd wants: the C0 byte is its to make.
     const text = [...k].length === 1 ? k : '';
     const action = e.type === 'keyup' ? 'release' : e.repeat ? 'repeat' : 'press';
-    return { code: e.code || '', key: k, mods, text, action };
+    return { code: e.code || '', key: k, mods, text, action, option_as_alt: optionAsAltField(optionAsAlt) };
 }

@@ -185,8 +185,16 @@ mod tests {
                 mods: vec!["Shift".into()],
                 text: String::new(),
                 action: Some(KeyAction::Repeat),
+                option_as_alt: OptionAsAlt::False,
             }),
             Op::Key(Key { handle: 3, key: "é".into(), text: "é".into(), ..Default::default() }),
+            Op::Key(Key {
+                handle: 3,
+                key: "å".into(),
+                text: "å".into(),
+                option_as_alt: OptionAsAlt::True,
+                ..Default::default()
+            }),
             Op::Paste(Paste { handle: 3, text: "a\nb".into(), allow_unsafe: Some(true) }),
         ];
         for op in ops {
@@ -199,6 +207,30 @@ mod tests {
         // A newer minor's extra fields are ignored.
         let r: Request = serde_json::from_str(r#"{"req":1,"op":"list","future":{"x":1}}"#).unwrap();
         assert_eq!(r.op, Op::List);
+    }
+
+    /// (1.3) `option_as_alt` is `"auto"`, `true` or `false` on the wire; absent is auto, and auto
+    /// is left out when sent.
+    #[test]
+    fn option_as_alt_is_auto_true_or_false() {
+        let key = |json: &str| match serde_json::from_str::<Request>(json).map(|r| r.op) {
+            Ok(Op::Key(k)) => Ok(k.option_as_alt),
+            Ok(op) => panic!("{op:?}"),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(key(r#"{"req":1,"op":"key","handle":1}"#), Ok(OptionAsAlt::Auto));
+        assert_eq!(key(r#"{"req":1,"op":"key","handle":1,"option_as_alt":"auto"}"#), Ok(OptionAsAlt::Auto));
+        assert_eq!(key(r#"{"req":1,"op":"key","handle":1,"option_as_alt":true}"#), Ok(OptionAsAlt::True));
+        assert_eq!(key(r#"{"req":1,"op":"key","handle":1,"option_as_alt":false}"#), Ok(OptionAsAlt::False));
+        for bad in [r#""true""#, r#""left""#, "1", "null"] {
+            let e = key(&format!(r#"{{"req":1,"op":"key","handle":1,"option_as_alt":{bad}}}"#)).unwrap_err();
+            assert!(e.contains(r#""auto", true or false"#), "{bad}: {e}");
+        }
+        let json = |o| serde_json::to_string(&Key { handle: 1, option_as_alt: o, ..Default::default() }).unwrap();
+        assert_eq!(json(OptionAsAlt::Auto), r#"{"handle":1}"#);
+        assert_eq!(json(OptionAsAlt::False), r#"{"handle":1,"option_as_alt":false}"#);
+        assert_eq!("false".parse(), Ok(OptionAsAlt::False));
+        assert!("left".parse::<OptionAsAlt>().is_err());
     }
 
     #[test]

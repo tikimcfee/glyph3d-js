@@ -157,6 +157,13 @@ fn send_key_and_paste_type_what_a_keyboard_and_a_clipboard_would() {
     p.read(b"\x03\r");
     ok(g3d(&d.socket, &["key", "plain", "shift+enter", "!"], None));
     p.read(b"\r!");
+    // Alt is Alt (ESC a) unless the person says Option types characters: then alt+a is a.
+    ok(g3d(&d.socket, &["key", "plain", "alt+a"], None));
+    p.read(b"\x1ba");
+    ok(g3d(&d.socket, &["key", "--option-as-alt", "false", "plain", "alt+a"], None));
+    p.read(b"a");
+    let o = g3d(&d.socket, &["key", "--option-as-alt", "left", "plain", "alt+a"], None);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("auto, true or false"));
     // A line break into a program without bracketed paste would run it: refused, and said how.
     let o = g3d(&d.socket, &["paste", "plain"], Some(b"one\ntwo"));
     assert!(!o.status.success());

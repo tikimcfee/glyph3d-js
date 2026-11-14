@@ -16,7 +16,8 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * empty canvas to drop focus. With nothing focused, Esc clears the selection. On macOS any other ⌘
  * key stays with the browser (⌘C, ⌘V); elsewhere any other Ctrl+Alt key is the shell's. A focused
  * DOM input (the palette) keeps its own keys. Paste goes to the focused terminal as a paste, which
- * termd brackets when the program asked for bracketed paste.
+ * termd brackets when the program asked for bracketed paste. Each key carries the `optionAsAlt` knob
+ * (wall.config), read as it is sent.
  */
 export default class WallKeys {
     /** @param {import('./TerminalWall.js').default} wall */
@@ -50,7 +51,7 @@ export default class WallKeys {
         const id = this._down.get(e.code);
         if (id === undefined) return;
         this._down.delete(e.code);
-        const key = keyEventFor(e, { captureEscape: true });
+        const key = keyEventFor(e, { captureEscape: true, optionAsAlt: this.wall.config.optionAsAlt });
         if (key) this.wall.terminal(id)?.sendKey(key);
     }
 
@@ -85,7 +86,7 @@ export default class WallKeys {
             if (e.key === 'Escape' && wall.selection.size) { e.preventDefault(); wall.run(['wall.select', 'none']); }
             return;
         }
-        const key = keyEventFor(e, { captureEscape: true });
+        const key = keyEventFor(e, { captureEscape: true, optionAsAlt: wall.config.optionAsAlt });
         if (!key) return;
         e.preventDefault();
         e.stopPropagation();

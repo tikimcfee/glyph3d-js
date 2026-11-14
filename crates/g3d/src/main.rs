@@ -8,7 +8,7 @@
 //!   g3d watch <id>
 //!   g3d capture <id> [--history N] [--vt]
 //!   g3d send <id> [text]          (stdin when no text)
-//!   g3d key <id> <chord>...       (shift+enter, ctrl+c, alt+left)
+//!   g3d key [--option-as-alt auto|true|false] <id> <chord>...   (shift+enter, ctrl+c, alt+left)
 //!   g3d paste <id> [text] [--unsafe]   (stdin when no text)
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
 //!   g3d upgrade [--binary PATH]
@@ -114,6 +114,10 @@ enum Cmd {
     /// encodes them as the program asked to read keys (Kitty keyboard, modifyOtherKeys, cursor
     /// key modes), as a terminal's keyboard would.
     Key {
+        /// Whether Alt is Alt when it made a character (macOS Option): auto (Alt unless it typed
+        /// one), true, false (Ghostty's `macos-option-as-alt`, per key event; protocol 1.3).
+        #[arg(long, default_value = "auto")]
+        option_as_alt: OptionAsAlt,
         id: String,
         #[arg(required = true)]
         chords: Vec<String>,
@@ -287,11 +291,15 @@ fn main() {
             }
             done_writing(&mut c, handle);
         }
-        Cmd::Key { id, chords } => {
+        Cmd::Key { option_as_alt, id, chords } => {
             let keys: Vec<Key> = chords.iter().map(|k| g3d::chord::parse(k).unwrap_or_else(|e| die(e))).collect();
             let (mut c, handle) = writer(&target, &id, Some("key"));
+            if !option_as_alt.is_auto() && !c.welcome.features.iter().any(|f| f == "option_as_alt") {
+                die(format!("{} has no `option_as_alt` (protocol 1.3); upgrade it (g3d upgrade)", c.welcome.daemon));
+            }
             for mut k in keys {
                 k.handle = handle;
+                k.option_as_alt = option_as_alt;
                 let _: WrittenReply = c.request(Op::Key(k)).unwrap_or_else(|e| die(e));
             }
             done_writing(&mut c, handle);

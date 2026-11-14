@@ -41,6 +41,7 @@ fn key(handle: u32, code: &str, k: &str, mods: &[&str], text: &str) -> Op {
         mods: mods.iter().map(|m| m.to_string()).collect(),
         text: text.into(),
         action: None,
+        option_as_alt: OptionAsAlt::Auto,
     })
 }
 
@@ -89,6 +90,24 @@ fn modify_other_keys_and_application_cursor_keys_follow_the_program() {
     expect(&mut c, &mut seen, key(h, "ArrowUp", "ArrowUp", &[], ""), b"\x1b[A");
     expect(&mut c, &mut seen, key(h, "ArrowLeft", "ArrowLeft", &["Alt"], ""), b"\x1b[1;3D");
     expect(&mut c, &mut seen, key(h, "KeyB", "b", &["Alt"], "b"), b"\x1bb");
+}
+
+/// (1.3) A Mac browser's Option+A (`å`, Alt held) in a modifyOtherKeys program: the character by
+/// default (`option_as_alt` auto), Alt+A when the client says Option is Alt, and the feature
+/// announced so a client knows the field is read.
+#[test]
+fn option_as_alt_chooses_between_options_character_and_alt() {
+    let d = Daemon::start();
+    let (mut c, h, mut seen) = start(&d, "mok", "\\033[>4;2m");
+    assert!(c.welcome.features.iter().any(|f| f == "option_as_alt"));
+    let opt_a = |o| match key(h, "KeyA", "å", &["Alt"], "å") {
+        Op::Key(k) => Op::Key(Key { option_as_alt: o, ..k }),
+        _ => unreachable!(),
+    };
+    expect(&mut c, &mut seen, opt_a(OptionAsAlt::Auto), "å".as_bytes());
+    expect(&mut c, &mut seen, opt_a(OptionAsAlt::True), b"\x1b[27;3;97~");
+    expect(&mut c, &mut seen, opt_a(OptionAsAlt::False), "å".as_bytes());
+    expect(&mut c, &mut seen, key(h, "KeyB", "b", &["Alt"], "b"), b"\x1b[27;3;98~");
 }
 
 #[test]

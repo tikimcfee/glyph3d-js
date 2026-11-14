@@ -23,6 +23,7 @@
  *     exec,           (cmd) => router.execute(cmd) — fire a verb (toggle / nav tiers)
  *     gestureEnv,     the env resolveGesture wants (Esc pops the context chain)
  *     captureToggle,  optional chord override for the settle/unsettle key (default CAPTURE_TOGGLE)
+ *     optionAsAlt,    optional () => the Option-as-Alt setting, read as each terminal key is sent
  *   }
  *
  * PASTE rides alongside as a second listener on the same env: the browser's native `paste` event
@@ -77,9 +78,9 @@ function captureToggle(e, env) {
 /** Terminal: KeyboardEvent → key event → grid.sendKey (the canvas→shell leg; termd encodes it in
  *  the program's modes). When `captured`, Esc goes too (otherwise it maps to null here and falls
  *  to the context tier). */
-function terminalKeyHandler(e, grid, captured) {
+function terminalKeyHandler(e, grid, captured, optionAsAlt) {
     if (!grid || typeof grid.sendKey !== 'function') return false;
-    const key = keyEventFor(e, { captureEscape: captured });
+    const key = keyEventFor(e, { captureEscape: captured, optionAsAlt });
     if (!key) return false;
     return grid.sendKey(key);
 }
@@ -118,7 +119,7 @@ function gridKeyHandler(e, grid) {
 // One entry per keystroke-target entity type. Adding a type is a one-liner here — the chain
 // above is unchanged. (Composable like gestureResolver's POLICIES.)
 const ENTITY_HANDLERS = {
-    terminal: (e, entity, slot, captured) => terminalKeyHandler(e, entity.grid, captured),
+    terminal: (e, entity, slot, captured, env) => terminalKeyHandler(e, entity.grid, captured, env.optionAsAlt?.()),
     grid:     (e, entity)                 => gridKeyHandler(e, entity.grid),
 };
 
@@ -154,7 +155,7 @@ function entityTyping(e, env) {
     if (!handler) return false;
     const captured = env.am.isCaptured?.() === true;
     try {
-        return handler(e, entity, slot, captured);
+        return handler(e, entity, slot, captured, env);
     } catch (err) {
         console.error(`[keyboard] ${entity.type} typing handler threw:`, err);
         return false;
@@ -203,6 +204,8 @@ function domInputFocused(doc) {
  * @param {Object} env.gestureEnv  env for resolveGesture (Esc tier)
  * @param {{key:string,ctrl?:boolean,shift?:boolean,alt?:boolean,meta?:boolean}} [env.captureToggle]
  *   override the settle/unsettle chord (default CAPTURE_TOGGLE = Ctrl+Shift+Enter)
+ * @param {() => string} [env.optionAsAlt]  the Option-as-Alt setting (keyEncoding.OPTION_AS_ALT),
+ *   read as each terminal key is sent; absent is 'auto'
  * @param {Document} [env.document] injectable for tests; defaults to the global
  * @returns {() => void} uninstall
  */

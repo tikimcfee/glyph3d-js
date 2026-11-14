@@ -8,7 +8,7 @@
 //! thread, the one that holds its `Terminal`.
 
 use g3d_wire::code;
-use g3d_wire::msg::{Key as WireKey, KeyAction};
+use g3d_wire::msg::{Key as WireKey, KeyAction, OptionAsAlt as WireOptionAsAlt};
 use libghostty_vt::Terminal;
 use libghostty_vt::key::{Action, Encoder, Event, Key, KittyKeyFlags, Mods, OptionAsAlt};
 use std::collections::HashMap;
@@ -30,6 +30,9 @@ pub struct Spec {
     /// The key's character with no modifiers, which the Kitty protocol reports.
     pub unshifted: Option<char>,
     pub action: Action,
+    /// Whether Alt is Alt for this event (Ghostty's `macos-option-as-alt`, resolved from the
+    /// request's `option_as_alt`); false: Option types characters.
+    pub option_as_alt: bool,
 }
 
 /// Ghostty's key enum is named by W3C `KeyboardEvent.code` values (src/input/key.zig), the
@@ -250,14 +253,30 @@ pub fn spec(k: &WireKey) -> Result<Spec, (&'static str, String)> {
     .or_else(|| us_char(key))
     .or(one)
     .filter(|c| !c.is_control() || *c == '\t');
-    let text = (!k.text.is_empty()).then(|| k.text.clone());
+    let mut text = (!k.text.is_empty()).then(|| k.text.clone());
+    let base = unshifted.map(String::from);
+    // Option made the text: Alt is held and the text is another character than the key's own
+    // (`å` on A), as a Mac's Option types one.
+    let option_char = alt && text.as_ref().is_some_and(|t| base.as_deref() != Some(t.to_lowercase().as_str()));
+    let option_as_alt = match k.option_as_alt {
+        WireOptionAsAlt::Auto => !option_char,
+        WireOptionAsAlt::True => true,
+        WireOptionAsAlt::False => false,
+    };
+    // Alt as Alt over Option's character: the key's own character instead, with Shift as a US
+    // key has it, as Ghostty's macOS apprt translates the key without Option.
+    if option_as_alt
+        && option_char
+        && let Some(c) = unshifted
+    {
+        text = Some(if shift { g3d::chord::us_shifted(c).unwrap_or(c) } else { c }.to_string());
+    }
     let mut consumed = Mods::empty();
     if let Some(t) = &text {
-        let base = unshifted.map(String::from);
         if shift && base.as_deref() != Some(t.as_str()) {
             consumed |= Mods::SHIFT;
         }
-        if alt && base.as_deref() != Some(t.to_lowercase().as_str()) {
+        if !option_as_alt && option_char {
             consumed |= Mods::ALT;
         }
     }
@@ -266,7 +285,7 @@ pub fn spec(k: &WireKey) -> Result<Spec, (&'static str, String)> {
         KeyAction::Repeat => Action::Repeat,
         KeyAction::Release => Action::Release,
     };
-    Ok(Spec { key, mods, consumed, text, unshifted, action })
+    Ok(Spec { key, mods, consumed, text, unshifted, action, option_as_alt })
 }
 
 /// One terminal's key encoder and the event it reuses, on its owner thread.
@@ -285,14 +304,39 @@ impl Keyboard {
 
     /// The bytes `s` is in `term`'s current modes (empty: it encodes to nothing, as a bare
     /// modifier or a release does outside Kitty's event reporting).
+    ///
+    /// Alt as a character modifier (`s.option_as_alt` false) is Ghostty's `macos-option-as-alt =
+    /// false`, on every daemon platform. libghostty reads that option only when it is built for
+    /// macOS (key_encode.zig tests the target at compile time), so termd pins it true everywhere
+    /// and makes false's three differences itself, around the same encoder: no ESC prefix for Alt
+    /// (mode 1036 off for the event), modifyOtherKeys not counting Alt (the event encoded without
+    /// it), and Kitty's associated text kept with Alt held ([`associate_text`]).
     pub fn encode(&mut self, term: &Terminal<'_, '_>, s: &Spec) -> Result<Vec<u8>, String> {
-        // Option-as-character is the client's to resolve (into `text`); an Alt that reaches
-        // termd is Alt, on a macOS daemon too.
         self.enc.set_options_from_terminal(term).set_macos_option_as_alt(OptionAsAlt::True);
+        let (kitty, modify_other_keys) = self.modes(term)?;
         if let Some(bytes) = legacy_chord(s)
-            && self.legacy(term)?
+            && kitty == KittyKeyFlags::DISABLED
+            && !modify_other_keys
         {
             return Ok(bytes);
+        }
+        if s.option_as_alt || !s.mods.contains(Mods::ALT) {
+            return self.encode_event(s);
+        }
+        if kitty != KittyKeyFlags::DISABLED {
+            let mut out = self.encode_event(s)?;
+            if kitty.contains(KittyKeyFlags::REPORT_ASSOCIATED) {
+                associate_text(&mut out, s);
+            }
+            return Ok(out);
+        }
+        self.enc.set_alt_esc_prefix(false);
+        // modifyOtherKeys 2 reads a one-character key's modifiers without Alt (key_encode.zig,
+        // `legacy`); taking Alt off the event changes nothing else on the way there for a key that
+        // isn't a function or keypad key (only they have PC-style sequences, which come first).
+        if modify_other_keys && s.text.as_deref().and_then(one_char).is_some() && !is_keypad(s.key) {
+            let bare = Spec { mods: s.mods - Mods::ALT, consumed: s.consumed - Mods::ALT, ..s.clone() };
+            return self.encode_event(&bare);
         }
         self.encode_event(s)
     }
@@ -311,13 +355,14 @@ impl Keyboard {
         Ok(out)
     }
 
-    /// Whether the program asked for no keyboard mode: no Kitty flags and no modifyOtherKeys
-    /// state 2. libghostty has no getter for modifyOtherKeys; the encoder, set from the terminal
-    /// just now, answers it: Ctrl+P is `0x10` unless state 2 is on (`CSI 27;5;112~`).
-    fn legacy(&mut self, term: &Terminal<'_, '_>) -> Result<bool, String> {
+    /// The keyboard modes the program asked for: its Kitty flags, and (with none) whether
+    /// modifyOtherKeys state 2 is on. libghostty has no getter for modifyOtherKeys; the encoder,
+    /// set from the terminal just now, answers it: Ctrl+P is `0x10` unless state 2 is on
+    /// (`CSI 27;5;112~`).
+    fn modes(&mut self, term: &Terminal<'_, '_>) -> Result<(KittyKeyFlags, bool), String> {
         let kitty = term.kitty_keyboard_flags().map_err(|e| format!("kitty keyboard flags: {e}"))?;
         if kitty != KittyKeyFlags::DISABLED {
-            return Ok(false);
+            return Ok((kitty, false));
         }
         let probe = Spec {
             key: Key::P,
@@ -326,9 +371,59 @@ impl Keyboard {
             text: Some("p".into()),
             unshifted: Some('p'),
             action: Action::Press,
+            option_as_alt: true,
         };
-        Ok(self.encode_event(&probe)? == [0x10])
+        Ok((kitty, self.encode_event(&probe)? != [0x10]))
     }
+}
+
+/// Kitty's associated text (flag 16) for an event whose Alt is Option, the character modifier:
+/// Ghostty's encoder leaves it out whenever Alt is held, unless `macos-option-as-alt` is false
+/// (`alt_prevents_text`), and keeps it out for Control and Super either way. `out` is the
+/// encoder's sequence for the event; when it is a `CSI … u` (not the bare text it sends for an
+/// unmodified key), the text goes last as Ghostty writes it: `;` and the code points, `:` between,
+/// control characters skipped. Alt held means the modifier field is there, so one `;`.
+fn associate_text(out: &mut Vec<u8>, s: &Spec) {
+    if s.action == Action::Release || s.mods.intersects(Mods::CTRL | Mods::SUPER) {
+        return;
+    }
+    let Some(text) = &s.text else { return };
+    if !(out.starts_with(b"\x1b[") && out.last() == Some(&b'u')) {
+        return;
+    }
+    let cps: Vec<String> = text.chars().filter(|c| !c.is_control()).map(|c| u32::from(c).to_string()).collect();
+    if cps.is_empty() {
+        return;
+    }
+    out.pop();
+    out.push(b';');
+    out.extend_from_slice(cps.join(":").as_bytes());
+    out.push(b'u');
+}
+
+/// A keypad key that types: it has PC-style sequences (keypad application mode,
+/// function_keys.zig) that libghostty matches before modifyOtherKeys.
+fn is_keypad(k: Key) -> bool {
+    use Key::*;
+    matches!(
+        k,
+        Numpad0
+            | Numpad1
+            | Numpad2
+            | Numpad3
+            | Numpad4
+            | Numpad5
+            | Numpad6
+            | Numpad7
+            | Numpad8
+            | Numpad9
+            | NumpadDecimal
+            | NumpadDivide
+            | NumpadMultiply
+            | NumpadSubtract
+            | NumpadAdd
+            | NumpadEnter
+    )
 }
 
 /// What a program that asked for no keyboard mode (no Kitty flags, no modifyOtherKeys) gets for
@@ -380,6 +475,7 @@ mod tests {
             mods: mods.iter().map(|m| m.to_string()).collect(),
             text: text.into(),
             action: None,
+            option_as_alt: WireOptionAsAlt::Auto,
         }
     }
 
@@ -390,22 +486,73 @@ mod tests {
         Keyboard::new().unwrap().encode(&t, &spec(k).unwrap()).unwrap()
     }
 
+    /// [`w`] with `option_as_alt` set.
+    fn wo(code: &str, key: &str, mods: &[&str], text: &str, o: WireOptionAsAlt) -> WireKey {
+        WireKey { option_as_alt: o, ..w(code, key, mods, text) }
+    }
+
+    /// The program's keyboard modes the Option table is measured in: none, Kitty disambiguate,
+    /// Kitty all flags, modifyOtherKeys 2.
+    const MODES: [&[u8]; 4] = [b"", b"\x1b[>1u", b"\x1b[>31u", b"\x1b[>4;2m"];
+
+    /// `k` in each of [`MODES`].
+    fn in_modes(k: &WireKey) -> Vec<Vec<u8>> {
+        MODES.iter().map(|m| enc(m, k)).collect()
+    }
+
     /// What a macOS browser sends for Option+A on a US layout (Chrome and Safari alike: `key` is
-    /// the character Option typed, `altKey` set) reaches a legacy or Kitty-disambiguate program as
-    /// that character, as Ghostty's default `macos-option-as-alt = false` types it; an Alt whose
-    /// text is the key's own character (`g3d key alt+a`, a Linux browser) is Alt. Kitty's
-    /// all-keys mode and modifyOtherKeys 2 differ from Ghostty's default for the Option character
-    /// (MACOS.md, "Keys"): not asserted here, the lead's to decide.
+    /// the character Option typed, `altKey` set) reaches the program as Ghostty's default
+    /// `macos-option-as-alt = false` sends it, in every mode (MACOS.md, "Keys"); an Alt whose text
+    /// is the key's own character (`g3d key alt+a`, a Linux browser) is Alt in every mode.
     #[test]
     fn a_macos_option_character_is_its_text_and_alt_as_alt_is_alt() {
         let opt_a = w("KeyA", "å", &["Alt"], "å");
-        assert_eq!(enc(b"", &opt_a), "å".as_bytes());
-        assert_eq!(enc(b"\x1b[>1u", &opt_a), "å".as_bytes());
+        let ghostty_default: [&[u8]; 4] = ["å".as_bytes(), "å".as_bytes(), b"\x1b[97;3;229u", "å".as_bytes()];
+        assert_eq!(in_modes(&opt_a), ghostty_default);
         let alt_a = w("KeyA", "a", &["Alt"], "a");
-        assert_eq!(enc(b"", &alt_a), b"\x1ba");
-        assert_eq!(enc(b"\x1b[>1u", &alt_a), b"\x1b[97;3u");
+        let alt: [&[u8]; 4] = [b"\x1ba", b"\x1b[97;3u", b"\x1b[97;3u", b"\x1b[27;3;97~"];
+        assert_eq!(in_modes(&alt_a), alt);
+        // Shift+Option, Ctrl+Option: Option's character, the other modifiers as they are.
+        let opt_shift_a = w("KeyA", "Å", &["Alt", "Shift"], "Å");
+        assert_eq!(enc(b"", &opt_shift_a), "Å".as_bytes());
+        assert_eq!(enc(b"\x1b[>31u", &opt_shift_a), b"\x1b[97:197;4;197u");
+        let ctrl_opt_a = w("KeyA", "å", &["Alt", "Control"], "å");
+        assert_eq!(enc(b"\x1b[>4;2m", &ctrl_opt_a), b"\x1b[27;5;229~");
+        assert_eq!(enc(b"\x1b[>31u", &ctrl_opt_a), b"\x1b[97;7u", "Control keeps the text out");
+        // A held key repeats with its text after the event type.
+        let repeat = WireKey { action: Some(KeyAction::Repeat), ..opt_a.clone() };
+        assert_eq!(enc(b"\x1b[>31u", &repeat), b"\x1b[97;3:2;229u");
         // A dead key (Option+E) types nothing; the next key's text is the composed character.
         assert_eq!(enc(b"", &w("KeyE", "é", &[], "é")), "é".as_bytes());
+    }
+
+    /// `option_as_alt: false` is Ghostty's default for every event: Alt never ESC-prefixes, isn't
+    /// counted by modifyOtherKeys and keeps Kitty's text, so even `alt+a` types `a`. Keys without
+    /// text keep Alt (an arrow's modifier field).
+    #[test]
+    fn option_as_alt_false_makes_alt_a_character_modifier() {
+        let f = WireOptionAsAlt::False;
+        let ghostty_default: [&[u8]; 4] = ["å".as_bytes(), "å".as_bytes(), b"\x1b[97;3;229u", "å".as_bytes()];
+        assert_eq!(in_modes(&wo("KeyA", "å", &["Alt"], "å", f)), ghostty_default);
+        let alt_a: [&[u8]; 4] = [b"a", b"\x1b[97;3u", b"\x1b[97;3;97u", b"a"];
+        assert_eq!(in_modes(&wo("KeyA", "a", &["Alt"], "a", f)), alt_a);
+        let left = wo("ArrowLeft", "ArrowLeft", &["Alt"], "", f);
+        assert_eq!(in_modes(&left), in_modes(&w("ArrowLeft", "ArrowLeft", &["Alt"], "")));
+        assert_eq!(enc(b"", &left), b"\x1b[1;3D");
+        // Control still makes its byte, ESC-prefixed for Alt as Ghostty's C0 path does.
+        assert_eq!(enc(b"", &wo("KeyC", "c", &["Alt", "Control"], "c", f)), b"\x1b\x03");
+    }
+
+    /// `option_as_alt: true` is Alt for every event: Option+A is Alt+A, the key's own character
+    /// (with Shift as a US key has it) in place of Option's.
+    #[test]
+    fn option_as_alt_true_makes_option_alt() {
+        let t = WireOptionAsAlt::True;
+        let alt_a: [&[u8]; 4] = [b"\x1ba", b"\x1b[97;3u", b"\x1b[97;3u", b"\x1b[27;3;97~"];
+        assert_eq!(in_modes(&wo("KeyA", "å", &["Alt"], "å", t)), alt_a);
+        assert_eq!(in_modes(&wo("KeyA", "a", &["Alt"], "a", t)), alt_a);
+        assert_eq!(enc(b"", &wo("Digit1", "⁄", &["Alt", "Shift"], "⁄", t)), b"\x1b!");
+        assert_eq!(enc(b"", &wo("KeyA", "Å", &["Alt", "Shift"], "Å", t)), b"\x1bA");
     }
 
     #[test]
@@ -449,7 +596,10 @@ mod tests {
         assert_eq!(s.unshifted, Some('ф'));
         // Option-as-character on macOS: the text is the client's, and Option made it.
         let s = spec(&w("KeyA", "å", &["Alt"], "å")).unwrap();
-        assert_eq!((s.unshifted, s.consumed), (Some('a'), Mods::ALT));
+        assert_eq!((s.unshifted, s.consumed, s.option_as_alt), (Some('a'), Mods::ALT, false));
+        // The same event with Option as Alt: the key's own character, nothing consumed.
+        let s = spec(&wo("KeyA", "å", &["Alt"], "å", WireOptionAsAlt::True)).unwrap();
+        assert_eq!((s.text.as_deref(), s.consumed, s.option_as_alt), (Some("a"), Mods::empty(), true));
         // Alt as Alt: nothing consumed.
         let s = spec(&w("KeyA", "a", &["Alt"], "a")).unwrap();
         assert_eq!((s.unshifted, s.consumed), (Some('a'), Mods::empty()));
@@ -565,18 +715,42 @@ mod tests {
                 other => panic!("a key the test doesn't know: {other}"),
             };
             for (cell, mode) in cells[1..].iter().zip(modes) {
-                let want: Vec<u8> = cell
-                    .trim_matches('`')
-                    .split(' ')
-                    .flat_map(|t| match t {
-                        "CSI" => b"\x1b[".to_vec(),
-                        "ESC" => b"\x1b".to_vec(),
-                        "\\r" => b"\r".to_vec(),
-                        t if t.starts_with("0x") => vec![u8::from_str_radix(&t[2..], 16).unwrap()],
-                        t => t.as_bytes().to_vec(),
-                    })
-                    .collect();
-                assert_eq!(enc(mode, &k), want, "{name} after {mode:?}: the table says {cell}");
+                assert_eq!(enc(mode, &k), doc_bytes(cell), "{name} after {mode:?}: the table says {cell}");
+            }
+        }
+    }
+
+    /// A PROTOCOL.md table cell's bytes: `CSI 97 ; 3 u`, `ESC a`, `\r`, `0x03`, `å`.
+    fn doc_bytes(cell: &str) -> Vec<u8> {
+        cell.trim_matches('`')
+            .split(' ')
+            .flat_map(|t| match t {
+                "CSI" => b"\x1b[".to_vec(),
+                "ESC" => b"\x1b".to_vec(),
+                "\\r" => b"\r".to_vec(),
+                t if t.starts_with("0x") => vec![u8::from_str_radix(&t[2..], 16).unwrap()],
+                t => t.as_bytes().to_vec(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn protocol_md_option_table_is_what_termd_sends() {
+        let spec = include_str!("../../../docs/termd/PROTOCOL.md");
+        let start = spec.find("| event, `option_as_alt` |").expect("the option table");
+        let rows: Vec<&str> = spec[start..].lines().skip(2).take_while(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        for row in rows {
+            let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+            let (event, o) = cells[0].split_once(", ").unwrap();
+            let o: WireOptionAsAlt = o.trim_matches(['`', '"']).parse().unwrap();
+            let k = match event {
+                "Option+A" => wo("KeyA", "å", &["Alt"], "å", o),
+                "Alt+A" => wo("KeyA", "a", &["Alt"], "a", o),
+                other => panic!("an event the test doesn't know: {other}"),
+            };
+            for (cell, mode) in cells[1..].iter().zip(MODES) {
+                assert_eq!(enc(mode, &k), doc_bytes(cell), "{} after {mode:?}: the table says {cell}", cells[0]);
             }
         }
     }

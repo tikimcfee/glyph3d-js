@@ -832,13 +832,14 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   bun test tools/wall-layout.test.mjs tools/wall-labels.test.mjs
   ```
-- **`wall-store.test.mjs`** / **`wall-groups.test.mjs`** / **`wall-panels.test.mjs`** (headless,
-  `bun test`) — the wall's per-relay memory (names, spots, hidden terminals, groups, the sidebar
-  and the status window's place, pruned against the live set), its groups on a stand-in wall, and
-  its two side panels (where the sidebar and the status window dock, side by side on one edge; the
-  status window's knobs checked as `wall.config`'s).
+- **`wall-store.test.mjs`** / **`wall-groups.test.mjs`** / **`wall-panels.test.mjs`** /
+  **`wall-keys.test.mjs`** (headless, `bun test`) — the wall's per-relay memory (names, spots,
+  hidden terminals, groups, the sidebar and the status window's place, pruned against the live
+  set), its groups on a stand-in wall, its two side panels (where the sidebar and the status window
+  dock, side by side on one edge; the status window's knobs checked as `wall.config`'s), and its
+  keyboard on a stand-in wall (every key carries the `optionAsAlt` knob as it is when sent).
   ```
-  bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs
+  bun test tools/wall-store.test.mjs tools/wall-groups.test.mjs tools/wall-panels.test.mjs tools/wall-keys.test.mjs
   ```
 - **`wall-e2e.mjs`** — the wall end to end in a real-GPU browser: spawn, typing (Enter runs the
   line: the shell's output, not its echo), a real Shift+Enter running a line in a plain shell and

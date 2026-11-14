@@ -14,8 +14,9 @@ Version 1.1 is the first release. What is marked **(1.1)** is new in it: the res
 code, `upgrade` with its `upgrade_failed` event), `create`'s environment, `env_base`, defaults and
 reply fields, the `env` op, and the status document (`status`, `status_follow`, `status_unfollow`,
 the `status` event). What is marked **(1.2)** is new in 1.2: key events and paste (`key`, `paste`,
-the features of the same names, the `unsafe_paste` code). The daemon on branch `termd` speaks all
-of 1.2 and announces `proto` `[1, 2]`.
+the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
+`key`'s `option_as_alt` and the feature of the same name. The daemon on branch `termd` speaks all
+of 1.3 and announces `proto` `[1, 3]`.
 
 ## At a glance
 
@@ -176,10 +177,10 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 2], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+{"proto": [1, 3], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -192,7 +193,8 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `cells` (packed cells, reserved).
+  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `cells` (packed cells,
+  reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -550,15 +552,39 @@ The fields mean what the W3C UI Events `KeyboardEvent` fields of the same names 
 | `mods` | `[]` | the modifiers held, by their W3C names: `"Shift"`, `"Control"`, `"Alt"`, `"Meta"` (`"Super"` is the same), `"CapsLock"`, `"NumLock"`. `"AltGraph"`, `"Fn"`, `"FnLock"`, `"Hyper"`, `"ScrollLock"`, `"Symbol"` and `"SymbolLock"` are accepted and ignored: they only shape `text`. Any other name is `bad_request` |
 | `text` | `""` | what the key typed, in the client's layout, after Shift, AltGr, Caps Lock, a dead key, an input method or macOS Option-as-character: `"a"`, `"A"`, `"é"`, `"å"`. Empty when it typed nothing (Enter, Tab, an arrow, a function key). With Control held it is the character without Control's change (`"c"` for Ctrl+C: the `0x03` is termd's to make). At most 4,096 bytes (`too_large`) and no control characters (`bad_request`: send the key that makes one) |
 | `action` | `"press"` | `"press"`, `"repeat"` (the key held) or `"release"`. Programs see a release only when they asked for Kitty's event reporting (flag 2) |
+| `option_as_alt` | `"auto"` | (1.3, feature `option_as_alt`) whether Alt is Alt when it also made `text`, as a Mac's Option does: `"auto"`, `true` or `false`, Ghostty's `macos-option-as-alt` chosen per event. Any other value is `bad_request`. A 1.2 daemon ignores the field, so a client checks the feature before relying on it |
 
 Layouts, dead keys, input methods and Option-as-character are the client's to resolve: its OS
 knows them and termd doesn't. termd works out what the W3C event doesn't carry: the key's
 unshifted character, which the Kitty protocol reports (`key` when no Shift or Alt is held, a
 letter lowercased, else the US layout's character for `code`), and which modifiers went into
 `text` (Shift when the text isn't the unshifted character; Alt when it is another character, as
-macOS Option makes one), which the encoder must not report a second time. An Alt that did not go
-into `text` is Alt, on every daemon platform. A key event needs a key: one with neither a known
-`code` or `key` nor `text` is `bad_request`.
+macOS Option makes one, and Option types characters), which the encoder must not report a second
+time. A key event needs a key: one with neither a known `code` or `key` nor `text` is
+`bad_request`.
+
+`option_as_alt` (1.3) settles an Alt that made `text`, the same on every daemon platform:
+
+- `"auto"`: an Alt held while `text` is another character than the key's own (`"å"` on `KeyA`)
+  typed that character, and the event is encoded as Ghostty's default (`false`); any other Alt is
+  Alt (`"a"` on `KeyA` with Alt held, Alt on an arrow).
+- `true`: Alt is Alt. Option's character gives way to the key's own (with Shift as a US key has
+  it): Option+A is Alt+A.
+- `false`: Alt is a character modifier, as in Ghostty by default: no `ESC` prefix, not counted by
+  modifyOtherKeys, Kitty's associated text kept (flag 16). Even Alt+A types `a`. Keys that type no
+  text keep Alt (Alt+ArrowLeft is `CSI 1 ; 3 D`).
+
+Ghostty's `left` and `right` have no counterpart: a key event can't say which Alt is held.
+Option+A from a Mac browser (`code` `"KeyA"`, `key` and `text` `"å"`, `mods` `["Alt"]`) and Alt+A
+(`text` `"a"`):
+
+| event, `option_as_alt` | no mode set | Kitty flags 1 | Kitty flags 31 | modifyOtherKeys 2 |
+|---|---|---|---|---|
+| Option+A, `"auto"` | `å` | `å` | `CSI 97 ; 3 ; 229 u` | `å` |
+| Option+A, `false` | `å` | `å` | `CSI 97 ; 3 ; 229 u` | `å` |
+| Option+A, `true` | `ESC a` | `CSI 97 ; 3 u` | `CSI 97 ; 3 u` | `CSI 27 ; 3 ; 97 ~` |
+| Alt+A, `"auto"` | `ESC a` | `CSI 97 ; 3 u` | `CSI 97 ; 3 u` | `CSI 27 ; 3 ; 97 ~` |
+| Alt+A, `false` | `a` | `CSI 97 ; 3 u` | `CSI 97 ; 3 ; 97 u` | `a` |
 
 What some keys become (the bytes the program reads):
 
@@ -1146,6 +1172,9 @@ writes, and send keystrokes as `INPUT`.
 
 ## Versions
 
+- **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is
+  `"auto"`, and a 1.2 client is served as before but for an Alt that made a character, which
+  encodes as Ghostty's default.
 - **1.2**: key events and paste: the `key` and `paste` ops, the features of the same names,
   and the `unsafe_paste` code. Additive: a 1.1 client is served as before.
 - **1.1** (the first release): `status`, `status_follow`, `status_unfollow`, `upgrade`; the

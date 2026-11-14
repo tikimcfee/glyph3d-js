@@ -304,7 +304,7 @@ func runTerminal(cfg terminalConfig) {
 				key: func(k termdKey) {
 					s := sess.Load()
 					if s.offers("key") {
-						send("key", k.fields(s.handle))
+						send("key", s.keyFields(k))
 					}
 				},
 				// The display's paste is the person's own (a paste chord in a focused terminal),
@@ -546,6 +546,19 @@ func (s *termdSession) offers(op string) bool {
 	return false
 }
 
+// keyFields is the `key` op's request for a display's key event on this session's terminal. Its
+// option_as_alt rides only to a brain that reads it (feature `option_as_alt`, protocol 1.3); an
+// older one encodes Option's character as its own build does, which is logged once.
+func (s *termdSession) keyFields(k termdKey) map[string]any {
+	reads := s.tc.Has("option_as_alt")
+	if k.OptionAsAlt != nil && !reads {
+		if _, was := s.said.LoadOrStore("option_as_alt", true); !was {
+			log.Printf("[attach] termd %s has no option_as_alt (protocol 1.3): the display's Option-as-Alt setting is dropped until it is upgraded (g3d upgrade)", s.tc.Welcome.Daemon)
+		}
+	}
+	return k.fields(s.handle, reads)
+}
+
 // encodeOutputFrame builds an OUTPUT data-plane frame:
 // [type][idLen][id][cols:u16 BE][rows:u16 BE][payload]. cols/rows are the size the payload was
 // written at, so the display aligns its emulator to the content before parsing it.
@@ -582,16 +595,22 @@ type termdKey struct {
 	Mods   []string `json:"mods,omitempty"`
 	Text   string   `json:"text,omitempty"`
 	Action string   `json:"action,omitempty"`
+	// OptionAsAlt is "auto", true or false as the display sent it (termd checks it); nil: unsent.
+	OptionAsAlt any `json:"option_as_alt,omitempty"`
 }
 
-// fields is the `key` op's request fields for terminal handle h.
-func (k termdKey) fields(h uint32) map[string]any {
+// fields is the `key` op's request fields for terminal handle h; option_as_alt only when the
+// brain reads it (optionAsAlt: WELCOME.features has `option_as_alt`).
+func (k termdKey) fields(h uint32, optionAsAlt bool) map[string]any {
 	f := map[string]any{"handle": h, "code": k.Code, "key": k.Key, "text": k.Text}
 	if len(k.Mods) > 0 {
 		f["mods"] = k.Mods
 	}
 	if k.Action != "" {
 		f["action"] = k.Action
+	}
+	if optionAsAlt && k.OptionAsAlt != nil {
+		f["option_as_alt"] = k.OptionAsAlt
 	}
 	return f
 }

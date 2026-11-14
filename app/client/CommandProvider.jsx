@@ -739,6 +739,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     const keystrokes = installKeyboardRouter({
       am: state.ctx.attentionManager,
       exec: (cmd) => state.router.execute(cmd),
+      optionAsAlt: () => getSetting('terminal.optionAsAlt'),
       gestureEnv: {
         exec: (cmd) => state.router.execute(cmd),
         get attention() { return state.ctx.attentionManager; },

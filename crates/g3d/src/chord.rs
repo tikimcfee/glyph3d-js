@@ -4,7 +4,7 @@
 //! `command`); a key is a name or one character, and `+` alone is the plus key. A chord stands
 //! for a US keyboard, as a terminal's own keybinds do: `shift+1` is `!`, `!` is `shift+1`.
 
-use g3d_wire::msg::Key;
+use g3d_wire::msg::{Key, OptionAsAlt};
 
 /// Named keys: (the names a chord may use, the W3C `code`, the W3C `key`, its text).
 const NAMED: &[(&[&str], &str, &str, &str)] = &[
@@ -51,6 +51,15 @@ const US: &[(char, char, &str)] = &[
     ('/', '?', "Slash"),
     ('`', '~', "Backquote"),
 ];
+
+/// A US key's character with Shift held: a letter's capital, a digit's or punctuation key's
+/// shifted character (`1` → `!`); `None` for a character that isn't on a US key.
+pub fn us_shifted(c: char) -> Option<char> {
+    if c.is_ascii_lowercase() {
+        return Some(c.to_ascii_uppercase());
+    }
+    US.iter().find(|(u, ..)| *u == c).map(|(_, s, _)| *s)
+}
 
 fn modifier(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -134,7 +143,7 @@ pub fn parse(chord: &str) -> Result<Key, String> {
             }
         }
     };
-    Ok(Key { handle: 0, code, key, mods, text, action: None })
+    Ok(Key { handle: 0, code, key, mods, text, action: None, option_as_alt: OptionAsAlt::Auto })
 }
 
 #[cfg(test)]

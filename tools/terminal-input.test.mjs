@@ -17,7 +17,7 @@
 //
 // Pure functions of their input, so this runs with no DOM and no GPU.
 
-import { keyEventFor, isPasteChord } from '../packages/glyph3d-core/src/services/interaction/keyEncoding.js';
+import { keyEventFor, isPasteChord, OPTION_AS_ALT } from '../packages/glyph3d-core/src/services/interaction/keyEncoding.js';
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
@@ -37,7 +37,7 @@ const ev = (key, code, mods = {}, extra = {}) => ({
     ok(keyEventFor(ev('V', 'KeyV', { ctrl: true, shift: true })) === null, 'Ctrl+Shift+V is no key');
     // Plain Ctrl+V stays a real key — readline's quoted-insert. Breaking it to "fix paste" would be
     // a silent regression for anyone using C-v C-j to insert a newline.
-    ok(same(keyEventFor(ev('v', 'KeyV', { ctrl: true })), { code: 'KeyV', key: 'v', mods: ['Control'], text: 'v', action: 'press' }),
+    ok(same(keyEventFor(ev('v', 'KeyV', { ctrl: true })), { code: 'KeyV', key: 'v', mods: ['Control'], text: 'v', action: 'press', option_as_alt: 'auto' }),
         'plain Ctrl+V is the key Ctrl+V (termd makes it \\x16)');
     ok(isPasteChord(ev('v', 'KeyV', { ctrl: true })) === false, 'Ctrl+V is not a paste chord');
     ok(keyEventFor(ev('c', 'KeyC', { meta: true }))?.text === 'c', 'Cmd+C is not swept up by the chord test');
@@ -45,9 +45,9 @@ const ev = (key, code, mods = {}, extra = {}) => ({
 
 // ── 2. keys map to W3C key events, never to bytes ──
 {
-    ok(same(keyEventFor(ev('Enter', 'Enter', { shift: true })), { code: 'Enter', key: 'Enter', mods: ['Shift'], text: '', action: 'press' }),
+    ok(same(keyEventFor(ev('Enter', 'Enter', { shift: true })), { code: 'Enter', key: 'Enter', mods: ['Shift'], text: '', action: 'press', option_as_alt: 'auto' }),
         'Shift+Enter is Shift+Enter (no \\r: termd encodes it for the program)');
-    ok(same(keyEventFor(ev('A', 'KeyA', { shift: true })), { code: 'KeyA', key: 'A', mods: ['Shift'], text: 'A', action: 'press' }), 'Shift+A types A');
+    ok(same(keyEventFor(ev('A', 'KeyA', { shift: true })), { code: 'KeyA', key: 'A', mods: ['Shift'], text: 'A', action: 'press', option_as_alt: 'auto' }), 'Shift+A types A');
     ok(keyEventFor(ev('a', 'KeyA', { caps: true }))?.mods.includes('CapsLock'), 'Caps Lock is reported as held');
     ok(keyEventFor(ev('ArrowLeft', 'ArrowLeft', { alt: true }))?.text === '', 'a named key types no text');
     ok(keyEventFor(ev('é', 'KeyE'))?.text === 'é', "a dead key's result types the composed character");
@@ -61,10 +61,24 @@ const ev = (key, code, mods = {}, extra = {}) => ({
     ok(keyEventFor(ev('a', 'KeyA', {}, { type: 'keyup' }))?.action === 'release', 'a keyup is a release');
     // AltGr on a Windows browser is Ctrl+Alt with AltGraph held: the character is the text, and
     // Ctrl/Alt went into it (termd would make Ctrl+Alt+@ a NUL).
-    ok(same(keyEventFor(ev('@', 'KeyQ', { ctrl: true, alt: true, altGr: true })), { code: 'KeyQ', key: '@', mods: [], text: '@', action: 'press' }),
+    ok(same(keyEventFor(ev('@', 'KeyQ', { ctrl: true, alt: true, altGr: true })), { code: 'KeyQ', key: '@', mods: [], text: '@', action: 'press', option_as_alt: 'auto' }),
         'AltGr+Q on a German layout types @, no Ctrl or Alt');
     ok(same(keyEventFor(ev('{', 'Digit7', { ctrl: true, alt: true, altGr: true }))?.mods, []), 'AltGr+7 types {');
     ok(same(keyEventFor(ev('@', 'KeyQ', { ctrl: true, alt: true }))?.mods, ['Control', 'Alt']), 'a real Ctrl+Alt still rides');
+}
+
+// ── 2b. the Option-as-Alt setting rides on every key, read per key (a change takes the next one) ──
+{
+    // A Mac browser's Option+A: the character Option typed, Alt held.
+    const optA = ev('å', 'KeyA', { alt: true });
+    ok(keyEventFor(optA)?.option_as_alt === 'auto', 'no setting is auto');
+    ok(keyEventFor(optA, { optionAsAlt: 'false' })?.option_as_alt === false, "'false' is the op's false");
+    ok(keyEventFor(optA, { optionAsAlt: 'true' })?.option_as_alt === true, "'true' is the op's true");
+    ok(keyEventFor(optA, { optionAsAlt: 'auto' })?.text === 'å', 'the text is the browser\'s either way: termd applies the setting');
+    let threw = '';
+    try { keyEventFor(optA, { optionAsAlt: 'left' }); } catch (err) { threw = String(err); }
+    ok(/auto, true, false/.test(threw), `a bad setting throws naming the values (${threw})`);
+    ok(OPTION_AS_ALT.join() === 'auto,true,false', 'the values: auto, true, false');
 }
 
 // ── 3. the grid stamps its id; the push names the kind ──
@@ -108,6 +122,24 @@ const gridStub = (id) => {
     ok(g.paste('x') === false, 'paste with no owner returns false');
     ok(g.sendKey({ code: 'KeyX', key: 'x', mods: [], text: 'x', action: 'press' }) === false, 'sendKey with no owner returns false');
     ok(g.sendInput('x') === false, 'sendInput with no owner returns false');
+}
+
+// ── 4. the IDE's keyboard chain hands the terminal its Option-as-Alt setting, read per key ──
+{
+    const { installKeyboardRouter } = await import('../app/client/keyboardRouter.js');
+    const listeners = {};
+    const doc = { activeElement: null, addEventListener: (t, f) => { listeners[t] = f; }, removeEventListener() {} };
+    const sent = [];
+    const grid = { sendKey: (k) => (sent.push(k), true) };
+    const am = { get: (slot) => (slot === 'key' ? { entity: { type: 'terminal', grid } } : null), isCaptured: () => false };
+    let setting = 'auto';
+    const off = installKeyboardRouter({ am, exec() {}, gestureEnv: {}, document: doc, optionAsAlt: () => setting });
+    const press = () => listeners.keydown({ ...ev('å', 'KeyA', { alt: true }), preventDefault() {}, stopImmediatePropagation() {} });
+    press();
+    setting = 'false';
+    press();
+    ok(same(sent.map((k) => k.option_as_alt), ['auto', false]), `the chain reads the setting per key (${sent.map((k) => k.option_as_alt)})`);
+    off();
 }
 
 // The push each input becomes on the relay, through terminal.create's real owner binding:

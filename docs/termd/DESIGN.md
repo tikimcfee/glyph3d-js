@@ -386,8 +386,8 @@ new file.
 ## Status as built (2026-11-12)
 
 What the branch has of [Status](#status), and where it departs from it. Protocol 1.1 is whole: the
-daemon announces `proto` `[1, 2]` (1.2 adds [keys and paste](#keys-and-paste-protocol-12)) and the
-feature `status`.
+daemon announces `proto` `[1, 3]` (1.2 adds [keys and paste](#keys-and-paste-protocol-12), 1.3
+`key`'s `option_as_alt`) and the feature `status`.
 
 **The daemon** (`crates/g3d-termd/src/status.rs`, the types in `g3d-wire`'s `Status`):
 
@@ -947,7 +947,7 @@ proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-re
 | the session source (a creator with no environment) | the systemd user manager's environment, filtered to the allowlist | `launchctl getenv <name>` per allowlisted name (one `sh`, about 90 ms for 20 names), which holds what was `setenv`'d and the agents' sockets; plus the two a Mac session has that `getenv` never answers: `TMPDIR` as launchd gives every job (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), and `LANG` from the user's `AppleLocale` when launchd has no locale (as Terminal.app, iTerm2 and Ghostty make it; tagged `AppleLocale`). Either platform falls back per name to the daemon's start value; see [Environment](#environment). Proven on the M2 (`tests/env.rs`' launchd test, read only, in a GUI session; the stripped-relay gate of `termd-relay-check`; `launchctl setenv` reaching the next create, by hand) |
 | `PATH` when the base has none | `/etc/login.defs`' `ENV_PATH`, else `/usr/local/bin:/bin:/usr/bin` (util-linux `login`) | `/usr/bin:/bin` (`login`'s `_PATH_DEFPATH`) |
 | default locale when none is set | `C.UTF-8` | the `AppleLocale` preference `.UTF-8`, else `C.UTF-8` |
-| Option on a Mac keyboard (a browser client) | no Option key | the browser resolves Option into `text` (`å`, `altKey` set); termd's encoder runs with `macos-option-as-alt` true and counts Alt as consumed by the text: `å` in legacy and Kitty-disambiguate modes, as Ghostty's default types it; Kitty all-keys and modifyOtherKeys 2 differ from Ghostty's default (MACOS.md, "Keys and paste"), open |
+| Option on a Mac keyboard (a browser client) | no Option key | the browser resolves Option into `text` (`å`, `altKey` set); the `key` op's `option_as_alt` (default `auto`) makes an Alt that typed a character Ghostty's default (`macos-option-as-alt = false`: `å` in every mode) and any other Alt Alt; `true` and `false` force one. termd makes `false` itself on both platforms, since libghostty reads the option only in a macOS build ([Keys and paste](#keys-and-paste-protocol-12)) |
 
 **cgroup scopes (Linux).** The normal practice for terminals: Ghostty moves each surface into
 `app-ghostty-surface-transient-<pid>.scope`, VTE each child into `vte-spawn-<uuid>.scope`, and
@@ -1567,11 +1567,41 @@ physical keys Ghostty names by W3C `code` values. termd builds libghostty's `Key
 encodes it with libghostty's `KeyEncoder` after `set_options_from_terminal` (Kitty flags,
 modifyOtherKeys 2, DECCKM, DECKPAM, 1035, 1036, DECBKM), in `crates/g3d-termd/src/keys.rs`. The
 client resolves what its OS knows and termd doesn't: the layout, dead keys, the input method,
-Option-as-character (all into `text`), so termd encodes Alt as Alt on a macOS daemon too
-(`macos_option_as_alt` true). termd derives what the W3C event leaves implicit: the unshifted
-character (the client's `key` when it is unshifted, a shifted letter lowercased, else the US
-layout's character for `code`, Ghostty's `Key.codepoint()` table) and the consumed modifiers (Shift
-when it changed the text, Alt when it made another character). A keypad digit `code` whose `key` is
+Option-as-character (all into `text`). termd derives what the W3C event leaves implicit: the
+unshifted character (the client's `key` when it is unshifted, a shifted letter lowercased, else the
+US layout's character for `code`, Ghostty's `Key.codepoint()` table) and the consumed modifiers
+(Shift when it changed the text, Alt when it made another character and Option types characters).
+
+**Option as Alt.** Ghostty's `macos-option-as-alt` decides whether a Mac's Option is Alt or a
+character modifier; termd takes it per key event (`key.option_as_alt`, protocol 1.3), because a
+browser's event already says which happened. `auto` (the default): an Alt held while the text is
+another character than the key's own (`å` on A) typed that character, so the event encodes as
+Ghostty's default (`false`); any other Alt (`g3d key alt+a`, a Linux browser, Alt on an arrow) is
+Alt. `true` is Alt for every event, the key's own character in place of Option's (with Shift as a
+US key has it, as Ghostty's macOS apprt translates the key without Option): Option+A is `ESC a`.
+`false` is a character modifier for every event: even Alt+A types `a`. libghostty reads the option
+only when it is built for macOS (key_encode.zig tests the target at compile time), so `keys.rs`
+pins it true on every platform and makes `false` itself around the same encoder, the three places
+it differs: no ESC prefix for Alt (mode 1036 off for that event), modifyOtherKeys 2 reading a
+character key's modifiers without Alt (the event encoded without it, which changes nothing else on
+the way there for a key with no PC-style sequence), and Kitty's associated text (flag 16) kept with
+Alt held (`;` and the code points added to the encoder's `CSI … u`, as Ghostty writes them). For a
+Mac browser's Option+A under `auto`:
+
+| program's mode | bytes (Ghostty's default) | with `true` |
+|---|---|---|
+| legacy | `å` | `ESC a` |
+| Kitty, flags 1 | `å` | `CSI 97;3u` |
+| Kitty, flags 31 | `CSI 97;3;229u` | `CSI 97;3u` |
+| modifyOtherKeys 2 | `å` | `CSI 27;3;97~` |
+
+Ghostty's `left` and `right` are not carried: a browser's key event can't say which Option is
+held (`KeyboardEvent.location` is set only on the modifier key's own event), and `auto` already
+gives each event the meaning it had. The browser sends the setting with every key: the wall's
+`optionAsAlt` knob (`wall.config optionAsAlt false`), the IDE's `terminal.optionAsAlt` setting
+(Settings ▸ Terminals), both read as each key is sent; the relay's adapter forwards it only to a
+brain that announces `option_as_alt`. `g3d key --option-as-alt auto|true|false` sets it for a
+chord. A keypad digit `code` whose `key` is
 a navigation key (NumLock off: `Numpad8` with `ArrowUp`) is the keypad's navigation key
 (`numpad_up`), as Ghostty's apprt gives it from the keysym `KP_Up`: the cursor key's bytes, Kitty's
 `KP_UP`, never the digit. What comes out is Ghostty's byte for byte, but for a program that asked
@@ -1910,10 +1940,18 @@ holder.
   is on, a line break without it is refused (`unsafe_paste`) and with `allow_unsafe` arrives as
   `\r`, a `\r\n` as one `\r` (inside a bracket, as it came), and a pasted `ESC [201~` arrives as
   ` [201~` inside one bracket; `key` and `paste` need a writing subscription. PROTOCOL.md's key
-  table equals the encoder's output. `g3d send`/`key`/`paste` against a private daemon, and a
+  table equals the encoder's output. Option+A (`å`, Alt) is Ghostty's default in legacy, Kitty
+  1, Kitty 31 and modifyOtherKeys 2 under `option_as_alt` auto and `false`, Alt+A with text `a` is
+  Alt in all four under auto, and `true` makes Option+A Alt+A (unit tests); over the socket a
+  modifyOtherKeys program reads `å` for auto and `false` and `CSI 27;3;97~` for `true`.
+  `g3d send`/`key`/`paste` against a private daemon (`key --option-as-alt false alt+a` types
+  `a`), and a
   17 MB `g3d paste` refused as `too_large` before it is sent. The relay's adapter sends no `key` or
-  `paste` to a brain whose features lack them, and refuses a request over `max_frame` unsent
-  (`cli/termd_input_test.go`); the wall's notice says so (`wall-panels.test.mjs`). Through the relay
+  `paste` to a brain whose features lack them, nor `option_as_alt` to one without that feature
+  (`cli/attach_unix_test.go`), and refuses a request over `max_frame` unsent
+  (`cli/termd_input_test.go`); the wall's notice says so (`wall-panels.test.mjs`). Every key the
+  wall and the IDE send carries their Option-as-Alt setting as it is at that key
+  (`terminal-input.test.mjs`, `wall-keys.test.mjs`). Through the relay
   (`termd-relay-check.mjs`): `terminal.key` Shift+Enter and Ctrl+C into a Kitty-mode program,
   `terminal.paste` bracketed with its `ESC` a space, `relay.lacks` empty for a current brain. In
   the browser (`wall-e2e.mjs`): Enter running a typed line (its output, not the echo), a real

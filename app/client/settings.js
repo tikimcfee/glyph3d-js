@@ -6,6 +6,7 @@ import {
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
+import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { FAR_LOD_DEFAULTS } from '@glyph3d/core/collections/GlyphFarLod.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { LAYER_BAND, setBandDistance, getBandDistance } from '@glyph3d/core/core/layerBands.js';
@@ -300,6 +301,7 @@ export const GROUPS = [
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · set-back · cursor · focus / hover / input colors', columns: 2 },
   { name: 'Display & glyph LOD', subtitle: 'font size · greeking · far-LOD backdrops', columns: 2 },
   { name: 'Code grids',         subtitle: 'default fold for new grids · tab width · syntax re-color pause', columns: 2 },
+  { name: 'Terminals',          subtitle: 'keyboard · Option as Alt' },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
     subs: [
@@ -581,6 +583,13 @@ export const SETTINGS = [
     key: 'terminal.cursorOutline', label: 'Terminal cursor outline (px)', group: 'Theme & appearance',
     type: 'number', default: TERMINAL_CURSOR_DEFAULTS.borderWidth, min: 0.5, max: 6, step: 0.1,
     apply: (ctx, v) => cursorStyleAll(ctx, { borderWidth: v }),
+  },
+  // Terminal keyboard — whether Alt that typed a character (macOS Option) is still Alt. Each key
+  // event carries it (keyEncoding.keyEventFor) and termd applies it, so it is read per key: no
+  // apply, the next key takes a change.
+  {
+    key: 'terminal.optionAsAlt', group: 'Terminals', type: 'enum', options: [...OPTION_AS_ALT], default: 'auto',
+    label: 'Option as Alt: auto = Option’s character when it types one (å), else Alt · true = Option is Alt (Option+A sends ESC a) · false = Option types characters, even Alt+A',
   },
   // Appearance — the interaction color vocabulary (focus / hover / edit-input). ONE source of truth,
   // shared by the in-shader panel border (every grid/terminal) AND the directory overlay, so the two
