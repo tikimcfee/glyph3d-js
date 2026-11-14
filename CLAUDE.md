@@ -149,7 +149,9 @@ Each line is an index entry; the detail lives in the named doc. Read the doc bef
 that subsystem.
 
 - **Rendering** (`docs/architecture/rendering.md`): text is one instanced draw per field
-  (`InstancedField`, `InstancedSlotBuffer`); `CodeGrid` (a source file as an `Object3D`);
+  (`InstancedField`, `InstancedSlotBuffer`); cells — a background pass for fills, SGR styles
+  (`core/cellAttrs.js`), box/block/braille/powerline sprites generated to the cell
+  (`shaping/cellSprites.js`), seamless at shared edges; `CodeGrid` (a source file as an `Object3D`);
   layout through the `LayoutDescription` seam (`core/LayoutGenerator.js`, `core/foldGeometry.js`);
   GPU picking (`picking/`, multi-channel ID pass, async readback); frustum culling on stated
   extents (`InstancedField.setLayoutExtent`); the flat render root
@@ -163,7 +165,8 @@ that subsystem.
   wire `docs/termd/PROTOCOL.md`): terminals live in `g3d-termd` (holder + restartable brain,
   one daemon per namespace, outlives the relay); the relay's forked adapters turn termd's events
   into size-stamped frames; `TerminalGrid`s render them through the frame-pulled
-  `TerminalScreenQueue`.
+  `TerminalScreenQueue`; what a cell draws (attributes, fonts, `tools/term-test-pattern.sh`) is
+  its "Cells" section.
 - **Agents** (`docs/architecture/agents.md`): agent sessions and events over relay↔display
   JSON-RPC (`cli/agentevents.go`), agent books (`app/client/SessionBooks.js`), the agents desk,
   hidden agents, the gomuxai hub (`app/client/GomuxHub.js`, `cli/gomux.go`).

@@ -53,3 +53,36 @@ row: a detected scroll moves the ring's head (scrolled-off rows become history w
 rewrite), and only the cells that differ from the slots are written and uploaded
 (`InstancedField.markSlotsDirty` / `markHighlightDirty`: pooled ranges). No allocation per
 update. Gate: `tools/terminal-text-path.test.mjs`.
+
+## Cells
+
+What a terminal's cell draws (the renderer's side: `docs/architecture/rendering.md` "Cells").
+`TerminalEmulator.readScreen` fills one reused `TerminalScreen` from xterm's buffer — per cell the
+codepoint, the colour the text draws in, the fill, the attributes word and the underline's own
+colour (`cp`, `fg`, `bg`, `at`, `ul`: typed arrays, nothing allocated). The attributes are
+`core/cellAttrs.js`'s flags, one bit per SGR attribute: bold (1), dim (2), italic (3), blink
+(5, held, not drawn), inverse (7), conceal (8), strikethrough (9), overline (53), the underline
+style (4, `4:1` single, `4:2` or 21 double, `4:3` curly, `4:4` dotted, `4:5` dashed) and whether
+SGR 58 named its colour (true colour or palette; 59 or none: the text's). Two are resolved in the
+read: inverse swaps the drawn colours (the text takes the cell's background, or the terminal's
+own panel colour where it names none — `setDefaultBackground`; the cell fills with the
+foreground), and a concealed cell reads as a space (its fill and lines stay; `readText` still
+has the text). Bold brightens the foreground there too.
+
+`TerminalGrid` keeps those five per physical cell and writes what differs: the glyph (the italic
+face's under SGR 3; a cell sprite for what a terminal draws itself), the colour and the style
+byte into the slot (the style rides the group lane's spare bits — a changed attribute is one
+slot, no extra upload), the fill into the highlight texel, an underline's colour into the
+decoration texel (made when a cell first names one). The field's background pass draws while
+some row has a fill (`_bgRows`), and not at all otherwise. Rows that scroll into history keep
+their styles and drop their fills.
+
+Fonts: Cousine, then MesloLGS NF Mono, then DejaVu Sans, with Cousine Italic as Cousine's italic
+face (`packages/glyph3d-core/src/fonts/`, Apache 2.0 — v1.211, as the regular); box drawing,
+blocks, braille, sextants/wedges and powerline separators are generated to the cell, not taken
+from any of them.
+
+Gates: `tools/cell-attrs.test.mjs` (the flags, the read), `tools/terminal-text-path.test.mjs`
+(the grid's writes against a reference, attributes included), `tools/wall-cells-check.mjs`
+(pixels: seams, runs, inverse, dim, a wide emoji on a fill). For the eye:
+`sh tools/term-test-pattern.sh` in any terminal of 80 × 23 or more.

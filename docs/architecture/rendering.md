@@ -1,6 +1,6 @@
 # Rendering
 
-The glyph renderer in `@glyph3d/core`: draw, layout, picking, culling, LOD, batching, transforms, uploads.
+The glyph renderer in `@glyph3d/core`: draw, cells (fills, styles, sprites), layout, picking, culling, LOD, batching, transforms, uploads.
 
 ## Single instanced draw call
 
@@ -10,6 +10,74 @@ renders as one `InstancedBufferGeometry`. A field's group table (per-group pose,
 starts at one row — group 0, all most fields use — and `createGroup` doubles it on demand up to
 `groupCap` (past it: loud, the dead group); the 1×1 placeholder textures are shared by every glyph
 material. Gate: `tools/group-table.test.mjs`.
+
+A slot is 32 bytes, eight float lanes (`core/InstancedSlotBuffer.js`): pen x y z, glyph slot,
+colour (RGB888), group row, advance, height. The group lane holds the row in its low 16 bits and
+the cell's STYLE BYTE above them (below); a slot with no style holds its bare row.
+
+## Cells: fills, styles, sprites
+
+What a cell draws beyond its glyph — a terminal's cells, and a `CodeGrid`'s (selections, trails,
+ANSI backgrounds): one path, in the one glyph shader (`core/glyphMaterial.js`).
+
+**The background pass.** A cell's fill (its highlight texel's colour and opacity, else its
+group's background) is drawn by a second material, the FILL material, from the field's own mesh:
+the same geometry, slot buffer, group table and highlight texture, drawn once more BEFORE the ink
+(`InstancedField._ensureFillPass`: the mesh's material is `[fill, ink]` over two geometry groups
+that both span the quad; three draws them in that order, as one object). The fill pass draws each
+filled cell's whole rectangle, flat, and collapses every other cell's quad in the vertex stage; the
+ink pass collapses a cell with no ink and no line. So fills never cover a neighbour's ink — a wide
+glyph (an emoji) keeps the half that lies over the next cell — and nothing is drawn twice. Its
+cost: one more draw per field WHILE some cell has a fill (`field.fillsActive`; the material is
+hidden otherwise, with no scene visibility change — a field that never fills a cell has no fill
+material at all), no byte uploaded that wasn't already, and a flat fragment per filled pixel.
+Both vertex stages end in the same expression under `invariant gl_Position`, so a cell's fill and
+ink share a depth. Gates: `tools/glyph-fill-pass.test.mjs`, `tools/wall-cells-check.mjs` (pixels).
+
+**Styles.** A cell's attributes are one flags word (`core/cellAttrs.js` — the layout a packed
+wire cell maps onto: bold, dim, italic, blink, inverse, conceal, strike, overline, a 3-bit
+underline style, underline-colour). What the shader draws of it is the 7-bit style byte
+(`cellStyle`: dim, strike, overline, underline style, underline-has-its-own-colour) in the slot's
+group lane; an underline's own colour is the field's decoration texel (`InstancedField.decorWords`,
+one RGBA8 per slot, made when a cell first names one). The lines — underline (single, double,
+curly, dotted, dashed), strikethrough, overline — are bands the fragment stage draws across the
+WHOLE cell, so a run of cells draws one unbroken line, in the text's colour or the underline's
+own; dim keeps `dimAlpha` of the ink's opacity. Where the lines sit and how thick they are comes
+from the primary font (`FontChain.lineMetrics`: the post and OS/2 tables, `shaping/fontTables.js`
+→ `setGlyphLineMetrics`); `lineThickness`, `underlineRaise`, `curlyAmplitude` and `dimAlpha` are
+tuned live (`setGlyphLineStyle`: Settings ▸ Display & glyph LOD, `wall.config`). A line is never
+thinner than a pixel; lines draw in the exact tier only. Italic is a glyph, not a style bit: the
+italic face's slot (`FontChain.lookupItalic`; a font spec's `italic` — Cousine Italic for
+Cousine; a glyph from a font with no italic face stays upright, none is synthesized). Bold
+brightens the colour.
+
+**Sprites.** The glyphs a terminal draws itself come from no font: box drawing U+2500–257F,
+block elements U+2580–259F, braille U+2800–28FF, the legacy-computing sextants, wedges and eighth
+blocks (U+1FB00–1FB90, 1FB9A–1FB9B) and powerline U+E0B0–E0BF are OUTLINES GENERATED TO THE CELL
+(`shaping/cellSprites.js`, after Ghostty's sprite font: lines centred, light the weight of the
+primary font's ─, heavy its ━ or twice light, a double line two light lines a light gap apart,
+rounded corners arcs, a shade a full cell at 25/50/75 % ink). They are one more glyph source of
+the Slug atlas, as an emoji's bitmap is: `FontChain` routes those codepoints to a sprite slot
+before any font, `LiveSlugAtlas` generates and lands their curves synchronously (a few
+rectangles — never in flight, never persisted as growth; the core cache holds the core's, keyed
+by `SPRITE_VERSION`), and the glyph shader draws them in glyph-map mode 3.
+
+**Drawn to the cell: no seams.** A sprite's coverage, and a cell line's, is counted over the part
+of each pixel that lies INSIDE the cell: the Slug window of a mode-3 glyph is clamped to the cell
+(and its rays start inside it), a line's band likewise. A pixel belongs to exactly one cell (the
+rasterizer's rule; under MSAA each sample does), so two cells whose shapes meet at their shared
+edge both report full coverage there: █ joins █, ─ joins ─ and an underline runs on, at any
+zoom, with no pixel snapping. (Overlapping shapes past the cell instead is not possible — curve
+coordinates and the quad end at the cell — and would blend a translucent edge twice.) An edge
+between ink and nothing that lies ON a cell boundary is therefore pixel-hard; edges inside the
+cell are anti-aliased as any glyph's. Cell edges themselves are exact: `computeCellMetrics` snaps
+the cell's width and height to 10 significant bits (`snapCellDimension`, under 0.1 %), so column
+k's right edge and column k+1's left edge are the same float32, and so are rows' — neighbours
+share their edge to the bit, and every glyph's advance is a whole number of cell widths
+(`LayoutGenerator`). Gates: `tools/cell-sprites.test.mjs` (shapes, atlas, lattice),
+`tools/cell-attrs.test.mjs`, `tools/wall-cells-check.mjs` (seams, runs, styles in pixels);
+`tools/term-test-pattern.sh` prints one screenful of all of it for the eye
+(`tools/term-test-shots.mjs` photographs it on the wall).
 
 ## CodeGrid
 
@@ -74,7 +142,7 @@ floor, the built-ins). The glyph and far-LOD shaders' lanes (slot, group, highli
 sRGB and reach the output through the same two transfer functions (`laneOut`,
 `core/glyphMaterial.js`). No tone mapping: `GlyphCanvas` is r3f-`flat` (r3f otherwise switches
 ACES on after the renderer is made). Coverage and opacity apply to the ENCODED colour — WebGL
-blends the canvas that way, so the glyph shader composites a cell's own fill that way too, and
+blends the canvas that way, a cell's fill is drawn there first (the background pass), and
 an edge weighs the same over a fill as over the panel behind it (gamma-space blending, a
 terminal's native look); a far backdrop's tint is the mean of its ink's sRGB for the same
 reason. Where plain sRGB meets three, the crossing is three's own: into a `THREE.Color` or a
@@ -87,8 +155,9 @@ ink and cell fills stay opaque.
 
 **Glyph tiers** by on-screen size, nothing in between: exact Slug coverage (counted once,
 premultiplied); under `glyph.greekPx` (default 8 px tall) a glyph is a bar through the
-x-height where its ink would be (`core/glyphMaterial.js`, about as much light as the text);
-under far-LOD's size, one box per file.
+x-height where its ink would be (`core/glyphMaterial.js`, about as much light as the text) —
+a cell sprite stays exact at every size (a block or a rule is its own bar, and a few curves), and
+the cell's lines are not drawn; under far-LOD's size, one box per file.
 
 ## Far-LOD
 
