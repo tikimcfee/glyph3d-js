@@ -54,14 +54,14 @@ export function ansi16toRGB(idx) {
 export function ansi256toRGB(idx) {
     if (idx < 16) return ansi16toRGB(idx);
     if (idx >= 232) {
-        const v = (idx - 232) / 23;
+        const v = (8 + 10 * (idx - 232)) / 255;   // xterm's ramp: 8, 18, … 238
         return { r: v, g: v, b: v };
     }
     const n = idx - 16;
     const r = Math.floor(n / 36);
     const g = Math.floor((n % 36) / 6);
     const b = n % 6;
-    // cube levels: 0,95,135,175,215,255 → normalized
-    const CUBE = [0.0, 0.373, 0.529, 0.686, 0.843, 1.0];
+    // xterm's cube levels, 0–255
+    const CUBE = [0, 95 / 255, 135 / 255, 175 / 255, 215 / 255, 1];
     return { r: CUBE[r], g: CUBE[g], b: CUBE[b] };
 }
