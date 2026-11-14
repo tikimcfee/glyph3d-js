@@ -84,5 +84,5 @@ as `SourceState.device` on every frame, hand or not, and `latency.captureToSend`
 timestamp) and `latency.arrivalLag` (how much later than the fastest frame of the trailing
 10 s a frame arrived — the clocks share no epoch, so absolute transit time isn't knowable).
 `HandModel` (`hand/HandModel.js`) learns the hand and its space from every frame (see
-CLAUDE.md, Sensor plane); `HandSim` (`hand/HandSim.js`) emits this format with known truth for
+`docs/architecture/hand-tracking.md`); `HandSim` (`hand/HandSim.js`) emits this format with known truth for
 tests and `hand.simulate`.
