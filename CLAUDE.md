@@ -90,6 +90,8 @@ Makefile  tools/dev.sh  tools/termd-vendor.sh
 
 **Dev loop**: `tools/dev.sh` runs Vite (`:5173`) + the Go relay (`:8080`). Open
 `http://localhost:5173` and **hard-reload** (Ctrl-Shift-R) after a Vite restart.
+`tools/dev.sh wall …` does the same for the wall: Vite `:5180` + its own relay `:8180` in termd
+namespace `wall` (page `http://localhost:5180/?relay=8180`); both can run at once.
 
 - `tools/dev.sh vite` restarts Vite + clears its cache (do this after editing
   core/handlers — the watcher can serve stale transforms; verify with

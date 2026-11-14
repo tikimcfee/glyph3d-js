@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # dev.sh — glyph3d dev-loop helper.
 #
-# Owns the two long-running dev servers so refreshes are one command:
-#   - Vite     (the r3f IDE client)         on :5173
-#   - the relay (glyph3d-cli serve, Go)     on :8080
+# Owns the two long-running dev servers of an app so refreshes are one command. Two profiles:
+#   ide (default)  Vite (the r3f IDE, app/) on :5173 + its relay on :8080, termd namespace `default`
+#   wall           Vite (the wall, wall/)  on :5180 + its own relay on :8180, termd namespace `wall`
+# A relay takes ONE display, so the wall runs its own relay; both profiles can run at once.
 #
 # Why this exists: editing CommandProvider / command handlers / the router (or
 # adding a new client module) needs a FULL Vite refresh — those are built once
@@ -14,7 +15,7 @@
 # Kills are BY PORT (via ss), never by process-name pattern — a pattern kill
 # self-matches this script's own command line and nukes the wrong thing.
 #
-# Usage:
+# Usage:  tools/dev.sh [wall] {vite|relay|refresh|status|stop}     (no profile word = ide)
 #   tools/dev.sh vite      clear .vite cache + (re)start Vite     [after editing JS/JSX]
 #   tools/dev.sh relay     rebuild Go + termd (make) + (re)start relay    [after editing cli/*.go]
 #                          (terminals live in g3d-termd and survive; a NEW g3d-termd binary takes
@@ -24,20 +25,30 @@
 #   tools/dev.sh stop      stop both
 #
 # After `vite`/`refresh`: HARD-RELOAD the browser (Ctrl+Shift+R).
+# The wall's page is http://localhost:5180/?relay=8180 (`tools/dev.sh wall status` prints it).
 #
-# Env overrides: GLYPH_APP_DIR (default app), VITE_PORT (5173),
-#                RELAY_PORT (8080), GLYPH_LOG_DIR (/tmp/glyph3d).
+# Env overrides: VITE_PORT, RELAY_PORT, TERMD_NS (the profile's defaults above),
+#                GLYPH_SERVE_ROOT (the relay's served root; default the repo), GLYPH_LOG_DIR (/tmp/glyph3d).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${GLYPH_APP_DIR:-$ROOT/app}"   # THE app: the r3f IDE (panel system + HUD overlay + command bar)
-VITE_PORT="${VITE_PORT:-5173}"
-RELAY_PORT="${RELAY_PORT:-8080}"
+PROFILE=ide
+if [ "${1:-}" = wall ]; then PROFILE=wall; shift; fi
+case "$PROFILE" in
+  # ide: the r3f IDE (panel system + HUD overlay + command bar) beside agent sessions (gomuxai).
+  ide)  APP_DIR="$ROOT/app";  DEF_VITE=5173; DEF_RELAY=8080; DEF_NS=default; RELAY_FLAGS=() ;;
+  # wall: terminals only — its relay follows no agent sessions.
+  wall) APP_DIR="$ROOT/wall"; DEF_VITE=5180; DEF_RELAY=8180; DEF_NS=wall;    RELAY_FLAGS=(--no-gomuxai) ;;
+esac
+VITE_PORT="${VITE_PORT:-$DEF_VITE}"
+RELAY_PORT="${RELAY_PORT:-$DEF_RELAY}"
+TERMD_NS="${TERMD_NS:-$DEF_NS}"
+SERVE_ROOT="${GLYPH_SERVE_ROOT:-$ROOT}"
 LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d}"
 mkdir -p "$LOG_DIR"
-VITE_LOG="$LOG_DIR/vite.log"
-RELAY_LOG="$LOG_DIR/relay.log"
+VITE_LOG="$LOG_DIR/$PROFILE-vite.log"
+RELAY_LOG="$LOG_DIR/$PROFILE-relay.log"
 
 # pid_on_port PORT -> the listening pid (empty if none). Filters by source port
 # directly so nothing but a real listener on that port can match. ss on Linux;
@@ -71,10 +82,10 @@ start_vite() {
   echo "→ vite: clear cache + (re)start on :$VITE_PORT"
   kill_port "$VITE_PORT" vite
   rm -rf "$APP_DIR/node_modules/.vite"
-  ( cd "$APP_DIR" && nohup bun run dev >"$VITE_LOG" 2>&1 & disown )
+  ( cd "$APP_DIR" && VITE_PORT="$VITE_PORT" nohup bun run dev >"$VITE_LOG" 2>&1 & disown )
   sleep 2
   if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
-    echo "  vite up → http://localhost:$VITE_PORT/   (log: $VITE_LOG)"
+    echo "  vite up → $(page_url)   (log: $VITE_LOG)"
     echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
   else
     echo "  ✗ vite failed to start — last lines of $VITE_LOG:"; tail -n6 "$VITE_LOG"
@@ -83,10 +94,10 @@ start_vite() {
 }
 
 start_relay() {
-  echo "→ relay: rebuild Go + termd, (re)start on :$RELAY_PORT   (terminals live in g3d-termd and survive)"
+  echo "→ relay: rebuild Go + termd, (re)start on :$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && nohup ./glyph3d-cli serve --port "$RELAY_PORT" "$ROOT" >"$RELAY_LOG" 2>&1 & disown )
+  ( cd "$ROOT" && nohup ./glyph3d-cli serve --port "$RELAY_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 & disown )
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServe), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
@@ -101,13 +112,19 @@ start_relay() {
   return 1
 }
 
+# The page to open: the wall names its relay in the URL; the IDE's Vite proxies to :8080.
+page_url() {
+  if [ "$PROFILE" = wall ]; then echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; else echo "http://localhost:$VITE_PORT/"; fi
+}
+
 status() {
   local vp rp
   vp="$(pid_on_port "$VITE_PORT")"
   rp="$(pid_on_port "$RELAY_PORT")"
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
-  echo "logs  $LOG_DIR/{vite,relay}.log"
+  echo "page  $(page_url)   (termd namespace $TERMD_NS)"
+  echo "logs  $LOG_DIR/$PROFILE-{vite,relay}.log"
   echo "      structured app logs: ./glyph3d-cli log.follow  (and log.search / log.query / log.errors / log.stats)"
 }
 
@@ -117,5 +134,5 @@ case "${1:-refresh}" in
   refresh|all) start_relay; start_vite ;;
   status)      status ;;
   stop)        kill_port "$VITE_PORT" vite; kill_port "$RELAY_PORT" relay ;;
-  *) echo "usage: tools/dev.sh {vite|relay|refresh|status|stop}" >&2; exit 2 ;;
+  *) echo "usage: tools/dev.sh [wall] {vite|relay|refresh|status|stop}" >&2; exit 2 ;;
 esac

@@ -38,7 +38,7 @@ for (let i = 0; i < 24; i++) {
   await new Promise((r) => setTimeout(r, 500));
 }
 if (body == null) {
-  console.error(`✗ Vite never served ${url} — check the log: tail -n 30 /tmp/glyph3d/vite.log`);
+  console.error(`✗ Vite never served ${url} — check the log: tail -n 30 /tmp/glyph3d/ide-vite.log`);
   process.exit(1);
 }
 console.log(`✓ Vite up · glyph-bench.jsx compiled & served (${body.length} bytes)`);
