@@ -76,6 +76,23 @@ console.log('the first fill');
     f.fillsActive = true;
     eq(renderItems(f.instanceMesh).length, 2, 'and back');
 
+    // setGlyphHighlight counts its fills: the pass goes when the last one is cleared.
+    f.setGlyphHighlight(5, { r: 0, g: 1, b: 0 }, 0.5);
+    f.setGlyphHighlight(3, null);
+    ok(f.fillsActive, 'one of two fills cleared: still drawn');
+    f.setGlyphHighlight(5, { r: 0, g: 1, b: 0 }, 0.9);
+    f.setGlyphHighlight(5, null);
+    ok(!f.fillsActive && renderItems(f.instanceMesh).length === 1, 'the last fill cleared: the fill pass is not drawn');
+    f.setGlyphHighlight(4, { r: 0.2, g: 0.2, b: 0 });
+    ok(!f.fillsActive, 'a tint is not a fill');
+    f.setGlyphHighlight(1, { r: 1, g: 0, b: 0 }, 1);
+    f.copyGlyphLanes(1, 6, 1);
+    f.setGlyphHighlight(1, null);
+    ok(f.fillsActive, 'a fill copied to another slot (copyGlyphLanes) is counted');
+    f.setGlyphHighlight(6, null);
+    ok(!f.fillsActive, 'until it too is cleared');
+    f.setGlyphHighlight(3, { r: 1, g: 0, b: 0 }, 0.8);
+
     // The group table growing rebinds both materials.
     for (let i = 0; i < 5; i++) f.createGroup();
     ok(f.groupTexture !== groupTex, 'the group table grew (a new texture)');

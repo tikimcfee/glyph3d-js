@@ -244,6 +244,8 @@ export default class InstancedField {
         // tint — and the decoration colour, an underline's own.
         /** @private */ this._highlight = new SlotTexels();
         /** @private */ this._decor = new SlotTexels();
+        /** @private highlight texels with a fill, as setGlyphHighlight has written them */
+        this._fills = 0;
 
         // Partial uploads: the slot buffer by float range (the per-slot textures by texel rows).
         this._slotUploads = new UploadRanges((ib) => ib.addUpdateRange(0, ib.array.length));
@@ -835,8 +837,8 @@ export default class InstancedField {
 
     /**
      * Whether any slot has a fill: while false the fill pass is not drawn at all (its material is
-     * hidden — three skips the draw; no scene visibility changes). setGlyphHighlight turns it on
-     * with the first fill it writes; a writer of highlightWords says so itself.
+     * hidden — three skips the draw; no scene visibility changes). setGlyphHighlight keeps it
+     * (it counts the fills it writes and clears); a writer of highlightWords says so itself.
      * @type {boolean}
      */
     get fillsActive() { return !!this.fillMaterial?.visible; }
@@ -856,17 +858,22 @@ export default class InstancedField {
         this._ensureHighlightTexture(slotIndex + 1);
         const data = this._highlightTexture.image.data;
         const base = slotIndex * 4;
+        const had = data[base + 3] > 0;
         if (color) {
             data[base + 0] = Math.round((color.r ?? 0) * 255);
             data[base + 1] = Math.round((color.g ?? 0) * 255);
             data[base + 2] = Math.round((color.b ?? 0) * 255);
             data[base + 3] = Math.round(fillOpacity * 255);
-            if (data[base + 3] > 0) this.fillsActive = true;
         } else {
             data[base + 0] = 0;
             data[base + 1] = 0;
             data[base + 2] = 0;
             data[base + 3] = 0;
+        }
+        const has = data[base + 3] > 0;
+        if (has !== had) {
+            this._fills += has ? 1 : -1;
+            this.fillsActive = this._fills > 0;
         }
         this._highlight.uploads.all();
         this._showHighlight();
@@ -1038,6 +1045,11 @@ export default class InstancedField {
             const hl = this._highlightTexture.image.data;
             hl.copyWithin(dstSlot * 4, srcSlot * 4, (srcSlot + count) * 4);
             this._highlight.uploads.all();
+            // The copy moved fills about: count them again (an edit, not a frame).
+            let fills = 0;
+            for (let i = 3; i < hl.length; i += 4) if (hl[i] > 0) fills++;
+            this._fills = fills;
+            this.fillsActive = fills > 0;
         }
     }
 

@@ -864,9 +864,29 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   ```
   bun tools/wall-e2e.mjs --url http://localhost:5180/ --relay 8099 [--shots DIR]
   ```
+- **`wall-cells-check.mjs`** — what a terminal draws itself, read from the wall's pixels at
+  two fractional zooms (lines 17.37 px and 41.83 px, the grid off the pixel grid — where a seam
+  shows): █ cells joined across and down (the darkest pixel inside a 2 × 8 block is the ink), a
+  ─ run continuous along its own pixel row, an underline and a strikethrough unbroken under
+  blank cells, inverse swapping fill and ink, dim darker than plain and still drawn, a wide
+  emoji on a cell background keeping its right half. Its own relay (termd namespace
+  `glyph-cells-check`) and one terminal that prints the cases and sleeps. Blind to the shapes
+  beyond those cases and to HiDPI. `--shots DIR` saves the page at each size.
+  ```
+  bun tools/wall-cells-check.mjs --url http://localhost:5180/ --relay 8099 [--shots DIR]
+  ```
+- **`term-test-pattern.sh`** — for the EYE, not a check: one screenful (80 columns, 22 lines,
+  POSIX sh) of block art, blocks and shades, box drawing, a divider, braille, sextants and
+  wedges, powerline separators, every SGR style alone and combined, inverse and dim, a wide
+  emoji on a fill, plain text. Run it in any terminal on the wall (`--keep` prints below what is
+  there). **`term-test-shots.mjs`** runs it in one terminal on its own relay and saves the wall's
+  page at the wall's own framing, at 16.3 px lines, in 61.7 px close-ups and at 6.3 px (under
+  the greek tier): `bun tools/term-test-shots.mjs --url <wall vite> --relay <free port> --out DIR`.
 - **`wall-gpu-attribution.mjs`** — where the wall's GPU frame goes: one layer toggled at a
   time (glyph fields, panels, scrollback depth) at OVERVIEW and FRAMED, timing the main pass
-  with `EXT_disjoint_timer_query_webgl2`. Needs a relay already holding terminals.
+  with `EXT_disjoint_timer_query_webgl2` and counting its draws. `--fill 'cmd'` is what each
+  terminal runs to fill its screen (default `ls -la /usr/bin | head -60`; `sh
+  tools/term-test-pattern.sh` for cell fills and styles). Needs a relay already holding terminals.
 - **`wall-text-perf.mjs`** — the terminal text path timed stage by stage (OUTPUT frame →
   parse → readScreen → applyScreen → GL uploads → GPU fence) in four passes: IDLE, FLOOD
   (direct and shell sources, 1/4/14 terminals), COLD (atlas misses), PROFILE. Needs a relay
