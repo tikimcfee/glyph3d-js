@@ -541,22 +541,12 @@ export default class TerminalWall {
     }
 
     /**
-     * Whether the program in a terminal turned mouse reporting on (DECSET 9 / 1000 / 1002 / 1003):
-     * then a right-click on its body is the program's (contextMenu.js). Read from the terminal's own
-     * headless emulator — xterm's public `modes.mouseTrackingMode` (termd's repaint sets the mode
-     * again, so a re-adopted terminal reads true too). The grid has no getter for it, so the wall
-     * reaches through its emulator here, in one place; a core `TerminalGrid.mouseReporting` would
-     * take this over.
+     * Whether the program in a terminal turned mouse reporting on (`TerminalGrid.mouseReporting`):
+     * then a right-click on its body, once it's focused, is the program's (contextMenu.js).
      * @param {string} id @returns {boolean}
      */
     mouseReporting(id) {
-        const grid = this.ctx.terminals.get(id);
-        if (!grid) return false;
-        const modes = grid._emulator?._term?.modes;
-        if (!modes || typeof modes.mouseTrackingMode !== 'string') {
-            throw new Error(`[wall] terminal ${id}'s emulator has no xterm modes.mouseTrackingMode (TerminalGrid._emulator._term.modes moved?) — the right-click policy can't tell whether its program reports the mouse`);
-        }
-        return modes.mouseTrackingMode !== 'none';
+        return !!this.ctx.terminals.get(id)?.mouseReporting;
     }
 
     /**

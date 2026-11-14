@@ -134,6 +134,15 @@ export default class TerminalEmulator {
     }
 
     /**
+     * Whether the program turned mouse reporting on (DECSET 9 / 1000 / 1002 / 1003) in the bytes
+     * parsed so far: xterm's public `modes.mouseTrackingMode`. termd's repaint sets the mode again,
+     * so a re-adopted terminal reads true as well.
+     */
+    get mouseReporting() {
+        return this._term.modes.mouseTrackingMode !== 'none';
+    }
+
+    /**
      * Subscribe to window-title changes (OSC 0/2) in the byte stream — the titles the program
      * sets (termd also puts the current one in every repaint). Returns an unsubscribe.
      * @param {(title: string) => void} cb

@@ -248,7 +248,7 @@ function MenuBox({ wall, state, menu }) {
 /** @type {Record<string, import('react').CSSProperties>} */
 const styles = {
   box: {
-    position: 'absolute', zIndex: 30, minWidth: 196, maxWidth: 360, padding: '4px 0', background: 'rgba(12, 14, 20, 0.97)',
+    position: 'absolute', zIndex: 30, minWidth: 196, maxWidth: 360, padding: '4px 0', background: '#0c0e14',
     border: '1px solid #2a303c', borderRadius: 7, boxShadow: '0 8px 30px rgba(0,0,0,0.45)', outline: 'none',
     font: '12.5px ui-monospace, SFMono-Regular, Menlo, monospace', color: '#d4d9e2', userSelect: 'none', boxSizing: 'border-box',
   },

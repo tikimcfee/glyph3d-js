@@ -642,6 +642,15 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
+     * Whether the program in this terminal turned mouse reporting on: its clicks are then the
+     * program's (the wall's right-click menu, for one, steps aside on a focused terminal).
+     * @returns {boolean}
+     */
+    get mouseReporting() {
+        return this._emulator ? this._emulator.mouseReporting : false;
+    }
+
+    /**
      * Feed raw VT bytes from the terminal byte stream. The internal headless VT
      * emulator parses them (cursor motion, scroll regions, erase, SGR, …); the next frame
      * applies the screen before it renders (applyPendingScreen).
