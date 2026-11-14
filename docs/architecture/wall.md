@@ -24,7 +24,9 @@ chords, palette, sidebar, status window, right-click menu and CLI all run; knobs
 A right-click opens the wall's own menu (`wall/contextMenu.js` decides, `WallMenu` routes the
 events, `ContextMenu.jsx` draws it; `wall.menu` opens and closes it): on a terminal — frame, focus,
 rename, add to / take out of the selection, group (new, with the selection, add to a group, take
-out), size (the `menuSizes` offers, `terminal.resize`), redraw (`terminal.refresh`), Option as Alt
+out), size (the `menuSizes` offers, and `custom…`: cols × rows fields on its own size, Tab between
+them, Enter resizes through `terminal.resize`, Esc cancels, a non-whole number, 0 or past termd's
+u16 refused with the reason under the row), redraw (`terminal.refresh`), Option as Alt
 (wall-wide, `wall.config optionAsAlt`), hide, and close HELD for `closeHoldMs` (the hold ring); on a
 group's header — frame, rename, layout, columns, select its terminals, hide all, ungroup; on empty
 canvas — a new terminal with its window's top-left at the point (`wall.spawn x y`; with snap on, its
@@ -33,9 +35,10 @@ on/off (`wall.snap`), grid show/hide (`wall.grid`), the sidebar, the status wind
 (`wall.settings`). Every row is a verb.
 It never takes the browser's menu away: a second right-click while it is open, Shift+right-click,
 and a right-click on a text field or the DOM chrome (sidebar, palette, status window) are the
-browser's. A terminal whose program turned mouse reporting on (DECSET 9/1000/1002/1003, read off its
-emulator: `TerminalWall.mouseReporting`) owns a right-click on its body, and Shift+right-click
-reaches the wall's menu (Ghostty's rule); the wall forwards no mouse clicks to programs yet, so that
+browser's. The FOCUSED terminal (`focusedId`, the one the keys go to), when its program turned mouse
+reporting on (DECSET 9/1000/1002/1003, read off its emulator: `TerminalWall.mouseReporting`), owns a
+right-click on its body, and Shift+right-click reaches the wall's menu (Ghostty's rule); a terminal
+only hovered gives its right-click to the wall's menu whatever its program asked; the wall forwards no mouse clicks to programs yet, so that
 click goes nowhere (`WallMenu._toProgram` is where it will). The menu sits by the pointer, flipped at
 the view's edges; ↑ ↓ ← → Enter move and choose, Esc, a click outside, a wheel, a pan or its target
 going away close it; the ContextMenu key or Shift+F10 opens it on the focused terminal. Its knobs

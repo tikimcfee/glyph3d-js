@@ -1,13 +1,14 @@
 // wall-menu.test.mjs — the wall's right-click menu, headless: who a right-click belongs to
 // (contextPolicy: first → ours; again while ours is open → the browser's; Shift → the browser's;
-// a mouse-reporting terminal's body → the program, Shift → ours; inputs and DOM chrome → the
+// the focused mouse-reporting terminal's body → the program, Shift → ours, an unfocused one → ours;
+// inputs and DOM chrome → the
 // browser's; the menu key's own event → ours), the same policy as WallMenu routes real events on a
 // stand-in wall (default prevented or not, the verb it runs), what each menu lists and the verbs
 // its rows run, where it sits (flipped at the view's edges), the knobs, and the wall.menu /
 // wall.select all / wall.fit verbs.
 // Run: bun test tools/wall-menu.test.mjs
 import { test, expect } from 'bun:test';
-import { contextPolicy, isSecondaryPress, menuItems, placeMenu, parseSizes } from '../wall/contextMenu.js';
+import { contextPolicy, isSecondaryPress, menuItems, placeMenu, parseSizes, checkSize, MAX_CELLS } from '../wall/contextMenu.js';
 import { WALL_CONFIG, checkConfig } from '../wall/wallConfig.js';
 import { KNOBS, searchSettings } from '../wall/wallSettings.js';
 
@@ -27,7 +28,7 @@ class FakeElement {
 globalThis.Element = FakeElement;
 const { default: WallMenu } = await import('../wall/WallMenu.js');
 
-const base = { shiftKey: false, editable: false, chrome: false, menuOpen: false, keyboard: false, mouseReporting: false };
+const base = { shiftKey: false, editable: false, chrome: false, menuOpen: false, keyboard: false, mouseReporting: false, focused: false };
 const term = (part = 'body') => ({ kind: 'terminal', id: 't1', part });
 
 test('the event policy: first right-click ours, again while open native, Shift native', () => {
@@ -41,13 +42,17 @@ test('the event policy: first right-click ours, again while open native, Shift n
     expect(contextPolicy({ ...base, target: { kind: 'canvas' }, shiftKey: true }).verdict).toBe('native');
 });
 
-test('the event policy: a mouse-reporting terminal body is the program\'s; Shift reaches ours; its title is ours', () => {
-    expect(contextPolicy({ ...base, target: term(), mouseReporting: true }).verdict).toBe('program');
-    expect(contextPolicy({ ...base, target: term(), mouseReporting: true, shiftKey: true }).verdict).toBe('ours');
-    expect(contextPolicy({ ...base, target: term('title'), mouseReporting: true }).verdict).toBe('ours');
-    expect(contextPolicy({ ...base, target: term('edge'), mouseReporting: true, shiftKey: true }).verdict).toBe('native');
+test('the event policy: the FOCUSED mouse-reporting terminal\'s body is the program\'s; Shift reaches ours; unfocused, hovered or its title, ours', () => {
+    const rep = { ...base, mouseReporting: true, focused: true };
+    expect(contextPolicy({ ...rep, target: term() }).verdict).toBe('program');
+    expect(contextPolicy({ ...rep, target: term(), shiftKey: true }).verdict).toBe('ours');
+    expect(contextPolicy({ ...rep, target: term('title') }).verdict).toBe('ours');
+    expect(contextPolicy({ ...rep, target: term('edge'), shiftKey: true }).verdict).toBe('native');
+    // a terminal merely hovered — not the one the keys go to — gives its right-click to the wall
+    expect(contextPolicy({ ...rep, focused: false, target: term() }).verdict).toBe('ours');
+    expect(contextPolicy({ ...rep, focused: false, target: term(), shiftKey: true }).verdict).toBe('native');
     // and the native menu still comes on a second right-click
-    expect(contextPolicy({ ...base, target: term(), mouseReporting: true, menuOpen: true }).verdict).toBe('native');
+    expect(contextPolicy({ ...rep, target: term(), menuOpen: true }).verdict).toBe('native');
 });
 
 test('the event policy: inputs, editable fields and DOM chrome keep the browser menu; the menu key is ours', () => {
@@ -99,7 +104,7 @@ test('WallMenu: a right-click on a terminal opens ours there (prevented); again 
     expect(wall.menu).toBe(null);
 });
 
-test('WallMenu: Shift, chrome and inputs pass; a reporting body is the program\'s; a group header and the canvas open theirs', () => {
+test('WallMenu: Shift, chrome and inputs pass; an unfocused reporting body is ours, the focused one the program\'s; a group header and the canvas open theirs', () => {
     let s = standIn({ hit: { id: 't1', part: 'body' } });
     const shift = ctx(s.canvas, { shiftKey: true });
     s.menu._onContext(shift);
@@ -110,6 +115,12 @@ test('WallMenu: Shift, chrome and inputs pass; a reporting body is the program\'
     const input = new FakeElement({ tag: 'input' }, new FakeElement({ 'data-wall-menu': '' }));
     for (const t of [new FakeElement({}, sidebar), input]) { const e = ctx(t); s.menu._onContext(e); expect(e.prevented).toBe(false); }
     expect(s.wall.ran).toEqual([]);
+
+    s = standIn({ hit: { id: 't2', part: 'body' }, reporting: true });   // t2 reports the mouse but isn't focused (t1 is)
+    const hovered = ctx(s.canvas);
+    s.menu._onContext(hovered);
+    expect(hovered.prevented).toBe(true);
+    expect(s.wall.ran.at(-1)).toEqual(['wall.menu', 'terminal', 't2', '100', '200']);
 
     s = standIn({ hit: { id: 't1', part: 'body' }, reporting: true });
     const prog = ctx(s.canvas);
@@ -175,7 +186,9 @@ test('a terminal\'s menu: frame, focus, rename, selection, group, size, redraw, 
     expect(items.select.verb).toEqual(['wall.select.toggle', 't1']);
     expect(items.group.verb).toEqual(['wall.group', 't2', 't1']);
     expect(items['add-to'].options[0].verb).toEqual(['wall.group.add', 'g-1', 't1']);
-    expect(items.size.options.map((o) => [o.label, o.on])).toEqual([['80×24', true], ['120×36', false], ['160×48', false]]);
+    expect(items.size.options.map((o) => [o.label, !!o.on])).toEqual([['80×24', true], ['120×36', false], ['160×48', false], ['custom…', false]]);
+    expect(items.size.options.at(-1)).toMatchObject({ id: 'custom', custom: true });
+    expect(items.size.edit).toEqual({ verb: ['terminal.resize', 't1'], cols: 80, rows: 24 });   // the fields open on its own size
     expect(items.size.options[1].verb).toEqual(['terminal.resize', 't1', '120', '36']);
     expect(items.size.detail).toBeUndefined();   // its size is an offer: marked, not repeated
     const odd = { ...snap, terminals: snap.terminals.map((t) => (t.id === 't1' ? { ...t, cols: 100, rows: 30 } : t)) };
@@ -192,7 +205,9 @@ test('a terminal\'s menu: frame, focus, rename, selection, group, size, redraw, 
     expect(grouped['add-to']).toBeUndefined();
     expect(menuItems({ kind: 'terminal', id: 't4', part: 'body' }, snap, WALL_CONFIG)).toEqual([]);   // hidden: gone
     expect(menuItems({ kind: 'terminal', id: 'nope', part: 'body' }, snap, WALL_CONFIG)).toEqual([]);
-    expect(byId(menuItems({ kind: 'terminal', id: 't1', part: 'body' }, snap, { ...WALL_CONFIG, menuSizes: '' })).size).toBeUndefined();
+    const none = byId(menuItems({ kind: 'terminal', id: 't1', part: 'body' }, snap, { ...WALL_CONFIG, menuSizes: '' })).size;
+    expect(none.options.map((o) => o.id)).toEqual(['custom']);   // no offers: any size is still a chip away
+    expect(none.detail).toBe('80×24');
 });
 
 test('a group header\'s menu: frame, rename, layout, columns, select, hide all (shown members), ungroup', () => {
@@ -220,6 +235,17 @@ test('the canvas menu: a new terminal at the point, fit all, select all, snap, g
     expect(items.status).toMatchObject({ label: 'close the status window', verb: ['wall.status', 'close'] });
     const empty = byId(menuItems({ kind: 'canvas' }, { ...snap, terminals: [] }, WALL_CONFIG));
     expect(Object.keys(empty)).toEqual(['spawn', 'snap', 'grid', 'sidebar', 'status', 'settings']);
+});
+
+test('a custom size: any whole cols and rows from 1 to termd\'s u16; anything else refused with a short reason', () => {
+    expect(checkSize('100', ' 7 ')).toEqual({ cols: 100, rows: 7 });
+    expect(checkSize('1', String(MAX_CELLS))).toEqual({ cols: 1, rows: MAX_CELLS });
+    expect(() => checkSize('0', '24')).toThrow(/^cols: at least 1$/);
+    expect(() => checkSize('80', '')).toThrow(/^rows: a whole number/);
+    expect(() => checkSize('8x', '24')).toThrow(/^cols: '8x' isn't a whole number$/);
+    expect(() => checkSize('80', '2.5')).toThrow(/^rows: '2.5' isn't a whole number$/);
+    expect(() => checkSize('-3', '24')).toThrow(/isn't a whole number/);
+    expect(() => checkSize('80', String(MAX_CELLS + 1))).toThrow(/^rows: at most 65535/);
 });
 
 test('the menu sits at the point, flips at the right and bottom edges, and stays in the view', () => {

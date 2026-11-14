@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { menuItems, placeMenu } from './contextMenu.js';
+import { menuItems, placeMenu, checkSize } from './contextMenu.js';
 import { holdPress } from './holdPress.js';
 import FitText from './FitText.jsx';
 
@@ -36,7 +36,9 @@ function HoldRow({ wall, item, active, onHover, holdRef, onDone }) {
  * gives the browser's own menu (the `menuHint` knob). It sits by the pointer, flipped at the view's
  * edges (placeMenu on WallCamera.view), and takes the keys while open: ↑ ↓ move, ← → pick in a row
  * of options, Enter runs (on close it's HELD, as the pointer is), Esc closes. Choosing closes it,
- * except stepping a group's columns.
+ * except stepping a group's columns. The size row's `custom…` turns it into cols × rows fields on
+ * the terminal's own size (Tab between them, Enter resizes, Esc goes back to the chips; a refusal —
+ * checkSize's or terminal.resize's — shows under the row).
  */
 export default function ContextMenu({ wall, state }) {
   const menu = state.menu;
@@ -52,8 +54,12 @@ function MenuBox({ wall, state, menu }) {
   const [option, setOption] = useState(0);
   const [renaming, setRenaming] = useState(null);   // the rename row's id while its box is up
   const [text, setText] = useState('');
+  /** The size row's own size, being typed: { cols, rows } as text, and the last refusal. */
+  const [sizing, setSizing] = useState(/** @type {{ cols: string, rows: string, error: string }|null} */ (null));
   const [pos, setPos] = useState(null);
   const boxRef = useRef(null);
+  const colsRef = useRef(null);
+  const rowsRef = useRef(null);
   const holdRef = useRef(null);
 
   const close = () => wall.run(['wall.menu', 'close']);
@@ -63,25 +69,44 @@ function MenuBox({ wall, state, menu }) {
   useLayoutEffect(() => {
     const r = boxRef.current.getBoundingClientRect();
     setPos(placeMenu(menu.at, { w: r.width, h: r.height }, wall.viewport.view));
-  }, [menu, items.length, renaming]);
-  // Focus once placed (a box still visibility: hidden can't take it); back from the rename box too.
+  }, [menu, items.length, renaming, !!sizing, sizing?.error]);
+  // Focus once placed (a box still visibility: hidden can't take it); back from the rename box and the size fields too.
   const placed = pos != null;
-  useEffect(() => { if (placed && !renaming) boxRef.current?.focus({ preventScroll: true }); }, [placed, renaming]);
+  useEffect(() => { if (placed && !renaming && !sizing) boxRef.current?.focus({ preventScroll: true }); }, [placed, renaming, !!sizing]);
   useEffect(() => { if (!items.length) close(); }, [items.length]);
   useLayoutEffect(() => {   // a row of options lights its current one (before the next key reads it)
     const c = active?.kind === 'choice' ? active.options.findIndex((o) => o.on) : -1;
     setOption(Math.max(0, c));
   }, [active?.id]);
 
+  /** An option chosen: a custom one opens its row's fields, prefilled with the current value; any other runs its verb. */
+  const pick = (it, o) => {
+    if (o.custom) { setIndex(rows.indexOf(it)); setSizing({ cols: String(it.edit.cols), rows: String(it.edit.rows), error: '' }); }
+    else run(o.verb, it.id === 'columns');
+  };
   const choose = (it) => {
     if (!it) return;
     if (it.kind === 'action') run(it.verb);
     else if (it.kind === 'rename') { setRenaming(it.id); setText(it.value); }
-    else if (it.kind === 'choice') { const o = it.options[Math.min(option, it.options.length - 1)]; run(o.verb, it.id === 'columns'); }
+    else if (it.kind === 'choice') pick(it, it.options[Math.min(option, it.options.length - 1)]);
+  };
+  /** Enter in the size fields: refused with a reason under the row, or resized and closed. */
+  const applySize = async (it) => {
+    let size;
+    try { size = checkSize(sizing.cols, sizing.rows); } catch (err) { setSizing((z) => z && { ...z, error: err.message }); return; }
+    const r = await wall.run([...it.edit.verb, String(size.cols), String(size.rows)]);
+    if (r.text.startsWith('ERR')) setSizing((z) => z && { ...z, error: r.text.replace(/^ERR:\s*/, '') });
+    else close();
+  };
+  const sizeKey = (it, which) => (e) => {
+    e.stopPropagation();
+    if (e.key === 'Tab') { e.preventDefault(); (which === 'cols' ? rowsRef : colsRef).current?.focus(); }
+    else if (e.key === 'Enter') { e.preventDefault(); applySize(it); }
+    else if (e.key === 'Escape') { e.preventDefault(); setSizing(null); }   // back to the row's chips; Esc again closes
   };
 
   const onKeyDown = (e) => {
-    if (renaming) return;
+    if (renaming || sizing) return;
     const k = e.key;
     const claim = () => { e.preventDefault(); e.stopPropagation(); };
     if (k === 'Escape') { claim(); close(); }
@@ -109,7 +134,7 @@ function MenuBox({ wall, state, menu }) {
   const keys = useRef({ onKeyDown, onKeyUp });
   keys.current = { onKeyDown, onKeyUp };
   useEffect(() => {
-    const own = (e) => e.target instanceof Element && e.target.closest('[data-menu-rename]');
+    const own = (e) => e.target instanceof Element && e.target.closest('[data-menu-rename], [data-menu-field]');
     const down = (e) => { if (!own(e)) flushSync(() => keys.current.onKeyDown(e)); };
     const up = (e) => { if (!own(e)) keys.current.onKeyUp(e); };
     window.addEventListener('keydown', down, true);
@@ -157,6 +182,35 @@ function MenuBox({ wall, state, menu }) {
             </div>
           );
         }
+        if (it.kind === 'choice' && it.edit && sizing) {
+          const field = (which, ref, auto) => (
+            <input
+              ref={ref}
+              autoFocus={auto}
+              data-menu-field={which}
+              aria-label={which}
+              inputMode="numeric"
+              value={sizing[which]}
+              onFocus={(e) => e.target.select()}
+              onChange={(e) => setSizing({ ...sizing, [which]: e.target.value, error: '' })}
+              onKeyDown={sizeKey(it, which)}
+              spellCheck={false}
+              style={styles.cell}
+            />
+          );
+          return (
+            <div key={it.id} data-menu-item={it.id} data-sizing="">
+              <div style={{ ...styles.row, ...styles.active }}>
+                <span style={styles.mark} />
+                <span style={styles.label}>{it.label}</span>
+                <span style={styles.options}>
+                  {field('cols', colsRef, true)}<span style={styles.times}>×</span>{field('rows', rowsRef, false)}
+                </span>
+              </div>
+              {sizing.error && <div data-menu-refused="" style={styles.refused}>{sizing.error}</div>}
+            </div>
+          );
+        }
         if (it.kind === 'choice') {
           return (
             <div key={it.id} data-menu-item={it.id} onPointerMove={hover} style={{ ...styles.row, ...(on ? styles.active : null) }}>
@@ -170,7 +224,7 @@ function MenuBox({ wall, state, menu }) {
                     data-menu-option={o.id}
                     data-on={o.on ? '' : undefined}
                     onPointerMove={(e) => { if (e.movementX || e.movementY) setOption(k); }}
-                    onClick={() => run(o.verb, it.id === 'columns')}
+                    onClick={() => pick(it, o)}
                     style={{ ...styles.option, ...(it.id === 'add-to' ? styles.optionFit : null), ...(o.on ? styles.optionOn : null), ...(on && k === option ? styles.optionActive : null) }}
                   >{it.id === 'add-to' ? <FitText text={o.label} maxPx={12} style={{}} /> : o.label}</span>
                 ))}
@@ -205,11 +259,17 @@ const styles = {
   label: { flex: '1 1 auto', whiteSpace: 'nowrap' },
   detail: { color: '#5d6574', fontSize: 10.5, flex: '0 0 auto', marginLeft: 12, whiteSpace: 'nowrap' },
   options: { display: 'flex', gap: 2, flex: '0 1 auto', minWidth: 0, marginLeft: 'auto', paddingLeft: 10 },
-  option: { padding: '0 6px', borderRadius: 4, color: '#8b95a7', cursor: 'pointer', display: 'flex', flex: '0 0 auto', maxWidth: 120, whiteSpace: 'nowrap', border: '1px solid transparent' },
+  option: { padding: '0 6px', borderRadius: 4, color: '#8b95a7', cursor: 'pointer', display: 'flex', flex: '0 0 auto', maxWidth: 120, whiteSpace: 'nowrap', borderWidth: 1, borderStyle: 'solid', borderColor: 'transparent' },
   optionFit: { flex: '0 1 auto', minWidth: 0 },   // a group's name shrinks to fit (FitText), never cut
   optionOn: { color: '#e6e9ef', background: '#1d2330' },
   optionActive: { borderColor: '#3b4352' },
   sep: { height: 1, background: '#1e2430', margin: '4px 0' },
+  cell: {
+    width: 52, background: '#0b0d13', color: '#e6e9ef', border: '1px solid #2a303c', borderRadius: 4,
+    padding: '1px 5px', font: 'inherit', fontSize: 12, outline: 'none', textAlign: 'right',
+  },
+  times: { color: '#5d6574', padding: '0 4px' },
+  refused: { color: '#e5534b', fontSize: 11, padding: '0 10px 3px 26px' },
   input: {
     flex: 1, minWidth: 0, background: '#0b0d13', color: '#e6e9ef', border: '1px solid #2a303c', borderRadius: 4,
     padding: '2px 6px', font: 'inherit', outline: 'none', marginLeft: 20,

@@ -10,7 +10,8 @@ const KEY_INSET_PX = 12;
  *
  *   contextmenu (window, capture)    contextPolicy: ours → `wall.menu <target> x y` (default
  *                                    prevented); native → nothing prevented, ours closes; program →
- *                                    the program's click (see _toProgram)
+ *                                    the program's click (see _toProgram) — only on the focused
+ *                                    terminal
  *   pointerdown outside the menu     closes it — but not a secondary press (right button, or
  *                                    Ctrl+click on macOS): its contextmenu is the "again"
  *   wheel (zoom / scroll)            closes it, as a pan's press does
@@ -80,7 +81,7 @@ export default class WallMenu {
         const id = target?.kind === 'terminal' ? target.id : null;
         const { verdict } = contextPolicy({
             shiftKey: e.shiftKey, editable, chrome, menuOpen: !!wall.menu, keyboard: false, target,
-            mouseReporting: !!id && wall.mouseReporting(id),
+            mouseReporting: !!id && wall.mouseReporting(id), focused: !!id && id === wall.focusedId,
         });
         if (verdict === 'native') {
             if (wall.menu) wall.run(['wall.menu', 'close']);

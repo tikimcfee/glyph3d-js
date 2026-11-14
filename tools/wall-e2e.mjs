@@ -55,9 +55,10 @@
  * edit sets the knob through wall.config); and the right-click menu (ours on a terminal, opened there
  * with its default prevented; a second right-click closes it and leaves the browser's menu alone, as
  * Shift+right-click does; hide from it; a short click on its close keeps the terminal, a held one
- * kills it; a mouse-reporting program gets the right-click and Shift reaches ours; Esc, a wheel and
- * the menu key; "new terminal here" lands at the point; a group header's menu sets the layout and
- * ungroups). Exit 1 on any FAIL.
+ * kills it; a mouse-reporting program gets the right-click only on the focused terminal (merely
+ * hovered, ours) and Shift reaches ours; Esc, a wheel and the menu key; a custom size typed by keys
+ * (Esc cancels, 0 refused under the row, Tab, Enter resizes); "new terminal here" lands at the
+ * point; a group header's menu sets the layout and ungroups). Exit 1 on any FAIL.
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -743,17 +744,26 @@ try {
         ok(!!killed && (await W((i) => window.__wall.store.position(i), M)) === null && !(await W(() => window.__wall.menu)),
             `holding the menu's close for ${HOLD} ms kills ${M}, forgets it and closes the menu`);
 
-        // A terminal whose program turned mouse reporting on: a right-click on its body is the program's; Shift reaches ours.
+        // A terminal whose program turned mouse reporting on: only the FOCUSED one hands its right-click to
+        // the program (Shift reaches ours); merely hovered, its right-click opens ours.
         await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "printf '\\033[?1000h'\r"]);
         const reporting = await until((i) => window.__wall.mouseReporting(i), M2, 8000);
+        await W(() => window.__wall.focus(null));
         const b2 = mid(await geo(M2));
+        await page.mouse.click(b2.x, b2.y, { button: 'right' });
+        const hoveredOurs = await menuOn(`terminal:${M2}`);
+        ok(!!reporting && !!hoveredOurs && (await prevented()) === true,
+            `with mouse reporting on (DECSET 1000) but ${M2} not focused, a right-click on its body opens our menu`);
+        await page.keyboard.press('Escape');
+        await menuOn(null);
+        await W((i) => window.__wall.focus(i), M2);
         await page.mouse.click(b2.x, b2.y, { button: 'right' });
         const progPrevented = await prevented();
         const noMenu = !(await W(() => window.__wall.menu));
         await page.keyboard.down('Shift'); await page.mouse.click(b2.x, b2.y, { button: 'right' }); await page.keyboard.up('Shift');
         const shiftOurs = await menuOn(`terminal:${M2}`);
-        ok(!!reporting && progPrevented === true && noMenu && !!shiftOurs && (await prevented()) === true,
-            `with mouse reporting on (DECSET 1000), a right-click on ${M2}'s body goes to its program (no menu, no browser menu); Shift+right-click opens ours`);
+        ok(progPrevented === true && noMenu && !!shiftOurs && (await prevented()) === true,
+            `focused, a right-click on ${M2}'s body goes to its program (no menu, no browser menu); Shift+right-click opens ours`);
         await page.keyboard.press('Escape');
         ok(!!(await menuOn(null)), 'Esc closes the menu');
         await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "printf '\\033[?1000l'\r"]);
@@ -826,6 +836,45 @@ try {
         await page.click('[data-wall-menu] [data-menu-item="ungroup"]');
         const gone = await until((g) => !window.__wall.store.group(g) && !window.__wall.menu, gid, 5000);
         ok(!!free && !!gone, `the group menu sets ${gid} freeform and ungroups it`);
+
+        // A custom size, all from the keys: the menu key, ↓ to the size row, → to "custom…", Enter opens
+        // cols × rows on its own size (keys in cols); Esc cancels; 0 is refused under the row; Tab
+        // moves to rows; Enter resizes through terminal.resize and closes the menu.
+        await W((i) => window.__wall.focus(i), M2);
+        const toCustom = async () => {
+            await page.keyboard.press('ContextMenu');
+            await menuOn(`terminal:${M2}`);
+            const nav = await W(() => {
+                const m = document.querySelector('[data-wall-menu]');
+                const rowIds = [...m.querySelectorAll('[data-menu-item]')].map((el) => el.dataset.menuItem);
+                const opts = [...m.querySelectorAll('[data-menu-item="size"] [data-menu-option]')];
+                return { down: rowIds.indexOf('size') + 1, right: opts.length - 1 - Math.max(0, opts.findIndex((o) => o.hasAttribute('data-on'))) };
+            });
+            for (let k = 0; k < nav.down; k++) await page.keyboard.press('ArrowDown');
+            for (let k = 0; k < nav.right; k++) await page.keyboard.press('ArrowRight');
+            await page.keyboard.press('Enter');
+            return until(() => document.activeElement?.dataset.menuField === 'cols' && { cols: document.querySelector('[data-menu-field="cols"]').value, rows: document.querySelector('[data-menu-field="rows"]').value }, null, 4000);
+        };
+        const own = await W((i) => ({ cols: window.__wall.terminal(i).cols, rows: window.__wall.terminal(i).rows }), M2);
+        const pre = await toCustom();
+        ok(!!pre && pre.cols === String(own.cols) && pre.rows === String(own.rows),
+            `"custom…" (reached by keys) opens cols × rows fields on ${M2}'s own size (${pre ? `${pre.cols}×${pre.rows}` : '—'}), the keys in cols`);
+        await page.keyboard.press('Escape');
+        const cancelled = await until(() => !document.querySelector('[data-menu-field]') && !!window.__wall.menu, null, 3000);
+        await page.keyboard.press('Escape');
+        await menuOn(null);
+        ok(!!cancelled && (await W((i) => window.__wall.terminal(i).cols, M2)) === own.cols, 'Esc in the fields cancels the size (the menu stays, a second Esc closes it)');
+        await toCustom();
+        await page.keyboard.type('0'); await page.keyboard.press('Enter');
+        const refused = await until(() => document.querySelector('[data-wall-menu] [data-menu-refused]')?.textContent, null, 3000);
+        await page.keyboard.press('Control+A'); await page.keyboard.type('97');
+        await page.keyboard.press('Tab');
+        const inRows = await until(() => document.activeElement?.dataset.menuField === 'rows', null, 3000);
+        await page.keyboard.press('Control+A'); await page.keyboard.type('31');
+        await page.keyboard.press('Enter');
+        const sized = await until((i) => { const g = window.__wall.terminal(i); return g.cols === 97 && g.rows === 31 && !window.__wall.menu; }, M2, 10000);
+        ok(refused === 'cols: at least 1' && !!inRows && !!sized,
+            `0 is refused under the row ("${refused}"); Tab moves to rows; 97 × 31 and Enter resize ${M2} through terminal.resize and close the menu`);
 
         for (const id of [M2, born]) if (id) await W((i) => window.__wall.run(['wall.close', i]), id);
         await until((ids) => ids.every((i) => !window.__wall.terminal(i)), [M2, born].filter(Boolean), 8000);

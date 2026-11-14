@@ -13,8 +13,11 @@
  *   anything, while OUR menu is open              the browser's menu, and ours closes (YouTube's
  *                                                 pattern: right-click twice for the native menu)
  *   anything, with Shift                          the browser's menu (Firefox's rule, kept everywhere)
- *   a terminal's body whose program turned        the program; with Shift, our menu (Ghostty's rule:
- *     mouse reporting on (DECSET 9/1000/1002/1003)   Shift bypasses mouse capture)
+ *   the FOCUSED terminal's body, its program      the program; with Shift, our menu (Ghostty's rule:
+ *     having turned mouse reporting on              Shift bypasses mouse capture). Only the terminal
+ *     (DECSET 9/1000/1002/1003)                     the keys go to (TerminalWall.focusedId) hands its
+ *                                                   clicks to its program: a merely hovered one's
+ *                                                   right-click is the wall's
  *   a terminal, a group's header, empty canvas    our menu
  *
  * The keyboard way in (the ContextMenu key, Shift+F10) opens ours on the focused terminal; the
@@ -35,9 +38,10 @@
  * or contenteditable. `chrome`: its target is DOM chrome, not the wall's surface (the canvas, a
  * title bar's buttons, a map label). `keyboard`: raised by the menu key (or Shift+F10) the wall
  * already answered. `target`: what's under the pointer (null off the wall's surface).
- * `mouseReporting`: the target terminal's program asked for mouse reports.
+ * `mouseReporting`: the target terminal's program asked for mouse reports. `focused`: the target
+ * terminal is the focused one (the keys go to it).
  * @param {{ shiftKey: boolean, editable: boolean, chrome: boolean, menuOpen: boolean, keyboard: boolean,
- *   target: MenuTarget|null, mouseReporting: boolean }} e
+ *   target: MenuTarget|null, mouseReporting: boolean, focused: boolean }} e
  * @returns {{ verdict: Verdict, why: string }}
  */
 export function contextPolicy(e) {
@@ -45,7 +49,7 @@ export function contextPolicy(e) {
     if (e.editable) return { verdict: 'native', why: 'a text field keeps its own menu' };
     if (e.menuOpen) return { verdict: 'native', why: 'right-click again: the browser menu' };
     if (e.chrome || !e.target) return { verdict: 'native', why: 'DOM chrome keeps its own menu' };
-    const reported = e.target.kind === 'terminal' && e.target.part === 'body' && e.mouseReporting;
+    const reported = e.target.kind === 'terminal' && e.target.part === 'body' && e.mouseReporting && e.focused;
     if (reported) return e.shiftKey ? { verdict: 'ours', why: 'Shift bypasses the program\'s mouse capture' } : { verdict: 'program', why: 'the program reports the mouse' };
     if (e.shiftKey) return { verdict: 'native', why: 'Shift+right-click is the browser menu' };
     return { verdict: 'ours', why: `over ${e.target.kind}` };
@@ -59,6 +63,27 @@ export function contextPolicy(e) {
  */
 export function isSecondaryPress(e, isMac) {
     return e.button === 2 || (isMac && e.button === 0 && e.ctrlKey);
+}
+
+/** The most columns or rows a terminal can have: termd's wire carries a size as u16 (g3d-wire msg.rs). */
+export const MAX_CELLS = 65535;
+
+/**
+ * Check a custom size as typed: two whole numbers from 1 to MAX_CELLS. Throws a short reason (shown
+ * under the menu's size row) for anything else.
+ * @param {string} cols @param {string} rows @returns {{ cols: number, rows: number }}
+ */
+export function checkSize(cols, rows) {
+    const one = (s, what) => {
+        const t = String(s).trim();
+        if (!t) throw new Error(`${what}: a whole number, please`);
+        if (!/^\d+$/.test(t)) throw new Error(`${what}: '${t}' isn't a whole number`);
+        const n = Number(t);
+        if (n < 1) throw new Error(`${what}: at least 1`);
+        if (n > MAX_CELLS) throw new Error(`${what}: at most ${MAX_CELLS} (termd's limit)`);
+        return n;
+    };
+    return { cols: one(cols, 'cols'), rows: one(rows, 'rows') };
 }
 
 /** What `wall.config optionAsAlt` takes, in the order the menu offers them. */
@@ -83,12 +108,15 @@ export function parseSizes(s) {
  *   action   runs `verb`
  *   hold     runs `verb` only when held for closeHoldMs (the ring fills; let go early and nothing happens)
  *   rename   becomes a text box; Enter runs `verb` + the text (empty gives back the default name)
- *   choice   a row of options, each with its own verb; `on` marks the current one
+ *   choice   a row of options, each with its own verb; `on` marks the current one. An option marked
+ *            `custom` has no verb: choosing it turns the row into the fields its `edit` names
+ *            (the size row's cols × rows), and Enter runs `edit.verb` + what was typed
  *   sep      a quiet rule between sections
  * @typedef {{ kind: 'action', id: string, label: string, verb: string[], detail?: string }
  *         | { kind: 'hold', id: string, label: string, verb: string[], detail?: string }
  *         | { kind: 'rename', id: string, label: string, verb: string[], value: string, placeholder: string }
- *         | { kind: 'choice', id: string, label: string, detail?: string, options: { id: string, label: string, verb: string[], on?: boolean }[] }
+ *         | { kind: 'choice', id: string, label: string, detail?: string, options: { id: string, label: string, verb?: string[], on?: boolean, custom?: boolean }[],
+ *             edit?: { verb: string[], cols: number, rows: number } }
  *         | { kind: 'sep', id: string }} MenuItem
  */
 
@@ -137,10 +165,13 @@ function terminalItems(id, state, config) {
     const sizes = parseSizes(config.menuSizes).map((z) => ({
         id: `${z.cols}x${z.rows}`, label: `${z.cols}×${z.rows}`, verb: ['terminal.resize', id, String(z.cols), String(z.rows)], on: z.cols === t.cols && z.rows === t.rows,
     }));
-    if (sizes.length) {
-        // Its own size rides along when no offer is it.
-        items.push({ kind: 'choice', id: 'size', label: 'size', options: sizes, ...(sizes.some((o) => o.on) ? {} : { detail: `${t.cols}×${t.rows}` }) });
-    }
+    // The offers, then any size at all: `custom…` opens cols × rows fields on the terminal's own size.
+    items.push({
+        kind: 'choice', id: 'size', label: 'size',
+        options: [...sizes, { id: 'custom', label: 'custom…', custom: true }],
+        edit: { verb: ['terminal.resize', id], cols: t.cols, rows: t.rows },
+        ...(sizes.some((o) => o.on) ? {} : { detail: `${t.cols}×${t.rows}` }),   // its own size, when no offer is it
+    });
     items.push(
         { kind: 'action', id: 'redraw', label: 'redraw', verb: ['terminal.refresh', id] },
         {
