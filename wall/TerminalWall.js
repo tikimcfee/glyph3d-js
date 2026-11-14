@@ -17,7 +17,8 @@ import WallMenu from './WallMenu.js';
 import SelectionOverlay from './SelectionOverlay.js';
 import WallPaper from './WallPaper.js';
 import registerWallCommands from './wallCommands.js';
-import { WALL_CONFIG, checkConfig } from './wallConfig.js';
+import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
+import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
 import { snapStep, snapTo } from './wallSnap.js';
 
@@ -136,6 +137,8 @@ export default class TerminalWall {
         this._born = Object.freeze({ ...WALL_CONFIG, ...config });
         /** @type {import('./wallConfig.js').WallConfig} */
         this.config = { ...this._born, ...this._dialled() };
+        // The cell's own lines and dim are the glyph shader's: every terminal draws with them.
+        setGlyphLineStyle(Object.fromEntries(LINE_STYLE_KNOBS.map((k) => [k, this.config[k]])));
         this.viewport = new WallCamera(camera, gl.domElement);
 
         /** @type {WallContext} */
@@ -461,6 +464,7 @@ export default class TerminalWall {
     setConfig(key, value) {
         this.config[key] = value;
         this.store.setConfig(key, value);
+        if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: value });   // live on every terminal
         this._emit();
         return value;
     }
@@ -472,6 +476,7 @@ export default class TerminalWall {
     resetConfig(key) {
         this.config[key] = this._born[key];
         this.store.clearConfig(key);
+        if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: this.config[key] });
         this._emit();
         return this.config[key];
     }

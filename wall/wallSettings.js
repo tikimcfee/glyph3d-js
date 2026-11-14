@@ -29,6 +29,7 @@ import { parseSizes } from './contextMenu.js';
 export const SECTIONS = Object.freeze([
     { id: 'canvas', title: 'Canvas', subtitle: 'background · drafting grid · snapping' },
     { id: 'terminals', title: 'Terminals', subtitle: 'closing · title-bar buttons' },
+    { id: 'text', title: 'Text', subtitle: 'underline · strikethrough · overline · dim' },
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
     { id: 'status', title: 'Status', subtitle: 'the termd status window · notices' },
     { id: 'input', title: 'Input', subtitle: 'keyboard' },
@@ -80,6 +81,22 @@ export const KNOBS = Object.freeze({
     barButtonsMinPx: {
         section: 'terminals', label: 'Bar buttons from', type: 'number', min: 0, step: 1, unit: 'px',
         description: "A hovered title bar shows its hide and close buttons only when the bar is at least this tall on screen.",
+    },
+    lineThickness: {
+        section: 'text', label: 'Line thickness', type: 'number', above: 0, step: 0.05, unit: "× the font's",
+        description: "How thick underlines, strikethroughs and overlines are drawn in every terminal, as a multiple of the font's own underline thickness. A line is never thinner than one pixel.",
+    },
+    underlineRaise: {
+        section: 'text', label: 'Underline raise', type: 'number', min: -1, max: 1, step: 0.005, unit: 'line heights',
+        description: 'Lifts every underline from where the font puts it (Cousine draws its own under the descenders, close to the next line): 0.05 is a twentieth of a line up; a negative value lowers it.',
+    },
+    curlyAmplitude: {
+        section: 'text', label: 'Curly underline height', type: 'number', min: 0, step: 0.1, unit: '× thickness',
+        description: "How tall the wave of a curly underline — the squiggle under a diagnostic — is, as a multiple of the line's thickness; 0 flattens it to a straight line.",
+    },
+    dimAlpha: {
+        section: 'text', label: 'Dim text opacity', type: 'number', min: 0, max: 1, step: 0.02,
+        description: 'How much of its opacity dim (faint) text keeps: 1 draws it like plain text, lower lets the background show through it, 0 hides it.',
     },
     groupLayout: {
         section: 'groups', label: 'New group layout', type: 'enum', options: ['tile', 'freeform'],

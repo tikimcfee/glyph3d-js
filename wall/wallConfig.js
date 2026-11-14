@@ -1,9 +1,10 @@
+import { GLYPH_LINE_DEFAULTS } from '@glyph3d/core/core/glyphMaterial.js';
 import { KNOBS, checkKnob } from './wallSettings.js';
 
 /**
  * wallConfig — the wall's knobs for hiding, closing, selecting and grouping, the termd status
- * window's, the keyboard's, the right-click menu's and the canvas's (its colour, the drafting grid,
- * snapping), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
+ * window's, the keyboard's, the right-click menu's, the canvas's (its colour, the drafting grid,
+ * snapping) and the text's (the cell's own lines, dim), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
  * <value>` dials one live and remembers it per relay (WallStore; `wall.config <key> default` hands it
  * back). A group's own columns and gap live on the group; these are what a new group is born with.
  * What each knob is — its type, range, section and description — is wallSettings.KNOBS.
@@ -62,7 +63,20 @@ export const WALL_CONFIG = Object.freeze({
     menuHint: true,
     /** The sizes a terminal's right-click menu offers, as COLSxROWS, space-separated ('' offers none). */
     menuSizes: '80x24 120x36 160x48',
+
+    // ── text: the lines a cell draws itself, and dim (core/glyphMaterial.js GLYPH_LINE_DEFAULTS; live on every terminal) ──
+    /** The thickness of underline, strikethrough and overline, × the font's own underline thickness. */
+    lineThickness: GLYPH_LINE_DEFAULTS.lineThickness,
+    /** Lifts the underline from where the font puts it, in line heights (0.05 = a twentieth of a line up; negative lowers it). */
+    underlineRaise: GLYPH_LINE_DEFAULTS.underlineRaise,
+    /** The curly underline's wave height, × the line's thickness. */
+    curlyAmplitude: GLYPH_LINE_DEFAULTS.curlyAmplitude,
+    /** How much of its opacity dim (SGR 2) text keeps, 0..1. */
+    dimAlpha: GLYPH_LINE_DEFAULTS.dimAlpha,
 });
+
+/** The knobs that are the glyph shader's line style (TerminalWall hands them to setGlyphLineStyle). */
+export const LINE_STYLE_KNOBS = Object.freeze(Object.keys(GLYPH_LINE_DEFAULTS));
 
 for (const key of Object.keys(WALL_CONFIG)) if (!(key in KNOBS)) throw new Error(`[wall] knob '${key}' has no definition in wallSettings.KNOBS`);
 for (const key of Object.keys(KNOBS)) if (!(key in WALL_CONFIG)) throw new Error(`[wall] wallSettings.KNOBS defines '${key}', which WALL_CONFIG lacks`);

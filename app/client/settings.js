@@ -1,7 +1,7 @@
 import { stateController } from '@glyph3d/core/services/state';
 import { setPanelStateColorDefaults } from '@glyph3d/core/collections';
 import {
-  setGlyphGreekPx, GLYPH_GREEK_PX_DEFAULT,
+  setGlyphGreekPx, GLYPH_GREEK_PX_DEFAULT, setGlyphLineStyle, GLYPH_LINE_DEFAULTS,
 } from '@glyph3d/core';
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
@@ -889,6 +889,12 @@ export const SETTINGS = [
   // The glyph tiers by on-screen size: exact glyphs; under the greek size, a bar where each
   // glyph's ink would be (live on every glyph material); under the far-LOD size, one box per file.
   { key: 'glyph.greekPx', label: 'Greek below (px tall, 0 = never)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_GREEK_PX_DEFAULT, min: 0, max: 96, step: 0.5, apply: (_ctx, v) => setGlyphGreekPx(v) },
+  // The lines a cell draws itself (underline, strikethrough, overline — terminals' SGR styles) and
+  // dim text: live on every glyph material.
+  { key: 'glyph.lineThickness', label: 'Underline / strike thickness (× the font\'s)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LINE_DEFAULTS.lineThickness, min: 0.25, max: 6, step: 0.05, apply: (_ctx, v) => setGlyphLineStyle({ lineThickness: v }) },
+  { key: 'glyph.underlineRaise', label: 'Underline raise (line heights)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LINE_DEFAULTS.underlineRaise, min: -0.2, max: 0.4, step: 0.005, apply: (_ctx, v) => setGlyphLineStyle({ underlineRaise: v }) },
+  { key: 'glyph.curlyAmplitude', label: 'Curly underline height (× thickness)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LINE_DEFAULTS.curlyAmplitude, min: 0, max: 6, step: 0.1, apply: (_ctx, v) => setGlyphLineStyle({ curlyAmplitude: v }) },
+  { key: 'glyph.dimAlpha', label: 'Dim text opacity (SGR 2)', group: 'Display & glyph LOD', type: 'number', default: GLYPH_LINE_DEFAULTS.dimAlpha, min: 0, max: 1, step: 0.02, apply: (_ctx, v) => setGlyphLineStyle({ dimAlpha: v }) },
   // Far-LOD (GlyphFarLod) — a field whose tallest row is under this many px at its nearest depth
   // stops drawing glyphs; one quad of its mean ink colour stands in. Backdrop strength = ink
   // cover × gain (fitted so a far file reads the same either way). 0 px = always draw glyphs.
