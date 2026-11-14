@@ -56,6 +56,10 @@ pub const SCRUB: &[&str] = &[
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
     "AI_AGENT",
+    // gomuxai's agent identity (its `agent` CLI sets both in each agent's session): a program
+    // that reads them (`agent send`, `agent state`, its status hook) acts as that agent.
+    "AGENT_NAME",
+    "AGENT_HOST",
     "TERM",
     "COLORTERM",
     "TERM_PROGRAM*",
@@ -1411,6 +1415,8 @@ mod tests {
             ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
             ("CLAUDE_PID", "42"),
             ("AI_AGENT", "claude-code"),
+            ("AGENT_NAME", "worker-3"),
+            ("AGENT_HOST", "desk"),
             ("ATUIN_SESSION", "0190"),
             ("MEMORY_PRESSURE_WATCH", "/sys/fs/cgroup/x/memory.pressure"),
             ("MANAGERPIDFDID", "7"),
@@ -1457,6 +1463,8 @@ mod tests {
             "CLAUDE_CODE_MESSAGING_TOKEN",
             "CLAUDE_PID",
             "AI_AGENT",
+            "AGENT_NAME",
+            "AGENT_HOST",
             "ATUIN_SESSION",
             "MEMORY_PRESSURE_WATCH",
             "MANAGERPIDFDID",

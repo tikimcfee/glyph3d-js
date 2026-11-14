@@ -593,6 +593,36 @@ fn a_callers_environment_is_the_base_and_none_is_the_sessions() {
     assert_eq!(tagged(&mut c, "clean")["DISPLAY"], (":0".into(), EnvSource::Session, Some(SOURCE_VIA.into())));
 }
 
+/// A terminal made from a gomuxai agent's shell (`g3d new` there) is not that agent: the
+/// `AGENT_NAME` and `AGENT_HOST` its `agent` CLI set in the caller's environment stay out, and
+/// `termd.toml`'s `pass` brings them back when a person asks.
+#[test]
+fn an_agents_identity_stays_with_the_agent() {
+    let d = odd_daemon(&["--idle-exit", "0"]);
+    let mut c = d.client();
+    let base: BTreeMap<String, String> =
+        [("PATH", "/usr/bin:/bin"), ("AGENT_NAME", "worker-3"), ("AGENT_HOST", "desk"), ("FOO", "custom")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+    let make = |c: &mut Client, id: &str| {
+        let r = create_with(c, id, |cr| {
+            cr.argv = probe_argv();
+            cr.env_base = Some(base.clone());
+        })
+        .unwrap();
+        environ(r.pid)
+    };
+    let env = make(&mut c, "from-agent");
+    assert_eq!(env.get("FOO").map(String::as_str), Some("custom"), "the caller's base rides along");
+    assert_eq!((env.get("AGENT_NAME"), env.get("AGENT_HOST")), (None, None), "the agent's identity leaked");
+    std::fs::write(d.dir.join("termd.toml"), "[env]\npass = [\"AGENT_*\"]\n").unwrap();
+    let env = make(&mut c, "passed");
+    assert_eq!(env.get("AGENT_NAME").map(String::as_str), Some("worker-3"));
+    assert_eq!(env.get("AGENT_HOST").map(String::as_str), Some("desk"));
+    assert_eq!(tagged(&mut c, "passed")["AGENT_NAME"], ("worker-3".into(), EnvSource::Caller, None));
+}
+
 /// A creator with no shell and a stripped environment (the relay started by a unit, cron, an
 /// agent): its terminals get the desktop session's handles from the session source, and none of
 /// the session's other variables.
