@@ -868,8 +868,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   two fractional zooms (lines 17.37 px and 41.83 px, the grid off the pixel grid — where a seam
   shows): █ cells joined across and down (the darkest pixel inside a 2 × 8 block is the ink), a
   ─ run continuous along its own pixel row, an underline and a strikethrough unbroken under
-  blank cells, inverse swapping fill and ink, dim darker than plain and still drawn, a wide
-  emoji on a cell background keeping its right half. Its own relay (termd namespace
+  blank cells, a curly underline in its SGR 58 colour, inverse swapping fill and ink, dim darker
+  than plain and still drawn, a wide emoji on a cell background keeping its right half; then a
+  resize makes termd repaint the screen and every attribute must read the same. Its own relay (termd namespace
   `glyph-cells-check`) and one terminal that prints the cases and sleeps. Blind to the shapes
   beyond those cases and to HiDPI. `--shots DIR` saves the page at each size.
   ```

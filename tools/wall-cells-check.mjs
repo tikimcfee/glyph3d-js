@@ -17,11 +17,15 @@
  *   - a ─ run is continuous: along the rule's own pixel row, the dimmest pixel is as bright as the
  *     brightest (a rule drawn as font glyphs breaks at every cell edge);
  *   - an underline and a strikethrough run under blank cells exist and are continuous;
+ *   - a curly underline draws in the colour SGR 58 named, not the text's;
  *   - inverse swaps: an inverse blank cell fills with the text colour, and a ▄ under inverse
  *     draws its ink in the background's colour over a fill of the foreground's;
  *   - dim is darker than plain, and still there;
  *   - a wide emoji on a cell background is whole: its right half (which lies over the next cell)
  *     shows the emoji's own colours, not that cell's fill.
+ * Then the terminal is resized, which makes termd REPAINT the screen from its own emulator's cells
+ * rather than the program's bytes: every attribute read before (underline styles and colour,
+ * strike, dim, inverse) reads the same after.
  * Exit 1 on any FAIL. --shots DIR saves the page at each size (for a person; never read).
  */
 import { mkdirSync } from 'node:fs';
@@ -43,7 +47,7 @@ const rgb = (c) => `rgb(${c.join(',')})`;
 const sum = (c) => c[0] + c[1] + c[2];
 
 const COLS = 60, ROWS = 14, RUN = 8, LINE = 12;
-const FILL = [40, 90, 160], INV_FG = [200, 100, 50], INV_BG = [10, 20, 30];
+const FILL = [40, 90, 160], INV_FG = [200, 100, 50], INV_BG = [10, 20, 30], CURLY = [255, 80, 0];
 const sgr = (codes, text) => `\\033[${codes}m${text}\\033[0m`;
 /** The cases, one labelled line each (the label finds its row; the cells start two past it). */
 const LINES = [
@@ -52,6 +56,7 @@ const LINES = [
     `RULE  ${'─'.repeat(LINE)}`,
     `UNDER ${sgr('4', ' '.repeat(LINE))}`,
     `STRIK ${sgr('9', ' '.repeat(LINE))}`,
+    `CURLY ${sgr(`4:3;58:2::${CURLY.join(':')}`, ' '.repeat(LINE))}`,
     `INVSP ${sgr('7', ' '.repeat(RUN))}`,
     `INVHB ${sgr(`7;38;2;${INV_FG.join(';')};48;2;${INV_BG.join(';')}`, '▄'.repeat(RUN))}`,
     `PLAIN ${'█'.repeat(RUN)}`,
@@ -191,6 +196,7 @@ try {
             { label: 'DIMMD', n: RUN, inX: 1, y0: 0.25, y1: 0.75 },        // 8
             { label: 'EMOJI', c0: 1, n: 1, inX: 0.1, y0: 0.15, y1: 0.85 }, // 9: the cell after the emoji's own: its right half
             { label: 'EMOJI', c0: 4, n: 2, inX: 0.2, y0: 0.25, y1: 0.75 }, // 10: the fill, clear of the emoji
+            { label: 'CURLY', n: LINE, inX: 1, y0: 0.5, y1: 1 },           // 11: the curly underline's half of the row
         ]);
         ok(g.rects.every(Boolean), 'every case\'s row is on screen');
         const px = await read(g.rects);
@@ -213,6 +219,12 @@ try {
         lineRun(px[2], 'an underline runs unbroken under blank cells');
         lineRun(px[3], 'a strikethrough runs unbroken across blank cells');
 
+        // A curly underline in its own colour: the row's most saturated pixel is that colour's hue
+        // (red well over green over blue), where the text's grey would have all three alike.
+        const curly = px[11].rows.length ? px[11].bright : [0, 0, 0];
+        ok(px[11].n > 0 && curly[0] >= 150 && curly[0] - curly[1] >= 60 && curly[1] - curly[2] >= 20,
+            `${at}: a curly underline draws in the colour SGR 58 named — its brightest pixel is ${rgb(curly)} for ${rgb(CURLY)} (the text is ${rgb(ink)})`);
+
         // Inverse swaps what is drawn.
         ok(px[4].n > 0 && near(px[4].med, ink, 2), `${at}: an inverse blank cell fills with the text colour — ${rgb(px[4].med)} for ${rgb(ink)}`);
         ok(px[5].n > 0 && near(px[5].med, INV_FG, 2), `${at}: inverse ▄: above the half block the cell fills with the foreground — ${rgb(px[5].med)} for ${rgb(INV_FG)}`);
@@ -230,6 +242,30 @@ try {
         ok(fill.n > 0 && near(fill.med, FILL, 2) && right.n > 0 && emojiLift >= 80 && notFill,
             `${at}: a wide emoji on a cell background is whole — over the next cell (its right half) the median is ${rgb(right.med)} and the pixel farthest from the fill ${rgb(right.bright)}; the fill beside it reads ${rgb(fill.med)} for ${rgb(FILL)}`);
     }
+
+    // A repaint keeps the styles: a resize makes termd repaint from its own emulator's cells (the
+    // program, asleep, redraws nothing). Read each case's first cell's attributes — and the curly
+    // underline's colour — off the grid's emulator, before and after.
+    const attrs = () => W(([i, C0, labels]) => {
+        const g = window.__wall.terminal(i), s = g._emulator.readScreen(g.cols, g.rows), lines = g.readText();
+        if (!s.at || !s.ul) return null;   // an emulator that reads no attributes
+        return labels.map((label) => { const row = lines.findIndex((x) => x.startsWith(label)); return row < 0 ? null : [s.at[row * g.cols + C0], s.ul[row * g.cols + C0]]; });
+    }, [id, C0, ['UNDER', 'STRIK', 'CURLY', 'INVSP', 'DIMMD']]);
+    const was = await attrs();
+    ok(!!was && was.every((a) => a && a[0] !== 0) && was[2][1] === (CURLY[0] | (CURLY[1] << 8) | (CURLY[2] << 16)),
+        `each styled case reads its attributes off the emulator (underline, strike, curly + colour, inverse, dim): ${JSON.stringify(was)}`);
+    const repaints = await W(async ([i, cols, rows]) => {
+        const g = window.__wall.terminal(i), emu = g._emulator;
+        let bytes = 0;
+        const off = g.onBytes((b) => { bytes += b.length; });
+        const r = await window.__wall.router.execute(['terminal.resize', i, String(cols), String(rows)]);
+        for (let n = 0; n < 200 && !(emu._term.rows === rows && bytes > 0 && g.readText().some((l) => l.trim() === 'CELLS-DONE')); n++) await new Promise((res) => setTimeout(res, 50));
+        off();
+        return { text: r.text, rows: emu._term.rows, bytes };
+    }, [id, COLS, ROWS + 3]);
+    ok(repaints.rows === ROWS + 3 && repaints.bytes > 0, `a resize to ${ROWS + 3} rows brought a repaint from termd (${repaints.bytes} B; ${repaints.text})`);
+    const now = await attrs();
+    ok(!!now && JSON.stringify(now) === JSON.stringify(was), `and every attribute reads the same after it: ${JSON.stringify(now)}`);
 
     const errs = app.errors.filter((e) => !/favicon/.test(e.text));
     ok(errs.length === 0, `no page errors${errs.length ? `: ${errs.slice(0, 4).map((e) => e.text).join(' | ')}` : ''}`);
