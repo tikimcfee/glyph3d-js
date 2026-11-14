@@ -29,7 +29,7 @@ test('every knob is described — a section, a label, a type, a sentence — and
         expect(sections.has(def.section)).toBe(true);
         expect(def.label.length).toBeGreaterThan(0);
         expect(def.description.length).toBeGreaterThan(20);
-        expect(['bool', 'number', 'color', 'enum']).toContain(def.type);
+        expect(['bool', 'number', 'color', 'enum', 'text']).toContain(def.type);
         expect(checkConfig(key, WALL_CONFIG[key])).toEqual(WALL_CONFIG[key]);
         expect(checkConfig(key, String(WALL_CONFIG[key]))).toEqual(WALL_CONFIG[key]);   // as a verb sends it
     }

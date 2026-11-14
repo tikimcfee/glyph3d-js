@@ -55,6 +55,7 @@ export default class MapLabels {
             padding: `0 ${PAD_X}px`, font: FONT, whiteSpace: 'nowrap', borderRadius: '4px', borderWidth: '1px',
             borderStyle: 'solid', pointerEvents: 'auto', cursor: 'pointer', boxSizing: 'border-box', willChange: 'transform',
         });
+        el.dataset.mapLabel = id;   // whose label a right-click is on (WallMenu)
         el.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); this._onPress(id, e); });
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         line.setAttribute('stroke-width', '1');

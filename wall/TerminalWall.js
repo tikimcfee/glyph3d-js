@@ -13,11 +13,13 @@ import WallPointer from './WallPointer.js';
 import WallKeys from './WallKeys.js';
 import WallGroups from './WallGroups.js';
 import BarButtons from './BarButtons.js';
+import WallMenu from './WallMenu.js';
 import SelectionOverlay from './SelectionOverlay.js';
 import WallPaper from './WallPaper.js';
 import registerWallCommands from './wallCommands.js';
 import { WALL_CONFIG, checkConfig } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
+import { snapStep, snapTo } from './wallSnap.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
 const EDGE_GRAB_PX = 7;
@@ -91,7 +93,9 @@ function shortTitle(title) {
  *   parts        WallCamera (the ortho camera + every mapping through it), WallNames (title bars +
  *                map labels), WallGroups (groups: tiling, header drags, frames), BarButtons (a hovered
  *                bar's hide + hold-to-close), SelectionOverlay (lasso, outlines, the group button),
- *                WallPointer (gestures), WallKeys (keyboard)
+ *                WallPointer (gestures), WallKeys (keyboard), WallMenu (the right-click menu's
+ *                events: contextMenu.js decides who a right-click belongs to; `menu` is the open
+ *                one, opened and closed by wall.menu, drawn by ContextMenu.jsx)
  *   termd        TermdStatus (core): the relay's termd/status pushes — the daemon, its terminals,
  *                restarts and losses — for the status window and the topbar's chip; the wall.status
  *                verbs (wallCommands) open and place the window
@@ -119,6 +123,13 @@ export default class TerminalWall {
         this.selection = new Set();
         /** @type {RelayState} */
         this.relay = { state: 'offline', reason: '' };
+        /**
+         * The open right-click menu: what it's on, where (canvas-relative CSS px) and the world point
+         * under it; null when closed. Opened and closed by `wall.menu`; it closes by itself when its
+         * terminal is hidden or goes, or its group goes.
+         * @type {{ target: import('./contextMenu.js').MenuTarget, at: { x: number, y: number }, world: { x: number, y: number } }|null}
+         */
+        this.menu = null;
         this._listeners = new Set();
         this.store = new WallStore(relayPort);
         /** The knobs as the wall was born with them — what `wall.config <knob> default` hands back. */
@@ -155,6 +166,7 @@ export default class TerminalWall {
         this.pointer = new WallPointer(this, this.viewport);
         this.keys = new WallKeys(this);
         this.paper = new WallPaper(scene, renderer);
+        this.menuInput = new WallMenu(this);
         const host = this.viewport.canvas.parentElement;
         this.names = new WallNames({
             atlas, host, camera: this.viewport,
@@ -176,6 +188,7 @@ export default class TerminalWall {
         this._syncTerminals();
         this.pointer.install();
         this.keys.install();
+        this.menuInput.install();
 
         const port = this._relayPort;
         this.bridge = new WebSocketBridge(this.router, {
@@ -197,6 +210,8 @@ export default class TerminalWall {
         this.bridge = null;
         this.ctx.wsbridge = null;
         this.relay = { state: 'offline', reason: '' };
+        this.menu = null;
+        this.menuInput.uninstall();
         this.keys.uninstall();
         this.pointer.uninstall();
         this.ctx.registry.removeChangeListener(this._onRegistry);
@@ -247,7 +262,10 @@ export default class TerminalWall {
     /** Subscribe to state changes (connection, terminal set, focus, names). Returns an unsubscribe. */
     onChange(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
 
-    _emit() { for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } } }
+    _emit() {
+        this._pruneMenu();
+        for (const fn of this._listeners) { try { fn(); } catch (e) { console.error('[wall] listener threw:', e); } }
+    }
 
     /**
      * Run a verb on the wall's router — what the buttons, sidebar, status window, palette and chords
@@ -493,12 +511,61 @@ export default class TerminalWall {
         this._emit();
     }
 
+    // ── the right-click menu ────────────────────────────────────────────────
+
+    /**
+     * Open the menu on `target` at a canvas-relative point (CSS px). Refused (throws, saying why)
+     * for a terminal that isn't shown or a group that isn't there.
+     * @param {import('./contextMenu.js').MenuTarget} target @param {{ x: number, y: number }} at
+     */
+    openMenu(target, at) {
+        if (target.kind === 'terminal' && !this.isShown(target.id)) throw new Error(this.ctx.terminals.has(target.id) ? `terminal '${target.id}' is hidden` : `no terminal '${target.id}'`);
+        if (target.kind === 'group') this.groups.get(target.id);   // throws for an unknown group
+        const r = this.viewport.canvas.getBoundingClientRect();
+        this.menu = { target, at: { x: at.x, y: at.y }, world: this.viewport.toWorld(r.left + at.x, r.top + at.y) };
+        this._emit();
+    }
+
+    /** Close the menu (nothing to do when it's closed). */
+    closeMenu() {
+        if (!this.menu) return;
+        this.menu = null;
+        this._emit();
+    }
+
+    /** The menu's target went: its terminal hidden or gone, its group gone. */
+    _pruneMenu() {
+        const t = this.menu?.target;
+        if (!t) return;
+        if ((t.kind === 'terminal' && !this.isShown(t.id)) || (t.kind === 'group' && !this.store.group(t.id))) this.menu = null;
+    }
+
+    /**
+     * Whether the program in a terminal turned mouse reporting on (DECSET 9 / 1000 / 1002 / 1003):
+     * then a right-click on its body is the program's (contextMenu.js). Read from the terminal's own
+     * headless emulator — xterm's public `modes.mouseTrackingMode` (termd's repaint sets the mode
+     * again, so a re-adopted terminal reads true too). The grid has no getter for it, so the wall
+     * reaches through its emulator here, in one place; a core `TerminalGrid.mouseReporting` would
+     * take this over.
+     * @param {string} id @returns {boolean}
+     */
+    mouseReporting(id) {
+        const grid = this.ctx.terminals.get(id);
+        if (!grid) return false;
+        const modes = grid._emulator?._term?.modes;
+        if (!modes || typeof modes.mouseTrackingMode !== 'string') {
+            throw new Error(`[wall] terminal ${id}'s emulator has no xterm modes.mouseTrackingMode (TerminalGrid._emulator._term.modes moved?) — the right-click policy can't tell whether its program reports the mouse`);
+        }
+        return modes.mouseTrackingMode !== 'none';
+    }
+
     /**
      * @returns {{ connected: boolean, relay: RelayState, focusedId: string|null, selection: string[],
      *   sidebar: import('./WallStore.js').SidebarState,
      *   statusWindow: import('./WallStore.js').StatusWindowState,
      *   settingsPanel: import('./WallStore.js').SettingsPanelState,
      *   config: import('./wallConfig.js').WallConfig, dialled: string[],
+     *   menu: TerminalWall['menu'],
      *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null}[],
      *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform', columns:number, gap:number, members:string[]}[] }}
      *   a group lists only its members on the wall
@@ -514,6 +581,7 @@ export default class TerminalWall {
             settingsPanel: this.store.settingsPanel(),
             config: { ...this.config },
             dialled: Object.keys(this.store.config()),
+            menu: this.menu,
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
                 const lines = g.readText();
@@ -610,12 +678,29 @@ export default class TerminalWall {
 
     /**
      * Ask the relay to fork a new terminal (terminal.spawn): it lands through the wall's host,
-     * focused + framed. @returns {Promise<{ ok: boolean, id?: string, reason?: string }>}
+     * focused + framed. `at` (a world point) puts its window's top-left corner there — the title
+     * bar's corner (its height at the zoom when asked), the body just under it; with snap on the body's
+     * top-left takes the nearest grid crossing — and frames it there.
+     * @param {{ at?: { x: number, y: number }|null }} [o]
+     * @returns {Promise<{ ok: boolean, id?: string, reason?: string }>}
      */
-    async spawn() {
+    async spawn({ at = null } = {}) {
+        const zoom = this.viewport.zoom;   // the bar's room as the person saw it when asking (landing may already be easing)
         const r = await this.router.execute('terminal.spawn');
-        if (r.data?.landed) { this.termd.dismissLost(); return { ok: true, id: r.data.id }; }
-        return { ok: false, id: r.data?.id, reason: r.text };
+        if (!r.data?.landed) return { ok: false, id: r.data?.id, reason: r.text };
+        const id = r.data.id;
+        this.termd.dismissLost();
+        if (at && this.ctx.terminals.has(id)) {
+            // Landing framed it at its free slot (nothing has drawn since): move it, then frame it here.
+            // With snap on, its body's top-left takes the nearest crossing, as a move's does (wallSnap).
+            const body = { x: at.x, y: at.y - (this.names?.barHeight(id, zoom) ?? 0) };
+            const step = this.config.snap ? snapStep(this.config, zoom) : 0;
+            this.placeBody(id, step ? { x: snapTo(body.x, step), y: snapTo(body.y, step) } : body);
+            this.rememberPosition(id);
+            this.groups?.relayoutOf(id);
+            this.frame(id);
+        }
+        return { ok: true, id };
     }
 
     /** Fully close a terminal — its program in termd too — and forget it now: its name, spot,

@@ -1,7 +1,8 @@
 /**
  * holdPress — a button that acts only when HELD: a press fills a ring around it over the hold time,
  * and the action runs when the ring closes; letting go (or sliding off) before then cancels, and the
- * ring runs back. The wall's close buttons (title bar, sidebar) and the held close chord (X) share it.
+ * ring runs back. The wall's close buttons (title bar, sidebar, the right-click menu) and the held
+ * close chord (X) share it.
  */
 
 const SVG = 'http://www.w3.org/2000/svg';
@@ -10,13 +11,14 @@ const R = 8.5;
 const LEN = 2 * Math.PI * R;
 
 /**
- * Give `el` a progress ring (an absolutely placed SVG filling it) and return the hold controller.
- * The pointer drives it by itself; `start()` / `cancel()` let a held key drive the same ring.
+ * Give `el` a progress ring (an absolutely placed SVG filling `ring`, `el` itself unless given — a
+ * wide row holds its ring in a small mark) and return the hold controller. The pointer on `el`
+ * drives it by itself; `start()` / `cancel()` let a held key drive the same ring.
  * @param {HTMLElement} el
- * @param {{ ms: () => number, onDone: () => void, color?: string }} o - ms is read at each press
+ * @param {{ ms: () => number, onDone: () => void, color?: string, ring?: HTMLElement }} o - ms is read at each press
  * @returns {{ start: () => void, cancel: () => void, holding: () => boolean, dispose: () => void }}
  */
-export function holdPress(el, { ms, onDone, color = '#e5534b' }) {
+export function holdPress(el, { ms, onDone, color = '#e5534b', ring: host = el }) {
     const svg = document.createElementNS(SVG, 'svg');
     svg.setAttribute('viewBox', '0 0 20 20');
     Object.assign(svg.style, { position: 'absolute', inset: '0', width: '100%', height: '100%', pointerEvents: 'none', transform: 'rotate(-90deg)' });
@@ -25,8 +27,8 @@ export function holdPress(el, { ms, onDone, color = '#e5534b' }) {
     ring.style.strokeDasharray = `${LEN}`;
     ring.style.strokeDashoffset = `${LEN}`;
     svg.appendChild(ring);
-    if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
-    el.appendChild(svg);
+    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    host.appendChild(svg);
 
     let timer = null;
     const holding = () => timer != null;

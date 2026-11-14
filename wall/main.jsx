@@ -10,6 +10,7 @@ import Palette from './Palette.jsx';
 import Sidebar from './Sidebar.jsx';
 import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
+import ContextMenu from './ContextMenu.jsx';
 import { dockLayout } from './Panel.jsx';
 import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL } from './chord.js';
 
@@ -97,13 +98,14 @@ function Chrome({ wall }) {
       <TermdNotice wall={wall} />
       <div style={{ ...styles.hint, left: inset.left, right: inset.right }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, {SNAP_INVERT_LABEL}-drag free) · wheel to zoom (over the focused terminal: its scrollback) · drag empty canvas to pan
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · wheel to zoom (over the focused terminal: its scrollback) · drag empty canvas to pan · right-click for a menu
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
       </div>
       <Sidebar wall={wall} state={state} />
       <StatusWindow wall={wall} state={state} />
       <SettingsPanel wall={wall} state={state} />
       {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}
+      <ContextMenu wall={wall} state={state} />
     </>
   );
 }

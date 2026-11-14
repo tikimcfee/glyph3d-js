@@ -1,4 +1,5 @@
 import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js';
+import { parseSizes } from './contextMenu.js';
 
 /**
  * wallSettings — what each wall knob IS: its section, its label, its type and range, and a sentence
@@ -9,17 +10,19 @@ import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js
  *
  * The type vocabulary is the IDE Settings schema's (app/client/settings.js): `bool`, `number` (min,
  * max, step; `whole` for integers), `color` (a `#rrggbb` sRGB hex) and `enum` (options) — so a knob
- * reads the same in either. Unlike the IDE's coerce, a value that doesn't fit is REFUSED, naming the
+ * reads the same in either — plus `text`: a line of words (a list, like menuSizes), checked and
+ * tidied by the knob's own `parse`. Unlike the IDE's coerce, a value that doesn't fit is REFUSED, naming the
  * knob, never clamped: ranges are wide, bounding only what would break.
  */
 
 /**
  * @typedef {{ id: string, title: string, subtitle: string }} SettingsSection
  * @typedef {{ section: string, label: string, description: string,
- *             type: 'bool'|'number'|'color'|'enum',
+ *             type: 'bool'|'number'|'color'|'enum'|'text',
  *             min?: number, above?: number, max?: number, step?: number, whole?: boolean, unit?: string,
- *             options?: readonly string[] }} KnobDef
+ *             options?: readonly string[], parse?: (s: string) => string }} KnobDef
  *   min: the least value (inclusive); above: a value must exceed it (exclusive); max: the most.
+ *   parse (text): the value as it is kept, or a throw saying what's wrong with it.
  */
 
 /** The panel's sections, in order. @type {readonly SettingsSection[]} */
@@ -29,6 +32,7 @@ export const SECTIONS = Object.freeze([
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
     { id: 'status', title: 'Status', subtitle: 'the termd status window · notices' },
     { id: 'input', title: 'Input', subtitle: 'keyboard' },
+    { id: 'menu', title: 'Menu', subtitle: 'the right-click menu' },
 ]);
 
 /** Every knob's definition, in the panel's order within each section. @type {Readonly<Record<string, KnobDef>>} */
@@ -105,6 +109,15 @@ export const KNOBS = Object.freeze({
         section: 'input', label: 'Option as Alt', type: 'enum', options: OPTION_AS_ALT,
         description: "Whether ⌥/Alt is Alt for the terminal: auto sends Option's character when it made one (å), else Alt; true always Alt (Option+A is ESC a); false types characters. Takes the next key.",
     },
+    menuHint: {
+        section: 'menu', label: 'Second-click hint', type: 'bool',
+        description: "Show the quiet line at the foot of the right-click menu saying a second right-click opens the browser's own menu.",
+    },
+    menuSizes: {
+        section: 'menu', label: 'Terminal sizes', type: 'text',
+        parse: (s) => { parseSizes(s); return s.trim().split(/\s+/).filter(Boolean).join(' '); },
+        description: "The sizes a terminal's right-click menu offers to resize it to, as COLSxROWS separated by spaces (like 80x24 120x36); empty offers none.",
+    },
 });
 
 const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
@@ -133,6 +146,10 @@ export function checkKnob(key, def, value) {
         const s = String(value).trim();
         if (!HEX.test(s)) throw new Error(`${key} takes a colour as #rrggbb, not '${value}'`);
         return s.toLowerCase();
+    }
+    if (def.type === 'text') {
+        const s = String(value);
+        try { return def.parse ? def.parse(s) : s.trim(); } catch (e) { throw new Error(`${key}: ${e.message}`); }
     }
     if (def.type === 'enum') {
         const s = String(value);

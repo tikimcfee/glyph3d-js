@@ -5,8 +5,9 @@
  *
  * --shots DIR saves screenshots of the coloured words, the status window (as it reads normally,
  * restarting and unreachable), the bar buttons, a close being held, a lasso in progress, the
- * selection, a tiled group, a freeform group, the sidebar docked left, and the sidebar and status
- * window docked on one edge (for a person to judge the look; the checks never read them).
+ * selection, a tiled group, a freeform group, the sidebar docked left, the sidebar and status
+ * window docked on one edge, and the right-click menu on a terminal, on the canvas and on a group
+ * header (and its close being held) (for a person to judge the look; the checks never read them).
  *
  * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
  * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` in the termd namespace `glyph-wall-e2e`, no
@@ -51,7 +52,12 @@
  * its colour ±2, the background between ±2; the minor level gone below gridMinPx; none with the grid
  * off), the background knob reaching the canvas ±2, and the settings panel (its chord puts the keys
  * in its search; a search shows exactly the matching knobs, marked; Enter flips a switch; a field
- * edit sets the knob through wall.config). Exit 1 on any FAIL.
+ * edit sets the knob through wall.config); and the right-click menu (ours on a terminal, opened there
+ * with its default prevented; a second right-click closes it and leaves the browser's menu alone, as
+ * Shift+right-click does; hide from it; a short click on its close keeps the terminal, a held one
+ * kills it; a mouse-reporting program gets the right-click and Shift reaches ours; Esc, a wheel and
+ * the menu key; "new terminal here" lands at the point; a group header's menu sets the layout and
+ * ungroups). Exit 1 on any FAIL.
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -687,6 +693,144 @@ try {
         ok(kept && !!gone2, `${CHORD}+X held closes the focused terminal; let go early, it stays`);
     }
 
+    // ── the right-click menu: ours first, the browser's on a second right-click or with Shift ──
+    {
+        const [M, M2] = await park(2);
+        // Every contextmenu's defaultPrevented as it leaves the page (bubble, after the wall's capture
+        // listener) — then prevented here, so a headed run opens no native menu over the page.
+        await W(() => { window.__ctxPrevented = []; window.addEventListener('contextmenu', (e) => { window.__ctxPrevented.push(e.defaultPrevented); e.preventDefault(); }); });
+        const prevented = () => W(() => window.__ctxPrevented.at(-1));
+        const menuOn = (want) => until((w) => { const m = window.__wall.menu; const el = document.querySelector('[data-wall-menu]'); return w === null ? !m && !el : !!m && !!el && el.dataset.target === w && getComputedStyle(el).visibility === 'visible'; }, want, 5000);
+        const mid = (b) => ({ x: (b.left + b.right) / 2, y: (b.top + b.bottom) / 2 });
+        const body = mid(await geo(M));
+        const rows = () => W(() => [...document.querySelectorAll('[data-wall-menu] [data-menu-item]')].map((el) => el.dataset.menuItem));
+
+        await page.mouse.click(body.x, body.y, { button: 'right' });
+        const opened = await menuOn(`terminal:${M}`);
+        ok(!!opened && (await prevented()) === true, `a right-click on ${M} opens our menu there, its default prevented (rows: ${(await rows()).join(' ')})`);
+        const hint = await W(() => document.querySelector('[data-wall-menu] [data-menu-hint]')?.textContent);
+        ok(!!hint, `its footer says a second right-click gives the browser's menu ("${hint}")`);
+        await shot('menu-terminal');
+        await page.mouse.click(body.x, body.y, { button: 'right' });
+        const closed = await menuOn(null);
+        ok(!!closed && (await prevented()) === false, 'a second right-click while it is open closes ours and leaves defaultPrevented false (the browser menu comes)');
+
+        await page.keyboard.down('Shift'); await page.mouse.click(body.x, body.y, { button: 'right' }); await page.keyboard.up('Shift');
+        ok((await prevented()) === false && !(await W(() => window.__wall.menu)), 'Shift+right-click on a terminal is the browser\'s: not prevented, ours stays shut');
+
+        await page.mouse.click(body.x, body.y, { button: 'right' });
+        await menuOn(`terminal:${M}`);
+        await page.click('[data-wall-menu] [data-menu-item="hide"]');
+        const hidden = await until((i) => window.__wall.store.hidden(i) && !window.__wall.menu, M, 5000);
+        ok(!!hidden, `choosing hide hides ${M} and closes the menu`);
+        await W((i) => window.__wall.run(['wall.show', i]), M);
+
+        await page.mouse.click(body.x, body.y, { button: 'right' });
+        await menuOn(`terminal:${M}`);
+        const cl = await box('[data-wall-menu] [data-menu-item="close"]');
+        await page.mouse.move(cl.x, cl.y); await page.mouse.down();
+        const started = await until(() => document.querySelector('[data-wall-menu] [data-menu-item="close"]')?.dataset.holding === '1', null, 3000);
+        await page.mouse.up();
+        // Let go: the ring runs back and no timer is left that could still kill it (holdPress: holding = a timer pending).
+        const let_go = await until(() => document.querySelector('[data-wall-menu] [data-menu-item="close"]')?.dataset.holding === undefined, null, 3000);
+        ok(!!started && !!let_go && !!(await W((i) => window.__wall.terminal(i), M)) && !!(await W(() => window.__wall.menu)),
+            `a short click on the menu's close starts the ring, lets go, and keeps ${M} (the menu stays open)`);
+        await page.mouse.move(cl.x, cl.y); await page.mouse.down();
+        await until(() => document.querySelector('[data-wall-menu] [data-menu-item="close"]')?.dataset.holding === '1', null, 3000);
+        await shot('menu-close-hold');
+        const killed = await until((i) => !window.__wall.terminal(i), M, HOLD + 8000);
+        await page.mouse.up();
+        ok(!!killed && (await W((i) => window.__wall.store.position(i), M)) === null && !(await W(() => window.__wall.menu)),
+            `holding the menu's close for ${HOLD} ms kills ${M}, forgets it and closes the menu`);
+
+        // A terminal whose program turned mouse reporting on: a right-click on its body is the program's; Shift reaches ours.
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "printf '\\033[?1000h'\r"]);
+        const reporting = await until((i) => window.__wall.mouseReporting(i), M2, 8000);
+        const b2 = mid(await geo(M2));
+        await page.mouse.click(b2.x, b2.y, { button: 'right' });
+        const progPrevented = await prevented();
+        const noMenu = !(await W(() => window.__wall.menu));
+        await page.keyboard.down('Shift'); await page.mouse.click(b2.x, b2.y, { button: 'right' }); await page.keyboard.up('Shift');
+        const shiftOurs = await menuOn(`terminal:${M2}`);
+        ok(!!reporting && progPrevented === true && noMenu && !!shiftOurs && (await prevented()) === true,
+            `with mouse reporting on (DECSET 1000), a right-click on ${M2}'s body goes to its program (no menu, no browser menu); Shift+right-click opens ours`);
+        await page.keyboard.press('Escape');
+        ok(!!(await menuOn(null)), 'Esc closes the menu');
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "printf '\\033[?1000l'\r"]);
+        await until((i) => !window.__wall.mouseReporting(i), M2, 8000);
+
+        // The menu key on the focused terminal opens it there.
+        await W((i) => window.__wall.focus(i), M2);
+        await page.keyboard.press('ContextMenu');
+        ok(!!(await menuOn(`terminal:${M2}`)), `the ContextMenu key opens the menu on the focused terminal ${M2}`);
+        // Keys: ↓ lights frame, ↓ again rename, Enter opens its box, the name typed and Enter renames it.
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('Enter');
+        const box_ = await until(() => document.activeElement?.hasAttribute('data-menu-rename'), null, 3000);
+        await page.keyboard.type('menu named');
+        await page.keyboard.press('Enter');
+        const renamed = await until((i) => window.__wall.nameOf(i) === 'menu named' && !window.__wall.menu, M2, 5000);
+        const why = box_ && renamed ? '' : ` (${await W((i) => JSON.stringify({ menu: window.__wall.menu?.target ?? null, name: window.__wall.nameOf(i), focus: document.activeElement?.tagName, groups: window.__wall.groups.ids(), selection: [...window.__wall.selection] }), M2)})`;
+        ok(!!box_ && !!renamed, `↓ ↓ and Enter open the rename box; typing a name and Enter renames ${M2} and closes the menu${why}`);
+
+        // Empty canvas: a new terminal at the point.
+        const g2 = await geo(M2);
+        const pt = { x: g2.right + 60, y: g2.barTop };
+        const want = await W(([x, y]) => { const w = window.__wall; return { ...w.viewport.toWorld(x, y), bar: w.names.barHeight(w.order[0], w.viewport.zoom), n: w.order.length }; }, [pt.x, pt.y]);
+        await page.mouse.click(pt.x, pt.y, { button: 'right' });
+        ok(!!(await menuOn('canvas')) && (await prevented()) === true, 'a right-click on empty canvas opens the canvas menu');
+        await shot('menu-canvas');
+        // The point the menu opened at is the event's (the browser hands integer px), within a pixel of the click.
+        const menuAt = await W(() => ({ ...window.__wall.menu.world, zoom: window.__wall.viewport.zoom }));
+        ok(Math.hypot(menuAt.x - want.x, menuAt.y - want.y) * menuAt.zoom < 1, `the canvas menu holds the world point it was opened at (${menuAt.x.toFixed(2)}, ${menuAt.y.toFixed(2)})`);
+        await page.click('[data-wall-menu] [data-menu-item="spawn"]');
+        const born = await until((n) => window.__wall.order.length > n && window.__wall.focusedId && !window.__wall.order.slice(0, n).includes(window.__wall.focusedId) && window.__wall.focusedId, want.n, 20000);
+        if (born) spawned.push(born);
+        const r = born ? await W((i) => window.__wall.terminalRect(i), born) : null;
+        // Its window's top-left at that point; with snap on (the default), its body's top-left on the nearest crossing.
+        const cfg = await W(() => ({ ...window.__wall.config }));
+        const step = cfg.snap ? snapStep(cfg, menuAt.zoom) : 0;
+        const wantX = Math.round(menuAt.x * 100) / 100, wantY = Math.round(menuAt.y * 100) / 100 - want.bar;
+        const at = step ? { x: snapTo(wantX, step), y: snapTo(wantY, step) } : { x: wantX, y: wantY };
+        ok(!!r && Math.abs(r.minX - at.x) < 1e-6 && Math.abs(r.maxY - at.y) < 1e-6,
+            `"new terminal here" lands ${born} at the point${step ? `, its body's top-left snapped to the grid (step ${step})` : ''} (${r ? `${r.minX.toFixed(2)}, ${r.maxY.toFixed(2)}` : '—'} vs ${at.x.toFixed(2)}, ${at.y.toFixed(2)})`);
+        // Somewhere the canvas itself is under the pointer and nothing on it is.
+        const empty = await W(() => {
+            const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect();
+            for (let y = cr.top + 80; y < cr.bottom - 60; y += 40) for (let x = cr.left + 40; x < cr.right - 40; x += 40) {
+                if (document.elementFromPoint(x, y) === v.canvas && !w.hit(v.toWorld(x, y))) return { x, y };
+            }
+            return null;
+        });
+        await page.mouse.click(empty.x, empty.y, { button: 'right' });
+        await menuOn('canvas');
+        await page.mouse.move(empty.x - 12, empty.y - 12);   // off the menu (it opens with its corner under the pointer)
+        await page.mouse.wheel(0, 120);
+        ok(!!(await menuOn(null)), 'a wheel (zoom) closes the menu');
+
+        // A group's header: its menu, Esc, then layout and ungroup through it.
+        const gid = (await W((ids) => window.__wall.run(['wall.group', ...ids]).then((x) => x.data.gid), [M2, born]));
+        await W((g) => window.__wall.run(['wall.group.frame', g]), gid);
+        await until(() => !window.__wall.viewport.moving, null, 8000);
+        const header = async () => W((g) => { const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(); const s = v.toScreenBox(w.groups.headerRect(g, v.zoom)); return { x: cr.left + (s.left + s.right) / 2, y: cr.top + (s.top + s.bottom) / 2 }; }, gid);
+        let hd = await header();
+        await page.mouse.click(hd.x, hd.y, { button: 'right' });
+        ok(!!(await menuOn(`group:${gid}`)), `a right-click on ${gid}'s header opens the group menu (rows: ${(await rows()).join(' ')})`);
+        await shot('menu-group');
+        await page.click('[data-wall-menu] [data-menu-item="layout"] [data-menu-option="freeform"]');
+        const free = await until((g) => window.__wall.groups.get(g).layout === 'freeform' && !window.__wall.menu, gid, 5000);
+        hd = await header();
+        await page.mouse.click(hd.x, hd.y, { button: 'right' });
+        await menuOn(`group:${gid}`);
+        await page.click('[data-wall-menu] [data-menu-item="ungroup"]');
+        const gone = await until((g) => !window.__wall.store.group(g) && !window.__wall.menu, gid, 5000);
+        ok(!!free && !!gone, `the group menu sets ${gid} freeform and ungroups it`);
+
+        for (const id of [M2, born]) if (id) await W((i) => window.__wall.run(['wall.close', i]), id);
+        await until((ids) => ids.every((i) => !window.__wall.terminal(i)), [M2, born].filter(Boolean), 8000);
+    }
+
     // ── lasso → group → tiling → header drag → freeform ───────────────────
     {
         const L = await park(3);
@@ -994,6 +1138,21 @@ try {
         const said5 = await run(['wall.config', 'gridMinor']);
         const back = await W(() => document.activeElement?.hasAttribute('data-settings-search'));
         ok(!!inField && !!set5 && said5 === 'OK: gridMinor 5' && back, `Enter on "Grid spacing" puts the keys in its field; 5 + Enter sets it through wall.config (${said5}) and the keys come back to the search`);
+        // The right-click menu's knobs are there too: a switch and a line of sizes, edited as one value.
+        await choose('right-click', 'menuSizes');
+        const listed = await W(() => !!document.querySelector('[data-settings] [data-setting="menuHint"] [data-control="bool"]') && !!document.querySelector('[data-settings] [data-setting="menuSizes"] [data-control="text"]'));
+        await page.keyboard.press('Enter');
+        const inSizes = await until(() => document.activeElement?.dataset.field === 'menuSizes', null, 4000);
+        await page.keyboard.type('100x30   200x60'); await page.keyboard.press('Enter');
+        const setSizes = await until(() => window.__wall.config.menuSizes === '100x30 200x60', null, 4000);
+        const saidSizes = await run(['wall.config', 'menuSizes']);
+        await page.keyboard.press('Enter');
+        await until(() => document.activeElement?.dataset.field === 'menuSizes', null, 4000);
+        await page.keyboard.type('big'); await page.keyboard.press('Enter');
+        const refusal = await until(() => document.querySelector('[data-settings] [data-setting="menuSizes"] [data-refused]')?.textContent, null, 4000);
+        ok(listed && !!inSizes && !!setSizes && saidSizes === 'OK: menuSizes 100x30 200x60' && /not 'big'/.test(refusal || '') && (await W(() => window.__wall.config.menuSizes)) === '100x30 200x60',
+            `searching "right-click" lists the menu's knobs (a switch, a text line); a typed size list sets menuSizes through wall.config (${saidSizes}) and a bad one is refused under it ("${refusal}")`);
+        await run(['wall.config', 'menuSizes', 'default']);
         await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
         const closed = await until(() => !document.querySelector('[data-settings]'), null, 4000);
         ok(!!closed, 'Escape clears the search, then closes the panel');

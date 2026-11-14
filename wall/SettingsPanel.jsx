@@ -82,6 +82,13 @@ function Control({ k, def, value, set, back }) {
       </span>
     );
   }
+  if (def.type === 'text') {
+    return (
+      <span data-control="text" style={styles.colorRow}>
+        <Field id={k} value={value} onCommit={set} back={back} placeholder="(none)" style={{ width: 150 }} />
+      </span>
+    );
+  }
   return (
     <span data-control="number" style={styles.colorRow}>
       <Field id={k} value={value} onCommit={set} back={back} inputMode="decimal" style={{ width: 64, textAlign: 'right' }} />

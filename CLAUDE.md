@@ -17,9 +17,11 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
 - **`wall/`** — the wall: an infinite flat (orthographic) canvas of terminals on the same
   core and relay (Vite :5180, `?relay=PORT`, default 8080 — a relay takes ONE display, so beside
   the IDE the wall needs its own relay). Pan, zoom, type, resize, hide/close, lasso-select and
-  group terminals; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`). Every action is
-  a `wall.*` verb (`wall/wallCommands.js`) that buttons, chords, palette, sidebar, status window
-  and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`); per-relay state in
+  group terminals; chords are ⌘ on macOS, Ctrl+Alt elsewhere (`wall/chord.js`). A right-click
+  opens the wall's menu for what's under it (`wall/contextMenu.js`); a second right-click,
+  Shift+right-click, text fields and DOM chrome keep the browser's own. Every action is
+  a `wall.*` verb (`wall/wallCommands.js`) that buttons, chords, palette, sidebar, status window,
+  the right-click menu and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`); per-relay state in
   `WallStore`; `TerminalWall` is the composition root (start/stop symmetric). Gate:
   `bun tools/wall-e2e.mjs` (own relay, termd namespace and terminals; `--reuse-relay`).
   The canvas is drafting paper (`WallPaper`; moves and resizes snap to it: `wallSnap`, chord+' /

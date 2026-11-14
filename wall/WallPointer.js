@@ -1,7 +1,7 @@
 import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
 import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
-import { invertsSnap } from './chord.js';
+import { invertsSnap, IS_MAC } from './chord.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
 const DRAG_SLOP_PX = 4;
@@ -35,6 +35,9 @@ const PINCH_MAX_DELTA = 50;
  * line); Ctrl (⌃) held while dragging inverts it, read as the drag goes — pressing or letting go of
  * it mid-drag re-places what's held. A tiled member's spot is its tile's: its drag and resize
  * don't snap (the group's header drag does, by the group's corner).
+ *
+ * A right-click (or, on macOS, a Ctrl+click — which is why ⌃ inverts snapping only once a drag is
+ * under way there) is the menu's (WallMenu), never a gesture.
  *
  * A group's backdrop is canvas (it pans and lassoes). A title bar's hide / close buttons and the
  * selection's group button are DOM over the canvas and never reach here.
@@ -128,6 +131,7 @@ export default class WallPointer {
 
     _onDown(e) {
         if (e.button !== 0 && e.button !== 1) return;
+        if (IS_MAC && e.ctrlKey && e.button === 0) return;   // macOS: Ctrl+click is the secondary click (the menu's)
         this.camera.target = null;
         const hit = e.button === 0 ? this.wall.hit(this.camera.toWorld(e.clientX, e.clientY)) : null;
         if (e.button === 0 && e.shiftKey) {

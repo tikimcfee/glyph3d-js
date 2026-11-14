@@ -19,7 +19,8 @@ import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
  * key stays with the browser (⌘C, ⌘V); elsewhere any other Ctrl+Alt key is the shell's. A focused
  * DOM input (the palette) keeps its own keys. Paste goes to the focused terminal as a paste, which
  * termd brackets when the program asked for bracketed paste. Each key carries the `optionAsAlt` knob
- * (wall.config), read as it is sent.
+ * (wall.config), read as it is sent. The menu key (and Shift+F10) opens the right-click menu on the
+ * focused terminal (else on the canvas), as native apps do; while that menu is open it has the keys.
  */
 export default class WallKeys {
     /** @param {import('./TerminalWall.js').default} wall */
@@ -61,6 +62,12 @@ export default class WallKeys {
         const t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         const wall = this.wall;
+        if (wall.menu) return;   // the open right-click menu has the keys (ContextMenu.jsx)
+        if (!isChord(e) && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey))) {
+            e.preventDefault(); e.stopPropagation();
+            wall.menuInput.openByKey();
+            return;
+        }
         if (isChord(e)) {
             const claim = () => { e.preventDefault(); e.stopPropagation(); };
             switch (e.code) {

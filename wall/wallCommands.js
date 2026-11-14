@@ -12,9 +12,11 @@ import { searchSettings, SECTIONS } from './wallSettings.js';
  *   wall.list                                  every terminal and group: shown, hidden, grouped
  *   wall.hide <id…> · wall.show <id…>          off the canvas (still running) · back at its spot
  *   wall.reveal <id>                           show it, focus it, frame it
+ *   wall.spawn [x y]                           a new terminal (its window's top-left at world x y)
+ *   wall.fit                                   ease the camera to fit every shown terminal
  *   wall.close <id>                            kill it (its program in termd) and forget it
  *   wall.rename <id> [name…]                   empty gives back the shell's title
- *   wall.select [<id…>|none] · wall.select.add <id…> · wall.select.toggle <id>
+ *   wall.select [<id…>|all|none] · wall.select.add <id…> · wall.select.toggle <id>
  *   wall.group [<id…>]                         a new group of these (default: the selection)
  *   wall.group.add <gid> <id…> · wall.group.remove <id…> · wall.ungroup <gid>
  *   wall.group.layout <gid> tile [columns] [gap] | freeform
@@ -27,6 +29,9 @@ import { searchSettings, SECTIONS } from './wallSettings.js';
  *   wall.config.find <words…>                  the knobs whose label, key, description or section hold every word
  *   wall.snap [toggle|on|off] · wall.grid [toggle|on|off]   snapping to the grid · drawing it
  *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
+ *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
+ *                                              the right-click menu, at canvas px (default: on the
+ *                                              terminal, under the header, the view's centre)
  *
  * termd's state itself comes from the relay (`./glyph3d-cli termd.status` answers page-less); the
  * status verbs only show it.
@@ -87,6 +92,17 @@ export default function registerWallCommands(router, wall) {
         wall.focus(id, { frame: true });
         return OK(`revealed ${id}`, { id });
     });
+    verb('wall.spawn', '[x y]', "A new terminal, focused and framed; at x y (world) its window's top-left corner", async (args) => {
+        const at = args.length ? { x: numArg(args[0], 'x'), y: numArg(args[1], 'y') } : null;
+        const r = await wall.spawn({ at });
+        if (!r.ok) throw new Error(r.reason || 'the spawn did not land');
+        return OK(`spawned ${r.id}${at ? ` at (${at.x}, ${at.y})` : ''}`, { id: r.id, at });
+    });
+    verb('wall.fit', '', 'Ease the camera to fit every shown terminal', () => {
+        if (!wall.shownOrder().length) throw new Error('no shown terminal to fit');
+        wall.fitAll();
+        return OK(`fitting ${wall.shownOrder().length} terminal(s)`);
+    });
     verb('wall.close', '<id>', 'Kill a terminal — its program in termd — and forget it', async (args) => {
         const [id] = terminalIds(args.slice(0, 1));
         return wall.kill(id);
@@ -97,8 +113,9 @@ export default function registerWallCommands(router, wall) {
         return OK(`${id} is "${wall.nameOf(id)}"`, { id, name: wall.nameOf(id) });
     });
 
-    verb('wall.select', '[<id…>|none]', 'Select exactly these terminals (none clears)', (args) => {
-        const ids = args.length === 1 && args[0] === 'none' ? [] : terminalIds(args, 0);
+    verb('wall.select', '[<id…>|all|none]', 'Select exactly these terminals (all: every shown one; none clears)', (args) => {
+        const one = args.length === 1 ? args[0] : null;
+        const ids = one === 'none' ? [] : one === 'all' ? wall.shownOrder() : terminalIds(args, 0);
         wall.select(ids);
         return OK(`selected ${ids.length}`, { selection: [...wall.selection] });
     });
@@ -211,8 +228,33 @@ export default function registerWallCommands(router, wall) {
         return wall.termd.dismissLost() ? OK('dismissed the termd-lost notice') : OK('no termd-lost notice to dismiss');
     });
 
-    verb('wall.config', '[<knob> [value]]', "Read or set the wall's knobs", (args) => {
-        const [key, value] = args;
+    verb('wall.menu', 'terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close', 'Open the right-click menu on a terminal, a group or the canvas (at canvas px), or close it', (args) => {
+        const [kind, ...rest] = args;
+        if (kind === 'close') { wall.closeMenu(); return OK('menu closed'); }
+        if (kind !== 'terminal' && kind !== 'group' && kind !== 'canvas') throw new Error(`the menu opens on terminal|group|canvas (or close), not '${kind}'`);
+        const id = kind === 'canvas' ? null : rest.shift();
+        if (kind !== 'canvas' && !id) throw new Error(`name a ${kind}`);
+        let at;
+        if (rest.length) at = { x: numArg(rest[0], 'x'), y: numArg(rest[1], 'y') };
+        else if (kind === 'terminal') {
+            if (!wall.isShown(id)) throw new Error(wall.terminal(id) ? `terminal '${id}' is hidden` : `no terminal '${id}'`);
+            const b = wall.viewport.toScreenBox(wall.terminalRect(id));
+            at = { x: Math.round(b.left + 12), y: Math.round(b.top + 12) };
+        } else if (kind === 'group') {
+            const h = wall.groups.headerRect(id, wall.viewport.zoom);
+            if (!h) throw new Error(`group '${id}' has no header on the canvas`);
+            const b = wall.viewport.toScreenBox(h);
+            at = { x: Math.round(b.left), y: Math.round(b.bottom) };
+        } else at = { x: Math.round(wall.viewport.view.w / 2), y: Math.round(wall.viewport.view.h / 2) };
+        /** @type {import('./contextMenu.js').MenuTarget} */
+        const target = kind === 'terminal' ? { kind, id, part: 'body' } : kind === 'group' ? { kind, id } : { kind: 'canvas' };
+        wall.openMenu(target, at);
+        return OK(`menu on ${kind}${id ? ` ${id}` : ''} at (${at.x}, ${at.y})`, { menu: wall.menu });
+    });
+
+    verb('wall.config', '[<knob> [value…|default]]', "Read or set the wall's knobs", (args) => {
+        const [key, ...rest] = args;
+        const value = rest.length ? rest.join(' ') : null;   // a list knob (menuSizes) may come as several args
         if (!key) return { text: Object.entries(wall.config).map(([k, v]) => `${k} ${v}`).join('\n'), data: { ...wall.config } };
         const v = value == null ? (checkConfig(key, wall.config[key]), wall.config[key])
             : value === 'default' ? (checkConfig(key, wall.config[key]), wall.resetConfig(key))

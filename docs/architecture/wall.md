@@ -19,8 +19,29 @@ reveals its terminal — `wall/StatusWindow.jsx`) and a notice under the topbar 
 restarts (amber, once it lingers past `restartNoticeMs`) or is unreachable, failed or lost (red).
 The sidebar and the status window float or dock left/right, side by side on one edge
 (`wall/Panel.jsx`). Every action is a `wall.*` verb (`wall/wallCommands.js`:
-hide/show/reveal/close/select/group…/sidebar/status/config) that the buttons, chords, palette,
-sidebar, status window and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`).
+hide/show/reveal/spawn/fit/close/select/group…/sidebar/status/menu/config/snap/grid/settings) that the buttons,
+chords, palette, sidebar, status window, right-click menu and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`).
+A right-click opens the wall's own menu (`wall/contextMenu.js` decides, `WallMenu` routes the
+events, `ContextMenu.jsx` draws it; `wall.menu` opens and closes it): on a terminal — frame, focus,
+rename, add to / take out of the selection, group (new, with the selection, add to a group, take
+out), size (the `menuSizes` offers, `terminal.resize`), redraw (`terminal.refresh`), Option as Alt
+(wall-wide, `wall.config optionAsAlt`), hide, and close HELD for `closeHoldMs` (the hold ring); on a
+group's header — frame, rename, layout, columns, select its terminals, hide all, ungroup; on empty
+canvas — a new terminal with its window's top-left at the point (`wall.spawn x y`; with snap on, its
+body's top-left on the nearest crossing), fit all (`wall.fit`), select all (`wall.select all`), snap
+on/off (`wall.snap`), grid show/hide (`wall.grid`), the sidebar, the status window, the settings
+(`wall.settings`). Every row is a verb.
+It never takes the browser's menu away: a second right-click while it is open, Shift+right-click,
+and a right-click on a text field or the DOM chrome (sidebar, palette, status window) are the
+browser's. A terminal whose program turned mouse reporting on (DECSET 9/1000/1002/1003, read off its
+emulator: `TerminalWall.mouseReporting`) owns a right-click on its body, and Shift+right-click
+reaches the wall's menu (Ghostty's rule); the wall forwards no mouse clicks to programs yet, so that
+click goes nowhere (`WallMenu._toProgram` is where it will). The menu sits by the pointer, flipped at
+the view's edges; ↑ ↓ ← → Enter move and choose, Esc, a click outside, a wheel, a pan or its target
+going away close it; the ContextMenu key or Shift+F10 opens it on the focused terminal. Its knobs
+are the Menu section's: `menuHint` (the footer line) and `menuSizes` (the size offers, a line of
+COLSxROWS). On macOS a Ctrl+click is the OS's right-click, so it opens the menu and starts no drag;
+⌃ still frees a drag from snapping once the drag is under way (press, then hold ⌃).
 Names, spots, hidden terminals, groups, the sidebar and the status window's place (`WallStore`)
 are per relay and pruned against the relay's live terminals on every connect (a group loses dead
 members, goes when empty); a kill forgets at once. `TerminalWall` is its composition root
@@ -48,13 +69,16 @@ group, its first tile) on a crossing, moving every member by that one delta — 
 is untouched; a tiled member's own drag and resize don't snap (its spot is its tile's). The step is
 the minor spacing while minor lines draw at this zoom, else the major. The `snap` knob turns it on or
 off (`wall.snap`, chord+'); Ctrl (⌃ on macOS) held during a drag inverts it for as long as it's held
-(`chord.invertsSnap`: not ⌥, which moves, not ⇧, which lassoes, not the chord). The grid shows or
+(`chord.invertsSnap`: not ⌥, which moves, not ⇧, which lassoes, not the chord). On macOS ⌃ at the
+press is a right-click (the menu's), so there it is pressed once the drag has begun. The grid shows or
 hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
 **The settings panel** (`wall/SettingsPanel.jsx`, chord+`,`, the topbar's settings button, the
-palette, `wall.settings`) lists every wall knob in sections — Canvas, Terminals, Groups, Status,
-Input — from ONE schema, `wall/wallSettings.js` (`KNOBS`: section, label, type, range, a sentence
-saying what changing it does; the IDE Settings schema's type vocabulary: bool, number, color, enum).
+palette, `wall.settings`, the canvas's right-click menu) lists every wall knob in sections —
+Canvas, Terminals, Groups, Status, Input, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:
+section, label, type, range, a sentence saying what changing it does; the IDE Settings schema's type
+vocabulary: bool, number, color, enum — plus text, a line of words its knob's `parse` checks, edited
+as one value: `wall.config menuSizes 80x24 120x36` joins the words).
 `wall.config` checks every value by that schema (refused naming the knob, never clamped) and every
 WALL_CONFIG knob must have an entry (wallConfig fails loudly as it loads). The search box takes the
 keys when the panel opens; typing filters knobs by label, key, description and section title (every

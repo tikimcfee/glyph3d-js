@@ -2,8 +2,8 @@ import { KNOBS, checkKnob } from './wallSettings.js';
 
 /**
  * wallConfig — the wall's knobs for hiding, closing, selecting and grouping, the termd status
- * window's and the keyboard's, the canvas's (its colour, the drafting grid, snapping), born
- * configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
+ * window's, the keyboard's, the right-click menu's and the canvas's (its colour, the drafting grid,
+ * snapping), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
  * <value>` dials one live and remembers it per relay (WallStore; `wall.config <key> default` hands it
  * back). A group's own columns and gap live on the group; these are what a new group is born with.
  * What each knob is — its type, range, section and description — is wallSettings.KNOBS.
@@ -56,6 +56,12 @@ export const WALL_CONFIG = Object.freeze({
     gridMajorColor: '#181c26',
     /** Moves and resizes snap to the grid (a held Ctrl / ⌃ inverts it for that drag: chord.js). */
     snap: true,
+
+    // ── the right-click menu (contextMenu.js) ──
+    /** Whether the right-click menu's footer says a second right-click gives the browser's own menu. */
+    menuHint: true,
+    /** The sizes a terminal's right-click menu offers, as COLSxROWS, space-separated ('' offers none). */
+    menuSizes: '80x24 120x36 160x48',
 });
 
 for (const key of Object.keys(WALL_CONFIG)) if (!(key in KNOBS)) throw new Error(`[wall] knob '${key}' has no definition in wallSettings.KNOBS`);
