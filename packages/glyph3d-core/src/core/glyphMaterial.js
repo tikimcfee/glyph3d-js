@@ -106,8 +106,11 @@ void main() {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     }
 
-    // Unpack 24-bit packed color (little-endian RGB888 in float)
-    int uCol = int(aColor + 0.5);
+    // Unpack 24-bit packed color (little-endian RGB888 in float). The lane holds an exact integer;
+    // round() keeps it. NOT int(aColor + 0.5): from 2^23 up a float32's step is 1, so x + 0.5 is a
+    // tie that rounds to even. Every odd colour there gains 1, and 0xFFFFFF (pure white: bold
+    // default text, Claude Code's ●) becomes 0x1000000, whose RGB bytes are all 0: black text.
+    int uCol = int(round(aColor));
     vec3 iColor = vec3(
         float(uCol & 0xFF),
         float((uCol >> 8) & 0xFF),
