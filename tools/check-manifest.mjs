@@ -356,7 +356,7 @@ export const CHECKS = [
     {
         name: 'wall-cells-check', cmd: ['bun', 'tools/wall-cells-check.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal', 'render'],
         needs: ['wall-vite', 'own-relay', 'browser', 'gpu', 'termd'], apart: ['display'],
-        compare: 'what a terminal draws itself, in the wall\'s pixels at two fractional zooms: █ cells joined across and down show no seam (the darkest pixel inside the block is the ink), a ─ run is continuous along its own pixel row, an underline and a strikethrough run unbroken under blank cells, a curly underline draws in its SGR 58 colour, inverse swaps fill and ink, dim is darker than plain and still drawn, a wide emoji on a cell background keeps its right half; then every attribute reads the same after a resize makes termd repaint the screen',
+        compare: 'what a terminal draws itself, in the wall\'s pixels at two fractional zooms: █ cells joined across and down show no seam (the darkest pixel inside the block is the ink), a ─ run is continuous along its own pixel row, an underline and a strikethrough run unbroken under blank cells, a curly underline draws in its SGR 58 colour, inverse swaps fill and ink, dim is darker than plain and still drawn, a wide emoji on a cell background keeps its right half; then every attribute reads the same after a resize makes termd repaint the screen; then the settings panel lists the four text knobs under Text, dim opacity set to 1 in its field draws dim as plain, and its default makes it dim again',
         blind: 'the shapes themselves beyond those cases (tools/term-test-pattern.sh + term-test-shots.mjs are for the eye); HiDPI',
     },
     {

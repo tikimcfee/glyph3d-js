@@ -78,10 +78,13 @@ hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
 **The settings panel** (`wall/SettingsPanel.jsx`, chord+`,`, the topbar's settings button, the
 palette, `wall.settings`, the canvas's right-click menu) lists every wall knob in sections —
-Canvas, Terminals, Groups, Status, Input, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:
+Canvas, Terminals, Text, Groups, Status, Input, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:
 section, label, type, range, a sentence saying what changing it does; the IDE Settings schema's type
 vocabulary: bool, number, color, enum — plus text, a line of words its knob's `parse` checks, edited
 as one value: `wall.config menuSizes 80x24 120x36` joins the words).
+The Text section's four knobs (`lineThickness`, `underlineRaise`, `curlyAmplitude`, `dimAlpha`) are
+the glyph shader's line style (`setGlyphLineStyle`, born from core's `GLYPH_LINE_DEFAULTS`): a
+set or a reset reaches every terminal's underlines, strikethroughs and dim text at once.
 `wall.config` checks every value by that schema (refused naming the knob, never clamped) and every
 WALL_CONFIG knob must have an entry (wallConfig fails loudly as it loads). The search box takes the
 keys when the panel opens; typing filters knobs by label, key, description and section title (every

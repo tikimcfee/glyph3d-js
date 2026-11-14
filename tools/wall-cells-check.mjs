@@ -26,6 +26,9 @@
  * Then the terminal is resized, which makes termd REPAINT the screen from its own emulator's cells
  * rather than the program's bytes: every attribute read before (underline styles and colour,
  * strike, dim, inverse) reads the same after.
+ * Last, the knobs: the settings panel (chord + ,) lists the four text knobs in its Text section;
+ * dim opacity set to 1 in its field makes dim text read as plain in the pixels, and handing the
+ * knob back (`wall.config dimAlpha default`) makes it dim again.
  * Exit 1 on any FAIL. --shots DIR saves the page at each size (for a person; never read).
  */
 import { mkdirSync } from 'node:fs';
@@ -33,6 +36,8 @@ import path from 'node:path';
 import { launchGpuBrowser, openApp } from './itest/driver.mjs';
 import { privateRelay } from './lib/wall-relay.mjs';
 import { RESET_FG } from '../packages/glyph3d-core/src/collections/terminalPalette.js';
+import { searchSettings } from '../wall/wallSettings.js';
+import { WALL_CONFIG, LINE_STYLE_KNOBS } from '../wall/wallConfig.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL_ = arg('--url', 'http://localhost:5180/');
@@ -266,6 +271,48 @@ try {
     ok(repaints.rows === ROWS + 3 && repaints.bytes > 0, `a resize to ${ROWS + 3} rows brought a repaint from termd (${repaints.bytes} B; ${repaints.text})`);
     const now = await attrs();
     ok(!!now && JSON.stringify(now) === JSON.stringify(was), `and every attribute reads the same after it: ${JSON.stringify(now)}`);
+
+    // The knobs, through the settings panel: listed under Text, edited in the field, in the pixels.
+    {
+        const CHORD = (await W(() => window.__wall.keys.chordKeys)).join('+');
+        const dimRects = async () => {
+            await drawn();
+            const g = await rects([
+                { label: 'PLAIN', n: RUN, inX: 1, y0: 0.25, y1: 0.75 },
+                { label: 'DIMMD', n: RUN, inX: 1, y0: 0.25, y1: 0.75 },
+            ]);
+            const px = await read(g.rects);
+            return { plain: px[0].med, dim: px[1].med, n: Math.min(px[0].n, px[1].n) };
+        };
+        await W(() => window.__wall.focus(null));
+        await page.keyboard.press(`${CHORD}+Comma`);
+        const opened = await until(() => document.activeElement?.hasAttribute('data-settings-search'), null, 4000);
+        const listed = await W((keys) => keys.map((k) => {
+            const el = document.querySelector(`[data-settings] [data-setting="${k}"]`);
+            return el ? { key: k, section: el.closest('[data-section]')?.dataset.section, number: !!el.querySelector('[data-control="number"]'), field: el.querySelector(`[data-field="${k}"]`)?.value } : null;
+        }), LINE_STYLE_KNOBS);
+        ok(!!opened && listed.every((l, k) => l && l.section === 'text' && l.number && Number(l.field) === WALL_CONFIG[LINE_STYLE_KNOBS[k]]),
+            `${CHORD}+, opens the settings panel, which lists ${LINE_STYLE_KNOBS.join(', ')} under Text as number fields holding their defaults (${JSON.stringify(listed.map((l) => l && [l.section, l.field]))})`);
+        await page.keyboard.type('dim text opacity');
+        const order = searchSettings('dim text opacity').flatMap((x) => x.items.map((it) => it.key));
+        for (let k = 0; k < order.indexOf('dimAlpha'); k++) await page.keyboard.press('ArrowDown');
+        const chose = await until(() => document.querySelector('[data-settings] [data-setting][data-active]')?.dataset.setting === 'dimAlpha', null, 4000);
+        await page.keyboard.press('Enter');
+        const inField = await until(() => document.activeElement?.dataset.field === 'dimAlpha', null, 4000);
+        await page.keyboard.type('1'); await page.keyboard.press('Enter');
+        const set1 = await until(() => window.__wall.config.dimAlpha === 1, null, 4000);
+        const reset = await W(() => !!document.querySelector('[data-settings] [data-setting="dimAlpha"] [data-action="reset"]'));
+        ok(order.includes('dimAlpha') && !!chose && !!inField && !!set1 && reset,
+            `searching "dim text opacity" finds the knob; Enter puts the keys in its field, 1 + Enter sets it through wall.config, and its ↺ shows`);
+        await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+        ok(!!await until(() => !document.querySelector('[data-settings]'), null, 4000), 'Escape closes the panel');
+        const full = await dimRects();
+        ok(full.n > 0 && near(full.dim, full.plain, 2) && near(full.plain, ink, 2), `with dim opacity 1 the dim cells draw as plain — ${rgb(full.dim)} beside ${rgb(full.plain)}`);
+        const said = await W(async () => (await window.__wall.router.execute(['wall.config', 'dimAlpha', 'default'])).text);
+        const back = await dimRects();
+        ok((await W(() => window.__wall.config.dimAlpha)) === WALL_CONFIG.dimAlpha && sum(back.dim) < sum(back.plain) - 60,
+            `wall.config dimAlpha default hands it back (${said}) and dim is dim again — ${rgb(back.dim)} beside ${rgb(back.plain)}`);
+    }
 
     const errs = app.errors.filter((e) => !/favicon/.test(e.text));
     ok(errs.length === 0, `no page errors${errs.length ? `: ${errs.slice(0, 4).map((e) => e.text).join(' | ')}` : ''}`);
