@@ -24,9 +24,8 @@ What exists on branch `termd`, and where it departs from the plan below:
 - **Daemon** (`crates/g3d-termd`): everything in PROTOCOL.md 1.0 (`raw`, `view`,
   `capture`; `cells` answers `unsupported`). Paths: socket and log follow the namespace rule;
   `G3D_TERMD_DIR` overrides both (tests and the check runner keep their daemons in scratch
-  directories with it). A socket path over 100 bytes is refused at start. `kill` signals the
-  program's group and the PTY's foreground group, closes the PTY, and sends `SIGKILL` to both
-  if the program outlives a 2 s grace. The test hooks exist only in a build with the cargo feature
+  directories with it). A socket path over 100 bytes is refused at start. `kill` ends the
+  terminal's whole process tree by the close rule ([Process trees](#process-trees)). The test hooks exist only in a build with the cargo feature
   `test-hooks` (the tests' alone: `cargo test --features g3d-termd/test-hooks`; `make` and release
   builds have none), armed by `G3D_TERMD_TEST_HOOKS=1`: an `INPUT`
   of one magic string panics that terminal's owner thread (the panic-boundary test), another stops
@@ -34,7 +33,9 @@ What exists on branch `termd`, and where it departs from the plan below:
   start while that file exists (the crash-loop test); `G3D_TERMD_TEST_ENGINE_FILE` names the engine
   a brain reports (the cross-engine handoff test); `G3D_TERMD_TEST_SESSION_ENV_FILE` stands in for
   the user manager (the environment test); `G3D_TERMD_TEST_CANDIDATE_DIES_FILE` makes an upgrade's
-  candidate die 100 ms after it says `ready` (the died-after-commit test). The scrub removes these from programs' environments.
+  candidate die 100 ms after it says `ready` (the died-after-commit test); `G3D_TERMD_TEST_RECORD_MAJOR_FILE`
+  makes `--check-holder-record` read only the next record format (the incompatible-record test). The
+  scrub removes these from programs' environments.
   `exit` carries a signal by name. `on_xtversion` answers `g3d-termd <version>`.
 - **Client** (`crates/g3d`): `attach` (raw tty, query filter, `Ctrl-\` twice to detach,
   `--take` owns the size and follows `SIGWINCH`), `watch` (`Ctrl-C` or the detach chord
@@ -64,8 +65,9 @@ What exists on branch `termd`, and where it departs from the plan below:
 - **Designed after S1:** the holder/brain split is built ([below](#holder-and-brain-as-built-2026-11-12)),
   and so are the environment policy and the defaults audit's decisions
   ([below](#environment-and-defaults-as-built-2026-11-12)), and so is protocol 1.1's status stream
-  with everything that renders it ([below](#status-as-built-2026-11-12)). Not built yet: the config
-  file and `g3d config`, the cgroup scopes.
+  with everything that renders it ([below](#status-as-built-2026-11-12)), and so are process trees
+  and the holder's re-exec ([Process trees and the holder's re-exec as built](#process-trees-and-the-holders-re-exec-as-built-2026-11-14)).
+  Not built yet: the config file and `g3d config`.
 - **macOS (darwin-arm64)** builds and passes every gate on branch `termd-macos`, which is this design
   plus its platform seams ([Linux and macOS](#linux-and-macos); MACOS.md has what macOS does
   differently). The code lands with the merge.
@@ -74,32 +76,37 @@ What exists on branch `termd`, and where it departs from the plan below:
 
 What the branch has of [Holder and brain](#holder-and-brain), and where it departs from it.
 
-**The holder** is `crates/g3d-hold`: 1,762 lines in six files (1,501 without comments and blank
-lines): `holder.rs` (the loop, 1,087), `spawn.rs` (the PTY and the fork, 182), `link.rs` (the hold
-link's framing and fd passing, 137), `shm.rs` (memfd / `shm_open`, 57), `log.rs` (30) and `lib.rs`.
-It depends on `rustix`, `libc`, `g3d-wire` (the frame codec) and `serde_json`; Cargo keeps
-libghostty and tokio out. That is more than "tiny": most of it is the brain's supervision and
-the upgrade handshake, which have to live in the process that outlives the brain. Its whole job,
-and nothing else:
+**The holder** is `crates/g3d-hold`: 3,734 lines in eight files (3,113 without comments and blank
+lines, its unit tests included): `holder.rs` (the loop, 1,970), `tree.rs` (process trees, 330),
+`record.rs` (the holder record, 243), `spawn.rs` (the PTY and the fork, 224), `link.rs` (the hold
+link's framing and fd passing, 137), `shm.rs` (memfd / `shm_open`, 95), `log.rs` (85) and `lib.rs`.
+It depends on `rustix`, `libc`, `g3d-wire` (the frame codec), `serde` and `serde_json`; Cargo keeps
+libghostty and tokio out. That is more than "tiny": most of it is the brain's supervision, the
+upgrade handshakes (the brain's and its own re-exec) and the close rule, which have to live in the
+process that outlives the brain. Its whole job, and nothing else:
 
-1. the namespace: the lock (holding its pid), the listening socket, daemonizing, the hourly
-   `utimes` re-stamp of both, `PR_SET_NAME` `g3d-termd`;
+1. the namespace: the lock (holding its pid), the listening socket, daemonizing (a systemd user
+   service, else the double fork), the hourly `utimes` re-stamp of both, `PR_SET_NAME` `g3d-termd`;
 2. the shells: spawning on a PTY when the brain asks (`IUTF8`, the slave opened before
    `TIOCSWINSZ`, every signal disposition and the mask reset, the soft `RLIMIT_NOFILE` put back,
    `close_range`, `execve` with the brain's environment and `PATH` lookup in it, the exec error back
-   through a close-on-exec pipe), reaping, keeping each master fd and exit status until the brain
-   releases the terminal, `kill` (the program's group and the PTY's foreground group, `SIGKILL`
-   after `--kill-grace`);
+   through a close-on-exec pipe), reaping (and, Linux, the terminals' orphans: it is their
+   subreaper), keeping each master fd and exit status until the brain releases the terminal, and
+   each terminal's process tree: its cgroup leaf or its session, the close rule on `kill`, what an
+   ended program left running ([Process trees](#process-trees));
 3. the store: each terminal's newest two blobs, and the `seq_marks` page, handed to every brain;
 4. the brain: start, restart after a crash (`--brain-restart-delay-ms` 100, `--brain-start-burst`
    5 in `--brain-start-interval` 10 s), failed (retried after `--brain-failed-backoff` 30 s doubling
    to `--brain-failed-backoff-max` 600 s, at once on `SIGHUP`; while failed it answers every
    connection with `ERROR brain_failed` naming the last exit, the log and its pid), the watchdog
    (`--brain-watchdog` 30 s: `SIGABRT`, `SIGKILL` 5 s later), and the upgrade handshake
-   (`--upgrade-deadline` 10 s);
+   (`--upgrade-deadline` 10 s), its own re-exec included ([Versions between holder and
+   brain](#versions-between-holder-and-brain));
 5. the end: `SIGTERM` (the brain is asked to `shutdown`, so subscribers get `exit` + `closed`; the
-   holder hangs every program up itself if the brain hasn't ended in `--kill-grace` + 2 s), a
-   brain's `exit_namespace` (`stop`, idle exit), or idle with no brain and no terminals.
+   holder ends every tree itself if the brain hasn't ended in `--kill-grace` + 2 s), a brain's
+   `exit_namespace` (`stop`, idle exit), or idle with no brain and no terminals: every tree, and
+   every leftover, gets the close rule, and the holder exits once they are empty (an event: a leaf's
+   `cgroup.events`, a reap), `--kill-grace` + 2 s at the latest.
 
 It ignores `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGPIPE`. Its panic hook logs, then aborts.
 
@@ -114,7 +121,9 @@ slot, id, pid, the brain's opaque `meta`, the exit status if reaped; fds: the ma
 stored blobs newest first), `terms_done`, `go`, `spawned`, `exited`, `candidate`, `commit`,
 `upgrade_abort`, `shutdown`. Brain → holder: `hello` (hold `[2, 0]`, engine, version), `spawn` (the path to exec, argv, the whole environment, the cwd),
 `kill`, `release`, `snapshot` (fd: the blob), `alive`, `upgrade`, `upgrade_cancel`, `handoff_done`,
-`ready`, `upgrade_abort`, `exit_namespace`.
+`ready`, `upgrade_abort`, `exit_namespace`. Hold 2.2 adds `killed` (a close's report), `leftover`
+and `leftover_gone`, `welcome`'s `trees`, `leftovers`, `upgrades` and `upgrade_failed`, and
+`upgrade` and `candidate` with `holder` (its re-exec).
 
 **Saving and restoring screens.**
 
@@ -155,8 +164,8 @@ after it is not a failed upgrade (the old brain has handed over and exits anyway
 the next brain, which the holder restarts from the handoff blobs (every terminal exact); the log
 says that, and `last_start` reads `crash` with the candidate's exit. On failure the asker gets an
 `upgrade_failed` event on stream 0. `g3d upgrade [--binary PATH]` prints the new generation, or the failure; with the brain failed
-it sends the holder `SIGHUP` instead and waits for a brain. The holder records for
-`g3d upgrade --holder` are not built (`holder: true` answers `unsupported`).
+it sends the holder `SIGHUP` instead and waits for a brain. `g3d upgrade --holder` replaces the
+holder too ([as built](#process-trees-and-the-holders-re-exec-as-built-2026-11-14)).
 
 **The relay** (`cli/attach_unix.go`, `cli/termd.go`): an adapter whose connection drops rides the
 restart by [the rule](#riding-a-restart-relay-and-clients) (`serve --termd-reconnect`, 30 s,
@@ -166,9 +175,8 @@ whose adapter this relay started is still alive: during a restart termd lists ev
 no owner for a moment, and a second adapter would fight the first. "Unknown is not empty" needed
 no change: a listing that can't get a `WELCOME` (a brain restarting, `brain_failed`) is an error.
 
-**Not built yet:** the cgroup scopes (programs, the brain and the holder stay in their starter's
-cgroup; the brain's `oom_score_adj` +300 is set), the holder's re-exec (`--holder`, the holder
-record and `--check-holder-record`), a fuzzed hold-link decoder. (The status stream, the relay's
+**Not built yet:** a fuzzed hold-link decoder. (The brain's `oom_score_adj` +300 is set; process
+trees and the holder's re-exec are built: [as built](#process-trees-and-the-holders-re-exec-as-built-2026-11-14).) (The status stream, the relay's
 status connection and its re-adopting of terminals whose adapters gave up are built: [Status as
 built](#status-as-built-2026-11-12).)
 
@@ -217,9 +225,9 @@ brain wrote has none, and `env` answers an empty list for it.
 meaning, so a new major. A hold-1 holder stops a hold-2 candidate at its hello, and `g3d upgrade`
 answers "upgrade failed; the running brain carries on" (tried: a namespace started by the previous
 build, upgraded to this one; its shell kept running under the old brain). So a namespace started
-before this change takes a restart (`g3d stop`, which ends its shells) to get the new environment,
-until the holder's re-exec (`g3d upgrade --holder`) exists. A hold-2 holder now names the reason
-in the `upgrade_failed` it sends.
+before this change takes a restart (`g3d stop`, which ends its shells) to get the new environment.
+A hold-2 holder now names the reason in the `upgrade_failed` it sends, and a holder of hold 2.2 or
+later moves to a new hold major with `g3d upgrade --holder`; an older one still takes a restart.
 
 **Settings** (flags on `g3d-termd`, passed to every brain):
 `--env-source auto|daemon` (also `G3D_TERMD_ENV_SOURCE`, so a relay's tests and the check tools set
@@ -334,8 +342,8 @@ from the uid on both sides (`g3d::paths::socket_dir`, `cli/termd.go` `termdSocke
 `/run/user/<uid>/g3d`, else `/tmp/g3d-<uid>`, ignoring `$XDG_RUNTIME_DIR` and `$TMPDIR`
 (`tests/attach.rs` and `cli/termd_paths_test.go` check that `env -i` and a desktop environment
 find the same socket). The holder refuses a socket directory that is not a directory, is another
-user's, or is writable by group or others (tmux's check of `/tmp/tmux-<uid>`). Not applied: the
-cgroup scopes.
+user's, or is writable by group or others (tmux's check of `/tmp/tmux-<uid>`). Process trees are
+applied ([as built](#process-trees-and-the-holders-re-exec-as-built-2026-11-14)).
 
 **The test hooks are compiled out** of every build but the tests': the cargo feature `test-hooks`
 gates the magic `INPUT`s, the failing brain, the named engine and the user-manager stand-in, and
@@ -505,6 +513,111 @@ held by stopping the holder: the amber notice, then unreachable, both clearing; 
 after; docking and closing by verb; `--shots DIR` saves the window normal, restarting and
 unreachable).
 
+## Process trees and the holder's re-exec as built (2026-11-14)
+
+What the branch has of [Process trees](#process-trees) and [Upgrading the
+holder](#versions-between-holder-and-brain), and where it departs from them.
+
+**Process trees** (`crates/g3d-hold/src/tree.rs`, `crates/g3d-termd/src/service.rs`):
+
+- `g3d-termd --daemon` on Linux runs `systemd-run --user --collect --unit
+  g3d-termd-<ns>-<pid>.service` (a socket namespace: `g3d-termd-sock-<hash>-<pid>.service`) with
+  `Type=exec`, `Delegate=yes`, `KillMode=control-group`, `SendSIGHUP=yes`, `TimeoutStopSec=`
+  `--kill-grace`, the log as `StandardOutput=`/`StandardError=append:<log>` (created `0600` first)
+  and every variable of the starter's environment that systemd can carry (`--setenv=NAME`), then
+  exits 0 once the manager has started the unit, as the double fork's first parent did. The service
+  runs `g3d-termd <the same flags> --systemd-unit <unit>`; the holder checks that `/proc/self/cgroup`
+  is that unit's (only then is the subtree delegated to it, not merely writable: everything under
+  `user@<uid>.service` is the user's to write, Ghostty's surface scopes included), moves itself into
+  the leaf `holder`, and logs the mode. No `systemd-run`, a manager that refuses or doesn't answer
+  within `--service-start-timeout-ms` (3,000): the double fork, saying why on stderr (a relay keeps
+  it). `--cgroups off` skips the service. `busctl`'s bus finding applies (`XDG_RUNTIME_DIR` from the
+  uid), so `env -i` starters get a service too.
+- Each terminal's leaf is `term-<handle>`, made by the holder before the fork and joined by the
+  child itself (`spawn::enter_cgroup`: `open`, `write("0")`, `close` on `cgroup.procs`, async-signal-
+  safe) before `setsid`: no race with the program's first fork, no D-Bus call per terminal (the
+  per-terminal transient scope Ghostty and tmux use needs a `StartTransientUnit` call and a wait
+  for its job, which Ghostty does by polling its own cgroup for 250 ms). A failure to join fails the
+  spawn (`spawn_failed`, "joining its cgroup"). Brains get `brain-<n>`. Leaves are removed when they
+  empty.
+- Session mode (no service, macOS): the tree is the session; on Linux the holder is the
+  terminals' subreaper (`PR_SET_CHILD_SUBREAPER`), so an orphan's end is a reap the holder sees.
+  The scan: `/proc/*/stat` (one pass for every tree a status document asks about); macOS
+  `proc_listallpids` + `getsid` + `proc_pidinfo(PROC_PIDTBSDINFO)` (zombies left out, by
+  `pbi_status`).
+- The close rule (`Holder::close`, `advance_closings`): `kill`'s signal to every member and to the
+  PTY's foreground group, the holder's copy of the PTY closed; `SIGTERM` to what is left at
+  `--kill-term-after-ms` (0); `SIGKILL` at `--kill-grace` (`cgroup.kill` for a leaf). Done when the
+  tree is empty: a leaf's `cgroup.events` (inotify, `IN_MODIFY`) or, for a session, a reap or a
+  step finding none; a session's `SIGKILL` step ends it. The report (`killed`) goes to the log
+  (`terminal t1 closed: SIGHUP → 3918499 sleep, …; SIGTERM → …; SIGKILL → …`), to the status
+  document's `closes` (the last `--status-closes`, 16) and, when `SIGKILL` was needed, to the errors
+  (`killed`). The brain's `kill` reply still comes when the program has ended; the tree's end is the
+  holder's from then on.
+- Leftovers: a program that exits on its own while its tree still holds processes leaves them
+  running (logged, `leftover` to the brain, `daemon.leftovers` with what they are) until they end
+  (`leftover_gone`) or the namespace does.
+- The holder's death: systemd stops the service when its main process dies and ends what is left
+  of the cgroup (`SIGTERM` + `SIGHUP`, `SIGKILL` after `TimeoutStopSec`); measured: a holder
+  `SIGKILL`ed with a terminal running `trap '' HUP TERM` and a `setsid`'d child doing the same left
+  nothing, and the unit was collected. The brain, which sees the hold link close, runs the close rule
+  on every tree it knows (the live terminals' and the leftovers') before it exits, waiting on pidfds
+  (macOS: kqueue `NOTE_EXIT`) up to `--kill-grace`: in session mode it is the only one that does.
+- **Departure:** each terminal is a leaf of the namespace's one delegated service, not its own
+  systemd unit: `systemctl --user status g3d-termd-…` shows the holder, the brains and every
+  terminal's tree as one unit's cgroup, and systemd-oomd sees one unit. **Departure:** the holder and
+  the brain share the service (the design had a scope each): the holder's death ending the trees is
+  the service's own lifetime, which separate scopes don't give.
+
+**The holder's re-exec** (`g3d upgrade --holder`; `crates/g3d-hold/src/record.rs`,
+`crates/g3d-termd/src/recheck.rs`, `Holder::run_check`, `exec_holder`, `resume`):
+
+- The brain's `upgrade` with `holder: true` runs its usual handoff; the holder plays the candidate:
+  it writes a **trial record** of itself and runs the new binary as `g3d-termd <its flags>
+  --check-holder-record <fd>` (the record's fds' close-on-exec cleared in that child only; its
+  stdout and stderr on a pipe the poll loop reads, its exit a reap), which answers one JSON line
+  with its version and engine. Then the brain cuts (snapshots when the engine matches, else VT
+  repaints), the holder writes the **final record** (every handoff blob in its store) and runs the
+  check again, which now also reads each live terminal's newest blob as the new brain will (the
+  handoff flag, its id, exact at the terminal's mark, its engine). Only then `commit`: the old brain
+  closes its connections with `ERROR restart` and exits; the holder writes the record once more
+  (what ended meanwhile), clears close-on-exec on what it names and `execv`s `g3d-termd <its flags>
+  --holder-resume <fd>`. The new image takes the record (the same pid, lock, listener, page,
+  masters, store, closes in progress and leftovers; the first holder's soft `RLIMIT_NOFILE`;
+  `instance` and `started_at`), reaps what ended across the exec (its `SIGCHLD` was discarded with
+  the old handlers, its zombie wasn't), and starts a brain of its binary (`last_start` `upgrade`),
+  which restores every terminal exact. Measured by hand: two terminals, 1 s from the request to the
+  new brain (the old brain's 1 s drain of its connections is most of it), the holder's fds the same
+  but the two new handoff blobs.
+- Anything before the commit that fails (the check refuses, exits, hangs past
+  `--upgrade-deadline`, the binary isn't one) aborts as a brain upgrade's failure does: the brain
+  resumes, no connection drops (`upgrade_failed` to the asker, naming the check's answer). After the
+  commit only the `execv` can fail: the holder puts the fds' flags back and starts a brain of its own
+  binary from the handoff (every terminal exact); that brain's errors carry `upgrade_failed` and `g3d
+  upgrade --holder` reports it.
+- The record (`G3DHREC1`, format 1.0; `tests/fixtures/holder-record-v1.bin`) is frozen like the
+  blob: a major the reader doesn't know is refused at the check, a minor only adds fields.
+- `daemon.holder.upgrades` counts the re-execs; `g3d upgrade --holder [--binary PATH]` prints the
+  holder's new version, or why it didn't re-exec. A holder from before hold 2.2 has no re-exec and
+  answers `holder: true` with `unsupported` (it takes `g3d stop` once).
+
+**Gates:** `tests/trees.rs` (cgroup mode under the user manager, read-only otherwise: a close ends
+a tree whose program and children ignore `SIGHUP` and `SIGTERM`, one of them `setsid`'d away, with
+the close's three steps reported and a `killed` error; the holder `SIGKILL`ed with the same tree
+running leaves none of it; `stop` ends the trees and a `nohup` job an ended terminal left, which the
+status listed; session mode: a close and `stop` end a session whose job has its own process group,
+and the holder's `SIGKILL` leaves nothing of it, ended by the brain); `tests/holder.rs` (a holder
+upgrade under a 300,000-line flood: no byte lost, both terminals exact, the shells' pids, parent
+and tty unchanged and a `SIGHUP` trap never firing, the holder's pid the same; candidates that exit
+or hang leave the holder, brain and connection serving; a candidate reading only the next record
+major is refused, naming both formats; six upgrades with the holder's fds and RSS flat; in a
+systemd service, the holder back in its leaf and a terminal's tree, `setsid`'d member included,
+kept and ended by a close after); `g3d-hold`'s units (the record round-trips, a torn, short or
+foreign one is refused, every fixture decodes; `/proc` names with parentheses; this process found
+in its session); `crates/g3d/tests/attach.rs` (`g3d attach` and `watch` ride `upgrade --holder`).
+Every one of these fails on the code before it (checked: the old daemon left the trapped processes
+running, and answered `holder: true` with `unsupported`).
+
 ## Measured ground (2026-11-12)
 
 Each line was checked on the build machine against libghostty-vt 1.0.1 (Ghostty tag
@@ -602,7 +715,15 @@ itself), it connects to the namespace's socket. If nothing listens, it starts
 fails loud with the daemon log's tail if the daemon still isn't up. Listing and
 `terminal.recover` start nothing: a namespace with no daemon has no live terminals.
 
-`--daemon` detaches properly:
+`--daemon` detaches properly. On Linux with a systemd user manager (`--cgroups auto`, the
+default), the namespace becomes a transient user service: `systemd-run --user` starts the holder as
+the service's main process with a delegated cgroup, the log as its stdout and stderr, and the
+starter's environment, and `--daemon` returns once the manager has started it. A per-user daemon
+that owns processes normally runs under the service manager (shpool ships a user unit; Ghostty
+itself runs as `app-com.mitchellh.ghostty.service` and puts each surface in a scope), and it is what
+gives termd [process trees](#process-trees) and a holder whose death ends them. With no manager, or
+one that doesn't start the unit within `--service-start-timeout-ms` (3 s), and on macOS, it is the
+classic double fork:
 
 1. fork; the parent waits only for the child's exit status;
 2. `setsid` (a new session, no controlling terminal);
@@ -613,7 +734,7 @@ fails loud with the daemon log's tail if the daemon still isn't up. Listing and
 
 The relay must **never** set `PR_SET_PDEATHSIG` on it and never registers it in
 `children.go`'s kill-on-exit set: outliving the relay is the point. The relay doesn't
-`Wait` on it either (the double fork means there is nothing to wait for). An operator
+`Wait` on it either (the service manager, or the double fork, means there is nothing to wait for). An operator
 can also start it by hand, or `g3d attach` can start it the same way.
 
 The relay finds the binary next to its own executable, then on `PATH`, or at
@@ -638,8 +759,9 @@ There is no tmux fallback.
   adapter sees `closed` and tears down the grid.
 - **The brain crashes, or is upgraded.** The shells keep running. See [Holder and
   brain](#holder-and-brain).
-- **The holder dies.** Every PTY hangs up and every shell in the namespace gets `SIGHUP`, as with
-  `tmux kill-server`. See [If the holder dies](#if-the-holder-dies).
+- **The holder dies.** Every PTY hangs up, and every terminal's whole tree is ended: by the service
+  manager (the holder is its service's main process) and by the brain, which outlives it by a
+  moment. See [If the holder dies](#if-the-holder-dies).
 
 ## Holder and brain
 
@@ -692,7 +814,7 @@ status window tell them apart.
 | **mosh** | `mosh-server` holds the PTY and a terminal emulator per connection | the server is the session; there is no restart that keeps the shell. Clients get the latest screen state, not a byte replay (no scrollback) | Taken: a reconnecting viewer gets the screen (a repaint), not a replay |
 | **Eternal Terminal** | the server side keeps the shell across client reconnects | each side keeps a `BackedWriter` buffer of recent bytes and replays what the peer's byte count says it missed | Not taken for clients: a repaint is exact and cheaper than a replay buffer per connection |
 | **WezTerm** | `wezterm-mux-server` holds the panes in one process; the GUI attaches over a unix domain | panes persist "until they are closed"; the docs want a compatible version on both ends; no restart keeps panes | Not taken (tmux's shape) |
-| **kitty**, **Ghostty** | the app holds its own PTYs; no detached server | quitting the app ends the shells. Ghostty's contribution is libghostty-vt itself (which zmx, phux, hexe and termd build on), its environment practice and per-surface cgroup scopes (below) | Taken: the environment and cgroup practice |
+| **kitty**, **Ghostty** | the app holds its own PTYs; no detached server | quitting the app ends the shells. Ghostty's contribution is libghostty-vt itself (which zmx, phux, hexe and termd build on), its environment practice and per-surface cgroup scopes ([Process trees](#process-trees)) | Taken: the environment and cgroup practice |
 
 ### Does the holder read the PTY? No.
 
@@ -845,22 +967,39 @@ for every client, written into PROTOCOL.md ("Restarts"):
 
 ### If the holder dies
 
-Every master fd closes, the kernel hangs up each PTY, and every shell gets `SIGHUP`. The brain sees
-the hold link close and exits; clients find nothing listening and report the namespace lost. This is
-`tmux kill-server`. What makes it unlikely:
+Every master fd closes, the kernel hangs up each PTY, and every shell gets `SIGHUP`. That alone is
+`tmux kill-server`, and it leaves running whatever ignores `SIGHUP` (a `trap '' HUP`, `nohup`, a
+daemon that left the session), with no parent and no record. So the holder's death ends every
+terminal's [tree](#process-trees) too: the service manager stops the holder's service when its main
+process dies and ends what is left of its cgroup (`KillMode=control-group`: `SIGTERM` with
+`SendSIGHUP=yes`, `SIGKILL` after `TimeoutStopSec=`, `--kill-grace`), and the brain, which sees the
+hold link close, runs the close rule on every tree it knows before it exits (the only end a session
+tree gets). Clients find nothing listening and report the namespace lost.
+
+**Why the cgroup's answer and not the kernel's.** `PR_SET_PDEATHSIG` would make the kernel signal
+each shell when the holder dies, but it reaches only the holder's direct children (the programs),
+never what they started, and it is lost in a child that is set-uid (prctl(2)); the `trap '' HUP`
+program a shell started, a `nohup` job and a `setsid` daemon all outlive it. A cgroup holds every
+process a program started, however it forked, and the service manager watches it for the holder
+(it is the holder's parent, so the holder's death is its `SIGCHLD`, and the kernel's
+`cgroup.events` tells it when the cgroup has emptied): nothing of termd's needs to survive the
+holder to end its trees. Without a service manager (macOS, a container) the brain is
+that survivor, by session; a `SIGKILL` that takes the holder and the brain at once (`kill -9` of
+both) leaves a session tree running there, which is the residual risk.
+
+What makes the holder's death unlikely:
 
 - **Little code, and no untrusted input.** The holder parses no program output and no client JSON.
   Its peers are the brain (over a socketpair, with a fuzzed decoder) and, only while the brain is
   failed, connections it answers with a fixed `ERROR` without reading them.
 - **One thread, bounded state.** A `poll` loop over the hold link, the signal pipe, the listening
   socket (only while failed) and timers. Memory grows only with the terminal table.
-- **Its own cgroup scope** (Linux, below). systemd-oomd kills whole cgroups, so the holder, the
-  brain and each shell get their own scope: oomd's choice falls on the brain (restartable) or one
-  runaway shell, never on the holder. The brain also raises its own `oom_score_adj` by
-  `brain_oom_score_adj` (300) above the holder's, so the kernel's OOM killer prefers it too. Without
-  this, termd and every shell live in the cgroup of whatever started the relay (on the build
-  machine, a terminal window's transient scope), and a kill of that scope, or of that window's
-  scope by oomd, ends them all.
+- **Its own service** (Linux). The namespace's cgroup is its own, not the starter's: without it,
+  termd and every shell lived in the cgroup of whatever started the relay (on the build machine, a
+  terminal window's transient scope), and a kill of that scope, or of that window's scope by oomd,
+  ended them all. Inside it the holder, each brain and each terminal have a leaf of their own. The
+  brain raises its own `oom_score_adj` by `brain_oom_score_adj` (300) above the holder's, so the
+  kernel's OOM killer prefers the restartable process.
 - **Signals.** It ignores `SIGINT`, `SIGQUIT`, `SIGTSTP` and `SIGPIPE`. `SIGHUP` retries the brain.
   `SIGTERM` stops the namespace (every shell dies), as `tmux kill-server` on `SIGTERM`.
 - **It changes rarely**, and it changes by re-exec (below), never by a restart.
@@ -874,15 +1013,26 @@ the hold link close and exits; clients find nothing listening and report the nam
   data. Minors only add messages and fields. A brain speaks exactly one major (no compatibility
   paths). A brain whose major differs from the holder's exits at hello and says so in the log; the
   holder treats it as failed.
-- **Upgrading the holder** is a re-exec: `exec` keeps the pid, so the shells stay its children and
-  the fds stay open. `g3d upgrade --holder` does a brain upgrade with the holder's re-exec in the
-  middle: the old brain hands off into the store and exits, the holder writes its own record
-  (terminals, fds, pids, exit statuses, the store's names, counters, instance id) to a memfd,
-  runs the candidate binary once as `g3d-termd --check-holder-record <fd>` (it must parse the
-  record before anything irreversible happens), clears `FD_CLOEXEC` on what it keeps and execs
-  `g3d-termd --holder-resume <fd>`, which starts the new brain from the handoff. `g3d upgrade`
-  without `--holder` refuses, naming `--holder`, when the candidate's hold major differs from the
-  running holder's.
+- **Upgrading the holder** is a re-exec in place: `exec` keeps the pid, so the shells stay its
+  children on the same PTYs and every fd it keeps stays open. Prior art: systemd's `daemon-reexec`
+  serializes the manager's state to a file descriptor, keeps the fds it holds open across the
+  `execve` and deserializes in the new image (`--deserialize=<fd>`); HAProxy's master
+  (master-worker mode) re-execs itself on a reload, keeping its pid; nginx's binary upgrade (`USR2`) forks a new
+  master that inherits the listening sockets by fd number, a new pid beside the old, which a
+  holder can't do (the shells are the old process's children); phux re-execs and re-adopts its
+  PTYs from a frozen blob the candidate parses first. tmux, zellij, shpool, WezTerm's mux, kitty and
+  Ghostty have no in-place upgrade (a version mismatch means ending the sessions). `g3d upgrade
+  --holder` does a brain upgrade with the holder as the candidate: the holder writes a trial record
+  of itself (terminals, fds, pids, exit statuses, the store, the trees, the closes in progress,
+  counters, instance id) to a sealed memfd and runs the new binary as `g3d-termd
+  --check-holder-record <fd>`; once it has read the record and found every fd, the old brain hands
+  every terminal off into the store; the check runs again on the final record (every handoff blob
+  read as the new brain will); only then is the old brain told to commit, and when it has exited
+  the holder clears `FD_CLOEXEC` on what it keeps and execs `g3d-termd --holder-resume <fd>`, which
+  starts a brain of the new binary from the handoff. Nothing is irreversible before the commit: a
+  check that refuses, fails or hangs leaves the old holder and brain serving with every connection
+  open. `g3d upgrade` without `--holder` refuses, naming `--holder`, when the candidate's hold major
+  differs from the running holder's.
 - **Snapshots** restore only into the exact same engine. **Handoff and holder records** are
   frozen formats with append-only fixtures.
 - `WELCOME` reports the daemon (brain) version, the holder's version and hold protocol, the
@@ -900,8 +1050,9 @@ spawn, the holder (single-threaded, so `fork` is safe):
   `posix_openpt` takes no `O_CLOEXEC`), opens the slave, then sets `IUTF8` and the size
   (`TIOCSWINSZ`) before the child starts. The slave is opened first because macOS answers
   `TIOCSWINSZ` on a master whose slave was never opened with `ENOTTY` (found on the M2);
-- forks. The child first waits on a pipe while the holder moves it into a new transient systemd
-  scope (Linux, below). Then, using only async-signal-safe calls: `setsid`, `TIOCSCTTY` on the
+- forks. The child first joins its [tree](#process-trees)'s cgroup (Linux, under the namespace's
+  service: it writes itself into its leaf's `cgroup.procs`), so nothing it starts can begin outside
+  it. Then, using only async-signal-safe calls: `setsid`, `TIOCSCTTY` on the
   slave, `dup2` onto 0/1/2, every signal disposition back to default and the mask cleared (an
   ignored signal stays ignored across `exec`, so a holder that ignores `SIGINT` would otherwise
   hand every shell a dead Ctrl-C), the soft `RLIMIT_NOFILE` back to its value at the holder's
@@ -917,10 +1068,48 @@ spawn, the holder (single-threaded, so `fork` is safe):
   It keeps the fd and the status until the brain, having read the PTY to EOF, releases the
   terminal; a brain that restarts in between still gets both.
 
-Signals go through the holder: `kill` asks it to send `SIGHUP` (or the requested signal) to the
-program's process group and the PTY's foreground group, it closes its copy when the brain releases
-its own (the last close hangs up the PTY), and `SIGKILL` follows after `kill_grace` (2 s) if the
-program outlives it. Resize (`TIOCSWINSZ`) and I/O stay in the brain, on its own copy of the fd.
+Signals go through the holder: `kill` is the [close rule](#process-trees) on the terminal's tree, run
+by the holder, which closes its copy of the PTY at once (the brain's close then hangs it up). Resize
+(`TIOCSWINSZ`) and I/O stay in the brain, on its own copy of the fd.
+
+### Process trees
+
+A terminal's processes are one **tree**: its program and everything the program started, however it
+forked. termd keeps each terminal's tree, so a close, the holder's death and a namespace's end reach
+all of it, and the status says what runs (PROTOCOL.md's `daemon.trees`, `terminals[].processes`,
+`daemon.leftovers`, `daemon.closes`).
+
+- **Linux: a cgroup per terminal.** The normal practice for terminals is a cgroup each: Ghostty moves
+  each surface into `app-ghostty-surface-transient-<pid>.scope` (its apprt/gtk/cgroup.zig calls
+  `StartTransientUnit` with the child's pid, `ManagedOOMMemoryPressure=kill` and optional
+  `MemoryHigh`/`TasksMax`, and the child polls its own cgroup for up to 250 ms before it execs;
+  failure is soft, `linux-cgroup-hard-fail = false`), VTE each child into `vte-spawn-<uuid>.scope`,
+  tmux built with systemd each pane into `tmux-spawn-<uuid>.scope`, and `systemd-run --scope` waits
+  for its scope's start job before it execs the command. termd's namespace is one systemd user
+  service with `Delegate=yes`, so its cgroup subtree is the holder's to manage (systemd's
+  cgroup-delegation rules: a delegated unit makes its own sub-cgroups and keeps its processes in
+  leaves): the holder in `holder`, each brain in `brain-<n>`, each terminal in `term-<handle>`. The
+  forked child joins its leaf itself before `exec` (a write to `cgroup.procs`), which has neither
+  the race between a spawn and a scope's start job nor a D-Bus call per terminal. Members are the
+  leaf's `cgroup.procs`; the leaf's `cgroup.events` says when it empties (inotify); `cgroup.kill`
+  ends it in one write a fork can't race.
+- **macOS, and Linux with no service manager: the session.** The program is a session leader (its
+  `setsid`), so its tree is the processes whose session id is its pid: on Linux a `/proc` scan, with
+  the holder the terminals' subreaper (`PR_SET_CHILD_SUBREAPER`) so an orphan's end is a reap it
+  hears; on macOS `proc_listallpids` and `getsid`. A process that leaves the session (`setsid`, a
+  daemon's double fork) leaves the tree: the session is as far as a process can follow its
+  descendants without cgroups, which is all tmux and screen kill on a close either.
+- **The close rule** (`kill`, a namespace's end): the asked signal (`SIGHUP`, what a closed tty
+  sends) to every process in the tree and to the PTY's foreground group, the PTY hung up; `SIGTERM`
+  to what is left after `--kill-term-after-ms` (0: at once, as systemd's `SendSIGHUP=yes` sends
+  `SIGHUP` right after its `SIGTERM`); `SIGKILL` to what is still left after `--kill-grace` (2 s:
+  a closed window is not a service, whose `TimeoutStopSec` is 90 s). What each step reached is in
+  the log and the status document, and a close that needed `SIGKILL` is an error (`killed`).
+- **A program that exits on its own** leaves its `nohup` jobs running, as every terminal does
+  (tmux, screen, Ghostty): they are the person's. termd lists them as **leftovers** until they end,
+  and ends them with the namespace (the session's end, as logind's `KillUserProcesses=` ends a
+  login session's).
+- **The holder's death** ends every tree: [If the holder dies](#if-the-holder-dies).
 
 ### Linux and macOS
 
@@ -936,10 +1125,11 @@ proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-re
 | closing fds in a child | `close_range` | the pre-fork list ([Spawning a terminal](#spawning-a-terminal)) |
 | `TIOCSWINSZ` on a fresh master | works at once | `ENOTTY` until the slave is opened: open the slave first, on both |
 | process RSS (status) | `/proc/<pid>/statm` | `proc_pidinfo(PROC_PIDTASKINFO)`; tests use `ps -o rss=` on both and fail loud when it can't measure |
-| cgroup scopes | one transient scope per process role, via `StartTransientUnit` on the user manager (below) | none |
+| process trees | a cgroup leaf per terminal in the namespace's delegated user service (`systemd-run --user`, [Process trees](#process-trees)) | the session (`proc_listallpids` + `getsid`, `proc_pidinfo` for names and zombies); not proven on the M2 yet (MACOS.md) |
 | OOM preference | brain raises `oom_score_adj` | none |
 | process names | `PR_SET_NAME` | none (no `prctl`) |
-| parent death | not used: the brain sees the hold link close; shells see their PTY hang up | the same, so nothing to port |
+| parent death | not `PR_SET_PDEATHSIG` (it reaches only direct children): the service manager ends the holder's cgroup when it dies, and the brain, seeing the hold link close, ends every tree | the brain ends every session tree; waiting on a process that isn't its child: `pidfd_open` + `poll` on Linux, kqueue `EVFILT_PROC` `NOTE_EXIT` on macOS |
+| the holder's re-exec | `execv` keeping the record's fds; the listener checked with `SO_ACCEPTCONN` | the same; macOS declares `SO_ACCEPTCONN` and doesn't answer it, so the check reads the socket type |
 | `SCM_RIGHTS` receive | `MSG_CMSG_CLOEXEC` | no `MSG_CMSG_CLOEXEC`: the hold link sets `FD_CLOEXEC` right after `recvmsg`, in the holder and in the brain (no race: the row above) |
 | peer credentials | `SO_PEERCRED` | `getpeereid`, which answers `ENOTCONN` once the client has closed (Linux still answers): such a connection is dropped without a log line |
 | bytes queued on a PTY master (a read's bound, so the high-water mark is exact) | `FIONREAD` | `TIOCOUTQ` on the master: `FIONREAD` there answers 0 whatever is queued, which made every read and every `OUTPUT` frame one byte (floods about 50× slower; found on the M2) |
@@ -950,19 +1140,6 @@ proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-re
 | `PATH` when the base has none | `/etc/login.defs`' `ENV_PATH`, else `/usr/local/bin:/bin:/usr/bin` (util-linux `login`) | `/usr/bin:/bin` (`login`'s `_PATH_DEFPATH`) |
 | default locale when none is set | `C.UTF-8` | the `AppleLocale` preference `.UTF-8`, else `C.UTF-8` |
 | Option on a Mac keyboard (a browser client) | no Option key | the browser resolves Option into `text` (`å`, `altKey` set); the `key` op's `option_as_alt` (default `auto`) makes an Alt that typed a character Ghostty's default (`macos-option-as-alt = false`: `å` in every mode) and any other Alt Alt; `true` and `false` force one. termd makes `false` itself on both platforms, since libghostty reads the option only in a macOS build ([Keys and paste](#keys-and-paste-protocol-12)) |
-
-**cgroup scopes (Linux).** The normal practice for terminals: Ghostty moves each surface into
-`app-ghostty-surface-transient-<pid>.scope`, VTE each child into `vte-spawn-<uuid>.scope`, and
-tmux (built with systemd, as on the build machine) each pane into `tmux-spawn-<uuid>.scope` while
-its server stays in its starter's scope. termd does the same for every process it starts:
-`app-g3d-termd-holder-<pid>.scope` (the holder moves itself at start), `app-g3d-termd-brain-<pid>.scope`
-and `app-g3d-termd-term-<pid>.scope` per program. The holder calls the user manager's
-`StartTransientUnit` (with `PIDs=[pid]` and `CollectMode=inactive-or-failed`, so an emptied scope is
-collected) through `busctl --user call`, systemd's own client, so the holder links no D-Bus library.
-The child waits on its pipe until the move is done, which avoids the race tmux users hit when a
-short-lived pane exits before its scope registers. Failure is soft, as Ghostty's default
-(`linux-cgroup-hard-fail = false`): logged once, shown in the status stream, and the spawn goes on.
-`cgroup_scopes = "auto" | "off"`; `auto` uses them when the user manager answers.
 
 ## Environment
 
@@ -1411,7 +1588,7 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | max frame | 16 MiB | keep | |
 | read chunk | 64 KiB | keep | one Linux pipe's worth; keeps a flood's per-read latency small |
 | continuation | 64 KiB | keep | needed for mid-sequence repaints and snapshots |
-| kill grace | `SIGHUP` (or the asked signal), then `SIGKILL` after 2 s | keep | a kill always ends; systemd's stop timeout (90 s) is for services, not a closed window |
+| close rule | `SIGHUP` (or the asked signal) to the whole tree, `SIGTERM` to what is left at once (`--kill-term-after-ms` 0), `SIGKILL` after 2 s (`--kill-grace`) | **change** (S1: `SIGHUP` to two process groups, `SIGKILL` to them after 2 s) | a close reaches the whole tree ([Process trees](#process-trees)); `SIGHUP` first is what a closed tty sends; `SIGTERM` right after it is systemd's `SendSIGHUP=yes` order turned round; a kill always ends: systemd's stop timeout (90 s) is for services, not a closed window |
 | default colours, `cell_px` | the browser's palette; `[8, 16]` | keep | OSC 10/11 and `CSI 14 t` must answer without waiting |
 | `TERM` | `xterm-256color` (`--term`; also the emulator's terminfo name, kept per terminal) | keep | [Environment](#environment) |
 | detach | `Ctrl-\` twice (`g3d attach`; `--detach-key`, `G3D_DETACH_KEY`) | keep | dtach, abduco and zmx detach on `Ctrl-\`; pressing it twice keeps a single `Ctrl-\` (the program's `SIGQUIT`) one key away: the first press is held, any other key sends both. Platform note: on some non-US macOS layouts `\` needs Option, so the macOS agent checks it is typeable and the setting is the escape hatch |
@@ -1421,7 +1598,8 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | brain watchdog | 30 s; `SIGABRT`, then `SIGKILL` 5 s later | **new** | systemd's `WatchdogSec` / `WatchdogSignal` practice; generous so a loaded machine doesn't trip it |
 | brain OOM preference | `oom_score_adj` +300 over the holder (Linux); `--brain-oom-score-adj` | **new** | the restartable process should be the one the kernel picks |
 | most terminals | 8,192 per namespace (`--max-terminals`; the `seq_marks` page is 8 B each, 64 KiB) | **new** | far above any wall or desk; the page stays one small fixed allocation the holder never grows |
-| cgroup scopes | `auto` (Linux, soft failure) | **new** | Ghostty, VTE and tmux put each child in its own scope |
+| process trees | `auto` (`--cgroups`): Linux under a systemd user manager, a cgroup leaf per terminal in the namespace's delegated service; else the session. The manager has 3 s to start the service (`--service-start-timeout-ms`), else the double fork | **new** | Ghostty, VTE and tmux put each child in its own cgroup; systemd's delegation is the normal way for a service to manage sub-cgroups; failure is soft, as Ghostty's `linux-cgroup-hard-fail = false` |
+| holder upgrade | the same deadline as a brain's (`--upgrade-deadline` 10 s), from the request to the final record's check | **new** | |
 | snapshot interval | 2 s, terminals with new output only, LZ4 (`--snapshot-interval-ms`, 0 = never) | **new** | bounds what a crash loses to two seconds of parsed output, at < 0.1% of an owner thread (measured) |
 | upgrade deadline | 10 s for the candidate to report ready | **new** | |
 | client reconnect | 100 ms doubling to 2 s, for 30 s (the relay: `serve --termd-reconnect`) | **new** | covers a crash restart plus the first crash-loop retries |
@@ -1437,6 +1615,7 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | status interval | 1 s (a follower may ask for 250 ms to 60 s: `--status-interval-ms`, `--status-min-interval-ms`, `--status-max-interval-ms`); keepalive 30 s (`--status-keepalive-ms`) | **new** | one push a second is what `top` and `htop` refresh at by default and what a person reads; 250 ms bounds a follower's cost at four documents a second; a 30 s keepalive is the relay's adapters' ride window and keeps gauges from going stale. [Status](#status) |
 | status rate window | bytes over the last 5 s (`--status-rate-window-ms`) | **new** | the load-average idea at a human scale: long enough that a prompt's echo doesn't flicker the rate, short enough that a finished flood reads idle within seconds |
 | recent errors | the last 32 distinct, with counts (`--status-errors`) | **new** | the page-side log storm brake's coalescing, applied to the daemon |
+| recent closes | the last 16 closes' steps (`--status-closes`) | **new** | enough to see what the last few closes had to kill, bounded like the errors |
 | relay status connection | ask termd for 1 s; look again every 5 s while nothing listens or the brain is failed; `restarting` reads `unreachable` after 5 s (`serve --termd-status-interval`, `--termd-status-redial`, `--termd-status-grace`) | **new** | a failed `connect` costs a syscall; 5 s is the holder's own failed-retry scale and long past a crash restart (100 ms) and an upgrade's handoff, so `unreachable` means something |
 | wall restart notice | after 400 ms of restarting (`restartNoticeMs`); 3 errors shown (`errorsShown`); `wall.config` | **new** | a crash restart that returns in a blink shows only the chip (no flash); one that lingers is said in words. 400 ms is four times the crash restart measured here (about 100 ms from `SIGKILL` to a `WELCOME`, the 100 ms restart delay included, two terminals restored) and under the half second a person reads as "something is happening" |
 
@@ -1464,7 +1643,7 @@ terminals, then asks each one for its state, then polls. The shape is PROTOCOL.m
   macOS (a `cfg` seam).
 - Recent errors are a ring of the last 32 distinct `(code, terminal)` pairs with first and last
   times and a count: owner-thread panics, spawn failures, `input_full`, lags, brain restarts and
-  why, failed upgrades, environment warnings, cgroup-scope failures.
+  why, failed upgrades, environment warnings, and a close that needed `SIGKILL` (`killed`).
 - `g3d status [--json] [--follow]` renders it in a terminal: a header (daemon, holder, brain), one
   row per terminal, the recent errors.
 
@@ -2002,10 +2181,17 @@ holder.
   exactly; a candidate that fails to decode, or never reports ready, leaves the old brain serving
   with its connections open. Across engines (a fixture pair), the VT handoff reproduces the
   screen.
-- **Records.** Every fixture of the handoff and holder records decodes; `--check-holder-record`
-  refuses a corrupt one and the holder stays.
+- **Records.** Every fixture of the handoff and holder records decodes; a torn, truncated or foreign
+  record is refused; `--check-holder-record` refuses another format major and the holder stays.
+- **Holder upgrade** (`tests/holder.rs`). `g3d upgrade --holder` under a flood loses no byte and every
+  terminal comes back exact; the holder's pid and every shell's pid, parent and tty are unchanged and
+  no shell gets `SIGHUP`; `g3d attach` and `watch` ride it; candidates that exit, hang or read
+  another record major leave the holder and brain serving with every connection; repeated upgrades
+  keep the holder's fds and RSS flat; in a systemd service the trees survive it.
 - **Holder death.** `SIGKILL` the holder: every shell gets `SIGHUP`, the brain exits, clients see
-  nothing listening, the relay reports `lost`.
+  nothing listening, the relay reports `lost`; and nothing of any terminal survives, a program that
+  ignores `SIGHUP` and `SIGTERM` and one that left the session included (cgroup mode), a program in
+  its own process group ignoring both (session mode, ended by the brain).
 - **Environment.** A child's environment: scrubbed names absent, reserved names refused at
   `create`, `PWD` = `cwd`, the default cwd is home, the default program the passwd shell with
   argv0 `-<basename>` (a `$SHELL` naming another shell is ignored), `LANG=C.UTF-8` under an empty
@@ -2020,8 +2206,10 @@ holder.
   Built as `tests/env.rs` and `crates/g3d/tests/attach.rs`; the per-create read is driven through
   a file standing in for the manager (a test hook), so no test changes the person's session. The
   macOS lookup (`launchctl getenv`) and the Rex case on a Mac are the M2 agent's to prove.
-- **cgroup scopes** (Linux, when a user manager answers): holder, brain and each program in their
-  own scopes; with the manager unreachable, spawns still succeed and the status says why.
+- **Process trees** (`tests/trees.rs`; Linux cgroup mode when a user manager answers). A close ends
+  the whole tree and reports each step; `stop` ends every tree and what an ended terminal left
+  running, which the status listed meanwhile; the status counts each tree; a foreground daemon says
+  why it keeps sessions and still ends whole sessions.
 - **Status.** The document's shape against a golden file (keys and types); a quiet daemon sends
   only keepalives; a flood pushes at the interval with live rates; 100 followers get one
   serialization per tick.
@@ -2068,9 +2256,15 @@ holder.
 
 - **One holder, one blast radius.** A libghostty abort now ends only the brain; the
   shells survive and their screens come back from snapshots. The holder's death still
-  ends every shell in the namespace (D3), which is why it is small, parses no output, sits
-  in its own cgroup scope and changes only by a validated re-exec ([If the holder
-  dies](#if-the-holder-dies)).
+  ends every shell in the namespace (D3), and now every tree with them, which is why it parses no
+  output, runs as its own service and changes only by a validated re-exec ([If the holder
+  dies](#if-the-holder-dies)). It is no longer small (3.7k lines): every line of it can end every
+  shell, so it grows only by what has to outlive a brain.
+- **A holder and a brain killed together** in session mode (no service manager: macOS, a
+  container) leave their session trees running: nothing termd's is left to end them.
+- **A failed resume after the final check** (the new binary read the record, then dies on the same
+  bytes in `--holder-resume`) ends every shell: there is no image to go back to. The check is the
+  guard: it is the same decoder on the same record, with the same flags.
 - **Crash restore loses up to one snapshot interval of parsed output** (2 s by default),
   counted and reported. A restored terminal whose snapshot came from another engine version
   starts blank and relies on the program's redraw.

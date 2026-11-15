@@ -944,6 +944,19 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   that writes `HELLO` late still reads the `ERROR`, never `EPIPE`) and back on SIGHUP (the episode
   in `last_start.failed_at` and a `brain_failed` error), a terminal restored from a snapshot saving
   a new one while quiet (the next crash restores it exact), the watchdog, the holder's death hanging every shell up; the blob format's fixtures;
+  process trees (`tests/trees.rs`; the cgroup half under the systemd user manager, which it asks
+  read-only whether it answers: a close ends a tree whose members ignore `SIGHUP` and `SIGTERM`, one
+  `setsid`'d away, with the three steps in `daemon.closes` and a `killed` error; the holder
+  `SIGKILL`ed leaving nothing of it; `stop` ending the trees and a `nohup` job an ended terminal
+  left, listed meanwhile in `daemon.leftovers`; the session half on a foreground daemon: a close,
+  `stop` and the holder's death each ending a session whose job has its own process group);
+  the holder's re-exec (`tests/holder.rs`: `upgrade --holder` under a 300000-line flood with no
+  byte lost, every terminal exact and the shells' pid, parent and tty unchanged, no `SIGHUP`;
+  candidates that exit or hang, and one reading only the next record major, leaving the holder,
+  brain and connection serving; six re-execs with the holder's fds and RSS flat; in a systemd
+  service, the holder's leaf and a tree kept and a close after it ending the tree); `g3d-hold`'s
+  units (the holder record round-trips and refuses a torn, short or foreign one;
+  `tests/fixtures/holder-record-v1.bin` decodes; `/proc/<pid>/stat` names with parentheses);
   the environment (`src/env.rs` unit tests, and `tests/env.rs`: a daemon started from a stripped
   environment with a stale `DISPLAY`, Terminal.app's and tmux's identity, a parent shell's state,
   `SIGINT` ignored, a low fd limit, a Claude Code shell's, atuin's, a unit's and launchd's variables
@@ -984,7 +997,7 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   `g3d send`/`key`/`paste` against a private daemon, and 64 MiB through `g3d paste` into
   `cat > file` byte for byte, bracketed and not (`crates/g3d/tests/input.rs`);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
-  the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` sending its
+  the outer terminal, detach; both riding an upgrade, a holder's upgrade and a brain crash), `g3d new` sending its
   environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
   `--clean` taking the session's fresh `DISPLAY`; `-e NAME` with a non-UTF-8 value refused; a
   `PATH` holding `.` finding a program in the caller's directory) and `g3d env`'s tags, and the

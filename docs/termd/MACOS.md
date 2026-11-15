@@ -220,6 +220,36 @@ In the holder, whose panic hook aborts, it would hang up every shell. A failed l
 dropped. Gate: `an_unwritable_log_does_not_wedge_the_daemon`, which fails with `eprintln!`. Not
 macOS-specific.
 
+## Process trees and the holder's re-exec: what the M2 must prove
+
+Written on Linux and compiled for `aarch64-apple-darwin` (`cargo check -p g3d-hold --target
+aarch64-apple-darwin`), never run on a Mac. macOS has no cgroups, so a terminal's tree is its
+session (DESIGN.md, "Process trees"); the code behind `cfg(not(target_os = "linux"))` in
+`crates/g3d-hold/src/tree.rs`:
+
+- the session's members: `proc_listallpids`, each pid's `getsid`, its name and whether it is a
+  zombie from `proc_pidinfo(PROC_PIDTBSDINFO)` (`pbi_comm`, `pbi_status == SZOMB`);
+- waiting for a process that isn't the brain's child to end: kqueue `EVFILT_PROC` `NOTE_EXIT`;
+- the holder record's listener check reads `SO_TYPE` (macOS declares `SO_ACCEPTCONN` and doesn't
+  answer it).
+
+What the M2 must run and see:
+
+1. `cargo test --workspace --features g3d-termd/test-hooks` green, `tests/trees.rs`' session tests
+   and `tests/holder.rs` among them (the cgroup tests say "no systemd user manager" and stop).
+2. `tests/trees.rs` `a_close_ends_the_whole_session`: a program that ignores `SIGHUP` and `SIGTERM`
+   with a job of its own process group (`set -m`) is gone 2 s after `kill`, and `daemon.closes`
+   lists both under `HUP`, `TERM` and `KILL`. If it isn't, `getsid` or `proc_listallpids` is the
+   seam to look at.
+3. `the_holders_death_ends_every_session`: after `kill -9` of the holder the brain logs `the holder
+   is gone: ending 1 terminal tree(s)` and nothing of the session survives `--kill-grace`.
+4. `status`'s `terminals[].processes` equals the processes `ps -ax -o pid=,tty=` shows on the
+   terminal's tty (every member of a fresh session has it as its controlling terminal).
+5. `tests/holder.rs` whole: the re-exec keeps the holder's pid and every shell's parent and tty
+   (`ps -o ppid=,tty=`), and six re-execs keep `lsof -p <holder>`'s fd count flat.
+6. A `setsid`'d child leaves its session on macOS as on Linux: it is not in the tree there, by
+   design (no cgroups), and `kill` doesn't reach it; say so if it does.
+
 ## Not verified here
 
 - That an sshd session lacks `$TMPDIR`, and `tests/env.rs`'s launchd test skipping in an ssh

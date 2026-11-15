@@ -17,8 +17,8 @@ the `status` event). What is marked **(1.2)** is new in 1.2: key events and past
 the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
 `key`'s `option_as_alt` and the feature of the same name. What is marked **(1.4)** is new in 1.4:
 pointer events (`mouse` and the feature of the same name). What is marked **(1.5)** is new in 1.5:
-a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`), and process
-trees (what a `kill` ends and the status document reports). The daemon
+a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`), process
+trees (what a `kill` ends and the status document reports), and `upgrade`'s `holder`. The daemon
 on branch `termd` speaks all of 1.5 and announces `proto` `[1, 5]`.
 
 ## At a glance
@@ -910,8 +910,12 @@ the handoff didn't carry is not kept. New connections wait in the socket's backl
 upgrade doesn't happen, the connection that asked gets an `EVENT` on stream 0:
 `{"ev": "upgrade_failed", "message": "…"}`, and everything carries on.
 
-Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it will use the same op with
-`"holder": true`, which the daemon on branch `termd` answers `unsupported`.
+(1.5) `"holder": true` replaces the holder too (`g3d upgrade --holder`, DESIGN.md "Upgrading the
+holder"): the process that keeps every terminal re-execs into `binary` in place, the same `pid`, so
+no program notices. To a client it is the same upgrade: the same reply, `busy` window, `ERROR`
+`restart` and `upgrade_failed`, a `WELCOME` with the same `instance` and a higher `generation`
+after it, and the status document's `daemon.holder.upgrades` one higher (its `version` the new
+binary's). A holder from before 1.5 answers `holder: true` with `unsupported`.
 
 ## Data frames
 
@@ -1297,8 +1301,9 @@ writes, and send keystrokes as `INPUT`.
   room in the program's input buffer instead of failing `input_full`, and its reply waits with it.
   Process trees: `kill` ends a terminal's whole tree by the close rule (`SIGHUP`, then `SIGTERM`,
   then `SIGKILL`), and the status document's `daemon.trees`, `daemon.leftovers`, `daemon.closes`,
-  `terminals[].processes` and the `killed` error say what runs and what a close reached. Additive: a
-  paste without `more` is the whole paste, as in 1.4, and a 1.4 client ignores the new fields.
+  `terminals[].processes` and the `killed` error say what runs and what a close reached. `upgrade`
+  with `holder` replaces the holder in place (`daemon.holder.upgrades`). Additive: a paste without
+  `more` is the whole paste, as in 1.4, and a 1.4 client ignores the new fields.
 - **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
   is served as before.
 - **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is
