@@ -183,14 +183,8 @@ export const CHECKS = [
     h('agent-book-history.test.mjs', ['books', 'agents'], 'the sliding window over a synthetic 100-turn stream: byte offsets, prefetch, slides, read failures', 'a real relay read'),
     h('agent-book-labels.test.mjs', ['books', 'agents'], 'agent nameplates: hue, status readout, multi-line bake, container fit and wrap', 'pixels'),
     h('agent-events.test.mjs', ['agents', 'books'],
-        "agent books fed by gomuxai's conformance corpus: the reader under any chunking, one sheet per event, prompts of every origin, in-place updates",
-        'transcripts outside the corpus; needs a gomuxai checkout (GOMUXAI_DIR) and FAILS without one, by design',
-        {
-            known: {
-                reason: 'one prompt event of the corpus has no sheet (31/33) — red on the-backport too; not yet fixed',
-                signature: [/every prompt event is a sheet \(31\/33\)/, /agent-events: \d+ passed, 1 failed/],
-            },
-        }),
+        "agent books fed by gomuxai's conformance corpus: the reader under any chunking, one sheet per event, prompts of every origin, in-place updates, a left branch's events marked abandoned and set quietly",
+        'transcripts outside the corpus; needs a gomuxai checkout (GOMUXAI_DIR, default ~/dev/gomuxai) and FAILS without one, by design'),
     h('session-books.test.mjs', ['agents', 'books'],
         'agent books over a fake relay event wire: tail read → hydrate → follow, live lines, in-place updates, ended → re-follow, paging back, orphans',
         "the real relay and gomuxai (the bridge is a fake that plays them)"),

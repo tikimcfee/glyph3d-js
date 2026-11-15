@@ -55,7 +55,9 @@
  * (`[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
  * `[harness]`), its words set in the prompt hue — beside `think` (a redacted block says
  * so), `say` (a final reply marked), tool and `system` sheets; a call the tool table calls
- * noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt
+ * noise is a sheet too, set in a dim hue, and so is an event of a branch the conversation
+ * left (gomuxai's `abandoned`: a prompt edited and sent again, and what answered it — its
+ * info rows say so). Each sheet carries its event's TURN (the prompt
  * it belongs to: id + index; the HUD reads the open sheet's) so a later layer may group by
  * it. An event
  * that changes (a tool's result landing, a provisional reply confirmed) arrives again
@@ -227,6 +229,8 @@ const HEADER_ROWS = 1.5;
 
 /** A sheet's info rows: the tool table's numeric meta, then the event's own facts (its
  *  turn, a call's status, a final reply…). */
+/** A sheet set in the dim lift: a noise call, or an event of a branch the conversation left. */
+const quiet = (record) => record.action === 'noise' || !!record.abandoned;
 const infoOf = (record) => [fmtMeta(record.meta, '\n'), ...eventFacts(record)].filter(Boolean).join('\n');
 
 /**
@@ -452,7 +456,7 @@ export default class AgentBooks {
         const action = this._card(`[${call.verb}]`, setAs(call.head, sz.head.cols), {
             worldScale: CARD_WORLD_SCALE, gridScale: sz.head.gridScale,
             layout: { wrapWidth: sz.head.cols, zWrapSpacing: 0 },
-            filenameColor: hue, textColor: liftHue(hue, record.action === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
+            filenameColor: hue, textColor: liftHue(hue, quiet(record) ? this.cfg.noiseTextLift : this.cfg.callTextLift),
         }, { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         let body = null;
         if (call.rest) {
@@ -1688,7 +1692,8 @@ export default class AgentBooks {
      *  the page-text rule (_rectoSize: prose at the recto size, an output at its ratio;
      *  word-wrapped to the page, or its own lines). A prompt's words are set in the prompt
      *  hue (lifted by cfg.promptTextLift) under a header naming whose they are; a noise
-     *  call's output in the dim noise hue (cfg.noiseTextLift), so it reads as background.
+     *  call's output, and an abandoned event's words, in the dim lift (cfg.noiseTextLift), so
+     *  they read as background.
      *  @param {Object} record @param {'prose'|'output'} role */
     _outputSnapshot(record, role, pick, lane, sheetId) {
         const name = record.action === 'prompt' ? (record.tag || 'prompt')
@@ -1697,9 +1702,9 @@ export default class AgentBooks {
         const text = String(record.result ?? '');
         const sz = this._rectoSize(lane, role, text);
         const opts = { worldScale: CARD_WORLD_SCALE, gridScale: sz.gridScale, layout: { wrapWidth: sz.cols, zWrapSpacing: 0 } };
-        if (record.action === 'prompt' || record.action === 'noise') {
-            const hue = this.cfg.hues[record.action] || this.cfg.hues.other;
-            opts.textColor = liftHue(hue, record.action === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
+        if (record.action === 'prompt' || quiet(record)) {
+            const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
+            opts.textColor = liftHue(hue, quiet(record) ? this.cfg.noiseTextLift : this.cfg.promptTextLift);
             opts.filenameColor = hue;
         }
         return this._card(name, setAs(text, sz.cols), opts, pick, lane, sheetId);

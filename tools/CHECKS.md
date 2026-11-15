@@ -41,10 +41,9 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   writes `out/check/last-run.json`. `out/` is gitignored.
 - **Known reds** are declared, not skipped: an entry's `known` names the reason and the
   failure's signature. The run stays green only while the failure matches it; a different
-  failure is RED, and so is an unexpected pass (remove the entry). Today:
-  `agent-events` (one corpus prompt event has no sheet, 31/33 — red on the-backport too) and
-  `itests` (semantic.itest probes every package.json the repo load brought in; only the one
-  it opened builds structure).
+  failure is RED, and so is an unexpected pass (remove the entry). Today: `itests`
+  (semantic.itest probes every package.json the repo load brought in; only the one it opened
+  builds structure).
 - **Floors.** `tools/check-floors.json` holds, per tier, how many checks an unscoped run must
   RUN; fewer is RED ("checks went missing"). `--ratchet` raises a floor to what a green run
   ran and never lowers it.

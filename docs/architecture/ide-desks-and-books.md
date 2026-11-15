@@ -47,8 +47,11 @@ the run, hued by action kind, the open one raised); the HUD reads turn · sheet 
 EVENT, never grouped: prompts of every origin are first-class sheets (tagged by whose words —
 `[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
 `[harness]` — in the prompt hue), bookkeeping tool calls are sheets too, set in a dim noise
-hue (`book.showNoise` off hides them), every sheet carries its turn id + index, and an event's
-update (a tool's result, a confirmed reply) rebuilds its sheet IN PLACE (`Book.replaceSheet`).
+hue (`book.showNoise` off hides them), an event of a branch the conversation left (gomuxai's
+`abandoned`: a prompt edited and sent again, and what answered it) keeps its sheet, set in the same
+dim lift and marked abandoned in its info rows, every sheet carries its turn id + index, and an
+event's update (a tool's result, a confirmed reply, a branch abandoned) rebuilds its sheet IN
+PLACE (`Book.replaceSheet`).
 An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
 (`AgentBooks.setHistory` — SessionBooks gives it the session's `agentEvents/read`): pushing past its
 oldest sheet slides it one sheet back (the older one materializes at the front, the newest

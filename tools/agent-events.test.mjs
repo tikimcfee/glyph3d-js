@@ -178,7 +178,9 @@ for (const c of CASES.keys()) {
     const origins = [...byOrigin.keys()].sort();
     eq(origins, ['command', 'delivered', 'human', 'peer', 'queued', 'task-notification'], 'the corpus\'s prompt origins all became sheets');
     const prompts = [...byOrigin.values()].flat();
-    const promptEvents = [...CASES.entries()].filter(([c]) => !c.endsWith('.requests')).flatMap(([c]) => evs(c).filter((f) => f.kind === 'prompt'));
+    // An event is its id: an update frame (a prompt marked abandoned) is the same event again.
+    const promptEvents = [...CASES.entries()].filter(([c]) => !c.endsWith('.requests'))
+        .flatMap(([c]) => [...new Map(evs(c).filter((f) => f.kind === 'prompt').map((f) => [f.id, f])).values()]);
     ok(prompts.length === promptEvents.length, `every prompt event is a sheet (${prompts.length}/${promptEvents.length})`);
     const lift = (h, t) => ({ r: h.r + (1 - h.r) * t, g: h.g + (1 - h.g) * t, b: h.b + (1 - h.b) * t });
     for (const { e, lane, i, c } of prompts) {
@@ -187,8 +189,8 @@ for (const c of CASES.keys()) {
         ok(e.call.verb === tag && e.action.filename === `[${tag}]`, `${c}: a ${e.record.origin} prompt's headline is tagged [${tag}] (got [${e.call.verb}])`);
         ok(e.record.result === ev.prompt.text, `${c}: the prompt's words ride whole`);
         ok(lane.book.sheets[i].meta.kind === 'prompt' && lane.book.tabs[i].key === 'prompt', `${c}: a prompt sheet's tab bands as 'prompt'`);
-        ok(e.snapshot && e.snapshot.filename === tag && J(e.snapshot.config.textColor) === J(lift(ACTION_HUES.prompt, AGENT_BOOKS_DEFAULTS.promptTextLift)),
-            `${c}: the recto sets the words in the prompt hue under whose words they are`);
+        ok(e.snapshot && e.snapshot.filename === tag && J(e.snapshot.config.textColor) === J(lift(ACTION_HUES.prompt, e.record.abandoned ? AGENT_BOOKS_DEFAULTS.noiseTextLift : AGENT_BOOKS_DEFAULTS.promptTextLift)),
+            `${c}: the recto sets the words in the prompt hue under whose words they are (dim when abandoned)`);
         ok(e.rectoRole === 'prose', `${c}: a prompt is prose (set at the right page text size)`);
     }
     const cmd = byOrigin.get('command').find((p) => p.e.record.command === '/review');
@@ -418,6 +420,28 @@ for (const c of CASES.keys()) {
     const k = newBooks();
     live(k, 'I', 'kimi/interleaved');
     eq(k.lanes.get('I').entries.map((e) => e.record.action), ['prompt', 'think', 'read', 'say', 'think', 'bash', 'say'], 'interleaved thinking, tools and text stay in stream order');
+}
+
+// ── 8b. a branch the conversation left: its events are marked, set quietly ───────────
+{
+    // claude/rewind: a prompt edited and sent again — gomuxai re-sends the old branch's
+    // events as updates with `abandoned: true`, after the new prompt's add.
+    const books = newBooks();
+    live(books, 'W', 'claude/rewind');
+    const lane = books.lanes.get('W');
+    const last = new Map(evs('claude/rewind').map((f) => [f.id, f]));
+    const left = lane.entries.filter((e) => last.get(e.record.id).abandoned);
+    ok(left.length >= 2 && left.every((e) => e.record.abandoned && /abandoned/.test(e.infoText)),
+        `every event of a left branch is marked abandoned and says so (${left.length})`);
+    ok(lane.entries.filter((e) => !last.get(e.record.id).abandoned).every((e) => !e.record.abandoned && !/abandoned/.test(e.infoText)),
+        'the branch the conversation kept is not');
+    eq(ids(lane), visibleIds('claude/rewind'), 'an abandoned event keeps its sheet, in place');
+    const lum = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const [oldP, newP] = lane.entries.filter((e) => e.record.action === 'prompt');
+    ok(oldP.record.abandoned && !newP.record.abandoned
+        && lum(oldP.action.config.textColor) < lum(newP.action.config.textColor) * 0.8
+        && lum(oldP.snapshot.config.textColor) < lum(newP.snapshot.config.textColor) * 0.8,
+        'an abandoned prompt is set quieter than the one sent in its place (headline and words)');
 }
 
 // ── 9. history: the sliding window pages back by `at` over an event stream ───────────
