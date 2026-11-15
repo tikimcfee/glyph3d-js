@@ -85,14 +85,18 @@ start_vite() {
   # exec: the server replaces the subshell, so no wrapper shell lingers holding this script's
   # stdout (a caller piping dev.sh's output would otherwise wait on it forever).
   ( cd "$APP_DIR" && VITE_PORT="$VITE_PORT" exec nohup bun run dev >"$VITE_LOG" 2>&1 </dev/null ) & disown
-  sleep 2
-  if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
-    echo "  vite up → $(page_url)   (log: $VITE_LOG)"
-    echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
-  else
-    echo "  ✗ vite failed to start — last lines of $VITE_LOG:"; tail -n6 "$VITE_LOG"
-    return 1
-  fi
+  # Wait for the port, not a fixed time: a first start after a dependency change re-optimizes
+  # for several seconds.
+  for _ in $(seq 1 60); do
+    if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
+      echo "  vite up → $(page_url)   (log: $VITE_LOG)"
+      echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "  ✗ vite didn't listen on :$VITE_PORT within 30 s — last lines of $VITE_LOG:"; tail -n6 "$VITE_LOG"
+  return 1
 }
 
 start_relay() {
