@@ -41,8 +41,8 @@ and a right-click on a text field or the DOM chrome (sidebar, palette, status wi
 browser's. The FOCUSED terminal (`focusedId`, the one the keys go to), when its program turned mouse
 reporting on (DECSET 9/1000/1002/1003, read off its emulator: `TerminalWall.mouseReporting`), owns a
 right-click on its body, and Shift+right-click reaches the wall's menu (Ghostty's rule); a terminal
-only hovered gives its right-click to the wall's menu whatever its program asked; the wall forwards no mouse clicks to programs yet, so that
-click goes nowhere (`WallMenu._toProgram` is where it will). The menu sits by the pointer, flipped at
+only hovered gives its right-click to the wall's menu whatever its program asked. The program's
+right-click is its press and release (below); the menu only prevents the browser's. The menu sits by the pointer, flipped at
 the view's edges; ↑ ↓ ← → Enter move and choose, Esc, a click outside, a wheel, a pan or its target
 going away close it; the ContextMenu key or Shift+F10 opens it on the focused terminal. Its knobs
 are the Menu section's: `menuHint` (the footer line) and `menuSizes` (the size offers, a line of
@@ -54,6 +54,31 @@ members, goes when empty); a kill forgets at once. `TerminalWall` is its composi
 (start/stop symmetric); gate
 `bun tools/wall-e2e.mjs` — its own relay (`tools/lib/wall-relay.mjs`, which the wall's perf tools
 share), termd namespace and terminals; `--reuse-relay` to run on one you started.
+
+**The mouse, for a program that hears it** (`wall/WallMouse.js`, asked first by `WallPointer`).
+The FOCUSED terminal's program, once it turned mouse reporting on (DECSET 9/1000/1002/1003, read off
+its emulator: `TerminalGrid.mouseTracking`), gets the pointer on that terminal's body as a terminal
+gives it: a press of the left, middle, right, back or forward button, every press and release of
+the gesture it starts, and a move with a button held, until the last button is let go — off the
+terminal too, clamped to its edge, as terminals keep reporting a drag that left the window; with
+any-event tracking (1003) the hover over the focused body too. Moves go once per cell, never per
+pixel. termd encodes each in the program's live modes and drops what they don't report
+(docs/termd/DESIGN.md, "The mouse"): the wall sends the event — `TerminalGrid.sendMouse` →
+`terminal.mouse` → the adapter → termd's `mouse` op (protocol 1.4) — and the cell, fractional
+(`col` 3.5 is the fourth column's middle; SGR-pixels reads the fraction), from the grid's own
+geometry (`TerminalGrid.cellAt`: a slot sits at its cell's left edge and vertical centre). The wall
+keeps what is its own: Shift (the lasso and ⇧-click now, selection later: Ghostty's
+`mouse-shift-capture` default), Alt on the left button (⌥-drag moves), the title bar, the border and
+its grip, the wheel's zoom modifier. An unfocused terminal's click focuses it and reaches nothing: a
+program gets the mouse only once its terminal has the keys. A double-click on the program's body is
+the program's (no frame), and the pointer there is the arrow. The wheel over the focused terminal
+is `terminal.scroll` with the pointer's cell: termd's scrollback on the primary screen, as ever; on
+the alternate screen the adapter sends termd one wheel notch per line at that cell, which termd
+reports to a program that hears the mouse and makes cursor keys for one that doesn't (alternate
+scroll, mode 1007: `less`, `man`). `terminal.mouse <id> <press|release|move> <button> <col> <row>
+[mods…]` is the same event from the CLI. Gates: `tools/wall-mouse.test.mjs`, and `wall-e2e`'s mouse
+steps (a program echoing what it reads in hex: a click's exact SGR bytes, a drag under 1000 and
+1002, an unfocused click and a Shift+click reaching nothing, the alt-screen wheel).
 
 **The canvas is drafting paper.** `wall/WallPaper.js` draws it: the canvas colour (the renderer's
 clear colour, the `background` knob) and a grid of minor lines every `gridMinor` world units, every

@@ -24,6 +24,7 @@ export {
 export {
     computeBackgroundLayout,
     computeCellGridLayout,
+    cellAtPoint,
     createBackgroundMesh,
     fitBackground,
 } from './GridBackground.js';

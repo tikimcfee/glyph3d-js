@@ -2,6 +2,7 @@ import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalComm
 import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
 import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
 import { invertsSnap, zoomsWheel, IS_MAC } from './chord.js';
+import WallMouse from './WallMouse.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
 const DRAG_SLOP_PX = 4;
@@ -36,6 +37,10 @@ const PINCH_MAX_DELTA = 50;
  * it mid-drag re-places what's held. A tiled member's spot is its tile's: its drag and resize
  * don't snap (the group's header drag does, by the group's corner).
  *
+ * First of all, a press on the FOCUSED terminal's body whose program reports the mouse is the
+ * program's (WallMouse: presses, releases and drags for it, and any-event hover; Shift, and Alt on the
+ * left button, keep the wall's), and so is a double-click there.
+ *
  * A right-click (or, on macOS, a Ctrl+click — which is why ⌃ inverts snapping only once a drag is
  * under way there) is the menu's (WallMenu), never a gesture.
  *
@@ -44,7 +49,8 @@ const PINCH_MAX_DELTA = 50;
  *
  * Wheel, a canvas's convention: a plain wheel or two-finger swipe PANS, both axes, the content
  * moving as a scrolled page's would — except over the FOCUSED terminal, where it drives that
- * terminal's scrollback. With a zoom modifier (chord.js zoomsWheel, the `zoomKeys` knob) it
+ * terminal's scrollback (`terminal.scroll`, with the pointer's cell: an alternate-screen program
+ * gets the wheel itself, at that cell). With a zoom modifier (chord.js zoomsWheel, the `zoomKeys` knob) it
  * ZOOMS the canvas about the pointer, over a terminal or not: a small delta (a trackpad pinch, which
  * the browser sends as Ctrl+wheel) zooms directly with the fingers, a mouse notch glides in eased
  * steps (WallCamera.wheelZoomAt). The browser never page-zooms or scrolls.
@@ -64,6 +70,8 @@ export default class WallPointer {
         this.canvas = camera.canvas;
         this._drag = null;
         this._last = null;   // last pointer position, to re-evaluate the cursor when ⌥ changes
+        /** The pointer for a program that hears the mouse. */
+        this.mouse = new WallMouse(wall, camera);
         this._h = {
             wheel: (e) => this._onWheel(e),
             down: (e) => this._onDown(e),
@@ -133,10 +141,20 @@ export default class WallPointer {
     }
 
     _onDown(e) {
+        if (this._drag?.kind === 'program') return;   // another button joining the program's gesture comes as a move
+        const at = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
+        if (this.mouse.down(e, at)) {
+            e.preventDefault();   // the program's: no middle-click autoscroll, no back/forward navigation
+            this.camera.target = null;
+            this._start(e, { kind: 'program' });
+            this.canvas.setPointerCapture(e.pointerId);
+            this._drag.captured = true;
+            return;
+        }
         if (e.button !== 0 && e.button !== 1) return;
         if (IS_MAC && e.ctrlKey && e.button === 0) return;   // macOS: Ctrl+click is the secondary click (the menu's)
         this.camera.target = null;
-        const hit = e.button === 0 ? this.wall.hit(this.camera.toWorld(e.clientX, e.clientY)) : null;
+        const hit = e.button === 0 ? at : null;
         if (e.button === 0 && e.shiftKey) {
             if (hit?.id) this._start(e, { kind: 'shift', id: hit.id });
             else this._start(e, { kind: 'lasso', points: [{ x: e.clientX, y: e.clientY }] });
@@ -173,6 +191,7 @@ export default class WallPointer {
         const d = this._drag;
         if (!d || d.pointerId !== e.pointerId) return;
         this._end();
+        if (d.kind === 'program') { this.mouse.cancel(); return; }
         if ((d.kind === 'press' || d.kind === 'resize') && d.moved && this.wall.terminal(d.id)) this._settle(d);
         if (d.kind === 'group' && d.moved) this.wall.groups.dragEnd(d.groupDrag);
     }
@@ -181,6 +200,7 @@ export default class WallPointer {
         this._last = { clientX: e.clientX, clientY: e.clientY };   // (modifiers come from the key event that re-hovers)
         const d = this._drag;
         if (!d) { this._hover(e); return; }
+        if (d.kind === 'program') { this.mouse.move(e); return; }
         if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > DRAG_SLOP_PX) d.moved = true;
         if (d.kind === 'pan') {
             const z = this.camera.zoom;
@@ -233,6 +253,7 @@ export default class WallPointer {
         const d = this._drag;
         if (!d || d.pointerId !== e.pointerId) return;
         this._end();
+        if (d.kind === 'program') { this.mouse.up(e); return; }
         if (d.kind === 'pan') { if (!d.moved) { this.wall.focus(null); this.wall.run(['wall.select', 'none']); } return; }
         if (d.kind === 'lasso') { if (d.moved) this._lassoSelect(d.points); return; }
         if (d.kind === 'group') {
@@ -265,6 +286,7 @@ export default class WallPointer {
     _onDouble(e) {
         if (e.shiftKey) return;   // ⇧-clicks are selection
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
+        if (this.mouse.claims(e, hit)) return;   // the program's double-click (its two presses went to it)
         if (hit?.group) this.wall.run(['wall.group.frame', hit.group]);
         else if (hit && hit.part !== 'edge') this.wall.focus(hit.id, { frame: true });
         else if (!hit) this.wall.fitAll();
@@ -280,7 +302,8 @@ export default class WallPointer {
             const r = this.wall.terminalRect(focused);
             const p = this.camera.toWorld(e.clientX, e.clientY);
             if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) {
-                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(rawY))]);
+                const at = this.mouse.cellOf(focused, e);
+                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(rawY)), String(at.x), String(at.y)]);
                 return;
             }
         }
@@ -297,7 +320,9 @@ export default class WallPointer {
     _hover(e) {
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         this.wall.setHovered(hit?.id ?? null);
+        this.mouse.hover(e, hit);
         this.canvas.style.cursor = !hit ? (e.shiftKey ? 'crosshair' : 'grab')
+            : this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default'   // the program's pointer
             : hit.group ? 'move'
             : e.shiftKey ? 'copy'
             : e.altKey || hit.part === 'title' ? 'move'

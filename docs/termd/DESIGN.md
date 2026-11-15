@@ -1655,9 +1655,65 @@ IDE (`keyboardRouter`'s terminal tier and paste tier) both take this path: they 
 grid and its owner route, so there is one. The wall also sends the release of a key whose press
 it sent, to the terminal that got the press (Kitty's event reporting reads releases); the IDE's
 chain is keydown-only and sends none. Raw bytes stay for clients that encode their own keys: the
-IDE's 2D xterm companion (`TerminalView`, xterm.js's `onData`), the wheel's mouse reports from
-the adapter, and scripted `sendInput`. The canvas has no editable element, so an input method's
+IDE's 2D xterm companion (`TerminalView`, xterm.js's `onData`) and scripted `sendInput`. The canvas has no editable element, so an input method's
 composition never starts there (dead keys do resolve); a hidden text input for IME is not built.
+
+## The mouse (protocol 1.4)
+
+The pointer is the keyboard's case again: a browser has pointer events and no terminal that tracks
+the program's mouse modes, so it sends what it knows, the event, and termd encodes it on the
+terminal's owner thread against the `Terminal` that has parsed every mode change the program made
+([`mouse`](./PROTOCOL.md#mouse-14)). A terminal attached with `g3d attach` encodes its own mouse and
+sends `INPUT`.
+
+**Encoding.** `crates/g3d-termd/src/mouse.rs` runs libghostty's mouse encoder (libghostty-rs
+`mouse::Encoder`, Ghostty's src/input/mouse_encode.zig), set from the terminal
+(`set_options_from_terminal`: the tracking 9/1000/1002/1003 and the format default/1005/1006/
+1015/1016) and given the terminal's geometry (cols × rows of `cell_px`, no padding). It is
+Ghostty's encoding byte for byte, and Ghostty's rules for what goes unreported: X10 hears presses of
+the three buttons only, normal tracking no motion, button-event no motion without a button, the
+default format nothing past cell 223, buttons 10 and 11 nothing. A move is reported once per cell
+(the encoder's `track_last_cell`, Ghostty's `last_cell`), so a client that sends every pixel still
+makes one report per cell. libghostty forgets that cell whenever its options or size are set, so
+`mouse.rs` sets them only when the program's mouse modes (read as the eight DEC modes) or the
+geometry change. The client says where the pointer is in cells, fractional (`col` 3.5 is the middle
+of the fourth column), never in pixels: the pixel space SGR-pixels reports in is termd's own, the
+`cell_px` that `CSI 14 t` and `CSI 16 t` answer with, which a client can't know. The position is
+clamped to the screen's last pixel, so a drag that left the window goes on reporting its edge.
+
+**The wheel.** A wheel notch is a `mouse` press of `wheel-up`/`-down`/`-left`/`-right` (buttons
+64–67), never released. A program that doesn't hear the mouse gets Ghostty's alternate scroll
+(`scrollCallback` in Surface.zig): on the alternate screen with mode 1007 on (its default), the
+cursor keys `CSI A`/`CSI B` (`ESC O A`/`ESC O B` under DECCKM), so `less` and `man` scroll; on the
+primary screen nothing, because there the client scrolls termd's scrollback (`view`). The relay's
+adapter is that client: `terminal.scroll` on the primary screen moves its view, as before; on the
+alternate screen it sends one `mouse` wheel notch per line, at the pointer's cell when the display
+sent one (the wall does) and the screen's centre when not. The adapter encodes no mouse bytes of its
+own: termd's encoder is the one.
+
+**Brains without it.** The adapter checks `mouse` in `WELCOME.features`, as it does `key` and
+`paste`: a brain from before 1.4 gets no `mouse` op, which is logged once per connection
+(`[attach] termd … has no "mouse" op (protocol 1.4)`), so the display's mouse and an alternate-screen
+wheel do nothing until `g3d upgrade`. `relay.lacks` and the wall's red notice stay about typing.
+
+**The wall.** `WallMouse` (wall/WallMouse.js) decides, `WallPointer` asks it first: a press on the
+FOCUSED terminal's body whose program reports the mouse (`TerminalGrid.mouseTracking`, read off its
+emulator) is the program's, with every press, release and move of that gesture until the last button
+is let go (pointer capture keeps it coming from outside the terminal, the cell clamped to the edge),
+moves only when the program tracks them (1002/1003) and once per cell; any-event tracking (1003) also
+hears the hover over the focused body, once per cell. Shift is the wall's (lasso now, selection
+later), as Ghostty's `mouse-shift-capture` default makes it Ghostty's; so is Alt on the left button
+(the wall's ⌥-drag move), the title bar, the border and its grip. An unfocused terminal's press
+focuses it and reaches nothing. A right-click the program gets is prevented as a menu (contextMenu.js
+`program`). The cell comes from the grid's own geometry (`TerminalGrid.cellAt`: a slot sits at its
+cell's left edge and vertical centre, `computeCellGridLayout`). The event leaves through the grid's
+owner route like a key (`TerminalGrid.sendMouse` → `terminal.mouse` push → the adapter's `mouse` op);
+the `terminal.mouse` verb sends one from the CLI, and `g3d mouse <id> <action> <button> <col> <row>
+[--mods …]` straight to termd.
+
+Ghostty also lets a program take Shift back (XTSHIFTESCAPE, `CSI > 1 s`); libghostty keeps that
+flag but its C API has no getter for it, so on the wall Shift stays the wall's whatever the program
+asks.
 
 ## The Go adapter moves to termd (S1)
 

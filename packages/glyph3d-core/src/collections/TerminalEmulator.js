@@ -232,6 +232,17 @@ export default class TerminalEmulator {
     }
 
     /**
+     * Which pointer events the program asked to hear (DECSET 9 / 1000 / 1002 / 1003, the last set
+     * winning, as in xterm): `'none'`, `'x10'`, `'normal'`, `'button'` or `'any'` — termd's
+     * names (xterm's `modes.mouseTrackingMode` says vt200 for normal and drag for button).
+     * @returns {'none'|'x10'|'normal'|'button'|'any'}
+     */
+    get mouseTracking() {
+        const m = this._term.modes.mouseTrackingMode;
+        return m === 'vt200' ? 'normal' : m === 'drag' ? 'button' : m;
+    }
+
+    /**
      * Subscribe to window-title changes (OSC 0/2) in the byte stream — the titles the program
      * sets (termd also puts the current one in every repaint). Returns an unsubscribe.
      * @param {(title: string) => void} cb

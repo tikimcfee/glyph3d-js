@@ -71,6 +71,28 @@ export function computeCellGridLayout(cols, rows, metrics, padding = 0.3, bgGap)
 
 
 /**
+ * The cell under a point of a cell grid, in the grid's own frame (the one computeCellGridLayout lays
+ * out: the cells span x ∈ [0, cols·strideX] and y ∈ [strideY/2 − rows·strideY, strideY/2], row 0 on
+ * top). `x` and `y` are the point in cells from the grid's top-left corner, clamped to the grid
+ * (3.5 is the middle of the fourth column); `col` and `row` the cell holding it, from 0. A point off
+ * the grid is its nearest edge's, as a terminal goes on reporting a drag that left it.
+ *
+ * @param {number} cols
+ * @param {number} rows
+ * @param {{charWidth:number,letterSpacing:number,lineSpacing:number}} metrics
+ * @param {number} px - the point's x in the grid's frame
+ * @param {number} py - the point's y in the grid's frame
+ * @returns {{x:number, y:number, col:number, row:number}}
+ */
+export function cellAtPoint(cols, rows, metrics, px, py) {
+    const strideX = metrics.charWidth + metrics.letterSpacing;
+    const strideY = metrics.lineSpacing;
+    const x = Math.min(Math.max(px / strideX, 0), cols);
+    const y = Math.min(Math.max((strideY / 2 - py) / strideY, 0), rows);
+    return { x, y, col: Math.min(Math.floor(x), cols - 1), row: Math.min(Math.floor(y), rows - 1) };
+}
+
+/**
  * Create a background plane mesh backed by panelMaterial.
  * @param {Object} config
  * @param {number|string} [config.backgroundColor]

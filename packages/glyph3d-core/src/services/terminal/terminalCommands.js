@@ -1,9 +1,9 @@
 /**
  * Terminal commands — the CONTROL plane for terminal viewports. The byte DATA plane
  * is separate: OUTPUT arrives as binary frames (WebSocketBridge.onBinaryFrame →
- * grid.writeBytes → the headless VT emulator); INPUT enters via grid.sendInput/paste and
- * leaves through the grid's onInput hook as a terminal.key / terminal.paste / terminal.bytes push to the
- * owning adapter.
+ * grid.writeBytes → the headless VT emulator); INPUT enters via grid.sendInput/sendKey/paste/sendMouse
+ * and leaves through the grid's onInput hook as a terminal.key / terminal.paste / terminal.mouse /
+ * terminal.bytes push to the owning adapter.
  * These verbs manage lifecycle + layout.
  *
  * Control verbs:
@@ -16,6 +16,9 @@
  *   terminal.close  <id>                     (dispose display grid only)
  *   terminal.kill   <id>                     (full teardown: the program in termd + the grid)
  *   terminal.focus  <id>                     (the keyboard target, as the host defines it)
+ *   terminal.mouse  <id> <press|release|move> <button> <col> <row> [mods…]
+ *                                            (a pointer event for the program: termd encodes it in
+ *                                             its mouse modes)
  *   terminal.list · terminal.move <id> <x> <y> <z> · terminal.scale <id> <factor>
  *
  * Grids render fixed-size cell grids via TerminalGrid, writing directly to GPU
@@ -106,15 +109,16 @@ function getTerminals(ctx) {
 }
 
 /**
- * A grid's input as the push its owning adapter reads: a key event (`terminal.key`) and a paste
- * (`terminal.paste`), which the adapter hands to termd's `key` and `paste` ops, or raw bytes
- * (`terminal.bytes`, base64), written to the program as given. JSON pushes: input is sparse; the
- * binary lane is the high-volume OUTPUT direction's.
- * @param {{bytes?: string, key?: Object, paste?: string}} input - TerminalGrid.onInput's shapes
+ * A grid's input as the push its owning adapter reads: a key event (`terminal.key`), a paste
+ * (`terminal.paste`) and a pointer event (`terminal.mouse`), which the adapter hands to termd's
+ * `key`, `paste` and `mouse` ops, or raw bytes (`terminal.bytes`, base64), written to the program
+ * as given. JSON pushes: input is sparse; the binary lane is the high-volume OUTPUT direction's.
+ * @param {{bytes?: string, key?: Object, paste?: string, mouse?: Object}} input - TerminalGrid.onInput's shapes
  * @param {string} terminalId
  */
 function inputPush(input, terminalId) {
     if (input.key) return { event: 'terminal.key', data: { terminalId, ...input.key } };
+    if (input.mouse) return { event: 'terminal.mouse', data: { terminalId, ...input.mouse } };
     if (input.paste != null) return { event: 'terminal.paste', data: { terminalId, text: input.paste } };
     return { event: 'terminal.bytes', data: { terminalId, b64: encodeBase64(input.bytes) } };
 }
@@ -443,29 +447,50 @@ export default function registerTerminalCommands(router) {
     }, { description: "Read a terminal's visible screen as plain text", usage: '<id>' });
 
     // ------------------------------------------------------------------
-    // terminal.scroll <id> <lines>   (+ = back into history, − = forward to live)
+    // terminal.scroll <id> <lines> [col row]   (+ = back into history, − = forward to live)
     // ------------------------------------------------------------------
     router.register('terminal.scroll', (args, ctx) => {
-        if (args.length < 2) {
-            return { text: 'ERR: usage: terminal.scroll <id> <lines> (+back/-forward)', data: null };
-        }
+        const usage = 'ERR: usage: terminal.scroll <id> <lines> [col row] (+back/-forward; the pointer\'s cell, from 0)';
+        if (args.length !== 2 && args.length !== 4) return { text: usage, data: null };
         const id = args[0];
         const lines = parseInt(args[1], 10);
         if (isNaN(lines)) return { text: 'ERR: lines must be an integer', data: null };
+        const at = args.length === 4 ? { col: Number(args[2]), row: Number(args[3]) } : null;
+        if (at && !(Number.isFinite(at.col) && Number.isFinite(at.row))) return { text: usage, data: null };
 
         const info = ctx.registry.get(id);
         if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
 
         // Scrollback is termd's: the adapter moves its view (termd `view`) and the viewed rows
         // stream back as a repaint through the byte lane — the grid/emulator just mirror it (no
-        // client-side scroll state). An alternate-screen app gets the wheel itself. A pure
-        // control push, like terminal.resize.
+        // client-side scroll state). An alternate-screen app gets the wheel itself, as termd
+        // `mouse` wheel notches at the pointer's cell (else the screen's centre). A pure control
+        // push, like terminal.resize.
         const owner = info?.meta?.owner;
         if (owner && ctx.wsbridge?.connected) {
-            ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, lines } });
+            ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, lines, ...at } });
         }
-        return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines } };
-    }, { description: "Scroll a terminal's termd scrollback (+ back / - forward)", usage: '<id> <lines>' });
+        return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines, ...at } };
+    }, { description: "Scroll a terminal's termd scrollback (+ back / - forward); on the alternate screen the wheel goes to the program, at the pointer's cell", usage: '<id> <lines> [col row]' });
+
+    // ------------------------------------------------------------------
+    // terminal.mouse <id> <press|release|move> <button> <col> <row> [mods…]
+    // ------------------------------------------------------------------
+    router.register('terminal.mouse', (args, ctx) => {
+        const usage = 'ERR: usage: terminal.mouse <id> <press|release|move> <button> <col> <row> [Shift|Control|Alt|Meta…]';
+        if (args.length < 5) return { text: usage, data: null };
+        const [id, action, b, c, r, ...mods] = args;
+        if (!['press', 'release', 'move'].includes(action)) return { text: usage, data: null };
+        const col = Number(c), row = Number(r);
+        if (!Number.isFinite(col) || !Number.isFinite(row)) return { text: usage, data: null };
+        const button = /^\d+$/.test(b) ? Number(b) : b;   // 8..11 ride as numbers; termd checks the rest
+        const grid = getTerminals(ctx).get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+        /** @type {import('../../collections/TerminalGrid.js').TerminalMouseEvent} */
+        const mouse = { action, button, col, row, ...(mods.length ? { mods } : {}) };
+        if (!grid.sendMouse(mouse)) return { text: `ERR: terminal '${id}' has no input route (no adapter owns it)`, data: null };
+        return { text: `OK: terminal '${id}' mouse ${action} ${b} ${col} ${row}`, data: { id, ...mouse } };
+    }, { description: "A pointer event for a terminal's program: termd encodes it in the program's mouse modes and drops what they don't report", usage: '<id> <press|release|move> <button> <col> <row> [mods…]' });
 
     // ------------------------------------------------------------------
     // terminal.depth <id> [on|off]

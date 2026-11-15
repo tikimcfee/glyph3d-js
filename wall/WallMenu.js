@@ -10,8 +10,9 @@ const KEY_INSET_PX = 12;
  *
  *   contextmenu (window, capture)    contextPolicy: ours → `wall.menu <target> x y` (default
  *                                    prevented); native → nothing prevented, ours closes; program →
- *                                    the program's click (see _toProgram) — only on the focused
- *                                    terminal
+ *                                    prevented, nothing opened: the focused terminal's program has
+ *                                    the click (its press and release went to it from WallPointer,
+ *                                    by WallMouse's rule, the same one)
  *   pointerdown outside the menu     closes it — but not a secondary press (right button, or
  *                                    Ctrl+click on macOS): its contextmenu is the "again"
  *   wheel (pan / zoom / scroll)      closes it, as a pan's press does
@@ -88,21 +89,9 @@ export default class WallMenu {
             return;   // never prevented: the browser's (and the OS's) own menu
         }
         e.preventDefault();
-        if (verdict === 'program') { this._toProgram(id, e); return; }
+        if (verdict === 'program') return;   // the program's click: neither menu covers its screen
         const at = this._canvasPoint(e);
         wall.run(['wall.menu', target.kind, ...(target.kind === 'canvas' ? [] : [target.id]), String(at.x), String(at.y)]);
-    }
-
-    /**
-     * The program in `id` reports the mouse, and this right-click is its. The wall forwards no
-     * mouse clicks to programs yet (only the wheel, as terminal.scroll, which the relay turns into
-     * SGR wheel reports for an alt-screen program — cli/attach_unix.go wheelBytes): when it does,
-     * the right button's press and release reports go from here. Until then the click is the
-     * program's and nothing else's — neither our menu nor the browser's covers its screen.
-     * @param {string} id @param {MouseEvent} e
-     */
-    _toProgram(id, e) {
-        void id; void e;
     }
 
     /** @param {PointerEvent} e */

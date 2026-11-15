@@ -43,6 +43,7 @@ import { SLOT_FLOATS, LANE_GLYPH_ID, LANE_COLOR, LANE_GROUP_ID, packGroupStyle }
 import { CELL_UNDERLINE_COLOR, FACE_COUNT, cellFace, cellStyle } from '../core/cellAttrs.js';
 import {
     computeCellGridLayout,
+    cellAtPoint,
     GridChrome,
     TERMINAL_CONTROL_SPEC,
     GridBlockCursor,
@@ -69,6 +70,16 @@ export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
     fillOpacity: 0.5,
     borderWidth: 1.5,
 });
+
+/**
+ * A pointer event for the program (termd's `mouse` op, docs/termd/PROTOCOL.md): `col`, `row` are
+ * where the pointer is in cells from the top-left corner, from 0 (fractional: the cell is the whole
+ * part, SGR-pixels reports read the fraction); `button` a name or X11's number for buttons 8–11;
+ * `mods` W3C modifier names, as for a key event.
+ * @typedef {{ action: 'press'|'release'|'move',
+ *   button: 'left'|'middle'|'right'|'none'|'wheel-up'|'wheel-down'|'wheel-left'|'wheel-right'|8|9|10|11,
+ *   col: number, row: number, mods?: string[] }} TerminalMouseEvent
+ */
 
 // Cursor block render order: above glyphs (0), below the window chrome (GRID_CHROME = 6) — the
 // same band CodeGrid's caret uses. A compositing constant, not a taste knob, so it stays baked.
@@ -182,15 +193,17 @@ export default class TerminalGrid extends FramedGlyphField {
 
         /**
          * Input callback -- set by the owning agent or process. When set, every input this
-         * terminal emits leaves through here, bound for the owning adapter and termd. Three
-         * shapes, one per kind of input (sendInput / sendKey / paste):
+         * terminal emits leaves through here, bound for the owning adapter and termd. Four
+         * shapes, one per kind of input (sendInput / sendKey / paste / sendMouse):
          *   { bytes: string }   raw bytes, written as given (an emulator that encodes its own
          *                       keys: a 2D xterm companion)
          *   { key: TerminalKeyEvent }  a key event, which termd encodes in the program's modes
          *   { paste: string }   pasted text, which termd frames per the program's paste mode
+         *   { mouse: TerminalMouseEvent }  a pointer event, which termd encodes in the program's
+         *                       mouse modes
          * Signature: (input, terminalId: string) => void — the id is THIS grid's
          * `this.terminalId`, supplied by the grid, not by the caller.
-         * @type {((input: {bytes?: string, key?: import('../services/interaction/keyEncoding.js').TerminalKeyEvent, paste?: string}, terminalId: string) => void)|null}
+         * @type {((input: {bytes?: string, key?: import('../services/interaction/keyEncoding.js').TerminalKeyEvent, paste?: string, mouse?: TerminalMouseEvent}, terminalId: string) => void)|null}
          */
         this.onInput = null;
 
@@ -719,6 +732,28 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
+     * Which pointer events the program asked to hear, in the bytes parsed so far: `'none'`,
+     * `'x10'` (9: presses), `'normal'` (1000: presses and releases), `'button'` (1002: and moves
+     * with a button held), `'any'` (1003: and every move). termd encodes what it is sent against
+     * its own copy of the modes, so this only saves sending what the program would never hear.
+     * @returns {'none'|'x10'|'normal'|'button'|'any'}
+     */
+    get mouseTracking() {
+        return this._emulator ? this._emulator.mouseTracking : 'none';
+    }
+
+    /**
+     * The cell under a point in this grid's own frame (its local coordinates: position and scale
+     * taken off) — the cells' own geometry, computeCellGridLayout's: `x`, `y` in cells from the
+     * top-left corner, clamped to the grid; `col`, `row` the cell, from 0.
+     * @param {number} x @param {number} y
+     * @returns {{x:number, y:number, col:number, row:number}}
+     */
+    cellAt(x, y) {
+        return cellAtPoint(this.cols, this.rows, this._metrics, x, y);
+    }
+
+    /**
      * Feed raw VT bytes from the terminal byte stream. The internal headless VT
      * emulator parses them (cursor motion, scroll regions, erase, SGR, …); the next frame
      * applies the screen before it renders (applyPendingScreen).
@@ -775,6 +810,20 @@ export default class TerminalGrid extends FramedGlyphField {
     paste(text) {
         if (typeof this.onInput !== 'function' || typeof text !== 'string' || text === '') return false;
         this.onInput({ paste: text }, this.terminalId);
+        return true;
+    }
+
+    /**
+     * A pointer event for the program (a press, a release, a move). termd encodes it in the
+     * program's live mouse modes (tracking, format) and drops what they don't report, as a
+     * terminal does — the grid never turns the pointer into bytes itself.
+     *
+     * @param {TerminalMouseEvent} mouse
+     * @returns {boolean} true if an owner was listening and took it
+     */
+    sendMouse(mouse) {
+        if (typeof this.onInput !== 'function' || !mouse) return false;
+        this.onInput({ mouse }, this.terminalId);
         return true;
     }
 

@@ -23,7 +23,10 @@
  * metrics and pose put its cells), the specified colours themselves (CLAUDE.md "Colour": solid runs
  * of the default grey, a true colour, a 256-palette colour, pure white and a cell background, the
  * terminal's panel and the focused title bar's strip, each within ±2 a channel), Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
- * browser's key events in the program's modes) and a paste bracketed as it asked, the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
+ * browser's key events in the program's modes) and a paste bracketed as it asked, the mouse for a program that
+ * reports it (1000 + 1006: a click on a known cell is exactly its SGR press and release; a drag is no motion
+ * under 1000 and once per cell crossed under 1002; an unfocused terminal's click and a Shift+click reach
+ * nothing; the wheel over an alt-screen program is wheel reports at the pointer's cell), the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
  * border resize, title-bar drag vs body press, ⌥-drag on the body, top-edge resize, names (shell
  * title → name, palette rename, clear, a long name whole in its bar or handed to its map label, never
  * cut), a second display refused with the reason on its chip, a page reload (names, spots and shell
@@ -301,6 +304,91 @@ try {
         ok(!!await until(([i, h]) => window.__wall.terminal(i).readText().join('').includes(h), [A, kitty + hexOf('\x1b[200~hi\x1b[201~')], 8000),
             'a paste reaches it bracketed, as it asked');
         ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'KEYS-5'), A, 8000), 'the program read exactly those bytes and ended');
+    }
+
+    // ── the mouse: the focused terminal's program hears it, as termd encodes it in its modes ──
+    // A program that turns mouse reporting on, then echoes in hex every byte it reads until a `q`.
+    // Clicks land on a known cell, found from the grid's own geometry (a slot at its cell's left edge
+    // and vertical centre). Nothing reaching the program is shown by a marker key typed after: the
+    // program reads the marker next, with nothing between.
+    {
+        const hexOf = (str) => [...Buffer.from(str)].map((b) => `[${b.toString(16).padStart(2, '0')}]`).join('');
+        const screen = (i) => W((id) => window.__wall.terminal(id).readText().join(''), i);
+        const mouseProg = (setup, unset) => `clear; sh -c 'stty raw -echo; printf "${setup}MOUSE-%s" READY; while :; do `
+            + 'b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d " \\n"); printf "[%s]" "$b"; [ "$b" = 71 ] && break; done; '
+            + `printf "${unset}"; stty sane; echo; echo MOUSE-$((4+5))'\r`;
+        /** The page point at the middle of cell (c, r) of terminal `id`, from its pose and metrics. */
+        const cellXY = (id, c, r) => W(([i, c, r]) => {
+            const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(), g = w.terminal(i), m = g._metrics;
+            const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing;
+            const wx = g.position.x + g.scale.x * (c + 0.5) * sx, wy = g.position.y + g.scale.y * (sy / 2 - (r + 0.5) * sy);
+            return { x: cr.left + cr.width / 2 + (wx - v.camera.position.x) * v.zoom, y: cr.top + cr.height / 2 - (wy - v.camera.position.y) * v.zoom };
+        }, [id, c, r]);
+        /** Wait for the program to have read `want` after `from` (hex), then return what it read since. */
+        const readSince = async (from, want, ms = 8000) => {
+            const got = await until(([i, f, h]) => { const t = window.__wall.terminal(i).readText().join(''); const at = t.indexOf(f); return at >= 0 && t.slice(at + f.length).includes(h) ? t.slice(at + f.length) : null; }, [A, from, want], ms);
+            return got;
+        };
+        const sgr = (b, c, r, end = 'M') => hexOf(`\x1b[<${b};${c + 1};${r + 1}${end}`);
+        await W((i) => window.__wall.focus(i, { frame: true }), A);
+        await until(() => !window.__wall.viewport.moving, null, 8000);
+
+        // 1000 + 1006: a click on cell (5, 3) is exactly ESC[<0;6;4M then ESC[<0;6;4m.
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, mouseProg('\\033[?1000h\\033[?1006h', '\\033[?1000l\\033[?1006l')]);
+        const up1 = await until((i) => window.__wall.terminal(i).readText().join('').includes('MOUSE-READY') && window.__wall.terminal(i).mouseTracking === 'normal', A, 10000);
+        ok(!!up1, 'a program with mouse reporting on (1000 + 1006) is up in the focused terminal, and the wall reads its tracking');
+        let p = await cellXY(A, 5, 3);
+        await page.mouse.click(p.x, p.y);
+        const click = sgr(0, 5, 3) + sgr(0, 5, 3, 'm');
+        ok(!!await readSince('MOUSE-READY', click), `a click on cell (5, 3) reaches it as exactly ESC[<0;6;4M ESC[<0;6;4m (${(await screen(A)).slice(-80)})`);
+
+        // A drag under normal tracking (1000): the press and the release, no motion between.
+        const mark1 = hexOf('z');
+        p = await cellXY(A, 2, 1);
+        const q = await cellXY(A, 9, 1);
+        await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.mouse.move(q.x, q.y, { steps: 8 }); await page.mouse.up();
+        await page.keyboard.press('z');
+        const dragNormal = await readSince(click, mark1);
+        ok(dragNormal === sgr(0, 2, 1) + sgr(0, 9, 1, 'm') + mark1, `a drag under 1000 is a press and a release only, no motion (${dragNormal})`);
+
+        // An unfocused terminal's click focuses it and reaches nothing; Shift+click is the wall's.
+        await W((i) => window.__wall.focus(i), B);
+        p = await cellXY(A, 4, 4);
+        await page.mouse.click(p.x, p.y);
+        const refocused = await until(([i]) => window.__wall.focusedId === i, [A], 4000);
+        const mark2 = hexOf('y');
+        await page.keyboard.press('y');
+        const afterUnfocused = await readSince(dragNormal, mark2);
+        ok(!!refocused && afterUnfocused === mark2, `with ${B} focused, a click on ${A}'s body focuses ${A} and its program reads nothing of it (then: ${afterUnfocused})`);
+        await page.keyboard.down('Shift'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Shift');
+        const mark3 = hexOf('x');
+        await page.keyboard.press('x');
+        const afterShift = await readSince(dragNormal + mark2, mark3);
+        ok(afterShift === mark3, `Shift+click on the focused program's body is the wall's: the program reads nothing of it (then: ${afterShift})`);
+        await W(() => window.__wall.run(['wall.select', 'none']));
+        await page.keyboard.press('q');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'MOUSE-9') && window.__wall.terminal(i).mouseTracking === 'none', A, 8000), 'the program ended on q and turned reporting off');
+
+        // 1002 + 1006 on the alternate screen: a drag reports its motion (once per cell crossed), and
+        // the wheel reaches the program as wheel reports at the pointer's cell.
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, mouseProg('\\033[?1049h\\033[?1002h\\033[?1006h', '\\033[?1002l\\033[?1006l\\033[?1049l')]);
+        const up2 = await until((i) => window.__wall.terminal(i).readText().join('').includes('MOUSE-READY') && window.__wall.terminal(i).mouseTracking === 'button', A, 10000);
+        ok(!!up2, 'a program with button-event tracking (1002 + 1006) is up on the alternate screen');
+        p = await cellXY(A, 2, 1);
+        const q2 = await cellXY(A, 5, 1);
+        await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.mouse.move(q2.x, q2.y, { steps: 12 }); await page.mouse.up();
+        const mark4 = hexOf('w');
+        await page.keyboard.press('w');
+        const dragButton = await readSince('MOUSE-READY', mark4);
+        const motions = [3, 4, 5].map((c) => sgr(32, c, 1)).join('');
+        ok(dragButton === sgr(0, 2, 1) + motions + sgr(0, 5, 1, 'm') + mark4, `a drag under 1002 reports each cell it crosses once, with the button held (${dragButton})`);
+        p = await cellXY(A, 7, 2);
+        await page.mouse.move(p.x, p.y);
+        await page.mouse.wheel(0, -120);
+        const wheeled = await readSince(dragButton, sgr(64, 7, 2));
+        ok(!!wheeled && wheeled.startsWith(sgr(64, 7, 2)), `the wheel over the alt-screen program reaches it as wheel-up reports at the pointer's cell, ESC[<64;8;3M (${wheeled?.slice(0, 80)})`);
+        await page.keyboard.press('q');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'MOUSE-9'), A, 8000), 'it ended on q, off the alternate screen');
     }
 
     // ── termd's status: the chip, the window, a brain restart ─────────────
@@ -786,7 +874,8 @@ try {
             `focused, a right-click on ${M2}'s body goes to its program (no menu, no browser menu); Shift+right-click opens ours`);
         await page.keyboard.press('Escape');
         ok(!!(await menuOn(null)), 'Esc closes the menu');
-        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "printf '\\033[?1000l'\r"]);
+        // Ctrl+U first: the right-click went to the shell as X10 mouse reports, typed into its line.
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [M2, "\x15printf '\\033[?1000l'\r"]);
         await until((i) => !window.__wall.mouseReporting(i), M2, 8000);
 
         // The menu key on the focused terminal opens it there.
