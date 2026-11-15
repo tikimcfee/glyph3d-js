@@ -29,10 +29,12 @@
  * cut), a second display refused with the reason on its chip, a page reload (names, spots and shell
  * titles come back; a remembered terminal the relay no longer has is pruned), a kill forgetting its
  * name at once, a relay restart (the re-adopted terminal takes typing again with no reload; the next
- * spawn mints a fresh id), wheel over the focused terminal → scrollback while the camera holds, pinch
- * → zoom, a plain wheel elsewhere → an eased zoom that lands exactly and holds the point under the
- * pointer, map labels (no overlaps, bar names hidden, trace lines when crowded, click frames exactly
- * like frame(), drag moves the terminal), the shared scene systems serving frames, the core
+ * spawn mints a fresh id), a plain wheel over the focused terminal → scrollback while the camera
+ * holds, pinch (Ctrl+wheel) there → a canvas zoom, Ctrl + mouse notches → an eased zoom that lands
+ * exactly and holds the point under the pointer, a plain wheel elsewhere → a pan on both axes by
+ * exactly the deltas, the content moving as a scrolled page's (zoom unchanged), map labels (no
+ * overlaps, bar names hidden, trace lines when crowded, click frames exactly like frame(), drag moves
+ * the terminal), the shared scene systems serving frames, the core
  * terminal verbs run against the wall (terminal.move, terminal.focus), and termd's status: the chip,
  * the status window (the chord opens it, it lists the wall's terminals from termd's own document, it
  * docks and closes by verb) and a brain restart held long enough to read — the amber restarting notice,
@@ -543,30 +545,47 @@ try {
     ok(top1 !== top0 && c1.zoom === c0.zoom && c1.x === c0.x, `wheel over the focused terminal scrolls its history ("${top0?.trim().slice(0, 12)}" → "${top1?.trim().slice(0, 12)}"), camera still`);
     for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(50); }
     await page.keyboard.down('Control'); await page.mouse.wheel(0, -40); await page.keyboard.up('Control'); await settle(300);
-    ok((await cam()).zoom !== c1.zoom, 'pinch over the focused terminal zooms the canvas');
+    ok((await cam()).zoom !== c1.zoom, 'pinch (Ctrl+wheel) over the focused terminal zooms the canvas');
 
-    // ── wheel zoom: plain wheel glides about the pointer, lands exactly, holds the point under it ──
+    // ── wheel zoom: the zoom modifier + mouse notches glide about the pointer, land exactly, hold the point under it ──
+    // Control is the zoom modifier on every platform (chord.js zoomsWheel; ⌘ too on macOS).
     await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
     const cr = await W(() => { const r = window.__wall.viewport.canvas.getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.4 }; });
     await page.mouse.move(cr.x, cr.y);
-    // The deltas the page receives, which are what the wall zooms by: a synthetic wheel of 100 px
-    // reaches a headed macOS Chrome as 200 (measured), so the notches are counted from them.
+    // The deltas the page receives, which are what the wall zooms (and pans) by: a synthetic wheel of
+    // 100 px reaches a headed macOS Chrome as 200 (measured), so the notches are counted from them.
     const z0 = await W((p) => {
         const v = window.__wall.viewport;
         window.__wheelSeen = [];
-        window.addEventListener('wheel', (e) => window.__wheelSeen.push([e.deltaY, e.deltaMode]), { capture: true });
+        window.addEventListener('wheel', (e) => window.__wheelSeen.push([e.deltaX, e.deltaY, e.deltaMode]), { capture: true });
         return { zoom: v.zoom, at: v.toWorld(p.x, p.y), step: v.wheelZoom.stepFactor, perNotch: v.wheelZoom.pixelsPerNotch };
     }, cr);
+    await page.keyboard.down('Control');
     for (let i = 0; i < 3; i++) await page.mouse.wheel(0, -100);
+    await page.keyboard.up('Control');
     const mid = await W(() => window.__wall.viewport.moving);
     await settle(800);
     const z1 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), moving: v.moving }; }, cr);
-    const seen = await W(() => window.__wheelSeen);
-    const notches = -seen.reduce((n, [dy, mode]) => n + (mode === 0 ? dy : NaN), 0) / z0.perNotch;
+    const seen = await W(() => window.__wheelSeen.splice(0));
+    const notches = -seen.reduce((n, [, dy, mode]) => n + (mode === 0 ? dy : NaN), 0) / z0.perNotch;
     const zWant = z0.zoom * z0.step ** notches;
     ok(seen.length === 3 && notches > 0 && mid && !z1.moving && Math.abs(z1.zoom / zWant - 1) < 1e-6,
-        `three wheel notches glide (moving mid-way) and land exactly at ${z0.step}^${notches} for the deltas the page got (${seen.map(([dy]) => dy).join(' ')} px; zoom ${z0.zoom.toFixed(4)} → ${z1.zoom.toFixed(4)}, want ${zWant.toFixed(4)})`);
+        `three Ctrl+wheel notches glide (moving mid-way) and land exactly at ${z0.step}^${notches} for the deltas the page got (${seen.map(([, dy]) => dy).join(' ')} px; zoom ${z0.zoom.toFixed(4)} → ${z1.zoom.toFixed(4)}, want ${zWant.toFixed(4)})`);
     ok(Math.hypot(z1.at.x - z0.at.x, z1.at.y - z0.at.y) * z1.zoom < 0.5, 'the world point under the pointer stays under it through the glide');
+
+    // ── wheel pan: a plain wheel (nothing focused) pans by exactly its deltas, zoom unchanged ──
+    // + deltaY is a scroll down: the view moves down the world (camera y falls) and the content rises,
+    // as a page's does; + deltaX moves the view right (camera x grows).
+    const p0 = await cam();
+    await page.mouse.wheel(60, 100);
+    await settle(300);
+    const p1 = await cam();
+    const panSeen = await W(() => window.__wheelSeen.splice(0));
+    const pdx = panSeen.reduce((n, [dx, , mode]) => n + (mode === 0 ? dx : NaN), 0);
+    const pdy = panSeen.reduce((n, [, dy, mode]) => n + (mode === 0 ? dy : NaN), 0);
+    ok(panSeen.length > 0 && pdx > 0 && pdy > 0 && p1.zoom === p0.zoom
+        && Math.abs((p1.x - p0.x) * p0.zoom - pdx) < 1e-6 && Math.abs((p0.y - p1.y) * p0.zoom - pdy) < 1e-6,
+        `a plain wheel pans by its deltas (${pdx}, ${pdy} px → camera ${((p1.x - p0.x) * p0.zoom).toFixed(2)}, ${((p0.y - p1.y) * p0.zoom).toFixed(2)} px right / down), the content moving up-left, zoom unchanged (${p0.zoom.toFixed(4)} → ${p1.zoom.toFixed(4)})`);
 
     // ── map labels ─────────────────────────────────────────────────────────
     for (let i = 0; i < 5; i++) { const r = await W(() => window.__wall.spawn()); if (r.ok) spawned.push(r.id); }
@@ -818,7 +837,7 @@ try {
         await menuOn('canvas');
         await page.mouse.move(empty.x - 12, empty.y - 12);   // off the menu (it opens with its corner under the pointer)
         await page.mouse.wheel(0, 120);
-        ok(!!(await menuOn(null)), 'a wheel (zoom) closes the menu');
+        ok(!!(await menuOn(null)), 'a wheel (a pan) closes the menu');
 
         // A group's header: its menu, Esc, then layout and ungroup through it.
         const gid = (await W((ids) => window.__wall.run(['wall.group', ...ids]).then((x) => x.data.gid), [M2, born]));
