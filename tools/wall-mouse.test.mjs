@@ -18,6 +18,7 @@ import { test, expect } from 'bun:test';
 
 globalThis.window ??= { location: { hostname: 'localhost' }, addEventListener() {}, removeEventListener() {} };
 await import('./headless-canvas.mjs');
+const { WALL_CONFIG } = await import('../wall/wallConfig.js');
 const { HEADLESS_ATLAS } = await import('./headless-atlas.mjs');
 const THREE = await import('three');
 const { default: CommandRouter } = await import('../packages/glyph3d-core/src/services/orchestration/CommandRouter.js');
@@ -83,7 +84,7 @@ test('a grid reads its program\'s tracking off the DECSETs; its cellAt is its ow
 });
 
 test('terminal.mouse pushes termd\'s mouse op to the owning adapter; terminal.scroll carries the pointer\'s cell', async () => {
-    const { ctx, router, pushed } = setup();
+    const { router, pushed } = setup();
     await router.execute('terminal.create term-2 20 6', { sender: 'ctrl-4' });
     pushed.length = 0;
     let r = await router.execute('terminal.mouse term-2 press left 3.5 1 Control');
@@ -155,6 +156,7 @@ function standIn({ tracking = 'button', focused = 't' } = {}) {
         run: (cmd) => ran.push(cmd),
         router: { execute: (cmd) => ran.push(cmd) },
         selectionOverlay: { setLasso: () => {} },
+        config: { ...WALL_CONFIG },
     };
     const captured = new Set();
     const canvas = {
