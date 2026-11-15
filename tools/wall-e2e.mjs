@@ -548,7 +548,7 @@ try {
     ok((await cam()).zoom !== c1.zoom, 'pinch (Ctrl+wheel) over the focused terminal zooms the canvas');
 
     // ── wheel zoom: the zoom modifier + mouse notches glide about the pointer, land exactly, hold the point under it ──
-    // Control is the zoom modifier on every platform (chord.js zoomsWheel; ⌘ too on macOS).
+    // Control is a zoom key on every platform (chord.js zoomsWheel, the zoomKeys knob: ctrl alt meta).
     await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
     const cr = await W(() => { const r = window.__wall.viewport.canvas.getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.4 }; });
     await page.mouse.move(cr.x, cr.y);

@@ -38,6 +38,14 @@ export const WALL_CONFIG = Object.freeze({
      * Read per key: a change takes the next key.
      */
     optionAsAlt: 'auto',
+    /** Log every wheel, key and pointer press the page receives as an `[input]` line (inputTrace.js), into the relay's log store. */
+    traceInput: false,
+    /**
+     * The modifiers that make a wheel zoom instead of pan (chord.js zoomsWheel), any of ctrl alt meta
+     * shift. Ctrl is how a trackpad pinch arrives; alt (Option) and meta (⌘) reach the wall from a Mac
+     * through a remote desktop when macOS's screen zoom takes Ctrl+scroll.
+     */
+    zoomKeys: 'ctrl alt meta',
 
     // ── the canvas: its colour, the drafting grid, snapping (wallSnap.js, WallPaper.js) ──
     /** The canvas colour, sRGB. */

@@ -44,7 +44,7 @@ const PINCH_MAX_DELTA = 50;
  *
  * Wheel, a canvas's convention: a plain wheel or two-finger swipe PANS, both axes, the content
  * moving as a scrolled page's would — except over the FOCUSED terminal, where it drives that
- * terminal's scrollback. With the zoom modifier (chord.js zoomsWheel: Ctrl, and on macOS ⌘ too) it
+ * terminal's scrollback. With a zoom modifier (chord.js zoomsWheel, the `zoomKeys` knob) it
  * ZOOMS the canvas about the pointer, over a terminal or not: a small delta (a trackpad pinch, which
  * the browser sends as Ctrl+wheel) zooms directly with the fingers, a mouse notch glides in eased
  * steps (WallCamera.wheelZoomAt). The browser never page-zooms or scrolls.
@@ -274,7 +274,7 @@ export default class WallPointer {
         e.preventDefault();
         // The deltas before deltaMode: Firefox reports lines only to a listener that reads the mode first.
         const rawX = e.deltaX, rawY = e.deltaY;
-        const zoom = zoomsWheel(e);
+        const zoom = zoomsWheel(e, this.wall.config.zoomKeys);
         const focused = this.wall.focusedId;
         if (!zoom && focused) {
             const r = this.wall.terminalRect(focused);

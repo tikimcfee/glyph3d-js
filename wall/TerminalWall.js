@@ -1,5 +1,7 @@
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
 import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
+import { installInputTrace } from './inputTrace.js';
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import SceneSystems from '@glyph3d/core/collections/SceneSystems.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
@@ -158,6 +160,10 @@ export default class TerminalWall {
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
         this.bridge = null;
+        /** Removes the console forwarder start() installed. @type {(() => void)|null} */
+        this._offConsole = null;
+        /** Removes the input trace's listeners (inputTrace.js). @type {(() => void)|null} */
+        this._offTrace = null;
         this._onRegistry = () => this._syncTerminals();
         this._running = false;
     }
@@ -199,6 +205,9 @@ export default class TerminalWall {
             url: `ws://${location.hostname}:${port}`, port, autoConnect: false, showStatus: false,
         });
         this.ctx.wsbridge = this.bridge;
+        // The page's console and uncaught errors go to the relay's log store (log.query / log.search).
+        this._offConsole = installConsoleForwarder(this.bridge);
+        this._offTrace = installInputTrace(this);
         routeTerminalOutput(this.bridge, this.ctx);
         this._offTermd = this.termd.attach(this.bridge);
         this.bridge.onConnectionChange((up) => this._onConnection(up));
@@ -210,6 +219,10 @@ export default class TerminalWall {
         this._running = false;
         this._offTermd();
         this.termd.clear();
+        this._offTrace();
+        this._offTrace = null;
+        this._offConsole?.();
+        this._offConsole = null;
         this.bridge.dispose();
         this.bridge = null;
         this.ctx.wsbridge = null;

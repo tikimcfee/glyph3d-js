@@ -2,6 +2,13 @@ import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
 
 /**
+ * Alt pressed and released on its own opens Firefox's menu bar (and Windows browsers' menus) unless
+ * the page cancels it: the wall is the whole window, so it does. Alt still rides other keys (Alt+F).
+ * @param {KeyboardEvent} e
+ */
+function noMenuBar(e) { if (e.key === 'Alt') e.preventDefault(); }
+
+/**
  * WallKeys — the keyboard. Wall chords take the platform's chord modifier (chord.js: ⌘ on macOS,
  * Ctrl+Alt elsewhere) and are matched on e.code (the physical key) so layouts never rewrite them:
  * [ ] cycle focus, ↵ frames the focused terminal or returns to the overview, Shift+↵ opens a new
@@ -50,6 +57,7 @@ export default class WallKeys {
     /** The held close chord ends when X or the chord comes up (or the window loses the keys). A
      *  key whose press a terminal got sends that terminal its release. */
     _keyUp(e) {
+        noMenuBar(e);
         if (e.code === 'KeyX' || !isChord(e)) this.wall.barButtons?.releaseKey();
         const id = this._down.get(e.code);
         if (id === undefined) return;
@@ -59,6 +67,7 @@ export default class WallKeys {
     }
 
     _key(e) {
+        noMenuBar(e);
         const t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         const wall = this.wall;

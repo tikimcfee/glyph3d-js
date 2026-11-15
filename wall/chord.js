@@ -30,16 +30,40 @@ export function invertsSnap(e) { return !!e.ctrlKey; }
 /** What the snap modifier is called on this platform. */
 export const SNAP_INVERT_LABEL = IS_MAC ? '⌃' : 'Ctrl';
 
-/**
- * The zoom modifier: a wheel carrying it zooms the canvas; without it a wheel pans (WallPointer).
- * Ctrl everywhere — a trackpad pinch arrives as a Ctrl+wheel (macOS's browsers, and Chrome and
- * Firefox on Linux), so pinch zooms through it — and on macOS ⌘ too, the chord's key.
- * @param {{ ctrlKey: boolean, metaKey: boolean }} e - a wheel event
- */
-export function zoomsWheel(e) { return !!e.ctrlKey || (IS_MAC && !!e.metaKey); }
+/** The modifiers a zoom wheel may carry (the `zoomKeys` knob names them), and the event flag each is. */
+const ZOOM_FLAG = { ctrl: 'ctrlKey', alt: 'altKey', meta: 'metaKey', shift: 'shiftKey' };
+/** What each zoom modifier is called on this platform. */
+const ZOOM_LABEL = IS_MAC ? { ctrl: '⌃', alt: '⌥', meta: '⌘', shift: '⇧' } : { ctrl: 'Ctrl', alt: 'Alt', meta: 'Super', shift: 'Shift' };
 
-/** What the zoom modifier is called on this platform. */
-export const ZOOM_WHEEL_LABEL = IS_MAC ? '⌘' : 'Ctrl';
+/**
+ * The `zoomKeys` knob's words, checked: any of ctrl, alt, meta, shift, separated by spaces (empty: none).
+ * @param {string} s @returns {string[]}
+ */
+export function parseZoomKeys(s) {
+    const keys = String(s).trim().split(/\s+/).filter(Boolean);
+    for (const k of keys) if (!(k in ZOOM_FLAG)) throw new Error(`"${k}" is not a modifier (ctrl, alt, meta, shift)`);
+    return keys;
+}
+
+let _zoomKeysText = null, _zoomKeys = [];
+/**
+ * The zoom modifiers: a wheel carrying any of them zooms the canvas; without one it pans
+ * (WallPointer). Ctrl must stay among them for a trackpad pinch to zoom: the browser sends a pinch
+ * as Ctrl+wheel. Alt is there for a Mac reaching the wall through a remote desktop (Moonlight),
+ * where macOS's screen zoom can take Ctrl+scroll first and Option arrives as Alt.
+ * @param {{ ctrlKey: boolean, altKey: boolean, metaKey: boolean, shiftKey: boolean }} e - a wheel event
+ * @param {string} zoomKeys - the `zoomKeys` knob
+ */
+export function zoomsWheel(e, zoomKeys) {
+    if (zoomKeys !== _zoomKeysText) { _zoomKeys = parseZoomKeys(zoomKeys); _zoomKeysText = zoomKeys; }
+    for (const k of _zoomKeys) if (e[ZOOM_FLAG[k]]) return true;
+    return false;
+}
+
+/** The zoom modifiers as the hint names them (`Ctrl/Alt/Super`, `⌃/⌥/⌘`). @param {string} zoomKeys */
+export function zoomWheelLabel(zoomKeys) {
+    return parseZoomKeys(zoomKeys).map((k) => ZOOM_LABEL[k]).join('/') || 'no key';
+}
 
 /** @param {KeyboardEvent} e @returns {boolean} true when `e` carries the wall's chord (Shift may ride along) */
 export function isChord(e) {

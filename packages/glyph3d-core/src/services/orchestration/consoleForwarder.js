@@ -159,12 +159,13 @@ export function emitLogRecord(level, scope, msg, attrs) {
  * @param {Object} [options]
  * @param {boolean} [options.captureWindowErrors=true] - also capture
  *   window.onerror and unhandledrejection as error-level records.
- * @returns {boolean} true if it installed the forwarder, false if it was already
- *   installed (and this call did nothing).
+ * @returns {(() => void)|null} the uninstall (restores the console, drops the window
+ *   listeners and the sink, forgets the bridge; the ring stays), or null if a forwarder was
+ *   already installed or the bridge can't send (and this call did nothing).
  */
 export function installConsoleForwarder(bridge, options = {}) {
-    if (_installed) return false;
-    if (!bridge || typeof bridge.send !== 'function') return false;
+    if (_installed) return null;
+    if (!bridge || typeof bridge.send !== 'function') return null;
     _installed = true;
     _bridge = bridge;
 
@@ -197,8 +198,12 @@ export function installConsoleForwarder(bridge, options = {}) {
         emitLogRecord(level, record.name ?? null, record.message, attrs);
     });
 
+    /** @type {Array<[string, Function]>} */
+    const originals = [];
     for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
-        const original = console[level].bind(console);
+        const unpatched = console[level];
+        originals.push([level, unpatched]);
+        const original = unpatched.bind(console);
         console[level] = (...args) => {
             original(...args);
             if (isLoggerEmitting()) return; // structured via the Logger sink
@@ -206,15 +211,27 @@ export function installConsoleForwarder(bridge, options = {}) {
         };
     }
 
-    if (captureWindowErrors && typeof window !== 'undefined') {
-        window.addEventListener('error', (e) => {
-            emitLogRecord('error', null, `[uncaught] ${e.error?.stack || e.message || String(e)}`, null);
-        });
-        window.addEventListener('unhandledrejection', (e) => {
-            const r = e.reason;
-            emitLogRecord('error', null, `[unhandled-rejection] ${r?.stack || r?.message || String(r)}`, null);
-        });
+    const onError = (e) => {
+        emitLogRecord('error', null, `[uncaught] ${e.error?.stack || e.message || String(e)}`, null);
+    };
+    const onRejection = (e) => {
+        const r = e.reason;
+        emitLogRecord('error', null, `[unhandled-rejection] ${r?.stack || r?.message || String(r)}`, null);
+    };
+    const listening = captureWindowErrors && typeof window !== 'undefined';
+    if (listening) {
+        window.addEventListener('error', onError);
+        window.addEventListener('unhandledrejection', onRejection);
     }
 
-    return true;
+    return () => {
+        for (const [level, fn] of originals) console[level] = fn;
+        if (listening) {
+            window.removeEventListener('error', onError);
+            window.removeEventListener('unhandledrejection', onRejection);
+        }
+        setLogRecordSink(null);
+        _bridge = null;
+        _installed = false;
+    };
 }

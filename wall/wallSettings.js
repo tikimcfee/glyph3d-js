@@ -1,6 +1,7 @@
 import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { FONT_FAMILY_IDS } from '@glyph3d/core/fonts/families.js';
 import { parseSizes } from './contextMenu.js';
+import { parseZoomKeys } from './chord.js';
 
 /**
  * wallSettings — what each wall knob IS: its section, its label, its type and range, and a sentence
@@ -134,6 +135,15 @@ export const KNOBS = Object.freeze({
     optionAsAlt: {
         section: 'input', label: 'Option as Alt', type: 'enum', options: OPTION_AS_ALT,
         description: "Whether ⌥/Alt is Alt for the terminal: auto sends Option's character when it made one (å), else Alt; true always Alt (Option+A is ESC a); false types characters. Takes the next key.",
+    },
+    zoomKeys: {
+        section: 'input', label: 'Zoom keys', type: 'text',
+        parse: (s) => parseZoomKeys(s).join(' '),
+        description: "Held with the wheel, any of these zooms the canvas instead of panning it: ctrl, alt, meta, shift, separated by spaces. Keep ctrl for a trackpad pinch (it arrives as Ctrl+wheel); alt is Option and meta is ⌘ from a Mac.",
+    },
+    traceInput: {
+        section: 'input', label: 'Trace input', type: 'bool',
+        description: "Log every wheel, key and pointer press this page receives (its deltas, key, code, modifiers and the element it landed on) to the relay's log store, as [input] lines — to see what a remote desktop or a trackpad actually sends.",
     },
     menuHint: {
         section: 'menu', label: 'Second-click hint', type: 'bool',
