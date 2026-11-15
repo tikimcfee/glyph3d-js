@@ -27,7 +27,13 @@
  *     (stems thicker), in the same colour (boldIsBright is off);
  *   - a base letter and its combining mark share the cell: a run of x + U+0301 shows the x (as
  *     much ink over the x's own rows as a plain x run) AND the mark over it; and e + U+0301 draws
- *     as the precomposed é does.
+ *     as the precomposed é does;
+ *   - the outer columns stay inside the panel: █ in the first and the LAST column (rows below the
+ *     cases), read at the panel's left and right edges — the █'s ink reaches its cell's outer edge,
+ *     the padding between that edge and the panel's border holds the panel's colour and no ink, and
+ *     the border beside the █ rows reads as it does beside blank rows (no ink drawn over it).
+ *     The cell rects come from the grid's metrics (a slot's position is its cell's LEFT edge), the
+ *     panel's from its getLocalBounds().
  * Then the terminal is resized, which makes termd REPAINT the screen from its own emulator's cells
  * rather than the program's bytes: every attribute read before (underline styles and colour,
  * strike, dim, inverse) reads the same after, and the combining-mark cells are still clusters.
@@ -60,7 +66,11 @@ const info = (msg) => console.log(`info  ${msg}`);
 const rgb = (c) => `rgb(${c.join(',')})`;
 const sum = (c) => c[0] + c[1] + c[2];
 
-const COLS = 60, ROWS = 20, RUN = 8, LINE = 12;
+const COLS = 60, ROWS = 22, RUN = 8, LINE = 12;
+/** The outer-column case: █ in the first and the last column of these rows; the two below stay blank. */
+const EDGE_ROWS = [18, 19], BLANK_ROWS = [20, 21];
+/** The camera centres on the middle of this many rows: the pixel phases the cases' thresholds hold at. */
+const CENTRE_ROWS = 20;
 const FILL = [40, 90, 160], INV_FG = [200, 100, 50], INV_BG = [10, 20, 30], CURLY = [255, 80, 0];
 const sgr = (codes, text) => `\\033[${codes}m${text}\\033[0m`;
 /** The cases, one labelled line each (the label finds its row; the cells start two past it). */
@@ -82,8 +92,11 @@ const LINES = [
     `MARKX ${'x\u0301'.repeat(RUN)}`,
     `PRECO ${'\u00e9'.repeat(RUN)}`,
     `DECOM ${'e\u0301'.repeat(RUN)}`,
-    'CELLS-DONE',
 ];
+// The outer columns' █, placed by CUP (no wrap: the last column's █ leaves the cursor pending, the
+// next CUP clears it), then back to the last line's own row for CELLS-DONE.
+LINES.push(`${EDGE_ROWS.map((r) => `\\033[${r + 1};1H█\\033[${r + 1};${COLS}H█`).join('')}\\033[${LINES.length + 1};1HCELLS-DONE`);
+if (EDGE_ROWS[0] < LINES.length || BLANK_ROWS[BLANK_ROWS.length - 1] >= ROWS) throw new Error('the outer-column rows must lie below the cases, on the screen');
 const C0 = 6;   // the column the cells start at
 
 const relay = await privateRelay({ port: RELAY, ns: 'glyph-cells-check' });
@@ -194,14 +207,17 @@ try {
     const ink = [Math.round(RESET_FG.r * 255), Math.round(RESET_FG.g * 255), Math.round(RESET_FG.b * 255)];
     const near = (a, b, tol) => Math.max(...a.map((v, j) => Math.abs(v - b[j]))) <= tol;
 
-    /** The camera: this line height, centred on the cases, the grid's origin off the pixel grid. */
-    const look = async (linePx) => {
-        await W(([i, linePx, cols, rows]) => {
+    /**
+     * The camera: this line height, centred on the cases (or on column `atCol`), the grid's origin
+     * off the pixel grid.
+     */
+    const look = async (linePx, atCol = COLS / 2) => {
+        await W(([i, linePx, atCol, rows]) => {
             const w = window.__wall, g = w.terminal(i), v = w.viewport, st = g.cellStride;
             v.camera.zoom = linePx / st.y;
             v.camera.updateProjectionMatrix();
-            v.moveTo(g.position.x + (cols / 2) * st.x + 0.37 / v.camera.zoom, g.position.y - (rows / 2) * st.y + 0.29 / v.camera.zoom);
-        }, [id, linePx, COLS, ROWS]);
+            v.moveTo(g.position.x + atCol * st.x + 0.37 / v.camera.zoom, g.position.y - (rows / 2) * st.y + 0.29 / v.camera.zoom);
+        }, [id, linePx, atCol, CENTRE_ROWS]);
         await until(() => !window.__wall.viewport.moving);
         await drawn();
     };
@@ -254,6 +270,62 @@ try {
         const eTop = extent(baseX)[0];
         ok(total(preco) > 0 && Math.abs(total(decom) - total(preco)) <= 0.03 * total(preco) && Math.abs(dTop - pTop) <= 1 && Math.abs(dFoot - pFoot) <= 1 && pTop < eTop - 1,
             `${at}: e + U+0301 draws as the precomposed é — ${total(decom).toFixed(0)} px of ink over pixel rows ${dTop}–${dFoot}, the é run ${total(preco).toFixed(0)} px over ${pTop}–${pFoot} (its accent reaches above the x-height, row ${eTop})`);
+    };
+
+    /**
+     * The outer columns, at this line height: per side, the camera centred on that edge; the rects
+     * (page CSS px) of the █ cells' outer strip, the padding (the cells' outer edge to the panel's
+     * border), and the border beside the █ rows and beside the blank rows. The cells' span is the
+     * metrics' (a slot's position is its cell's LEFT edge: column c spans [c, c + 1) × stride); the
+     * panel's is getLocalBounds(); the border's width is the panel material's, for its flags. Read
+     * unfocused: the focused border is wider, and at the small size it covers most of the padding.
+     */
+    const edges = async (linePx) => {
+        const focused = await W(() => { const w = window.__wall, f = w.focusedId; w.focus(null); return f; });
+        for (const side of ['left', 'right']) {
+            await look(linePx, side === 'left' ? 0 : COLS);
+            const geo = await W(([i, side, cols, edgeRows, blankRows]) => {
+                const w = window.__wall, g = w.terminal(i), m = g._metrics, v = w.viewport, cr = v.canvas.getBoundingClientRect();
+                const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing, p = g.position, s = g.scale, zoom = v.camera.zoom;
+                const lb = g.getLocalBounds(), mat = g._background.material, flags = g._panel.getBorderFlags();
+                // panelMaterial: the band is w = uBorderWidth × (2.6 captured | 1.6 focused / input | 1)
+                // screen px from the edge, smoothed over ±0.5 px — judged at a pixel's centre, so a
+                // whole pixel more than w from the edge is the fill alone.
+                const scale = (flags & 16) ? 2.6 : (flags & (4 | 8)) ? 1.6 : 1;
+                const borderPx = mat.uniforms.uBorderWidth.value * scale;
+                const X = (lx) => cr.left + v.toScreenBox({ minX: p.x + lx * s.x, maxX: p.x + lx * s.x, minY: 0, maxY: 0 }).left;
+                const Y = (ly) => cr.top + v.toScreenBox({ minX: 0, maxX: 0, minY: p.y + ly * s.y, maxY: p.y + ly * s.y }).top;
+                // Row r spans y ∈ [sy/2 − (r + 1)·sy, sy/2 − r·sy] (a slot's y is its row's centre).
+                const rowsY = (rs, a, b) => ({ t: Y(sy / 2 - (rs[0] + a) * sy), b: Y(sy / 2 - (rs[rs.length - 1] + b) * sy) });
+                const cellEdge = X(side === 'left' ? 0 : cols * sx), panelEdge = X(side === 'left' ? lb.min.x : lb.max.x);
+                const strip = Math.min(2, 0.25 * sx * s.x * zoom);   // px of the cell's outer strip
+                const dir = side === 'left' ? -1 : 1;                 // outward
+                const span = (a, b) => ({ l: Math.min(a, b), r: Math.max(a, b) });
+                const ink = rowsY(edgeRows, 0.2, 0.8), blank = rowsY(blankRows, 0.2, 0.8);
+                const pad = span(cellEdge, panelEdge - dir * borderPx);
+                // The border and a pixel past the panel (a 1.5 px band need not hold a whole pixel).
+                const border = span(panelEdge - dir * borderPx, panelEdge + dir);
+                const h = typeof g._bgColor === 'string' ? parseInt(g._bgColor.replace('#', ''), 16) : g._bgColor;
+                return {
+                    panel: [(h >> 16) & 255, (h >> 8) & 255, h & 255], cellPx: sx * s.x * zoom, padPx: dir * (panelEdge - cellEdge), borderPx,
+                    // the padding as the panel draws it: inverted (r < l) when the cells cross the border
+                    padSigned: dir * (panelEdge - dir * borderPx - cellEdge),
+                    cellStrip: { ...span(cellEdge - dir * strip, cellEdge), ...ink },
+                    pad: { ...pad, ...ink },
+                    borderInk: { ...border, ...ink },
+                    borderBlank: { ...border, ...blank },
+                };
+            }, [id, side, COLS, EDGE_ROWS, BLANK_ROWS]);
+            const at = `lines ${linePx} px, ${side} edge (cell ${geo.cellPx.toFixed(2)} px; the panel's edge ${geo.padPx.toFixed(2)} px past the cells', its border ${geo.borderPx.toFixed(1)} px)`;
+            const [strip, pad, bInk, bBlank] = await read([geo.cellStrip, geo.padSigned > 0 ? geo.pad : null, geo.borderInk, geo.borderBlank]);
+            ok(strip.n > 0 && sum(strip.dark) >= sum(ink) - 12,
+                `${at}: the █'s ink reaches its cell's ${side} edge — the darkest of the ${strip.n} px in the cell's outer strip is ${rgb(strip.dark)}, the ink ${rgb(ink)}`);
+            ok(geo.padSigned > 0 && !!pad && pad.n > 0 && near(pad.dark, geo.panel, 3) && near(pad.bright, geo.panel, 3),
+                `${at}: the padding between the █ cells and the panel's border is the panel's own colour, no ink — ${pad?.n ? `${pad.n} px from ${rgb(pad.dark)} to ${rgb(pad.bright)}` : geo.padSigned > 0 ? `not one whole pixel in its ${geo.padSigned.toFixed(2)} px` : `none: the cells run ${(-geo.padSigned).toFixed(2)} px past the border's inner edge`}, the panel ${rgb(geo.panel)}`);
+            ok(bInk.n > 0 && bBlank.n > 0 && near(bInk.med, bBlank.med, 6) && near(bInk.bright, bBlank.bright, 6),
+                `${at}: the border beside the █ rows reads as beside blank rows (no ink over it) — ${rgb(bInk.med)} / brightest ${rgb(bInk.bright)}, beside blank rows ${rgb(bBlank.med)} / ${rgb(bBlank.bright)}`);
+        }
+        await W((f) => { window.__wall.focus(f); }, focused);
     };
 
     for (const linePx of [17.37, 41.83]) {
@@ -319,6 +391,7 @@ try {
             `${at}: a wide emoji on a cell background is whole — over the next cell (its right half) the median is ${rgb(right.med)} and the pixel farthest from the fill ${rgb(right.bright)}; the fill beside it reads ${rgb(fill.med)} for ${rgb(FILL)}`);
 
         await facesAndClusters(at);
+        await edges(linePx);
     }
 
     // A repaint keeps the styles: a resize makes termd repaint from its own emulator's cells (the
