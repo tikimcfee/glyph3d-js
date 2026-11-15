@@ -56,3 +56,9 @@ pub const HOLD: [u64; 2] = [2, 2];
 /// Bytes per terminal in the `seq_marks` page: one little-endian `u64`, the terminal's `seq`
 /// after the brain's latest read.
 pub const MARK_BYTES: usize = 8;
+
+/// Unit tests that fork and ones that seal a memfd take turns: a child forked on another test's
+/// thread holds a copy of a writable mapping until it execs, and sealing then fails `EBUSY`. The
+/// holder is one thread, so it never meets this.
+#[cfg(test)]
+pub(crate) static FORKS: std::sync::Mutex<()> = std::sync::Mutex::new(());

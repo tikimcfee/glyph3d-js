@@ -235,6 +235,7 @@ mod tests {
 
     /// Runs `script` under `/bin/sh` on a PTY and returns what it printed.
     fn run(script: &str) -> String {
+        let _turn = crate::FORKS.lock().unwrap_or_else(|e| e.into_inner());
         let argv = ["sh".to_owned(), "-c".to_owned(), script.to_owned()];
         let plan = Plan::new("/bin/sh", &argv, &[("PATH".into(), "/usr/bin:/bin".into())], None, 80, 24).unwrap();
         let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };

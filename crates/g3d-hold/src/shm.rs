@@ -119,6 +119,7 @@ mod tests {
     /// page multiple on macOS.
     #[test]
     fn an_object_reads_back_what_was_written() {
+        let _turn = crate::FORKS.lock().unwrap_or_else(|e| e.into_inner());
         for len in [1usize, 100, 4096, 70_001] {
             let bytes: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
             let fd = super::create_from("test", &bytes).unwrap();
