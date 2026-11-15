@@ -38,8 +38,8 @@ if [ "${1:-}" = wall ]; then PROFILE=wall; shift; fi
 case "$PROFILE" in
   # ide: the r3f IDE (panel system + HUD overlay + command bar) beside agent sessions (gomuxai).
   ide)  APP_DIR="$ROOT/app";  DEF_VITE=5173; DEF_RELAY=8080; DEF_NS=default; RELAY_FLAGS=() ;;
-  # wall: terminals only — its relay follows no agent sessions.
-  wall) APP_DIR="$ROOT/wall"; DEF_VITE=5180; DEF_RELAY=8180; DEF_NS=wall;    RELAY_FLAGS=(--no-gomuxai) ;;
+  # wall: the 2D terminal canvas beside agent sessions (gomuxai).
+  wall) APP_DIR="$ROOT/wall"; DEF_VITE=5180; DEF_RELAY=8180; DEF_NS=wall;    RELAY_FLAGS=() ;;
 esac
 VITE_PORT="${VITE_PORT:-$DEF_VITE}"
 RELAY_PORT="${RELAY_PORT:-$DEF_RELAY}"

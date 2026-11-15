@@ -243,6 +243,23 @@ func runTerminal(cfg terminalConfig) {
 		send("view", map[string]any{"handle": s.handle, "delta": lines})
 	}
 
+	// scrollTo moves this adapter's primary-screen view to an exact offset back from live (0 = live)
+	// using termd's `view` op (`live: true`, then `delta: offset` when offset > 0). Alternate-screen
+	// apps have no primary scrollback, so an absolute jump does nothing there.
+	scrollTo := func(offset int) {
+		modes.Lock()
+		alt := modes.m.Alt
+		modes.Unlock()
+		if alt {
+			return
+		}
+		s := sess.Load()
+		send("view", map[string]any{"handle": s.handle, "live": true})
+		if offset > 0 {
+			send("view", map[string]any{"handle": s.handle, "delta": offset})
+		}
+	}
+
 	onResize := func(c, r int) {
 		if c <= 0 || r <= 0 {
 			return
@@ -295,6 +312,7 @@ func runTerminal(cfg terminalConfig) {
 				},
 				resize:   onResize,
 				scroll:   scroll,
+				scrollTo: scrollTo,
 				refresh:  repaint,
 				kill:     requestKill,
 				recreate: recreate,
@@ -582,6 +600,7 @@ type inboundHandlers struct {
 	mouse    func(termdMouse)
 	resize   func(cols, rows int)
 	scroll   func(lines int, at *cellPoint)
+	scrollTo func(offset int)
 	refresh  func()
 	kill     func()
 	recreate func()
@@ -658,6 +677,8 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			Cols       int    `json:"cols"`
 			Rows       int    `json:"rows"`
 			Lines      int    `json:"lines"`
+			Live       bool   `json:"live"`
+			Offset     *int   `json:"offset"`
 			// A pointer event's cell (terminal.mouse; terminal.scroll's pointer), its button.
 			Col    *float64 `json:"col"`
 			Row    *float64 `json:"row"`
@@ -688,6 +709,16 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 				h.mouse(termdMouse{Action: ev.Data.Action, Button: ev.Data.Button, Col: *ev.Data.Col, Row: *ev.Data.Row, Mods: ev.Data.Mods})
 			}
 		case "terminal.scroll":
+			if ev.Data.Live || ev.Data.Offset != nil {
+				off := 0
+				if ev.Data.Offset != nil && *ev.Data.Offset > 0 {
+					off = *ev.Data.Offset
+				}
+				if h.scrollTo != nil {
+					h.scrollTo(off)
+				}
+				break
+			}
 			var at *cellPoint
 			if ev.Data.Col != nil && ev.Data.Row != nil {
 				at = &cellPoint{Col: *ev.Data.Col, Row: *ev.Data.Row}

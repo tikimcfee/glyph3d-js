@@ -475,31 +475,49 @@ export default function registerTerminalCommands(router) {
     }, { description: "A terminal's text selection: what is selected (its text and cells), or select cells, a word or a line, or clear it", usage: '<id> [clear | cells <col0> <row0> <col1> <row1> [block] | word <col> <row> | line <row>]' });
 
     // ------------------------------------------------------------------
-    // terminal.scroll <id> <lines> [col row]   (+ = back into history, − = forward to live)
+    // terminal.scroll <id> <lines | live | to <offset>> [col row]
+    //   (+ = back into history, − = forward to live; `live` returns to offset 0;
+    //    `to <offset>` jumps to `offset` rows back from live via termd `view`)
     // ------------------------------------------------------------------
     router.register('terminal.scroll', (args, ctx) => {
-        const usage = 'ERR: usage: terminal.scroll <id> <lines> [col row] (+back/-forward; the pointer\'s cell, from 0)';
-        if (args.length !== 2 && args.length !== 4) return { text: usage, data: null };
+        const usage = 'ERR: usage: terminal.scroll <id> <lines | live | to <offset>> [col row]';
         const id = args[0];
+        if (!id || args.length < 2) return { text: usage, data: null };
+        const info = ctx.registry.get(id);
+        if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
+        const owner = info?.meta?.owner;
+
+        if (args[1] === 'live' && args.length === 2) {
+            if (owner && ctx.wsbridge?.connected) {
+                ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, live: true } });
+            }
+            return { text: `OK: terminal '${id}' scroll live`, data: { id, live: true, offset: 0 } };
+        }
+        if (args[1] === 'to' && args.length === 3) {
+            const offset = Number(args[2]);
+            if (!Number.isInteger(offset) || offset < 0) return { text: 'ERR: offset must be a whole number ≥ 0', data: null };
+            if (owner && ctx.wsbridge?.connected) {
+                ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, live: true, offset } });
+            }
+            return { text: `OK: terminal '${id}' scroll to ${offset}`, data: { id, live: true, offset } };
+        }
+
+        if (args.length !== 2 && args.length !== 4) return { text: usage, data: null };
         const lines = parseInt(args[1], 10);
         if (isNaN(lines)) return { text: 'ERR: lines must be an integer', data: null };
         const at = args.length === 4 ? { col: Number(args[2]), row: Number(args[3]) } : null;
         if (at && !(Number.isFinite(at.col) && Number.isFinite(at.row))) return { text: usage, data: null };
-
-        const info = ctx.registry.get(id);
-        if (!info) return { text: `ERR: no terminal '${id}'`, data: null };
 
         // Scrollback is termd's: the adapter moves its view (termd `view`) and the viewed rows
         // stream back as a repaint through the byte lane — the grid/emulator just mirror it (no
         // client-side scroll state). An alternate-screen app gets the wheel itself, as termd
         // `mouse` wheel notches at the pointer's cell (else the screen's centre). A pure control
         // push, like terminal.resize.
-        const owner = info?.meta?.owner;
         if (owner && ctx.wsbridge?.connected) {
             ctx.wsbridge.push(owner, { event: 'terminal.scroll', data: { terminalId: id, lines, ...at } });
         }
         return { text: `OK: terminal '${id}' scroll ${lines}`, data: { id, lines, ...at } };
-    }, { description: "Scroll a terminal's termd scrollback (+ back / - forward); on the alternate screen the wheel goes to the program, at the pointer's cell", usage: '<id> <lines> [col row]' });
+    }, { description: "Scroll a terminal's termd scrollback (+ back / - forward, `live`, or `to <offset>`); on the alternate screen the wheel goes to the program, at the pointer's cell", usage: '<id> <lines | live | to <offset>> [col row]' });
 
     // ------------------------------------------------------------------
     // terminal.mouse <id> <press|release|move> <button> <col> <row> [mods…]

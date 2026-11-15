@@ -114,6 +114,9 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 				got = append(got, fmt.Sprintf("scroll:%d@%g,%g", n, at.Col, at.Row))
 			}
 		},
+		scrollTo: func(off int) {
+			got = append(got, fmt.Sprintf("scrollTo:%d", off))
+		},
 		refresh:  func() { got = append(got, "refresh") },
 		kill:     func() { got = append(got, "kill") },
 		recreate: func() { got = append(got, "recreate") },
@@ -130,10 +133,13 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 	handleInbound([]byte(`{"event":"terminal.mouse","data":{"terminalId":"t2","action":"press","button":"left","col":0,"row":0}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t1","lines":-2}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t1","lines":3,"col":10.5,"row":4}}`), "t1", h)
+	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t1","live":true}}`), "t1", h)
+	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t1","live":true,"offset":42}}`), "t1", h)
+	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t2","live":true,"offset":10}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.refresh","data":{"terminalId":"t1"}}`), "t1", h)
 	handleInbound([]byte(`ERR: no terminal 't1'`), "t1", h)
 	want := []string{"bytes:hi", `key:Enter/Enter/[Shift]/""/press`, `key:KeyA/a/[Control]/"a"/`, "paste:one\ntwo",
-		"mouse:press/left/3.5,0/[Control]", "mouse:move/none/1,2/[]", "scroll:-2", "scroll:3@10.5,4", "refresh", "recreate"}
+		"mouse:press/left/3.5,0/[Control]", "mouse:move/none/1,2/[]", "scroll:-2", "scroll:3@10.5,4", "scrollTo:0", "scrollTo:42", "refresh", "recreate"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

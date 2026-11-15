@@ -181,6 +181,8 @@ export default class TerminalGrid extends FramedGlyphField {
         // every write goes through _writeSpans / _writeSeqRows / _pushAll, which upload what
         // they wrote.
         this._ringStart = 0;
+        /** Monotonic count of primary-screen rows observed scrolling off the top of this grid. */
+        this.scrolledRows = 0;
         this._scrollBase = false;  // the live rows hold the last screen applied (a scroll may be diffed against them)
         /** @type {Uint32Array} */ this._cp = null;
         /** @type {Uint32Array} */ this._fg = null;
@@ -442,8 +444,15 @@ export default class TerminalGrid extends FramedGlyphField {
             this._bgRows--;
         }
         this._ringStart = (this._ringStart + k) % P;
+        this.scrolledRows += k;
         this._indexLiveRows();
     }
+
+    /** The live cursor's viewport row (0 = top row). */
+    get cursorRow() { return this._cursor.y; }
+
+    /** Whether the current frame is on the alternate screen (no primary scrollback). */
+    get altScreen() { return this._altActive; }
 
     /** @private Each live row's first physical cell, for the ring's current head. */
     _indexLiveRows() {
