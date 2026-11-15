@@ -44,30 +44,18 @@ build: prep termd
 
 # --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
 # The relay finds g3d-termd next to its own executable. Release builds have no test hooks (the
-# `test-hooks` feature is the tests' alone). libghostty-vt builds from vendor/, which
-# tools/termd-vendor.sh fills once. Linux and macOS hosts build their own platform natively;
-# `make linux-arm64` cross-builds with cargo-zigbuild when it is installed. darwin-amd64 needs an
-# Intel Mac or rustup's x86_64-apple-darwin target (docs/termd/MACOS.md).
+# `test-hooks` feature is the tests' alone). libghostty-vt builds from vendor/ (gitignored), which
+# tools/termd-vendor.sh fills before every build: the first fetches and verifies libghostty-vt's
+# release tarballs and Zig into the per-user cache, the rest return at once. Linux and macOS hosts
+# build their own platform natively; `make linux-arm64` cross-builds with cargo-zigbuild when it is
+# installed. darwin-amd64 needs an Intel Mac or rustup's x86_64-apple-darwin target
+# (docs/termd/MACOS.md).
 CARGO_OUT := $(or $(CARGO_TARGET_DIR),target)
 HOST_OS   := $(shell go env GOOS)
 
-define TERMD_VENDOR_MISSING
-g3d-termd: vendor/ has no libghostty-vt source or Zig.
-
-  libghostty-vt (the terminal emulator g3d-termd links) builds from the verified
-  libghostty-vt 1.0.1 release tarballs and Zig 0.17, never a build-time git fetch.
-  Fetch, verify (minisign + pinned SHA-256) and unpack them once:
-
-      tools/termd-vendor.sh          # into vendor/ (gitignored)
-      tools/termd-vendor.sh DIR      # into DIR, with vendor/ a link to it
-
-  It needs curl and minisign (or rsign). See docs/termd/DESIGN.md, "Build and vendoring".
-endef
-export TERMD_VENDOR_MISSING
-
 termd:
 ifneq ($(filter linux darwin,$(HOST_OS)),)
-	@{ test -e vendor/ghostty/build.zig && test -x vendor/zig/zig; } || { echo "$$TERMD_VENDOR_MISSING" >&2; exit 1; }
+	@tools/termd-vendor.sh
 	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
 	# Copy, then rename over: a running daemon holds ./g3d-termd ("text file busy" for a cp onto
 	# it), and a rename leaves its inode running while the next start (or `g3d upgrade`) gets the new.
@@ -182,6 +170,7 @@ linux-arm64: prep
 ifeq ($(HOST_OS),linux)
 	@# g3d-termd + g3d for arm64: a static musl build through cargo-zigbuild and the vendored Zig.
 	@if command -v cargo-zigbuild >/dev/null 2>&1; then \
+		tools/termd-vendor.sh && \
 		PATH="$(CURDIR)/vendor/zig:$$PATH" CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} \
 			cargo zigbuild --release -p g3d-termd -p g3d --target aarch64-unknown-linux-musl && \
 		cp $(CARGO_OUT)/aarch64-unknown-linux-musl/release/g3d-termd $(OUT_DIR)/g3d-termd-linux-arm64 && \

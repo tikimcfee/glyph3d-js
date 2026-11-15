@@ -1,0 +1,13 @@
+# The minisign check tools/termd-vendor.sh runs on every download it unpacks into vendor/
+# (libghostty-vt's release tarballs and Zig). Rust is already what termd builds with, so the
+# check needs nothing installed; minisign-verify (no dependencies) is pinned by Cargo.lock.
+[package]
+name = "g3d-vendor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+minisign-verify = "0.3.0"

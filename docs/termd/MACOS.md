@@ -8,10 +8,13 @@ in DESIGN.md, "Linux and macOS"; this file has the why and the measurements behi
 
 ## Building
 
-- `tools/termd-vendor.sh DIR` fetches the macOS Zig (`zig-aarch64-macos-0.17.0`) and the same
-  libghostty tarballs. `minisign` comes from Homebrew. Every download is checked against its
-  minisign signature **and** a pinned SHA-256 (Zig's are pinned per host, from ziglang.org's
-  `index.json`). The script uses `sha256sum`, else `shasum -a 256`, whichever is on `PATH`.
+- `make termd` fills `vendor/` itself (`tools/termd-vendor.sh`): the macOS Zig
+  (`zig-aarch64-macos-0.17.0`) and the same libghostty tarballs, downloaded once per user into
+  `~/Library/Caches/glyph3d/termd-vendor/` (`$XDG_CACHE_HOME/glyph3d/termd-vendor/` when that is
+  set). Every file is checked on every unpack against a pinned SHA-256 (Zig's are pinned per
+  host, from ziglang.org's `index.json`) **and** its minisign signature, by the workspace's own
+  `crates/g3d-vendor`: nothing to install from Homebrew. The script uses `sha256sum`, else
+  `shasum -a 256`, whichever is on `PATH`.
 - `make termd` (and `make build`) builds `g3d-termd` and `g3d` natively. A cold build takes about
   2 minutes, mostly libghostty's Zig build. `g3d-termd` links only libSystem and libiconv.
 - `make darwin-arm64` puts both in `dist/` beside the CLI, and `make release` ships them when they

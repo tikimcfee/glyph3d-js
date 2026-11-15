@@ -345,13 +345,14 @@ binary was checked to hold none of the hooks' strings.
 **`make`.** `make build` (and `make termd`) builds `g3d-termd` and `g3d` and puts them beside
 `glyph3d-cli`; `make linux-amd64` also puts them in `dist/`; `make linux-arm64` cross-builds them
 with cargo-zigbuild when installed (it isn't on the build machine today, so the 2026-11-12 arm64
-proof under qemu stands as the last one). A missing `vendor/` stops the build with what the vendor
-step is and the command (`tools/termd-vendor.sh [DIR]`). `make release` ships the linux-amd64 pair
+proof under qemu stands as the last one). Each fills `vendor/` first (`tools/termd-vendor.sh`,
+from the per-user download cache; "Build and vendoring"). `make release` ships the linux-amd64 pair
 and requires it, and the linux-arm64 and darwin pairs when they were built. `make darwin-arm64` and
 `make darwin-amd64` build their pair natively on a Mac of that architecture (arm64 proven on the M2);
-no other host builds them. A bare `cargo build` with no `vendor/`
-still fails inside libghostty-vt-sys's build script ("GHOSTTY_SOURCE_DIR does not contain
-build.zig"), whose message we don't control; `.cargo/config.toml` says where that comes from.
+no other host builds them. A bare `cargo build` before any `make termd` (no `vendor/` yet)
+fails inside libghostty-vt-sys's build script ("GHOSTTY_SOURCE_DIR does not contain
+build.zig"), whose message we don't control; `.cargo/config.toml` says to run `make termd` (or
+`tools/termd-vendor.sh`) once.
 
 **Gates** (all on private sockets and a scratch `--config`, `--env-source daemon` unless the test is
 about the source): `src/env.rs`'s unit tests (the composition: each layer winning over the one
@@ -1855,15 +1856,40 @@ ours.
   `vt-1.0.1`) until a 1.0-based crates.io release exists.
 - The Ghostty source and its dependencies come from the **release tarballs**
   (`libghostty-vt-1.0.1.tar.gz` and `-deps.tar.gz` from release.files.ghostty.org),
-  never a git fetch at build time. `tools/termd-vendor.sh [DIR]` downloads them,
-  verifies each against its minisign signature (Ghostty's published key) and a pinned
-  SHA-256, and unpacks them into a gitignored `vendor/` directory (or into `DIR`, with
-  `vendor/` a link to it, to keep toolchains out of the tree). `.cargo/config.toml`
-  points `GHOSTTY_SOURCE_DIR` and `GHOSTTY_ZIG_SYSTEM_DIR` there with
-  `relative = true`, so no tracked file holds an absolute path.
-- Zig 0.17.x is required (libghostty's `minimum_zig_version` is 0.17.0; any 0.17 patch
-  works, 0.16 and 0.18 don't). The same script fetches and verifies it
-  (ziglang.org minisign key), or uses `ZIG` if set.
+  never a git fetch at build time. Zig 0.17.x is required (libghostty's
+  `minimum_zig_version` is 0.17.0; any 0.17 patch works, 0.16 and 0.18 don't); the host's
+  (x86_64/aarch64 Linux, arm64/x86_64 macOS) comes from ziglang.org. `.cargo/config.toml`
+  points `GHOSTTY_SOURCE_DIR`, `GHOSTTY_ZIG_SYSTEM_DIR` and `ZIG` at `vendor/` with
+  `relative = true`, so no tracked file holds an absolute path (a `ZIG` in the environment
+  wins).
+- **`git clone && make` needs no setup step.** `make termd` runs `tools/termd-vendor.sh`
+  before every build:
+  - `vendor/` (gitignored) is the checkout's own: real directories `ghostty/`,
+    `ghostty-deps/`, `zig/`, and `.pins` (the pinned versions and SHA-256s it was unpacked
+    from, written last). When `.pins` matches the script's pins the script returns at once,
+    needing no network; a changed pin unpacks `vendor/` anew. A `vendor/` that is a symlink
+    (the old `termd-vendor.sh DIR` layout) stops it, saying to remove the link.
+  - The downloads live once per user, in `$XDG_CACHE_HOME/glyph3d/termd-vendor/` (unset:
+    `~/Library/Caches` on macOS, `~/.cache` elsewhere), under `libghostty-vt-<version>/` and
+    `zig-<version>/` (about 65 MB for one host). A new checkout or worktree fills from it with
+    no download (about 2 s); the network is needed once per user and pin (about 25 s).
+  - **Every file is checked each time it is unpacked**, from the cache or fresh: its pinned
+    SHA-256 (Zig's from ziglang.org's `index.json`), then its minisign signature (Ghostty's
+    and Zig's published keys), whose trusted comment must name the file. A failure unpacks
+    nothing, removes the bad cached copy, and names the URL, the expected hash and how to
+    retry (run `make termd` again).
+  - **The verifier is ours, built with the workspace**: `crates/g3d-vendor`, on the
+    `minisign-verify` crate (no dependencies; pinned in `Cargo.lock`). Rust is what termd
+    builds with, so the signature check needs nothing installed and runs the same on every
+    host. The other options were worse: requiring `minisign`/`rsign2` is a setup step on every
+    machine (neither ships with Linux or macOS), and checking the SHA-256 pins alone when no
+    minisign is found makes the check depend on what happens to be installed. The pin is the
+    strong check for a known file (it is what the signature was checked against when it was
+    pinned); the signature makes a wrong pin, or a pin bump, fail on the publisher's key.
+  - Bumping a pin: set the version and SHA-256s in `tools/termd-vendor.sh` (Zig's from
+    `index.json`; the signatures are then checked on the first fetch). libghostty-vt-sys's
+    build script reruns on its env (the `vendor/` paths), not on the files under them, so a
+    libghostty-vt bump comes with libghostty-rs's rev (`Cargo.toml`), which rebuilds it.
 - Linux amd64/arm64: cargo-zigbuild with that Zig. Proven here for musl arm64 with a C
   dependency. S1 must still prove libghostty itself for arm64, with the hedge of
   building `libghostty-vt.a` with `zig build -Dtarget=…` and pointing the crate at it.
@@ -1873,7 +1899,7 @@ ours.
 - `libghostty-vt-sys` builds `ReleaseFast` in every profile (`[profile.dev.package]`): its
   Debug mode parses a flood slowly enough to stall the daemon's own tests.
 - **What `make` builds** (see also [as built](#environment-and-defaults-as-built-2026-11-12): the
-  missing-`vendor/` message, the test hooks compiled out, `make release`): `make termd` (part of `make build`) builds `g3d-termd`
+  vendor step, the test hooks compiled out, `make release`): `make termd` (part of `make build`) builds `g3d-termd`
   and `g3d` natively on a Linux host and copies them beside `glyph3d-cli`; on linux-amd64,
   `make linux-amd64` also puts them in `dist/`. `make linux-arm64` builds them as static
   `aarch64-unknown-linux-musl` binaries through cargo-zigbuild and the vendored Zig, when
@@ -1887,6 +1913,33 @@ ours.
      (required), and linux-arm64 and darwin when built;
   4. Windows: none (no PTYs; the relay has no terminals there).
 
+### Not built: prebuilt libghostty
+
+A build could need only Rust, no Zig and no libghostty source, by linking a pinned prebuilt
+`libghostty-vt.a` per platform. What it would take:
+
+- **The artifacts.** Per platform (x86_64/aarch64 Linux, arm64 macOS; x86_64 macOS if wanted):
+  `libghostty-vt.a` (about 22 MB on linux-amd64), its headers (`include/ghostty/vt.h` and
+  the rest) and its `.pc` file, built by `zig build` from the verified tarballs with exactly
+  the options the build script passes today (`ReleaseFast`, the `kitty-graphics` feature, the
+  baseline CPU: a native-CPU archive would not run on another machine). Built on each
+  platform (the M2 for macOS) or cross-built with Zig, and published as release assets.
+- **Trust.** Their SHA-256s pinned in `tools/termd-vendor.sh` beside today's, and a
+  signature from a key of ours (minisign; `crates/g3d-vendor` checks it). Zig builds are
+  close to reproducible, so anyone could rebuild one from the tarballs and compare.
+- **Linking it.** libghostty-vt-sys builds from source whenever `GHOSTTY_SOURCE_DIR` is set,
+  and otherwise, with its `pkg-config` feature, links an installed library found by
+  pkg-config. So: drop the `GHOSTTY_*`/`ZIG` lines from `.cargo/config.toml`, enable
+  `libghostty-vt-sys/pkg-config` (a direct dependency, for feature unification), and point
+  `PKG_CONFIG_PATH` at `vendor/prebuilt/lib/pkgconfig`. But pkg-config itself doesn't ship
+  with macOS, so that trades Zig for pkg-config; the clean form is a lib-dir override in
+  libghostty-vt-sys's build script (an env naming the archive and include dirs), upstream or
+  in a fork pinned by rev.
+- **Keeping it honest.** A pin bump means rebuilding and re-signing every platform's archive,
+  and the source build stays the way to make them, so `vendor/` with Zig remains for whoever
+  builds a release. The gain: a cold build skips libghostty's Zig build (most of today's
+  90 s) and the 55 MB Zig download per user.
+
 ## Workspace layout (D10)
 
 ```
@@ -1899,6 +1952,7 @@ crates/
   g3d-termd/            the binary: holder entry (g3d-hold), and the brain (owner
                         threads, libghostty, the socket server, status)
   g3d/                  the client binary: attach, watch, ls, new, kill, stop
+  g3d-vendor/           the minisign check tools/termd-vendor.sh runs on each download
 ```
 
 S2's relay joins as `crates/glyph3d-cli` and replaces `cli/`. S3's packer goes in

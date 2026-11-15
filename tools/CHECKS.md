@@ -986,7 +986,7 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   socket path the
   same from `env -i` as from a desktop environment. Cap the build: `CARGO_BUILD_JOBS=8` (`.cargo/config.toml`).
   ```
-  tools/termd-vendor.sh [DIR]   # once: libghostty-vt + Zig, minisign-verified, into vendor/
+  tools/termd-vendor.sh         # make termd runs it: libghostty-vt + Zig, verified, into vendor/
   cargo test --workspace --features g3d-termd/test-hooks
   ```
 - **`termd-relay-check.mjs`** (tier full) — the relay on termd with a simulated display: spawn +
