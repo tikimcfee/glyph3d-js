@@ -47,6 +47,10 @@ export function computeBackgroundLayout(bounds, padding, frameRows, lineHeight, 
 /**
  * Compute background layout for a fixed cell grid (cols x rows) with metrics.
  *
+ * A glyph slot's position is its cell's pen origin: the LEFT edge and the vertical CENTRE
+ * (glyphMaterial's `aPos`). So the cells span x ∈ [0, cols·strideX] and
+ * y ∈ [strideY/2 − rows·strideY, strideY/2], and the panel centres on that span.
+ *
  * @param {number} cols
  * @param {number} rows
  * @param {{charWidth:number,charHeight:number,letterSpacing:number,lineSpacing:number}} metrics
@@ -59,7 +63,7 @@ export function computeCellGridLayout(cols, rows, metrics, padding = 0.3, bgGap)
     const strideY = metrics.lineSpacing;
     const width = cols * strideX + padding * 2;
     const height = rows * strideY + padding * 2;
-    const cx = (cols * strideX) / 2 - metrics.charWidth / 2;
+    const cx = (cols * strideX) / 2;
     const cy = -(rows * strideY) / 2 + strideY / 2;
     const gap = bgGap ?? getBandDistance(LAYER_BAND.GRID_BACKGROUND);
     return { width, height, cx, cy, strideX, strideY, z: -gap };

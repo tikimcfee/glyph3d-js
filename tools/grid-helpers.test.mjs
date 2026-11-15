@@ -153,8 +153,13 @@ console.log('Testing Grid Helpers...');
     assert.strictEqual(cellLayout.strideY, 25);
     assert.strictEqual(cellLayout.width, 80 * 12 + 1.0);
     assert.strictEqual(cellLayout.height, 24 * 25 + 1.0);
-    assert.strictEqual(cellLayout.cx, (80 * 12) / 2 - 5);
-    assert.strictEqual(cellLayout.cy, -(24 * 25) / 2 + 12.5);
+    // A slot's position is its cell's pen origin (left edge, vertical centre: glyphMaterial's
+    // aPos), so the cells span x ∈ [0, 80·12] and y ∈ [12.5 − 24·25, 12.5], and the panel pads
+    // that span equally on every side: the last column's ink stays inside the right border.
+    assert.strictEqual(cellLayout.cx - cellLayout.width / 2, -0.5, 'panel left = cells left − padding');
+    assert.strictEqual(cellLayout.cx + cellLayout.width / 2, 80 * 12 + 0.5, 'panel right = cells right + padding');
+    assert.strictEqual(cellLayout.cy + cellLayout.height / 2, 12.5 + 0.5, 'panel top = cells top + padding');
+    assert.strictEqual(cellLayout.cy - cellLayout.height / 2, 12.5 - 24 * 25 - 0.5, 'panel bottom = cells bottom − padding');
     assert.strictEqual(cellLayout.z, -0.2);
 }
 
