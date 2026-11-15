@@ -192,10 +192,11 @@ export default class WallGroups {
         if (!gid || this.get(gid).layout !== 'tile') { this.wall.rememberPosition(id); return; }
         const g = this.get(gid);
         const shown = this.shownMembers(gid);
-        const { places } = this._tiling(g, shown);
+        const { places, metrics } = this._tiling(g, shown);
         const centres = shown.map((m, i) => {
             const r = this.wall.terminalRect(m);
-            return { x: places[i].x + (r.maxX - r.minX) / 2, y: places[i].y - (r.maxY - r.minY) / 2 };
+            const mx = metrics[i].shiftX, my = metrics[i].shiftY;
+            return { x: places[i].x + mx + (r.maxX - r.minX) / 2, y: places[i].y - my - (r.maxY - r.minY) / 2 };
         });
         const r = this.wall.terminalRect(id);
         const to = nearestPlace(centres, { x: (r.minX + r.maxX) / 2, y: (r.minY + r.maxY) / 2 });
@@ -218,8 +219,11 @@ export default class WallGroups {
         const shown = this.shownMembers(gid);
         if (!shown.length) return;
         const origin = g.origin ?? this._originOf(shown);
-        const { places } = this._tiling({ ...g, origin }, shown);
-        shown.forEach((id, i) => { this.wall.placeBody(id, places[i]); this.wall.rememberPosition(id); });
+        const { places, metrics } = this._tiling({ ...g, origin }, shown);
+        shown.forEach((id, i) => {
+            this.wall.placeBody(id, { x: places[i].x + metrics[i].shiftX, y: places[i].y - metrics[i].shiftY });
+            this.wall.rememberPosition(id);
+        });
         if (!g.origin) this._store.setGroup(gid, { ...g, origin });
     }
 
@@ -235,13 +239,14 @@ export default class WallGroups {
     // ── drawing + hitting ────────────────────────────────────────────────────
 
     /**
-     * A group's frame rect at `zoom`: its shown members' windows (title bars at that zoom), padded.
+     * A group's frame rect at `zoom`: its shown members' footprints (windows + open agent views at that zoom), padded.
      * Null when no member is shown.
      */
     frameRect(gid, zoom) {
         const shown = this.shownMembers(gid);
         if (!shown.length) return null;
-        return padRect(unionRect(shown.map((id) => this.wall.windowRect(id, zoom))), this.wall.config.groupPad);
+        const rectOf = (id) => (this.wall.footprintRect ? this.wall.footprintRect(id, zoom) : this.wall.windowRect(id, zoom));
+        return padRect(unionRect(shown.map(rectOf)), this.wall.config.groupPad);
     }
 
     /** The header's rect at `zoom` (above the frame), or null. */
@@ -303,17 +308,31 @@ export default class WallGroups {
         return g;
     }
 
-    /** Where a tiling of these terminals starts: their bodies' top-left, a bar's room above. */
+    /** Tile footprint metrics for `id` (includes an open Agent View when `wall.agents` is present). */
+    _metricsOf(id) {
+        if (this.wall.agents?.tileMetrics) return this.wall.agents.tileMetrics(id);
+        const r = this.wall.terminalRect(id);
+        return {
+            w: r.maxX - r.minX,
+            h: r.maxY - r.minY,
+            shiftX: 0,
+            shiftY: 0,
+            tileBox: { minX: r.minX, maxX: r.maxX, minY: r.minY, maxY: r.maxY + BAR_ROOM },
+        };
+    }
+
+    /** Where a tiling of these terminals starts: their footprints' top-left, a bar's room above. */
     _originOf(ids) {
-        const rects = ids.filter((id) => this.wall.terminal(id)).map((id) => this.wall.terminalRect(id));
+        const rects = ids.filter((id) => this.wall.terminal(id)).map((id) => this._metricsOf(id).tileBox);
         const u = unionRect(rects);
-        return u ? { x: u.minX, y: u.maxY + BAR_ROOM } : null;
+        return u ? { x: u.minX, y: u.maxY } : null;
     }
 
     /** The tiling of `shown` (member order) for group `g`. */
     _tiling(g, shown) {
-        const sizes = shown.map((id) => { const r = this.wall.terminalRect(id); return { w: r.maxX - r.minX, h: r.maxY - r.minY }; });
-        return tileLayout(sizes, { origin: g.origin ?? this._originOf(shown), columns: g.columns, gap: g.gap, barRoom: BAR_ROOM });
+        const metrics = shown.map((id) => this._metricsOf(id));
+        const { places, extent } = tileLayout(metrics, { origin: g.origin ?? this._originOf(shown), columns: g.columns, gap: g.gap, barRoom: BAR_ROOM });
+        return { places, extent, metrics };
     }
 
     /** Write a group, re-tile it and any group it took members from, and tell the wall. */

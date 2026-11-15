@@ -177,9 +177,11 @@ const snap = {
 };
 const byId = (items) => Object.fromEntries(items.filter((i) => i.kind !== 'sep').map((i) => [i.id, i]));
 
-test('a terminal\'s menu: copy (text selected in it), paste, frame, focus, rename, selection, group, size, redraw, Option as Alt, hide, held close', () => {
+test('a terminal\'s menu: copy (text selected in it), paste, frame, focus, rename, agent view, selection, group, size, redraw, Option as Alt, hide, held close', () => {
     const items = byId(menuItems({ kind: 'terminal', id: 't1', part: 'body' }, snap, WALL_CONFIG));
-    expect(Object.keys(items)).toEqual(['paste', 'frame', 'focus', 'rename', 'select', 'group', 'add-to', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
+    expect(Object.keys(items)).toEqual(['paste', 'frame', 'focus', 'rename', 'agent-view', 'select', 'group', 'add-to', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
+    expect(items['agent-view'].options.map((o) => [o.id, !!o.on])).toEqual([['off', true], ['right', false], ['left', false], ['top', false], ['bottom', false]]);
+    expect(items['agent-view'].options[1].verb).toEqual(['wall.agent.side', 't1', 'right']);
     expect(items.paste.verb).toEqual(['wall.paste', 't1']);
     const t2 = byId(menuItems({ kind: 'terminal', id: 't2', part: 'body' }, snap, WALL_CONFIG));
     expect(Object.keys(t2).slice(0, 2)).toEqual(['copy', 'paste']);

@@ -19,6 +19,7 @@ import WallMenu from './WallMenu.js';
 import SelectionOverlay from './SelectionOverlay.js';
 import WallPaper from './WallPaper.js';
 import WallFullscreen from './WallFullscreen.js';
+import WallAgentViews from './WallAgentViews.js';
 import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
@@ -175,6 +176,8 @@ export default class TerminalWall {
         registerTerminalCommands(this.router);
         /** termd's state as the relay pushes it (termd/status). */
         this.termd = new TermdStatus();
+        /** Per-terminal Agent Views: categorized gomuxai event streams attached alongside terminals. */
+        this.agents = new WallAgentViews(this);
         registerWallCommands(this.router, this);
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
@@ -203,6 +206,8 @@ export default class TerminalWall {
         });
         this.groups = new WallGroups(this, { atlas, scene });
         this.barButtons = new BarButtons(host, {
+            onAgent: (id) => this.run(['wall.agent', id, 'toggle']),
+            isAgentOpen: (id) => this.agents.isOpen(id),
             onHide: (id) => this.run(['wall.hide', id]),
             onClose: (id) => this.run(['wall.close', id]),
             holdMs: () => this.config.closeHoldMs,
@@ -229,6 +234,7 @@ export default class TerminalWall {
         this._offTrace = installInputTrace(this);
         routeTerminalOutput(this.bridge, this.ctx);
         this._offTermd = this.termd.attach(this.bridge);
+        this.agents.start(this.bridge);
         this.bridge.onConnectionChange((up) => this._onConnection(up));
         this._running = true;
         this.bridge.connect();
@@ -236,6 +242,7 @@ export default class TerminalWall {
 
     stop() {
         this._running = false;
+        this.agents.stop();
         this._offTermd();
         this.termd.clear();
         this._offTrace();
@@ -295,6 +302,7 @@ export default class TerminalWall {
         const items = [];
         for (const id of this.selection) if (this.onCanvas(id)) items.push({ id, box: v.toScreenBox(this.windowRect(id)) });
         this.selectionOverlay.update(items, v.view, this.pointer.lassoing);
+        this.agents.updateScreenTransforms(v);
     }
 
     /** Subscribe to state changes (connection, terminal set, focus, names). Returns an unsubscribe. */
@@ -344,6 +352,7 @@ export default class TerminalWall {
             if (m.ok) {
                 this._setRelay('up', '');
                 this.termd.request(this.bridge);
+                this.agents.onRelayUp();
                 this._recover();
             } else {
                 const why = String(m.error || 'refused');
@@ -375,6 +384,7 @@ export default class TerminalWall {
         if (!Array.isArray(r.live)) { console.warn(`[wall] the relay couldn't list its terminals (${r.error ?? 'no live list'}) — names and spots kept as they were`); return; }
         const gone = this.store.prune(new Set([...r.live, ...this.ctx.terminals.keys()]));
         if (gone.length) {
+            this.agents.prune((id) => !gone.includes(id));
             console.info(`[wall] forgot ${gone.length} terminal(s) whose sessions are gone: ${gone.join(', ')}`);
             this.groups?.relayoutAll();
             this._emit();
@@ -394,6 +404,18 @@ export default class TerminalWall {
         const r = this.terminalRect(id);
         const bar = this.names ? this.names.barHeight(id, zoom) : 0;
         return { ...r, maxY: r.maxY + bar };
+    }
+
+    /** A terminal's attached Agent View rect at `zoom`, or null when closed. */
+    agentRect(id, zoom = this.viewport.zoom) {
+        return this.agents.rect(id, zoom);
+    }
+
+    /** Full canvas footprint of `id` at `zoom`: its window plus its open Agent View (if any). */
+    footprintRect(id, zoom = this.viewport.zoom) {
+        const win = this.windowRect(id, zoom);
+        const ag = this.agents.rect(id, zoom);
+        return ag ? unionRect([win, ag]) : win;
     }
 
     /**
@@ -538,6 +560,7 @@ export default class TerminalWall {
         else if (key === 'fontFamily') for (const grid of this.ctx.terminals.values()) grid.setFontFamily(value);
         else if (key === 'boldIsBright') for (const grid of this.ctx.terminals.values()) grid.setBoldIsBright(value);
         else if (key in SELECTION_STYLE_KNOBS) for (const grid of this.ctx.terminals.values()) grid.setSelectionStyle(SELECTION_STYLE_KNOBS[key](value));
+        else if (key === 'agentViewWidth' || key === 'agentViewHeight' || key === 'agentViewGap') this.groups?.relayoutAll();
     }
 
     /**
@@ -656,8 +679,10 @@ export default class TerminalWall {
                 return {
                     id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview,
                     hidden: this.store.hidden(id), group: this.store.groupOf(id), selected: g.hasSelection,
+                    agentView: this.agents.isOpen(id) ? { open: true, side: this.agents.sideOf(id) } : null,
                 };
             }),
+            agentViews: this.order.filter((id) => this.agents.isOpen(id)).map((id) => this.agents.describe(id)).filter(Boolean),
             groups: this.groups ? this.groups.ids().map((gid) => {
                 const g = this.groups.get(gid);
                 return {
@@ -750,22 +775,24 @@ export default class TerminalWall {
         if (this.ctx.terminals.has(id)) this.viewport.easeTo(this.frameTarget(id));
     }
 
-    /** The pose that frames one terminal + its bar: fit to the view, capped at FRAME_MAX_LINE_PX rows.
+    /** The pose that frames one terminal + its bar (and open Agent View): fit to the view, capped at FRAME_MAX_LINE_PX rows.
      *  Fit once for the zoom, then again with the bar's height at that zoom (the bar is screen-sized). */
     frameTarget(id) {
         const cap = FRAME_MAX_LINE_PX / this.ctx.terminals.get(id).cellStride.y;
-        const first = this.viewport.fitTarget(this.terminalRect(id), 0.94, cap);
-        return this.viewport.fitTarget(this.windowRect(id, first.zoom), 0.94, cap);
+        const body = this.terminalRect(id);
+        const ag = this.agents.rect(id, this.viewport.zoom);
+        const first = this.viewport.fitTarget(ag ? unionRect([body, ag]) : body, 0.94, cap);
+        return this.viewport.fitTarget(this.footprintRect(id, first.zoom), 0.94, cap);
     }
 
-    /** Ease the camera to fit every shown terminal (bars included). */
+    /** Ease the camera to fit every shown terminal (bars and open Agent Views included). */
     fitAll() {
         if (this.fullscreen.id) this.fullscreen.exit();
         const shown = this.shownOrder();
-        const all = unionRect(shown.map((id) => this.terminalRect(id)));
+        const all = unionRect(shown.map((id) => this.footprintRect(id, this.viewport.zoom)));
         if (!all) return;
         const first = this.viewport.fitTarget(all, 0.9);
-        this.viewport.easeTo(this.viewport.fitTarget(unionRect(shown.map((id) => this.windowRect(id, first.zoom))), 0.9));
+        this.viewport.easeTo(this.viewport.fitTarget(unionRect(shown.map((id) => this.footprintRect(id, first.zoom))), 0.9));
     }
 
     /** Ease the camera to fit a group's shown members, its header included. @returns {boolean} */
@@ -816,6 +843,7 @@ export default class TerminalWall {
     kill(id) {
         const gid = this.store.groupOf(id);
         this.store.forget(id);
+        this.agents.prune((tid) => tid !== id);
         this.selection.delete(id);
         const r = this.router.execute(['terminal.kill', id]);
         if (gid && this.store.group(gid)) this.groups?.relayout(gid);
@@ -836,11 +864,13 @@ export default class TerminalWall {
             grid.onWindowTitle(() => this._emit());
             grid.visible = this.onCanvas(id);
             this.names.attach(id, grid);
+            if (this.agents.isOpen(id)) this.agents._rebindOne(id);
             this.groups?.relayoutOf(id);
             this.fullscreen.adopt(id);   // a reload's saved fullscreen, once its terminal is back
             changed = true;
         }
         this.names.prune((id) => live.has(id));
+        this.agents.prune((id) => live.has(id) || !!this.store.agentView(id));
         const left = this.order.filter((id) => !live.has(id));
         if (left.length) {
             this.order = this.order.filter((id) => live.has(id));
@@ -893,7 +923,12 @@ export default class TerminalWall {
         // Offset from the grid's origin to its bounds' top-left, so the slot math works on rects.
         const offX = -r.minX, offY = -r.maxY;
         const taken = [];
-        for (const g of this.ctx.terminals.values()) if (g !== grid) taken.push(rectOf(g));
+        for (const [tid, g] of this.ctx.terminals) {
+            if (g === grid) continue;
+            const tr = rectOf(g);
+            const ar = this.agents.rect(tid);
+            taken.push(ar ? unionRect([tr, ar]) : tr);
+        }
         const slot = freeFlowSlot(r.maxX - r.minX, r.maxY - r.minY, taken);
         grid.position.set(slot.x + offX, slot.y + offY, 0);
         if (grid.terminalId) this.store.setPosition(grid.terminalId, grid.position);

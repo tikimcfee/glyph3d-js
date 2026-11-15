@@ -28,6 +28,8 @@ function TermRow({ wall, t, depth, focused }) {
       <FitText text={t.name} maxPx={12.5} style={{ color: t.hidden ? '#6b7383' : focused ? '#8ef0b8' : '#d4d9e2', fontStyle: t.hidden ? 'italic' : 'normal' }} />
       {t.hidden && <span style={styles.tag}>hidden</span>}
       <span className="wall-sidebar-tools" style={styles.tools}>
+        <Btn title={`agent view (${chordLabel(['A'])})`} data-action="agent" on={!!t.agentView?.open}
+          onClick={() => wall.run(['wall.agent', t.id, 'toggle'])}>≡</Btn>
         {t.group && <Btn title="take it out of its group" data-action="leave" onClick={() => wall.run(['wall.group.remove', t.id])}>⇱</Btn>}
         {t.hidden
           ? <Btn title="show it, at its own spot" data-action="show" onClick={() => wall.run(['wall.show', t.id])}>○</Btn>

@@ -10,6 +10,7 @@ import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import HelpPanel from './HelpPanel.jsx';
 import ContextMenu from './ContextMenu.jsx';
+import AgentViewOverlay from './AgentViewOverlay.jsx';
 import { dockLayout } from './dockLayout.js';
 import { isChord, chordLabel } from './chord.js';
 
@@ -92,6 +93,7 @@ function Chrome({ wall }) {
         </span>
         <TermdChip wall={wall} />
       </div>}
+      <AgentViewOverlay wall={wall} state={state} />
       <TermdNotice wall={wall} />
       {state.notice && <div data-wall-notice style={{ ...styles.notice, left: inset.left, right: inset.right }}>{state.notice}</div>}
       <Sidebar wall={wall} state={state} />

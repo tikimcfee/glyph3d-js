@@ -2,8 +2,8 @@ import TitleBar from './TitleBar.js';
 import MapLabels from './MapLabels.js';
 import { BAR_ROOM } from './wallLayout.js';
 
-/** Room a bar keeps clear at its right end for the hover buttons (hide, close), in bar heights. */
-const BAR_BUTTON_ROOM = 2.1;
+/** Room a bar keeps clear at its right end for the hover buttons (agent, hide, close), in bar heights. */
+const BAR_BUTTON_ROOM = 3.15;
 
 /** A terminal narrower than this on screen (CSS px) shows its name as a map label instead of in
  *  its bar; wider than MAP_LABEL_OFF_PX, back in the bar. The band between is hysteresis. */

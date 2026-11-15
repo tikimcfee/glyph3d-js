@@ -25,6 +25,7 @@
  */
 
 import { COPY_LABEL, PASTE_LABEL } from './chord.js';
+import { AGENT_SIDES } from './wallAgentView.js';
 
 /** @typedef {'ours'|'native'|'program'} Verdict */
 
@@ -148,6 +149,7 @@ function terminalItems(id, state, config) {
     const g = t.group ? state.groups.find((x) => x.id === t.group) : null;
     const selected = state.selection.includes(id);
     const others = state.selection.filter((x) => x !== id);
+    const agentSide = t.agentView?.open ? t.agentView.side : 'off';
     /** @type {MenuItem[]} */
     const items = [
         t.selected && { kind: 'action', id: 'copy', label: 'copy', detail: COPY_LABEL, verb: ['wall.copy', id] },
@@ -156,6 +158,13 @@ function terminalItems(id, state, config) {
         { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.reveal', id] },
         state.focusedId !== id && { kind: 'action', id: 'focus', label: 'focus', verb: ['terminal.focus', id] },
         { kind: 'rename', id: 'rename', label: 'rename…', verb: ['wall.rename', id], value: t.named ? t.name : '', placeholder: t.name },
+        {
+            kind: 'choice', id: 'agent-view', label: 'agent view',
+            options: [
+                { id: 'off', label: 'off', verb: ['wall.agent', id, 'close'], on: agentSide === 'off' },
+                ...AGENT_SIDES.map((s) => ({ id: s, label: s, verb: ['wall.agent.side', id, s], on: agentSide === s })),
+            ],
+        },
         { kind: 'sep', id: 's1' },
         { kind: 'action', id: 'select', label: selected ? 'take out of the selection' : 'add to the selection', verb: ['wall.select.toggle', id] },
         g && { kind: 'action', id: 'leave', label: `take out of ${q(g.name)}`, verb: ['wall.group.remove', id] },

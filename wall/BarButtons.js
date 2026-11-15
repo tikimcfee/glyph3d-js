@@ -1,25 +1,30 @@
 import { holdPress } from './holdPress.js';
 
 const STYLE = {
-    color: '#9aa3b2', hover: '#e6e9ef', background: 'transparent', hoverBackground: 'rgba(255,255,255,0.07)',
+    color: '#9aa3b2', hover: '#e6e9ef', active: '#8ef0b8',
+    background: 'transparent', hoverBackground: 'rgba(255,255,255,0.07)', activeBackground: 'rgba(110, 231, 160, 0.14)',
 };
 
 /**
- * BarButtons — the small cluster on the hovered terminal's title bar: hide (an instant click) and
- * close (held: the ring fills over the wall's closeHoldMs and the terminal is killed when it closes;
- * let go early and nothing happens). DOM over the canvas, placed in the same frame the canvas
- * renders (the wall's tick), at the bar's right end — the bar keeps that room clear of its name
- * (WallNames.BAR_BUTTON_ROOM). Both buttons run wall verbs; the held close chord (WallKeys) drives
- * the same ring through holdKey / releaseKey.
+ * BarButtons — the small cluster on the hovered terminal's title bar: agent view (toggle its transcript
+ * stream), hide (an instant click) and close (held: the ring fills over the wall's closeHoldMs and the
+ * terminal is killed when it closes; let go early and nothing happens). DOM over the canvas, placed in
+ * the same frame the canvas renders (the wall's tick), at the bar's right end — the bar keeps that room
+ * clear of its name (WallNames.BAR_BUTTON_ROOM). All buttons run wall verbs; the held close chord
+ * (WallKeys) drives the same ring through holdKey / releaseKey.
  */
 export default class BarButtons {
     /**
      * @param {HTMLElement} host - the element the canvas fills
-     * @param {{ onHide: (id: string) => void, onClose: (id: string) => void, holdMs: () => number, minPx: () => number }} o
+     * @param {{ onAgent?: (id: string) => void, isAgentOpen?: (id: string) => boolean,
+     *           onHide: (id: string) => void, onClose: (id: string) => void,
+     *           holdMs: () => number, minPx: () => number }} o
      *   holdMs: the close hold, read at each press; minPx: the shortest bar (CSS px) that shows the cluster
      */
-    constructor(host, { onHide, onClose, holdMs, minPx }) {
+    constructor(host, { onAgent, isAgentOpen, onHide, onClose, holdMs, minPx }) {
         this._minPx = minPx;
+        this._isAgentOpen = isAgentOpen ?? (() => false);
+        this._agentHovered = false;
         this._root = document.createElement('div');
         this._root.dataset.barButtons = '';
         Object.assign(this._root.style, {
@@ -28,6 +33,15 @@ export default class BarButtons {
         });
         /** The terminal the cluster is on. @type {string|null} */
         this.id = null;
+        this.agent = this._button('≡', 'agent view (live transcript events alongside this terminal)');
+        this.agent.dataset.action = 'agent';
+        this.agent.addEventListener('pointerenter', () => { this._agentHovered = true; this._paintAgent(); });
+        this.agent.addEventListener('pointerleave', () => { this._agentHovered = false; this._paintAgent(); });
+        this.agent.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault(); e.stopPropagation();
+            if (this.id && onAgent) onAgent(this.id);
+        });
         this.hide = this._button('–', 'hide (it keeps running; the sidebar and the palette bring it back)');
         this.hide.dataset.action = 'hide';
         this.hide.addEventListener('pointerdown', (e) => {
@@ -62,6 +76,12 @@ export default class BarButtons {
     /** The terminal a running close hold is for — the cluster stays on it until the hold ends. */
     get holdTarget() { return this._hold.holding() ? this._holdId : null; }
 
+    _paintAgent() {
+        const on = !!(this.id && this._isAgentOpen(this.id));
+        this.agent.style.color = on ? STYLE.active : (this._agentHovered ? STYLE.hover : STYLE.color);
+        this.agent.style.background = on ? STYLE.activeBackground : (this._agentHovered ? STYLE.hoverBackground : STYLE.background);
+    }
+
     /**
      * Per frame: sit on `id`'s bar, or hide. (The wall passes holdTarget while a hold runs.)
      * @param {string|null} id
@@ -76,14 +96,16 @@ export default class BarButtons {
             return;
         }
         this.id = id;
-        const x = bar.right - 3 - 2 * size - 2, y = bar.top + (barPx - size) / 2;
-        const key = `${id}|${x.toFixed(1)}|${y.toFixed(1)}|${size}`;
+        const agentOn = this._isAgentOpen(id) ? 1 : 0;
+        const x = bar.right - 3 - 3 * size - 4, y = bar.top + (barPx - size) / 2;
+        const key = `${id}|${x.toFixed(1)}|${y.toFixed(1)}|${size}|${agentOn}`;
         if (key === this._key) return;
         this._key = key;
         this._root.style.display = 'flex';
         this._root.dataset.id = id;
         this._root.style.transform = `translate(${x}px, ${y}px)`;
-        for (const b of [this.hide, this.close]) { b.style.width = `${size}px`; b.style.height = `${size}px`; b.style.lineHeight = `${size}px`; }
+        for (const b of [this.agent, this.hide, this.close]) { b.style.width = `${size}px`; b.style.height = `${size}px`; b.style.lineHeight = `${size}px`; }
+        this._paintAgent();
     }
 
     /** The close chord (X) went down on `id`: run the same hold. */

@@ -16,6 +16,16 @@ export const WALL_CONFIG = Object.freeze({
     closeHoldMs: 650,
     /** A title bar's button cluster shows only when the bar is at least this tall on screen, CSS px. */
     barButtonsMinPx: 14,
+
+    // ── agent view (WallAgentViews.js, AgentViewOverlay.jsx) ──
+    /** Default side of a terminal a newly opened Agent View attaches to ('right'|'left'|'top'|'bottom'). */
+    agentViewSide: 'right',
+    /** World width of an Agent View on the left or right side of a terminal. */
+    agentViewWidth: 76,
+    /** World height of an Agent View on the top or bottom side of a terminal. */
+    agentViewHeight: 44,
+    /** World gap between a terminal and its attached Agent View. */
+    agentViewGap: 1.5,
     /** A new group's layout: 'tile' (members packed in columns) or 'freeform' (members keep their spots). */
     groupLayout: 'tile',
     /** A new tiled group's columns; 0 = the square root of its size, rounded up. */

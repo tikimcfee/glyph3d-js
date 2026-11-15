@@ -1,5 +1,6 @@
 import { checkConfig } from './wallConfig.js';
 import { searchSettings, SECTIONS } from './wallSettings.js';
+import { AGENT_SIDES } from './wallAgentView.js';
 
 /**
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
@@ -353,5 +354,69 @@ export default function registerWallCommands(router, wall) {
         if (on) set.add(id); else set.delete(id);
         wall.setSettingsPanel({ collapsed: [...set] });
         return OK(`${id} ${on ? 'folded' : 'unfolded'}`, { section: id, collapsed: on });
+    });
+
+    // ── agent views (WallAgentViews.js, AgentViewOverlay.jsx) ────────────────
+    const AGENT_MODES = new Set(['toggle', 'open', 'close', 'on', 'off', ...AGENT_SIDES]);
+    verb('wall.agent', '[id] [toggle|open|close|right|left|top|bottom]', "Open, close or place a terminal's Agent View transcript companion (default: the focused terminal)", (args) => {
+        let [first, second] = args;
+        let id = first;
+        let how = second ?? 'toggle';
+        if (!first || (AGENT_MODES.has(first) && !wall.terminal(first))) {
+            id = wall.focusedId;
+            how = first || 'toggle';
+        }
+        if (!id) throw new Error('no terminal named, and none is focused');
+        const r = wall.agents.setOpen(id, /** @type {any} */ (how));
+        return OK(`agent view on ${id}: ${r.open ? `open (${r.side})` : 'closed'}`, { id, ...r });
+    });
+    verb('wall.agent.side', '<id> <right|left|top|bottom>', "Attach a terminal's Agent View to right, left, top or bottom", (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = wall.agents.setSide(id, /** @type {any} */ (args[1]));
+        return OK(`agent view on ${id}: ${r.side}`, { id, ...r });
+    });
+    verb('wall.agent.session', '<id> [auto|<session>]', "Pair a terminal's Agent View with an agent session (or auto-match its directory)", (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = wall.agents.setSession(id, args[1] ?? 'auto');
+        return OK(`agent view on ${id}: session ${r.resolved ?? r.pinned}`, r);
+    });
+    verb('wall.agent.filter', '<id> <reset|all|only|on|off|toggle> [category…]', "Filter visible event categories in a terminal's Agent View (e.g. only tools, only read image, reset)", (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const rawMode = (args[1] || 'reset').toLowerCase();
+        const mode = rawMode === 'all' ? 'reset' : rawMode;
+        const r = wall.agents.setFilter(id, /** @type {any} */ (mode), args.slice(2));
+        return OK(`agent view filter on ${id} updated`, r);
+    });
+    verb('wall.agent.expand', '<id> [all|<category…>]', 'Expand all visible events or a category subset (e.g. tools, reads, read, image, edit, run, think, say)', (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = wall.agents.setBulkExpanded(id, true, args.slice(1));
+        return OK(`expanded ${r.changed} event(s) on ${id}`, r);
+    });
+    verb('wall.agent.collapse', '<id> [all|<category…>]', 'Collapse all expanded events or a category subset', (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = wall.agents.setBulkExpanded(id, false, args.slice(1));
+        return OK(`collapsed ${r.changed} event(s) on ${id}`, r);
+    });
+    verb('wall.agent.show', '<id> <eventId> [toggle|on|off|full]', 'Expand or collapse a single event row (`full` shows uncapped file/output lines)', (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const [, eventId, how = 'toggle'] = args;
+        if (how === 'full') {
+            wall.agents.toggleEvent(id, eventId, 'on');
+            wall.agents.showFullBody(id, eventId);
+            return OK(`expanded full body of ${eventId} on ${id}`, { id, eventId, expanded: true, full: true });
+        }
+        if (how !== 'toggle' && how !== 'on' && how !== 'off') throw new Error(`show takes toggle|on|off|full, not '${how}'`);
+        const r = wall.agents.toggleEvent(id, eventId, how);
+        return OK(`${r.expanded ? 'expanded' : 'collapsed'} ${eventId} on ${id}`, r);
+    });
+    verb('wall.agent.jump', '<id> [<eventId>|live]', "Jump the attached terminal's scrollback view to where an event occurred (or `live` for offset 0)", async (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = await wall.agents.jump(id, args[1] ?? 'live');
+        return OK(r.live ? `${id} scrolled to live` : `${id} jumped to ${r.eventId} (offset ${r.offset})`, r);
+    });
+    verb('wall.agent.earlier', '<id>', "Load an earlier window of transcript events into a terminal's Agent View", async (args) => {
+        const [id] = terminalIds(args.slice(0, 1));
+        const r = await wall.agents.loadEarlier(id);
+        return OK(`loaded ${r.loaded} earlier event(s) on ${id}`, r);
     });
 }

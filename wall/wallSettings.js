@@ -2,6 +2,7 @@ import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js
 import { FONT_FAMILY_IDS } from '@glyph3d/core/fonts/families.js';
 import { parseSizes } from './contextMenu.js';
 import { parseZoomKeys } from './chord.js';
+import { AGENT_SIDES } from './wallAgentView.js';
 
 /**
  * wallSettings — what each wall knob IS: its section, its label, its type and range, and a sentence
@@ -31,6 +32,7 @@ import { parseZoomKeys } from './chord.js';
 export const SECTIONS = Object.freeze([
     { id: 'canvas', title: 'Canvas', subtitle: 'background · drafting grid · snapping' },
     { id: 'terminals', title: 'Terminals', subtitle: 'closing · title-bar buttons' },
+    { id: 'agent', title: 'Agent view', subtitle: 'transcript side · dimensions · gap' },
     { id: 'fullscreen', title: 'Fullscreen', subtitle: 'text size · room at the edge' },
     { id: 'text', title: 'Text', subtitle: 'font family · bold · underline · strikethrough · overline · dim' },
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
@@ -84,7 +86,23 @@ export const KNOBS = Object.freeze({
     },
     barButtonsMinPx: {
         section: 'terminals', label: 'Bar buttons from', type: 'number', min: 0, step: 1, unit: 'px',
-        description: "A hovered title bar shows its hide and close buttons only when the bar is at least this tall on screen.",
+        description: "A hovered title bar shows its agent, hide and close buttons only when the bar is at least this tall on screen.",
+    },
+    agentViewSide: {
+        section: 'agent', label: 'Default side', type: 'enum', options: AGENT_SIDES,
+        description: 'Which side of a terminal a newly opened Agent View attaches to (drag its header to move it to any side).',
+    },
+    agentViewWidth: {
+        section: 'agent', label: 'Side width', type: 'number', min: 24, max: 300, step: 2, unit: 'world units',
+        description: 'World width of an Agent View when attached to the left or right of its terminal.',
+    },
+    agentViewHeight: {
+        section: 'agent', label: 'Top / bottom height', type: 'number', min: 16, max: 240, step: 2, unit: 'world units',
+        description: 'World height of an Agent View when attached above or below its terminal.',
+    },
+    agentViewGap: {
+        section: 'agent', label: 'Attachment gap', type: 'number', min: 0, max: 32, step: 0.5, unit: 'world units',
+        description: 'World space between a terminal and its attached Agent View.',
     },
     fullscreenMinLinePx: {
         section: 'fullscreen', label: 'Smallest entry text', type: 'number', min: 4, max: 200, step: 1, unit: 'px a row',

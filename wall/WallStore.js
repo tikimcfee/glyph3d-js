@@ -75,6 +75,7 @@ export default class WallStore {
             positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status'),
             config: k('config'), settings: k('settings'), help: k('help'),
             fullscreen: k('fullscreen'), fullscreenText: k('fullscreenText'),
+            agentViews: k('agentViews'),
         };
         this._positions = read(this.keys.positions, {});
         this._names = read(this.keys.names, {});
@@ -96,6 +97,8 @@ export default class WallStore {
         this._fullscreen = read(this.keys.fullscreen, null);
         /** Each terminal's fullscreen text size, CSS px per row, once the text keys set one. @type {Record<string, number>} */
         this._fullscreenText = read(this.keys.fullscreenText, {});
+        /** Per-terminal Agent View state (`{ open, side, session, filters }`). @type {Record<string, any>} */
+        this._agentViews = read(this.keys.agentViews, {});
     }
 
     // ── terminals ─────────────────────────────────────────────────────────────
@@ -129,7 +132,7 @@ export default class WallStore {
         write(this.keys.hidden, [...this._hidden]);
     }
 
-    /** Forget a terminal for good — its spot, its name, its hiding, its place in a group. @param {string} id */
+    /** Forget a terminal for good — its spot, its name, its hiding, its place in a group, its agent view. @param {string} id */
     forget(id) {
         if (id in this._positions) { delete this._positions[id]; write(this.keys.positions, this._positions); }
         if (id in this._names) { delete this._names[id]; write(this.keys.names, this._names); }
@@ -138,6 +141,7 @@ export default class WallStore {
         if (gid) this._dropMembers(gid, [id]);
         this.setFullscreenText(id, null);
         if (this._fullscreen?.id === id) this.setFullscreen(null);
+        this.setAgentView(id, null);
     }
 
     /**
@@ -146,7 +150,13 @@ export default class WallStore {
      * @param {Set<string>} live @returns {string[]} the terminal ids forgotten
      */
     prune(live) {
-        const known = new Set([...Object.keys(this._positions), ...Object.keys(this._names), ...this._hidden, ...Object.keys(this._fullscreenText)]);
+        const known = new Set([
+            ...Object.keys(this._positions),
+            ...Object.keys(this._names),
+            ...this._hidden,
+            ...Object.keys(this._fullscreenText),
+            ...Object.keys(this._agentViews),
+        ]);
         if (this._fullscreen) known.add(this._fullscreen.id);
         for (const g of Object.values(this._groups)) for (const id of g.members) known.add(id);
         const gone = [...known].filter((id) => !live.has(id));
@@ -289,5 +299,29 @@ export default class WallStore {
         if (px == null) { if (!(id in this._fullscreenText)) return; delete this._fullscreenText[id]; }
         else this._fullscreenText[id] = px;
         write(this.keys.fullscreenText, this._fullscreenText);
+    }
+
+    // ── agent views ───────────────────────────────────────────────────────────
+
+    /** Every persisted Agent View entry, keyed by terminal id. @returns {Record<string, any>} */
+    agentViews() { return this._agentViews; }
+
+    /** @param {string} id */
+    agentView(id) { return this._agentViews[id] ?? null; }
+
+    /** @param {string} id @param {object|null} state - null forgets it */
+    setAgentView(id, state) {
+        if (state == null) {
+            if (!(id in this._agentViews)) return;
+            delete this._agentViews[id];
+        } else {
+            this._agentViews[id] = {
+                open: !!state.open,
+                side: state.side,
+                session: state.session ?? 'auto',
+                filters: state.filters ? { ...state.filters } : undefined,
+            };
+        }
+        write(this.keys.agentViews, this._agentViews);
     }
 }
