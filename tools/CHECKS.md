@@ -41,10 +41,9 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   writes `out/check/last-run.json`. `out/` is gitignored.
 - **Known reds** are declared, not skipped: an entry's `known` names the reason and the
   failure's signature. The run stays green only while the failure matches it; a different
-  failure is RED, and so is an unexpected pass (remove the entry). Today:
-  `agent-events` (one corpus prompt event has no sheet, 31/33 — red on the-backport too) and
-  `itests` (semantic.itest probes every package.json the repo load brought in; only the one
-  it opened builds structure).
+  failure is RED, and so is an unexpected pass (remove the entry). Today: `itests`
+  (semantic.itest probes every package.json the repo load brought in; only the one it opened
+  builds structure).
 - **Floors.** `tools/check-floors.json` holds, per tier, how many checks an unscoped run must
   RUN; fewer is RED ("checks went missing"). `--ratchet` raises a floor to what a green run
   ran and never lowers it.
@@ -52,7 +51,8 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   appear in the manifest, or the run is RED before anything starts. Instruments that judge
   nothing (`frame-profile`, `gpu-traffic`, the profilers) stay out of it.
 - **What it starts.** For browser/gpu checks the runner starts its own Vite on a free port
-  (config wrapped so its cache is `out/check/vite-cache/`, never the dev server's), warms it
+  (config wrapped so its cache is `out/check/vite-cache/`, never the dev server's, and with no
+  hot reload: a file saved in the shared tree mid-check would reload the page under it), warms it
   once, and gives each relay-needing check a fresh PRIVATE relay —
   `glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --termd-ns c<n> --no-gomuxai <scratch root>`
   with `G3D_TERMD_DIR` a scratch directory (`$G3D_TEST_RUN_DIR/ck-<pid>`, else `out/termd/ck-<pid>`;
@@ -62,6 +62,13 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   gomuxai. What it can't start
   (no `./glyph3d-cli` — `make build` or `--cli PATH`; no `./g3d-termd` beside it; no chromium; no GPU render
   node; no network for the GitHub-loading itests) is a `NOTE` and those checks `SKIP`.
+- **Waits.** A browser check waits for the state or the event its next step reads, never a
+  guessed delay: a predicate checked once a frame (`page.waitForFunction(…, { polling: 'raf' })`),
+  the wall's next drawn frame (`TerminalWall.nextFrame()`), the camera at rest
+  (`viewport.moving`), the relay's own log line (`privateRelay().logged(re)`: its
+  `[serve] listening on` once bound, an adapter's `back on termd` after a brain restart). A
+  deadline only bounds a failure. A hold is driven by its ring's state (`data-holding`,
+  `barButtons.holdTarget`), not by holding for so many ms.
 - **Concurrency.** `-j N` (default: every core). Checks sharing an `apart` token never
   overlap (`display`: the browser/gpu checks run one at a time); `*` runs alone, after the
   rest (the GPU timing instruments).
@@ -279,9 +286,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 - **`far-lod-check.mjs`** — does a far file SHOW as its backdrop, and does nothing else move?
   Renders the live scene FULL (every glyph) / LOD / BARE (backdrops at gain 0) at fit-all and
   three closer poses; fails if a pixel outside the far rects moves or the backdrops lift the far
-  rects' mean linear light under 5% (of FULL) over bare panels — the box must be visible, not a
-  match for sub-pixel glyphs that add next to no light (the old straight-alpha backdrop lifted
-  1–2% and fails here). Reports the TRANSITION BAND (far fields within 2× of the threshold) LOD
+  rects' mean linear light under 5% (of FULL) over bare panels where a backdrop can show — the box
+  must be visible, not a match for sub-pixel glyphs that add next to no light (the old
+  straight-alpha backdrop lifted 1–2% and fails here). Where it can show = the far rects' pixels
+  the brightest gain swept moves: a far file behind a nearer book shows nothing at any gain. A
+  pose whose far files are all hidden (drawn with no depth test, the backdrops do show) is
+  reported, not judged; backdrops that draw nothing even so fail, and so does a run with no pose
+  judged. Reports the TRANSITION BAND (far fields within 2× of the threshold) LOD
   and BARE against the glyphs, and the gain that would match them, as information.
   ```
   bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
@@ -858,7 +869,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   panels together (docked on one edge side by side with the topbar clear of both, the status
   window's knobs in `wall.config`, a status row revealing a hidden terminal). Starts its own relay
   (`--relay-only`, termd namespace `glyph-wall-e2e` in a scratch dir, no gomuxai) if nothing
-  listens on `--relay`, and stops it and its termd daemon at the end. `--shots DIR` saves the
+  listens on `--relay`, and stops it and its termd daemon at the end. Every step waits on the
+  state or the frame it reads (see the runner's **Waits**); a navigation the steps didn't ask for
+  (a dev server's hot reload, a crash) is a FAIL of its own. `--shots DIR` saves the
   status window normal, restarting and unreachable, the bar buttons, a held close, the lasso, the
   groups, the sidebar, and both panels docked right.
   ```

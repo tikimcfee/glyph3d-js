@@ -296,6 +296,39 @@ fn stop_sends_followers_a_last_document_with_no_terminals() {
     assert!(last.terminals.is_empty(), "every terminal ended before the last document");
 }
 
+/// `saved_seq` says where a crash now would bring a terminal back to: once its output is saved
+/// (the snapshot interval) it reaches the terminal's `seq` — a change, so a follower hears it —
+/// and a crash then restores it exactly there.
+#[test]
+fn saved_seq_says_where_a_crash_restores_to() {
+    let d = Daemon::start_with(&["--idle-exit", "0", "--snapshot-interval-ms", "300"]);
+    let mut c = d.client();
+    let instance = c.welcome.instance.clone().unwrap();
+    create(&mut c, "t", &["sh", "-c", "echo saved-marker; exec sleep 100"], 80, 24);
+    let mut f = d.client();
+    follow(&mut f, Some(250));
+    let saved = loop {
+        let (_, doc) = next_status(&mut f);
+        if let Some(t) = doc.terminals.iter().find(|t| t.id == "t")
+            && t.seq > 0
+            && t.saved_seq == Some(t.seq)
+        {
+            break t.seq;
+        }
+    };
+    let brain = c.welcome.pid.unwrap();
+    unsafe { libc::kill(brain as i32, libc::SIGKILL) };
+    let mut c = d.reconnect(&instance);
+    let doc = c.request::<StatusReply>(Op::Status).unwrap().status;
+    let t = doc.terminals.iter().find(|t| t.id == "t").unwrap();
+    assert_eq!(
+        (t.restored.as_deref(), t.unseen, t.seq, t.saved_seq),
+        (Some("exact"), Some(0), saved, Some(saved)),
+        "{}",
+        d.log()
+    );
+}
+
 #[test]
 fn a_brain_crash_and_an_upgrade_are_in_the_next_brains_status() {
     let d = Daemon::start();

@@ -1559,6 +1559,9 @@ func listenAndServe(addr string, handler http.Handler) error {
 		return fmt.Errorf("listen %s: still in use after %v (another server already running?): %w",
 			addr, time.Duration(tries)*gap, err)
 	}
+	// The line a supervisor (or a test that started this relay) waits on: from here a connect is
+	// accepted (the backlog holds it until Serve takes it).
+	log.Printf("[serve] listening on %s", ln.Addr())
 	return http.Serve(ln, handler)
 }
 

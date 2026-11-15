@@ -188,6 +188,8 @@ export default class TerminalWall {
         this._offTrace = null;
         this._onRegistry = () => this._syncTerminals();
         this._running = false;
+        /** Who waits for the next frame (nextFrame). @type {Array<() => void>} */
+        this._frameWaiters = [];
     }
 
     // ── lifecycle ───────────────────────────────────────────────────────────
@@ -289,7 +291,17 @@ export default class TerminalWall {
         this.paper.update(this.viewport, this.config);
         this._tickChrome();
         this.ctx.sceneSystems.update(this.viewport.camera, size.height);
+        if (this._frameWaiters.length) for (const done of this._frameWaiters.splice(0)) done();
     }
+
+    /**
+     * Resolves once the next frame is drawn: this tick runs in r3f's frame before its render, and a
+     * resolve's continuations run when that frame's task ends — the render included — so whoever
+     * awaits it sees the frame's layout (names, map labels, chrome) and its pixels. What a test (or
+     * anything else) waits on after changing what the wall shows, in place of a guessed delay.
+     * @returns {Promise<void>}
+     */
+    nextFrame() { return new Promise((done) => this._frameWaiters.push(done)); }
 
     /** Place the DOM chrome that tracks the canvas: the hovered bar's buttons, the selection marks. */
     _tickChrome() {

@@ -9,9 +9,12 @@
  *   FULL — showGlyphsPx 0 (every glyph drawn)
  *   LOD  — the default threshold, at each backdrop gain swept (and the configured one)
  *   BARE — far fields hidden, backdrops at gain 0 (the panels alone: the teeth)
- * Compared inside the far fields' screen rects by mean LINEAR light: the backdrops must
- * add at least VISIBLE_PTS (percent of FULL's light) over BARE, and outside the far rects
- * nothing may change. Reports draw calls FULL vs LOD and, for the TRANSITION BAND (far
+ * Compared inside the far fields' screen rects by mean LINEAR light, where a backdrop can show
+ * (the rects' pixels the brightest gain swept moves off BARE: a far file behind a nearer book
+ * shows nothing at any gain): the backdrops must add at least VISIBLE_PTS (percent of FULL's
+ * light) over BARE there, and outside the far rects nothing may change. A pose whose far files
+ * are all hidden (its backdrops drawn with no depth test do show) is reported, not judged; one
+ * whose backdrops draw nothing even so fails, and so does a run in which no pose was judged. Reports draw calls FULL vs LOD and, for the TRANSITION BAND (far
  * fields whose rows measure between half the threshold and the threshold), how LOD and BARE
  * read against the glyphs plus the gain that would match them (glyph3d-rs's backdrop_gain
  * fit) — information, not a verdict.
@@ -38,6 +41,8 @@ if (!DIR) { console.error('usage: --dir /abs/dir (inside the relay root or its -
 
 const browser = await launchGpuBrowser({});
 let failed = 0;
+/** Poses whose far fields are all hidden behind nearer content (reported, not judged). */
+let unjudged = 0;
 try {
     const app = await openApp(browser, { url: URL, relayPort: RELAY, wait: 6000, session: 'off', viewport: { width: W, height: H } });
     if (!app.booted) throw new Error('app did not boot');
@@ -142,9 +147,34 @@ try {
             lod.setParam('backdropGain', 0);
             const bare = grab();
             const sweep = [];
+            let brightest = null;
             for (let g = 0.1; g <= 2.001; g += 0.1) {
                 lod.setParam('backdropGain', +g.toFixed(2));
-                sweep.push([+g.toFixed(2), meanLin(grab().px)]);
+                const shot = grab();
+                sweep.push([+g.toFixed(2), meanLin(shot.px)]);
+                brightest = shot;
+            }
+            // Where a backdrop can be seen at all: the far rects' pixels the brightest backdrops move
+            // off bare panels. A far file behind nearer content (a book in front of it) shows
+            // nothing at any gain — its rect is not a place the backdrops can lift.
+            const seen = new Uint8Array(w * h);
+            for (let i = 0; i < mask.length; i++) {
+                const o = i * 4;
+                if (mask[i] && (brightest.px[o] !== bare.px[o] || brightest.px[o + 1] !== bare.px[o + 1] || brightest.px[o + 2] !== bare.px[o + 2])) seen[i] = 1;
+            }
+            // None seen: hidden behind nearer content, or not drawn at all? The same backdrops drawn
+            // through everything (no depth test) tell them apart.
+            let drawnThrough = null;
+            if (!seen.some(Boolean)) {
+                const m = lod.mesh.material, dt = m.depthTest;
+                m.depthTest = false; m.needsUpdate = true;
+                const through = grab();
+                m.depthTest = dt; m.needsUpdate = true;
+                drawnThrough = 0;
+                for (let i = 0; i < mask.length; i++) {
+                    const o = i * 4;
+                    if (mask[i] && (through.px[o] !== bare.px[o] || through.px[o + 1] !== bare.px[o + 1] || through.px[o + 2] !== bare.px[o + 2])) drawnThrough++;
+                }
             }
             lod.setParam('backdropGain', keep.backdropGain);
             const at = grab();
@@ -155,12 +185,14 @@ try {
             const rel = (m) => +(100 * (m - mFull) / Math.max(mFull, 1e-9)).toFixed(1);
             return {
                 canvas: [w, h], far: at.stats, farRects, bandFields,
-                farPixels: mask.reduce((a, b) => a + b, 0), bandPixels: band.reduce((a, b) => a + b, 0),
+                farPixels: mask.reduce((a, b) => a + b, 0), seenPixels: seen.reduce((a, b) => a + b, 0), drawnThrough, bandPixels: band.reduce((a, b) => a + b, 0),
                 draws: { full: full.calls, lod: at.calls },
                 bandMeanLinear: { full: +mFull.toFixed(5), lod: +meanLin(at.px).toFixed(5), bare: +meanLin(bare.px).toFixed(5) },
                 bandVsFullPct: { lod: rel(meanLin(at.px)), bare: rel(meanLin(bare.px)) },
                 allFarVsFullPct: { lod: +(100 * (meanLin(at.px, mask) / Math.max(meanLin(full.px, mask), 1e-9) - 1)).toFixed(1),
                     bare: +(100 * (meanLin(bare.px, mask) / Math.max(meanLin(full.px, mask), 1e-9) - 1)).toFixed(1) },
+                seenFarVsFullPct: { lod: +(100 * (meanLin(at.px, seen) / Math.max(meanLin(full.px, seen), 1e-9) - 1)).toFixed(1),
+                    bare: +(100 * (meanLin(bare.px, seen) / Math.max(meanLin(full.px, seen), 1e-9) - 1)).toFixed(1) },
                 absDiffPerChannel: { lod: absDiff(full.px, at.px), bare: absDiff(full.px, bare.px) },
                 gain: { configured: keep.backdropGain, bestFit: best[0], bestFitPct: rel(best[1]) },
             };
@@ -170,17 +202,25 @@ try {
         const problems = [];
         if (!r.far.backdrops) problems.push('no far field at this pose — vacuous');
         if (r.absDiffPerChannel.lod.outsidePixelsChanged) problems.push(`${r.absDiffPerChannel.lod.outsidePixelsChanged} pixels changed OUTSIDE the far rects`);
-        const lift = r.allFarVsFullPct.lod - r.allFarVsFullPct.bare;
-        if (lift < VISIBLE_PTS) problems.push(`the backdrops lift the far rects ${lift.toFixed(1)}% over bare panels (< ${VISIBLE_PTS}%): they don't show`);
+        // The lift is judged where a backdrop can show; a pose whose far files are all behind nearer
+        // content shows none at any gain, and is reported, not judged (at least one pose must be).
+        const hidden = r.far.backdrops > 0 && r.seenPixels === 0 && r.drawnThrough > 0;
+        if (r.far.backdrops > 0 && r.seenPixels === 0 && !r.drawnThrough) problems.push(`the backdrops draw nothing at this pose, even through what is in front (${r.far.backdrops} staged)`);
+        const lift = r.seenFarVsFullPct.lod - r.seenFarVsFullPct.bare;
+        if (!hidden && r.seenPixels > 0 && lift < VISIBLE_PTS) problems.push(`the backdrops lift the far rects ${lift.toFixed(1)}% over bare panels where they can show (< ${VISIBLE_PTS}%): they don't show`);
         for (const p of problems) console.log(`  ✗ ${p}`);
-        if (!problems.length) {
+        if (!problems.length && hidden) {
+            console.log(`  · every far field at this pose (${r.far.backdrops}) is behind nearer content: its backdrops draw (${r.drawnThrough} px with no depth test) but none can show — not judged`);
+            unjudged++;
+        } else if (!problems.length) {
             const band = r.bandFields
                 ? `band (${r.bandFields} fields): backdrops ${r.bandVsFullPct.lod}% vs glyphs, bare ${r.bandVsFullPct.bare}%, glyph-matching gain ${r.gain.bestFit}`
                 : 'no field in the transition band at this pose';
-            console.log(`  ✓ backdrops lift the far rects ${lift.toFixed(1)}% over bare; ${band}; draws ${r.draws.full} → ${r.draws.lod}`);
+            console.log(`  ✓ backdrops lift the far rects ${lift.toFixed(1)}% over bare where they can show (${r.seenPixels} of ${r.farPixels} px); ${band}; draws ${r.draws.full} → ${r.draws.lod}`);
         }
         failed += problems.length ? 1 : 0;
     }
+    if (unjudged === poses.length) { console.log('  ✗ every pose\'s far files are behind nearer content: no pose judged the backdrops'); failed++; }
     if (app.errors.length) { console.log('page errors:', app.errors.slice(0, 3)); failed++; }
 } finally {
     await browser.close();

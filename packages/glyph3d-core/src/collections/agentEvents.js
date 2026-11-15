@@ -242,6 +242,8 @@ export function sessionPath(target, cwd) {
  *   system  action 'system', detail = the subtype, result = the text (else the data as JSON)
  *   request action 'request', detail = the model (only a `--requests` stream has these)
  *
+ * An event of a branch the conversation left (gomuxai's `abandoned`: a Claude prompt edited
+ * and sent again, and what answered it) carries `abandoned: true`, whatever its kind.
  * Every event is a record by default (1:1); `showNoise: false` makes a noise call null.
  * @param {AgentEvent} ev
  * @param {{at:number, line?:number, seq?:number}|null} [pos] the event's position (its add);
@@ -255,6 +257,7 @@ export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
         id: ev.id, eventKind: ev.kind, at, ts: ev.ts ?? null,
         turn: ev.turn ? { id: ev.turn.id, index: ev.turn.index ?? 0, derived: !!ev.turn.derived } : null,
         agent: ev.agent || null,
+        ...(ev.abandoned ? { abandoned: true } : {}),
         target: '', detail: '', result: '', meta: null,
     };
     const b = ev[ev.kind];
@@ -303,7 +306,7 @@ export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
 /**
  * The event's own facts as info rows, beside the tool table's meta: its turn, a prompt's
  * images, a reply's final/provisional mark, a redacted thought, a call's status (ok is
- * silent) and the subagent it started. (A subagent's own events sit in its own book, so
+ * silent), the subagent it started, and a branch the conversation left (abandoned). (A subagent's own events sit in its own book, so
  * their `agent` needs no row.) A record that came from no event (an agent.activity
  * record) has none.
  * @param {Object} rec @returns {string[]}
@@ -312,6 +315,7 @@ export function eventFacts(rec) {
     if (!rec?.eventKind) return [];
     const rows = [];
     if (rec.turn) rows.push(`turn ${rec.turn.index}${rec.turn.derived ? ' (derived)' : ''}`);
+    if (rec.abandoned) rows.push('abandoned (its prompt was edited and sent again)');
     if (rec.eventKind === 'prompt' && rec.images) rows.push(`${rec.images} image${rec.images === 1 ? '' : 's'}`);
     if (rec.eventKind === 'say' && rec.final) rows.push(rec.provisional ? 'final reply · provisional' : 'final reply');
     else if (rec.eventKind === 'say' && rec.provisional) rows.push('provisional');

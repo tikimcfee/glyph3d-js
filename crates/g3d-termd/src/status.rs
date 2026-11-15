@@ -33,6 +33,9 @@ pub struct TermStats {
     pub input_queued: AtomicU64,
     /// The crash-restore blobs the holder keeps for it (the newest two).
     pub snapshot_bytes: AtomicU64,
+    /// The `seq` a crash now would bring it back to (its newest save's); `u64::MAX` while a
+    /// restore that was not exact waits for its first save.
+    pub saved_seq: AtomicU64,
     pub slow: Mutex<SlowStats>,
 }
 
@@ -304,6 +307,7 @@ impl Hub {
                 let slow = s.slow.lock().unwrap();
                 let (out_bps, in_bps) = self.rate(t.handle);
                 let last = s.last_output_at.load(SeqCst);
+                let saved = s.saved_seq.load(SeqCst);
                 StatusTerminal {
                     id: i.id,
                     handle: i.handle,
@@ -327,6 +331,7 @@ impl Hub {
                     memory: slow.memory,
                     restored: slow.restored.map(Into::into),
                     unseen: slow.restored.map(|_| slow.unseen),
+                    saved_seq: (saved != u64::MAX).then_some(saved),
                     subscribers: slow
                         .subs
                         .iter()

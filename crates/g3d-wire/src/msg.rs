@@ -618,6 +618,11 @@ pub struct StatusTerminal {
     /// saved (0 when exact).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unseen: Option<u64>,
+    /// The `seq` a crash now would bring this terminal back to: its newest crash-restore save's
+    /// (a crash loses `seq − saved_seq`). Absent while a restore that was not exact waits for its
+    /// first save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_seq: Option<u64>,
     pub subscribers: Vec<StatusSubscriber>,
 }
 

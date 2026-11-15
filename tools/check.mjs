@@ -190,7 +190,11 @@ const probes = {
     'wall-vite': async () => (existsSync(join(ROOT, 'node_modules/.bin/vite')) ? null : 'no vite in node_modules (bun install)'),
 };
 
-/** Start a Vite for `app` or `wall` on a free port, with its own cache dir; warm it in a browser. */
+/**
+ * Start a Vite for `app` or `wall` on a free port, with its own cache dir; warm it in a browser. No
+ * hot reload: a file saved while a check runs (the tree is shared) would reload the page under it
+ * and hand its later steps a fresh app. A page loads the code as it stands when it loads.
+ */
 async function startVite(which) {
     const port = await freePort();
     mkdirSync(RUN_DIR, { recursive: true });
@@ -198,7 +202,7 @@ async function startVite(which) {
     writeFileSync(cfg, [
         `import base from ${JSON.stringify(join(ROOT, which, 'vite.config.js'))};`,
         `export default { ...base, root: ${JSON.stringify(join(ROOT, which))}, cacheDir: ${JSON.stringify(join(OUT, 'vite-cache', which))},`,
-        `  clearScreen: false, server: { ...base.server, host: '127.0.0.1', port: ${port}, strictPort: true } };`,
+        `  clearScreen: false, server: { ...base.server, host: '127.0.0.1', port: ${port}, strictPort: true, hmr: false } };`,
     ].join('\n'));
     const log = [];
     const p = spawn(join(ROOT, 'node_modules/.bin/vite'), ['--config', cfg], { cwd: join(ROOT, which), stdio: ['ignore', 'pipe', 'pipe'] });

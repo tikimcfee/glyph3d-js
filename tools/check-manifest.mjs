@@ -183,14 +183,8 @@ export const CHECKS = [
     h('agent-book-history.test.mjs', ['books', 'agents'], 'the sliding window over a synthetic 100-turn stream: byte offsets, prefetch, slides, read failures', 'a real relay read'),
     h('agent-book-labels.test.mjs', ['books', 'agents'], 'agent nameplates: hue, status readout, multi-line bake, container fit and wrap', 'pixels'),
     h('agent-events.test.mjs', ['agents', 'books'],
-        "agent books fed by gomuxai's conformance corpus: the reader under any chunking, one sheet per event, prompts of every origin, in-place updates",
-        'transcripts outside the corpus; needs a gomuxai checkout (GOMUXAI_DIR) and FAILS without one, by design',
-        {
-            known: {
-                reason: 'one prompt event of the corpus has no sheet (31/33) — red on the-backport too; not yet fixed',
-                signature: [/every prompt event is a sheet \(31\/33\)/, /agent-events: \d+ passed, 1 failed/],
-            },
-        }),
+        "agent books fed by gomuxai's conformance corpus: the reader under any chunking, one sheet per event, prompts of every origin, in-place updates, a left branch's events marked abandoned and set quietly",
+        'transcripts outside the corpus; needs a gomuxai checkout (GOMUXAI_DIR, default ~/dev/gomuxai) and FAILS without one, by design'),
     h('session-books.test.mjs', ['agents', 'books'],
         'agent books over a fake relay event wire: tail read → hydrate → follow, live lines, in-place updates, ended → re-follow, paging back, orphans',
         "the real relay and gomuxai (the bridge is a fake that plays them)"),
@@ -349,13 +343,7 @@ export const CHECKS = [
     g('panel-batch-check.mjs', 'the batched frame vs every panel drawing itself, per pose', 'poses not sampled'),
     // Labels (book tabs, nameplates) and far files appear in the library layout.
     g('glyph-batch-check.mjs', 'the batched frame vs every label drawing itself (3×3-blurred, past 24/255), per pose, in the library layout', 'sub-threshold edge differences, by design', { args: ['--cmd', 'layout.scheme library'] }),
-    {
-        ...g('far-lod-check.mjs', 'far files show as their backdrop (≥5% light lift) and nothing outside the far rects moves, in the library layout', 'how the transition band looks (reported, not judged)', { args: ['--cmd', 'layout.scheme library'] }),
-        known: {
-            reason: 'red at a64def3, before the text-path and atlas merges, as after them: no backdrop shows over bare panels and nothing differs inside the far rects (0.0% lift, every diff 0) — the check sees nothing drawn in the far rects under the runner, not a measured regression; open',
-            signature: [/✗ the backdrops lift the far rects 0\.0% over bare panels/],
-        },
-    },
+    g('far-lod-check.mjs', 'far files show as their backdrop (≥5% light lift where a backdrop can show) and nothing outside the far rects moves, in the library layout; a pose whose far files are all behind nearer books is reported, backdrops that draw nothing even with no depth test fail', 'how the transition band looks (reported, not judged)', { args: ['--cmd', 'layout.scheme library'] }),
     g('glyph-cull-truth.mjs', "every live quad lies inside its mesh's stated bounding box across a dir load, the presets, an arranged grid and a terminal", 'fields moved through the group table (labels) — they opt out of culling'),
     {
         name: 'wall-e2e', cmd: ['bun', 'tools/wall-e2e.mjs', '--url', '{wallUrl}', '--relay', '{port}'], tier: 'gpu', scope: ['wall', 'terminal'],

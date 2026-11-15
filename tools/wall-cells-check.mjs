@@ -103,14 +103,18 @@ const relay = await privateRelay({ port: RELAY, ns: 'glyph-cells-check' });
 let browser = null;
 try {
     browser = await launchGpuBrowser({});
-    const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 3000, viewport: { width: 1400, height: 1100 } });
+    const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 0, viewport: { width: 1400, height: 1100 } });
     const page = app.page;
     const W = (fn, a) => app.evalPage(fn, a);
+    /**
+     * Wait until a page predicate holds, checked once a frame (a throw counts as not yet); returns
+     * its value, or null if `ms` ran out first — a deadline only bounds a failure.
+     */
     const until = async (fn, a, ms = 20000) => {
-        const t = Date.now();
-        let v;
-        while (!(v = await W(fn, a).catch(() => null)) && Date.now() - t < ms) await page.waitForTimeout(100);
-        return v;
+        const h = await page.waitForFunction(([src, arg]) => {
+            try { return (0, eval)(`(${src})`)(arg) || false; } catch { return false; }
+        }, [String(fn), a], { polling: 'raf', timeout: ms }).catch(() => null);
+        return h ? h.jsonValue() : null;
     };
     ok(app.booted && !!await until(() => window.__wall?.snapshot().connected), `boots and registers as the relay's display on :${RELAY}`);
 
@@ -123,12 +127,12 @@ try {
     if (!shown) throw new Error('nothing to read');
     await page.mouse.move(2, 2);   // off every bar: a hovered bar shows its buttons
 
-    /** Drawn: the screen applied, every glyph it asked the atlas for landed, and frames since. */
+    /** Drawn: the screen applied, every glyph it asked the atlas for landed, and frames since (TerminalWall.nextFrame). */
     const drawn = () => W(async () => {
-        const frames = (n) => new Promise((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
-        await frames(3);
-        await window.__wall.ctx.atlas._live?.whenIdle();
-        await frames(3);
+        const w = window.__wall;
+        for (let n = 0; n < 3; n++) await w.nextFrame();
+        await w.ctx.atlas._live?.whenIdle();
+        for (let n = 0; n < 3; n++) await w.nextFrame();
     });
 
     /**
@@ -410,7 +414,8 @@ try {
         let bytes = 0;
         const off = g.onBytes((b) => { bytes += b.length; });
         const r = await window.__wall.router.execute(['terminal.resize', i, String(cols), String(rows)]);
-        for (let n = 0; n < 200 && !(emu._term.rows === rows && bytes > 0 && g.readText().some((l) => l.trim() === 'CELLS-DONE')); n++) await new Promise((res) => setTimeout(res, 50));
+        // Checked once a frame (the screen applies in the frame); 600 frames only bound a failure.
+        for (let n = 0; n < 600 && !(emu._term.rows === rows && bytes > 0 && g.readText().some((l) => l.trim() === 'CELLS-DONE')); n++) await window.__wall.nextFrame();
         off();
         return { text: r.text, rows: emu._term.rows, bytes };
     }, [id, COLS, ROWS + 3]);
