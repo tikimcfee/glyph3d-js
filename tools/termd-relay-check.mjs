@@ -49,6 +49,8 @@ let failures = 0;
 const ok = (cond, msg) => { if (!cond) failures++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); };
 const info = (msg) => console.log(`info  ${msg}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** How long a started relay may take to log its listener (a failure bound, never the wait). */
+const BIND_MS = 10_000;
 
 const freePort = () => new Promise((res) => {
     const s = net.createServer();
@@ -68,14 +70,22 @@ const relayEnv = { ...termd.env, TERM_PROGRAM: 'Apple_Terminal', TERM_SESSION_ID
 async function startRelay(env = relayEnv, ns = NS, port = PORT) {
     relay = spawn(BIN, ['serve', '--listen', '127.0.0.1', '--port', String(port), '--relay-only', '--termd-ns', ns, '--no-gomuxai', root],
         { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    relay.stdout.on('data', (b) => { relayLog += b; });
-    relay.stderr.on('data', (b) => { relayLog += b; });
-    for (let i = 0; i < 100; i++) {
-        const up = await new Promise((res) => { const s = net.connect(port, '127.0.0.1', () => { s.end(); res(true); }); s.on('error', () => res(false)); });
-        if (up) return;
-        if (relay.exitCode != null) break;
-        await sleep(50);
-    }
+    // The relay logs `[serve] listening on <addr>` once its socket is bound: that line, or its exit,
+    // is what a start waits for (BIND_MS only bounds a relay that does neither).
+    const from = relayLog.length;
+    let bound = null;
+    const ready = new Promise((res) => { bound = res; });
+    const keep = (b) => { relayLog += b; if (relayLog.indexOf('[serve] listening on ', from) >= 0) bound(true); };
+    relay.stdout.on('data', keep);
+    relay.stderr.on('data', keep);
+    // Both pipes close when every process holding them has exited: the relay and its adapters
+    // (they inherit its stdout and stderr) — what "the relay and everything it ran are gone" is.
+    const r = relay;
+    r.drained = Promise.all([r.stdout, r.stderr].map((p) => new Promise((res) => p.once('close', res))));
+    let bounded = null;
+    const up = await Promise.race([ready, new Promise((res) => r.once('exit', () => res(false))), new Promise((res) => { bounded = setTimeout(() => res(false), BIND_MS); })]);
+    clearTimeout(bounded);
+    if (up) return;
     throw new Error(`relay did not start on :${port}\n${relayLog.slice(-800)}`);
 }
 async function stopRelay() {
@@ -166,7 +176,10 @@ const adapterPid = (id) => {
 const KITTY_HEX = ['sh', '-c', "stty raw -echo; printf '\\033[>1u\\033[?2004hKEYS-%s\\n' READY; " +
     "while :; do b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); printf '[%s]' \"$b\"; done"];
 // A program on the alternate screen that asked for SGR mouse reports, echoing what it reads.
-const ALT_MOUSE = ['sh', '-c', "printf '\\033[?1049h\\033[?1000h\\033[?1006hALT-READY'; stty raw -echo; exec cat -v"];
+// ALT-READY is printed once the tty is raw (so a report reaches cat whole) and the modes are set:
+// termd's `modes` event follows the output that set them, so the adapter knows them before the
+// display can see the marker and answer it.
+const ALT_MOUSE = ['sh', '-c', "stty raw -echo; printf '\\033[?1049h\\033[?1000h\\033[?1006hALT-READY'; exec cat -v"];
 
 try {
     await startRelay();
@@ -280,7 +293,6 @@ try {
     const W = sw.id;
     await waitFor(() => term(W).owner, 8000, 'the alt-screen terminal');
     ok(await screenHas(W, 'ALT-READY'), 'the alt-screen program is up');
-    await sleep(300);
     wheel(W, 3);
     ok(await screenHas(W, '^[[<64;'), 'a wheel over it arrives as SGR wheel reports');
 
@@ -290,7 +302,8 @@ try {
     const logAtStop = relayLog.length;
     await stopRelay();
     display.close();
-    await sleep(500); // the adapters notice and detach
+    // The adapters notice and detach: once they (and the relay) are gone, the pipes they shared close.
+    await Promise.race([relay.drained, sleep(10_000)]);
     ok(!/LOST termd/.test(relayLog.slice(logAtStop)), 'stopping the relay logs no termd loss (termd is fine)');
     for (const id of [A, W]) { term(id).owner = null; term(id).text = ''; }
     ok(termdPid(termd.dir, NS) === daemon1, 'termd outlives the relay');
@@ -306,7 +319,9 @@ try {
     ok(new RegExp(`\\[attach\\] ${A} adopted in termd namespace "${NS}" \\([^)]*\\): /\\S*/sh in /`).test(relayLog),
         "the re-adopting adapter names the terminal's own program (sh, resolved), not its default shell");
     await waitFor(() => term(W).owner, 8000, 'the alt-screen terminal re-adopted');
-    await sleep(500);
+    // Its adoption repaint (the screen, marker included): the adapter has subscribed, and termd's
+    // `modes` follow the repaint in its stream (PROTOCOL.md, `subscribe`), so it knows them by now.
+    ok(await screenHas(W, 'ALT-READY'), 'the alt-screen terminal is repainted after the restart');
     // Down this time (button 65): the repaint carries the up reports already on the screen.
     wheel(W, -3);
     ok(await screenHas(W, '^[[<65;'), 'after re-adoption the wheel still reaches the alt-screen program (the adapter knows its modes)');

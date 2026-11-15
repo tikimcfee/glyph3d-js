@@ -95,19 +95,35 @@ const relay = await privateRelay({ port: RELAY, ns: 'glyph-wall-e2e', reuse: pro
 let browser = null;
 let app = null;
 const spawned = [];
+/** The page's own loads after its first: the steps' reloads, and every navigation seen (see below). */
+let reloads = 0, navigations = 0, crashed = false;
 try {
     browser = await launchGpuBrowser({});
-    app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 3000, viewport: { width: 1400, height: 900 } });
+    app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 0, viewport: { width: 1400, height: 900 } });
     const page = app.page;
+    // The page loads once, and again only where a step reloads it (reload): a navigation of its own
+    // (a dev server's hot reload of a saved file, a crash) would hand every later step a fresh wall.
+    page.on('framenavigated', (f) => { if (f === page.mainFrame()) navigations++; });
+    page.on('crash', () => { crashed = true; });
+    const reload = async () => { reloads++; await page.reload({ waitUntil: 'load' }); };
     const W = (fn, a) => app.evalPage(fn, a);
-    const settle = (ms = 1300) => page.waitForTimeout(ms);
-    /** Poll a page predicate until it holds (or `ms` runs out); returns its last value. */
+    // No step waits a guessed delay: each waits for the state or the event its check reads — a
+    // predicate checked once a frame (until), the next drawn frame (frame), the camera at rest
+    // (still). A deadline only bounds a failure: it is never the wait.
+    /**
+     * Wait until a page predicate holds, checked once a frame (a throw counts as not yet); returns
+     * its value, or null if `ms` ran out first.
+     */
     const until = async (fn, a, ms = 15000) => {
-        const t = Date.now();
-        let v;
-        while (!(v = await W(fn, a).catch(() => null)) && Date.now() - t < ms) await page.waitForTimeout(200);
-        return v;
+        const h = await page.waitForFunction(([src, arg]) => {
+            try { return (0, eval)(`(${src})`)(arg) || false; } catch { return false; }
+        }, [String(fn), a], { polling: 'raf', timeout: ms }).catch(() => null);
+        return h ? h.jsonValue() : null;
     };
+    /** The next frame drawn (TerminalWall.nextFrame): its layout, labels, chrome and pixels are in. */
+    const frame = () => W(() => window.__wall.nextFrame());
+    /** The camera at rest (no framing ease, no wheel glide), then a frame drawn there. */
+    const still = async () => { await until(() => !window.__wall.viewport.moving, null, 10000); await frame(); };
     // Screen geometry of a terminal (CSS px, page coords) + its pose and size.
     const geo = (id) => W((i) => {
         const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(), g = w.terminal(i);
@@ -129,9 +145,9 @@ try {
     /** A bar's name as drawn: its text, whether it shows, whether the whole name fits. */
     const barName = (id) => W((i) => { const b = window.__wall.names._bars.get(i); return { text: b.label.text, visible: b.label.visible, fits: b.nameFits, name: window.__wall.nameOf(i) }; }, id);
     /** With --shots, save the page as `<name>.png` (for a person to judge; the checks never read it). */
-    const shot = async (name) => { if (SHOTS) { await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }); info(`screenshot ${path.join(SHOTS, `${name}.png`)}`); } };
+    const shot = async (name) => { if (SHOTS) { await frame(); await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }); info(`screenshot ${path.join(SHOTS, `${name}.png`)}`); } };
 
-    ok(app.booted && await W(() => window.__wall.snapshot().connected), `boots and registers as the relay's display on :${RELAY}`);
+    ok(app.booted && !!await until(() => window.__wall?.snapshot().connected), `boots and registers as the relay's display on :${RELAY}`);
     ok((await W(() => document.querySelector('[data-relay]')?.dataset.relay)) === 'up', 'the relay chip reads up');
     const preexisting = await W(() => window.__wall.order.length);
     if (relay.started) ok(preexisting === 0, `the private relay adopted no live sessions (saw ${preexisting})`);
@@ -147,9 +163,8 @@ try {
     // The shell's answer, not the echoed command line: `wall-e2e-42` is only on screen once Enter ran it.
     await page.keyboard.type('echo wall-e2e-$((6*7))');
     await page.keyboard.press('Enter');
-    await settle(900);
     const lastLines = async (i) => JSON.stringify((await W((id) => window.__wall.terminal(id).readText().filter((l) => l.trim()), i)).slice(-4));
-    const typedOk = await screenHas(A, 'wall-e2e-42');
+    const typedOk = !!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'wall-e2e-42'), A, 8000);
     ok(typedOk, `typing reaches the focused shell and Enter runs it${typedOk ? '' : ` (screen: ${await lastLines(A)})`}`);
     // A shell that asked for no keyboard mode reads Shift+Enter as Enter (\r), as xterm sends it.
     await page.keyboard.type('echo shift-$((1+1))');
@@ -201,10 +216,10 @@ try {
             // Drawn: the frame after the text applies its screen and asks the atlas for new glyphs; once
             // their outlines land, two more frames upload and draw them.
             await W(async () => {
-                const frames = (n) => new Promise((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); });
-                await frames(2);
-                await window.__wall.ctx.atlas._live?.whenIdle();
-                await frames(2);
+                const w = window.__wall;
+                await w.nextFrame(); await w.nextFrame();
+                await w.ctx.atlas._live?.whenIdle();
+                await w.nextFrame(); await w.nextFrame();
             });
             // Each word's cells and, as the panel's own colour, ten blank cells two to the right of
             // it; each run's inner cells, the middle half of their height; a stretch of the title
@@ -429,7 +444,7 @@ try {
         ok(!!dragged, `a drag across a printed line selects exactly it ("${await selText(A)}")`);
         ok((await W((i) => window.__wall.selectionClipboard, A)) === LINE, 'copyOnSelect (true) put it on the wall\'s selection clipboard');
         // The pixels: the selected cells fill in the selection colour; the cells past it keep the panel's.
-        await W(async () => { const frames = (n) => new Promise((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); }); await frames(3); });
+        await frame();   // the frame that draws the selection's cells
         const rects = await W(([i, row, n]) => {
             const w = window.__wall, g = w.terminal(i), m = g._metrics, v = w.viewport, cr = v.canvas.getBoundingClientRect();
             const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing, p = g.position, s = g.scale;
@@ -547,7 +562,6 @@ try {
         ok(!!listed && !!(await W(() => document.querySelector('[data-status-window]'))), `${CHORD}+S opens the status window, and it lists the wall's terminals from termd's document (${listed?.join(', ')})`);
         const head = await W(() => document.querySelector('[data-status-window]').innerText);
         ok(/g3d-termd \S+ · libghostty-vt/.test(head) && /holder \d+/.test(head) && /brain \d+ · gen \d+/.test(head), 'the window names the daemon, its engine, holder and brain');
-        await settle(600);
         await shot('status-window');
 
         if (relay.started) {
@@ -575,19 +589,23 @@ try {
             ok(!!back && (await chip()) === 'ok', `when the brain answers the notice clears and the chip reads ok (generation ${gen0} → ${await W(() => window.__wall.termd.doc?.daemon.brain.generation)})`);
             const r = await W(() => window.__wall.termd.doc.daemon.brain);
             ok(r.restarts.crash === 1 && r.last_start.reason === 'crash', `termd's own document counts the crash (restarts ${JSON.stringify(r.restarts)}, last ${r.last_start.reason})`);
+            // Input while termd restarts is dropped, never replayed (DESIGN.md "Riding a restart":
+            // at most once), and the brain answering is not yet the shell's adapter back on it (it
+            // redials on its own backoff): type once the adapter says it has re-subscribed.
+            const resubscribed = await relay.logged(new RegExp(`\\[attach\\] ${A}: back on termd`), 35000);
+            ok(resubscribed, `after the restart ${A}'s adapter is back on termd (re-subscribed)`);
             await W((i) => window.__wall.focus(i), A);
             await page.keyboard.type('echo after-brain-restart');
             await page.keyboard.press('Enter');
             const typed = await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'after-brain-restart'), A, 8000);
-            ok(!!typed, 'the shell rode the brain restart: typing reaches it');
+            ok(!!typed, `the shell rode the brain restart: typing reaches it${typed ? '' : ` (screen: ${await lastLines(A)})\n${relay.log().split('\n').filter((l) => /attach|termd/.test(l)).slice(-12).join('\n')}`}`);
             await W(() => window.__wall.focus(null));
         } else info('reused relay: skipped the brain restart (its termd is not this tool\'s to stop)');
 
         const docked = await W(() => window.__wall.run(['wall.status', 'right']).then((x) => x.text));
         ok(docked.startsWith('OK') && (await W(() => document.querySelector('[data-status-window]')?.dataset.side)) === 'right', `wall.status right docks it (${docked})`);
         const closed = await W(() => window.__wall.run(['wall.status', 'close']).then((x) => x.text));
-        await settle(200);
-        ok(closed.startsWith('OK') && !(await W(() => document.querySelector('[data-status-window]'))), `wall.status close closes it (${closed})`);
+        ok(closed.startsWith('OK') && !!(await until(() => !document.querySelector('[data-status-window]'), null, 4000)), `wall.status close closes it (${closed})`);
         await W(() => window.__wall.run(['wall.status', 'float']).then(() => window.__wall.run(['wall.status', 'close'])));
         await W((i) => window.__wall.focus(i), A);   // as the steps below expect
     }
@@ -607,13 +625,13 @@ try {
     }
 
     // ── cycling, on the platform's chord ───────────────────────────────────
-    await page.keyboard.press(`${CHORD}+BracketRight`); await settle(300);
-    const after = await W(() => window.__wall.focusedId);
-    await page.keyboard.press(`${CHORD}+BracketLeft`); await settle(300);
-    ok(after !== A && (await W(() => window.__wall.focusedId)) === A, `${CHORD}+] moves focus (${A} → ${after}) and ${CHORD}+[ returns`);
+    await page.keyboard.press(`${CHORD}+BracketRight`);
+    const after = await until((a) => { const f = window.__wall.focusedId; return f && f !== a ? f : null; }, A, 4000);
+    await page.keyboard.press(`${CHORD}+BracketLeft`);
+    ok(!!after && !!(await until((a) => window.__wall.focusedId === a, A, 4000)), `${CHORD}+] moves focus (${A} → ${after}) and ${CHORD}+[ returns`);
 
     // ── overview, then pointer roles ───────────────────────────────────────
-    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
+    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await still();
     let g = await geo(C);
     await drag((g.left + g.right) / 2, (g.top + g.bottom) / 2, (g.left + g.right) / 2 + 80, (g.top + g.bottom) / 2 + 40);
     let g2 = await geo(C);
@@ -633,19 +651,20 @@ try {
 
     g = await geo(C);
     await drag(g.right, (g.top + g.bottom) / 2, g.right + 60, (g.top + g.bottom) / 2);
-    await settle(1200);
+    // The grid takes its new size from termd's resized stream (the stream is its one writer).
+    await until(([i, c]) => window.__wall.terminal(i).cols > c, [C, g.cols], 8000);
     g2 = await geo(C);
     ok(g2.cols > g.cols, `right-border drag adds columns (${g.cols} → ${g2.cols})`);
 
     g = await geo(C);
     await drag((g.left + g.right) / 2, g.barTop, (g.left + g.right) / 2, g.barTop - 50);
-    await settle(1200);
+    await until(([i, r]) => window.__wall.terminal(i).rows > r, [C, g.rows], 8000);
     g2 = await geo(C);
     ok(g2.rows > g.rows, `top-edge (bar top) drag adds rows (${g.rows} → ${g2.rows})`);
 
     // ── names ──────────────────────────────────────────────────────────────
-    await W((i) => window.__wall.terminal(i).sendInput('cd /tmp\r'), B); await settle(1200);
-    const titled = await W((i) => window.__wall.nameOf(i), B);
+    await W((i) => window.__wall.terminal(i).sendInput('cd /tmp\r'), B);
+    const titled = await until((i) => { const n = window.__wall.nameOf(i); return n === '/tmp' ? n : null; }, B, 8000) ?? await W((i) => window.__wall.nameOf(i), B);
     ok(titled === '/tmp', `a terminal is named by its shell title ("${titled}")`);
     await W((i) => window.__wall.focus(i), B);
     // Typed up to the action label's quote: a shell prompt (a path with "worktrees" in it) can
@@ -653,21 +672,21 @@ try {
     await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('rename "'); await page.keyboard.press('Enter');
     // A name no path holds: the other terminals' titles are their cwd, and a checkout under a
     // directory named like the search ("…-scratch/…") would match it too.
-    await page.keyboard.type('e2e quokka'); await page.keyboard.press('Enter'); await settle(300);
-    ok((await W((i) => window.__wall.nameOf(i), B)) === 'e2e quokka', 'the palette renames the focused terminal');
+    await page.keyboard.type('e2e quokka'); await page.keyboard.press('Enter');
+    ok(!!await until((i) => window.__wall.nameOf(i) === 'e2e quokka', B, 4000), 'the palette renames the focused terminal');
     await W(() => window.__wall.focus(null));
-    await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('quokka'); await page.keyboard.press('Enter'); await settle(300);
-    ok((await W(() => window.__wall.focusedId)) === B, 'the palette finds it by name');
+    await page.keyboard.press(`${CHORD}+KeyK`); await page.keyboard.type('quokka'); await page.keyboard.press('Enter');
+    ok(!!await until((i) => window.__wall.focusedId === i, B, 4000), 'the palette finds it by name');
     await W((i) => window.__wall.rename(i, ''), B);
     ok((await W((i) => window.__wall.nameOf(i), B)) === '/tmp', 'an empty name falls back to the shell title');
 
     // A name too long for its bar: whole, shrunk to fit — or, past the bar's text floor, on its map label.
     const LONG = 'a terminal name long enough that no title bar at the overview could hold it at a readable size';
     await W(([i, n]) => window.__wall.rename(i, n), [C, LONG]);
-    await W((i) => window.__wall.focus(i, { frame: true }), C); await settle();
+    await W((i) => window.__wall.focus(i, { frame: true }), C); await still();
     let bn = await barName(C);
     ok(bn.text === LONG && bn.visible && bn.fits, `framed, the long name sits whole in its bar (fits=${bn.fits}, ${bn.text.length} chars)`);
-    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
+    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await still();
     bn = await barName(C);
     const onMap = (await labels()).find((l) => l.id === C);
     ok(bn.text === LONG && ((bn.visible && bn.fits) || (!bn.visible && onMap?.text === LONG)),
@@ -680,7 +699,7 @@ try {
         v.camera.position.x = (r.minX + r.maxX) / 2; v.camera.position.y = (r.minY + r.maxY) / 2;
         v.camera.updateProjectionMatrix();
     }, C);
-    await settle(500);
+    await frame();   // the frame that lays the names out at this zoom
     bn = await barName(C);
     const floored = (await labels()).find((l) => l.id === C);
     ok(!bn.fits && !bn.visible && bn.text === LONG && floored?.text === LONG,
@@ -722,10 +741,11 @@ try {
     {
         await W(() => window.__wall.store.setName('term-9999', 'a session long gone'));
         const before = await W((ids) => ids.map((i) => { const p = window.__wall.terminal(i).position; return { x: p.x, y: p.y }; }), spawned);
-        await page.reload({ waitUntil: 'load' });
+        await reload();
         const back = await until((ids) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)), spawned, 20000);
         ok(!!back, `after a reload the wall re-adopts all ${spawned.length} terminals`);
-        await settle(800);
+        // The shell's title rides the adoption repaint; the given name, the store.
+        await until(([b, c]) => window.__wall.nameOf(b) === '/tmp' && window.__wall.nameOf(c) === 'keep me', [B, C], 8000);
         const names = await W((ids) => ids.map((i) => window.__wall.nameOf(i)), spawned);
         const now = await W((ids) => ids.map((i) => { const p = window.__wall.terminal(i).position; return { x: p.x, y: p.y }; }), spawned);
         ok(names[1] === '/tmp', `the shell's title comes back with its grid (${B}: "${names[1]}") — termd puts it in every repaint`);
@@ -752,8 +772,7 @@ try {
         await W((i) => window.__wall.focus(i), A);
         await page.keyboard.type('echo after-restart-typed');
         await page.keyboard.press('Enter');
-        await settle(1200);
-        ok(await screenHas(A, 'after-restart-typed'), 'typing reaches the re-adopted shell without a reload');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'after-restart-typed'), A, 8000), 'typing reaches the re-adopted shell without a reload');
         squatter.close();
         const r = await W(() => window.__wall.spawn());
         if (r.ok) spawned.push(r.id);
@@ -762,23 +781,25 @@ try {
 
     // ── wheel + pinch over the focused terminal ────────────────────────────
     await W((i) => window.__wall.terminal(i).sendInput('clear; seq 1 300\r'), A);
-    await W((i) => window.__wall.focus(i, { frame: true }), A); await settle();
+    await W((i) => window.__wall.focus(i, { frame: true }), A); await still();
     g = await geo(A);
     const top0 = await W((i) => window.__wall.terminal(i).readText().find((l) => l.trim()), A);
     const c0 = await cam();
     await page.mouse.move((g.left + g.right) / 2, (g.top + g.bottom) / 2);
-    for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, -120); await page.waitForTimeout(50); }
-    await settle(800);
-    const top1 = await W((i) => window.__wall.terminal(i).readText().find((l) => l.trim()), A);
+    for (let i = 0; i < 5; i++) await page.mouse.wheel(0, -120);
+    // termd answers a scroll with the view's rows: the screen's first line moves.
+    const top1 = await until(([i, t]) => { const l = window.__wall.terminal(i).readText().find((x) => x.trim()); return l !== t ? l : null; }, [A, top0], 8000)
+        ?? await W((i) => window.__wall.terminal(i).readText().find((l) => l.trim()), A);
     const c1 = await cam();
     ok(top1 !== top0 && c1.zoom === c0.zoom && c1.x === c0.x, `wheel over the focused terminal scrolls its history ("${top0?.trim().slice(0, 12)}" → "${top1?.trim().slice(0, 12)}"), camera still`);
-    for (let i = 0; i < 5; i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(50); }
-    await page.keyboard.down('Control'); await page.mouse.wheel(0, -40); await page.keyboard.up('Control'); await settle(300);
-    ok((await cam()).zoom !== c1.zoom, 'pinch (Ctrl+wheel) over the focused terminal zooms the canvas');
+    for (let i = 0; i < 5; i++) await page.mouse.wheel(0, 120);
+    await page.keyboard.down('Control'); await page.mouse.wheel(0, -40); await page.keyboard.up('Control');
+    ok(!!await until((z) => window.__wall.viewport.zoom !== z, c1.zoom, 4000), 'pinch (Ctrl+wheel) over the focused terminal zooms the canvas');
+    await still();
 
     // ── wheel zoom: the zoom modifier + mouse notches glide about the pointer, land exactly, hold the point under it ──
     // Control is a zoom key on every platform (chord.js zoomsWheel, the zoomKeys knob: ctrl alt meta).
-    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
+    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await still();
     const cr = await W(() => { const r = window.__wall.viewport.canvas.getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.4 }; });
     await page.mouse.move(cr.x, cr.y);
     // The deltas the page receives, which are what the wall zooms (and pans) by: a synthetic wheel of
@@ -793,7 +814,7 @@ try {
     for (let i = 0; i < 3; i++) await page.mouse.wheel(0, -100);
     await page.keyboard.up('Control');
     const mid = await W(() => window.__wall.viewport.moving);
-    await settle(800);
+    await until(() => !window.__wall.viewport.moving, null, 8000);   // the glide landed
     const z1 = await W((p) => { const v = window.__wall.viewport; return { zoom: v.zoom, at: v.toWorld(p.x, p.y), moving: v.moving }; }, cr);
     const seen = await W(() => window.__wheelSeen.splice(0));
     const notches = -seen.reduce((n, [, dy, mode]) => n + (mode === 0 ? dy : NaN), 0) / z0.perNotch;
@@ -807,7 +828,7 @@ try {
     // as a page's does; + deltaX moves the view right (camera x grows).
     const p0 = await cam();
     await page.mouse.wheel(60, 100);
-    await settle(300);
+    await until(() => window.__wheelSeen.length > 0 && !window.__wall.viewport.moving, null, 4000);
     const p1 = await cam();
     const panSeen = await W(() => window.__wheelSeen.splice(0));
     const pdx = panSeen.reduce((n, [dx, , mode]) => n + (mode === 0 ? dx : NaN), 0);
@@ -819,8 +840,8 @@ try {
     // ── map labels ─────────────────────────────────────────────────────────
     for (let i = 0; i < 5; i++) { const r = await W(() => window.__wall.spawn()); if (r.ok) spawned.push(r.id); }
     await W((ids) => { const n = ['build', 'api server', 'tests (watch)', 'agent: root', 'agent: camera', 'logs', 'db shell', 'scratch', 'extra']; ids.forEach((id, k) => window.__wall.rename(id, n[k])); }, spawned);
-    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await settle();
-    const zoomOut = async (f) => { await W((k) => { const v = window.__wall.viewport; v.target = null; v.camera.zoom *= k; v.camera.updateProjectionMatrix(); }, f); await settle(500); };
+    await W(() => { window.__wall.focus(null); window.__wall.fitAll(); }); await still();
+    const zoomOut = async (f) => { await W((k) => { const v = window.__wall.viewport; v.target = null; v.camera.zoom *= k; v.camera.updateProjectionMatrix(); }, f); await frame(); };
     await zoomOut(0.3);
     let ls = await labels();
     const total = await W(() => window.__wall.order.length);
@@ -841,7 +862,8 @@ try {
     ls = await labels();
     const lab2 = ls.find((l) => l.id === lab.id);
     await page.mouse.click((lab2.r.l + lab2.r.r) / 2, (lab2.r.t + lab2.r.b) / 2);
-    await settle(1500);
+    await until((i) => window.__wall.focusedId === i, lab.id, 4000);
+    await still();
     const landed = await cam();
     const want = await W((i) => window.__wall.frameTarget(i), lab.id);
     ok(Math.abs(landed.zoom / want.zoom - 1) < 1e-3 && Math.hypot(landed.x - want.x, landed.y - want.y) < 1e-3,
@@ -859,7 +881,8 @@ try {
         return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }, sel);
     const pos = (id) => W((i) => { const p = window.__wall.terminal(i)?.position; return p ? { x: p.x, y: p.y } : null; }, id);
-    const hoverBar = async (id) => { const b = await geo(id); await page.mouse.move((b.left + b.right) / 2 - 40, (b.top + b.barTop) / 2); await settle(250); };
+    const hoverBar = async (id) => { const b = await geo(id); await page.mouse.move((b.left + b.right) / 2 - 40, (b.top + b.barTop) / 2);
+        await until((i) => { const el = document.querySelector('[data-bar-buttons]'); return el?.dataset.id === i && getComputedStyle(el).display !== 'none'; }, id, 4000); };
     const HOLD = await W(() => window.__wall.config.closeHoldMs);
     /** Spawn `n` terminals of our own and park them in a row clear of every other terminal, framed. */
     const park = async (n) => {
@@ -877,7 +900,7 @@ try {
             for (const id of own) { const r = w.windowRect(id); u.minX = Math.min(u.minX, r.minX); u.minY = Math.min(u.minY, r.minY); u.maxX = Math.max(u.maxX, r.maxX); u.maxY = Math.max(u.maxY, r.maxY); }
             w.viewport.easeTo(w.viewport.fitTarget(u, own.length > 1 ? 0.7 : 0.6));
         }, ids);
-        await settle();
+        await still();
         return ids;
     };
     {
@@ -889,28 +912,32 @@ try {
         await shot('hover-buttons');
         const spot = await pos(H);
         const hb = await box('[data-bar-buttons] [data-action="hide"]');
-        await page.mouse.click(hb.x, hb.y); await settle(400);
+        await page.mouse.click(hb.x, hb.y);
+        await until((i) => window.__wall.store.hidden(i), H, 4000);
         const hid = await W((i) => { const w = window.__wall; return { hidden: w.store.hidden(i), visible: w.terminal(i).visible, shown: w.shownOrder().includes(i) }; }, H);
         ok(hid.hidden && !hid.visible && !hid.shown, `a click on hide takes ${H} off the canvas (${JSON.stringify(hid)})`);
 
-        await page.reload({ waitUntil: 'load' });
+        await reload();
         const back = await until((ids) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)), spawned, 20000);
-        await settle(800);
-        const still = await W((i) => ({ hidden: window.__wall.store.hidden(i), visible: window.__wall.terminal(i).visible }), H);
-        ok(!!back && still.hidden && !still.visible, `after a reload ${H} is re-adopted (it kept running) and still hidden`);
+        await frame();
+        const stillHidden = await W((i) => ({ hidden: window.__wall.store.hidden(i), visible: window.__wall.terminal(i).visible }), H);
+        ok(!!back && stillHidden.hidden && !stillHidden.visible, `after a reload ${H} is re-adopted (it kept running) and still hidden`);
 
-        await page.keyboard.press(`${CHORD}+KeyK`); await settle(200);
+        await page.keyboard.press(`${CHORD}+KeyK`);
+        await until(() => document.activeElement?.tagName === 'INPUT', null, 4000);
         await page.keyboard.type(await W((i) => window.__wall.nameOf(i), H));
-        const row = await W((i) => { const el = document.querySelector(`[data-item="terminal:${i}"]`); return el ? { hidden: el.hasAttribute('data-hidden'), text: el.textContent } : null; }, H);
+        const row = await until((i) => { const el = document.querySelector(`[data-item="terminal:${i}"]`); return el ? { hidden: el.hasAttribute('data-hidden'), text: el.textContent } : null; }, H);
         ok(!!row?.hidden, `the palette finds the hidden terminal, marked hidden ("${row?.text}")`);
-        await page.click(`[data-item="terminal:${H}"]`); await settle(1500);
+        await page.click(`[data-item="terminal:${H}"]`);
+        await until((i) => !window.__wall.store.hidden(i) && window.__wall.focusedId === i, H, 4000);
+        await still();
         const shownBack = await W((i) => ({ hidden: window.__wall.store.hidden(i), visible: window.__wall.terminal(i).visible, focus: window.__wall.focusedId }), H);
         const spot2 = await pos(H);
         ok(!shownBack.hidden && shownBack.visible && shownBack.focus === H && spot2.x === spot.x && spot2.y === spot.y,
             `choosing it shows it back at its own spot, focused (${JSON.stringify(shownBack)})`);
 
-        await page.keyboard.press(`${CHORD}+Minus`); await settle(300);
-        const chordHid = await W((i) => window.__wall.store.hidden(i), H);
+        await page.keyboard.press(`${CHORD}+Minus`);
+        const chordHid = !!await until((i) => window.__wall.store.hidden(i), H, 4000);
         const sv = await W((i) => window.__wall.run(['wall.show', i]).then((r) => r.text), H);
         ok(chordHid && sv.startsWith('OK') && !(await W((i) => window.__wall.store.hidden(i), H)), `${CHORD}+- hides the focused terminal; wall.show brings it back (${sv})`);
     }
@@ -918,28 +945,42 @@ try {
         const [K] = await park(1);
         await hoverBar(K);
         const cb = await box('[data-bar-buttons] [data-action="close"]');
-        await page.mouse.move(cb.x, cb.y); await page.mouse.down(); await page.waitForTimeout(150); await page.mouse.up();
-        await settle(HOLD + 600);
-        ok(!!(await W((i) => window.__wall.terminal(i), K)), `a short press on close (150 ms of ${HOLD}) keeps ${K}`);
-        await page.mouse.move(cb.x, cb.y); await page.mouse.down(); await page.waitForTimeout(HOLD / 2);
-        const filling = await W(() => document.querySelector('[data-bar-buttons] [data-action="close"]').dataset.holding === '1');
-        await shot('close-hold');
-        await page.waitForTimeout(HOLD / 2 + 300); await page.mouse.up();
-        const gone = await until((i) => !window.__wall.terminal(i), K, 8000);
-        ok(filling && !!gone && (await W((i) => window.__wall.store.position(i), K)) === null, `a press held ${HOLD} ms fills the ring and kills ${K}, forgotten`);
+        const ringOn = (on) => until((want) => (document.querySelector('[data-bar-buttons] [data-action="close"]')?.dataset.holding === '1') === want, on, 3000);
+        // A short press: let go once the ring has started. Its cancel clears the hold's timer
+        // (holdPress: holding = a timer pending), so once the ring is off nothing can kill it.
+        await page.mouse.move(cb.x, cb.y); await page.mouse.down();
+        const began = await ringOn(true);
+        await page.mouse.up();
+        const letGo = await ringOn(false);
+        ok(!!began && !!letGo && !!(await W((i) => window.__wall.terminal(i), K)), `a short press on close starts the ring, lets go, and keeps ${K}`);
+        // Held: the ring fills (the shot when it's half way) and closing it kills the terminal while the button is still down.
+        await page.mouse.move(cb.x, cb.y); await page.mouse.down();
+        const filling = await ringOn(true);
+        if (SHOTS) {
+            await until(() => { const c = document.querySelector('[data-bar-buttons] [data-action="close"] svg circle'); return c && parseFloat(getComputedStyle(c).strokeDashoffset) < 2 * Math.PI * 8.5 / 2; }, null, HOLD + 3000);
+            await shot('close-hold');
+        }
+        const gone = await until((i) => !window.__wall.terminal(i), K, HOLD + 8000);
+        await page.mouse.up();
+        ok(!!filling && !!gone && (await W((i) => window.__wall.store.position(i), K)) === null, `a press held ${HOLD} ms fills the ring and kills ${K}, forgotten`);
 
         const K2 = (await W(() => window.__wall.spawn())).id;
         spawned.push(K2);
-        await W((i) => window.__wall.focus(i), K2); await settle(300);
-        const holdChord = async (ms) => {
+        await W((i) => window.__wall.focus(i), K2);
+        /** Hold the close chord until `held` resolves, then let go. */
+        const holdChord = async (held) => {
             for (const k of CHORD.split('+')) await page.keyboard.down(k);
-            await page.keyboard.down('KeyX'); await page.waitForTimeout(ms); await page.keyboard.up('KeyX');
+            await page.keyboard.down('KeyX');
+            const v = await held();
+            await page.keyboard.up('KeyX');
             for (const k of CHORD.split('+').reverse()) await page.keyboard.up(k);
+            return v;
         };
-        await holdChord(150); await settle(HOLD + 400);
-        const kept = !!(await W((i) => window.__wall.terminal(i), K2));
-        await holdChord(HOLD + 300);
-        const gone2 = await until((i) => !window.__wall.terminal(i), K2, 8000);
+        const holding = (on) => until(([i, want]) => (window.__wall.barButtons.holdTarget === i) === want, [K2, on], 3000);
+        // Let go once the hold has started; once it's released no timer is left to kill it.
+        const chordBegan = await holdChord(() => holding(true));
+        const kept = !!chordBegan && !!(await holding(false)) && !!(await W((i) => window.__wall.terminal(i), K2));
+        const gone2 = await holdChord(() => until((i) => !window.__wall.terminal(i), K2, HOLD + 8000));
         ok(kept && !!gone2, `${CHORD}+X held closes the focused terminal; let go early, it stays`);
     }
 
@@ -1145,7 +1186,8 @@ try {
         await shot('lasso');
         await page.mouse.move(l, t + 20, { steps: 6 }); await page.mouse.up();
         await page.keyboard.up('Shift');
-        await settle(300);
+        await until(() => !window.__wall.pointer.lassoing, null, 4000);
+        await frame();   // the selection's outlines and its button are placed in the frame's chrome pass
         let sel = await W(() => [...window.__wall.selection].sort());
         ok(lassoUp && JSON.stringify(sel) === JSON.stringify([...L].sort()), `a ⇧-drag lasso (drawn on screen: ${lassoUp}) selects exactly what it touches (${sel.join(', ')})`);
         const marks = await W(() => ({ outlines: document.querySelectorAll('[data-selected]').length, button: getComputedStyle(document.querySelector('[data-selection-bar]')).display !== 'none' }));
@@ -1154,15 +1196,14 @@ try {
 
         const mid = boxes[1];
         await page.keyboard.down('Shift'); await page.mouse.click((mid.left + mid.right) / 2, (mid.top + mid.bottom) / 2); await page.keyboard.up('Shift');
-        await settle(200);
-        const without = await W(() => [...window.__wall.selection]);
+        const without = await until((i) => !window.__wall.selection.has(i) && [...window.__wall.selection], L[1], 4000) ?? await W(() => [...window.__wall.selection]);
         await page.keyboard.down('Shift'); await page.mouse.click((mid.left + mid.right) / 2, (mid.top + mid.bottom) / 2); await page.keyboard.up('Shift');
-        await settle(200);
-        sel = await W(() => [...window.__wall.selection]);
+        sel = await until((i) => window.__wall.selection.has(i) && [...window.__wall.selection], L[1], 4000) ?? await W(() => [...window.__wall.selection]);
         ok(!without.includes(L[1]) && without.length === 2 && sel.includes(L[1]) && sel.length === 3, '⇧-click takes a terminal out of the selection and puts it back');
 
         const gb = await box('[data-selection-bar] [data-action="group"]');
-        await page.mouse.click(gb.x, gb.y); await settle(600);
+        await page.mouse.click(gb.x, gb.y);
+        await until((ids) => window.__wall.snapshot().groups.some((x) => ids.every((id) => x.members.includes(id))), L, 4000);
         const snap = await W(() => window.__wall.snapshot());
         const grp = snap.groups.find((x) => L.every((id) => x.members.includes(id)));
         ok(!!grp && grp.members.length === 3 && snap.selection.length === 0, `the group button gathers the selection into ${grp?.id} ("${grp?.name}", ${grp?.layout} ${grp?.columns})`);
@@ -1179,7 +1220,7 @@ try {
         const want = tileLayout(tiled.sizes, { origin: tiled.group.origin, columns: tiled.group.columns, gap: tiled.group.gap, barRoom: BAR_ROOM }).places;
         const off = Math.max(...want.map((p, k) => Math.hypot(p.x - tiled.at[k].x, p.y - tiled.at[k].y)));
         ok(off < 1e-6, `the tiled members sit exactly where wallLayout.tileLayout puts them (max off ${off.toExponential(1)}, ${tiled.group.columns} columns, gap ${tiled.group.gap})`);
-        await W((g) => window.__wall.run(['wall.group.frame', g]), gid); await settle();
+        await W((g) => window.__wall.run(['wall.group.frame', g]), gid); await still();
         await shot('group-tiled');
 
         const hd = await W((g) => { const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(); const s = v.toScreenBox(w.groups.headerRect(g, v.zoom)); return { x: cr.left + (s.left + s.right) / 2, y: cr.top + (s.top + s.bottom) / 2, zoom: v.zoom }; }, gid);
@@ -1188,7 +1229,7 @@ try {
         await page.mouse.move(hd.x, hd.y);
         ok((await W(() => window.__wall.viewport.canvas.style.cursor)) === 'move', 'the cursor over a group header is "move"');
         await drag(hd.x, hd.y, hd.x + 70, hd.y + 50);
-        await settle(300);
+        await until(() => !window.__wall.pointer.busy, null, 4000);
         const after = await Promise.all(grp.members.map(pos));
         const o1 = await W((g) => window.__wall.groups.get(g).origin, gid);
         const ds = after.map((p, k) => ({ x: p.x - before[k].x, y: p.y - before[k].y }));
@@ -1199,13 +1240,13 @@ try {
         ok(kept2.every((p, k) => p.x === after[k].x && p.y === after[k].y), 'and every member remembers its new spot');
 
         const fl = await W((g) => window.__wall.run(['wall.group.layout', g, 'freeform']).then((r) => r.text), gid);
-        await settle(300);
+        await frame();
         const last = grp.members[2];
         const lg = await geo(last);
         const others0 = await Promise.all(grp.members.slice(0, 2).map(pos));
         const last0 = await pos(last);
         await drag((lg.left + lg.right) / 2, (lg.top + lg.barTop) / 2, (lg.left + lg.right) / 2 + 30, (lg.top + lg.barTop) / 2 + 60);
-        await settle(300);
+        await until(() => !window.__wall.pointer.busy, null, 4000);
         const others1 = await Promise.all(grp.members.slice(0, 2).map(pos));
         const last1 = await pos(last);
         ok(fl.startsWith('OK') && others1.every((p, k) => p.x === others0[k].x && p.y === others0[k].y) && last1.y < last0.y,
@@ -1220,9 +1261,10 @@ try {
 
         // ── the sidebar ────────────────────────────────────────────────────
         await W(() => window.__wall.focus(null));
-        await page.keyboard.press(`${CHORD}+KeyB`); await settle(300);
-        ok(!!(await W(() => document.querySelector('[data-sidebar]'))), `${CHORD}+B opens the sidebar`);
-        await page.click('[data-sidebar] [data-action="left"]'); await settle(300);
+        await page.keyboard.press(`${CHORD}+KeyB`);
+        ok(!!(await until(() => !!document.querySelector('[data-sidebar]'), null, 4000)), `${CHORD}+B opens the sidebar`);
+        await page.click('[data-sidebar] [data-action="left"]');
+        await until(() => document.querySelector('[data-sidebar]')?.dataset.side === 'left', null, 4000);
         const lists = await W(([g, ids, loose]) => {
             const sb = document.querySelector('[data-sidebar]');
             const grow = sb.querySelector(`[data-row="group:${g}"]`);
@@ -1234,33 +1276,37 @@ try {
         }, [gid, pruned, spawned[0]]);
         ok(lists.side === 'left' && lists.left === 0 && lists.group && lists.members.every(Boolean) && lists.loose,
             `the sidebar docks left and lists the group, its members under it, and the ungrouped terminals (${JSON.stringify(lists)})`);
-        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`); await settle(300);
+        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`);
+        await until((g) => document.querySelector(`[data-row="group:${g}"]`)?.hasAttribute('data-collapsed'), gid, 4000);
         const folded = await W(([g, ids]) => ({ collapsed: document.querySelector(`[data-row="group:${g}"]`).hasAttribute('data-collapsed'), rows: ids.filter((id) => document.querySelector(`[data-sidebar] [data-row="term:${id}"]`)).length }), [gid, pruned]);
         ok(folded.collapsed && folded.rows === 0, `a group folds in the sidebar (its ${pruned.length} member rows go)`);
-        await page.reload({ waitUntil: 'load' });
-        await until((ids) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)) && document.querySelector('[data-sidebar]'), pruned, 20000);
-        await settle(800);
+        await reload();
+        await until(([ids, g]) => window.__wall?.snapshot().connected && ids.every((i) => window.__wall.terminal(i)) && document.querySelector(`[data-sidebar] [data-row="group:${g}"]`), [pruned, gid], 20000);
         const kept3 = await W((g) => { const sb = document.querySelector('[data-sidebar]'); return { side: sb?.dataset.side, collapsed: !!sb?.querySelector(`[data-row="group:${g}"][data-collapsed]`) }; }, gid);
         ok(kept3.side === 'left' && kept3.collapsed, `after a reload the sidebar is still open, docked left, the group still folded (${JSON.stringify(kept3)})`);
-        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`); await settle(300);
+        await page.click(`[data-sidebar] [data-row="group:${gid}"] [data-action="collapse"]`);
         const rowSel = `[data-sidebar] [data-row="term:${pruned[0]}"]`;
-        await page.hover(rowSel); await page.click(`${rowSel} [data-action="hide"]`); await settle(300);
+        await until((s) => !!document.querySelector(s), rowSel, 4000);
+        await page.hover(rowSel); await page.click(`${rowSel} [data-action="hide"]`);
+        await until(([s, i]) => window.__wall.store.hidden(i) && document.querySelector(s)?.hasAttribute('data-hidden'), [rowSel, pruned[0]], 4000);
         const rowHidden = await W(([s, i]) => ({ marked: document.querySelector(s).hasAttribute('data-hidden'), hidden: window.__wall.store.hidden(i) }), [rowSel, pruned[0]]);
-        await page.hover(rowSel); await page.click(`${rowSel} [data-action="show"]`); await settle(300);
+        await page.hover(rowSel); await page.click(`${rowSel} [data-action="show"]`);
+        await until((i) => !window.__wall.store.hidden(i), pruned[0], 4000);
         const ringed = await W((s) => !!document.querySelector(`${s} [data-action="close"] svg circle`), rowSel);
         ok(rowHidden.marked && rowHidden.hidden && !(await W((i) => window.__wall.store.hidden(i), pruned[0])) && ringed,
             `a sidebar row hides its terminal (and marks it), shows it back, and carries the hold-to-close ring (${JSON.stringify(rowHidden)}, ring ${ringed})`);
-        await W(() => window.__wall.fitAll()); await settle();
+        await W(() => window.__wall.fitAll()); await still();
         await shot('sidebar-left');
-        await page.keyboard.press(`${CHORD}+KeyB`); await settle(300);
-        ok(!(await W(() => document.querySelector('[data-sidebar]'))), `${CHORD}+B closes it`);
+        await page.keyboard.press(`${CHORD}+KeyB`);
+        ok(!!(await until(() => !document.querySelector('[data-sidebar]'), null, 4000)), `${CHORD}+B closes it`);
 
         // ── the sidebar and the status window together ─────────────────────
         await W(() => window.__wall.focus(null));
         await page.keyboard.press(`${CHORD}+KeyB`);
         await page.keyboard.press(`${CHORD}+KeyS`);
         await W(() => window.__wall.run(['wall.sidebar', 'right']).then(() => window.__wall.run(['wall.status', 'right'])));
-        await settle(400);
+        await until(() => document.querySelector('[data-sidebar]')?.dataset.side === 'right' && document.querySelector('[data-status-window]')?.dataset.side === 'right', null, 4000);
+        await frame();
         const rects = await W(() => {
             const r = (sel) => { const b = document.querySelector(sel)?.getBoundingClientRect(); return b ? { l: b.left, r: b.right } : null; };
             return { sidebar: r('[data-sidebar]'), status: r('[data-status-window]'), topbar: r('[data-termd]')?.r, vw: document.documentElement.clientWidth };
@@ -1277,9 +1323,10 @@ try {
         await W(() => window.__wall.run(['wall.config', 'errorsShown', '3']));
         const target = pruned[0];
         await W((i) => window.__wall.run(['wall.hide', i]), target);
-        await settle(300);
+        await until((i) => window.__wall.store.hidden(i), target, 4000);
         await page.click(`[data-status-row="${target}"]`);
-        await settle(1500);
+        await until((i) => !window.__wall.store.hidden(i) && window.__wall.focusedId === i, target, 4000);
+        await still();
         const revealed = await W((i) => ({ hidden: window.__wall.store.hidden(i), shown: window.__wall.terminal(i).visible, focused: window.__wall.focusedId === i }), target);
         ok(!revealed.hidden && revealed.shown && revealed.focused, `a status row's click reveals its hidden terminal: shown and focused (${JSON.stringify(revealed)})`);
         await W(() => window.__wall.run(['wall.sidebar', 'close']).then(() => window.__wall.run(['wall.status', 'close'])));
@@ -1461,13 +1508,16 @@ try {
     }
 
     if (app.errors.length) { failures++; console.log('FAIL  page errors:', app.errors.slice(0, 3)); }
+    ok(!crashed && navigations === reloads, `the page loaded only where a step reloaded it (${reloads} reload(s), ${navigations} navigation(s)${crashed ? ', and it crashed' : ''})`);
 } catch (e) {
+    if (navigations !== reloads || crashed) console.log(`info  the page navigated ${navigations} time(s) for ${reloads} reload(s)${crashed ? ' and crashed' : ''} — a hot reload of a saved file, or a crash, under the run`);
     failures++;
     console.log(`FAIL  ${e.stack || e}`);
 } finally {
     if (app) {
         for (const id of spawned) await app.evalPage((i) => window.__wall.kill(i), id).catch(() => {});
-        await app.page.waitForTimeout(1000).catch(() => {});
+        // The relay's stop takes termd (and so every terminal) with it; this only lets the kills land first.
+        await app.page.waitForFunction((ids) => ids.every((i) => !window.__wall?.terminal(i)), spawned, { timeout: 5000 }).catch(() => {});
     }
     await browser?.close().catch(() => {});
     await relay.stop();

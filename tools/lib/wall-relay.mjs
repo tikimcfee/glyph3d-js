@@ -42,9 +42,14 @@ export async function listening(port) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** How long a started relay may take to log its listener before start gives up on it (a failure bound). */
+const BIND_MS = 10_000;
+/** How long a stopped relay may take to exit on SIGTERM before it is SIGKILLed (a failure bound). */
+const EXIT_MS = 3000;
 
 /**
- * @typedef {{ port: number, ns: string|null, termdDir: string|null, started: boolean,
+ * @typedef {{ port: number, ns: string|null, termdDir: string|null, started: boolean, log: () => string,
+ *   logged: (re: RegExp, ms?: number) => Promise<boolean>,
  *   restart: () => Promise<void>, stop: () => Promise<void> }} PrivateRelay
  */
 
@@ -61,25 +66,35 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
             throw new Error(`[wall-relay] something already listens on :${port} — refusing to run against a relay this tool didn't start (a person's display may be on it). Pick a free --relay port, or pass --reuse-relay to run against a relay you started yourself.`);
         }
         console.log(`info  --reuse-relay: running against the relay already on :${port} — not started here, so not stopped (or its terminals killed) here`);
-        return { port, ns: null, termdDir: null, started: false, restart: async () => { throw new Error('[wall-relay] can\'t restart a reused relay'); }, stop: async () => {} };
+        return { port, ns: null, termdDir: null, started: false, log: () => '', logged: async () => false, restart: async () => { throw new Error('[wall-relay] can\'t restart a reused relay'); }, stop: async () => {} };
     }
 
     const termd = privateTermd(`w${process.pid}`); // short: the socket path must fit a sockaddr
     let child = null;
     let log = '';
+    /** Who waits for a line in the log (logged). @type {Set<{re: RegExp, done: (v: boolean) => void, bound: any}>} */
+    const watchers = new Set();
     const start = async () => {
         log = '';
         child = spawn(BIN, ['serve', '--port', String(port), '--listen', '127.0.0.1', '--relay-only', '--termd-ns', ns, '--no-gomuxai', root],
             { env: termd.env, stdio: ['ignore', 'pipe', 'pipe'] });
-        const keep = (b) => { log += b; if (log.length > 64 * 1024) log = log.slice(-32 * 1024); };
+        // The relay logs `[serve] listening on <addr>` once its socket is bound: that line, or its
+        // exit, is what start waits for (BIND_MS only bounds a relay that does neither).
+        let bound = null;
+        const ready = new Promise((res) => { bound = res; });
+        const keep = (b) => {
+            log += b;
+            if (/\[serve\] listening on /.test(log)) bound('listening');
+            if (log.length > 64 * 1024) log = log.slice(-32 * 1024);
+            for (const w of [...watchers]) if (w.re.test(log)) { watchers.delete(w); clearTimeout(w.bound); w.done(true); }
+        };
         child.stdout.on('data', keep);
         child.stderr.on('data', keep);
         const exited = new Promise((res) => child.once('exit', (code, sig) => res(`exited (${sig ?? code})`)));
         child.once('error', (e) => { log += `\nspawn error: ${e.message}`; });
-        for (let i = 0; i < 60 && !(await listening(port)); i++) {
-            if (child.exitCode != null || child.signalCode != null) break;
-            await sleep(100);
-        }
+        let bounded = null;
+        await Promise.race([ready, exited, new Promise((res) => { bounded = setTimeout(res, BIND_MS); })]);
+        clearTimeout(bounded);
         // Ours, verified: the port answers, the relay we started is still running, and it bound the
         // port on its first try (a relay that found the port taken logs that it's waiting for it).
         const alive = child.exitCode == null && child.signalCode == null;
@@ -92,7 +107,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
         if (!child || child.exitCode != null || child.signalCode != null) return;
         const gone = new Promise((res) => child.once('exit', res));
         child.kill('SIGTERM');
-        await Promise.race([gone, sleep(3000)]);
+        await Promise.race([gone, sleep(EXIT_MS)]);
         if (child.exitCode == null && child.signalCode == null) { child.kill('SIGKILL'); await gone; }
     };
     await start();
@@ -107,9 +122,23 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
 
     return {
         port, ns, termdDir: termd.dir, started: true,
+        /** The relay's log so far (its last 32–64 KB), for a failure to show. */
+        log: () => log,
+        /**
+         * Resolves true once the relay's log (its adapters' lines included: they share its stderr)
+         * holds a match for `re` — at once if it already does — or false after `ms` (a failure bound).
+         * @param {RegExp} re @param {number} [ms]
+         */
+        logged(re, ms = 15000) {
+            if (re.test(log)) return Promise.resolve(true);
+            return new Promise((done) => {
+                const w = { re, done, bound: null };
+                w.bound = setTimeout(() => { if (watchers.delete(w)) done(false); }, ms);
+                watchers.add(w);
+            });
+        },
         async restart() {
-            await halt();
-            for (let i = 0; i < 50 && (await listening(port)); i++) await sleep(100);
+            await halt();   // its exit closed its listener (Go opens every fd close-on-exec: no child holds it)
             await start();
         },
         async stop() {
