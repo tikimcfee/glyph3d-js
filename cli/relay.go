@@ -351,6 +351,9 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 	var role string
 	var clientID string
 	var displayGen uint64 // this connection's display id, once it says DISPLAY
+	// The controllers this display pushed events to (its terminals' adapters, its input's
+	// destinations): told `display.gone` when it leaves, so a paste of its still arriving ends.
+	pushedTo := map[string]bool{}
 
 	for {
 		msgType, msg, err := ws.ReadMessage()
@@ -654,6 +657,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"data":  data,
 				})
 				ctrl.WriteMessage(websocket.TextMessage, fwd)
+				pushedTo[envelope.To] = true
 				continue
 			}
 
@@ -698,6 +702,20 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		// Its transcript subscriptions go with it; a follower nobody holds stops.
 		if r.fs != nil && r.fs.agents != nil {
 			r.fs.agents.DisplayGone(displayGen)
+		}
+		// Its events' destinations hear it left: what it was still sending (a paste's pieces)
+		// never comes. Written from this goroutine, as every push to them was.
+		gone, _ := json.Marshal(map[string]any{"event": "display.gone", "data": nil})
+		r.mu.RLock()
+		var told []*websocket.Conn
+		for id := range pushedTo {
+			if c, ok := r.controllers[id]; ok {
+				told = append(told, c)
+			}
+		}
+		r.mu.RUnlock()
+		for _, c := range told {
+			c.WriteMessage(websocket.TextMessage, gone)
 		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {

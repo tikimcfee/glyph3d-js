@@ -76,7 +76,8 @@ impl Stream {
             self.refused = true;
             return Err(Refused { close: self.close(), why });
         }
-        if !self.bracketed {
+        if !self.bracketed && !text.is_empty() {
+            // An empty chunk between a `\r` and its `\n` leaves them one line break.
             self.cr = text.ends_with('\r');
         }
         let keep = BRACKET_END.len() - 1;
@@ -177,6 +178,7 @@ mod tests {
         assert_eq!(run(false, true, &["a\r", "\nb"]).unwrap(), b"a\rb");
         assert_eq!(run(false, true, &["a\r\n", "b"]).unwrap(), b"a\rb");
         assert_eq!(run(false, true, &["a\r", "b"]).unwrap(), b"a\rb");
+        assert_eq!(run(false, true, &["a\r", "", "\nb"]).unwrap(), b"a\rb", "an empty chunk between");
         // Inside a bracket the text is the program's, as it came.
         assert_eq!(run(true, false, &["a\r", "\nb"]).unwrap(), b"\x1b[200~a\r\nb\x1b[201~");
     }

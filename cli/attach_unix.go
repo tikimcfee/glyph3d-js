@@ -283,6 +283,9 @@ func runTerminal(cfg terminalConfig) {
 				// The display's paste streams into termd as one paste (termdPaster), in order and
 				// at the program's pace.
 				paste: paster.add,
+				// The display left (the relay's word): a paste of its that is still arriving
+				// never will, so it ends with what came.
+				displayGone: paster.displayGone,
 				// A pointer event on the focused terminal of a program that hears the mouse; termd
 				// encodes it in the program's live mouse modes and drops what they don't report.
 				mouse: func(m termdMouse) {
@@ -518,6 +521,7 @@ type sessionPasteSink struct {
 
 func (k sessionPasteSink) streams() bool { return k.sess.Load().tc.Has("paste_stream") }
 func (k sessionPasteSink) maxFrame() int { return k.sess.Load().tc.maxFrame() }
+func (k sessionPasteSink) session() any  { return k.sess.Load() }
 
 func (k sessionPasteSink) paste(text string, more bool) (bool, error) {
 	s := k.sess.Load()
@@ -616,6 +620,8 @@ type inboundHandlers struct {
 	refresh  func()
 	kill     func()
 	recreate func()
+	// displayGone: the display this adapter's input came from left (the relay's `display.gone`).
+	displayGone func()
 }
 
 // termdKey is a display's key event, termd's `key` op as is (W3C KeyboardEvent semantics:
@@ -728,6 +734,8 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			h.scroll(ev.Data.Lines, at)
 		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — repaint into it NOW
 			h.refresh()
+		case "display.gone":
+			h.displayGone()
 		case "terminal.shutdown":
 			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — ending the terminal")
 			h.kill()

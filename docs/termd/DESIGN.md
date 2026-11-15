@@ -545,9 +545,12 @@ holder](#versions-between-holder-and-brain), and where it departs from them.
   The scan: `/proc/*/stat` (one pass for every tree a status document asks about); macOS
   `proc_listallpids` + `getsid` + `proc_pidinfo(PROC_PIDTBSDINFO)` (zombies left out, by
   `pbi_status`).
-- The close rule (`Holder::close`, `advance_closings`): `kill`'s signal to every member and to the
-  PTY's foreground group, the holder's copy of the PTY closed; `SIGTERM` to what is left at
-  `--kill-term-after-ms` (0); `SIGKILL` at `--kill-grace` (`cgroup.kill` for a leaf). Done when the
+- The close rule (`Holder::close`, `advance_closings`): `kill`'s signal to every member (read before
+  any signal goes, so the report names what the first signal ended) and then to the PTY's
+  foreground group, the holder's copy of the PTY closed; `SIGTERM` to what is left at
+  `--kill-term-after-ms` (0); each followed by `SIGCONT`, so a stopped process acts on it
+  (systemd's kill sends `SIGCONT` after its `SIGTERM`, systemd.kill(5); the kernel's hangup after
+  its `SIGHUP`); `SIGKILL` at `--kill-grace` (`cgroup.kill` for a leaf). Done when the
   tree is empty: a leaf's `cgroup.events` (inotify, `IN_MODIFY`) or, for a session, a reap or a
   step finding none; a session's `SIGKILL` step ends it. The report (`killed`) goes to the log
   (`terminal t1 closed: SIGHUP → 3918499 sleep, …; SIGTERM → …; SIGKILL → …`), to the status
@@ -556,7 +559,10 @@ holder](#versions-between-holder-and-brain), and where it departs from them.
   holder's from then on.
 - Leftovers: a program that exits on its own while its tree still holds processes leaves them
   running (logged, `leftover` to the brain, `daemon.leftovers` with what they are) until they end
-  (`leftover_gone`) or the namespace does.
+  (`leftover_gone`: a leaf's `cgroup.events`; in session mode a reap on Linux, the holder being
+  the subreaper, and on macOS, which has none, kqueue's `NOTE_EXIT` on each member,
+  `tree::ExitWatch`, re-armed at every scan) or the namespace does. A namespace that holds
+  leftovers is not idle: `--idle-exit` counts from when the last one ends.
 - The holder's death: systemd stops the service when its main process dies and ends what is left
   of the cgroup (`SIGTERM` + `SIGHUP`, `SIGKILL` after `TimeoutStopSec`); measured: a holder
   `SIGKILL`ed with a terminal running `trap '' HUP TERM` and a `setsid`'d child doing the same left
@@ -595,6 +601,15 @@ holder](#versions-between-holder-and-brain), and where it departs from them.
   commit only the `execv` can fail: the holder puts the fds' flags back and starts a brain of its own
   binary from the handoff (every terminal exact); that brain's errors carry `upgrade_failed` and `g3d
   upgrade --holder` reports it.
+- `SIGTERM` to the holder ends the namespace at any stage of an upgrade. Before the commit it aborts
+  the upgrade first (the brain resumes, then hears `shutdown` and ends its terminals); after it, the
+  holder ends the namespace as soon as the old brain has gone, with no re-exec and no candidate (its
+  socket and lock are already given up). The re-exec runs once every signal already read is handled:
+  it blocks `SIGCHLD`, `SIGHUP` and `SIGTERM` and drains the self-pipe; a `SIGTERM` there ends the
+  namespace instead, any other is raised again and stays pending, blocked, across `execve` (POSIX
+  keeps a process's signal mask and pending signals across `exec`), for the new image, which
+  unblocks them once its handlers are in. `g3d upgrade --holder` meeting nothing at the socket says
+  the namespace ended and fails.
 - The record (`G3DHREC1`, format 1.0; `tests/fixtures/holder-record-v1.bin`) is frozen like the
   blob: a major the reader doesn't know is refused at the check, a minor only adds fields.
 - `daemon.holder.upgrades` counts the re-execs; `g3d upgrade --holder [--binary PATH]` prints the
@@ -612,7 +627,11 @@ and tty unchanged and a `SIGHUP` trap never firing, the holder's pid the same; c
 or hang leave the holder, brain and connection serving; a candidate reading only the next record
 major is refused, naming both formats; six upgrades with the holder's fds and RSS flat; in a
 systemd service, the holder back in its leaf and a terminal's tree, `setsid`'d member included,
-kept and ended by a close after); `g3d-hold`'s units (the record round-trips, a torn, short or
+kept and ended by a close after; `SIGTERM` in the commit's drain ends the namespace with no
+re-exec, and in the final record's check aborts the upgrade and ends it at once); `trees.rs`
+also: a close's report names the program its first signal ended, a stopped process is continued
+and ends at `SIGHUP` with no `SIGKILL`, and a leftover keeps an idle namespace until it ends;
+`g3d-hold`'s units (the record round-trips, a torn, short or
 foreign one is refused, every fixture decodes; `/proc` names with parentheses; this process found
 in its session); `crates/g3d/tests/attach.rs` (`g3d attach` and `watch` ride `upgrade --holder`).
 Every one of these fails on the code before it (checked: the old daemon left the trapped processes
@@ -1102,13 +1121,16 @@ all of it, and the status says what runs (PROTOCOL.md's `daemon.trees`, `termina
 - **The close rule** (`kill`, a namespace's end): the asked signal (`SIGHUP`, what a closed tty
   sends) to every process in the tree and to the PTY's foreground group, the PTY hung up; `SIGTERM`
   to what is left after `--kill-term-after-ms` (0: at once, as systemd's `SendSIGHUP=yes` sends
-  `SIGHUP` right after its `SIGTERM`); `SIGKILL` to what is still left after `--kill-grace` (2 s:
+  `SIGHUP` right after its `SIGTERM`); each followed by `SIGCONT`, so a stopped process acts on it
+  (systemd.kill(5): `SIGTERM` "followed by `SIGCONT`"; the kernel's tty hangup does the same); `SIGKILL` to what is still left after `--kill-grace` (2 s:
   a closed window is not a service, whose `TimeoutStopSec` is 90 s). What each step reached is in
   the log and the status document, and a close that needed `SIGKILL` is an error (`killed`).
 - **A program that exits on its own** leaves its `nohup` jobs running, as every terminal does
   (tmux, screen, Ghostty): they are the person's. termd lists them as **leftovers** until they end,
   and ends them with the namespace (the session's end, as logind's `KillUserProcesses=` ends a
-  login session's).
+  login session's). A namespace holding leftovers is not idle, so no timer ends them: as logind
+  keeps a logged-out session's scope (`closing`) while its processes run (`KillUserProcesses=no`,
+  its default), the namespace's idle exit waits until the last leftover has ended.
 - **The holder's death** ends every tree: [If the holder dies](#if-the-holder-dies).
 
 ### Linux and macOS
@@ -1578,17 +1600,19 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | log | `$XDG_STATE_HOME/g3d/termd-<ns>.log` (`~/.local/state/…`), on Linux and macOS | keep | XDG puts logs in state. `~/Library/Logs` (where Console looks) was considered for macOS; one rule on both systems is worth more, as the macOS agent argued and as Ghostty keeps `~/.config` on macOS. The status document and `g3d status` print the path, so nobody has to know it |
 | log size | rotate at 10 MiB, keep one previous file (`.log.1`); `--log-max-bytes`, 0 = never | **new** (S1 appends forever) | size-capped rotation is what logrotate and journald do; one previous file keeps the last crash's context |
 | log line | `2026-11-12T15:25:13.751-06:00 holder[1230122] message` | **change** (S1: `[termd 1794518713.751]`, raw epoch seconds) | RFC 3339 is the normal form (journalctl's `short-iso-precise`, the relay's recordings use RFC 3339 too); local time with its offset reads at a glance and is still unambiguous. The role (`holder`/`brain`) and pid tell the two processes apart in one file. Values print as values: S1's `ended: code Some(0) signal None` becomes `ended: code 0` |
-| idle exit | 300 s with no terminals and no connections but status followers; 0 = never | keep (status followers newly don't count) | it works: the `default` namespace started 15:25:13, its `hello-world` exited 15:25:27, and the daemon logged `exiting: no terminals and no connections for 300s` at 15:30:27 (the log, the socket gone, the lock left). tmux's `exit-empty` exits at once; the 5 min grace absorbs a relay restart, and an empty exit is when a new binary takes over |
+| idle exit | 300 s with no terminals, no leftovers and no connections but status followers; 0 = never | keep (status followers newly don't count; leftovers keep it) | a leftover is a person's job (a `nohup`): ending the namespace over it would end the job, so it waits, as logind keeps a closing session while its processes run (`KillUserProcesses=no`). The rest works:  the `default` namespace started 15:25:13, its `hello-world` exited 15:25:27, and the daemon logged `exiting: no terminals and no connections for 300s` at 15:30:27 (the log, the socket gone, the lock left). tmux's `exit-empty` exits at once; the 5 min grace absorbs a relay restart, and an empty exit is when a new binary takes over |
 | scrollback | 10,000,000 bytes per terminal (`create.scrollback_bytes`, `--scrollback`); clamp `--max-scrollback` 64 MiB | **change** (S1: 2 MiB, clamp 16 MiB) | 10 MB is Ghostty's own `scrollback-limit` default. 2 MiB held only ~1.6k rows of 120-column text (measured), less than tmux's `history-limit` of 2000 lines; 10 MB holds ~9.3k (VTE and Alacritty keep 10,000 lines). Idle compression keeps it cheap: a full 10 MB history went from 9.9 MB to 0.86 MB resident (measured, build-log text). The clamp guards against a runaway request, not taste |
 | idle compression | after 30 s with no output | keep | libghostty's incremental compression; contents unchanged |
 | lossy queue | 4 MiB per subscription (`--lossy-queue`) | keep, now a setting | about a second of a flood at the browser's pace; hexe's ring and payload cap are 4 MiB too |
 | blocking owner | pause reads at 1 MiB queued, resume at 256 KiB (`--block-high`, `--block-low`) | keep, now a setting | high/low watermarks; the 4:1 gap avoids flapping |
 | PTY input buffer | 16 MiB per terminal (`--input-buffer`); a whole `INPUT` frame is accepted or refused (`input_full`); a paste waits for room instead | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. A paste larger than it streams through it at the program's pace (xterm's and Ghostty's write queues), so the buffer bounds memory, not a paste; the memory is used only while a program stops reading |
 | paste chunk | 1 MiB of text per `paste` request (`g3d paste --chunk`, the adapter's `attach --paste-chunk`; capped so a chunk of control characters fits `max_frame` as JSON); 1 Mi UTF-16 code units per display push (`TerminalGrid.pasteChunk`) | **new** | one chunk in flight per terminal, each a sixteenth of the input buffer: the flow control's step, small enough that no message holds a whole clipboard |
+| paste timeout | 60 s (`--paste-timeout-ms`, 0 = never): a streamed paste whose writer sends no next chunk this long after termd answered the last ends, closed, and what was held behind it follows | **new** | nginx's `client_body_timeout` (60 s between two reads of a request body): a writer that stays connected and sends nothing would otherwise hold every other writer's typing behind its paste forever. The writer that most often leaves a paste open, the relay's adapter after a page reload, ends it on the relay's `display.gone` instead; the timeout is for any other |
+| adapter paste queue | 256 MiB of the display's pastes waiting in the adapter for a program that isn't reading (`attach --paste-queue`); a display paste past it is refused whole, logged | **new** | the display can't be held back (its pieces come as fast as the relay moves them), so the adapter bounds its memory as termd's input buffer bounds termd's: sixteen of those (hexe's 16 MiB), above any clipboard in practice; refused whole, as `input_full` refuses a whole `INPUT` |
 | max frame | 16 MiB | keep | |
 | read chunk | 64 KiB | keep | one Linux pipe's worth; keeps a flood's per-read latency small |
 | continuation | 64 KiB | keep | needed for mid-sequence repaints and snapshots |
-| close rule | `SIGHUP` (or the asked signal) to the whole tree, `SIGTERM` to what is left at once (`--kill-term-after-ms` 0), `SIGKILL` after 2 s (`--kill-grace`) | **change** (S1: `SIGHUP` to two process groups, `SIGKILL` to them after 2 s) | a close reaches the whole tree ([Process trees](#process-trees)); `SIGHUP` first is what a closed tty sends; `SIGTERM` right after it is systemd's `SendSIGHUP=yes` order turned round; a kill always ends: systemd's stop timeout (90 s) is for services, not a closed window |
+| close rule | `SIGHUP` (or the asked signal) to the whole tree, `SIGTERM` to what is left at once (`--kill-term-after-ms` 0), each followed by `SIGCONT`, `SIGKILL` after 2 s (`--kill-grace`) | **change** (S1: `SIGHUP` to two process groups, `SIGKILL` to them after 2 s) | a close reaches the whole tree ([Process trees](#process-trees)); `SIGHUP` first is what a closed tty sends; `SIGTERM` right after it is systemd's `SendSIGHUP=yes` order turned round; `SIGCONT` after each is systemd's kill (systemd.kill(5)) and the kernel's hangup, so a stopped job ends too; a kill always ends: systemd's stop timeout (90 s) is for services, not a closed window |
 | default colours, `cell_px` | the browser's palette; `[8, 16]` | keep | OSC 10/11 and `CSI 14 t` must answer without waiting |
 | `TERM` | `xterm-256color` (`--term`; also the emulator's terminfo name, kept per terminal) | keep | [Environment](#environment) |
 | detach | `Ctrl-\` twice (`g3d attach`; `--detach-key`, `G3D_DETACH_KEY`) | keep | dtach, abduco and zmx detach on `Ctrl-\`; pressing it twice keeps a single `Ctrl-\` (the program's `SIGQUIT`) one key away: the first press is held, any other key sends both. Platform note: on some non-US macOS layouts `\` needs Option, so the macOS agent checks it is typeable and the setting is the escape hatch |
@@ -1830,9 +1854,11 @@ drains, Ghostty queues it on its IO thread. termd does the same with a paste str
   carried across each boundary so a bracket end split between chunks is caught. A refused chunk
   writes nothing and ends the paste closed (the bracket's end written): nothing before it could run,
   by the rule, so it sits typed. Every way a paste can end early closes it the same way (its writer
-  unsubscribes or disconnects, an upgrade cuts it), so a program is never left inside a bracket
-  swallowing keys; only a brain crash mid-paste can't (as a terminal emulator crashing mid-paste
-  couldn't).
+  unsubscribes or disconnects, an upgrade cuts it, its writer goes quiet past the paste timeout), so
+  a program is never left inside a bracket swallowing keys; only a brain crash mid-paste can't: the
+  program stays inside the bracket, reading what is typed as pasted text (a shell's Enter doesn't
+  run the line), until a later paste's end, and nothing reports it (a terminal emulator that crashes
+  mid-paste hangs its shell up instead; termd keeps the shell, bracket and all).
 - **Flow control.** A chunk's bytes join the input buffer when it has room (or is empty, for a chunk
   bigger than it), and only then is the chunk answered; the client sends the next chunk after the
   reply, so a program that stops reading holds the paste back at the client, never in termd, whose
@@ -1842,14 +1868,27 @@ drains, Ghostty queues it on its IO thread. termd does the same with a paste str
 - **Order.** Input from anyone (a key, `INPUT`, the mouse) reaching a terminal while its paste is open
   is held and follows the paste, as a key pressed during a paste follows it into the PTY; another
   writer's paste is `busy` until the open one ends.
+- **A writer gone quiet.** Once termd has answered a chunk, the paste waits for its writer's next for
+  `--paste-timeout-ms` (60 s; nginx's `client_body_timeout`, between two reads of a request body),
+  then ends there, closed, and what was held behind it follows; the writer's later chunks are
+  `paste_timeout` until its last. The status document shows the open paste (`terminals[].paste`,
+  with `idle_since` while termd waits for the writer) and counts what waits behind it in
+  `input_queued`.
 - **Clients.** `g3d paste` streams stdin (or its argument) in 1 MiB chunks (`--chunk`, capped so a
   chunk of control characters fits `max_frame` as JSON) cut on character boundaries, each after the
   last one's reply. The display pushes a long paste in pieces of one paste (`TerminalGrid.pasteChunk`,
   1 Mi UTF-16 code units, never splitting a surrogate pair; `terminal.paste` with `more`), and the
   adapter (`cli/termdpaste.go`) streams them in order, one chunk in flight, re-cut to its own chunk
-  size (`attach --paste-chunk`); input is at most once, so a chunk that fails (a brain restart) drops
-  the rest of its paste. A brain without `paste_stream` gets each paste whole in one request, as
-  before, which `max_frame` bounds.
+  size (`attach --paste-chunk`). Input is at most once and a paste is one session's: a chunk that
+  fails ends its paste (the adapter then sends its last chunk, empty, so termd stops refusing the
+  rest), and a session that changes mid-paste (a brain restart) is sent none of the rest; either way
+  the rest of that display paste is dropped. The relay tells every controller a display pushed
+  events to that it left (`display.gone`, when its socket closes), and the adapter ends that
+  display's paste still arriving with what came, closed: a page reload mid-paste leaves no
+  terminal's input held. What waits in the adapter for a program that isn't reading is bounded
+  (`attach --paste-queue`, 256 MiB): a display paste past it is refused whole, logged. A brain
+  without `paste_stream` gets each paste whole in one request, as before, which `max_frame`
+  bounds.
 
 **The browser.** `keyEncoding.js` (core, `services/interaction`) maps a `KeyboardEvent` to a key
 event (`keyEventFor`) and encodes nothing: modifiers held, `text` the one character `key` names,

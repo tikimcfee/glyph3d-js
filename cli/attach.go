@@ -45,6 +45,8 @@ func attachCmd() {
 	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the terminal lives in")
 	fs.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
 	fs.DurationVar(&termdReconnectWindow, "termd-reconnect", termdReconnectWindow, "how long to ride out a termd brain restart before giving the terminal up as lost")
+	fs.IntVar(&termdPasteChunk, "paste-chunk", termdPasteChunk, "the most text, in bytes, one termd paste request carries (a longer paste streams as several)")
+	fs.IntVar(&termdPasteQueue, "paste-queue", termdPasteQueue, "the most of the display's pastes, in bytes, that waits here for a program that isn't reading; a paste past it is refused")
 	cwd := fs.String("cwd", "", "Where a new terminal's program starts (default: the account's home)")
 
 	usage := func() {

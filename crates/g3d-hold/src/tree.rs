@@ -230,8 +230,16 @@ impl Trees {
             return who;
         }
         for p in &who {
-            // SAFETY: a plain kill(2) of a pid read from the tree just now.
-            unsafe { libc::kill(p.pid, sig) };
+            // SAFETY: a plain kill(2) of a pid read from the tree just now. A stopped process
+            // acts on a catchable signal only once continued: SIGCONT follows it, as systemd's
+            // kill sends one after its SIGTERM and SIGHUP (systemd.kill(5)) and the kernel's
+            // hangup after its SIGHUP.
+            unsafe {
+                libc::kill(p.pid, sig);
+                if sig != libc::SIGKILL {
+                    libc::kill(p.pid, libc::SIGCONT);
+                }
+            }
         }
         who
     }
@@ -327,6 +335,84 @@ fn sessions(sids: &[i32]) -> Vec<(i32, Proc)> {
     }
     out.sort_by_key(|p| p.1.pid);
     out
+}
+
+/// Hears processes that aren't this one's children end, for a session tree's members: kqueue's
+/// `EVFILT_PROC` `NOTE_EXIT` where there is no subreaper (macOS). On Linux the holder is the
+/// terminals' subreaper (`PR_SET_CHILD_SUBREAPER`): a member that outlives its parent ends as a
+/// reap the holder hears, and this watches nothing.
+pub struct ExitWatch {
+    #[cfg(not(target_os = "linux"))]
+    kq: Option<rustix::fd::OwnedFd>,
+}
+
+impl ExitWatch {
+    pub fn new() -> Self {
+        #[cfg(not(target_os = "linux"))]
+        {
+            use rustix::fd::FromRawFd;
+            // SAFETY: a kqueue of our own, owned from here.
+            let kq = unsafe { libc::kqueue() };
+            let kq = (kq >= 0).then(|| unsafe { rustix::fd::OwnedFd::from_raw_fd(kq) });
+            if let Some(k) = &kq {
+                let _ = rustix::io::fcntl_setfd(k, rustix::io::FdFlags::CLOEXEC);
+            }
+            ExitWatch { kq }
+        }
+        #[cfg(target_os = "linux")]
+        ExitWatch {}
+    }
+
+    /// Watches each of `pids` for its end (watching one again is harmless). False when one had
+    /// already gone (`ESRCH`), between the scan that found it and now: scan again.
+    pub fn watch(&self, pids: &[i32]) -> bool {
+        #[cfg(not(target_os = "linux"))]
+        if let Some(kq) = &self.kq {
+            use rustix::fd::AsRawFd;
+            let mut all = true;
+            for &p in pids {
+                // SAFETY: one EVFILT_PROC NOTE_EXIT registration on our own kqueue.
+                let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+                ev.ident = p as usize;
+                ev.filter = libc::EVFILT_PROC;
+                ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
+                ev.fflags = libc::NOTE_EXIT;
+                all &= unsafe { libc::kevent(kq.as_raw_fd(), &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) } == 0;
+            }
+            return all;
+        }
+        let _ = pids;
+        true
+    }
+
+    /// What a poll loop waits on: readable when a watched process has ended.
+    pub fn fd(&self) -> Option<rustix::fd::BorrowedFd<'_>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            use rustix::fd::AsFd;
+            self.kq.as_ref().map(|k| k.as_fd())
+        }
+        #[cfg(target_os = "linux")]
+        None
+    }
+
+    /// Takes the ends heard so far.
+    pub fn drain(&self) {
+        #[cfg(not(target_os = "linux"))]
+        if let Some(kq) = &self.kq {
+            use rustix::fd::AsRawFd;
+            let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: reading events of our own kqueue into a buffer we own, without waiting.
+            let mut out: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+            while unsafe { libc::kevent(kq.as_raw_fd(), std::ptr::null(), 0, out.as_mut_ptr(), 16, &zero) } > 0 {}
+        }
+    }
+}
+
+impl Default for ExitWatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Waits until none of `pids` is alive or `until` passes, on the processes' own exit (a pidfd

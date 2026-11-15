@@ -949,12 +949,16 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   `setsid`'d away, with the three steps in `daemon.closes` and a `killed` error; the holder
   `SIGKILL`ed leaving nothing of it; `stop` ending the trees and a `nohup` job an ended terminal
   left, listed meanwhile in `daemon.leftovers`; the session half on a foreground daemon: a close,
-  `stop` and the holder's death each ending a session whose job has its own process group);
+  `stop` and the holder's death each ending a session whose job has its own process group; a
+  close's report naming the program its first signal ended, a stopped job continued and ended by
+  `SIGHUP` with no `SIGKILL`, and a `nohup` leftover keeping an idle namespace until it ends);
   the holder's re-exec (`tests/holder.rs`: `upgrade --holder` under a 300000-line flood with no
   byte lost, every terminal exact and the shells' pid, parent and tty unchanged, no `SIGHUP`;
   candidates that exit or hang, and one reading only the next record major, leaving the holder,
   brain and connection serving; six re-execs with the holder's fds and RSS flat; in a systemd
-  service, the holder's leaf and a tree kept and a close after it ending the tree); `g3d-hold`'s
+  service, the holder's leaf and a tree kept and a close after it ending the tree; `SIGTERM` in the
+  commit's drain ending the namespace with no re-exec, and in the final record's check aborting
+  the upgrade and ending it at once); `g3d-hold`'s
   units (the holder record round-trips and refuses a torn, short or foreign one;
   `tests/fixtures/holder-record-v1.bin` decodes; `/proc/<pid>/stat` names with parentheses);
   the environment (`src/env.rs` unit tests, and `tests/env.rs`: a daemon started from a stripped
@@ -993,11 +997,14 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   bracket, a bracket end split across chunks refused with the bracket closed and the rest of the
   paste writing nothing, a split `\r\n` one Enter, a key typed meanwhile after the paste, a paste
   whose writer unsubscribes closed and another writer's `busy`, a program that stops reading
-  holding the paste back at the client with the brain's RSS bounded and nothing lost once it reads);
+  holding the paste back at the client with the brain's RSS bounded and nothing lost once it reads,
+  a writer gone quiet ended at the paste timeout with the held key following and the open paste in
+  the status document);
   `g3d send`/`key`/`paste` against a private daemon, and 64 MiB through `g3d paste` into
   `cat > file` byte for byte, bracketed and not (`crates/g3d/tests/input.rs`);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
-  the outer terminal, detach; both riding an upgrade, a holder's upgrade and a brain crash), `g3d new` sending its
+  the outer terminal, detach; both riding an upgrade, a holder's upgrade and a brain crash; `g3d
+  upgrade --holder` failing at once, saying so, when the namespace ends in its commit), `g3d new` sending its
   environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
   `--clean` taking the session's fresh `DISPLAY`; `-e NAME` with a non-UTF-8 value refused; a
   `PATH` holding `.` finding a program in the caller's directory) and `g3d env`'s tags, and the
@@ -1043,8 +1050,11 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   restarting across a crash, unreachable past the grace with the holder stopped, ok again with the
   orphans re-adopted, absent after `stop`, lost when the holder dies) and its display plane keeps
   only the latest notification; `termdpaste_test.go`: the adapter streams a paste one chunk in
-  flight, cut on character boundaries, drops the rest after a failed chunk and gives an older brain
-  each paste whole; `termd_paths_test.go`: the socket directory found from the uid,
+  flight, cut on character boundaries, drops the rest after a failed chunk (sending termd its empty
+  last chunk), sends a new brain none of a paste begun on the old one, ends a paste whose display
+  left with what came, refuses a display paste past `--paste-queue` whole, and gives an older brain
+  each paste whole; `relay_display_test.go`: the relay tells what a display pushed to that it left
+  (`display.gone`), and nothing else; `termd_paths_test.go`: the socket directory found from the uid,
   the same with and without `XDG_RUNTIME_DIR` and `TMPDIR`.
 
 ## Build / serve

@@ -230,6 +230,9 @@ session (DESIGN.md, "Process trees"); the code behind `cfg(not(target_os = "linu
 - the session's members: `proc_listallpids`, each pid's `getsid`, its name and whether it is a
   zombie from `proc_pidinfo(PROC_PIDTBSDINFO)` (`pbi_comm`, `pbi_status == SZOMB`);
 - waiting for a process that isn't the brain's child to end: kqueue `EVFILT_PROC` `NOTE_EXIT`;
+- a leftover's end (macOS has no subreaper, so a `nohup` job that outlives its program is
+  launchd's child and its end no reap of the holder's): `tree::ExitWatch`, a kqueue the holder's
+  poll loop waits on, `NOTE_EXIT` on each member, re-armed at every scan;
 - the holder record's listener check reads `SO_TYPE` (macOS declares `SO_ACCEPTCONN` and doesn't
   answer it).
 
@@ -249,6 +252,12 @@ What the M2 must run and see:
    (`ps -o ppid=,tty=`), and six re-execs keep `lsof -p <holder>`'s fd count flat.
 6. A `setsid`'d child leaves its session on macOS as on Linux: it is not in the tree there, by
    design (no cgroups), and `kill` doesn't reach it; say so if it does.
+7. `tests/trees.rs` `a_leftover_keeps_an_idle_namespace_until_it_ends`: the namespace exits within
+   its 10 s once the `nohup` sleep is killed. If it doesn't, `ExitWatch` is the seam: whether
+   `poll` on the kqueue's fd wakes on a `NOTE_EXIT`, and the log's `what its program left running
+   has ended`.
+8. `a_stopped_process_is_continued_and_ends_at_the_first_signal`: `SIGCONT` after `SIGHUP` ends a
+   stopped job at once there too.
 
 ## Not verified here
 

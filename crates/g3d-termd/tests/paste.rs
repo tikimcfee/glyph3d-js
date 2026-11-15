@@ -186,3 +186,37 @@ fn a_program_that_stops_reading_holds_the_paste_back_without_loss() {
     assert!(got[..TOTAL] == *text.as_bytes(), "every byte, in order");
     assert_eq!(got[TOTAL], b'Z', "the key typed during the paste, after it");
 }
+
+#[test]
+fn a_paste_whose_writer_goes_quiet_ends_at_the_paste_timeout() {
+    let d = Daemon::start_with(&["--idle-exit", "0", "--paste-timeout-ms", "600"]);
+    let (mut c, h, mut seen) = start(&d, "bracketed", "\\033[?2004h");
+    let mut w = d.client();
+    let s = subscribe(&mut w, "bracketed", Role::Attach, None);
+    let from = seen.output.len();
+    let _: WrittenReply = w.request(chunk(s.handle, "abc", true, false)).unwrap();
+    // The writer stays connected and sends nothing more. A key typed meanwhile is held behind the
+    // open paste, and the status document says so.
+    let key = Op::Key(Key { handle: h, code: "KeyK".into(), key: "k".into(), text: "k".into(), ..Default::default() });
+    let _: WrittenReply = c.request(key).unwrap();
+    let st = c.request::<StatusReply>(Op::Status).unwrap().status;
+    let t = st.terminals.iter().find(|t| t.id == "bracketed").unwrap();
+    let p = t.paste.as_ref().expect("the open paste in the status document");
+    assert_eq!(p.written, 3);
+    assert!(p.idle_since.is_some(), "termd waits for its writer: {p:?}");
+    assert_eq!(t.input_queued, 1, "the held key counts as input queued");
+    // At the timeout the paste ends, closed, and the key follows it.
+    read_back(&mut c, &mut seen, from, b"\x1b[200~abc\x1b[201~k");
+    assert!(d.log().contains("its writer sent no next chunk"), "{}", d.log());
+    // Its writer's later chunks are refused until its last; then it pastes again.
+    let e = w.request::<WrittenReply>(chunk(s.handle, "def", true, false)).unwrap_err();
+    assert_eq!(e.code(), Some(code::PASTE_TIMEOUT), "{e}");
+    let e = w.request::<WrittenReply>(chunk(s.handle, "", false, false)).unwrap_err();
+    assert_eq!(e.code(), Some(code::PASTE_TIMEOUT), "{e}");
+    let from = seen.output.len();
+    let _: WrittenReply = w.request(chunk(s.handle, "next", false, false)).unwrap();
+    read_back(&mut c, &mut seen, from, b"\x1b[200~next\x1b[201~");
+    let st = c.request::<StatusReply>(Op::Status).unwrap().status;
+    assert!(st.terminals.iter().all(|t| t.paste.is_none()));
+    assert!(st.errors.iter().any(|e| e.code == code::PASTE_TIMEOUT), "{:?}", st.errors);
+}

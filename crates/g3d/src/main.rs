@@ -688,7 +688,9 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8, window: Duration) {
     }
 }
 
-/// Waits up to 15 s for a brain of `instance` newer than `generation` to answer.
+/// Waits up to 15 s for a brain of `instance` newer than `generation` to answer. Nothing listening
+/// means the namespace ended meanwhile: its holder keeps its socket across a brain's restart and
+/// its own re-exec.
 fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Client {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
@@ -700,6 +702,9 @@ fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Clien
                 return c;
             }
             Ok(_) => {}
+            Err(e) if start::not_running(&e) => {
+                die(format!("the namespace ended meanwhile: nothing listens at {}", target.socket().display()))
+            }
             Err(e) if std::time::Instant::now() >= until => die(format!("no new brain answered: {e}")),
             Err(_) => {}
         }

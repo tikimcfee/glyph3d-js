@@ -74,6 +74,9 @@ pub struct Config {
     pub engine: String,
     /// Input a program hasn't read yet, per terminal (`--input-buffer`).
     pub input_max: usize,
+    /// A streamed paste whose writer sends no next chunk this long ends (`--paste-timeout-ms`;
+    /// zero: never).
+    pub paste_timeout: Duration,
     /// What each terminal's program is started as (env.rs).
     pub env: Arc<env::Policy>,
 }
@@ -597,7 +600,12 @@ struct Owner {
 /// A paste streaming into the program, chunk by chunk, under the input buffer's flow control.
 struct Pasting {
     conn: ConnId,
+    /// When its first chunk came (ms since the epoch).
+    since: u64,
     stream: crate::paste::Stream,
+    /// Since when termd has answered its last chunk and waits for the writer's next (and the same
+    /// in ms since the epoch, for the status document): the paste timeout's clock.
+    idle: Option<(Instant, u64)>,
     /// A chunk whose bytes wait for room in the input buffer, answered once they fit.
     waiting: Option<Waiting>,
     /// Input from anyone (keys, `INPUT`, a pointer) since the paste began: it follows the paste, as
@@ -1009,6 +1017,9 @@ impl Owner {
             if let Some(d) = self.snapshot_due() {
                 timeout = timeout.min(d.max(Duration::from_millis(1)));
             }
+            if let Some(d) = self.paste_due() {
+                timeout = timeout.min(d.max(Duration::from_millis(1)));
+            }
             let ts = Timespec { tv_sec: timeout.as_secs() as _, tv_nsec: timeout.subsec_nanos() as _ };
             let (wake_ready, pty_flags) = {
                 let mut pf = PollFlags::empty();
@@ -1051,6 +1062,7 @@ impl Owner {
                 self.flush_input();
             }
             self.pump_paste();
+            self.expire_paste();
             if self.compress_pending && self.last_output.elapsed() >= COMPRESS_IDLE {
                 self.compress_step();
             }
@@ -1198,7 +1210,25 @@ impl Owner {
                 Err(_) => break, // AGAIN: wait for POLLOUT; EIO: the program is gone
             }
         }
-        self.tref.stats.input_queued.store(self.input.len() as u64, SeqCst);
+        self.publish_input();
+    }
+
+    /// The status document's view of the input not yet read: the buffer, and an open paste's chunk
+    /// waiting for room and what is held behind it; and the paste itself.
+    fn publish_input(&self) {
+        let p = self.pasting.as_ref();
+        let queued = self.input.len() + p.map_or(0, |p| p.held.len() + p.waiting.as_ref().map_or(0, |w| w.bytes.len()));
+        self.tref.stats.input_queued.store(queued as u64, SeqCst);
+        let shown = p.map(|p| StatusPaste {
+            conn: p.conn,
+            since: p.since,
+            written: p.stream.written,
+            idle_since: p.idle.map(|i| i.1),
+        });
+        let mut slot = self.tref.stats.paste.lock().unwrap();
+        if *slot != shown {
+            *slot = shown;
+        }
     }
 
     fn current_modes(&self) -> Modes {
@@ -1784,17 +1814,21 @@ impl Owner {
             let bracketed = self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false);
             self.pasting = Some(Pasting {
                 conn,
+                since: status::ms_now(),
                 stream: crate::paste::Stream::new(bracketed, allow_unsafe),
+                idle: None,
                 waiting: None,
                 held: Vec::new(),
             });
         }
         let p = self.pasting.as_mut().expect("begun above");
+        p.idle = None;
         match p.stream.chunk(text, last) {
             Ok(bytes) => {
                 self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
                 p.waiting = Some(Waiting { bytes, last, out: out.clone(), req, done: done.take() });
                 self.pump_paste();
+                self.publish_input();
                 true
             }
             Err(r) => {
@@ -1841,7 +1875,37 @@ impl Owner {
         }
         if w.last {
             self.release_paste();
+        } else {
+            p.idle = Some((Instant::now(), status::ms_now()));
         }
+        self.flush_input();
+    }
+
+    /// How long until the open paste's writer has been quiet for the paste timeout, if it is
+    /// termd's turn to wait for it.
+    fn paste_due(&self) -> Option<Duration> {
+        let t = self.reg.cfg.paste_timeout;
+        let (from, _) = self.pasting.as_ref()?.idle?;
+        (!t.is_zero()).then(|| t.saturating_sub(from.elapsed()))
+    }
+
+    /// The open paste's writer sent no next chunk within the paste timeout: the paste ends there,
+    /// closed, and what was held behind it follows (nginx's `client_body_timeout`, between two
+    /// reads of a request body). The writer's later chunks are refused until its last, as a
+    /// refused chunk's are.
+    fn expire_paste(&mut self) {
+        if self.paste_due() != Some(Duration::ZERO) {
+            return;
+        }
+        let conn = self.pasting.as_ref().expect("due").conn;
+        let why = format!(
+            "the paste into {} ended: its writer sent no next chunk for {:?}",
+            self.tref.id, self.reg.cfg.paste_timeout
+        );
+        crate::log(&format!("terminal {}: {why}", self.tref.id));
+        self.reg.errors.record(code::PASTE_TIMEOUT, Some(&self.tref.id), why.clone());
+        self.paste_over.push((conn, code::PASTE_TIMEOUT, why));
+        self.release_paste();
         self.flush_input();
     }
 
@@ -1934,7 +1998,10 @@ impl Owner {
         }
         match self.pasting.as_mut() {
             // A paste is streaming: this follows it.
-            Some(p) => p.held.extend_from_slice(bytes),
+            Some(p) => {
+                p.held.extend_from_slice(bytes);
+                self.publish_input();
+            }
             None => {
                 self.input.extend_from_slice(bytes);
                 self.flush_input();

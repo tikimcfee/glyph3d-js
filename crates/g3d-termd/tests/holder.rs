@@ -292,3 +292,79 @@ fn a_holder_upgrade_in_its_service_keeps_every_tree() {
     let _: Empty = c.request(Op::Stop).unwrap();
     d.detached = None;
 }
+
+/// Waits for the test's holder (its child) to exit, up to `secs`; whether it did.
+fn holder_exits(d: &mut Daemon, secs: u64) -> bool {
+    let until = Instant::now() + Duration::from_secs(secs);
+    let child = d.child.as_mut().unwrap();
+    while Instant::now() < until {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn sigterm_during_a_holder_upgrades_commit_ends_the_namespace() {
+    let mut d = Daemon::start();
+    let mut c = d.client();
+    let holder = d.pid();
+    let a = create(&mut c, "a", &["sleep", "1791"], 40, 5);
+    create(&mut c, "b", &["cat"], 40, 5);
+    // A client that never reads nor closes: the old brain drains it for its full second after the
+    // commit, the window a SIGTERM lands in.
+    let _idle = d.client();
+    let next = d.dir.join("g3d-termd-next");
+    std::fs::copy(bin(), &next).unwrap();
+    let _: UpgradeReply = c.request(holder_upgrade(&next)).unwrap();
+    wait_until(15, "the commit's drain", || d.log().contains("upgrade: handed over; closing"));
+    // SAFETY: SIGTERM to the holder this test started.
+    unsafe { libc::kill(holder as i32, libc::SIGTERM) };
+    let ended = holder_exits(&mut d, 8);
+    let log = d.log();
+    assert!(ended, "the holder serves on after SIGTERM: {log}");
+    assert!(!log.contains("handed over; the holder"), "the holder re-exec'd after SIGTERM: {log}");
+    assert!(!log.contains("did not shut down in time"), "{log}");
+    assert!(!d.socket.exists(), "the namespace's socket is gone");
+    wait_until(5, "the terminals to end with the namespace", || !alive(a.pid));
+}
+
+#[test]
+fn sigterm_during_a_holder_upgrades_record_check_aborts_it_and_ends_the_namespace() {
+    let mut d = Daemon::start();
+    let mut c = d.client();
+    let holder = d.pid();
+    let a = create(&mut c, "a", &["sleep", "1792"], 40, 5);
+    create(&mut c, "b", &["cat"], 40, 5);
+    // A new binary whose second record check (the final record's) takes 2 s: SIGTERM lands in it.
+    let slow = d.dir.join("slow-check.sh");
+    let mark = d.dir.join("checked-once");
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *' --check-holder-record '*)\n  if [ -e '{m}' ]; then sleep 2; else : > '{m}'; fi;;\nesac\nexec '{b}' \"$@\"\n",
+            m = mark.display(),
+            b = bin()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _: UpgradeReply = c.request(holder_upgrade(&slow)).unwrap();
+    wait_until(15, "the final record's check", || d.log().contains("reads the final record"));
+    std::thread::sleep(Duration::from_millis(300));
+    let at = Instant::now();
+    // SAFETY: SIGTERM to the holder this test started.
+    unsafe { libc::kill(holder as i32, libc::SIGTERM) };
+    let ended = holder_exits(&mut d, 8);
+    let log = d.log();
+    assert!(ended, "the holder serves on after SIGTERM: {log}");
+    assert!(at.elapsed() < Duration::from_secs(3), "the namespace took {:?} to end: {log}", at.elapsed());
+    assert!(!log.contains("did not shut down in time"), "{log}");
+    assert!(log.contains("SIGTERM: the namespace is ending"), "the upgrade was aborted: {log}");
+    wait_until(5, "the terminals to end with the namespace", || !alive(a.pid));
+}

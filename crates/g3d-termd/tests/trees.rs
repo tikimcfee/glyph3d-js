@@ -185,3 +185,58 @@ fn stop_ends_every_session() {
     holder.wait().unwrap();
     wait_until(5, "every process of the session to end with the namespace", || pids.iter().all(|&p| !alive(p)));
 }
+
+#[test]
+fn a_close_reports_the_program_its_first_signal_ended() {
+    let d = Daemon::start();
+    let mut c = d.client();
+    let r = create(&mut c, "s", &["sleep", "1781"], 80, 24);
+    let _: Empty = c.request(Op::Kill(Kill { id: "s".into(), signal: None })).unwrap();
+    wait_until(5, "the close's report", || !status(&mut c).daemon.closes.is_empty());
+    let st = status(&mut c);
+    let close = &st.daemon.closes[0];
+    assert_eq!(close.steps[0].signal, "HUP", "{close:?}");
+    assert!(close.steps[0].procs.iter().any(|p| p.pid == r.pid), "SIGHUP reached the program: {close:?}");
+    assert!(!d.log().contains("terminal s closed: nothing was running"), "{}", d.log());
+}
+
+#[test]
+fn a_stopped_process_is_continued_and_ends_at_the_first_signal() {
+    let d = Daemon::start();
+    let mut c = d.client();
+    create(&mut c, "stopped", &["sh", "-c", "sleep 1784 & sleep 0.2; kill -STOP $!; wait"], 80, 24);
+    let mut pid = 0;
+    wait_until(10, "a stopped sleep", || {
+        pid = tagged("sleep 1784").first().copied().unwrap_or(0);
+        pid != 0 && ps_field(pid, "stat").is_some_and(|s| s.starts_with('T'))
+    });
+    let at = Instant::now();
+    let _: Empty = c.request(Op::Kill(Kill { id: "stopped".into(), signal: None })).unwrap();
+    wait_until(5, "the stopped sleep to end", || !alive(pid));
+    assert!(at.elapsed() < Duration::from_secs(1), "it took {:?}: it waited for SIGKILL", at.elapsed());
+    wait_until(5, "the close's report", || !status(&mut c).daemon.closes.is_empty());
+    let st = status(&mut c);
+    assert!(st.daemon.closes[0].steps.iter().all(|s| s.signal != "KILL"), "{:?}", st.daemon.closes[0]);
+    assert!(!st.errors.iter().any(|e| e.code == "killed"), "{:?}", st.errors);
+}
+
+#[test]
+fn a_leftover_keeps_an_idle_namespace_until_it_ends() {
+    let mut d = Daemon::start_with(&["--idle-exit", "1"]);
+    let mut c = d.client();
+    create(&mut c, "n", &["sh", "-c", "nohup sleep 1785 >/dev/null 2>&1 & sleep 0.2"], 80, 24);
+    wait_until(10, "the leftover in the status document", || !status(&mut c).daemon.leftovers.is_empty());
+    let left = tagged("sleep 1785");
+    assert_eq!(left.len(), 1);
+    drop(c);
+    std::thread::sleep(Duration::from_secs(3));
+    let holder = d.child.as_mut().unwrap();
+    assert!(holder.try_wait().unwrap().is_none(), "the namespace ended over its leftover: {}", d.log());
+    assert!(alive(left[0]), "the person's nohup job was ended by an idle timer");
+    // SAFETY: the test's own sleep.
+    unsafe { libc::kill(left[0] as i32, libc::SIGKILL) };
+    wait_until(10, "the namespace to go idle and exit once the leftover has gone", || {
+        holder.try_wait().unwrap().is_some()
+    });
+    d.child = None;
+}

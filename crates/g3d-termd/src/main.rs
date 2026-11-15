@@ -42,7 +42,8 @@ pub struct Args {
     /// Detach from the terminal and run in the background, logging to the namespace's log.
     #[arg(long)]
     daemon: bool,
-    /// Exit after this many seconds with no terminals and no connections (0 = never).
+    /// Exit after this many seconds with no terminals, no leftovers (what ended terminals left
+    /// running) and no connections (0 = never).
     #[arg(long, default_value_t = 300)]
     pub idle_exit: u64,
     /// Default primary-screen scrollback per terminal, in bytes (Ghostty's scrollback-limit).
@@ -55,6 +56,10 @@ pub struct Args {
     /// past it is refused.
     #[arg(long, default_value_t = 16 << 20)]
     pub input_buffer: usize,
+    /// A streamed paste whose writer sends no next chunk for this many ms ends there, closed, and
+    /// what was held behind it follows (0 = never).
+    #[arg(long, default_value_t = 60_000)]
+    pub paste_timeout_ms: u64,
     /// A lossy subscriber's queue past this many bytes is dropped and resynced.
     #[arg(long, default_value_t = 4 << 20)]
     pub lossy_queue: usize,

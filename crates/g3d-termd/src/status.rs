@@ -33,6 +33,8 @@ pub struct TermStats {
     pub last_output_at: AtomicU64,
     /// Input waiting for the program to read it.
     pub input_queued: AtomicU64,
+    /// The paste streaming into it now.
+    pub paste: Mutex<Option<StatusPaste>>,
     /// The crash-restore blobs the holder keeps for it (the newest two).
     pub snapshot_bytes: AtomicU64,
     pub slow: Mutex<SlowStats>,
@@ -280,6 +282,11 @@ impl Hub {
         self.leftovers.lock().unwrap().retain(|x| x.handle != handle);
     }
 
+    /// Something an ended terminal left running (a `nohup` job) still runs.
+    pub fn has_leftovers(&self) -> bool {
+        !self.leftovers.lock().unwrap().is_empty()
+    }
+
     /// Every tree the namespace holds: the live terminals' (their pids) and the leftovers'.
     pub fn all_trees(&self, reg: &Registry) -> Vec<Tree> {
         let mut t: Vec<Tree> =
@@ -416,6 +423,7 @@ impl Hub {
                     restored: slow.restored.map(Into::into),
                     unseen: slow.restored.map(|_| slow.unseen),
                     processes,
+                    paste: s.paste.lock().unwrap().clone(),
                     subscribers: slow
                         .subs
                         .iter()

@@ -15,7 +15,7 @@
 use crate::link::{self, Fill, Reader};
 use crate::log::log;
 use crate::record::{self, Record};
-use crate::tree::{Proc, Tree, Trees};
+use crate::tree::{ExitWatch, Proc, Tree, Trees};
 use crate::{HOLD, MARK_BYTES, shm, spawn};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use serde_json::{Value, json};
@@ -191,6 +191,22 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
+/// The signals the holder handles: blocked across its re-exec, so one that arrives then waits for
+/// the new image's handlers (a blocked signal stays pending across `execve`).
+const HANDLED: [i32; 3] = [libc::SIGCHLD, libc::SIGHUP, libc::SIGTERM];
+
+fn mask_handled(how: i32) {
+    // SAFETY: a signal set we own, applied to this (single-threaded) process.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for s in HANDLED {
+            libc::sigaddset(&mut set, s);
+        }
+        libc::sigprocmask(how, &set, std::ptr::null_mut());
+    }
+}
+
 fn install_signals() -> OwnedFd {
     let (rd, wr) = crate::pipe(true).unwrap_or_else(|e| die(&format!("signal pipe: {e}")));
     // SAFETY: SIG_WR is written before any handler that reads it is installed; the handlers
@@ -198,7 +214,7 @@ fn install_signals() -> OwnedFd {
     unsafe {
         SIG_WR = wr.as_raw_fd();
         std::mem::forget(wr);
-        for sig in [libc::SIGCHLD, libc::SIGHUP, libc::SIGTERM] {
+        for sig in HANDLED {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_signal as *const () as usize;
             sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
@@ -415,6 +431,8 @@ struct Holder {
     trees: Trees,
     /// inotify on every leaf's `cgroup.events` (cgroup mode): a leaf emptying is an event.
     inotify: Option<OwnedFd>,
+    /// The leftovers' members' ends, where no reap reports them (session mode on macOS).
+    exits: ExitWatch,
     closing: Vec<Closing>,
     leftovers: Vec<Leftover>,
     /// The namespace is ending (why, and the latest it waits for its trees): it exits once every
@@ -471,6 +489,9 @@ struct Holder {
     candidate_lost: Option<(String, i32)>,
     /// SIGTERM: the brain was asked to shut down; past this, the holder does it itself.
     shutdown_at: Option<Instant>,
+    /// A holder upgrade's old brain has gone: the re-exec into this binary, done once the signals
+    /// already delivered have been handled (`reexec`), so none is lost across the exec.
+    exec_due: Option<(PathBuf, i32)>,
     /// When the namespace last had no brain and no terminals.
     idle_since: Option<Instant>,
     restamped: Instant,
@@ -542,6 +563,7 @@ pub fn run(cfg: Config) -> ! {
     let mut h = Holder {
         trees,
         inotify,
+        exits: ExitWatch::new(),
         closing: Vec::new(),
         leftovers: Vec::new(),
         ending: None,
@@ -576,6 +598,7 @@ pub fn run(cfg: Config) -> ! {
         exiting: None,
         candidate_lost: None,
         shutdown_at: None,
+        exec_due: None,
         idle_since: None,
         restamped: Instant::now(),
         cfg,
@@ -616,6 +639,8 @@ pub fn resume(cfg: Config, fd: i32) -> ! {
     let exe = std::env::current_exe().unwrap_or_else(|e| die(&format!("own executable: {e}")));
     let _ = raise_nofile();
     let sig = install_signals();
+    // The previous image blocked them for its exec: what arrived since is delivered now.
+    mask_handled(libc::SIG_UNBLOCK);
     #[cfg(target_os = "linux")]
     // SAFETY: as in run().
     unsafe {
@@ -713,6 +738,7 @@ pub fn resume(cfg: Config, fd: i32) -> ! {
     let mut h = Holder {
         trees,
         inotify,
+        exits: ExitWatch::new(),
         closing,
         leftovers,
         ending: None,
@@ -751,6 +777,7 @@ pub fn resume(cfg: Config, fd: i32) -> ! {
         exiting: None,
         candidate_lost: None,
         shutdown_at: None,
+        exec_due: None,
         idle_since: None,
         restamped: now,
         cfg,
@@ -839,6 +866,10 @@ impl Holder {
             if let Some(c) = self.check.as_ref().filter(|_| checking) {
                 fds.push(pfd(c.out.as_fd(), libc::POLLIN));
             }
+            let exiting = self.exits.fd().is_some();
+            if let Some(e) = self.exits.fd() {
+                fds.push(pfd(e, libc::POLLIN));
+            }
             let ms = timeout.map_or(-1, |t| t.as_millis().min(60_000) as i32);
             // SAFETY: poll over a vector of pollfds we own.
             let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, ms) };
@@ -862,15 +893,22 @@ impl Holder {
             let ready: Vec<bool> =
                 fds[first_refused..first_refused + self.refused.len()].iter().map(|f| f.revents != 0).collect();
             self.drain_refused(&ready);
-            let ino_at = fds.len() - usize::from(watching) - usize::from(checking);
+            let ino_at = fds.len() - usize::from(watching) - usize::from(checking) - usize::from(exiting);
             if listening && fds[ino_at - 1].revents & libc::POLLIN != 0 {
                 self.refuse_connections();
             }
             if watching && fds[ino_at].revents != 0 {
                 self.leaf_events();
             }
-            if checking && fds.last().is_some_and(|f| f.revents != 0) {
+            if checking && fds[ino_at + usize::from(watching)].revents != 0 {
                 self.read_check();
+            }
+            if exiting && fds.last().is_some_and(|f| f.revents != 0) {
+                self.exits.drain();
+                self.check_trees();
+            }
+            if let Some((binary, old)) = self.exec_due.take() {
+                self.reexec(&binary, old);
             }
         }
     }
@@ -995,11 +1033,12 @@ impl Holder {
                 }
             }
         }
-        // Idle exit while no brain runs (a running brain applies it itself).
-        if self.brain.is_none() && self.terms.is_empty() {
+        // Idle exit while no brain runs (a running brain applies it itself). A leftover keeps the
+        // namespace: its end would end the person's job.
+        if self.brain.is_none() && self.terms.is_empty() && self.leftovers.is_empty() {
             let s = *self.idle_since.get_or_insert(now);
             if !self.cfg.idle_exit.is_zero() && now.duration_since(s) >= self.cfg.idle_exit {
-                self.end(&format!("no terminals and no brain for {:?}", self.cfg.idle_exit));
+                self.end(&format!("no terminals, no leftovers and no brain for {:?}", self.cfg.idle_exit));
             }
         } else {
             self.idle_since = None;
@@ -1014,36 +1053,46 @@ impl Holder {
             return;
         }
         for &s in &buf[..n as usize] {
-            match s as i32 {
-                libc::SIGCHLD => self.reap(),
-                libc::SIGHUP => {
-                    if self.brain.is_none() {
-                        log("SIGHUP: starting the brain now");
-                        self.failed = None;
-                        self.restart_at = None;
-                        self.starts.clear();
-                        self.backoff = self.cfg.failed_backoff;
-                        self.start_brain();
-                    } else {
-                        log("SIGHUP: the brain is running; nothing to retry");
-                    }
+            self.signal(s as i32);
+        }
+    }
+
+    fn signal(&mut self, s: i32) {
+        match s {
+            libc::SIGCHLD => self.reap(),
+            libc::SIGHUP => {
+                if self.brain.is_none() {
+                    log("SIGHUP: starting the brain now");
+                    self.failed = None;
+                    self.restart_at = None;
+                    self.starts.clear();
+                    self.backoff = self.cfg.failed_backoff;
+                    self.start_brain();
+                } else {
+                    log("SIGHUP: the brain is running; nothing to retry");
                 }
-                libc::SIGTERM => {
-                    if self.shutdown_at.is_some() {
-                        continue;
-                    }
-                    log(&format!("SIGTERM: ending the namespace ({} terminal(s))", self.terms.len()));
-                    self.leave_path();
-                    match &mut self.brain {
-                        Some(b) if b.hello => {
-                            b.queue(json!({"m": "shutdown"}), vec![]);
-                            self.shutdown_at = Some(Instant::now() + self.cfg.kill_grace + Duration::from_secs(2));
-                        }
-                        _ => self.end("SIGTERM"),
-                    }
-                }
-                _ => {}
             }
+            libc::SIGTERM => {
+                if self.shutdown_at.is_some() || self.ending.is_some() {
+                    return;
+                }
+                log(&format!("SIGTERM: ending the namespace ({} terminal(s))", self.terms.len()));
+                // An upgrade not yet committed ends with it: the brain resumes before it hears
+                // the shutdown, so it ends its terminals as itself, not mid-handoff. One past
+                // its commit ends when the old brain has gone (`brain_exited`).
+                if self.upgrade.as_ref().is_some_and(|u| u.stage != Stage::Committing) {
+                    self.abort_upgrade("SIGTERM: the namespace is ending");
+                }
+                self.leave_path();
+                match &mut self.brain {
+                    Some(b) if b.hello => {
+                        b.queue(json!({"m": "shutdown"}), vec![]);
+                        self.shutdown_at = Some(Instant::now() + self.cfg.kill_grace + Duration::from_secs(2));
+                    }
+                    _ => self.end("SIGTERM"),
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1819,6 +1868,51 @@ impl Holder {
         }
     }
 
+    /// The holder upgrade's re-exec, once its old brain has gone and every signal read so far has
+    /// been handled. The handled signals are blocked first and the self-pipe drained: a SIGTERM
+    /// in it ends the namespace instead (the exec never happens); any other is raised again, to
+    /// wait, blocked, for the new image's handlers.
+    fn reexec(&mut self, binary: &Path, old_brain: i32) {
+        if self.ending.is_some() {
+            return;
+        }
+        mask_handled(libc::SIG_BLOCK);
+        let mut caught = Vec::new();
+        let mut buf = [0u8; 64];
+        loop {
+            // SAFETY: reading the (non-blocking) self-pipe into a buffer we own.
+            let n = unsafe { libc::read(self.sig.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            caught.extend(buf[..n as usize].iter().map(|&b| i32::from(b)));
+        }
+        if caught.contains(&libc::SIGTERM) {
+            mask_handled(libc::SIG_UNBLOCK);
+            for s in caught {
+                self.signal(s);
+            }
+            return;
+        }
+        caught.sort_unstable();
+        caught.dedup();
+        for s in caught {
+            // SAFETY: raising a blocked signal leaves it pending, for the next image.
+            unsafe { libc::raise(s) };
+        }
+        let why = self.exec_holder(binary, old_brain);
+        // Pending signals reach this image's handlers again.
+        mask_handled(libc::SIG_UNBLOCK);
+        log(&format!(
+            "upgrade FAILED: the holder could not re-exec into {}: {why}; this holder carries on, and a brain \
+             of its own starts from the handoff",
+            binary.display()
+        ));
+        self.upgrade_failed = Some(format!("the holder could not re-exec into {}: {why}", binary.display()));
+        self.next_start = json!({"reason": "upgrade"});
+        self.restart_at = Some(Instant::now());
+    }
+
     /// Re-execs this process into `binary` with a record of itself (`--holder-resume <fd>`): the
     /// same pid, so every shell stays its child and every fd it keeps stays open. Returns only if
     /// the exec failed, and why, with every fd's close-on-exec flag back as it was.
@@ -1951,6 +2045,13 @@ impl Holder {
         if self.ending.is_some() {
             return;
         }
+        if self.shutdown_at.take().is_some() {
+            // SIGTERM: the namespace ends, also when it came during an upgrade's commit. Neither
+            // the re-exec nor the candidate goes on: the name is already released (`leave_path`),
+            // so a holder that went on would serve on no socket, holding no lock.
+            self.end("SIGTERM");
+            return;
+        }
         if let Some(binary) =
             self.upgrade.as_ref().filter(|u| u.stage == Stage::Committing).and_then(|u| u.holder.clone())
         {
@@ -1962,15 +2063,7 @@ impl Holder {
                 t.known = false;
             }
             self.restarts.upgrade += 1;
-            let why = self.exec_holder(&binary, old.pid);
-            log(&format!(
-                "upgrade FAILED: the holder could not re-exec into {}: {why}; this holder carries on, and a brain \
-                 of its own starts from the handoff",
-                binary.display()
-            ));
-            self.upgrade_failed = Some(format!("the holder could not re-exec into {}: {why}", binary.display()));
-            self.next_start = json!({"reason": "upgrade"});
-            self.restart_at = Some(Instant::now());
+            self.exec_due = Some((binary, old.pid));
             return;
         }
         if self.upgrade.as_ref().is_some_and(|u| u.stage == Stage::Committing) && self.candidate.is_some() {
@@ -1986,10 +2079,6 @@ impl Holder {
                 c.pid, self.generation, old.pid
             ));
             self.brain = Some(c);
-            return;
-        }
-        if self.shutdown_at.take().is_some() {
-            self.end("SIGTERM");
             return;
         }
         let watchdog = old.aborted.is_some();
@@ -2086,11 +2175,19 @@ impl Holder {
     }
 
     fn start_closing(&mut self, handle: u32, id: String, tree: Tree, sig: i32, fg: Option<i32>) {
-        if let Some(fg) = fg {
-            // SAFETY: the PTY's foreground group, one of the tree's.
-            unsafe { libc::kill(-fg, sig) };
-        }
+        // The tree first, its members read before any signal: a program the foreground group's
+        // signal ended would be missing from the report.
         let who = self.trees.signal(&tree, sig);
+        if let Some(fg) = fg {
+            // SAFETY: the PTY's foreground group, one of the tree's; SIGCONT after it, as the
+            // tree's members get (`Trees::signal`).
+            unsafe {
+                libc::kill(-fg, sig);
+                if sig != libc::SIGKILL {
+                    libc::kill(-fg, libc::SIGCONT);
+                }
+            }
+        }
         self.closing.push(Closing {
             handle,
             id,
@@ -2131,8 +2228,15 @@ impl Holder {
         }
     }
 
-    /// Trees that have emptied: a close is done (reported), a leftover is gone.
+    /// Trees that have emptied: a close is done (reported), a leftover is gone. Where no reap
+    /// reports a leftover's end (`ExitWatch`), its members are watched, and scanned again when one
+    /// went between the scan and its watch.
     fn check_trees(&mut self) {
+        while !self.check_trees_once() {}
+    }
+
+    /// One pass of `check_trees`; false when a leftover's member went before it was watched.
+    fn check_trees_once(&mut self) -> bool {
         let trees = &self.trees;
         let mut done = Vec::new();
         self.closing.retain(|c| {
@@ -2174,6 +2278,12 @@ impl Holder {
             }
             alive
         });
+        let mut watched = true;
+        if self.exits.fd().is_some() && !self.leftovers.is_empty() {
+            let trees: Vec<Tree> = self.leftovers.iter().map(|l| l.tree.clone()).collect();
+            let pids: Vec<i32> = self.trees.members_many(&trees).into_iter().flatten().map(|p| p.pid).collect();
+            watched = self.exits.watch(&pids);
+        }
         for (handle, id, tree) in gone {
             if let Tree::Leaf(l) = &tree {
                 self.trees.remove_leaf(l);
@@ -2183,6 +2293,7 @@ impl Holder {
                 b.queue(json!({"m": "leftover_gone", "handle": handle}), vec![]);
             }
         }
+        watched
     }
 
     /// A terminal's program exited on its own: what it left running in its tree (a `nohup` job)

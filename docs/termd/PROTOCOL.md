@@ -69,8 +69,8 @@ explicit socket path instead (`g3d-termd --socket <path>`); it then has no names
 
 If nothing listens there, a client that wants a daemon starts one:
 `g3d-termd --ns <namespace> --daemon` (or `--socket <path> --daemon`) detaches into the
-background and serves until it has had no terminals and no connections (other than status
-followers) for 5 minutes. Then
+background and serves until it has had no terminals, no leftovers (what ended terminals left
+running) and no connections (other than status followers) for 5 minutes. Then
 retry the connection for a few seconds. (1.1) The process that listens is the namespace's
 holder, which keeps the terminals alive across restarts of the daemon's engine; see
 [Restarts](#restarts-11). Starting a second daemon on a socket that already
@@ -248,6 +248,7 @@ Error codes, the same for every op:
 | `too_large` | a frame or a field exceeded a limit |
 | `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`; (1.5) another writer's streaming `paste` into the same terminal), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
 | `unsafe_paste` | (1.2) a `paste` whose text could run commands, sent without `allow_unsafe` ([`paste`](#paste-12)) |
+| `paste_timeout` | (1.5) a chunk of a streamed `paste` that termd ended because its writer sent no next chunk within the paste timeout ([`paste`](#paste-12)) |
 
 ### `create`
 
@@ -688,9 +689,13 @@ pointer events reaching the terminal while a paste is open are held and follow t
 pressed during a paste follows it into a real terminal's PTY; they count against the input buffer
 and are refused `input_full` when it is full. One paste streams into a terminal at a time: another
 writer's `paste` is `busy` until it ends. A paste ends early, closed, when its writer's subscription
-ends (unsubscribe, the connection closes) or an upgrade's handoff cuts it (its later chunks are
-`busy`: input is at most once). A brain that crashes mid-paste can't close it: the program stays
-inside the bracket until a later paste's end, as it would if a terminal emulator crashed mid-paste.
+ends (unsubscribe, the connection closes), an upgrade's handoff cuts it (its later chunks are
+`busy`: input is at most once), or its writer sends no next chunk within the paste timeout
+(`g3d-termd --paste-timeout-ms`, 60,000; 0 = never) once termd has answered the last one (its later
+chunks are `paste_timeout`). A writer whose paste ended early sends its chunk without `more` (empty
+will do) to end the refusal. The status document shows an open paste (`terminals[].paste`). A brain
+that crashes mid-paste can't close it: the program stays inside the bracket, reading what is typed
+as pasted text (a shell's Enter doesn't run the line), until a later paste's end; nothing reports it.
 
 ### `mouse` (1.4)
 
@@ -854,7 +859,7 @@ Unix epoch milliseconds, sizes are bytes):
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
 | `trees` | (1.5) how the daemon knows each terminal's processes, its **tree**: `mode` `"cgroup"` (Linux, a namespace started with `--daemon` under a systemd user manager: each terminal its own cgroup, a leaf of the daemon's service's, `unit`), or `"session"` (each terminal's session: the processes whose session id is its program's pid; `why` says why not a cgroup). A cgroup holds everything the program started however it forked; a session loses a process that called `setsid` |
-| `leftovers` | (1.5) what terminals whose programs exited on their own left running (a `nohup` job), each `id`, the program's `pid`, `since` (when it exited) and `processes` (`pid`, `comm`); listed until they end, which is with the namespace at the latest |
+| `leftovers` | (1.5) what terminals whose programs exited on their own left running (a `nohup` job), each `id`, the program's `pid`, `since` (when it exited) and `processes` (`pid`, `comm`); listed until they end, which is with the namespace at the latest; a namespace holding them is not idle |
 | `closes` | (1.5) the latest closes (`kill`, a namespace's end), newest first: each step of the close rule (`HUP` to every process in the tree, `TERM` to what was left, `KILL` to what was still left) with the processes it reached (`procs`). A close that needed `KILL` is also an error, `killed` |
 | `env` | `source`: where a terminal whose creator sends no environment looks the session's names up (`"systemd-user"`, `"launchd"`, or `"daemon"`: the daemon's start values, when no session source answers or the daemon is set so); `config`: the daemon's `termd.toml`, its `path`, its `state` (`"absent"`, `"loaded"`, `"error"`) and, while it is bad, its `error` (naming the line); `warnings` (strings: no UTF-8 locale to fill, the session source unreachable while it is, a bad config file, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
@@ -869,11 +874,12 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `out_bps`, `in_bps` | output and input bytes per second over the last 5 s |
 | `last_output_at` | when output last arrived; absent until this brain has seen output from the terminal (one with no output yet, or one restored after a restart and quiet since: the time is not carried across a restart) |
 | `flow` | `"live"` (termd reads the program's output as it comes), `"blocked"` (a `block` owner is behind and termd has stopped reading; the program waits), `"paused"` (an upgrade's cut) |
-| `input_queued` | input bytes waiting for the program to read them |
+| `input_queued` | input bytes waiting for the program to read them: the input buffer's, (1.5) an open paste's chunk waiting for room, and the input held behind the paste |
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
 | `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain). A terminal restored from a snapshot saves a new one at the next interval even while quiet, so a second crash restores it exact |
 | `unseen` | with `restored`: this terminal's output the previous brain read and never saved (0 when `exact`) |
 | `processes` | (1.5) how many processes its tree holds now (its program and everything it started); a gauge, like `memory` |
+| `paste` | (1.5) the paste streaming into it now, absent when none is: `conn` (its writer's connection), `since` (its first chunk), `written` (bytes of its text the program has been given), `idle_since` (when termd answered its last chunk and began waiting for the writer's next; absent while a chunk waits for room). An `idle_since` long ago is a writer gone quiet, which the paste timeout ends |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
 `errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,
@@ -1302,7 +1308,9 @@ writes, and send keystrokes as `INPUT`.
   Process trees: `kill` ends a terminal's whole tree by the close rule (`SIGHUP`, then `SIGTERM`,
   then `SIGKILL`), and the status document's `daemon.trees`, `daemon.leftovers`, `daemon.closes`,
   `terminals[].processes` and the `killed` error say what runs and what a close reached. `upgrade`
-  with `holder` replaces the holder in place (`daemon.holder.upgrades`). Additive: a paste without
+  with `holder` replaces the holder in place (`daemon.holder.upgrades`). A streamed paste whose
+  writer goes quiet ends at the paste timeout (`paste_timeout`), and the status document shows an
+  open paste (`terminals[].paste`). Additive: a paste without
   `more` is the whole paste, as in 1.4, and a 1.4 client ignores the new fields.
 - **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
   is served as before.

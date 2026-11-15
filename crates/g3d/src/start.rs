@@ -67,7 +67,8 @@ pub fn connect(target: &Target, name: &str) -> Result<Client, ClientError> {
     Client::connect(&target.socket(), name)
 }
 
-fn not_running(e: &ClientError) -> bool {
+/// Nothing listens at the socket: the namespace is gone (or never was).
+pub fn not_running(e: &ClientError) -> bool {
     matches!(e, ClientError::Io(io) if matches!(io.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused))
 }
 

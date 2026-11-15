@@ -528,3 +528,51 @@ fn the_socket_path_does_not_depend_on_the_environment() {
     assert!(stripped.contains("no daemon at /"), "{stripped}");
     assert_eq!(stripped, desktop);
 }
+
+/// `g3d upgrade --holder` while the namespace ends under it (SIGTERM to the holder in the commit's
+/// drain): it says the namespace ended and fails, at once, rather than waiting out its window or
+/// claiming every terminal carried over.
+#[test]
+fn upgrade_says_so_when_the_namespace_ends_during_it() {
+    let mut d = Daemon::start();
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let _: CreateReply = c
+        .request(Op::Create(Create {
+            id: "a".into(),
+            argv: Some(vec!["sleep".into(), "1793".into()]),
+            cols: 40,
+            rows: 5,
+            ..Default::default()
+        }))
+        .unwrap();
+    // A client that never reads nor closes holds the old brain's drain open for its second.
+    let _idle = Client::connect(&d.socket, "idle").unwrap();
+    let out = d.dir.join("upgrade.out");
+    let mut up = Command::new(env!("CARGO_BIN_EXE_g3d"))
+        .arg("--socket")
+        .arg(&d.socket)
+        .args(["upgrade", "--holder"])
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(d.dir.join("upgrade.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let log = d.dir.join("daemon.log");
+    let until = Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("upgrade: handed over; closing") {
+        assert!(Instant::now() < until, "no commit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    unsafe { libc::kill(d.child.id() as i32, libc::SIGTERM) };
+    let at = Instant::now();
+    let st = loop {
+        if let Some(st) = up.try_wait().unwrap() {
+            break st;
+        }
+        assert!(at.elapsed() < Duration::from_secs(10), "g3d upgrade waits on a namespace that ended");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let err = std::fs::read_to_string(d.dir.join("upgrade.err")).unwrap();
+    assert!(!st.success(), "it claimed success: {}", std::fs::read_to_string(&out).unwrap());
+    assert!(err.contains("the namespace ended meanwhile"), "{err}");
+    let _ = d.child.wait();
+}

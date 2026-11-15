@@ -93,6 +93,9 @@ pub mod code {
     /// (1.2) A `paste` whose text could run commands (a line break the program would read as
     /// Enter, or the bracketed-paste end), refused without `allow_unsafe`.
     pub const UNSAFE_PASTE: &str = "unsafe_paste";
+    /// (1.5) A chunk of a streamed paste termd ended because its writer sent no next chunk within
+    /// the paste timeout (`--paste-timeout-ms`).
+    pub const PASTE_TIMEOUT: &str = "paste_timeout";
     // Connection-level (ERROR frames).
     pub const BAD_FRAME: &str = "bad_frame";
     pub const VERSION: &str = "version";
@@ -688,7 +691,25 @@ pub struct StatusTerminal {
     /// couldn't be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processes: Option<u64>,
+    /// (1.5) The paste streaming into it now, absent when none is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<StatusPaste>,
     pub subscribers: Vec<StatusSubscriber>,
+}
+
+/// (1.5) A paste streaming into a terminal: whose, since when, how far.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusPaste {
+    /// The writer's connection (its `conn` among the subscribers).
+    pub conn: u64,
+    /// When its first chunk came (ms since the epoch).
+    pub since: u64,
+    /// Bytes of its text the program has been given so far.
+    pub written: u64,
+    /// When termd answered its last chunk and began waiting for the writer's next (ms since the
+    /// epoch); absent while a chunk waits for room in the input buffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -171,6 +171,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             kill_grace: Duration::from_secs(args.kill_grace),
             engine,
             input_max: args.input_buffer,
+            paste_timeout: Duration::from_millis(args.paste_timeout_ms),
             env: env_policy.clone(),
         },
         start.hold.clone(),
@@ -483,12 +484,15 @@ async fn run(
             let mut idle_since: Option<Instant> = None;
             loop {
                 tokio::time::sleep(Duration::from_millis(500).min(idle_exit)).await;
-                if srv.reg.len() == 0 && srv.active_conns() == 0 {
+                // A leftover keeps the namespace: its end would end the person's job.
+                if srv.reg.len() == 0 && srv.active_conns() == 0 && !srv.hub.has_leftovers() {
                     let since = *idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= idle_exit {
                         end_namespace(
                             &srv,
-                            &format!("no terminals and no connections but status followers for {idle_exit:?}"),
+                            &format!(
+                                "no terminals, no leftovers and no connections but status followers for {idle_exit:?}"
+                            ),
                         )
                         .await;
                     }
