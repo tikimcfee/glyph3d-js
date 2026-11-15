@@ -6,7 +6,8 @@ const EASE_RATE = 14;
 const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 200;
 /**
- * Wheel zoom, born configurable (`new WallCamera(camera, canvas, { wheelZoom })`): every
+ * Wheel zoom (a wheel with the zoom modifier, chord.js zoomsWheel; a plain wheel pans), born
+ * configurable (`new WallCamera(camera, canvas, { wheelZoom })`): every
  * `pixelsPerNotch` of wheel delta (one mouse notch) zooms by `stepFactor` about the pointer, and the
  * camera eases there at `settleRate` (1/s, exponential in log zoom: 95% in 3/settleRate s), so a run
  * of notches is one continuous glide that lands exactly. No overshoot, no inertia.

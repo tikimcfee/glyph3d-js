@@ -1,7 +1,7 @@
 import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
 import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
-import { invertsSnap, IS_MAC } from './chord.js';
+import { invertsSnap, zoomsWheel, IS_MAC } from './chord.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
 const DRAG_SLOP_PX = 4;
@@ -11,7 +11,7 @@ const LASSO_STEP_PX = 3;
 const MIN_SIZE = { minCols: 20, minRows: 5 };
 /** A wheel event in lines (deltaMode 1) moves this many CSS px. */
 const LINE_PX = 16;
-/** A ctrl+wheel delta under this (CSS px) is a trackpad pinch, followed directly; at or over it, a mouse notch. */
+/** A zoom wheel's delta (zoomsWheel) under this (CSS px) is a trackpad pinch, followed directly; at or over it, a mouse notch. */
 const PINCH_MAX_DELTA = 50;
 
 /**
@@ -42,11 +42,14 @@ const PINCH_MAX_DELTA = 50;
  * A group's backdrop is canvas (it pans and lassoes). A title bar's hide / close buttons and the
  * selection's group button are DOM over the canvas and never reach here.
  *
- * Wheel: over the FOCUSED terminal it drives that terminal's scrollback; anywhere else it zooms
- * about the pointer in small eased steps (WallCamera.wheelZoomAt), and a sideways delta pans. A
- * trackpad pinch (ctrl+wheel, small deltas) zooms directly with the fingers; ctrl + a mouse notch
- * glides like a plain notch. Double-click a terminal: focus + frame; a group's header: frame the
- * group; empty canvas: fit all. Hover lights the border and sets the cursor (⌥ shows move).
+ * Wheel, a canvas's convention: a plain wheel or two-finger swipe PANS, both axes, the content
+ * moving as a scrolled page's would — except over the FOCUSED terminal, where it drives that
+ * terminal's scrollback. With the zoom modifier (chord.js zoomsWheel: Ctrl, and on macOS ⌘ too) it
+ * ZOOMS the canvas about the pointer, over a terminal or not: a small delta (a trackpad pinch, which
+ * the browser sends as Ctrl+wheel) zooms directly with the fingers, a mouse notch glides in eased
+ * steps (WallCamera.wheelZoomAt). The browser never page-zooms or scrolls.
+ * Double-click a terminal: focus + frame; a group's header: frame the group; empty canvas: fit all.
+ * Hover lights the border and sets the cursor (⌥ shows move).
  * A pointercancel or a lost pointer capture ends the gesture where it stands (no click), and so
  * does the gesture's terminal (or group) going away; either way the capture is given back.
  */
@@ -269,23 +272,26 @@ export default class WallPointer {
 
     _onWheel(e) {
         e.preventDefault();
+        // The deltas before deltaMode: Firefox reports lines only to a listener that reads the mode first.
+        const rawX = e.deltaX, rawY = e.deltaY;
+        const zoom = zoomsWheel(e);
         const focused = this.wall.focusedId;
-        if (!e.ctrlKey && focused) {
+        if (!zoom && focused) {
             const r = this.wall.terminalRect(focused);
             const p = this.camera.toWorld(e.clientX, e.clientY);
             if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) {
-                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(e.deltaY))]);
+                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(rawY))]);
                 return;
             }
         }
         const px = e.deltaMode === 1 ? LINE_PX : e.deltaMode === 2 ? this.camera.view.h : 1;
-        const dy = e.deltaY * px;
-        if (e.ctrlKey && Math.abs(dy) < PINCH_MAX_DELTA) {
-            this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.01));
-            return;
-        }
-        if (e.deltaX) this.camera.panBy(e.deltaX * px, 0);
-        if (dy) this.camera.wheelZoomAt(e.clientX, e.clientY, dy);
+        const dx = rawX * px, dy = rawY * px;
+        // panBy takes a screen delta and moves the camera by it: + deltaY (scroll down) shows what's
+        // below, so the content rises, as a page's does; + deltaX shows what's to the right.
+        if (!zoom) { this.camera.panBy(dx, dy); return; }
+        if (!dy) return;
+        if (Math.abs(dy) < PINCH_MAX_DELTA) this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.01));
+        else this.camera.wheelZoomAt(e.clientX, e.clientY, dy);
     }
 
     _hover(e) {

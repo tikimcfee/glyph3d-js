@@ -13,7 +13,7 @@ import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { dockLayout } from './Panel.jsx';
-import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL } from './chord.js';
+import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL, ZOOM_WHEEL_LABEL } from './chord.js';
 
 const FONT_CHAIN = [
   { url: fontUrl, name: 'Cousine', italic: { url: italicUrl } },
@@ -99,7 +99,7 @@ function Chrome({ wall }) {
       <TermdNotice wall={wall} />
       <div style={{ ...styles.hint, left: inset.left, right: inset.right }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · wheel to zoom (over the focused terminal: its scrollback) · drag empty canvas to pan · right-click for a menu
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · drag empty canvas or wheel to pan (a wheel over the focused terminal: its scrollback) · {ZOOM_WHEEL_LABEL}-wheel or pinch to zoom · right-click for a menu
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
       </div>
       <Sidebar wall={wall} state={state} />

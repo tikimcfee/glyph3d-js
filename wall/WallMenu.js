@@ -14,7 +14,7 @@ const KEY_INSET_PX = 12;
  *                                    terminal
  *   pointerdown outside the menu     closes it — but not a secondary press (right button, or
  *                                    Ctrl+click on macOS): its contextmenu is the "again"
- *   wheel (zoom / scroll)            closes it, as a pan's press does
+ *   wheel (pan / zoom / scroll)      closes it, as a pan's press does
  *   the menu key / Shift+F10         WallKeys → openByKey: ours on the focused terminal (else the
  *                                    canvas at the view's centre); the contextmenu that key raises
  *                                    is ours too, not a second right-click
