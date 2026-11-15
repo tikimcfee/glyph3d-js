@@ -89,6 +89,28 @@ decoration texel (made when a cell first names one). The field's background pass
 some row has a fill (`_bgRows`), and not at all otherwise. Rows that scroll into history keep
 their styles and drop their fills.
 
+**Text selection** (core `collections/terminalSelection.js`, drawn and read by `TerminalGrid`; the
+wall's gestures, chords and clipboards: docs/architecture/wall.md "Selecting text"). A grid holds one
+selection on its screen: a STREAM between two cell boundaries in reading order (every row between to
+its edge), or a BLOCK of columns; started as a cell, a word (a run of non-boundary cells — whitespace
+and Ghostty's `selection-word-chars` end one — or of boundary cells, across soft wraps) or a logical
+line (soft-wrapped rows joined, its blanks left out), and extended by its head (`selectStart`,
+`selectExtend`, `selectCells`, `clearSelection`). The text comes from the emulator — the same buffer
+the glyphs render from, which holds the visible screen only (termd owns the scrollback; a scrolled
+view arrives as a repaint), read through xterm's own lines with no allocation: each line's trailing
+blanks trimmed, a soft wrap (`isWrapped`, which xterm sets as the program's text runs past the edge —
+termd's repaint keeps it: `wall-e2e` reads a wrapped line as one after `terminal.refresh`) joined, hard line ends kept as `\n`, a wide character or a cluster as its text (`selectionText`). It
+draws through the cell's fill: a selected cell's highlight texel takes the selection colour and its
+colour lane the selection's text colour (or keeps its own), so the background pass draws it with no
+extra draw while some cell is selected (`_selRows`), and a cell's own background comes back when it
+leaves the selection. Per physical row of the ring the grid keeps the columns it drew selected; a
+change rewrites and uploads only the cells between the old and the new (one or two runs a row), and a
+ring scroll carries those rows — and the selection with them — up with their text. It goes when a
+selected cell is rewritten (text, attributes or colour: `_diffLive`'s spans), when any of it scrolls off
+the top, and on a resize (`setSelectionStyle` restyles it live). `terminal.selection <id> [clear | cells
+<col0> <row0> <col1> <row1> [block] | word <col> <row> | line <row>]` reads or makes it from the CLI.
+The selection does not reach into termd's scrollback. Gate: `tools/terminal-selection.test.mjs`.
+
 Fonts (docs/architecture/rendering.md "Fonts"): a terminal draws in ONE FONT FAMILY of the chain
 (`packages/glyph3d-core/src/fonts/families.js`: Cousine, Monaspace Neon, Monaspace Argon — each
 with its regular, bold, italic and bold-italic faces), then the fallbacks MesloLGS NF Mono and

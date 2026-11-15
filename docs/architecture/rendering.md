@@ -78,8 +78,9 @@ test pattern and `tools/font-sample.sh` in every family, with two side-by-side s
 
 ## Cells: fills, styles, sprites
 
-What a cell draws beyond its glyph — a terminal's cells, and a `CodeGrid`'s (selections, trails,
-ANSI backgrounds): one path, in the one glyph shader (`core/glyphMaterial.js`).
+What a cell draws beyond its glyph — a terminal's cells (its ANSI backgrounds and its text selection,
+docs/architecture/terminals.md "Text selection"), and a `CodeGrid`'s (selections, trails, ANSI
+backgrounds): one path, in the one glyph shader (`core/glyphMaterial.js`).
 
 **The background pass.** A cell's fill (its highlight texel's colour and opacity, else its
 group's background) is drawn by a second material, the FILL material, from the field's own mesh:

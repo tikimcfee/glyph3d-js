@@ -19,6 +19,8 @@
  *   terminal.mouse  <id> <press|release|move> <button> <col> <row> [mods…]
  *                                            (a pointer event for the program: termd encodes it in
  *                                             its mouse modes)
+ *   terminal.selection <id> [clear | cells … | word <col> <row> | line <row>]
+ *                                            (the text selection: read it, make it, clear it)
  *   terminal.list · terminal.move <id> <x> <y> <z> · terminal.scale <id> <factor>
  *
  * Grids render fixed-size cell grids via TerminalGrid, writing directly to GPU
@@ -445,6 +447,32 @@ export default function registerTerminalCommands(router) {
             data: { id, cols: grid.cols, rows: grid.rows, lines },
         };
     }, { description: "Read a terminal's visible screen as plain text", usage: '<id>' });
+
+    // ------------------------------------------------------------------
+    // terminal.selection <id> [clear | cells <col0> <row0> <col1> <row1> [block] | word <col> <row> | line <row>]
+    //   A terminal's text selection (TerminalGrid: terminalSelection.js): with no more, what is
+    //   selected — its text (trailing blanks trimmed per line, soft wraps joined) and where it runs;
+    //   otherwise select as a click would (cells between two boundaries, a word, a logical line) or
+    //   clear it. Cells count from 0 at the screen's top-left; a boundary k is the left edge of column k.
+    // ------------------------------------------------------------------
+    router.register('terminal.selection', (args, ctx) => {
+        const usage = 'ERR: usage: terminal.selection <id> [clear | cells <col0> <row0> <col1> <row1> [block] | word <col> <row> | line <row>]';
+        const [id, how, ...rest] = args;
+        if (!id) return { text: usage, data: null };
+        const grid = getTerminals(ctx).get(id);
+        if (!grid) return { text: `ERR: no terminal '${id}'`, data: null };
+        const n = rest.map(Number);
+        const whole = (k) => n.length >= k && n.slice(0, k).every((v) => Number.isInteger(v) && v >= 0);
+        if (how === 'clear' && !rest.length) grid.clearSelection();
+        else if (how === 'cells' && whole(4) && (rest.length === 4 || (rest.length === 5 && rest[4] === 'block'))) grid.selectCells(n[0], n[1], n[2], n[3], { block: rest[4] === 'block' });
+        else if (how === 'word' && rest.length === 2 && whole(2)) grid.selectStart(n[0] + 0.5, n[1] + 0.5, { mode: 'word' });
+        else if (how === 'line' && rest.length === 1 && whole(1)) grid.selectStart(0.5, n[0] + 0.5, { mode: 'line' });
+        else if (how !== undefined) return { text: usage, data: null };
+        const selection = grid.selection, text = grid.selectionText();
+        if (!selection) return { text: `OK: terminal '${id}' has nothing selected`, data: { id, text: '', selection: null } };
+        const where = `${selection.start.col},${selection.start.row} → ${selection.end.col},${selection.end.row}${selection.block ? ' (block)' : ''}`;
+        return { text: `${text}\nOK: terminal '${id}' selection ${where}, ${[...text].length} characters`, data: { id, text, selection } };
+    }, { description: "A terminal's text selection: what is selected (its text and cells), or select cells, a word or a line, or clear it", usage: '<id> [clear | cells <col0> <row0> <col1> <row1> [block] | word <col> <row> | line <row>]' });
 
     // ------------------------------------------------------------------
     // terminal.scroll <id> <lines> [col row]   (+ = back into history, − = forward to live)

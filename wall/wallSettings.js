@@ -35,6 +35,7 @@ export const SECTIONS = Object.freeze([
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
     { id: 'status', title: 'Status', subtitle: 'the termd status window · notices' },
     { id: 'input', title: 'Input', subtitle: 'keyboard' },
+    { id: 'selection', title: 'Selection', subtitle: 'selecting text · copy · paste' },
     { id: 'menu', title: 'Menu', subtitle: 'the right-click menu' },
 ]);
 
@@ -144,6 +145,40 @@ export const KNOBS = Object.freeze({
     traceInput: {
         section: 'input', label: 'Trace input', type: 'bool',
         description: "Log every wheel, key and pointer press this page receives (its deltas, key, code, modifiers and the element it landed on) to the relay's log store, as [input] lines — to see what a remote desktop or a trackpad actually sends.",
+    },
+    selectionColor: {
+        section: 'selection', label: 'Selection colour', type: 'color',
+        description: "The fill behind selected text in every terminal. Ghostty's default: the terminal's own text colour, so a selection reads as the terminal's colours inverted.",
+    },
+    selectionForeground: {
+        section: 'selection', label: 'Selected text colour', type: 'text',
+        parse: (s) => {
+            const v = s.trim().toLowerCase();
+            if (v === 'keep' || /^#[0-9a-f]{6}$/.test(v)) return v;
+            throw new Error(`a colour as #rrggbb, or keep (each cell keeps its own colour), not '${s}'`);
+        },
+        description: 'The colour selected text is drawn in, as #rrggbb — or keep, and each cell keeps its own colour over the selection colour.',
+    },
+    selectionWordChars: {
+        section: 'selection', label: 'Word boundaries', type: 'text',
+        parse: (s) => s.replace(/\s+/g, ''),
+        description: "The characters that end a word when you double-click, besides spaces and tabs: a double-click selects the run of other characters around the pointer (or, on one of these, the run of these). Ghostty's default.",
+    },
+    copyOnSelect: {
+        section: 'selection', label: 'Copy on select', type: 'enum', options: ['true', 'clipboard', 'false'],
+        description: "What a selection is copied to as you finish it: true — the wall's own selection clipboard, which a middle-click on a terminal pastes (a browser page can't reach the system's primary selection); clipboard — that and the system clipboard; false — neither (the copy chord and the menu still copy).",
+    },
+    clickRepeatMs: {
+        section: 'selection', label: 'Double-click time', type: 'number', min: 0, step: 50, unit: 'ms',
+        description: 'Presses on a terminal closer together than this (and within a few pixels) count as a double click (a word) or a triple click (a line).',
+    },
+    selectionClearOnTyping: {
+        section: 'selection', label: 'Typing clears it', type: 'bool',
+        description: 'A key typed into a terminal drops its selection, as Ghostty does; off, the selection stays until its text changes.',
+    },
+    noticeMs: {
+        section: 'selection', label: 'Notice time', type: 'number', min: 0, step: 500, unit: 'ms',
+        description: 'How long a notice — a copy or paste the browser refused, and why — stays at the top of the wall.',
     },
     menuHint: {
         section: 'menu', label: 'Second-click hint', type: 'bool',

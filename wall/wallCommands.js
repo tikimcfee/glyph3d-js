@@ -17,6 +17,9 @@ import { searchSettings, SECTIONS } from './wallSettings.js';
  *   wall.close <id>                            kill it (its program in termd) and forget it
  *   wall.rename <id> [name…]                   empty gives back the shell's title
  *   wall.select [<id…>|all|none] · wall.select.add <id…> · wall.select.toggle <id>
+ *   wall.copy [id]                             a terminal's selected text (default: the focused one's) to the clipboard
+ *   wall.paste [id] [selection]                the clipboard — or the wall's selection clipboard — into a terminal
+ *                                              (a terminal's selection itself: the core terminal.selection)
  *   wall.group [<id…>]                         a new group of these (default: the selection)
  *   wall.group.add <gid> <id…> · wall.group.remove <id…> · wall.ungroup <gid>
  *   wall.group.layout <gid> tile [columns] [gap] | freeform
@@ -129,6 +132,33 @@ export default function registerWallCommands(router, wall) {
         if (next.has(id)) next.delete(id); else next.add(id);
         wall.select([...next]);
         return OK(`selected ${wall.selection.size}`, { selection: [...wall.selection] });
+    });
+
+    /** The terminal a text verb names, else the focused one. */
+    const textTarget = (args) => {
+        const id = args[0] ?? wall.focusedId;
+        if (!id) throw new Error('no terminal named, and none is focused');
+        if (!wall.terminal(id)) throw new Error(`no terminal '${id}'`);
+        return id;
+    };
+    verb('wall.copy', '[id]', "Copy a terminal's selected text (default: the focused terminal's) to the system clipboard", async (args) => {
+        const id = textTarget(args);
+        const text = wall.terminal(id).selectionText();
+        if (!text) throw new Error(`nothing is selected in ${id}`);
+        try { await wall.writeClipboard(text); } catch (e) { wall.notify(`copy: ${e.message}`); throw e; }
+        return OK(`copied ${[...text].length} characters from ${id}`, { id, text });
+    });
+    verb('wall.paste', '[id] [selection]', "Paste into a terminal (default: the focused one) as the paste chord does: the system clipboard, or with `selection` the wall's selection clipboard (what a middle-click pastes)", async (args) => {
+        const fromSelection = args[args.length - 1] === 'selection';
+        const id = textTarget(fromSelection ? args.slice(0, -1) : args);
+        let text;
+        if (fromSelection) text = wall.selectionClipboard;
+        else {
+            try { text = await wall.readClipboard(); } catch (e) { wall.notify(`paste: ${e.message}`); throw e; }
+        }
+        if (!text) throw new Error(fromSelection ? 'the selection clipboard is empty (select some text first)' : 'the clipboard holds no text');
+        if (!wall.terminal(id).paste(text)) throw new Error(`${id} has no input route (no adapter owns it)`);
+        return OK(`pasted ${[...text].length} characters into ${id}${fromSelection ? ' from the selection clipboard' : ''}`, { id, length: text.length });
     });
 
     verb('wall.group', '[<id…>]', 'Gather terminals (default: the selection) into a new group', (args) => {

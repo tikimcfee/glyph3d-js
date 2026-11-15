@@ -38,6 +38,13 @@ const RECOVER_REPLY_MS = 15000;
  */
 const TERMINAL_THEME = Object.freeze({ backgroundOpacity: 1 });
 
+/** The knobs that are every terminal's selection style (TerminalGrid.setSelectionStyle), and how each reaches it. */
+const SELECTION_STYLE_KNOBS = Object.freeze({
+    selectionColor: (v) => ({ background: v }),
+    selectionForeground: (v) => ({ foreground: v === 'keep' ? null : v }),
+    selectionWordChars: (v) => ({ wordChars: v }),
+});
+
 /**
  * A terminal's world rect, from its own pose — position + local bounds × scale. Wall terminals sit
  * directly under the scene, unrotated, so this is exact at any moment. It deliberately does NOT
@@ -134,6 +141,15 @@ export default class TerminalWall {
          * @type {{ target: import('./contextMenu.js').MenuTarget, at: { x: number, y: number }, world: { x: number, y: number } }|null}
          */
         this.menu = null;
+        /**
+         * The wall's selection clipboard (Ghostty's): the text last selected in a terminal, while
+         * `copyOnSelect` is on — what a middle-click on a terminal pastes. A page can't reach the
+         * system's primary selection, so the wall keeps its own; it lives as long as the page.
+         */
+        this.selectionClipboard = '';
+        /** A notice at the top of the wall (a copy or paste refused, and why); null when none. @type {string|null} */
+        this.notice = null;
+        this._noticeTimer = null;
         this._listeners = new Set();
         this.store = new WallStore(relayPort);
         /** The knobs as the wall was born with them — what `wall.config <knob> default` hands back. */
@@ -228,6 +244,8 @@ export default class TerminalWall {
         this.ctx.wsbridge = null;
         this.relay = { state: 'offline', reason: '' };
         this.menu = null;
+        clearTimeout(this._noticeTimer);
+        this.notice = null;
         this.menuInput.uninstall();
         this.keys.uninstall();
         this.pointer.uninstall();
@@ -506,6 +524,7 @@ export default class TerminalWall {
         if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: value });
         else if (key === 'fontFamily') for (const grid of this.ctx.terminals.values()) grid.setFontFamily(value);
         else if (key === 'boldIsBright') for (const grid of this.ctx.terminals.values()) grid.setBoldIsBright(value);
+        else if (key in SELECTION_STYLE_KNOBS) for (const grid of this.ctx.terminals.values()) grid.setSelectionStyle(SELECTION_STYLE_KNOBS[key](value));
     }
 
     /**
@@ -588,7 +607,8 @@ export default class TerminalWall {
      *   settingsPanel: import('./WallStore.js').SettingsPanelState,
      *   config: import('./wallConfig.js').WallConfig, dialled: string[],
      *   menu: TerminalWall['menu'],
-     *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null}[],
+     *   notice: string|null,
+     *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null, selected:boolean}[],
      *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform', columns:number, gap:number, members:string[]}[] }}
      *   a group lists only its members on the wall
      */
@@ -604,6 +624,7 @@ export default class TerminalWall {
             config: { ...this.config },
             dialled: Object.keys(this.store.config()),
             menu: this.menu,
+            notice: this.notice,
             terminals: this.order.map((id) => {
                 const g = this.ctx.terminals.get(id);
                 const lines = g.readText();
@@ -611,7 +632,7 @@ export default class TerminalWall {
                 for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { preview = lines[i].trim(); break; } }
                 return {
                     id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview,
-                    hidden: this.store.hidden(id), group: this.store.groupOf(id),
+                    hidden: this.store.hidden(id), group: this.store.groupOf(id), selected: g.hasSelection,
                 };
             }),
             groups: this.groups ? this.groups.ids().map((gid) => {
@@ -622,6 +643,52 @@ export default class TerminalWall {
                 };
             }) : [],
         };
+    }
+
+    // ── text: selections, the clipboards ────────────────────────────────────
+
+    /**
+     * A selection was made in terminal `id` (a drag let go, a double or triple click): `copyOnSelect`
+     * copies it — 'true' to the wall's selection clipboard, 'clipboard' to the system clipboard too.
+     * @param {string} id
+     */
+    selectionMade(id) {
+        const text = this.ctx.terminals.get(id)?.selectionText() ?? '';
+        const how = this.config.copyOnSelect;
+        if (!text || how === 'false') return;
+        this.selectionClipboard = text;
+        if (how === 'clipboard') this.writeClipboard(text).catch((e) => this.notify(`copy on select: ${e.message}`));
+    }
+
+    /**
+     * Put text on the system clipboard (the async Clipboard API). Refused — with the page's reason —
+     * when the page isn't a secure context (https, or localhost) or the browser denies it; the caller
+     * says so (notify).
+     * @param {string} text @returns {Promise<void>}
+     */
+    async writeClipboard(text) {
+        const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+        if (!clip?.writeText) throw new Error(`the browser offers no clipboard to this page — it needs a secure context (https, or localhost), and ${location.origin} is not one`);
+        try { await clip.writeText(text); } catch (e) { throw new Error(`the browser refused the clipboard (${e?.name ?? 'Error'}: ${e?.message ?? e})`); }
+    }
+
+    /** Read the system clipboard's text (the async Clipboard API); refused as writeClipboard is. @returns {Promise<string>} */
+    async readClipboard() {
+        const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
+        if (!clip?.readText) throw new Error(`the browser offers no clipboard to this page — it needs a secure context (https, or localhost), and ${location.origin} is not one`);
+        try { return await clip.readText(); } catch (e) { throw new Error(`the browser refused to read the clipboard (${e?.name ?? 'Error'}: ${e?.message ?? e}) — the paste chord (the browser's own paste) needs no permission`); }
+    }
+
+    /**
+     * Show a notice at the top of the wall for `noticeMs`, and log it (warn): what went wrong and why.
+     * @param {string} text
+     */
+    notify(text) {
+        console.warn(`[wall] ${text}`);
+        this.notice = text;
+        clearTimeout(this._noticeTimer);
+        this._noticeTimer = setTimeout(() => { this.notice = null; this._emit(); }, this.config.noticeMs);
+        this._emit();
     }
 
     // ── focus + framing ─────────────────────────────────────────────────────
@@ -776,7 +843,12 @@ export default class TerminalWall {
      */
     _terminalHost() {
         return {
-            theme: () => ({ ...TERMINAL_THEME, fontFamily: this.config.fontFamily, boldIsBright: this.config.boldIsBright }),
+            theme: () => ({
+                ...TERMINAL_THEME, fontFamily: this.config.fontFamily, boldIsBright: this.config.boldIsBright,
+                selectionColor: this.config.selectionColor,
+                selectionForeground: SELECTION_STYLE_KNOBS.selectionForeground(this.config.selectionForeground).foreground,
+                selectionWordChars: this.config.selectionWordChars,
+            }),
             place: (grid) => this._place(grid),
             landed: (id) => { this.focus(id, { frame: true }); return 'focused + framed'; },
             focus: (id) => ({ ok: this.focus(id) }),

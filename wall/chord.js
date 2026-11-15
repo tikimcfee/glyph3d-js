@@ -4,7 +4,8 @@
  * wall chord takes both. AltGr — which Linux and Windows report as Ctrl+Alt, and which many
  * layouts type [ ] { } 0 with — is never a chord. WallKeys and the palette's chord (main.jsx) both
  * ask isChord; the hint line and the palette label chords with chordLabel. The snap and zoom
- * modifiers (invertsSnap, zoomsWheel) are decided here too.
+ * modifiers (invertsSnap, zoomsWheel), the copy chord (isCopyChord) and the block-selection modifiers
+ * (blockSelects) are decided here too.
  */
 
 const platform = (typeof navigator !== 'undefined' && (navigator.userAgentData?.platform || navigator.platform)) || '';
@@ -64,6 +65,36 @@ export function zoomsWheel(e, zoomKeys) {
 export function zoomWheelLabel(zoomKeys) {
     return parseZoomKeys(zoomKeys).map((k) => ZOOM_LABEL[k]).join('/') || 'no key';
 }
+
+/**
+ * The copy chord: ⌘C on macOS, Ctrl+Shift+C elsewhere (Ghostty's, kitty's and GNOME Terminal's) — the
+ * twin of the paste chord (keyEncoding.isPasteChord: ⌘V, Ctrl+Shift+V). Never Ctrl+C: that is the
+ * program's (SIGINT). It copies only with a selection to copy (WallKeys); with none it is a key like
+ * any other, as Ghostty's performable copy is.
+ * @param {KeyboardEvent} e
+ */
+export function isCopyChord(e) {
+    if (e.key !== 'c' && e.key !== 'C') return false;
+    if (IS_MAC) return e.metaKey && !e.ctrlKey && !e.altKey;
+    return e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+}
+
+/** The copy and paste chords as the hint and the menu name them. */
+export const COPY_LABEL = IS_MAC ? '⌘C' : 'Ctrl+Shift+C';
+export const PASTE_LABEL = IS_MAC ? '⌘V' : 'Ctrl+Shift+V';
+
+/**
+ * The block-selection modifiers, held at a press on a terminal's body: the drag selects a rectangle of
+ * columns. Ghostty's rule off macOS (Ctrl or Super, with Alt — kitty's Ctrl+Alt too); on macOS ⌘⌥,
+ * since ⌥ alone is the wall's drag-to-move (Ghostty's macOS ⌥-drag) and ⌃ at a press is the secondary click.
+ * @param {{ altKey: boolean, ctrlKey: boolean, metaKey: boolean }} e - a pointer event
+ */
+export function blockSelects(e) {
+    return !!e.altKey && (IS_MAC ? !!e.metaKey : !!(e.ctrlKey || e.metaKey));
+}
+
+/** What the block-selection modifiers are called on this platform. */
+export const BLOCK_SELECT_LABEL = IS_MAC ? '⌘⌥' : 'Ctrl+Alt';
 
 /** @param {KeyboardEvent} e @returns {boolean} true when `e` carries the wall's chord (Shift may ride along) */
 export function isChord(e) {

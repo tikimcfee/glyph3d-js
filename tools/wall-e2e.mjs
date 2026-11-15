@@ -26,7 +26,12 @@
  * browser's key events in the program's modes) and a paste bracketed as it asked, the mouse for a program that
  * reports it (1000 + 1006: a click on a known cell is exactly its SGR press and release; a drag is no motion
  * under 1000 and once per cell crossed under 1002; an unfocused terminal's click and a Shift+click reach
- * nothing; the wheel over an alt-screen program is wheel reports at the pointer's cell), the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
+ * nothing; the wheel over an alt-screen program is wheel reports at the pointer's cell), text selection (a drag
+ * across a printed line selects exactly it, its cells in the selection colour in the page's pixels ±2 and
+ * the panel's beside them; copyOnSelect fills the selection clipboard; a double-click's word, a triple-click's
+ * line; the copy chord puts it on the clipboard; the menu offers copy and paste, and its paste runs in the
+ * shell; Ctrl+C with nothing selected is SIGINT; a reporting program gets the plain drag and ⇧-drag
+ * selects, the program reading nothing of it), the platform's chord (⌘ on macOS, Ctrl+Alt elsewhere) cycling (reversible),
  * border resize, title-bar drag vs body press, ⌥-drag on the body, top-edge resize, names (shell
  * title → name, palette rename, clear, a long name whole in its bar or handed to its map label, never
  * cut), a second display refused with the reason on its chip, a page reload (names, spots and shell
@@ -389,6 +394,142 @@ try {
         ok(!!wheeled && wheeled.startsWith(sgr(64, 7, 2)), `the wheel over the alt-screen program reaches it as wheel-up reports at the pointer's cell, ESC[<64;8;3M (${wheeled?.slice(0, 80)})`);
         await page.keyboard.press('q');
         ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'MOUSE-9'), A, 8000), 'it ended on q, off the alternate screen');
+    }
+
+    // ── text selection: drag, double and triple click, copy, Ctrl+C, a reporting program ──
+    // A printed line selected by a drag across it (the text equals it; the selection colour in the
+    // page's pixels at its cells, the panel's beside them), a double-click's word, a triple-click's
+    // line, the copy chord putting it on the clipboard (Playwright grants clipboard-read/write), the
+    // menu's paste typing it back, Ctrl+C with nothing selected still the program's (SIGINT), and a
+    // program reporting the mouse getting the plain drag while ⇧-drag selects.
+    {
+        await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new globalThis.URL(URL_).origin });
+        const hexOf = (str) => [...Buffer.from(str)].map((b) => `[${b.toString(16).padStart(2, '0')}]`).join('');
+        /** The page point at fraction (fx, fy) of cell (c, r) of terminal `id`. */
+        const cellAtXY = (id, c, r, fx = 0.5, fy = 0.5) => W(([i, c, r, fx, fy]) => {
+            const w = window.__wall, v = w.viewport, cr = v.canvas.getBoundingClientRect(), g = w.terminal(i), m = g._metrics;
+            const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing;
+            const wx = g.position.x + g.scale.x * (c + fx) * sx, wy = g.position.y + g.scale.y * (sy / 2 - (r + fy) * sy);
+            return { x: cr.left + cr.width / 2 + (wx - v.camera.position.x) * v.zoom, y: cr.top + cr.height / 2 - (wy - v.camera.position.y) * v.zoom };
+        }, [id, c, r, fx, fy]);
+        const selText = (id) => W((i) => window.__wall.terminal(i).selectionText(), id);
+        const IS_MAC_CHORD = CHORD === 'Meta';
+        const COPY = IS_MAC_CHORD ? 'Meta+KeyC' : 'Control+Shift+KeyC';
+        await W((i) => window.__wall.focus(i, { frame: true }), A);
+        await until(() => !window.__wall.viewport.moving, null, 8000);
+
+        const LINE = 'PICK alpha beta-gamma (delta) epsilon';
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, `clear; printf '%s\\n' '${LINE}'\r`]);
+        const row = await until(([i, l]) => { const r = window.__wall.terminal(i).readText().findIndex((x) => x.trim() === l); return r >= 0 ? r + 1 : 0; }, [A, LINE], 8000) - 1;
+        ok(row >= 0, `the line to select is on ${A}'s screen (row ${row})`);
+        // A drag from the first cell's left part to the last cell's right part: the boundaries 0 and its length.
+        let p = await cellAtXY(A, 0, row, 0.15), q = await cellAtXY(A, LINE.length - 1, row, 0.85);
+        await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.mouse.move(q.x, q.y, { steps: 10 }); await page.mouse.up();
+        const dragged = await until(([i, l]) => window.__wall.terminal(i).selectionText() === l, [A, LINE], 4000);
+        ok(!!dragged, `a drag across a printed line selects exactly it ("${await selText(A)}")`);
+        ok((await W((i) => window.__wall.selectionClipboard, A)) === LINE, 'copyOnSelect (true) put it on the wall\'s selection clipboard');
+        // The pixels: the selected cells fill in the selection colour; the cells past it keep the panel's.
+        await W(async () => { const frames = (n) => new Promise((r) => { const f = () => (--n ? requestAnimationFrame(f) : r()); requestAnimationFrame(f); }); await frames(3); });
+        const rects = await W(([i, row, n]) => {
+            const w = window.__wall, g = w.terminal(i), m = g._metrics, v = w.viewport, cr = v.canvas.getBoundingClientRect();
+            const sx = m.charWidth + m.letterSpacing, sy = m.lineSpacing, p = g.position, s = g.scale;
+            const box = (c0, k) => { const b = v.toScreenBox({ minX: p.x + c0 * sx * s.x, maxX: p.x + (c0 + k) * sx * s.x, minY: p.y + (-row * sy - sy / 4) * s.y, maxY: p.y + (-row * sy + sy / 4) * s.y }); return { l: cr.left + b.left + 1, r: cr.left + b.right - 1, t: cr.top + b.top, b: cr.top + b.bottom }; };
+            const hex = (c) => { const h = typeof c === 'string' ? parseInt(c.replace('#', ''), 16) : c; return [(h >> 16) & 255, (h >> 8) & 255, h & 255]; };
+            return { sel: box(0, n), after: box(n + 2, 8), want: hex(w.config.selectionColor), panel: hex(g._bgColor) };
+        }, [A, row, LINE.length]);
+        const all = [rects.sel, rects.after];
+        const clip = { x: Math.floor(Math.min(...all.map((r) => r.l))), y: Math.floor(Math.min(...all.map((r) => r.t))) };
+        clip.width = Math.ceil(Math.max(...all.map((r) => r.r))) - clip.x;
+        clip.height = Math.ceil(Math.max(...all.map((r) => r.b))) - clip.y;
+        const png = await page.screenshot({ clip, scale: 'css' });
+        const med = await W(async ([b64, o, rs]) => {
+            const img = new Image(); img.src = `data:image/png;base64,${b64}`; await img.decode();
+            const cv = new OffscreenCanvas(img.width, img.height), cx = cv.getContext('2d'); cx.drawImage(img, 0, 0);
+            const d = cx.getImageData(0, 0, img.width, img.height).data;
+            return rs.map((r) => {
+                const ch = [[], [], []];
+                for (let y = Math.max(0, Math.round(r.t - o.y)); y < Math.min(img.height, Math.round(r.b - o.y)); y++)
+                    for (let x = Math.max(0, Math.round(r.l - o.x)); x < Math.min(img.width, Math.round(r.r - o.x)); x++) { const k = (y * img.width + x) * 4; for (let j = 0; j < 3; j++) ch[j].push(d[k + j]); }
+                return { med: ch.map((a) => (a.sort((u, v) => u - v), a.length ? a[a.length >> 1] : -1)), n: ch[0].length };
+            });
+        }, [png.toString('base64'), clip, all]);
+        const off = (a, b) => Math.max(...a.map((v, j) => Math.abs(v - b[j])));
+        ok(med[0].n > 0 && off(med[0].med, rects.want) <= 2, `the selected cells fill in the selection colour: rgb(${rects.want}) reads rgb(${med[0].med}) (median of ${med[0].n} px, ±2)`);
+        ok(med[1].n > 0 && off(med[1].med, rects.panel) <= 2, `the cells past the selection keep the panel's colour: rgb(${rects.panel}) reads rgb(${med[1].med})`);
+        await shot('text-selection');
+
+        // A double-click: the word under it (Ghostty's boundaries: '-' is a word character, '(' isn't).
+        const at = LINE.indexOf('beta-gamma');
+        p = await cellAtXY(A, at + 3, row);
+        await page.mouse.dblclick(p.x, p.y);
+        ok(!!await until(([i]) => window.__wall.terminal(i).selectionText() === 'beta-gamma', [A], 4000), `a double-click selects the word under it ("${await selText(A)}")`);
+        p = await cellAtXY(A, LINE.indexOf('delta') + 1, row);
+        await page.mouse.click(p.x, p.y, { clickCount: 3 });
+        ok(!!await until(([i, l]) => window.__wall.terminal(i).selectionText() === l, [A, LINE], 4000), `a triple-click selects the line ("${await selText(A)}")`);
+        ok((await geo(A)).focus === A && !(await W(() => window.__wall.viewport.moving)), 'a double-click on the body frames nothing (the camera holds)');
+
+        // The copy chord: the system clipboard gets it.
+        await W(() => navigator.clipboard.writeText('stale'));
+        await page.keyboard.press(COPY);
+        const copied = await until((l) => navigator.clipboard.readText().then((t) => (t === l ? t : null)), LINE, 4000);
+        ok(copied === LINE, `the copy chord (${COPY}) puts the selection on the clipboard (${JSON.stringify(await W(() => navigator.clipboard.readText()))})`);
+        ok((await selText(A)) === LINE, 'copying keeps the selection');
+
+        // The menu: Copy shows with a selection; Paste types the clipboard into the shell.
+        const mp = await cellAtXY(A, 2, row);
+        await page.mouse.click(mp.x, mp.y, { button: 'right' });
+        ok(!!await until(() => document.querySelector('[data-wall-menu] [data-menu-item="copy"]') && document.querySelector('[data-wall-menu] [data-menu-item="paste"]'), null, 4000), 'the right-click menu offers copy and paste with text selected');
+        await W(() => navigator.clipboard.writeText('echo PASTED-$((6*7))'));
+        await page.click('[data-wall-menu] [data-menu-item="paste"]');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.includes('echo PASTED-$((6*7))')), A, 8000), 'the menu\'s paste puts the clipboard at the shell\'s prompt');
+        await page.keyboard.press('Enter');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'PASTED-42'), A, 8000), 'the menu\'s paste reaches the shell through the paste path (the line ran)');
+        ok(!(await W((i) => window.__wall.terminal(i).hasSelection, A)), 'the selection went when its text scrolled off or changed (or typing dropped it)');
+
+        // A line longer than the terminal is wide: its rows soft-wrapped, a line selection joins them.
+        const cols = await W((i) => window.__wall.terminal(i).cols, A);
+        const LONG = Array.from({ length: Math.ceil((cols + 30) / 9) }, (_, k) => `wrap${String(k).padStart(3, '0')}`).join(' ');
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, `clear; printf '%s\\n' '${LONG}'\r`]);
+        const longRow = await until(([i, l]) => { const t = window.__wall.terminal(i).readText(); const r = t.findIndex((x) => x.startsWith(l.slice(0, 12))); return r >= 0 && t[r + 1]?.trim() ? r + 1 : 0; }, [A, LONG], 8000) - 1;
+        p = await cellAtXY(A, 3, longRow + 1);
+        await page.mouse.click(p.x, p.y, { clickCount: 3 });
+        ok(!!await until(([i, l]) => window.__wall.terminal(i).selectionText() === l, [A, LONG], 4000), `a triple-click on a soft-wrapped line's second row selects the whole line, joined (${(await selText(A)).length} of ${LONG.length} characters)`);
+        // After a repaint (termd redraws the screen: a resize, a reconnect, a redraw), are the rows still one line?
+        await W((i) => window.__wall.run(['terminal.refresh', i]), A);
+        const joinedAfter = await until(([i, r]) => window.__wall.terminal(i)._emulator.wrapped(r + 1) ? 'joined' : null, [A, longRow], 3000);
+        info(`after termd's repaint the long line's rows are ${joinedAfter ? 'still one soft-wrapped line' : 'separate lines: the repaint drops soft wraps (a selection across them gets a newline)'}`);
+
+        // Ctrl+C with nothing selected is the program's: SIGINT.
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, `clear; sh -c 'trap "echo GOT-SIGINT; exit 0" INT; echo TRAP-READY; while :; do sleep 0.1; done'\r`]);
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'TRAP-READY'), A, 8000), 'a program trapping SIGINT is up');
+        await page.keyboard.press('Control+KeyC');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.includes('GOT-SIGINT')), A, 8000), `Ctrl+C with nothing selected reaches it as SIGINT (${(await W((i) => window.__wall.terminal(i).readText().filter((l) => l.trim()).slice(-2).join(' / '), A))})`);
+
+        // A program that reports the mouse (1002 + 1006): a plain drag is its; ⇧-drag selects.
+        const prog = `clear; sh -c 'stty raw -echo; printf "\\033[?1002h\\033[?1006hSEL-%s" READY; while :; do `
+            + 'b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d " \\n"); printf "[%s]" "$b"; [ "$b" = 71 ] && break; done; '
+            + `printf "\\033[?1002l\\033[?1006l"; stty sane; echo; echo SEL-$((4+5))'\r`;
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, prog]);
+        const readyRow = await until((i) => { const g = window.__wall.terminal(i); const r = g.readText().findIndex((l) => l.startsWith('SEL-READY')); return r >= 0 && g.mouseTracking === 'button' ? r + 1 : 0; }, A, 10000) - 1;
+        ok(readyRow >= 0, 'a program with button-event tracking is up on the primary screen');
+        p = await cellAtXY(A, 0, readyRow, 0.15); q = await cellAtXY(A, 8, readyRow, 0.85);
+        await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.mouse.move(q.x, q.y, { steps: 10 }); await page.mouse.up();
+        const sgrPress = hexOf(`\x1b[<0;1;${readyRow + 1}M`), sgrRelease = hexOf(`\x1b[<0;9;${readyRow + 1}m`);
+        const heard = await until(([i, a, b]) => { const t = window.__wall.terminal(i).readText().join(''); return t.includes(a) && t.includes(b); }, [A, sgrPress, sgrRelease], 8000);
+        ok(!!heard && !(await W((i) => window.__wall.terminal(i).hasSelection, A)), 'a plain drag goes to the program (its press and release reached it) and selects nothing');
+        const before = await W((i) => window.__wall.terminal(i).readText().join(''), A);
+        await page.keyboard.down('Shift');
+        await page.mouse.move(p.x, p.y); await page.mouse.down(); await page.mouse.move(q.x, q.y, { steps: 10 }); await page.mouse.up();
+        await page.keyboard.up('Shift');
+        ok(!!await until(([i]) => window.__wall.terminal(i).selectionText() === 'SEL-READY', [A], 4000), `⇧-drag over the program selects anyway ("${await selText(A)}")`);
+        await W(() => window.__wall.run(['wall.select', 'none']));
+        const mark = hexOf('v');
+        await page.keyboard.press('v');
+        const after = await until(([i, b, m]) => { const t = window.__wall.terminal(i).readText().join(''); return t.length > b.length && t.includes(m) ? t : null; }, [A, before, mark], 8000);
+        ok(!!after && after.endsWith(mark) && after.slice(0, -mark.length).trimEnd().endsWith(before.trimEnd().slice(-20)), `the program read nothing of the ⇧-drag (it read the marker next: …${after?.slice(-40)})`);
+        await page.keyboard.press('q');
+        ok(!!await until((i) => window.__wall.terminal(i).readText().some((l) => l.trim() === 'SEL-9'), A, 8000), 'the program ended on q');
+        await W(([i, c]) => window.__wall.terminal(i).sendInput(c), [A, 'clear\r']);
     }
 
     // ── termd's status: the chip, the window, a brain restart ─────────────
@@ -883,15 +1024,16 @@ try {
         await page.keyboard.press('ContextMenu');
         ok(!!(await menuOn(`terminal:${M2}`)), `the ContextMenu key opens the menu on the focused terminal ${M2}`);
         // Keys: ↓ lights frame, ↓ again rename, Enter opens its box, the name typed and Enter renames it.
-        await page.keyboard.press('ArrowDown');
-        await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('ArrowDown');   // paste (copy shows only with text selected)
+        await page.keyboard.press('ArrowDown');   // frame (focus is left out: it's the focused one)
+        await page.keyboard.press('ArrowDown');   // rename
         await page.keyboard.press('Enter');
         const box_ = await until(() => document.activeElement?.hasAttribute('data-menu-rename'), null, 3000);
         await page.keyboard.type('menu named');
         await page.keyboard.press('Enter');
         const renamed = await until((i) => window.__wall.nameOf(i) === 'menu named' && !window.__wall.menu, M2, 5000);
         const why = box_ && renamed ? '' : ` (${await W((i) => JSON.stringify({ menu: window.__wall.menu?.target ?? null, name: window.__wall.nameOf(i), focus: document.activeElement?.tagName, groups: window.__wall.groups.ids(), selection: [...window.__wall.selection] }), M2)})`;
-        ok(!!box_ && !!renamed, `↓ ↓ and Enter open the rename box; typing a name and Enter renames ${M2} and closes the menu${why}`);
+        ok(!!box_ && !!renamed, `↓ ↓ ↓ and Enter open the rename box; typing a name and Enter renames ${M2} and closes the menu${why}`);
 
         // Empty canvas: a new terminal at the point.
         const g2 = await geo(M2);

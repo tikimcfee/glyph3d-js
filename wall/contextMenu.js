@@ -24,6 +24,8 @@
  * contextmenu event that key also raises is ours (WallMenu marks it), whatever its Shift.
  */
 
+import { COPY_LABEL, PASTE_LABEL } from './chord.js';
+
 /** @typedef {'ours'|'native'|'program'} Verdict */
 
 /**
@@ -121,7 +123,8 @@ export function parseSizes(s) {
  */
 
 /**
- * The menu for a target, from the wall's snapshot: a terminal's (frame, focus, rename, selection,
+ * The menu for a target, from the wall's snapshot: a terminal's (copy — with text selected in it —,
+ * paste, frame, focus, rename, selection,
  * group, size, redraw, Option as Alt, hide, hold-to-close), a group header's (frame, rename,
  * layout, columns, select its members, hide them all, ungroup) or the canvas's (a new terminal at
  * the point, fit all, select all, snap and the grid on or off, the sidebar, the status window, the
@@ -147,6 +150,9 @@ function terminalItems(id, state, config) {
     const others = state.selection.filter((x) => x !== id);
     /** @type {MenuItem[]} */
     const items = [
+        t.selected && { kind: 'action', id: 'copy', label: 'copy', detail: COPY_LABEL, verb: ['wall.copy', id] },
+        { kind: 'action', id: 'paste', label: 'paste', detail: PASTE_LABEL, verb: ['wall.paste', id] },
+        { kind: 'sep', id: 's0' },
         { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.reveal', id] },
         state.focusedId !== id && { kind: 'action', id: 'focus', label: 'focus', verb: ['terminal.focus', id] },
         { kind: 'rename', id: 'rename', label: 'rename…', verb: ['wall.rename', id], value: t.named ? t.name : '', placeholder: t.name },

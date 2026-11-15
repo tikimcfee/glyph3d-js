@@ -1,7 +1,7 @@
 import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
 import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
-import { invertsSnap, zoomsWheel, IS_MAC } from './chord.js';
+import { invertsSnap, zoomsWheel, IS_MAC, blockSelects } from './chord.js';
 import WallMouse from './WallMouse.js';
 
 /** Pointer travel (CSS px) before a press becomes a drag instead of a click. */
@@ -14,6 +14,8 @@ const MIN_SIZE = { minCols: 20, minRows: 5 };
 const LINE_PX = 16;
 /** A zoom wheel's delta (zoomsWheel) under this (CSS px) is a trackpad pinch, followed directly; at or over it, a mouse notch. */
 const PINCH_MAX_DELTA = 50;
+/** What the first, second and third of a run of presses selects (a fourth starts again). */
+const CLICK_MODES = /** @type {const} */ (['cell', 'word', 'line']);
 
 /**
  * WallPointer — every pointer gesture on the wall, as one state machine.
@@ -27,8 +29,15 @@ const PINCH_MAX_DELTA = 50;
  *   a title bar                  focus                         move the terminal (a tiled member: drops
  *                                                              into the nearest tile, the group re-tiles)
  *   a map label                  focus + frame                 move the terminal
- *   a terminal's body            focus                         — (the body never drags…)
- *   ⌥ + anywhere on a terminal   focus                         move  (…unless ⌥ is held: drawing-canvas move)
+ *   a terminal's body            focus; clear its text         select text: a stream of cells (the press
+ *                                selection                     focuses it, the same drag selects)
+ *     … twice / three times      select a word / a line        whole words / whole lines
+ *   ⇧ + a terminal's body        (⇧-click, above)              select text (a lasso starts off the body)
+ *   Ctrl+Alt (⌘⌥ on macOS) +     focus                         select a block of columns (chord.js
+ *     a terminal's body                                        blockSelects)
+ *   ⌥ + anywhere on a terminal   focus                         move  (drawing-canvas move)
+ *   middle on a terminal's body  paste the wall's selection    pan
+ *                                clipboard into it
  *   a group's header             select the group's members    move the whole group
  *
  * Moves, resizes and group drags snap to the drafting grid while the `snap` knob is on (wallSnap.js
@@ -39,7 +48,12 @@ const PINCH_MAX_DELTA = 50;
  *
  * First of all, a press on the FOCUSED terminal's body whose program reports the mouse is the
  * program's (WallMouse: presses, releases and drags for it, and any-event hover; Shift, and Alt on the
- * left button, keep the wall's), and so is a double-click there.
+ * left button, keep the wall's), and so is a double-click there: there ⇧-drag selects text (Ghostty's
+ * rule). Text selection (TerminalGrid: terminalSelection.js) follows the terminals' conventions —
+ * Ghostty's, kitty's, WezTerm's: presses within `clickRepeatMs` and a few px of the last count up to a
+ * triple click; a finished selection is copied as `copyOnSelect` says (TerminalWall.selectionMade).
+ * A selection drag reads the pointer through WallCamera.toWorldInto and TerminalGrid.cellAt into
+ * scratch, so a move allocates nothing of its own.
  *
  * A right-click (or, on macOS, a Ctrl+click — which is why ⌃ inverts snapping only once a drag is
  * under way there) is the menu's (WallMenu), never a gesture.
@@ -54,7 +68,8 @@ const PINCH_MAX_DELTA = 50;
  * ZOOMS the canvas about the pointer, over a terminal or not: a small delta (a trackpad pinch, which
  * the browser sends as Ctrl+wheel) zooms directly with the fingers, a mouse notch glides in eased
  * steps (WallCamera.wheelZoomAt). The browser never page-zooms or scrolls.
- * Double-click a terminal: focus + frame; a group's header: frame the group; empty canvas: fit all.
+ * Double-click a terminal's title bar: focus + frame (on its body a double-click is a word); a group's
+ * header: frame the group; empty canvas: fit all.
  * Hover lights the border and sets the cursor (⌥ shows move).
  * A pointercancel or a lost pointer capture ends the gesture where it stands (no click), and so
  * does the gesture's terminal (or group) going away; either way the capture is given back.
@@ -72,6 +87,11 @@ export default class WallPointer {
         this._last = null;   // last pointer position, to re-evaluate the cursor when ⌥ changes
         /** The pointer for a program that hears the mouse. */
         this.mouse = new WallMouse(wall, camera);
+        /** The last press on a terminal's body — its terminal, time and place, and how many it ends (a double / triple click). */
+        this._clicks = { id: null, t: -Infinity, x: 0, y: 0, n: 0 };
+        /** Scratch for a selection drag's pointer: its world point and its cell. */
+        this._world = { x: 0, y: 0 };
+        this._cell = { x: 0, y: 0, col: 0, row: 0 };
         this._h = {
             wheel: (e) => this._onWheel(e),
             down: (e) => this._onDown(e),
@@ -156,10 +176,11 @@ export default class WallPointer {
         this.camera.target = null;
         const hit = e.button === 0 ? at : null;
         if (e.button === 0 && e.shiftKey) {
-            if (hit?.id) this._start(e, { kind: 'shift', id: hit.id });
+            if (hit?.id) this._start(e, { kind: 'shift', id: hit.id, ...(hit.part === 'body' ? this._anchor(hit.id, e) : null) });
             else this._start(e, { kind: 'lasso', points: [{ x: e.clientX, y: e.clientY }] });
-        } else if (!hit) this._start(e, { kind: 'pan' });
+        } else if (!hit) this._start(e, { kind: 'pan', pasteInto: e.button === 1 && at?.part === 'body' ? at.id : null });
         else if (hit.group) this._start(e, { kind: 'group', group: hit.group, groupDrag: this.wall.groups.dragStart(hit.group) });
+        else if (hit.part === 'body' && (!e.altKey || blockSelects(e))) this._startText(e, hit.id, blockSelects(e));
         else if (e.altKey || hit.part === 'title') this._start(e, { kind: 'press', id: hit.id });
         else if (hit.part === 'edge') {
             const grid = this.wall.terminal(hit.id);
@@ -168,9 +189,62 @@ export default class WallPointer {
                 start: { cols: grid.cols, rows: grid.rows }, last: { cols: grid.cols, rows: grid.rows },
             });
             this.wall.focus(hit.id);
-        } else this._start(e, { kind: 'focus', id: hit.id });
+        }
         this.canvas.setPointerCapture(e.pointerId);
         this._drag.captured = true;
+    }
+
+    /**
+     * A press on a terminal's body: focus it, and count it against the last press (a double or triple
+     * click). A single press clears the terminal's text selection (its drag starts a new one, once it
+     * travels); a double or triple press selects the word or line under it at once.
+     * @param {PointerEvent} e @param {string} id @param {boolean} block
+     */
+    _startText(e, id, block) {
+        const wall = this.wall;
+        if (wall.focusedId !== id) wall.focus(id);
+        const c = this._clicks, t = e.timeStamp ?? 0;
+        const again = c.id === id && t - c.t <= wall.config.clickRepeatMs && Math.hypot(e.clientX - c.x, e.clientY - c.y) <= DRAG_SLOP_PX;
+        c.n = again ? (c.n % CLICK_MODES.length) + 1 : 1;
+        c.id = id; c.t = t; c.x = e.clientX; c.y = e.clientY;
+        const mode = CLICK_MODES[c.n - 1];
+        this._start(e, { kind: 'text', id, block: block && mode === 'cell', mode, selecting: mode !== 'cell', ...this._anchor(id, e) });
+        const grid = wall.terminal(id);
+        if (mode === 'cell') grid.clearSelection();
+        else grid.selectStart(this._drag.ax, this._drag.ay, { mode });
+    }
+
+    /**
+     * The press's point in terminal `id`'s cells (a selection's anchor), measuring the canvas for the
+     * drag's moves.
+     * @param {string} id @param {{ clientX: number, clientY: number }} e
+     */
+    _anchor(id, e) {
+        this.camera.measure();
+        const at = this._cellOf(this.wall.terminal(id), e);
+        return { ax: at.x, ay: at.y };
+    }
+
+    /**
+     * The pointer over a terminal, in its cells (cellAt: fractional, clamped to the grid), into scratch.
+     * @param {import('@glyph3d/core/collections/TerminalGrid.js').default} grid @param {{ clientX: number, clientY: number }} e
+     */
+    _cellOf(grid, e) {
+        const w = this.camera.toWorldInto(e.clientX, e.clientY, this._world);
+        return grid.cellAt((w.x - grid.position.x) / grid.scale.x, (w.y - grid.position.y) / grid.scale.y, this._cell);
+    }
+
+    /** A selection drag moved: once it travels, the selection runs from the press to the pointer. */
+    _textMove(d, e) {
+        const grid = this.wall.terminal(d.id);
+        if (!grid) { this._end(); return; }   // its terminal went away mid-drag
+        if (!d.selecting) {
+            if (!d.moved) return;
+            grid.selectStart(d.ax, d.ay, { mode: 'cell', block: d.block });
+            d.selecting = true;
+        }
+        const at = this._cellOf(grid, e);
+        grid.selectExtend(at.x, at.y);
     }
 
     /** End the gesture in hand: drop it and give back the pointer capture it took. */
@@ -209,9 +283,17 @@ export default class WallPointer {
         }
         if (d.kind === 'shift') {
             if (!d.moved) return;
-            d.kind = 'lasso';   // a ⇧-press on a terminal that travels becomes a lasso from where it started
-            d.points = [{ x: d.startX, y: d.startY }];
+            if (d.ax !== undefined && this.wall.terminal(d.id)) {
+                // A ⇧-press on a terminal's body that travels selects its text (over a program that
+                // reports the mouse too: Ghostty's Shift), focusing it.
+                d.kind = 'text'; d.block = false; d.selecting = false;
+                if (this.wall.focusedId !== d.id) this.wall.focus(d.id);
+            } else {
+                d.kind = 'lasso';   // off the body (its bar, its border): a lasso from where it started
+                d.points = [{ x: d.startX, y: d.startY }];
+            }
         }
+        if (d.kind === 'text') { this._textMove(d, e); return; }
         if (d.kind === 'lasso') {
             const last = d.points[d.points.length - 1];
             if (Math.hypot(e.clientX - last.x, e.clientY - last.y) >= LASSO_STEP_PX) d.points.push({ x: e.clientX, y: e.clientY });
@@ -254,7 +336,12 @@ export default class WallPointer {
         if (!d || d.pointerId !== e.pointerId) return;
         this._end();
         if (d.kind === 'program') { this.mouse.up(e); return; }
-        if (d.kind === 'pan') { if (!d.moved) { this.wall.focus(null); this.wall.run(['wall.select', 'none']); } return; }
+        if (d.kind === 'pan') {
+            if (d.moved) return;
+            if (d.pasteInto) { if (this.wall.terminal(d.pasteInto) && this.wall.selectionClipboard) this.wall.run(['wall.paste', d.pasteInto, 'selection']); return; }
+            this.wall.focus(null); this.wall.run(['wall.select', 'none']);
+            return;
+        }
         if (d.kind === 'lasso') { if (d.moved) this._lassoSelect(d.points); return; }
         if (d.kind === 'group') {
             if (!this.wall.store.group(d.group)) return;
@@ -264,7 +351,7 @@ export default class WallPointer {
         }
         if (!this.wall.terminal(d.id)) return;   // its terminal went away
         if (d.kind === 'shift') { this.wall.run(['wall.select.toggle', d.id]); return; }
-        if (d.kind === 'focus') { this.wall.focus(d.id); return; }   // a body press focuses, however it wobbled
+        if (d.kind === 'text') { if (d.selecting && this.wall.terminal(d.id).hasSelection) this.wall.selectionMade(d.id); return; }
         if (d.kind === 'press' && !d.moved) { this.wall.focus(d.id, { frame: !!d.clickFrames }); return; }
         if (d.kind === 'press' || d.kind === 'resize') this._settle(d);
     }
@@ -288,7 +375,7 @@ export default class WallPointer {
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         if (this.mouse.claims(e, hit)) return;   // the program's double-click (its two presses went to it)
         if (hit?.group) this.wall.run(['wall.group.frame', hit.group]);
-        else if (hit && hit.part !== 'edge') this.wall.focus(hit.id, { frame: true });
+        else if (hit?.part === 'title') this.wall.focus(hit.id, { frame: true });   // (on the body: a word — _startText counts the clicks)
         else if (!hit) this.wall.fitAll();
     }
 
@@ -325,7 +412,7 @@ export default class WallPointer {
             : this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default'   // the program's pointer
             : hit.group ? 'move'
             : e.shiftKey ? 'copy'
-            : e.altKey || hit.part === 'title' ? 'move'
+            : (e.altKey && !blockSelects(e)) || hit.part === 'title' ? 'move'
             : hit.part === 'edge' ? edgeCursor(hit.edges) : 'text';
     }
 

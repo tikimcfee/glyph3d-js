@@ -307,6 +307,48 @@ export default class TerminalEmulator {
         return lines;
     }
 
+    // ── the visible screen as a selection's TextSource (terminalSelection.js) ──
+    // Read from xterm's own lines through the reused cell: no cell read allocates.
+
+    /** @private The buffer line of screen row y, or undefined off the screen. */
+    _line(y) {
+        if (y < 0 || y >= this._term.rows) return undefined;
+        const view = this._term.buffer.active;
+        return view._buffer.lines.get(view.baseY + y);
+    }
+
+    /** Whether screen row y continues the row above it (the program's text wrapped at the edge). @param {number} y */
+    wrapped(y) {
+        return !!this._line(y)?.isWrapped;
+    }
+
+    /**
+     * The codepoint in cell (x, y): 0 for an empty cell (and a wide character's second), a cluster's
+     * base, −1 off the screen.
+     * @param {number} y @param {number} x
+     */
+    code(y, x) {
+        const line = this._line(y);
+        if (!line || x < 0 || x >= line.length) return -1;
+        const cell = this._cell;
+        line.loadCell(x, cell);
+        return cell.isCombined() ? cell.getChars().codePointAt(0) : cell.getCode();
+    }
+
+    /** Cell (x, y)'s width: 2 for a wide character's first cell, 0 for its second, else 1. @param {number} y @param {number} x */
+    width(y, x) {
+        const line = this._line(y);
+        if (!line || x < 0 || x >= line.length) return 1;
+        line.loadCell(x, this._cell);
+        return this._cell.getWidth();
+    }
+
+    /** The text of row y's cells [x0, x1), untrimmed (a wide character once, a cluster whole). @param {number} y @param {number} x0 @param {number} x1 */
+    text(y, x0, x1) {
+        const line = this._line(y);
+        return line ? line.translateToString(false, x0, x1) : '';
+    }
+
     /**
      * Read the emulator's visible screen into its one reused TerminalScreen, at the READER's size
      * (cols × rows): cells outside xterm's grid — the reader resized ahead of the emulator, whose

@@ -39,6 +39,8 @@ export default class WallCamera {
         /** A wheel zoom in flight: the log zoom it lands on, and the world point held under the pointer. */
         /** @type {{lnZoom:number, clientX:number, clientY:number, world:{x:number,y:number}}|null} */
         this.wheel = null;
+        /** The canvas's client box as `measure()` last took it (toWorldInto reads it). @type {{left:number, top:number, width:number, height:number}|null} */
+        this._box = null;
     }
 
     /** True while the camera is moving on its own (a framing ease or a wheel glide). */
@@ -55,6 +57,27 @@ export default class WallCamera {
             x: c.position.x + (clientX - r.left - r.width / 2) / c.zoom,
             y: c.position.y - (clientY - r.top - r.height / 2) / c.zoom,
         };
+    }
+
+    /**
+     * Measure the canvas's client box for toWorldInto — once at a gesture's start (the canvas doesn't
+     * move under a drag), so a pointer move measures nothing.
+     */
+    measure() {
+        const r = this.canvas.getBoundingClientRect();
+        this._box = { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+
+    /**
+     * toWorld into `out`, through the box `measure()` took: what a pointer move calls, allocating nothing.
+     * @param {number} clientX @param {number} clientY @param {{ x: number, y: number }} out
+     */
+    toWorldInto(clientX, clientY, out) {
+        if (!this._box) this.measure();
+        const r = this._box, c = this.camera;
+        out.x = c.position.x + (clientX - r.left - r.width / 2) / c.zoom;
+        out.y = c.position.y - (clientY - r.top - r.height / 2) / c.zoom;
+        return out;
     }
 
     /** A world rect → canvas-relative screen box (CSS px, y down). */

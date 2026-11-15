@@ -53,9 +53,17 @@ import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { enrollPanel } from './PanelBatch.js';
+import TerminalSelection, { TERMINAL_SELECTION_DEFAULTS } from './terminalSelection.js';
 
 const _cellStrideScale = new THREE.Vector3(); // scratch for cellStride's world-scale read
 const _packColor = new THREE.Color();          // scratch for _packedBackground
+
+/** An sRGB colour (`#rrggbb`, a hex number) packed as the slot colour lane holds one (RGB888, red in the low byte). */
+function packSrgb(color) {
+    _packColor.set(color);
+    const h = _packColor.getHex(THREE.SRGBColorSpace);
+    return ((h >> 16) & 0xff) | (h & 0xff00) | ((h & 0xff) << 16);
+}
 
 /**
  * Terminal cursor defaults — the block that marks where typing lands. Born configurable
@@ -70,6 +78,7 @@ export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
     fillOpacity: 0.5,
     borderWidth: 1.5,
 });
+
 
 /**
  * A pointer event for the program (termd's `mouse` op, docs/termd/PROTOCOL.md): `col`, `row` are
@@ -250,6 +259,21 @@ export default class TerminalGrid extends FramedGlyphField {
         this._bgFillOpacity = options.cellBgFillOpacity ?? 1.0;
         this._visible = true; // setVisible state — the row poses' alpha
 
+        // ---- The text selection (terminalSelection.js) ----
+        // Drawn through the cells it covers: their highlight texel takes the selection's colour (the
+        // fill pass draws it like a cell background) and, unless the foreground is kept, their colour
+        // lane its text colour. Per physical row, the selected columns [lo, hi) as last drawn: a
+        // scroll that moves the ring carries them with their text, and a change rewrites only the
+        // cells whose state moved.
+        this._selection = new TerminalSelection(options.selectionWordChars ?? TERMINAL_SELECTION_DEFAULTS.wordChars);
+        this._selWord = 0;     // a selected cell's highlight word
+        this._selFg = -1;      // a selected cell's packed text colour; −1 keeps its own
+        this._setSelectionColors(options.selectionColor ?? TERMINAL_SELECTION_DEFAULTS.background,
+            options.selectionForeground === undefined ? TERMINAL_SELECTION_DEFAULTS.foreground : options.selectionForeground);
+        /** @type {Int32Array} */ this._selLo = null;
+        /** @type {Int32Array} */ this._selHi = null;
+        this._selRows = 0;     // physical rows with a selected cell: the fill pass draws while there is one
+
         // The cells, blank, and every slot pushed. The glyphs and cell fills are opaque ink in the
         // colours the program gave, whatever the panel's opacity (a terminal's background opacity
         // is its background's).
@@ -336,15 +360,22 @@ export default class TerminalGrid extends FramedGlyphField {
         // Lines that scrolled off the top since the last screen become history: compare the
         // incoming screen with the live rows as they stand, and move the ring's head by the
         // shift instead of moving any cells.
+        let selMoved = false;
         if (this._depthEnabled && !alt && this._scrollBase) {
             const k = detectVerticalScroll(this._cp, this._liveRowBase, screen.cp, rows, cols);
             if (k > 0) {
                 this._scrollRing(k);
                 repose = true;
+                // The selection rides its text up (its rows' spans moved with the ring); any of it
+                // scrolled off the top drops it.
+                if (this._selection.active && !this._selection.shift(k)) selMoved = true;
             }
         }
 
         this._diffLive(screen);
+        // A selected cell rewritten (its text, attributes or colour) drops the selection.
+        if (this._selRows && this._selectionTouched()) { this._selection.clear(); selMoved = true; }
+        if (selMoved) this._paintSelection();
         this._ensureFresh();
         this._writeSpans();
         this._showFills();
@@ -482,16 +513,18 @@ export default class TerminalGrid extends FramedGlyphField {
         const f32 = field.slotBuffer.f32;
         const CP = this._cp, FG = this._fg, BG = this._bg, AT = this._at;
         const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi, ulo = this._ulLo, uhi = this._ulHi;
+        const selFg = this._selFg, selWord = this._selWord;
         let words = null, fill = 0, decor = null;
         for (let y = 0; y < rows; y++) {
             const base = this._liveRowBase[y];
             const l = lo[y], h = hi[y];
+            const p = base / cols, sl = base + this._selLo[p], sh = base + this._selHi[p];
             if (h >= l) {
-                const group = this._rowGroups[base / cols];
+                const group = this._rowGroups[p];
                 for (let i = base + l, end = base + h; i <= end; i++) {
                     const o = i * SLOT_FLOATS, a = AT[i];
                     f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i], a);
-                    f32[o + LANE_COLOR] = FG[i];
+                    f32[o + LANE_COLOR] = selFg >= 0 && i >= sl && i < sh ? selFg : FG[i];
                     f32[o + LANE_GROUP_ID] = a === 0 ? group : packGroupStyle(group, cellStyle(a));
                     // The first cell to name an underline colour (even one equal to a blank texel's).
                     if ((a & CELL_UNDERLINE_COLOR) && !this._hasDecor) decor = this._decorWords();
@@ -503,7 +536,7 @@ export default class TerminalGrid extends FramedGlyphField {
                 if (!words) { words = this._highlightWords(); fill = this._fillAlphaBits(); }
                 for (let i = base + bl, end = base + bh; i <= end; i++) {
                     const b = BG[i];
-                    words[i] = b && fill ? (b & 0xffffff) | fill : 0;
+                    words[i] = i >= sl && i < sh ? selWord : b && fill ? (b & 0xffffff) | fill : 0;
                 }
                 field.markHighlightDirty(base + bl, bh - bl + 1);
             }
@@ -534,7 +567,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /** @private The field's fill pass draws while some row has a background (and fills are on). */
     _showFills() {
-        this._renderer.fillsActive = this._bgRows > 0 && this._bgFillOpacity > 0;
+        this._renderer.fillsActive = (this._bgRows > 0 && this._bgFillOpacity > 0) || this._selRows > 0;
     }
 
     /** @private The highlight texels, one RGBA8 word per slot. */
@@ -576,16 +609,17 @@ export default class TerminalGrid extends FramedGlyphField {
     _writeSeqRows(s0, n) {
         const cols = this.cols, P = this.rows + this._depthMax;
         const field = this._renderer, f32 = field.slotBuffer.f32;
-        const CP = this._cp, FG = this._fg, AT = this._at;
+        const CP = this._cp, FG = this._fg, AT = this._at, selFg = this._selFg;
         let runStart = -1, runEnd = -1;
         for (let s = s0; s < s0 + n; s++) {
             const p = (this._ringStart + s) % P;
             const base = p * cols;
             const group = this._rowGroups[p];
+            const sl = base + this._selLo[p], sh = base + this._selHi[p];
             for (let i = base; i < base + cols; i++) {
                 const o = i * SLOT_FLOATS, a = AT[i];
                 f32[o + LANE_GLYPH_ID] = this._glyphId(CP[i], a);
-                f32[o + LANE_COLOR] = FG[i];
+                f32[o + LANE_COLOR] = selFg >= 0 && i >= sl && i < sh ? selFg : FG[i];
                 f32[o + LANE_GROUP_ID] = a === 0 ? group : packGroupStyle(group, cellStyle(a));
             }
             if (base === runEnd) { runEnd += cols; continue; }
@@ -722,6 +756,179 @@ export default class TerminalGrid extends FramedGlyphField {
         return this._emulator ? this._emulator.readText() : [];
     }
 
+    // ================================================================
+    // Text selection (terminalSelection.js) — drawn through the cells' fills
+    // ================================================================
+    //
+    // A selection lives on the screen it was made on (screen cells, row 0 on top; the text read from
+    // the emulator, the same buffer the glyphs render from). It lasts until it is cleared, the
+    // terminal resizes, a selected cell is rewritten (its text, attributes or colour), or output
+    // scrolls any of it off the top — a scroll short of that carries it up with its text. Every
+    // change rewrites only the cells whose selected state moved, and uploads only them; nothing is
+    // allocated per change.
+
+    /** Whether some cell is selected. */
+    get hasSelection() {
+        return !this._selection.empty;
+    }
+
+    /**
+     * The selection as a verb reports it, or null with none: its mode, whether a block, and the
+     * cell boundaries it runs between — a stream from `start` to `end` (end exclusive), a block's
+     * rows start.row … end.row and columns [start.col, end.col).
+     * @returns {{ mode: import('./terminalSelection.js').SelectionMode, block: boolean,
+     *   start: { col: number, row: number }, end: { col: number, row: number } }|null}
+     */
+    get selection() {
+        const s = this._selection;
+        if (s.empty) return null;
+        return { mode: s.mode, block: s.block, start: { col: s.c0, row: s.r0 }, end: { col: s.c1, row: s.r1 } };
+    }
+
+    /**
+     * Start a selection at a point in cells (cellAt's `x`, `y`); in word or line mode the word or
+     * line there is selected at once. Returns whether the selection drawn changed.
+     * @param {number} x @param {number} y
+     * @param {{ mode?: import('./terminalSelection.js').SelectionMode, block?: boolean }} [o]
+     */
+    selectStart(x, y, o) {
+        if (!this._emulator) return false;
+        this._selection.start(this._emulator, x, y, o);
+        return this._paintSelection();
+    }
+
+    /**
+     * Move the selection's head to a point in cells (its anchor stays). Returns whether it changed;
+     * a pointer move to the same boundary writes nothing.
+     * @param {number} x @param {number} y
+     */
+    selectExtend(x, y) {
+        if (!this._emulator || !this._selection.extend(this._emulator, x, y)) return false;
+        return this._paintSelection();
+    }
+
+    /**
+     * Select exactly the cells between two boundaries (a stream, end exclusive, or a block), clamped
+     * to the screen.
+     * @param {number} col0 @param {number} row0 @param {number} col1 @param {number} row1
+     * @param {{ block?: boolean }} [o]
+     */
+    selectCells(col0, row0, col1, row1, o) {
+        if (!this._emulator) return false;
+        this._selection.set(this._emulator, col0, row0, col1, row1, o);
+        return this._paintSelection();
+    }
+
+    /** Drop the selection (nothing to do with none). */
+    clearSelection() {
+        if (!this._selection.active) return false;
+        this._selection.clear();
+        return this._paintSelection();
+    }
+
+    /**
+     * The selected text: each line's trailing blanks trimmed, soft wraps joined, hard line ends kept
+     * as \n, wide characters and clusters as their text ('' with nothing selected).
+     * @returns {string}
+     */
+    selectionText() {
+        return this._emulator ? this._selection.text(this._emulator) : '';
+    }
+
+    /**
+     * How the selection draws and what a double-click's word is, live: `background` its cells' fill
+     * colour, `foreground` their text's (null: each keeps its own), `wordChars` what ends a word
+     * besides whitespace. Colours are sRGB (`#rrggbb` or a hex number). All optional.
+     * @param {{ background?: string|number, foreground?: string|number|null, wordChars?: string }} style
+     */
+    setSelectionStyle({ background, foreground, wordChars } = {}) {
+        if (wordChars !== undefined) this._selection.setWordChars(wordChars);
+        if (background === undefined && foreground === undefined) return;
+        const fgWas = this._selFg;
+        this._setSelectionColors(background ?? this._selBackground, foreground === undefined ? this._selForeground : foreground);
+        // Rewrite the selected cells in the new colours (and, where the foreground stopped or started
+        // being kept, their text colour).
+        const cols = this.cols, P = this.rows + this._depthMax, field = this._renderer, f32 = field.slotBuffer.f32;
+        const words = this._selRows ? this._highlightWords() : null;
+        for (let p = 0; p < P && words; p++) {
+            const lo = this._selLo[p], hi = this._selHi[p];
+            if (hi <= lo) continue;
+            const base = p * cols;
+            words.fill(this._selWord, base + lo, base + hi);
+            field.markHighlightDirty(base + lo, hi - lo);
+            if (fgWas < 0 && this._selFg < 0) continue;
+            for (let i = base + lo; i < base + hi; i++) f32[i * SLOT_FLOATS + LANE_COLOR] = this._selFg >= 0 ? this._selFg : this._fg[i];
+            field.markSlotsDirty(base + lo, hi - lo);
+        }
+    }
+
+    /** @private The packed selection colours (the highlight word: opaque). */
+    _setSelectionColors(background, foreground) {
+        this._selBackground = background;
+        this._selForeground = foreground;
+        this._selWord = (packSrgb(background) | (InstancedField.encodeHighlightAlpha(1) << 24)) >>> 0;
+        this._selFg = foreground == null ? -1 : packSrgb(foreground);
+    }
+
+    /**
+     * @private Whether this update rewrote a selected cell: some live row's changed span (glyph,
+     * attributes, colour — _diffLive's) meets its selected columns.
+     */
+    _selectionTouched() {
+        const cols = this.cols, lo = this._spanLo, hi = this._spanHi;
+        for (let y = 0; y < this.rows; y++) {
+            if (hi[y] < lo[y]) continue;
+            const p = this._liveRowBase[y] / cols, sl = this._selLo[p], sh = this._selHi[p];
+            if (sh > sl && lo[y] < sh && hi[y] >= sl) return true;
+        }
+        return false;
+    }
+
+    /**
+     * @private Draw the selection as it now stands: per physical row, the columns it selects; a row
+     * whose columns moved has the cells between the old and the new rewritten — highlight texel, and
+     * colour lane unless the foreground is kept — and only those uploaded. Returns whether any did.
+     */
+    _paintSelection() {
+        const sel = this._selection, cols = this.cols, D = this._depthMax, P = this.rows + D;
+        let rowsOn = 0, changed = false;
+        for (let s = 0; s < P; s++) {
+            const p = (this._ringStart + s) % P, y = s - D;
+            let lo = 0, hi = 0;
+            if (y >= 0) { lo = sel.lo(y); hi = sel.hi(y, cols); if (hi <= lo) lo = hi = 0; }
+            if (hi > lo) rowsOn++;
+            const olo = this._selLo[p], ohi = this._selHi[p];
+            if (lo === olo && hi === ohi) continue;
+            this._selLo[p] = lo; this._selHi[p] = hi;
+            changed = true;
+            // The cells whose state moved: the two spans' difference — one or two runs.
+            const base = p * cols;
+            if (ohi <= olo) this._paintRun(base, lo, hi, lo, hi);
+            else if (hi <= lo || hi <= olo || ohi <= lo) { this._paintRun(base, olo, ohi, lo, hi); this._paintRun(base, lo, hi, lo, hi); }
+            else { this._paintRun(base, Math.min(lo, olo), Math.max(lo, olo), lo, hi); this._paintRun(base, Math.min(hi, ohi), Math.max(hi, ohi), lo, hi); }
+        }
+        this._selRows = rowsOn;
+        this._showFills();
+        return changed;
+    }
+
+    /**
+     * @private Rewrite cells [a, b) of the physical row at `base` for a selection of [lo, hi) there:
+     * highlight texel, and colour lane unless the foreground is kept; mark them for upload.
+     */
+    _paintRun(base, a, b, lo, hi) {
+        if (b <= a) return;
+        const field = this._renderer, f32 = field.slotBuffer.f32, words = this._highlightWords(), fill = this._fillAlphaBits();
+        const BG = this._bg, FG = this._fg, selWord = this._selWord, selFg = this._selFg;
+        for (let x = a, i = base + a; x < b; x++, i++) {
+            const on = x >= lo && x < hi, bg = BG[i];
+            words[i] = on ? selWord : bg && fill ? (bg & 0xffffff) | fill : 0;
+            if (selFg >= 0) f32[i * SLOT_FLOATS + LANE_COLOR] = on ? selFg : FG[i];
+        }
+        field.markHighlightDirty(base + a, b - a);
+        if (selFg >= 0) field.markSlotsDirty(base + a, b - a);
+    }
+
     /**
      * Whether the program in this terminal turned mouse reporting on: its clicks are then the
      * program's (the wall's right-click menu, for one, steps aside on a focused terminal).
@@ -747,10 +954,11 @@ export default class TerminalGrid extends FramedGlyphField {
      * taken off) — the cells' own geometry, computeCellGridLayout's: `x`, `y` in cells from the
      * top-left corner, clamped to the grid; `col`, `row` the cell, from 0.
      * @param {number} x @param {number} y
+     * @param {{x:number, y:number, col:number, row:number}} [out] - filled and returned (no allocation)
      * @returns {{x:number, y:number, col:number, row:number}}
      */
-    cellAt(x, y) {
-        return cellAtPoint(this.cols, this.rows, this._metrics, x, y);
+    cellAt(x, y, out) {
+        return cellAtPoint(this.cols, this.rows, this._metrics, x, y, out);
     }
 
     /**
@@ -1182,6 +1390,11 @@ export default class TerminalGrid extends FramedGlyphField {
         this._ul = new Uint32Array(n);
         this._rowHasBg = new Uint8Array(P);
         this._bgRows = 0;
+        // A reallocation (a resize, a new depth) moves every cell: the selection goes.
+        this._selection.clear();
+        this._selLo = new Int32Array(P);
+        this._selHi = new Int32Array(P);
+        this._selRows = 0;
         this._hasDecor = false;   // _pushAll rewrites the decoration texels if any cell needs them
         this._ringStart = 0;
         this._liveRowBase = new Int32Array(rows);
@@ -1298,11 +1511,12 @@ export default class TerminalGrid extends FramedGlyphField {
         const strideX = m.charWidth + m.letterSpacing;
         const sb = field.slotBuffer;
         sb.ensureCapacity(count);
+        const selFg = this._selFg;
         for (let p = 0; p < P; p++) {
-            const g = this._rowGroups[p];
+            const g = this._rowGroups[p], sl = this._selLo[p], sh = this._selHi[p];
             for (let x = 0, i = p * cols; x < cols; x++, i++) {
                 const a = this._at[i];
-                sb.setSlot(i, x * strideX, 0, 0, this._glyphId(this._cp[i], a), this._fg[i],
+                sb.setSlot(i, x * strideX, 0, 0, this._glyphId(this._cp[i], a), selFg >= 0 && x >= sl && x < sh ? selFg : this._fg[i],
                     a === 0 ? g : packGroupStyle(g, cellStyle(a)), m.charWidth, m.charHeight);
             }
         }
@@ -1316,6 +1530,7 @@ export default class TerminalGrid extends FramedGlyphField {
             words[i] = b && fill ? (b & 0xffffff) | fill : 0;
         }
         words.fill(0, count);
+        for (let p = 0; p < P; p++) words.fill(this._selWord, p * cols + this._selLo[p], p * cols + Math.max(this._selLo[p], this._selHi[p]));
         field.markHighlightDirty();
         this._showFills();
         // The decoration texels, where some cell names its underline's colour.
@@ -1469,9 +1684,7 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /** @private The panel's colour, packed as the slot colour lane holds one (RGB888, red in the low byte). */
     _packedBackground() {
-        _packColor.set(this._bgColor);
-        const h = _packColor.getHex(THREE.SRGBColorSpace);
-        return ((h >> 16) & 0xff) | (h & 0xff00) | ((h & 0xff) << 16);
+        return packSrgb(this._bgColor);
     }
 
     /**
@@ -1538,10 +1751,10 @@ export default class TerminalGrid extends FramedGlyphField {
     _rewriteFills() {
         const words = this._highlightWords(), fill = this._fillAlphaBits(), cols = this.cols;
         for (let y = 0; y < this.rows; y++) {
-            const base = this._liveRowBase[y];
+            const base = this._liveRowBase[y], p = base / cols, sl = base + this._selLo[p], sh = base + this._selHi[p];
             for (let i = base; i < base + cols; i++) {
                 const b = this._bg[i];
-                words[i] = b && fill ? (b & 0xffffff) | fill : 0;
+                words[i] = i >= sl && i < sh ? this._selWord : b && fill ? (b & 0xffffff) | fill : 0;
             }
             this._renderer.markHighlightDirty(base, cols);
         }

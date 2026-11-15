@@ -141,8 +141,9 @@ function standIn({ tracking = 'button', focused = 't' } = {}) {
     const m = { charWidth: 1, letterSpacing: 0, lineSpacing: 2 };
     const grid = {
         cols: 80, rows: 24, position: { x: 0, y: 0 }, scale: { x: 1, y: 1 }, mouseTracking: tracking,
-        cellAt: (x, y) => cellAtPoint(80, 24, m, x, y),
+        cellAt: (x, y, out) => cellAtPoint(80, 24, m, x, y, out),
         sendMouse: (ev) => { sent.push(ev); return true; },
+        hasSelection: false, clearSelection() {}, selectStart() {}, selectExtend() {},
     };
     const body = { minX: 0, maxX: 80, minY: -47, maxY: 1 };
     const wall = {
@@ -163,7 +164,10 @@ function standIn({ tracking = 'button', focused = 't' } = {}) {
         style: {},
         setPointerCapture: (id) => captured.add(id), releasePointerCapture: (id) => captured.delete(id), hasPointerCapture: (id) => captured.has(id),
     };
-    const camera = { canvas, zoom: 10, camera: { position: { x: 0, y: 0 } }, toWorld: (x, y) => ({ x: x / 10, y: -y / 10 }) };
+    const camera = {
+        canvas, zoom: 10, camera: { position: { x: 0, y: 0 } }, toWorld: (x, y) => ({ x: x / 10, y: -y / 10 }),
+        measure() {}, toWorldInto: (x, y, out) => { out.x = x / 10; out.y = -y / 10; return out; },
+    };
     const pointer = new WallPointer(wall, camera);
     return { wall, grid, pointer, sent, ran, focusCalls, captured };
 }

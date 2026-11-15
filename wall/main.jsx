@@ -10,7 +10,7 @@ import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { dockLayout } from './Panel.jsx';
-import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL, zoomWheelLabel } from './chord.js';
+import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL, zoomWheelLabel, COPY_LABEL, BLOCK_SELECT_LABEL } from './chord.js';
 
 // The font chain (fonts/families.js): the families a terminal can draw in (the `fontFamily` knob),
 // each with its four faces, then the fallbacks.
@@ -92,9 +92,10 @@ function Chrome({ wall }) {
         <TermdChip wall={wall} />
       </div>
       <TermdNotice wall={wall} />
+      {state.notice && <div data-wall-notice style={{ ...styles.notice, left: inset.left, right: inset.right }}>{state.notice}</div>}
       <div style={{ ...styles.hint, left: inset.left, right: inset.right }}>
         {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · drag empty canvas or wheel to pan (a wheel over the focused terminal: its scrollback) · {zoomWheelLabel(wall.config.zoomKeys)}-wheel or pinch to zoom · right-click for a menu
+        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag a terminal's text to select it (twice: a word, three times: a line, {BLOCK_SELECT_LABEL}-drag: a block), {COPY_LABEL} copies · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · drag empty canvas or wheel to pan (a wheel over the focused terminal: its scrollback) · {zoomWheelLabel(wall.config.zoomKeys)}-wheel or pinch to zoom · right-click for a menu
         {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
       </div>
       <Sidebar wall={wall} state={state} />
@@ -136,6 +137,11 @@ const styles = {
     padding: '4px 9px', font: 'inherit', cursor: 'pointer',
   },
   chip: { padding: '4px 6px' },
+  notice: {
+    position: 'absolute', top: 44, left: 12, right: 12, margin: '0 auto', width: 'fit-content', maxWidth: '80%',
+    background: '#2a1a12', color: '#f0b089', border: '1px solid #5a3422', borderRadius: 5, padding: '5px 10px',
+    zIndex: 6, pointerEvents: 'none',
+  },
   hint: {
     position: 'absolute', bottom: 8, left: 12, right: 12, color: '#6b7383', pointerEvents: 'none',
     lineHeight: 1.5, zIndex: 5,   // wraps rather than cutting the line short

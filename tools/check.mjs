@@ -27,7 +27,7 @@
  *   glyph3d-cli serve --listen 127.0.0.1 --port <free> --relay-only --termd-ns c<n> \
  *                     --no-gomuxai <scratch root>         (G3D_TERMD_DIR = a scratch dir of its own)
  * serving a fresh copy of the fixture (the core's sources + a mixed emoji/tab/wide file). Never
- * ports 5173 / 5180 / 8080 / 8099, never a person's termd namespace, never gomuxai. Anything it
+ * ports 5173 / 5180 / 5280 / 8080 / 8099 / 8180, never a person's termd namespace, never gomuxai. Anything it
  * can't start, it names in a NOTE and SKIPS the checks that needed it.
  */
 
@@ -47,7 +47,7 @@ const FLOORS_PATH = join(ROOT, 'tools/check-floors.json');
 // its own private relay (tools/lib/wall-relay.mjs) — the runner only hands it a free port as {port}.
 const NEEDS = ['vite', 'wall-vite', 'relay', 'own-relay', 'browser', 'gpu', 'termd', 'network'];
 /** Ports a person's live loop uses: the runner never takes them, even if the OS offers one. */
-const RESERVED_PORTS = new Set([5173, 5174, 5180, 8080, 8099]);
+const RESERVED_PORTS = new Set([5173, 5174, 5180, 5280, 8080, 8099, 8180]);
 const DEFAULT_TIMEOUT = { inner: 120_000, full: 120_000, parked: 300_000, browser: 300_000, gpu: 600_000 };
 /** Which manifest tiers a --tier selects. */
 const TIER_SETS = { inner: ['inner'], full: ['inner', 'full'], browser: ['browser'], gpu: ['gpu'], all: ['inner', 'full', 'browser', 'gpu'], parked: ['parked'] };

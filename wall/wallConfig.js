@@ -1,9 +1,10 @@
 import { GLYPH_LINE_DEFAULTS } from '@glyph3d/core/core/glyphMaterial.js';
 import { BOLD_IS_BRIGHT_DEFAULT } from '@glyph3d/core/collections/TerminalEmulator.js';
+import { TERMINAL_SELECTION_DEFAULTS } from '@glyph3d/core/collections/terminalSelection.js';
 import { KNOBS, checkKnob } from './wallSettings.js';
 
 /**
- * wallConfig — the wall's knobs for hiding, closing, selecting and grouping, the termd status
+ * wallConfig — the wall's knobs for hiding, closing, selecting (terminals, and text in them) and grouping, the termd status
  * window's, the keyboard's, the right-click menu's, the canvas's (its colour, the drafting grid,
  * snapping) and the text's (the font family, bold's colour, the cell's own lines, dim), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
  * <value>` dials one live and remembers it per relay (WallStore; `wall.config <key> default` hands it
@@ -46,6 +47,26 @@ export const WALL_CONFIG = Object.freeze({
      * through a remote desktop when macOS's screen zoom takes Ctrl+scroll.
      */
     zoomKeys: 'ctrl alt meta',
+
+    // ── selecting text in a terminal: the drag, a word, a line; copy and paste (WallPointer, TerminalGrid) ──
+    /** A selected cell's fill, sRGB. Ghostty's default: the terminal's own text colour (its colours inverted). */
+    selectionColor: TERMINAL_SELECTION_DEFAULTS.background,
+    /** A selected cell's text colour, sRGB — or 'keep': each keeps its own. Ghostty's default: the terminal's background. */
+    selectionForeground: TERMINAL_SELECTION_DEFAULTS.foreground,
+    /** What ends a word for a double-click, besides whitespace (Ghostty's `selection-word-chars`). */
+    selectionWordChars: TERMINAL_SELECTION_DEFAULTS.wordChars,
+    /**
+     * What a finished selection is copied to (Ghostty's `copy-on-select`, its values and its default):
+     * 'true' — the wall's selection clipboard, which a middle-click pastes (the browser can't reach the
+     * system's primary selection); 'clipboard' — that and the system clipboard; 'false' — neither.
+     */
+    copyOnSelect: 'true',
+    /** Presses closer together than this (ms, and a few px) count as a double or triple click (Ghostty's `click-repeat-interval`, 500 off macOS). */
+    clickRepeatMs: 500,
+    /** A key typed into a terminal drops its selection (Ghostty's `selection-clear-on-typing`). */
+    selectionClearOnTyping: true,
+    /** How long a wall notice (a refused copy or paste) stays up, ms. */
+    noticeMs: 5000,
 
     // ── the canvas: its colour, the drafting grid, snapping (wallSnap.js, WallPaper.js) ──
     /** The canvas colour, sRGB. */

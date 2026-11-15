@@ -82,14 +82,16 @@ export function computeCellGridLayout(cols, rows, metrics, padding = 0.3, bgGap)
  * @param {{charWidth:number,letterSpacing:number,lineSpacing:number}} metrics
  * @param {number} px - the point's x in the grid's frame
  * @param {number} py - the point's y in the grid's frame
+ * @param {{x:number, y:number, col:number, row:number}} [out] - filled and returned (a pointer move reads into one, allocating nothing)
  * @returns {{x:number, y:number, col:number, row:number}}
  */
-export function cellAtPoint(cols, rows, metrics, px, py) {
+export function cellAtPoint(cols, rows, metrics, px, py, out = { x: 0, y: 0, col: 0, row: 0 }) {
     const strideX = metrics.charWidth + metrics.letterSpacing;
     const strideY = metrics.lineSpacing;
     const x = Math.min(Math.max(px / strideX, 0), cols);
     const y = Math.min(Math.max((strideY / 2 - py) / strideY, 0), rows);
-    return { x, y, col: Math.min(Math.floor(x), cols - 1), row: Math.min(Math.floor(y), rows - 1) };
+    out.x = x; out.y = y; out.col = Math.min(Math.floor(x), cols - 1); out.row = Math.min(Math.floor(y), rows - 1);
+    return out;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
-import { isChord, IS_MAC, CHORD_KEYS } from './chord.js';
+import { isChord, IS_MAC, CHORD_KEYS, isCopyChord } from './chord.js';
 
 /**
  * Alt pressed and released on its own opens Firefox's menu bar (and Windows browsers' menus) unless
@@ -28,6 +28,10 @@ function noMenuBar(e) { if (e.key === 'Alt') e.preventDefault(); }
  * termd brackets when the program asked for bracketed paste. Each key carries the `optionAsAlt` knob
  * (wall.config), read as it is sent. The menu key (and Shift+F10) opens the right-click menu on the
  * focused terminal (else on the canvas), as native apps do; while that menu is open it has the keys.
+ * The copy chord (chord.js isCopyChord: ⌘C, Ctrl+Shift+C elsewhere) copies the focused terminal's
+ * selected text (`wall.copy`) when it has some, and is a key like any other when it has none (Ctrl+C
+ * is always the program's); a key typed into a terminal drops its selection while
+ * `selectionClearOnTyping` is on (Ghostty's `selection-clear-on-typing`).
  */
 export default class WallKeys {
     /** @param {import('./TerminalWall.js').default} wall */
@@ -72,6 +76,11 @@ export default class WallKeys {
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         const wall = this.wall;
         if (wall.menu) return;   // the open right-click menu has the keys (ContextMenu.jsx)
+        if (isCopyChord(e) && wall.focusedId && wall.terminal(wall.focusedId)?.hasSelection) {
+            e.preventDefault(); e.stopPropagation();
+            if (!e.repeat) wall.run(['wall.copy', wall.focusedId]);
+            return;
+        }
         if (!isChord(e) && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey))) {
             e.preventDefault(); e.stopPropagation();
             wall.menuInput.openByKey();
@@ -111,6 +120,7 @@ export default class WallKeys {
         e.preventDefault();
         e.stopPropagation();
         if (grid.sendKey(key) && key.code) this._down.set(key.code, wall.focusedId);
+        if (wall.config.selectionClearOnTyping) grid.clearSelection();
     }
 
     _paste(e) {

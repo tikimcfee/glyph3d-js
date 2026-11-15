@@ -169,7 +169,7 @@ const snap = {
     config: { ...WALL_CONFIG, snap: true, gridShow: false },
     terminals: [
         { id: 't1', name: 'zsh', named: false, cols: 80, rows: 24, hidden: false, group: null },
-        { id: 't2', name: 'logs', named: true, cols: 120, rows: 36, hidden: false, group: null },
+        { id: 't2', name: 'logs', named: true, cols: 120, rows: 36, hidden: false, group: null, selected: true },
         { id: 't3', name: 'build', named: false, cols: 80, rows: 24, hidden: false, group: 'g-1' },
         { id: 't4', name: 'old', named: false, cols: 80, rows: 24, hidden: true, group: 'g-1' },
     ],
@@ -177,9 +177,13 @@ const snap = {
 };
 const byId = (items) => Object.fromEntries(items.filter((i) => i.kind !== 'sep').map((i) => [i.id, i]));
 
-test('a terminal\'s menu: frame, focus, rename, selection, group, size, redraw, Option as Alt, hide, held close', () => {
+test('a terminal\'s menu: copy (text selected in it), paste, frame, focus, rename, selection, group, size, redraw, Option as Alt, hide, held close', () => {
     const items = byId(menuItems({ kind: 'terminal', id: 't1', part: 'body' }, snap, WALL_CONFIG));
-    expect(Object.keys(items)).toEqual(['frame', 'focus', 'rename', 'select', 'group', 'add-to', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
+    expect(Object.keys(items)).toEqual(['paste', 'frame', 'focus', 'rename', 'select', 'group', 'add-to', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
+    expect(items.paste.verb).toEqual(['wall.paste', 't1']);
+    const t2 = byId(menuItems({ kind: 'terminal', id: 't2', part: 'body' }, snap, WALL_CONFIG));
+    expect(Object.keys(t2).slice(0, 2)).toEqual(['copy', 'paste']);
+    expect(t2.copy.verb).toEqual(['wall.copy', 't2']);
     expect(items.frame.verb).toEqual(['wall.reveal', 't1']);
     expect(items.focus.verb).toEqual(['terminal.focus', 't1']);
     expect(items.rename).toMatchObject({ kind: 'rename', verb: ['wall.rename', 't1'], value: '', placeholder: 'zsh' });

@@ -22,10 +22,11 @@ reveals its terminal — `wall/StatusWindow.jsx`) and a notice under the topbar 
 restarts (amber, once it lingers past `restartNoticeMs`) or is unreachable, failed or lost (red).
 The sidebar and the status window float or dock left/right, side by side on one edge
 (`wall/Panel.jsx`). Every action is a `wall.*` verb (`wall/wallCommands.js`:
-hide/show/reveal/spawn/fit/close/select/group…/sidebar/status/menu/config/snap/grid/settings) that the buttons,
+hide/show/reveal/spawn/fit/close/select/copy/paste/group…/sidebar/status/menu/config/snap/grid/settings) that the buttons,
 chords, palette, sidebar, status window, right-click menu and CLI all run; knobs live in `wall/wallConfig.js` (`wall.config`).
 A right-click opens the wall's own menu (`wall/contextMenu.js` decides, `WallMenu` routes the
-events, `ContextMenu.jsx` draws it; `wall.menu` opens and closes it): on a terminal — frame, focus,
+events, `ContextMenu.jsx` draws it; `wall.menu` opens and closes it): on a terminal — copy (while
+text is selected in it) and paste (below, "Selecting text"), frame, focus,
 rename, add to / take out of the selection, group (new, with the selection, add to a group, take
 out), size (the `menuSizes` offers, and `custom…`: cols × rows fields on its own size, Tab between
 them, Enter resizes through `terminal.resize`, Esc cancels, a non-whole number, 0 or past termd's
@@ -67,11 +68,11 @@ pixel. termd encodes each in the program's live modes and drops what they don't 
 `terminal.mouse` → the adapter → termd's `mouse` op (protocol 1.4) — and the cell, fractional
 (`col` 3.5 is the fourth column's middle; SGR-pixels reads the fraction), from the grid's own
 geometry (`TerminalGrid.cellAt`: a slot sits at its cell's left edge and vertical centre). The wall
-keeps what is its own: Shift (the lasso and ⇧-click now, selection later: Ghostty's
+keeps what is its own: Shift (the lasso, ⇧-click, and ⇧-drag on the body selecting text: Ghostty's
 `mouse-shift-capture` default), Alt on the left button (⌥-drag moves), the title bar, the border and
 its grip, the wheel's zoom modifier. An unfocused terminal's click focuses it and reaches nothing: a
 program gets the mouse only once its terminal has the keys. A double-click on the program's body is
-the program's (no frame), and the pointer there is the arrow. The wheel over the focused terminal
+the program's, and the pointer there is the arrow. The wheel over the focused terminal
 is `terminal.scroll` with the pointer's cell: termd's scrollback on the primary screen, as ever; on
 the alternate screen the adapter sends termd one wheel notch per line at that cell, which termd
 reports to a program that hears the mouse and makes cursor keys for one that doesn't (alternate
@@ -79,6 +80,76 @@ scroll, mode 1007: `less`, `man`). `terminal.mouse <id> <press|release|move> <bu
 [mods…]` is the same event from the CLI. Gates: `tools/wall-mouse.test.mjs`, and `wall-e2e`'s mouse
 steps (a program echoing what it reads in hex: a click's exact SGR bytes, a drag under 1000 and
 1002, an unfocused click and a Shift+click reaching nothing, the alt-screen wheel).
+
+**Selecting text** (`wall/WallPointer.js` drives it; the model is core
+`collections/terminalSelection.js`, drawn and read by `TerminalGrid`). The conventions are the
+terminals' own — Ghostty's first, kitty's and WezTerm's where they agree:
+
+- A drag on a terminal's body selects: the press focuses the terminal and the same drag selects (as
+  terminals select on the first drag), a stream of cells between the cell boundaries nearest the press
+  and the pointer — every row between them to its edge — so a soft-wrapped line reads on. A click with
+  no travel clears the terminal's selection. Each terminal holds its own; focus moving leaves it.
+- Presses within `clickRepeatMs` (Ghostty's `click-repeat-interval`, 500 ms) and a few px of the last
+  count up: two select a word, three a line, a fourth starts again. A word is the run of cells around
+  the pointer that are not boundaries — whitespace and `selectionWordChars`, Ghostty's
+  `selection-word-chars` default `` '"│`|:;,()[]{}<>$ `` — or, on a boundary, the run of boundaries;
+  both follow soft wraps. A line is the logical line (its soft-wrapped rows joined), its leading and
+  trailing blanks left out. A double- or triple-click's drag grows by words or lines. So a body's
+  double-click frames nothing; the title bar's still does.
+- Ctrl+Alt-drag (⌘⌥-drag on macOS; `chord.js` `blockSelects`) selects a block — the same columns on
+  every row. It is Ghostty's Linux rule (Ctrl or Super, with Alt; kitty's Ctrl+Alt); Ghostty's macOS
+  ⌥-drag is the wall's move, and ⌃ at a press is macOS's secondary click.
+- Over a program that reports the mouse (the focused terminal's, above) a plain drag is the program's;
+  ⇧-drag selects anyway (Ghostty's rule). ⇧-drag on EMPTY canvas lassoes terminals and ⇧-drag that
+  starts on a title bar or border still lassoes; ⇧-drag on a body selects text, and ⇧-click there still
+  adds the terminal to (or takes it out of) the wall's selection — so ⇧-click doesn't extend a text
+  selection as it does in Ghostty.
+- The look: a selected cell fills with `selectionColor` and draws its text in `selectionForeground`
+  (or `keep`: its own colour) — by default the terminal's colours inverted, as Ghostty's unset
+  `selection-background` / `-foreground` are — through the cell fill the background pass already
+  draws (docs/architecture/rendering.md "Cells"): no extra draw.
+- Lifetime: a selection lasts until a click clears it, a key is typed into its terminal
+  (`selectionClearOnTyping`, Ghostty's `selection-clear-on-typing`), a selected cell is rewritten (its
+  text, attributes or colour), output scrolls any of it off the top, or the terminal resizes. Output
+  that scrolls the screen without reaching it carries it up with its text. The rule is Ghostty's and
+  kitty's: a selection never outlives its text. It lives on the screen it was made on — the wall holds
+  no history text (termd's scrollback reaches it as a repaint of the screen) — so a wheel that scrolls
+  the terminal's history drops a selection whose text it moves; a selection does not reach into
+  scrollback, and dragging past the top or bottom does not scroll it (not built).
+- Copy: the copy chord — ⌘C on macOS, Ctrl+Shift+C elsewhere (Ghostty's, kitty's, GNOME Terminal's;
+  `chord.js` `isCopyChord`) — copies the focused terminal's selection when it has one; with none it is
+  a key like any other (Ghostty's performable copy: the program hears Ctrl+Shift+C, ⌘C stays the
+  browser's). Ctrl+C is always the program's (SIGINT). The right-click menu's `copy` row shows while
+  its terminal has a selection; `wall.copy [id]` is the verb all three run. The text: each line's
+  trailing blanks trimmed, soft wraps joined, hard line ends kept, wide characters and clusters as their
+  text. It goes through the async Clipboard API, which needs a secure page (https, or localhost); a
+  page without one, or a refusal, answers the verb ERR with the browser's reason and puts it in a
+  notice at the top of the wall for `noticeMs`.
+- `copyOnSelect` (Ghostty's `copy-on-select`, its values and its default `true` on Linux and macOS):
+  a finished selection (a drag let go, a double or triple click) goes to the wall's SELECTION
+  CLIPBOARD (`TerminalWall.selectionClipboard`), which a middle-click on a terminal's body pastes into
+  it (a middle drag still pans; a reporting program gets its middle button, as it does any). A page
+  can't write or read the system's primary selection, so the wall keeps its own, in the page:
+  selecting in a terminal and middle-clicking in another works as X11's primary does, but the
+  selection doesn't reach other applications' middle-click, nor theirs the wall's. `clipboard` copies to
+  the system clipboard too (a finished selection is a user gesture, so the browser allows it); `false`
+  copies nowhere.
+- Paste: the paste chord (⌘V, Ctrl+Shift+V: `keyEncoding.isPasteChord`) is the browser's own paste
+  event, needing no permission; the menu's `paste` row is `wall.paste [id]` (the Clipboard API's
+  read: the browser may ask once); `wall.paste [id] selection` pastes the selection clipboard (the
+  middle-click). Every paste is `TerminalGrid.paste` → termd's bracketed paste.
+- From the CLI: the core `terminal.selection <id> [clear | cells <col0> <row0> <col1> <row1> [block] |
+  word <col> <row> | line <row>]` reads a terminal's selection (its text and cells) or makes one;
+  `wall.copy` and `wall.paste` as above.
+- Cost: a drag reads the pointer into scratch (`WallCamera.toWorldInto`, `TerminalGrid.cellAt`'s
+  `out`), resolves the selection with no allocation, and rewrites — and uploads — only the cells whose
+  selected state moved (one or two runs per changed row); the same boundary writes nothing.
+
+Gates: `tools/terminal-selection.test.mjs` (the model, the grid's writes and uploads, lifetime),
+`tools/wall-select.test.mjs` (the gestures on a stand-in wall, the clipboards), `tools/wall-keys.test.mjs`
+(the copy chord, Ctrl+C, typing), and `wall-e2e`'s selection steps (a drag's text and the selection
+colour in the pixels, a double-click's word, a triple-click's line, the copy chord on the clipboard,
+the menu's paste, Ctrl+C as SIGINT, a reporting program's plain drag and ⇧-drag).
 
 **The canvas is drafting paper.** `wall/WallPaper.js` draws it: the canvas colour (the renderer's
 clear colour, the `background` knob) and a grid of minor lines every `gridMinor` world units, every
@@ -106,7 +177,7 @@ hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
 **The settings panel** (`wall/SettingsPanel.jsx`, chord+`,`, the topbar's settings button, the
 palette, `wall.settings`, the canvas's right-click menu) lists every wall knob in sections —
-Canvas, Terminals, Text, Groups, Status, Input, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:
+Canvas, Terminals, Text, Groups, Status, Input, Selection, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:
 section, label, type, range, a sentence saying what changing it does; the IDE Settings schema's type
 vocabulary: bool, number, color, enum — plus text, a line of words its knob's `parse` checks, edited
 as one value: `wall.config menuSizes 80x24 120x36` joins the words).

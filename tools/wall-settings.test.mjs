@@ -61,7 +61,7 @@ test('search: words match label, key, description or section title; empty sectio
     expect(keys('')).toEqual(Object.keys(KNOBS).filter((k) => SECTIONS.some((s) => s.id === KNOBS[k].section)));
     expect(keys('snap')).toContain('snap');                      // label / key
     expect(sections('snap')).toEqual(['canvas']);                // only sections with a match show
-    expect(keys('colour').sort()).toEqual(['background', 'boldIsBright', 'gridMajorColor', 'gridMinorColor']);   // description
+    expect(keys('colour').sort()).toEqual(['background', 'boldIsBright', 'gridMajorColor', 'gridMinorColor', 'selectionColor', 'selectionForeground']);   // description
     expect(keys('font')).toEqual(['fontFamily', 'lineThickness', 'underlineRaise']);   // label, and descriptions that say "font"
     expect(sections('font family')).toEqual(['text']);
     expect(keys('GROUPS')).toEqual(Object.keys(KNOBS).filter((k) => KNOBS[k].section === 'groups'));   // the section's title, any case
