@@ -864,6 +864,16 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 }
             }
         }
+        Op::Mouse(m) => {
+            if let Some(t) = subscribed(srv, c, req, m.handle).cloned() {
+                match crate::mouse::spec(&m) {
+                    Ok(spec) => {
+                        to_owner(c, &t, req, TermOp::Mouse(Box::new(spec))).await;
+                    }
+                    Err((code, message)) => reply_err(&c.out, req, code, message),
+                }
+            }
+        }
         Op::Paste(p) => {
             if let Some(t) = subscribed(srv, c, req, p.handle).cloned() {
                 let allow_unsafe = p.allow_unsafe == Some(true);

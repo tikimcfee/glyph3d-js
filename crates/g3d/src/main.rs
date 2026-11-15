@@ -122,6 +122,26 @@ enum Cmd {
         #[arg(required = true)]
         chords: Vec<String>,
     },
+    /// A pointer event in a terminal: termd encodes it as the program asked to hear the mouse
+    /// (X10, normal, button-event or any-event tracking; the default, UTF-8, SGR, urxvt or
+    /// SGR-pixels format), as a terminal's mouse reporting would (protocol 1.4). Says so when the
+    /// program didn't ask to hear it.
+    Mouse {
+        id: String,
+        /// press, release or move.
+        #[arg(value_parser = parse_mouse_action)]
+        action: MouseAction,
+        /// left, middle, right, none (a move with no button), wheel-up, wheel-down, wheel-left,
+        /// wheel-right, or 8..11.
+        button: MouseButton,
+        /// Cells from the left edge, from 0 (3.5: the middle of the fourth column).
+        col: f64,
+        /// Cells from the top, from 0.
+        row: f64,
+        /// Modifiers held, W3C names: Shift, Control, Alt, Meta (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        mods: Vec<String>,
+    },
     /// Paste text into a terminal (stdin when no text): bracketed when the program asked for
     /// bracketed paste, refused when it could run commands (Ghostty's paste protection).
     Paste {
@@ -304,6 +324,15 @@ fn main() {
             }
             done_writing(&mut c, handle);
         }
+        Cmd::Mouse { id, action, button, col, row, mods } => {
+            let (mut c, handle) = writer(&target, &id, Some("mouse"));
+            let r: WrittenReply =
+                c.request(Op::Mouse(Mouse { handle, action, button, col, row, mods })).unwrap_or_else(|e| die(e));
+            if r.written == 0 {
+                eprintln!("g3d: {id}'s program didn't ask to hear that (nothing sent)");
+            }
+            done_writing(&mut c, handle);
+        }
         Cmd::Paste { id, text, allow_unsafe } => {
             let text = text.unwrap_or_else(|| {
                 String::from_utf8(stdin_all())
@@ -353,7 +382,8 @@ fn writer(target: &Target, id: &str, feature: Option<&str>) -> (Client, u32) {
     if let Some(f) = feature
         && !c.welcome.features.iter().any(|x| x == f)
     {
-        die(format!("{} has no `{f}` op (protocol 1.2); upgrade it (g3d upgrade)", c.welcome.daemon));
+        let since = if f == "mouse" { "1.4" } else { "1.2" };
+        die(format!("{} has no `{f}` op (protocol {since}); upgrade it (g3d upgrade)", c.welcome.daemon));
     }
     let sub: SubscribeReply = c
         .request(Op::Subscribe(Subscribe {
@@ -380,6 +410,16 @@ fn done_writing(c: &mut Client, handle: u32) {
         {
             die(format!("{code}: {message}"));
         }
+    }
+}
+
+/// A `mouse` action as typed: press, release or move.
+fn parse_mouse_action(s: &str) -> Result<MouseAction, String> {
+    match s {
+        "press" => Ok(MouseAction::Press),
+        "release" => Ok(MouseAction::Release),
+        "move" => Ok(MouseAction::Move),
+        _ => Err(format!("press, release or move, not {s:?}")),
     }
 }
 

@@ -5,6 +5,7 @@ use crate::blob;
 use crate::env;
 use crate::hold::{Exit, Held, Hold, Marks};
 use crate::keys::{self, Keyboard};
+use crate::mouse::{self, Mouse};
 use crate::out::{self, ConnOut, Kind, SubShared, Wake};
 use crate::repaint;
 use crate::spawn;
@@ -216,6 +217,8 @@ pub enum TermOp {
     Input(Vec<u8>),
     /// (1.2) A key event, encoded here against the terminal's live modes.
     Key(Box<keys::Spec>),
+    /// (1.4) A pointer event, encoded here against the terminal's live mouse modes.
+    Mouse(Box<mouse::Spec>),
     /// (1.2) A paste, framed here per the program's bracketed-paste mode.
     Paste {
         text: String,
@@ -551,6 +554,9 @@ struct Owner {
     term: Terminal<'static, 'static>,
     /// Its key encoder (libghostty's, made on first use): `key` ops.
     keyboard: Option<Keyboard>,
+    /// Its mouse encoder (libghostty's, made on first use): `mouse` ops. It remembers the cell it
+    /// last reported, so motion is reported once per cell.
+    mouse: Option<Mouse>,
     fx: Rc<Fx>,
     master: Option<OwnedFd>,
     slot: u32,
@@ -829,6 +835,7 @@ impl Owner {
             rx,
             term,
             keyboard: None,
+            mouse: None,
             fx,
             master: Some(held.master),
             slot: held.slot,
@@ -1633,6 +1640,34 @@ impl Owner {
                 };
                 self.written(out, req, i, &bytes)
             }
+            TermOp::Mouse(spec) => {
+                let i = match self.writer(conn, "mouse") {
+                    Ok(i) => i,
+                    Err((code, msg)) => {
+                        reply_err(out, req, code, msg);
+                        return false;
+                    }
+                };
+                if self.mouse.is_none() {
+                    match Mouse::new() {
+                        Ok(m) => self.mouse = Some(m),
+                        Err(e) => {
+                            reply_err(out, req, code::UNSUPPORTED, e);
+                            return false;
+                        }
+                    }
+                }
+                let (cols, rows, cell_w, cell_h) = self.fx.size.get();
+                let Some(m) = self.mouse.as_mut() else { unreachable!("made above") };
+                let bytes = match m.encode(&self.term, mouse::Geometry { cols, rows, cell_w, cell_h }, &spec) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        reply_err(out, req, code::BAD_REQUEST, e);
+                        return false;
+                    }
+                };
+                self.written(out, req, i, &bytes)
+            }
             TermOp::Paste { text, allow_unsafe } => {
                 let i = match self.writer(conn, "paste") {
                     Ok(i) => i,
@@ -1732,7 +1767,7 @@ impl Owner {
     }
 
     /// Queues input for the program from subscription `i`, as typed: `INPUT`'s bytes, an encoded
-    /// `key`, a framed `paste`. Typing snaps the writer's view back to live.
+    /// `key` or `mouse`, a framed `paste`. Typing snaps the writer's view back to live.
     fn write_input(&mut self, i: usize, bytes: &[u8]) -> Result<(), (&'static str, String)> {
         if self.cut {
             // At most once: input the handoff didn't carry is dropped, and said so.
@@ -1755,7 +1790,7 @@ impl Owner {
         Ok(())
     }
 
-    /// Writes a `key`'s or `paste`'s bytes and answers with how many.
+    /// Writes a `key`'s, `paste`'s or `mouse`'s bytes and answers with how many.
     fn written(&mut self, out: &ConnOut, req: u64, i: usize, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
             reply_ok(out, req, &WrittenReply { written: 0 });

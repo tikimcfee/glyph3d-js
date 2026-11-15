@@ -414,8 +414,8 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
     - create-or-adopt, then subscribe `own`;
     - the 16 ms / 16 KiB coalescer;
     - size stamps from `size` events, plus a repaint on each;
-    - `terminal.bytes` / `resize` / `scroll` / `refresh` / `shutdown`;
-    - the wheel on the alt screen (`wheelBytes`);
+    - `terminal.bytes` / `key` / `paste` / `mouse` / `resize` / `scroll` / `refresh` / `shutdown`;
+    - the wheel on the alt screen (termd `mouse` wheel notches at the pointer's cell);
     - the 2 s ping and its `ERR: no terminal` → recreate, at most once per 2 s, with repaints at
       150 / 500 / 1200 ms;
     - detach-not-kill;

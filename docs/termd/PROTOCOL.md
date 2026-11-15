@@ -1,4 +1,4 @@
-# The termd wire, version 1.2
+# The termd wire, version 1.4
 
 `g3d-termd` keeps terminals alive: it owns each terminal's pseudo-terminal (PTY), its
 process and a libghostty-vt emulator holding the terminal's screen and scrollback.
@@ -15,8 +15,9 @@ code, `upgrade` with its `upgrade_failed` event), `create`'s environment, `env_b
 reply fields, the `env` op, and the status document (`status`, `status_follow`, `status_unfollow`,
 the `status` event). What is marked **(1.2)** is new in 1.2: key events and paste (`key`, `paste`,
 the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
-`key`'s `option_as_alt` and the feature of the same name. The daemon on branch `termd` speaks all
-of 1.3 and announces `proto` `[1, 3]`.
+`key`'s `option_as_alt` and the feature of the same name. What is marked **(1.4)** is new in 1.4:
+pointer events (`mouse` and the feature of the same name). The daemon on branch `termd` speaks all
+of 1.4 and announces `proto` `[1, 4]`.
 
 ## At a glance
 
@@ -34,10 +35,11 @@ of 1.3 and announces `proto` `[1, 3]`.
   answers.
 - One subscriber at a time **owns** a terminal's size. Everyone else sees the size the
   owner picked.
-- Input is either the bytes a keyboard already encoded (`INPUT`, what a real terminal attached to
-  termd sends) or a key event and pasted text that termd encodes for the program's live modes
-  ([`key`](#key-12), [`paste`](#paste-12)), for a client that has keys but no terminal of its own
-  to encode them, such as a browser. (1.2)
+- Input is either the bytes a keyboard or mouse already encoded (`INPUT`, what a real terminal
+  attached to termd sends) or a key event, pasted text and a pointer event that termd encodes for
+  the program's live modes ([`key`](#key-12), [`paste`](#paste-12), [`mouse`](#mouse-14)), for a
+  client that has keys and a pointer but no terminal of its own to encode them, such as a
+  browser. (1.2, 1.4)
 - The daemon can restart its engine without ending any terminal. Connections close and clients
   reconnect ([Restarts](#restarts-11)). (1.1)
 - One request follows the daemon's whole state as a document pushed on change
@@ -177,10 +179,10 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 3], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+{"proto": [1, 4], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -193,8 +195,8 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `cells` (packed cells,
-  reserved).
+  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4), `cells`
+  (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -240,7 +242,7 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
-| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste`, during the handoff) |
+| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
 | `unsafe_paste` | (1.2) a `paste` whose text could run commands, sent without `allow_unsafe` ([`paste`](#paste-12)) |
 
 ### `create`
@@ -646,6 +648,68 @@ script decides for itself. The bracket can't be broken either way, since the `ES
 Reply: `{"req": 18, "ok": true, "written": 14}`. The bytes join the program's input as `key`'s do,
 and the errors are the same, plus `unsafe_paste`.
 
+### `mouse` (1.4)
+
+Feature `mouse`. One pointer event on the terminal's cells, which termd encodes for the program as
+a terminal's mouse reporting would, in the modes the program has asked for at that moment: the
+tracking (`CSI ? 9 h` X10, `1000` normal, `1002` button-event, `1003` any-event) and the format
+(the default, `1005` UTF-8, `1006` SGR, `1015` urxvt, `1016` SGR-pixels). The encoder is
+libghostty's, Ghostty's own (src/input/mouse_encode.zig), so a click reaches a program through
+termd exactly as it would through Ghostty. Use it when the client has a pointer but no terminal of
+its own that tracks those modes (a browser); a terminal attached to termd encodes its own mouse
+and sends `INPUT`.
+
+```json
+{"req": 19, "op": "mouse", "handle": 7, "action": "press", "button": "left", "col": 3.5, "row": 5.25, "mods": ["Control"]}
+```
+
+| field | default | meaning |
+|---|---|---|
+| `handle` | required | as for `key` |
+| `action` | `"press"` | `"press"`, `"release"` or `"move"` (the pointer moved, with `button` held or `"none"`) |
+| `button` | required | `"left"`, `"middle"`, `"right"`; `"none"` (a move with no button held); `"wheel-up"`, `"wheel-down"`, `"wheel-left"`, `"wheel-right"` (one notch, a press: X11's buttons 4–7); or the number `8`–`11`, X11's extra buttons (8 back, 9 forward). Anything else, a wheel that isn't a press, or `"none"` on a press or release, is `bad_request` |
+| `col`, `row` | required | where the pointer is, in cells from the terminal's top-left corner, from 0: `3` is the fourth column's left edge, `3.5` its middle. The cell is the whole part (reports count from 1, so column 3 is reported as 4); SGR-pixels reads the fraction too. Values off the screen are clamped to its edge, as a terminal goes on reporting a drag that left its window |
+| `mods` | `[]` | the modifiers held, W3C names as for `key`. Shift, Alt and Control ride in the report (4, 8, 16 added to the button); `"Meta"` and the lock keys have no bit |
+
+termd drops what the program's modes don't report, as Ghostty does: anything with no tracking on;
+under X10 all but a press of the left, middle or right button, and its modifiers; under normal
+tracking every move; under button-event a move with no button held; buttons 10 and 11 (Ghostty has
+no code for them); in the default format a cell past column or row 223, which one byte can't hold.
+A move is reported once per cell: one that stays in the cell last reported is dropped (in
+SGR-pixels every move is reported). A client still does well to send a move only when its cell
+changes.
+
+SGR-pixels (1016) reports the position in the terminal's pixels: `col` × the cell's width and
+`row` × its height, the cell size [`create`](#create)'s `cell_px` set, what `CSI 14 t` and
+`CSI 16 t` report to the program, rounded and clamped to the screen's last pixel. A client sends
+the pointer's position within the cell as the fraction and never needs to know that size.
+
+A wheel notch a program hears is a report like any press (buttons 64–67, never released). One that
+the program doesn't hear is Ghostty's alternate scroll: on the alternate screen, with alternate
+scroll on (mode 1007, on unless the program turns it off), `"wheel-up"` and `"wheel-down"` are the
+cursor keys `CSI A` and `CSI B` (`ESC O A`, `ESC O B` under DECCKM), so a pager scrolls; anywhere
+else nothing (on the primary screen the client scrolls its own view: [`view`](#view)).
+
+What a pointer event becomes (the bytes the program reads; `·` is a space, `—` nothing):
+
+| event | X10 (`9`) | normal (`1000`) | button-event (`1002`) | any-event + SGR (`1003`, `1006`) | any-event + SGR-pixels (`1003`, `1016`), `cell_px` 8 × 16 |
+|---|---|---|---|---|---|
+| `"button":"left","col":3,"row":5` | `CSI M·$&` | `CSI M·$&` | `CSI M·$&` | `CSI <0;4;6M` | `CSI <0;24;80M` |
+| `"action":"move","button":"left","col":4,"row":5` | — | — | `CSI M@%&` | `CSI <32;5;6M` | `CSI <32;32;80M` |
+| `"action":"release","button":"left","col":4,"row":5` | — | `CSI M#%&` | `CSI M#%&` | `CSI <0;5;6m` | `CSI <0;32;80m` |
+| `"action":"move","button":"none","col":5,"row":5` | — | — | — | `CSI <35;6;6M` | `CSI <35;40;80M` |
+| `"button":"right","col":0,"row":0,"mods":["Control"]` | `CSI M"!!` | `CSI M2!!` | `CSI M2!!` | `CSI <18;1;1M` | `CSI <18;0;0M` |
+| `"button":"wheel-down","col":3.5,"row":5.25` | — | `CSI Ma$&` | `CSI Ma$&` | `CSI <65;4;6M` | `CSI <65;28;84M` |
+
+The default format writes the button plus 32 and then each coordinate plus 32 as one byte, and a
+release as button 3 (it can't say which); UTF-8 (1005) writes the coordinates as UTF-8 characters,
+so they go past 223; SGR (1006) writes decimal numbers and ends a release with `m`; urxvt (1015)
+writes decimal numbers with the default format's button code.
+
+Reply: `{"req": 19, "ok": true, "written": 9}`, the bytes written for the program (0: the program
+didn't ask to hear this event). The bytes join the program's input as `key`'s do, and the errors
+are the same.
+
 ### `ping`
 
 `{"req": 11, "op": "ping"}` → `{"req": 11, "ok": true}`. The daemon never pings; a
@@ -698,7 +762,7 @@ Unix epoch milliseconds, sizes are bytes):
 ```json
 {"at": 1794519127407,
  "daemon": {
-   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 2],
+   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 4],
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
@@ -798,8 +862,8 @@ Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it will use t
 
 `stream` is the handle; the payload is bytes to write to the PTY, as a keyboard would
 send them, encoded by the client for the program's modes (a terminal attached to termd does that
-from the raw output it shows). A client with no terminal of its own sends [`key`](#key-12) and
-[`paste`](#paste-12) instead, and termd encodes them. (1.2) The connection must hold an `attach` or `own` subscription to that handle
+from the raw output it shows). A client with no terminal of its own sends [`key`](#key-12),
+[`paste`](#paste-12) and [`mouse`](#mouse-14) instead, and termd encodes them. (1.2) The connection must hold an `attach` or `own` subscription to that handle
 (`mode: "none"` counts). Otherwise the daemon sends an `EVENT` `error` with code
 `not_subscribed` or `read_only` and drops the bytes. `INPUT` has no reply.
 
@@ -1172,6 +1236,8 @@ writes, and send keystrokes as `INPUT`.
 
 ## Versions
 
+- **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
+  is served as before.
 - **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is
   `"auto"`, and a 1.2 client is served as before but for an Alt that made a character, which
   encodes as Ghostty's default.

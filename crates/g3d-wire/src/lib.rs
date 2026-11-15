@@ -196,6 +196,16 @@ mod tests {
                 ..Default::default()
             }),
             Op::Paste(Paste { handle: 3, text: "a\nb".into(), allow_unsafe: Some(true) }),
+            Op::Mouse(Mouse {
+                handle: 3,
+                action: MouseAction::Move,
+                button: MouseButton::None,
+                col: 4.5,
+                row: 0.0,
+                mods: vec!["Control".into()],
+            }),
+            Op::Mouse(Mouse { handle: 3, button: MouseButton::WheelDown, col: 1.0, row: 2.0, ..Default::default() }),
+            Op::Mouse(Mouse { handle: 3, button: MouseButton::Extra(9), ..Default::default() }),
         ];
         for op in ops {
             let r = Request { req: 9, op };
@@ -231,6 +241,42 @@ mod tests {
         assert_eq!(json(OptionAsAlt::False), r#"{"handle":1,"option_as_alt":false}"#);
         assert_eq!("false".parse(), Ok(OptionAsAlt::False));
         assert!("left".parse::<OptionAsAlt>().is_err());
+    }
+
+    /// (1.4) A `mouse` button is a name, or a number for X11's buttons 8–11; 1–7 go by name, and
+    /// `button` is required.
+    #[test]
+    fn a_mouse_button_is_a_name_or_an_extra_buttons_number() {
+        let button = |b: &str| match serde_json::from_str::<Request>(&format!(
+            r#"{{"req":1,"op":"mouse","handle":1,"col":0,"row":0,"button":{b}}}"#
+        ))
+        .map(|r| r.op)
+        {
+            Ok(Op::Mouse(m)) => Ok(m.button),
+            Ok(op) => panic!("{op:?}"),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(button(r#""left""#), Ok(MouseButton::Left));
+        assert_eq!(button(r#""wheel-right""#), Ok(MouseButton::WheelRight));
+        assert_eq!(button("8"), Ok(MouseButton::Extra(8)));
+        assert_eq!(button("11"), Ok(MouseButton::Extra(11)));
+        assert!(button("4").unwrap_err().contains("goes by its name"));
+        for bad in ["12", "0", "-1", r#""8""#, r#""back""#, "null"] {
+            assert!(button(bad).is_err(), "{bad}");
+        }
+        let r: Result<Request, _> = serde_json::from_str(r#"{"req":1,"op":"mouse","handle":1,"col":0,"row":0}"#);
+        assert!(r.unwrap_err().to_string().contains("button"));
+        let m: Request =
+            serde_json::from_str(r#"{"req":1,"op":"mouse","handle":1,"button":"left","col":2,"row":3}"#).unwrap();
+        assert_eq!(
+            m.op,
+            Op::Mouse(Mouse { handle: 1, button: MouseButton::Left, col: 2.0, row: 3.0, ..Default::default() })
+        );
+        assert_eq!("wheel-up".parse(), Ok(MouseButton::WheelUp));
+        assert_eq!("10".parse(), Ok(MouseButton::Extra(10)));
+        assert_eq!(MouseButton::Extra(10).to_string(), "10");
+        assert_eq!(serde_json::to_string(&MouseButton::Extra(8)).unwrap(), "8");
+        assert_eq!(serde_json::to_string(&MouseButton::WheelLeft).unwrap(), r#""wheel-left""#);
     }
 
     #[test]

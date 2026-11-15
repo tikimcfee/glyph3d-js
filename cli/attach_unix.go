@@ -41,45 +41,10 @@ type sizedBytes struct {
 	cols, rows int
 }
 
-// paneModes is what the last termd `modes` event said; the wheel reads it.
+// paneModes is what the last termd `modes` event said; the wheel reads whether the program is on
+// the alternate screen.
 type paneModes struct {
-	Alt      bool `json:"alt"`
-	Mouse    bool `json:"mouse"`
-	MouseSGR bool `json:"mouse_sgr"`
-}
-
-// wheelBytes realizes a wheel gesture for an ALT-SCREEN app. Such apps own the screen and have no
-// scrollback, so the wheel goes to the app itself: SGR mouse-wheel events when it asked for SGR
-// mouse reports (claude, vim ttymouse=sgr — it scrolls its OWN content), else arrow keys (pagers
-// like less/man — what xterm calls "alternateScroll"). `lines` follows the scroll convention:
-// >0 = back/up, <0 = forward/down; |lines| notches are sent.
-func wheelBytes(lines int, sgr bool, cols, rows int) []byte {
-	n, up := lines, lines > 0
-	if n < 0 {
-		n = -n
-	}
-	var notch string
-	if sgr {
-		// SGR (1006): ESC[<btn;col;row M, press-only. Wheel up=64, down=65. The coordinate
-		// barely matters for a wheel event; aim at the pane centre so it lands inside it.
-		col, row := cols/2, rows/2
-		if col < 1 {
-			col = 1
-		}
-		if row < 1 {
-			row = 1
-		}
-		btn := 65
-		if up {
-			btn = 64
-		}
-		notch = fmt.Sprintf("\x1b[<%d;%d;%dM", btn, col, row)
-	} else if up {
-		notch = "\x1b[A"
-	} else {
-		notch = "\x1b[B"
-	}
-	return []byte(strings.Repeat(notch, n))
+	Alt bool `json:"alt"`
 }
 
 // runTerminal connects to the relay, creates the display grid, creates-or-adopts the termd
@@ -250,24 +215,28 @@ func runTerminal(cfg terminalConfig) {
 	}
 
 	// Scrollback is termd's: a wheel on the focused terminal arrives as terminal.scroll (+lines =
-	// back into history, −lines = forward to live). On the primary screen it moves this adapter's
-	// view (termd sends the viewed rows as a repaint and holds output until the view is back at
-	// live, as copy-mode did); typing snaps the view back to live. An alternate-screen app has no
-	// scrollback, so the wheel goes to the app.
-	scroll := func(lines int) {
+	// back into history, −lines = forward to live), with the pointer's cell when the display has
+	// one. On the primary screen it moves this adapter's view (termd sends the viewed rows as a
+	// repaint and holds output until the view is back at live, as copy-mode did); typing snaps the
+	// view back to live. An alternate-screen app has no scrollback, so the wheel goes to the app as
+	// termd's `mouse` wheel notches, at the pointer (else the screen's centre): termd reports them
+	// to a program that hears the mouse and makes them cursor keys for one that doesn't.
+	scroll := func(lines int, at *cellPoint) {
 		if lines == 0 {
 			return
 		}
 		modes.Lock()
 		m := modes.m
 		modes.Unlock()
-		size.Lock()
-		cols, rows := size.cols, size.rows
-		size.Unlock()
 		s := sess.Load()
 		if m.Alt {
-			if err := s.tc.Input(s.handle, wheelBytes(lines, m.Mouse && m.MouseSGR, cols, rows)); err != nil {
-				log.Printf("[attach] wheel: %v", err)
+			if at == nil {
+				size.Lock()
+				at = &cellPoint{Col: float64(size.cols) / 2, Row: float64(size.rows) / 2}
+				size.Unlock()
+			}
+			for _, f := range s.wheel(lines, *at) {
+				send("mouse", f)
 			}
 			return
 		}
@@ -314,6 +283,14 @@ func runTerminal(cfg terminalConfig) {
 					s := sess.Load()
 					if s.offers("paste") {
 						send("paste", map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true})
+					}
+				},
+				// A pointer event on the focused terminal of a program that hears the mouse; termd
+				// encodes it in the program's live mouse modes and drops what they don't report.
+				mouse: func(m termdMouse) {
+					s := sess.Load()
+					if s.offers("mouse") {
+						send("mouse", m.fields(s.handle))
 					}
 				},
 				resize:   onResize,
@@ -532,18 +509,40 @@ type termdSession struct {
 	said sync.Map
 }
 
+// termdInputSince is the protocol version that brought each display input op.
+var termdInputSince = map[string]string{"key": "1.2", "paste": "1.2", "mouse": "1.4"}
+
 // offers reports whether this session's brain has `op` (WELCOME.features), as PROTOCOL.md asks of
 // a client before it uses anything newer than 1.0. A brain from an earlier build (a holder kept
-// across upgrades) lacks `key` and `paste`: the display's typing can't reach it, which is logged
-// once here and shown in termd's status (`relay.lacks`, the wall's notice), never per keystroke.
+// across upgrades) lacks `key` and `paste` (1.2), or `mouse` (1.4): the display's typing, pasting
+// or mouse can't reach it, which is logged once per connection here (and for key and paste shown
+// in termd's status: `relay.lacks`, the wall's notice), never per event.
 func (s *termdSession) offers(op string) bool {
 	if s.tc.Has(op) {
 		return true
 	}
 	if _, was := s.said.LoadOrStore(op, true); !was {
-		log.Printf("[attach] termd %s has no %q op (protocol 1.2): the display's input is dropped until it is upgraded (g3d upgrade)", s.tc.Welcome.Daemon, op)
+		log.Printf("[attach] termd %s has no %q op (protocol %s): the display's %s is dropped until it is upgraded (g3d upgrade)", s.tc.Welcome.Daemon, op, termdInputSince[op], op)
 	}
 	return false
+}
+
+// wheel is the `mouse` requests for a wheel of |lines| notches at `at` on this session's terminal,
+// for a program on the alternate screen (lines > 0: up, back into what's above). None for a brain
+// without `mouse`, which is logged once.
+func (s *termdSession) wheel(lines int, at cellPoint) []map[string]any {
+	if lines == 0 || !s.offers("mouse") {
+		return nil
+	}
+	b, n := "wheel-up", lines
+	if lines < 0 {
+		b, n = "wheel-down", -lines
+	}
+	out := make([]map[string]any, n)
+	for i := range out {
+		out[i] = termdMouse{Action: "press", Button: b, Col: at.Col, Row: at.Row}.fields(s.handle)
+	}
+	return out
 }
 
 // keyFields is the `key` op's request for a display's key event on this session's terminal. Its
@@ -580,8 +579,9 @@ type inboundHandlers struct {
 	bytes    func([]byte)
 	key      func(termdKey)
 	paste    func(text string)
+	mouse    func(termdMouse)
 	resize   func(cols, rows int)
-	scroll   func(lines int)
+	scroll   func(lines int, at *cellPoint)
 	refresh  func()
 	kill     func()
 	recreate func()
@@ -615,9 +615,38 @@ func (k termdKey) fields(h uint32, optionAsAlt bool) map[string]any {
 	return f
 }
 
+// cellPoint is where a pointer is, in cells from the terminal's top-left corner, from 0 (termd's
+// `mouse` col and row: the cell is the whole part, SGR-pixels reads the fraction too).
+type cellPoint struct {
+	Col, Row float64
+}
+
+// termdMouse is a display's pointer event, termd's `mouse` op as is (docs/termd/PROTOCOL.md,
+// "`mouse`"); termd encodes it in the program's live mouse modes.
+type termdMouse struct {
+	Action string
+	// Button is a name or one of the numbers 8–11, as the display sent it (termd checks it).
+	Button   any
+	Col, Row float64
+	Mods     []string
+}
+
+// fields is the `mouse` op's request fields for terminal handle h.
+func (m termdMouse) fields(h uint32) map[string]any {
+	f := map[string]any{"handle": h, "button": m.Button, "col": m.Col, "row": m.Row}
+	if m.Action != "" {
+		f["action"] = m.Action
+	}
+	if len(m.Mods) > 0 {
+		f["mods"] = m.Mods
+	}
+	return f
+}
+
 // handleInbound dispatches a relay message to this adapter. Events (display → controller
-// push): terminal.key (a key event) and terminal.paste (pasted text), which termd encodes for
-// the program; terminal.bytes (raw input, as given); terminal.resize, terminal.scroll,
+// push): terminal.key (a key event), terminal.paste (pasted text) and terminal.mouse (a pointer
+// event), which termd encodes for the program; terminal.bytes (raw input, as given);
+// terminal.resize, terminal.scroll (with the pointer's col and row when it has them),
 // terminal.refresh (repaint), terminal.shutdown (kill). Command responses also land here; an "ERR: no terminal" reply (to
 // our liveness ping) means the display reloaded → re-adopt.
 func handleInbound(msg []byte, termID string, h inboundHandlers) {
@@ -629,8 +658,13 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			Cols       int    `json:"cols"`
 			Rows       int    `json:"rows"`
 			Lines      int    `json:"lines"`
+			// A pointer event's cell (terminal.mouse; terminal.scroll's pointer), its button.
+			Col    *float64 `json:"col"`
+			Row    *float64 `json:"row"`
+			Button any      `json:"button"`
 			// A key event's fields; its `text` is a paste's too (one field: a second `text` here
-			// would shadow the key's and drop every key's text).
+			// would shadow the key's and drop every key's text), its `action` and `mods` a
+			// pointer event's too.
 			termdKey
 		} `json:"data"`
 	}
@@ -649,8 +683,16 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			h.paste(ev.Data.Text)
 		case "terminal.resize":
 			h.resize(ev.Data.Cols, ev.Data.Rows)
+		case "terminal.mouse":
+			if ev.Data.Col != nil && ev.Data.Row != nil {
+				h.mouse(termdMouse{Action: ev.Data.Action, Button: ev.Data.Button, Col: *ev.Data.Col, Row: *ev.Data.Row, Mods: ev.Data.Mods})
+			}
 		case "terminal.scroll":
-			h.scroll(ev.Data.Lines)
+			var at *cellPoint
+			if ev.Data.Col != nil && ev.Data.Row != nil {
+				at = &cellPoint{Col: *ev.Data.Col, Row: *ev.Data.Row}
+			}
+			h.scroll(ev.Data.Lines, at)
 		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — repaint into it NOW
 			h.refresh()
 		case "terminal.shutdown":

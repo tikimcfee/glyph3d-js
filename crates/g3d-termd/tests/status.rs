@@ -82,7 +82,7 @@ fn the_status_document_has_its_documented_shape() {
     let mut c = Client::connect(&d.socket, "status-test/1").unwrap();
     c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     assert!(c.welcome.features.iter().any(|f| f == "status"), "{:?}", c.welcome.features);
-    assert_eq!(c.welcome.proto, [1, 3]);
+    assert_eq!(c.welcome.proto, [1, 4]);
     create(&mut c, "t1", &["sh", "-c", "echo ready; exec sleep 100"], 100, 30);
     create(&mut c, "t2", &["sh", "-c", "echo also; exec sleep 100"], 80, 24);
     let s = subscribe(&mut c, "t1", Role::Own, None);
@@ -109,7 +109,7 @@ fn the_status_document_has_its_documented_shape() {
     );
 
     let dm = &doc.daemon;
-    assert_eq!((dm.proto, dm.exiting, dm.connections), ([1, 3], false, 1));
+    assert_eq!((dm.proto, dm.exiting, dm.connections), ([1, 4], false, 1));
     assert_eq!(dm.holder.pid, d.pid());
     assert_eq!(dm.brain.pid, c.welcome.pid.unwrap());
     assert_eq!(dm.brain.generation, 1);

@@ -12,6 +12,7 @@ mod blob;
 mod env;
 mod hold;
 mod keys;
+mod mouse;
 mod out;
 mod owner;
 mod repaint;

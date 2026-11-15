@@ -188,7 +188,7 @@ fn keypad_navigation(physical: Key, logical: &str) -> Option<Key> {
 /// W3C modifier key names (UI Events KeyboardEvent key values, "Modifier keys") → libghostty's.
 /// The ones a terminal has no bit for (`AltGraph`, `Fn`, the lock keys but Caps and Num) are
 /// accepted and dropped: they only ever shaped `text`, which the client resolved.
-fn modifier(name: &str) -> Result<Mods, String> {
+pub(crate) fn modifier(name: &str) -> Result<Mods, String> {
     Ok(match name {
         "Shift" => Mods::SHIFT,
         "Control" => Mods::CTRL,

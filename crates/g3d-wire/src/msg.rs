@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 3];
+pub const PROTO: [u32; 2] = [1, 4];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
 /// The features this daemon announces: the core plus `status`, `upgrade` and `env` (1.1), `key`
-/// and `paste` (1.2), `option_as_alt` (1.3).
-pub const DAEMON_FEATURES: [&str; 9] =
-    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt"];
+/// and `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4).
+pub const DAEMON_FEATURES: [&str; 10] =
+    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,10 +145,12 @@ pub enum Op {
     Key(Key),
     /// (1.2) Text pasted: bracketed when the program asked for bracketed paste.
     Paste(Paste),
+    /// (1.4) A pointer event, encoded by termd against the terminal's live mouse modes.
+    Mouse(Mouse),
 }
 
 /// The op names `Op` decodes, so a daemon can tell `unknown_op` from `bad_request`.
-pub const KNOWN_OPS: [&str; 19] = [
+pub const KNOWN_OPS: [&str; 20] = [
     "create",
     "list",
     "kill",
@@ -168,6 +170,7 @@ pub const KNOWN_OPS: [&str; 19] = [
     "env",
     "key",
     "paste",
+    "mouse",
 ];
 
 /// (1.2) `key`: one key event, with W3C `KeyboardEvent` semantics (PROTOCOL.md, "`key`").
@@ -291,8 +294,146 @@ pub struct Paste {
     pub allow_unsafe: Option<bool>,
 }
 
-/// (1.2) The `key` and `paste` replies: how many bytes went to the program (0: the key encodes
-/// to nothing in the terminal's modes, a release outside Kitty's event reporting, say).
+/// (1.4) `mouse`: one pointer event on the terminal's cells (PROTOCOL.md, "`mouse`").
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Mouse {
+    pub handle: u32,
+    /// `press` (the default), `release` or `move`.
+    #[serde(default)]
+    pub action: MouseAction,
+    pub button: MouseButton,
+    /// Where the pointer is, in cells from the terminal's top-left corner: column 3.5 is the
+    /// middle of the fourth column. The cell is the whole part; SGR-pixels reports read the
+    /// fraction too. Clamped to the screen.
+    pub col: f64,
+    pub row: f64,
+    /// The modifiers held, as W3C names (`Shift`, `Control`, `Alt`, `Meta`), as for `key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<String>,
+}
+
+/// (1.4) `mouse.action`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseAction {
+    #[default]
+    Press,
+    Release,
+    Move,
+}
+
+/// (1.4) `mouse.button`: a name, or X11's number for the buttons past the wheel (8 back, 9
+/// forward, 10, 11). 1–7 go by their names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    /// No button: a move with none held (any-event tracking reports it).
+    #[default]
+    None,
+    WheelUp,
+    WheelDown,
+    WheelLeft,
+    WheelRight,
+    /// X11 buttons 8–11.
+    Extra(u8),
+}
+
+impl MouseButton {
+    pub fn is_wheel(self) -> bool {
+        matches!(self, MouseButton::WheelUp | MouseButton::WheelDown | MouseButton::WheelLeft | MouseButton::WheelRight)
+    }
+}
+
+impl std::fmt::Display for MouseButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MouseButton::Left => "left",
+            MouseButton::Middle => "middle",
+            MouseButton::Right => "right",
+            MouseButton::None => "none",
+            MouseButton::WheelUp => "wheel-up",
+            MouseButton::WheelDown => "wheel-down",
+            MouseButton::WheelLeft => "wheel-left",
+            MouseButton::WheelRight => "wheel-right",
+            MouseButton::Extra(n) => return write!(f, "{n}"),
+        })
+    }
+}
+
+impl std::str::FromStr for MouseButton {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "left" => MouseButton::Left,
+            "middle" => MouseButton::Middle,
+            "right" => MouseButton::Right,
+            "none" => MouseButton::None,
+            "wheel-up" => MouseButton::WheelUp,
+            "wheel-down" => MouseButton::WheelDown,
+            "wheel-left" => MouseButton::WheelLeft,
+            "wheel-right" => MouseButton::WheelRight,
+            n => match n.parse::<u64>() {
+                Ok(n) => MouseButton::extra(n)?,
+                Err(_) => return Err(format!("button is {}, not {s:?}", MouseButton::NAMES)),
+            },
+        })
+    }
+}
+
+impl MouseButton {
+    const NAMES: &'static str = "left, middle, right, none, wheel-up, wheel-down, wheel-left, wheel-right or 8..11";
+
+    fn extra(n: u64) -> Result<Self, String> {
+        match n {
+            8..=11 => Ok(MouseButton::Extra(n as u8)),
+            1..=7 => Err(format!("button {n} goes by its name ({})", MouseButton::NAMES)),
+            _ => Err(format!("button is {}, not {n}", MouseButton::NAMES)),
+        }
+    }
+}
+
+impl Serialize for MouseButton {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MouseButton::Extra(n) => s.serialize_u8(*n),
+            b => s.serialize_str(&b.to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MouseButton {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = MouseButton;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(MouseButton::NAMES)
+            }
+            fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<MouseButton, E> {
+                MouseButton::extra(n).map_err(E::custom)
+            }
+            fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<MouseButton, E> {
+                MouseButton::extra(u64::try_from(n).unwrap_or(0)).map_err(E::custom)
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<MouseButton, E> {
+                // Names only: a number goes as a number.
+                match s.parse::<MouseButton>() {
+                    Ok(MouseButton::Extra(_)) | Err(_) => {
+                        Err(E::custom(format!("button is {}, not {s:?}", MouseButton::NAMES)))
+                    }
+                    Ok(b) => Ok(b),
+                }
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// (1.2) The `key`, `paste` and (1.4) `mouse` replies: how many bytes went to the program (0: the
+/// event encodes to nothing in the terminal's modes, a release outside Kitty's event reporting or
+/// a click the program didn't ask to hear, say).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WrittenReply {
     pub written: u64,
