@@ -12,6 +12,7 @@
  *                                [--payload seq,source]        (flood payloads; default both)
  *                                [--scale 1,4,14]              (terminals flooded at once)
  *                                [--seq 300000] [--source-bytes 2000000] [--top 25]
+ *                                [--config knob=value,…]       (wall knobs set on every page: fontFamily=cousine)
  *
  * Needs the wall's Vite (:5180) and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
  * (tools/lib/wall-relay.mjs: termd namespace `glyph-wall-text-perf`, no gomuxai; stopped with its termd
@@ -73,6 +74,8 @@ const SOURCES = list('--source', 'direct,shell');
 const PAYLOADS = list('--payload', 'seq,source');
 const SCALE = list('--scale', '1,4,14').map(Number);
 const SEQ = Number(arg('--seq', 300000));
+/** Wall knobs to run under (`wall.config <knob> <value>` on every fresh page, before anything is measured). */
+const CONFIG = list('--config', '').map((kv) => kv.split('='));
 const SOURCE_BYTES = Number(arg('--source-bytes', 2000000));
 const TOP = Number(arg('--top', 25));
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -576,6 +579,10 @@ const openWall = async () => {
         return window.__wall.snapshot().relay;
     });
     if (up.state !== 'up') throw new Error(`the wall isn't the relay's display on :${RELAY} (${up.state}${up.reason ? `: ${up.reason}` : ''})`);
+    for (const [knob, value] of CONFIG) {
+        const said = await app.evalPage(async (argv) => (await window.__wall.router.execute(argv)).text, ['wall.config', knob, value]);
+        if (!/^OK/.test(said)) throw new Error(`--config ${knob}=${value}: ${said}`);
+    }
     const need = Math.max(...SCALE, 1);
     if (!OWN.length) {
         OWN.push(...await spawnOwnTerminals(app.evalPage, need));

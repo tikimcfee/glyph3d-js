@@ -4,6 +4,7 @@
  *
  *   bun tools/atlas-cold-perf.mjs [--url http://localhost:5180/] [--relay 8099] [--reuse-relay]
  *                                 [--width 1600 --height 1000] [--json OUT] [--shot PNG]
+ *                                 [--config knob=value,…]   (wall knobs to run under: fontFamily=cousine)
  *
  * wall-text-perf's COLD pass times a burst to the first frame drawn after its applyScreen — with the
  * atlas growing off the main thread that frame draws the new glyphs BLANK, so it measures the
@@ -38,6 +39,8 @@ const RELAY = Number(arg('--relay', 8099));
 const W = Number(arg('--width', 1600)), H = Number(arg('--height', 1000));
 const OUT = arg('--json');
 const SHOT = arg('--shot');
+/** Wall knobs to run under (`wall.config <knob> <value>`, before the terminal is spawned). */
+const CONFIG = (arg('--config', '') || '').split(',').map((s) => s.trim()).filter(Boolean).map((kv) => kv.split('='));
 
 const range = (a, b) => { const o = []; for (let c = a; c <= b; c++) o.push(c); return o; };
 const rowsOf = (cps, perRow) => { const rows = []; for (let r = 0; r < 20; r++) { let s = ''; for (let c = 0; c < perRow; c++) s += String.fromCodePoint(cps[(r * perRow + c) % cps.length]); rows.push(s); } return '\x1b[2J\x1b[H' + rows.join('\r\n'); };
@@ -151,6 +154,10 @@ try {
         return window.__wall.snapshot().relay;
     });
     if (up.state !== 'up') throw new Error(`the wall isn't the relay's display on :${RELAY} (${up.state})`);
+    for (const [knob, value] of CONFIG) {
+        const said = await app.evalPage(async (argv) => (await window.__wall.router.execute(argv)).text, ['wall.config', knob, value]);
+        if (!/^OK/.test(said)) throw new Error(`--config ${knob}=${value}: ${said}`);
+    }
     const [id] = await spawnOwnTerminals(app.evalPage, 1);
     await app.evalPage(async (tid) => {
         for (let i = 0; i < 40 && !window.__wall.terminal(tid); i++) await new Promise((r) => setTimeout(r, 250));
