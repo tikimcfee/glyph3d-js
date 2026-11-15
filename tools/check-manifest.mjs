@@ -256,6 +256,7 @@ export const CHECKS = [
     h('command-resolve.test.mjs', ['shell'], 'CommandRouter name resolution precedence', 'verbs\' behaviour'),
     h('palette-rank.test.mjs', ['shell'], 'palette scoring: dot-free verb spelling, exact pin, boosts', 'taste'),
     h('rank-check.mjs', ['shell'], 'the palette\'s verb-ranking intent on short queries', 'taste'),
+    bt('command-help.test.mjs', ['shell', 'wall'], "help, the router's own verb on a bare router: the namespace map, a verb's card, a namespace's table, the optional dot, a miss", "how the IDE's palette shows the text"),
     bt('command-call.test.mjs', ['shell', 'wall'], "the call bundle, the router's own verb on a bare router: a gnarly-arg corpus round-trips byte-identical (and the plain line corrupts it), object form, coercion, sender, refusals", "the CLI's choice to bundle (cli/client.go, go test)"),
     h('log-storm-brake.test.mjs', ['shell'], 'the console storm brake: per-signature, heartbeat, info never braked', 'the relay log store'),
     h('search-session.test.mjs', ['shell'], 'SearchSession: cancelled runs stop writing, refinements don\'t blend, clear leaves nothing', 'the relay search'),

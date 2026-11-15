@@ -19,6 +19,7 @@ import errorTracker from '../../utils/ErrorTracker.js';
 import metrics from '../../utils/Metrics.js';
 import { emitLogRecord } from './consoleForwarder.js';
 import { decodeBase64 } from '../../utils/encoding.js';
+import { box } from '../../utils/formatResponse.js';
 
 /**
  * A command handler: `(args, ctx) => { text, data } | string`, sync or async.
@@ -54,6 +55,91 @@ export default class CommandRouter {
             description: 'Invoke any command from a base64-encoded JSON bundle ([name,...args] or {cmd,args})',
             usage: '<base64-json>',
         });
+        // …and `help`, the map of what this router holds (computed from it each call).
+        this.register('help', (args) => this._help(args), {
+            description: 'Map the command bus; help <namespace|verb> for detail',
+            usage: '[namespace|verb]',
+        });
+    }
+
+    /**
+     * `help [namespace|verb]` — bare, a map of the namespaces by weight; with a name, that verb's
+     * card (the only surface that shows `returns`) or that namespace's table.
+     * @param {string[]} args
+     */
+    _help(args) {
+        const cmds = this.listCommands();
+
+        // help <name…> — the dot-free spelling reads here too ("help grid list"
+        // asks after grid.list). An exact or unambiguous name gets the full verb
+        // card (the only surface that shows `returns`); a wider prefix gets its
+        // namespace table.
+        if (args.length > 0) {
+            const q = args.join('.').toLowerCase();
+            const matched = cmds.filter(c => c.name.startsWith(q));
+            if (matched.length === 0) {
+                return { text: `No commands matching '${q}' — bare help maps the namespaces`, data: null };
+            }
+            const exact = cmds.find(c => c.name === q);
+            if (exact || matched.length === 1) {
+                const c = exact || matched[0];
+                const lines = [c.description || '(no description)'];
+                if (c.usage) lines.push('', `usage    ${c.name} ${c.usage}`);
+                if (c.returns) lines.push(`returns  ${c.returns}`);
+                // Exact-first hides namespace siblings (select vs select.*) —
+                // point at them rather than silently swallowing the namespace.
+                if (exact && matched.length > 1) {
+                    lines.push('', `deeper: ${matched.length - 1} more under ${q}.* — help ${q}.`);
+                }
+                return { text: box(c.name, lines, 44), data: { commands: [c] } };
+            }
+            // One line per verb while it fits the palette's result box (~80
+            // chars); a long usage or description wraps to a two-line row
+            // instead of stretching the box into a horizontal scroll.
+            const lines = matched.flatMap(c => {
+                const head = c.usage ? `${c.name} ${c.usage}` : c.name;
+                const one = head.padEnd(30) + (c.description || '');
+                if (head.length <= 30 && one.length <= 76) return [one.trimEnd()];
+                return c.description ? [head, `  ${c.description}`] : [head];
+            });
+            return { text: box(`COMMANDS: ${q}*`, lines, 70), data: { commands: matched } };
+        }
+
+        // Bare help is a MAP, not a dump — the palette already searches every
+        // verb live, so this orients: namespaces by weight, then how to go
+        // deeper. Computed from the registry each call; it cannot go stale.
+        const ns = new Map();
+        const solo = [];
+        for (const c of cmds) {
+            const dot = c.name.indexOf('.');
+            if (dot === -1) { solo.push(c.name); continue; }
+            const head = c.name.slice(0, dot);
+            ns.set(head, (ns.get(head) || 0) + 1);
+        }
+        const cells = [...ns.entries()]
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([name, n]) => `${name} ${n}`);
+        const cellW = cells.length ? Math.max(...cells.map(s => s.length)) + 2 : 1;
+        const perRow = Math.max(1, Math.floor(64 / cellW));
+        const grid = [];
+        for (let i = 0; i < cells.length; i += perRow) {
+            grid.push(cells.slice(i, i + perRow).map(s => s.padEnd(cellW)).join('').trimEnd());
+        }
+        const lines = [
+            `${cmds.length} verbs · ${ns.size} namespaces`,
+            '',
+            ...grid,
+            '',
+            `single-word: ${solo.sort().join(' · ')}`,
+            '',
+            'help <namespace>   every verb in one namespace',
+            'help <verb>        one verb in full (usage · returns)',
+            'the dot is optional — "grid list" runs grid.list',
+        ];
+        return {
+            text: box('COMMAND BUS', lines, 70),
+            data: { count: cmds.length, namespaces: Object.fromEntries(ns), solo }
+        };
     }
 
     /**

@@ -9,7 +9,7 @@
  *             ctx.scene, ctx.atlas, ctx._cancelCameraAnimation
  */
 
-import { box, table } from '../formatResponse.js';
+import { box, table } from '@glyph3d/core/utils/formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { COLORS } from './colorConstants.js';
 import {

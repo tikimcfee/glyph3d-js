@@ -37,7 +37,7 @@
  * shelf's cfg (page dims, deck pitch, page text, faces, covers).
  */
 
-import { box, kvLines } from '../formatResponse.js';
+import { box, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { bookInFocus } from '../../client/bookFocus.js';
 import { BOOK_KNOBS, tuneBook, readBook } from '../../client/tuning.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */

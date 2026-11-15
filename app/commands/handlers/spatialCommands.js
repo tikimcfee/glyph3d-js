@@ -6,7 +6,7 @@
  * All coordinates are in world space. All helpers imported from spatialHelpers.js.
  */
 
-import { box as tuiBox, kvLines } from '../formatResponse.js';
+import { box as tuiBox, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import {
     resolveGridByIdOrIndex, getWorldBounds, getWorldBox3, unionBounds,
     resolveAnchor, ANCHOR_NAMES, fmtVec,

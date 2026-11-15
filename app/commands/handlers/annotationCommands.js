@@ -9,7 +9,7 @@
  * (scene.annotate) are lightweight CodeGrids. Highlights use shared gridVisualState.
  */
 
-import { box, table } from '../formatResponse.js';
+import { box, table } from '@glyph3d/core/utils/formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import FieldLabel from '@glyph3d/core/collections/FieldLabel.js';
 import { COLORS } from './colorConstants.js';

@@ -4,7 +4,7 @@
  */
 
 import * as THREE from 'three';
-import { box, kvLines } from '../formatResponse.js';
+import { box, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';
 
 /**

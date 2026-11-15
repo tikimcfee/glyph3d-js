@@ -3,7 +3,7 @@
  * Uses registry as source of truth for scene object counts.
  */
 
-import { box, kvLines } from '../formatResponse.js';
+import { box, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { verifyTransforms } from '@glyph3d/core/collections/SceneTransforms.js';
 import { pathOf } from '@glyph3d/core/collections/FlatRenderRoot.js';
 

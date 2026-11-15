@@ -9,7 +9,7 @@
  * the render-if-needed → attention-primary → camera-frame → mark-active gesture. Multi-field
  * (per-field camera) + SessionStore persistence land next.
  */
-import { box, table } from '../formatResponse.js';
+import { box, table } from '@glyph3d/core/utils/formatResponse.js';
 import { renderSheetGrid } from './fileLoader.js';
 import { canonicalPath } from './pathResolve.js';
 import { toFileUri } from '@glyph3d/core/core/fileUri.js';

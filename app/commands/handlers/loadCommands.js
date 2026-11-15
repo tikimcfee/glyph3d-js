@@ -16,7 +16,7 @@
  * so the count is the batching health metric, not just the milliseconds).
  */
 
-import { box, kvLines, table } from '../formatResponse.js';
+import { box, kvLines, table } from '@glyph3d/core/utils/formatResponse.js';
 import { formatTrace } from '../loadTrace.js';
 
 /**

@@ -21,7 +21,7 @@
  * that reads as "measured, and it's empty".
  */
 
-import { box } from '../formatResponse.js';
+import { box } from '@glyph3d/core/utils/formatResponse.js';
 import { getSlugCacheState, clearSlugCore } from '@glyph3d/core/shaping';
 import { peekWorkerBridge } from '@glyph3d/core/workers';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */

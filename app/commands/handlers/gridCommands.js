@@ -3,7 +3,7 @@
  * All grid resolution goes through the registry via resolveGridByIdOrIndex.
  */
 
-import { box, table, kvLines } from '../formatResponse.js';
+import { box, table, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import CodeGrid from '@glyph3d/core/collections/CodeGrid.js';
 import { LAYOUT_PRESETS } from '@glyph3d/core/workers/builders/index.js';
 import { resolveGridByIdOrIndex } from './spatialHelpers.js';

@@ -16,7 +16,7 @@
  */
 
 import { resolveGridByIdOrIndex, WORLD_FLOOR_Y } from './spatialHelpers.js';
-import { table } from '../formatResponse.js';
+import { table } from '@glyph3d/core/utils/formatResponse.js';
 import { beginLoad } from '../loadTrace.js';
 import { READABLE_MAX_CHARS, partitionDirEntries } from '@glyph3d/core';
 import { getSetting } from '../../client/settings.js';

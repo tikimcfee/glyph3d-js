@@ -20,7 +20,7 @@
  * and the grid highlights are 0-based throughout. This is the only place that converts.
  */
 
-import { box, table, kvLines } from '../formatResponse.js';
+import { box, table, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { toFileUri } from '@glyph3d/core/core/fileUri.js';
 /** @import { AppContext } from '../../client/CommandProvider.jsx' */
 

@@ -11,7 +11,7 @@
  * content arrives.
  */
 
-import { box, kvLines } from '../formatResponse.js';
+import { box, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { getSlugCacheState, clearSlugCore } from '@glyph3d/core/shaping';
 
 /** Parse a codepoint token: hex by default ("2500"), or "U+2500"/"0x2500". */

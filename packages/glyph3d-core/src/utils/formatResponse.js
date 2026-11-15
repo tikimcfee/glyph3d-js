@@ -1,9 +1,6 @@
 /**
  * Text formatting utilities for command responses.
  * Box-drawing, tables, key-value lists — all return plain strings.
- *
- * Relocated from src/tui/TUIFormatter.js (these are response formatters,
- * not TUI features).
  */
 
 const BOX = { tl: '\u2554', tr: '\u2557', bl: '\u255a', br: '\u255d', h: '\u2550', v: '\u2551' };

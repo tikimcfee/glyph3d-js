@@ -21,7 +21,7 @@
  * ContentTree.onRelayout — they decorate whatever scheme is live.
  */
 
-import { box, kvLines } from '../formatResponse.js';
+import { box, kvLines } from '@glyph3d/core/utils/formatResponse.js';
 import { LAYOUT_SCHEMES, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
 import { schemeSettingsOpts } from '../../client/settings.js';
 import { WORLD_FLOOR_Y } from './spatialHelpers.js';
