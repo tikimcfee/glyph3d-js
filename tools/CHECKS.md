@@ -278,9 +278,13 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
 - **`far-lod-check.mjs`** — does a far file SHOW as its backdrop, and does nothing else move?
   Renders the live scene FULL (every glyph) / LOD / BARE (backdrops at gain 0) at fit-all and
   three closer poses; fails if a pixel outside the far rects moves or the backdrops lift the far
-  rects' mean linear light under 5% (of FULL) over bare panels — the box must be visible, not a
-  match for sub-pixel glyphs that add next to no light (the old straight-alpha backdrop lifted
-  1–2% and fails here). Reports the TRANSITION BAND (far fields within 2× of the threshold) LOD
+  rects' mean linear light under 5% (of FULL) over bare panels where a backdrop can show — the box
+  must be visible, not a match for sub-pixel glyphs that add next to no light (the old
+  straight-alpha backdrop lifted 1–2% and fails here). Where it can show = the far rects' pixels
+  the brightest gain swept moves: a far file behind a nearer book shows nothing at any gain. A
+  pose whose far files are all hidden (drawn with no depth test, the backdrops do show) is
+  reported, not judged; backdrops that draw nothing even so fail, and so does a run with no pose
+  judged. Reports the TRANSITION BAND (far fields within 2× of the threshold) LOD
   and BARE against the glyphs, and the gain that would match them, as information.
   ```
   bun tools/far-lod-check.mjs --url http://localhost:5174/ --relay 8099 --dir /abs/dir --cmd 'layout.scheme library'
