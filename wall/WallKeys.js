@@ -1,5 +1,6 @@
 import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { isChord, IS_MAC, CHORD_KEYS, isCopyChord } from './chord.js';
+import { chordFor } from './wallKeymap.js';
 
 /**
  * Alt pressed and released on its own opens Firefox's menu bar (and Windows browsers' menus) unless
@@ -10,14 +11,10 @@ function noMenuBar(e) { if (e.key === 'Alt') e.preventDefault(); }
 
 /**
  * WallKeys — the keyboard. Wall chords take the platform's chord modifier (chord.js: ⌘ on macOS,
- * Ctrl+Alt elsewhere) and are matched on e.code (the physical key) so layouts never rewrite them:
- * [ ] cycle focus, ↵ frames the focused terminal or returns to the overview, Shift+↵ opens a new
- * terminal, 0 fits all, - hides the focused terminal, X HELD closes it (the bar's close ring fills
- * over closeHoldMs; let go early and it's kept), G gathers the selection (or the focused terminal)
- * into a group, Shift+G dissolves the focused terminal's group, B opens or closes the sidebar, S
- * opens or closes the termd status window, ' turns snapping to the grid on or off and Shift+' the
- * grid itself, `,` opens or closes the settings panel (K belongs to the DOM palette). Each runs a
- * wall verb.
+ * Ctrl+Alt elsewhere) and are matched on e.code (the physical key) so layouts never rewrite them;
+ * which chord does what is wallKeymap.KEYMAP — the table the help panel lists too (X is HELD to
+ * close: the bar's close ring fills over closeHoldMs; let go early and it's kept; K belongs to the
+ * DOM palette). Each runs a wall verb.
  * Everything else goes to the focused terminal as key events (keyEncoding.keyEventFor) that termd
  * encodes in the program's own keyboard modes, so Shift+Enter reaches a Kitty-keyboard program as
  * Shift+Enter — Esc included (vim and readline need it), Ctrl alone too (it's the shell's), and the
@@ -87,28 +84,12 @@ export default class WallKeys {
             return;
         }
         if (isChord(e)) {
-            const claim = () => { e.preventDefault(); e.stopPropagation(); };
-            switch (e.code) {
-                case 'BracketRight': claim(); wall.cycleFocus(+1); return;
-                case 'BracketLeft': claim(); wall.cycleFocus(-1); return;
-                case 'Enter': claim(); if (e.shiftKey) wall.spawn(); else wall.toggleFrame(); return;
-                case 'Digit0': claim(); wall.fitAll(); return;
-                case 'Minus': claim(); if (wall.focusedId) wall.run(['wall.hide', wall.focusedId]); return;
-                case 'KeyX': claim(); if (!e.repeat && wall.focusedId) wall.barButtons.holdKey(wall.focusedId); return;
-                case 'KeyG': {
-                    claim();
-                    const f = wall.focusedId;
-                    if (e.shiftKey) { const gid = f && wall.groups.groupOf(f); if (gid) wall.run(['wall.ungroup', gid]); }
-                    else wall.run(wall.selection.size || !f ? ['wall.group'] : ['wall.group', f]);
-                    return;
-                }
-                case 'KeyB': claim(); wall.run(['wall.sidebar', 'toggle']); return;
-                case 'KeyS': claim(); wall.run(['wall.status', 'toggle']); return;
-                case 'Quote': claim(); wall.run([e.shiftKey ? 'wall.grid' : 'wall.snap', 'toggle']); return;
-                case 'Comma': claim(); wall.run(['wall.settings', 'toggle']); return;
-                case 'KeyK': return;   // the palette's (main.jsx)
-                default: if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
+            const chord = chordFor(e);
+            if (chord) {
+                if (chord.run) { e.preventDefault(); e.stopPropagation(); chord.run(wall, e); }
+                return;   // a chord with no run is another part's (K: the palette, main.jsx)
             }
+            if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
         }
         const grid = wall.focusedId ? wall.terminal(wall.focusedId) : null;
         if (!grid) {

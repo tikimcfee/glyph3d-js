@@ -544,6 +544,12 @@ export default class TerminalWall {
         return out;
     }
 
+    /** @param {Partial<import('./WallStore.js').HelpPanelState>} patch */
+    setHelpPanel(patch) {
+        this.store.setHelpPanel(patch);
+        this._emit();
+    }
+
     /** @param {Partial<import('./WallStore.js').SettingsPanelState>} patch */
     setSettingsPanel(patch) {
         this.store.setSettingsPanel(patch);
@@ -605,6 +611,7 @@ export default class TerminalWall {
      *   sidebar: import('./WallStore.js').SidebarState,
      *   statusWindow: import('./WallStore.js').StatusWindowState,
      *   settingsPanel: import('./WallStore.js').SettingsPanelState,
+     *   helpPanel: import('./WallStore.js').HelpPanelState,
      *   config: import('./wallConfig.js').WallConfig, dialled: string[],
      *   menu: TerminalWall['menu'],
      *   notice: string|null,
@@ -621,6 +628,7 @@ export default class TerminalWall {
             sidebar: this.store.sidebar(),
             statusWindow: this.store.statusWindow(),
             settingsPanel: this.store.settingsPanel(),
+            helpPanel: this.store.helpPanel(),
             config: { ...this.config },
             dialled: Object.keys(this.store.config()),
             menu: this.menu,

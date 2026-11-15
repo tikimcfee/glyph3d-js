@@ -3,7 +3,7 @@
  * Ctrl alone belongs to the shell (^C, ^R, ^[…) and Alt alone is readline's Meta, so off macOS a
  * wall chord takes both. AltGr — which Linux and Windows report as Ctrl+Alt, and which many
  * layouts type [ ] { } 0 with — is never a chord. WallKeys and the palette's chord (main.jsx) both
- * ask isChord; the hint line and the palette label chords with chordLabel. The snap and zoom
+ * ask isChord; the help panel and the palette label chords with chordLabel. The snap and zoom
  * modifiers (invertsSnap, zoomsWheel), the copy chord (isCopyChord) and the block-selection modifiers
  * (blockSelects) are decided here too.
  */
@@ -61,7 +61,7 @@ export function zoomsWheel(e, zoomKeys) {
     return false;
 }
 
-/** The zoom modifiers as the hint names them (`Ctrl/Alt/Super`, `⌃/⌥/⌘`). @param {string} zoomKeys */
+/** The zoom modifiers as the help names them (`Ctrl/Alt/Super`, `⌃/⌥/⌘`). @param {string} zoomKeys */
 export function zoomWheelLabel(zoomKeys) {
     return parseZoomKeys(zoomKeys).map((k) => ZOOM_LABEL[k]).join('/') || 'no key';
 }
@@ -79,7 +79,7 @@ export function isCopyChord(e) {
     return e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
 }
 
-/** The copy and paste chords as the hint and the menu name them. */
+/** The copy and paste chords as the help and the menu name them. */
 export const COPY_LABEL = IS_MAC ? '⌘C' : 'Ctrl+Shift+C';
 export const PASTE_LABEL = IS_MAC ? '⌘V' : 'Ctrl+Shift+V';
 
@@ -103,7 +103,7 @@ export function isChord(e) {
 }
 
 /**
- * A chord's label for the hint and the palette: `⌘]` / `Ctrl+Alt+]`; several keys share one
+ * A chord's label for the help and the palette: `⌘]` / `Ctrl+Alt+]`; several keys share one
  * modifier (`⌘[ ⌘]` / `Ctrl+Alt+[ ]`).
  * @param {string[]} keys - the key glyphs (`[`, `↵`, `0`, `K`)
  * @param {{ shift?: boolean }} [o]

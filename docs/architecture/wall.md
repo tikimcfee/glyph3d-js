@@ -175,6 +175,15 @@ off (`wall.snap`, chord+'); Ctrl (⌃ on macOS) held during a drag inverts it fo
 press is a right-click (the menu's), so there it is pressed once the drag has begun. The grid shows or
 hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
+**The help panel** (`wall/HelpPanel.jsx`, chord+/, the topbar's ?, the palette, `wall.help`) lists
+the wall's keys, gestures and verbs, searchable (every word must match somewhere; Escape clears the
+search, then closes), floating or docked like the other panels. Nothing in it is written twice: the
+chords are `wall/wallKeymap.js`'s `KEYMAP`, the one table `WallKeys` dispatches from (each entry: the
+physical key, whether Shift is held, not held or either, what it does, and its run — none for K, the
+palette's); the plain keys and pointer gestures sit beside it there (`PLAIN_KEYS`, `gestures(config)`,
+naming this platform's keys and the `zoomKeys` set); the verbs are the router's own list (`help`'s).
+Open, side and spot persist per relay. Gate: `tools/wall-keymap.test.mjs`.
+
 **The settings panel** (`wall/SettingsPanel.jsx`, chord+`,`, the topbar's settings button, the
 palette, `wall.settings`, the canvas's right-click menu) lists every wall knob in sections —
 Canvas, Terminals, Text, Groups, Status, Input, Selection, Menu — from ONE schema, `wall/wallSettings.js` (`KNOBS`:

@@ -8,9 +8,10 @@ import Palette from './Palette.jsx';
 import Sidebar from './Sidebar.jsx';
 import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
+import HelpPanel from './HelpPanel.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { dockLayout } from './Panel.jsx';
-import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL, zoomWheelLabel, COPY_LABEL, BLOCK_SELECT_LABEL } from './chord.js';
+import { isChord, chordLabel } from './chord.js';
 
 // The font chain (fonts/families.js): the families a terminal can draw in (the `fontFamily` knob),
 // each with its four faces, then the fallbacks.
@@ -76,7 +77,6 @@ function Chrome({ wall }) {
   if (!wall || !state) return null;
   const relay = state.relay;
   const inset = dockLayout(state).inset;
-  const hidden = state.terminals.filter((t) => t.hidden).length;
   return (
     <>
       <div style={{ ...styles.topbar, right: inset.right }}>
@@ -85,6 +85,7 @@ function Chrome({ wall }) {
         <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
         <button style={styles.button} data-action="sidebar" onClick={() => wall.run(['wall.sidebar', 'toggle'])} title={`Every terminal and group (${chordLabel(['B'])})`}>list {chordLabel(['B'])}</button>
         <button style={styles.button} data-action="settings" onClick={() => wall.run(['wall.settings', 'toggle'])} title={`Every knob, searchable (${chordLabel([','])})`}>settings</button>
+        <button style={styles.button} data-action="help" onClick={() => wall.run(['wall.help', 'toggle'])} title={`Keys, gestures and verbs (${chordLabel(['/'])})`}>?</button>
         <span data-relay={relay.state} title={relay.state === 'refused' ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves` : ''}
           style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
           {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
@@ -93,14 +94,10 @@ function Chrome({ wall }) {
       </div>
       <TermdNotice wall={wall} />
       {state.notice && <div data-wall-notice style={{ ...styles.notice, left: inset.left, right: inset.right }}>{state.notice}</div>}
-      <div style={{ ...styles.hint, left: inset.left, right: inset.right }}>
-        {state.focusedId ? `typing → ${wall.nameOf(state.focusedId)}` : 'click a terminal to type'}
-        {' · '}{chordLabel(['[', ']'])} cycle · {chordLabel(['↵'])} frame/overview · {chordLabel(['K'])} find · {chordLabel(['-'])} hide · hold {chordLabel(['X'])} close · ⇧-drag lasso · {chordLabel(['G'])} group · {chordLabel(['S'])} termd · drag a terminal's text to select it (twice: a word, three times: a line, {BLOCK_SELECT_LABEL}-drag: a block), {COPY_LABEL} copies · drag border to resize · drag a title bar (or {ALT_LABEL}-drag) to move · moves snap to the grid ({chordLabel(["'"])} snap, hold {SNAP_INVERT_LABEL} mid-drag: free) · drag empty canvas or wheel to pan (a wheel over the focused terminal: its scrollback) · {zoomWheelLabel(wall.config.zoomKeys)}-wheel or pinch to zoom · right-click for a menu
-        {' · '}{state.terminals.length} terminal{state.terminals.length === 1 ? '' : 's'}{hidden ? ` (${hidden} hidden)` : ''}
-      </div>
       <Sidebar wall={wall} state={state} />
       <StatusWindow wall={wall} state={state} />
       <SettingsPanel wall={wall} state={state} />
+      <HelpPanel wall={wall} state={state} />
       {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}
       <ContextMenu wall={wall} state={state} />
     </>
@@ -141,10 +138,6 @@ const styles = {
     position: 'absolute', top: 44, left: 12, right: 12, margin: '0 auto', width: 'fit-content', maxWidth: '80%',
     background: '#2a1a12', color: '#f0b089', border: '1px solid #5a3422', borderRadius: 5, padding: '5px 10px',
     zIndex: 6, pointerEvents: 'none',
-  },
-  hint: {
-    position: 'absolute', bottom: 8, left: 12, right: 12, color: '#6b7383', pointerEvents: 'none',
-    lineHeight: 1.5, zIndex: 5,   // wraps rather than cutting the line short
   },
 };
 

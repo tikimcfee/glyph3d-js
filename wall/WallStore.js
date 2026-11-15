@@ -48,6 +48,14 @@ const STATUS_WINDOW_DEFAULT = Object.freeze({ open: false, side: 'float', float:
 /** @type {SettingsPanelState} */
 const SETTINGS_PANEL_DEFAULT = Object.freeze({ open: false, side: 'float', float: null, collapsed: Object.freeze([]) });
 
+/**
+ * The help panel: open or not, floating or stuck to an edge, where it floats (null: its default spot).
+ * @typedef {{ open: boolean, side: 'left'|'right'|'float', float: { x: number, y: number }|null }} HelpPanelState
+ */
+
+/** @type {HelpPanelState} */
+const HELP_PANEL_DEFAULT = Object.freeze({ open: false, side: 'float', float: null });
+
 /** @param {string} key @param {any} fallback */
 function read(key, fallback) {
     try { const v = JSON.parse(localStorage.getItem(key) || 'null'); return v ?? fallback; }
@@ -65,7 +73,7 @@ export default class WallStore {
         /** The localStorage keys — the e2e reads them. */
         this.keys = {
             positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status'),
-            config: k('config'), settings: k('settings'),
+            config: k('config'), settings: k('settings'), help: k('help'),
         };
         this._positions = read(this.keys.positions, {});
         this._names = read(this.keys.names, {});
@@ -81,6 +89,8 @@ export default class WallStore {
         this._config = read(this.keys.config, {});
         /** @type {SettingsPanelState} */
         this._settings = { ...SETTINGS_PANEL_DEFAULT, ...read(this.keys.settings, {}) };
+        /** @type {HelpPanelState} */
+        this._help = { ...HELP_PANEL_DEFAULT, ...read(this.keys.help, {}) };
     }
 
     // ── terminals ─────────────────────────────────────────────────────────────
@@ -239,5 +249,16 @@ export default class WallStore {
     setSettingsPanel(patch) {
         this._settings = { ...this._settings, ...patch };
         write(this.keys.settings, this._settings);
+    }
+
+    // ── the help panel ────────────────────────────────────────────────────────
+
+    /** @returns {HelpPanelState} */
+    helpPanel() { return this._help; }
+
+    /** @param {Partial<HelpPanelState>} patch */
+    setHelpPanel(patch) {
+        this._help = { ...this._help, ...patch };
+        write(this.keys.help, this._help);
     }
 }

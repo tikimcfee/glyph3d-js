@@ -32,6 +32,7 @@ import { searchSettings, SECTIONS } from './wallSettings.js';
  *   wall.config.find <words…>                  the knobs whose label, key, description or section hold every word
  *   wall.snap [toggle|on|off] · wall.grid [toggle|on|off]   snapping to the grid · drawing it
  *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
+ *   wall.help [toggle|open|close|left|right|float [x y]]   the keys, gestures and verbs
  *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
  *                                              the right-click menu, at canvas px (default: on the
  *                                              terminal, under the header, the view's centre)
@@ -216,17 +217,24 @@ export default function registerWallCommands(router, wall) {
         return OK(`framed ${args[0]}`, { gid: args[0] });
     });
 
-    verb('wall.sidebar', '[toggle|open|close|left|right|float [x y]]', 'Open, close or place the sidebar', (args) => {
-        const [what = 'toggle', x, y] = args;
-        const s = wall.store.sidebar();
-        if (what === 'toggle') wall.setSidebar({ open: !s.open });
-        else if (what === 'open' || what === 'close') wall.setSidebar({ open: what === 'open' });
-        else if (what === 'left' || what === 'right') wall.setSidebar({ open: true, side: what });
+    /**
+     * Open, close, dock or float a panel: `toggle|open|close|left|right|float [x y]`.
+     * @param {string} name - how the refusal names it
+     * @param {() => { open: boolean }} get @param {(patch: object) => void} set
+     */
+    const placePanel = (name, get, set, [what = 'toggle', x, y]) => {
+        if (what === 'toggle') set({ open: !get().open });
+        else if (what === 'open' || what === 'close') set({ open: what === 'open' });
+        else if (what === 'left' || what === 'right') set({ open: true, side: what });
         else if (what === 'float') {
             const patch = { open: true, side: 'float' };
             if (x != null) patch.float = { x: numArg(x, 'x'), y: numArg(y, 'y') };
-            wall.setSidebar(patch);
-        } else throw new Error(`the sidebar takes toggle|open|close|left|right|float, not '${what}'`);
+            set(patch);
+        } else throw new Error(`the ${name} takes toggle|open|close|left|right|float, not '${what}'`);
+    };
+
+    verb('wall.sidebar', '[toggle|open|close|left|right|float [x y]]', 'Open, close or place the sidebar', (args) => {
+        placePanel('sidebar', () => wall.store.sidebar(), (p) => wall.setSidebar(p), args);
         return OK(`sidebar ${wall.store.sidebar().open ? `open, ${wall.store.sidebar().side}` : 'closed'}`, { sidebar: wall.store.sidebar() });
     });
     verb('wall.sidebar.collapse', '<gid> [toggle|on|off]', "Fold or unfold a group's members in the sidebar", (args) => {
@@ -241,16 +249,7 @@ export default function registerWallCommands(router, wall) {
     });
 
     verb('wall.status', '[toggle|open|close|left|right|float [x y]]', "Open, close or place the termd status window", (args) => {
-        const [what = 'toggle', x, y] = args;
-        const s = wall.store.statusWindow();
-        if (what === 'toggle') wall.setStatusWindow({ open: !s.open });
-        else if (what === 'open' || what === 'close') wall.setStatusWindow({ open: what === 'open' });
-        else if (what === 'left' || what === 'right') wall.setStatusWindow({ open: true, side: what });
-        else if (what === 'float') {
-            const patch = { open: true, side: 'float' };
-            if (x != null) patch.float = { x: numArg(x, 'x'), y: numArg(y, 'y') };
-            wall.setStatusWindow(patch);
-        } else throw new Error(`the status window takes toggle|open|close|left|right|float, not '${what}'`);
+        placePanel('status window', () => wall.store.statusWindow(), (p) => wall.setStatusWindow(p), args);
         const now = wall.store.statusWindow();
         return OK(`status window ${now.open ? `open, ${now.side}` : 'closed'} · termd ${wall.termd.state}`, { window: now, termd: wall.termd.state });
     });
@@ -316,18 +315,14 @@ export default function registerWallCommands(router, wall) {
         return { text: out.join('\n') || `(no knob matches '${args.join(' ')}')`, data: { sections: found.map((g) => ({ id: g.section.id, keys: g.items.map((it) => it.key) })) } };
     });
     verb('wall.settings', '[toggle|open|close|left|right|float [x y]]', 'Open, close or place the settings panel', (args) => {
-        const [what = 'toggle', x, y] = args;
-        const s = wall.store.settingsPanel();
-        if (what === 'toggle') wall.setSettingsPanel({ open: !s.open });
-        else if (what === 'open' || what === 'close') wall.setSettingsPanel({ open: what === 'open' });
-        else if (what === 'left' || what === 'right') wall.setSettingsPanel({ open: true, side: what });
-        else if (what === 'float') {
-            const patch = { open: true, side: 'float' };
-            if (x != null) patch.float = { x: numArg(x, 'x'), y: numArg(y, 'y') };
-            wall.setSettingsPanel(patch);
-        } else throw new Error(`the settings panel takes toggle|open|close|left|right|float, not '${what}'`);
+        placePanel('settings panel', () => wall.store.settingsPanel(), (p) => wall.setSettingsPanel(p), args);
         const now = wall.store.settingsPanel();
         return OK(`settings ${now.open ? `open, ${now.side}` : 'closed'}`, { panel: now });
+    });
+    verb('wall.help', '[toggle|open|close|left|right|float [x y]]', "Open, close or place the help: the wall's keys, gestures and verbs", (args) => {
+        placePanel('help', () => wall.store.helpPanel(), (p) => wall.setHelpPanel(p), args);
+        const now = wall.store.helpPanel();
+        return OK(`help ${now.open ? `open, ${now.side}` : 'closed'}`, { panel: now });
     });
     verb('wall.settings.collapse', '<section> [toggle|on|off]', 'Fold or unfold a section of the settings panel', (args) => {
         const [id, how = 'toggle'] = args;

@@ -79,3 +79,11 @@ test("a brain without the key and paste ops says typing can't reach it", () => {
     t.update({ relay: relay('restarting', ['key']), status: null });
     expect(t.lacks).toEqual([]);
 });
+
+test('the help docks after the settings on a shared edge; floating or closed it takes none', () => {
+    const d = dockLayout({ sidebar: panel(true, 'right'), statusWindow: panel(false, 'right'), settingsPanel: panel(true, 'right'), helpPanel: panel(true, 'right') });
+    expect(d.settings).toBe(DOCK_WIDTHS.sidebar);
+    expect(d.help).toBe(DOCK_WIDTHS.sidebar + DOCK_WIDTHS.settings);
+    expect(d.inset.right).toBe(DOCK_WIDTHS.sidebar + DOCK_WIDTHS.settings + DOCK_WIDTHS.help + EDGE);
+    expect(dockLayout({ sidebar: panel(false, 'right'), statusWindow: panel(false, 'right'), helpPanel: panel(true, 'float') }).inset.right).toBe(EDGE);
+});

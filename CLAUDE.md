@@ -26,7 +26,9 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   `bun tools/wall-e2e.mjs` (own relay, termd namespace and terminals; `--reuse-relay`).
   The canvas is drafting paper (`WallPaper`; moves and resizes snap to it: `wallSnap`, chord+' /
   Ctrl held mid-drag inverts), and every knob is searchable in the settings panel (chord+,; one
-  schema, `wallSettings`; dialled knobs persist per relay) — the terminals' font family
+  schema, `wallSettings`; dialled knobs persist per relay), and every key, gesture and verb in the
+  help panel (chord+/ or the topbar's ?; the chords are ONE table, `wall/wallKeymap.js`, that
+  `WallKeys` dispatches from) — the terminals' font family
   (`fontFamily`, live) among them. A drag on a terminal's body selects its text (twice a word, three
   times a line, Ctrl+Alt / ⌘⌥ a block, ⇧-drag over a program that hears the mouse), drawn through the
   cell fills (core `terminalSelection.js` + `TerminalGrid`); ⌘C / Ctrl+Shift+C or the menu copies
