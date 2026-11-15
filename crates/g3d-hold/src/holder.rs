@@ -2018,11 +2018,10 @@ impl Holder {
             self.next_start =
                 json!({"reason": if watchdog { "watchdog" } else { "crash" }, "exit": describe_status(status).0});
         }
-        if self.upgrade.is_some() {
-            self.upgrade = None;
-            if let Some(c) = self.candidate.take() {
-                // SAFETY: our own child.
-                unsafe { libc::kill(c.pid, libc::SIGKILL) };
+        if self.upgrade.take().is_some() {
+            for pid in self.candidate.take().map(|c| c.pid).into_iter().chain(self.check.take().map(|c| c.pid)) {
+                // SAFETY: our own children: a candidate brain, a holder upgrade's record check.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
         for t in self.terms.values_mut() {
@@ -2050,9 +2049,11 @@ impl Holder {
         self.ending = Some((why.to_owned(), Instant::now() + self.cfg.kill_grace + Duration::from_secs(2)));
         self.restart_at = None;
         self.failed = None;
-        for p in [&self.brain, &self.candidate].into_iter().flatten() {
+        self.upgrade = None;
+        let check = self.check.take().map(|c| c.pid);
+        for pid in [&self.brain, &self.candidate].into_iter().flatten().map(|p| p.pid).chain(check) {
             // SAFETY: our own children.
-            unsafe { libc::kill(p.pid, libc::SIGKILL) };
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         let live: Vec<u32> = self.terms.values().filter(|t| t.exit.is_none() && !t.killed).map(|t| t.handle).collect();
         for h in live {
