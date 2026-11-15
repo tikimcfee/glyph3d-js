@@ -22,7 +22,7 @@ const { DOCK_WIDTHS } = await import('../wall/dockLayout.js');
 
 beforeEach(() => mem.clear());
 
-/** A terminal grid: a cell 0.6 × 1.2 world units, its body's top-left at its position. */
+/** A terminal grid: a cell 0.6 × 1.2 world units, its panel's top-left at its position. */
 function grid(cols, rows, x, y) {
     return { cols, rows, position: { x, y }, cellStride: { x: 0.6, y: 1.2 } };
 }
@@ -42,7 +42,9 @@ function standIn() {
         applyCanvas() {},
         _emit() {},
         groups: { relayoutOf() {} },
-        terminalRect: (id) => { const g = terminals.get(id); return { minX: g.position.x, maxX: g.position.x + g.cols * 0.6, minY: g.position.y - g.rows * 1.2, maxY: g.position.y }; },
+        // The panel: the cells plus PAD world units of the grid's own padding on every side, as
+        // TerminalGrid.getLocalBounds has it (computeCellGridLayout).
+        terminalRect: (id) => { const g = terminals.get(id); return { minX: g.position.x, maxX: g.position.x + g.cols * 0.6 + 2 * PAD, minY: g.position.y - g.rows * 1.2 - 2 * PAD, maxY: g.position.y }; },
         // terminal.resize as termd would land it (the size comes back at once here).
         router: { execute: (cmd) => { ran.push(cmd); if (cmd[0] === 'terminal.resize') { const g = terminals.get(cmd[1]); g.cols = +cmd[2]; g.rows = +cmd[3]; } } },
     };
@@ -50,11 +52,14 @@ function standIn() {
     return { wall, terminals, ran, eased, fs: wall.fullscreen };
 }
 
-/** What a fit at `linePx` makes of a W × H area: cols, rows, and where the body's top-left goes. */
+/** The grid's own padding round its cells, world units (TerminalGrid's background padding). */
+const PAD = 0.3;
+
+/** What a fit at `linePx` makes of a W × H area: cols, rows, and where the panel's top-left goes. */
 function fitOf(linePx, { left = 0, width = 1000, height = 600, pad = WALL_CONFIG.fullscreenPad } = {}) {
-    const cellW = 0.6 * (linePx / 1.2);
-    const cols = Math.floor((width - 2 * pad) / cellW), rows = Math.floor((height - 2 * pad) / linePx);
-    return { cols, rows, left: left + (width - cols * cellW) / 2, top: (height - rows * linePx) / 2, zoom: linePx / 1.2 };
+    const zoom = linePx / 1.2, cellW = 0.6 * zoom, frame = 2 * PAD * zoom;
+    const cols = Math.floor((width - 2 * pad - frame) / cellW), rows = Math.floor((height - 2 * pad - frame) / linePx);
+    return { cols, rows, left: left + (width - cols * cellW - frame) / 2, top: (height - rows * linePx - frame) / 2, zoom, frame };
 }
 
 test('entering keeps the canvas text size and fills the canvas: cols × rows, the corner placed, only it drawn', () => {
@@ -70,6 +75,11 @@ test('entering keeps the canvas text size and fills the canvas: cols × rows, th
     expect((pose.y - 0) * pose.zoom + 300).toBeCloseTo(f.top);
     expect(wall.store.fullscreen().id).toBe('a');
     expect(terminals.get('a').cols).toBe(f.cols);
+    // The whole panel — cells and the grid's padding — lands inside the area, less the pad.
+    const right = f.left + f.cols * 0.6 * f.zoom + f.frame, bottom = f.top + f.rows * 18 + f.frame;
+    expect(right).toBeLessThanOrEqual(1000 - WALL_CONFIG.fullscreenPad);
+    expect(bottom).toBeLessThanOrEqual(600 - WALL_CONFIG.fullscreenPad);
+    expect(f.left).toBeGreaterThanOrEqual(WALL_CONFIG.fullscreenPad);
 });
 
 test('from far out, entry text is at least fullscreenMinLinePx', () => {

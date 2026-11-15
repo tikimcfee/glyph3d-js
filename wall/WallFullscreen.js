@@ -167,14 +167,19 @@ export default class WallFullscreen {
         const stride = grid.cellStride;
         const zoom = s.linePx / stride.y;
         const cellW = stride.x * zoom, cellH = s.linePx, pad = w.config.fullscreenPad;
-        const cols = Math.max(MIN.cols, Math.floor((a.width - 2 * pad) / cellW));
-        const rows = Math.max(MIN.rows, Math.floor((a.height - 2 * pad) / cellH));
-        if (cols !== grid.cols || rows !== grid.rows) w.router.execute(['terminal.resize', s.id, String(cols), String(rows)]);
-        // The body's top-left stays put as it re-wraps (it grows right and down), so the pose is known
-        // now: that corner at the area's top-left, the leftover under a cell split evenly round it.
-        const left = a.left + Math.max(0, (a.width - cols * cellW) / 2);
-        const top = a.top + Math.max(0, (a.height - rows * cellH) / 2);
+        // The panel is the cells plus the grid's own padding round them (computeCellGridLayout), so
+        // the whole panel is what must fit: its frame (panel less cells) is measured off the grid as it
+        // stands, in px at this size — it doesn't change as the grid re-wraps.
         const r = w.terminalRect(s.id), v = w.viewport.view;
+        const frameX = (r.maxX - r.minX - grid.cols * stride.x) * zoom;
+        const frameY = (r.maxY - r.minY - grid.rows * stride.y) * zoom;
+        const cols = Math.max(MIN.cols, Math.floor((a.width - 2 * pad - frameX) / cellW));
+        const rows = Math.max(MIN.rows, Math.floor((a.height - 2 * pad - frameY) / cellH));
+        if (cols !== grid.cols || rows !== grid.rows) w.router.execute(['terminal.resize', s.id, String(cols), String(rows)]);
+        // The panel's top-left stays put as it re-wraps (it grows right and down), so the pose is known
+        // now: that corner at the area's top-left, the leftover under a cell split evenly round it.
+        const left = a.left + Math.max(0, (a.width - cols * cellW - frameX) / 2);
+        const top = a.top + Math.max(0, (a.height - rows * cellH - frameY) / 2);
         w.viewport.easeTo({ x: r.minX + (v.w / 2 - left) / zoom, y: r.maxY - (v.h / 2 - top) / zoom, zoom });
         return { cols, rows };
     }
