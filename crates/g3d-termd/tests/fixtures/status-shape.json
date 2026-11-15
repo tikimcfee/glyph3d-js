@@ -70,6 +70,7 @@
       "alt": "bool",
       "created_at": "int",
       "seq": "int",
+      "saved_seq": "int",
       "out_bps": "int",
       "in_bps": "int",
       "last_output_at": "int",

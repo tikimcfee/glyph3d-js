@@ -345,7 +345,15 @@ try {
     // ── termd's brain crashes: the holder restarts it and every grid rides it out ──
     type(A, 'echo before-brain-$((6*6))\r');
     ok(await screenHas(A, 'before-brain-36\r\n'), 'marker on screen before the brain crash');
-    await sleep(2500); // past one snapshot interval (2 s): the screen with the marker is saved
+    // termd's own word that the screen with the marker is saved: a status document built after the
+    // marker reached us names A's seq (at least the marker's end), and a later one a saved_seq at
+    // or past it (the snapshot interval's save).
+    const tMarker = Date.now(), evAtMarker = events.length;
+    const seqOf = (p, key) => p.status?.terminals?.find((t) => t.id === A)?.[key];
+    const afterMark = await statusSeen(evAtMarker, (p) => p.status?.at > tMarker && seqOf(p, 'seq') > 0, 10_000);
+    const markSeq = afterMark ? seqOf(afterMark, 'seq') : Infinity;
+    const saved = await statusSeen(evAtMarker, (p) => (seqOf(p, 'saved_seq') ?? -1) >= markSeq, 10_000);
+    ok(!!saved, `termd saved ${A}'s screen with the marker before the crash (saved_seq ${saved ? seqOf(saved, 'saved_seq') : 'never'} ≥ seq ${markSeq})`);
     const brain1 = brainPid(termd.dir, NS);
     ok(!!brain1 && brain1 !== daemon1, `found termd's brain (pid ${brain1}) beside its holder (pid ${daemon1})`);
     const closesBefore = term(A).closes + term(s2.id).closes;

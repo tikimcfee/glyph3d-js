@@ -31,8 +31,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
@@ -499,7 +499,8 @@ fn start_owner(
             created_at: meta.created_at,
             subscribers: SubscriberCounts::default(),
         }),
-        stats: TermStats::default(),
+        // Not known until its owner thread has restored it (or started it fresh).
+        stats: TermStats { saved_seq: AtomicU64::new(u64::MAX), ..TermStats::default() },
     });
     reg.insert(tref.clone());
     let (started_tx, started_rx) = oneshot::channel();
@@ -867,6 +868,7 @@ impl Owner {
         {
             let st = &o.tref.stats;
             st.snapshot_bytes.store(snap_sizes.iter().sum(), SeqCst);
+            st.saved_seq.store(o.snap_seq, SeqCst);
             let mut slow = st.slow.lock().unwrap();
             slow.pwd.clone_from(&o.pwd);
             slow.unseen = unseen;
@@ -918,6 +920,7 @@ impl Owner {
             .hold
             .send(&json!({"m": "snapshot", "handle": self.tref.handle, "seq": self.seq, "handoff": handoff}), &[fd]);
         self.snap_seq = self.seq;
+        self.tref.stats.saved_seq.store(self.snap_seq, SeqCst);
         self.last_snap = Instant::now();
         Ok(())
     }

@@ -777,7 +777,7 @@ Unix epoch milliseconds, sizes are bytes):
  "terminals": [
    {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src",
     "pwd": "/srv/src/app", "title": "~/src/app", "cols": 120, "rows": 40, "alt": false,
-    "created_at": 1794480000123, "seq": 18211, "out_bps": 1253000, "in_bps": 12,
+    "created_at": 1794480000123, "seq": 18211, "saved_seq": 17904, "out_bps": 1253000, "in_bps": 12,
     "last_output_at": 1794519127390, "flow": "live", "input_queued": 0,
     "scrollback_rows": 1567, "memory": {"resident": 1986560, "compressed": 0},
     "restored": "snapshot",
@@ -818,6 +818,7 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
 | `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain). A terminal restored from a snapshot saves a new one at the next interval even while quiet, so a second crash restores it exact |
 | `unseen` | with `restored`: this terminal's output the previous brain read and never saved (0 when `exact`) |
+| `saved_seq` | the `seq` a crash now would bring it back to: its newest crash-restore save's (a snapshot, every `snapshots.interval_ms` while its `seq` moves; an upgrade's handoff), so a crash now loses `seq − saved_seq`. A change like any other field: a follower hears the save. Absent while a terminal restored from a snapshot or blank waits for its first save |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
 `errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,

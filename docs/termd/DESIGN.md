@@ -393,7 +393,8 @@ daemon announces `proto` `[1, 3]` (1.2 adds [keys and paste](#keys-and-paste-pro
 
 - Owner threads publish into each terminal's `TermStats` as things change: input bytes, the last
   output time, queued input, the snapshot store's two blob sizes (read from the restored blobs'
-  `fstat` at a brain start), the `pwd`, the flow (`live`/`blocked`/`paused`), how it was restored,
+  `fstat` at a brain start) and the `seq` the newest is at (`saved_seq`: where a crash now would
+  bring the terminal back to), the `pwd`, the flow (`live`/`blocked`/`paused`), how it was restored,
   and every subscription's role, mode, flow and view offset after each command. Queue depth, lag
   and the resync count (`SubShared.lags`) are atomics the tick reads live. History rows and
   `memory_usage` (primary + alternate resident and compressed bytes) are sampled on the owner's own
