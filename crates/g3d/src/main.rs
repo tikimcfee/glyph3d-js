@@ -151,6 +151,11 @@ enum Cmd {
         /// or the bracketed-paste end.
         #[arg(long = "unsafe")]
         allow_unsafe: bool,
+        /// Send the text in chunks of at most this many bytes (one paste, streamed: each chunk
+        /// waits for the program to have room, as a terminal's paste does). Capped so a chunk of
+        /// control characters still fits the daemon's max_frame as JSON.
+        #[arg(long, default_value_t = 1 << 20)]
+        chunk: usize,
     },
     /// Kill a terminal's program.
     Kill {
@@ -333,22 +338,13 @@ fn main() {
             }
             done_writing(&mut c, handle);
         }
-        Cmd::Paste { id, text, allow_unsafe } => {
-            let text = text.unwrap_or_else(|| {
-                String::from_utf8(stdin_all())
-                    .unwrap_or_else(|_| die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"))
-            });
+        Cmd::Paste { id, text, allow_unsafe, chunk } => {
             let (mut c, handle) = writer(&target, &id, Some("paste"));
-            let r = c.request::<WrittenReply>(Op::Paste(Paste {
-                handle,
-                text,
-                allow_unsafe: allow_unsafe.then_some(true),
-            }));
-            match r {
-                Ok(_) => {}
-                Err(e) if e.code() == Some(code::UNSAFE_PASTE) => die(format!("{e} (g3d paste --unsafe)")),
-                Err(e) => die(e),
-            }
+            let src: Box<dyn Read> = match text {
+                Some(t) => Box::new(std::io::Cursor::new(t.into_bytes())),
+                None => Box::new(std::io::stdin()),
+            };
+            paste(&mut c, handle, src, chunk, allow_unsafe);
             done_writing(&mut c, handle);
         }
         Cmd::Kill { id, signal } => {
@@ -367,6 +363,67 @@ fn main() {
         }
         Cmd::Watch { id, detach_key } => attach(&target, &id, Role::Watch, parse_key(&detach_key), window),
     }
+}
+
+/// `g3d paste`: the text streamed as one paste in chunks (PROTOCOL.md "`paste`", `more`), each sent
+/// once the last one's bytes are in termd's input buffer, so a paste of any size goes through at
+/// the program's pace with bounded memory on both sides. A daemon without `paste_stream` (before
+/// protocol 1.5) gets the whole text as one request, which `max_frame` bounds.
+fn paste(c: &mut Client, handle: u32, mut src: Box<dyn Read>, chunk: usize, allow_unsafe: bool) {
+    let send = |c: &mut Client, text: String, more: bool| {
+        let op =
+            Op::Paste(Paste { handle, text, allow_unsafe: allow_unsafe.then_some(true), more: more.then_some(true) });
+        match c.request::<WrittenReply>(op) {
+            Ok(_) => {}
+            Err(e) if e.code() == Some(code::UNSAFE_PASTE) => die(format!("{e} (g3d paste --unsafe)")),
+            Err(e) => die(e),
+        }
+    };
+    if !c.welcome.features.iter().any(|f| f == "paste_stream") {
+        let mut b = Vec::new();
+        src.read_to_end(&mut b).unwrap_or_else(|e| die(format!("stdin: {e}")));
+        let text =
+            String::from_utf8(b).unwrap_or_else(|_| die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"));
+        return send(c, text, false);
+    }
+    // A control character is six bytes as JSON (`\u0003`): a chunk of them must still fit.
+    let chunk = chunk.clamp(4, (c.welcome.max_frame as usize).saturating_sub(1024) / 6);
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk + 4);
+    let mut ready: Option<String> = None;
+    loop {
+        let have = buf.len();
+        buf.resize(chunk, 0);
+        let n = match src.read(&mut buf[have..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                buf.truncate(have);
+                continue;
+            }
+            Err(e) => die(format!("stdin: {e}")),
+        };
+        buf.truncate(have + n);
+        if n == 0 && buf.is_empty() {
+            break;
+        }
+        // A chunk ends on a character's boundary; the rest of a character waits for the next.
+        let cut = match std::str::from_utf8(&buf) {
+            Ok(_) => buf.len(),
+            Err(e) if e.error_len().is_none() && n > 0 => e.valid_up_to(),
+            Err(_) => die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"),
+        };
+        if cut == 0 && n > 0 {
+            continue;
+        }
+        let rest = buf.split_off(cut);
+        let text = String::from_utf8(std::mem::replace(&mut buf, rest)).expect("checked above");
+        if let Some(prev) = ready.replace(text) {
+            send(c, prev, true);
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    send(c, ready.unwrap_or_default(), false);
 }
 
 fn stdin_all() -> Vec<u8> {

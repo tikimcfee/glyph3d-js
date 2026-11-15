@@ -976,8 +976,13 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   exactly under mode 2004, a line break without it refused unless `allow_unsafe`, a `\r\n` one
   `\r` outside a bracket, a pasted `ESC [201~` unable to close the bracket; PROTOCOL.md's key table
   equal to the encoder's output);
-  `g3d send`/`key`/`paste` against a private daemon, a 17 MB paste refused unsent as `too_large`
-  (`crates/g3d/tests/input.rs`);
+  a paste of any size (`src/paste.rs` unit tests and `tests/paste.rs`: chunks of one paste are one
+  bracket, a bracket end split across chunks refused with the bracket closed and the rest of the
+  paste writing nothing, a split `\r\n` one Enter, a key typed meanwhile after the paste, a paste
+  whose writer unsubscribes closed and another writer's `busy`, a program that stops reading
+  holding the paste back at the client with the brain's RSS bounded and nothing lost once it reads);
+  `g3d send`/`key`/`paste` against a private daemon, and 64 MiB through `g3d paste` into
+  `cat > file` byte for byte, bracketed and not (`crates/g3d/tests/input.rs`);
   and `g3d attach`/`watch`/`--take` driven through a real PTY (repaint, typing, no query reaching
   the outer terminal, detach; both riding an upgrade and a brain crash), `g3d new` sending its
   environment as the base (a stale `DISPLAY` and `FOO` arrive, `REX_SESSION` doesn't; `-e`;
@@ -996,7 +1001,8 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   restart (terminal survives, `terminal.recover` re-adopts it, the repaint carries the old
   screen, stopping the relay logs no termd loss, the adapter names the terminal's own program),
   `terminal.key` Shift+Enter and Ctrl+C reaching a Kitty-keyboard program as `CSI 13;2u` and
-  `CSI 99;5u`, `terminal.paste` bracketed with an embedded `ESC` made a space,
+  `CSI 99;5u`, `terminal.paste` bracketed with an embedded `ESC` made a space and three pieces of
+  one paste one bracket,
   the wheel reaching a mouse-reporting alt-screen program before and after re-adoption, a
   SIGKILLed adapter (the relay re-adopts its terminal, typing works), a SIGKILLed termd brain and
   a `g3d upgrade` (every adapter rides them: no grid closes, no `LOST termd`, the repaint brings the
@@ -1023,7 +1029,9 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   connection (`TestTermdStatus*`) reads every state from its side of the socket (absent, ok,
   restarting across a crash, unreachable past the grace with the holder stopped, ok again with the
   orphans re-adopted, absent after `stop`, lost when the holder dies) and its display plane keeps
-  only the latest notification; `termd_paths_test.go`: the socket directory found from the uid,
+  only the latest notification; `termdpaste_test.go`: the adapter streams a paste one chunk in
+  flight, cut on character boundaries, drops the rest after a failed chunk and gives an older brain
+  each paste whole; `termd_paths_test.go`: the socket directory found from the uid,
   the same with and without `XDG_RUNTIME_DIR` and `TMPDIR`.
 
 ## Build / serve

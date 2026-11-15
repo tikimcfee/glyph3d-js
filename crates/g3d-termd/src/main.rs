@@ -15,6 +15,7 @@ mod keys;
 mod mouse;
 mod out;
 mod owner;
+mod paste;
 mod repaint;
 mod server;
 mod spawn;

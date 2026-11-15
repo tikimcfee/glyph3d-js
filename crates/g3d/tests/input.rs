@@ -20,7 +20,9 @@ impl Daemon {
         let g3d = PathBuf::from(env!("CARGO_BIN_EXE_g3d"));
         let termd = g3d.with_file_name("g3d-termd");
         assert!(termd.is_file(), "no {} — run `cargo test --workspace` so the daemon is built", termd.display());
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("input-{}", std::process::id()));
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("input-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("termd-input.sock");
@@ -172,12 +174,6 @@ fn send_key_and_paste_type_what_a_keyboard_and_a_clipboard_would() {
     ok(g3d(&d.socket, &["paste", "--unsafe", "plain"], Some(b"one\ntwo")));
     p.read(b"one\rtwo");
 
-    // A paste larger than the daemon takes is said, and never sent (the daemon would end the
-    // connection over it, and the client would read a broken pipe).
-    let big = vec![b'x'; 17_000_000];
-    let o = g3d(&d.socket, &["paste", "plain"], Some(&big));
-    let err = String::from_utf8_lossy(&o.stderr);
-    assert!(!o.status.success() && err.contains("too_large") && err.contains("the daemon takes at most"), "{err}");
     ok(g3d(&d.socket, &["send", "plain", "z"], None));
     p.read(b"z");
 
@@ -189,4 +185,86 @@ fn send_key_and_paste_type_what_a_keyboard_and_a_clipboard_would() {
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("unknown modifier"));
     let o = g3d(&d.socket, &["key", "nope", "a"], None);
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("no_terminal"));
+}
+
+/// A program that reads its input raw into a file, as `cat > file` in a terminal would.
+fn sink(socket: &Path, id: &str, setup: &str, file: &Path) -> Client {
+    let mut c = Client::connect(socket, "input-test").unwrap();
+    let script = format!("stty raw -echo; printf '{setup}'; printf 'READY\\n'; exec cat > '{}'", file.display());
+    let _: CreateReply = c
+        .request(Op::Create(Create {
+            id: id.into(),
+            argv: Some(vec!["sh".into(), "-c".into(), script]),
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        }))
+        .unwrap();
+    let _: SubscribeReply = c
+        .request(Op::Subscribe(Subscribe {
+            id: id.into(),
+            mode: Mode::Raw,
+            role: Role::Watch,
+            history_rows: None,
+            flow: None,
+            cols: None,
+            rows: None,
+        }))
+        .unwrap();
+    let mut seen = Vec::new();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !seen.windows(5).any(|w| w == b"READY") {
+        assert!(Instant::now() < until, "{id} never said READY");
+        let f = c.next_frame().unwrap();
+        if f.ty == ty::OUTPUT
+            && let Some((_, b)) = frame::parse_output(&f.payload)
+        {
+            seen.extend_from_slice(b);
+        } else if f.ty == ty::REPAINT
+            && let Some((_, vt)) = frame::parse_repaint(&f.payload)
+        {
+            seen.extend_from_slice(vt);
+        }
+    }
+    c
+}
+
+/// A paste of any size goes through the PTY as a terminal's does (protocol 1.5, `more`): 64 MiB
+/// into `cat > file` arrives byte for byte, bracketed and not, at the program's pace.
+#[test]
+fn a_64_mib_paste_arrives_byte_identical() {
+    let d = Daemon::start();
+    const N: usize = 64 << 20;
+    // Printable text in lines of varying length: no byte a paste strips.
+    let mut x: u32 = 0x9e37_79b9;
+    let text: Vec<u8> = (0..N)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            if x.is_multiple_of(61) { b'\n' } else { b' ' + (x % 95) as u8 }
+        })
+        .collect();
+    for (id, setup, framed) in [
+        ("plain", "", text.iter().map(|&b| if b == b'\n' { b'\r' } else { b }).collect::<Vec<u8>>()),
+        ("bracketed", "\\033[?2004h", [b"\x1b[200~".as_slice(), &text, b"\x1b[201~"].concat()),
+    ] {
+        let file = d.dir.join(format!("{id}.out"));
+        let _c = sink(&d.socket, id, setup, &file);
+        let o = g3d(&d.socket, &["paste", "--unsafe", id], Some(&text));
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let until = Instant::now() + Duration::from_secs(120);
+        while std::fs::metadata(&file).map_or(0, |m| m.len()) < framed.len() as u64 {
+            assert!(
+                Instant::now() < until,
+                "{id}: {:?} of {} B",
+                std::fs::metadata(&file).map(|m| m.len()),
+                framed.len()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let got = std::fs::read(&file).unwrap();
+        assert_eq!(got.len(), framed.len(), "{id}");
+        assert!(got == framed, "{id}: byte for byte");
+    }
 }

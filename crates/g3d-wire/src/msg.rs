@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 4];
+pub const PROTO: [u32; 2] = [1, 5];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
 /// The features this daemon announces: the core plus `status`, `upgrade` and `env` (1.1), `key`
-/// and `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4).
-pub const DAEMON_FEATURES: [&str; 10] =
-    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"];
+/// and `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4), `paste_stream` (1.5).
+pub const DAEMON_FEATURES: [&str; 11] =
+    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse", "paste_stream"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,8 +290,13 @@ pub struct Paste {
     pub handle: u32,
     pub text: String,
     /// Paste text that could run commands (Ghostty's `clipboard-paste-protection` answered yes).
+    /// Read from a paste's first chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_unsafe: Option<bool>,
+    /// (1.5, feature `paste_stream`) More chunks of this paste follow: the paste stays open (one
+    /// bracket, one set of rules) until a chunk without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<bool>,
 }
 
 /// (1.4) `mouse`: one pointer event on the terminal's cells (PROTOCOL.md, "`mouse`").

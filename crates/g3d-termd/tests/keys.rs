@@ -46,7 +46,7 @@ fn key(handle: u32, code: &str, k: &str, mods: &[&str], text: &str) -> Op {
 }
 
 fn paste(handle: u32, text: &str, allow_unsafe: bool) -> Op {
-    Op::Paste(Paste { handle, text: text.into(), allow_unsafe: allow_unsafe.then_some(true) })
+    Op::Paste(Paste { handle, text: text.into(), allow_unsafe: allow_unsafe.then_some(true), more: None })
 }
 
 /// Sends `op`, then waits for the program to have read exactly `want` after what it had.

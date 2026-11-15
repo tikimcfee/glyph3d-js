@@ -151,7 +151,7 @@ const type = (id, text) => display.send(JSON.stringify({ to: term(id).owner, eve
 const screenHas = (id, s, ms = 8000) => waitFor(() => term(id).text.includes(s), ms, `"${s}" on ${id}`).then(() => true, () => false);
 /** A display's key event and paste, as the wall's keyboard and clipboard push them. */
 const press = (id, key) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.key', data: { terminalId: id, action: 'press', ...key } }));
-const pasteText = (id, text) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.paste', data: { terminalId: id, text } }));
+const pasteText = (id, text, more = false) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.paste', data: more ? { terminalId: id, text, more } : { terminalId: id, text } }));
 /** What a program read, as the hex echo below prints it. */
 const hexOf = (s) => [...Buffer.from(s)].map((b) => `[${b.toString(16).padStart(2, '0')}]`).join('');
 const wheel = (id, lines) => display.send(JSON.stringify({ to: term(id).owner, event: 'terminal.scroll', data: { terminalId: id, lines } }));
@@ -270,6 +270,12 @@ try {
         pasteText(sk.id, 'hi\x1b[201~x');
         ok(await screenHas(sk.id, hexOf('\x1b[200~hi [201~x\x1b[201~')),
             'terminal.paste is bracketed, and an ESC inside it is a space: the bracket ends once');
+        // A paste the display streams in pieces (`more`) is one paste for the program.
+        pasteText(sk.id, 'one', true);
+        pasteText(sk.id, 'two', true);
+        pasteText(sk.id, 'three');
+        ok(await screenHas(sk.id, hexOf('x\x1b[201~\x1b[200~onetwothree\x1b[201~')),
+            'terminal.paste in three pieces reaches the program as one bracketed paste');
         display.send(JSON.stringify({ to: term(sk.id).owner, event: 'terminal.shutdown', data: { terminalId: sk.id } }));
         await waitFor(() => !execFileSync(g3dBeside(BIN), ['--ns', NS, 'ls'], { env: termd.env, encoding: 'utf8' }).includes(`${sk.id} `),
             8000, `${sk.id} to end`);

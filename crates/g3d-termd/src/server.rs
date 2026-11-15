@@ -487,6 +487,9 @@ struct Conn {
     passive: bool,
     /// It has asked for something other than status or ping.
     active: bool,
+    /// Per terminal, the last paste chunk sent on: answered once its bytes are in the input
+    /// buffer. The next chunk waits for it, so at most one chunk per terminal waits in termd.
+    pasting: HashMap<u32, oneshot::Receiver<bool>>,
 }
 
 enum Flow {
@@ -532,6 +535,7 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
         pid,
         passive: false,
         active: false,
+        pasting: HashMap::new(),
     };
     srv.outs.lock().unwrap().insert(c.id, out.clone());
     let mut dec = FrameDecoder::default();
@@ -876,8 +880,23 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
         }
         Op::Paste(p) => {
             if let Some(t) = subscribed(srv, c, req, p.handle).cloned() {
-                let allow_unsafe = p.allow_unsafe == Some(true);
-                to_owner(c, &t, req, TermOp::Paste { text: p.text, allow_unsafe }).await;
+                // A chunk's reply comes once its bytes are in the input buffer (the program reads
+                // them): that is a paste's flow control. Other requests go on meanwhile; a client
+                // that sends the next chunk before that reply waits here, its socket backing up.
+                if let Some(prev) = c.pasting.remove(&p.handle) {
+                    let _ = prev.await;
+                }
+                let op = TermOp::Paste {
+                    text: p.text,
+                    allow_unsafe: p.allow_unsafe == Some(true),
+                    more: p.more == Some(true),
+                };
+                let (tx, rx) = oneshot::channel();
+                if t.send(Cmd { conn: c.id, out: c.out.clone(), req, op, done: Some(tx) }).is_err() {
+                    reply_err(&c.out, req, code::NO_TERMINAL, format!("terminal {} is gone", t.id));
+                } else {
+                    c.pasting.insert(p.handle, rx);
+                }
             }
         }
         Op::Capture(cp) => {

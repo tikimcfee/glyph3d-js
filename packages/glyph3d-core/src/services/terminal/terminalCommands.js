@@ -111,18 +111,38 @@ function getTerminals(ctx) {
 }
 
 /**
- * A grid's input as the push its owning adapter reads: a key event (`terminal.key`), a paste
+ * A grid's input as the pushes its owning adapter reads: a key event (`terminal.key`), a paste
  * (`terminal.paste`) and a pointer event (`terminal.mouse`), which the adapter hands to termd's
  * `key`, `paste` and `mouse` ops, or raw bytes (`terminal.bytes`, base64), written to the program
  * as given. JSON pushes: input is sparse; the binary lane is the high-volume OUTPUT direction's.
+ * A paste longer than `pasteChunk` code units goes as pieces of one paste, each but the last with
+ * `more` (never cut inside a surrogate pair), which termd streams into the program as one.
  * @param {{bytes?: string, key?: Object, paste?: string, mouse?: Object}} input - TerminalGrid.onInput's shapes
  * @param {string} terminalId
+ * @param {number} pasteChunk
+ * @returns {Object[]}
  */
-function inputPush(input, terminalId) {
-    if (input.key) return { event: 'terminal.key', data: { terminalId, ...input.key } };
-    if (input.mouse) return { event: 'terminal.mouse', data: { terminalId, ...input.mouse } };
-    if (input.paste != null) return { event: 'terminal.paste', data: { terminalId, text: input.paste } };
-    return { event: 'terminal.bytes', data: { terminalId, b64: encodeBase64(input.bytes) } };
+export function inputPushes(input, terminalId, pasteChunk) {
+    if (input.key) return [{ event: 'terminal.key', data: { terminalId, ...input.key } }];
+    if (input.mouse) return [{ event: 'terminal.mouse', data: { terminalId, ...input.mouse } }];
+    if (input.paste != null) {
+        const text = input.paste;
+        const pieces = [];
+        let at = 0;
+        while (text.length - at > pasteChunk) {
+            let end = at + Math.max(2, pasteChunk);
+            const c = text.charCodeAt(end - 1);
+            if (c >= 0xd800 && c <= 0xdbff) end -= 1;   // a high surrogate stays with its low half
+            pieces.push(text.slice(at, end));
+            at = end;
+        }
+        pieces.push(text.slice(at));
+        return pieces.map((t, i) => ({
+            event: 'terminal.paste',
+            data: i + 1 < pieces.length ? { terminalId, text: t, more: true } : { terminalId, text: t },
+        }));
+    }
+    return [{ event: 'terminal.bytes', data: { terminalId, b64: encodeBase64(input.bytes) } }];
 }
 
 /**
@@ -135,7 +155,7 @@ function inputPush(input, terminalId) {
 function bindOwner(ctx, grid, owner) {
     const bridge = ctx.wsbridge;
     grid.onInput = owner && bridge?.connected
-        ? (input, termId) => bridge.push(owner, inputPush(input, termId))
+        ? (input, termId) => { for (const p of inputPushes(input, termId, grid.pasteChunk)) bridge.push(owner, p); }
         : null;
 }
 

@@ -14,10 +14,8 @@ use g3d_wire::frame::{self, REPAINT_FLAG_VIEW, RepaintHead, ty};
 use g3d_wire::msg::*;
 use libghostty_vt::Terminal;
 use libghostty_vt::color::Rgb;
-use libghostty_vt::effect::ClipboardMime;
 use libghostty_vt::grid_ref::TrackedGridRef;
 use libghostty_vt::mode::Mode as VtMode;
-use libghostty_vt::paste::{Options as PasteOptions, Source as PasteSource};
 use libghostty_vt::point::{Coordinate, Point, Space};
 use libghostty_vt::screen::Screen;
 use libghostty_vt::terminal::CompressionMode;
@@ -219,10 +217,12 @@ pub enum TermOp {
     Key(Box<keys::Spec>),
     /// (1.4) A pointer event, encoded here against the terminal's live mouse modes.
     Mouse(Box<mouse::Spec>),
-    /// (1.2) A paste, framed here per the program's bracketed-paste mode.
+    /// (1.2) A paste, framed here per the program's bracketed-paste mode; (1.5) one chunk of it,
+    /// with `more` on all but the last.
     Paste {
         text: String,
         allow_unsafe: bool,
+        more: bool,
     },
     /// `kill` (with a reply) or part of `stop` (`reply: false`).
     Kill {
@@ -587,6 +587,30 @@ struct Owner {
     sampled: Option<Instant>,
     /// The sizes of the newest two blobs the holder keeps for it, newest first.
     snap_sizes: [u64; 2],
+    /// A paste in progress (PROTOCOL.md "`paste`", `more`): one writer's at a time.
+    pasting: Option<Pasting>,
+    /// Writers whose paste ended under them (a refused chunk, an upgrade's cut): their later
+    /// chunks are refused with this code and reason, writing nothing, until their last one.
+    paste_over: Vec<(ConnId, &'static str, String)>,
+}
+
+/// A paste streaming into the program, chunk by chunk, under the input buffer's flow control.
+struct Pasting {
+    conn: ConnId,
+    stream: crate::paste::Stream,
+    /// A chunk whose bytes wait for room in the input buffer, answered once they fit.
+    waiting: Option<Waiting>,
+    /// Input from anyone (keys, `INPUT`, a pointer) since the paste began: it follows the paste, as
+    /// a key pressed during a paste follows it into a real terminal's PTY.
+    held: Vec<u8>,
+}
+
+struct Waiting {
+    bytes: Vec<u8>,
+    last: bool,
+    out: Arc<ConnOut>,
+    req: u64,
+    done: Option<oneshot::Sender<bool>>,
 }
 
 /// How often an owner thread samples its terminal's gauges (scrollback rows, memory) for the
@@ -862,6 +886,8 @@ impl Owner {
             flow_shown: "",
             sampled: None,
             snap_sizes,
+            pasting: None,
+            paste_over: Vec::new(),
         };
         o.modes = o.current_modes();
         {
@@ -1024,6 +1050,7 @@ impl Owner {
             if pty_flags.contains(PollFlags::OUT) {
                 self.flush_input();
             }
+            self.pump_paste();
             if self.compress_pending && self.last_output.elapsed() >= COMPRESS_IDLE {
                 self.compress_step();
             }
@@ -1482,6 +1509,7 @@ impl Owner {
             }
             TermOp::Unsubscribe => match self.sub_index(conn) {
                 Some(i) => {
+                    self.end_paste_of(conn, "its writer unsubscribed");
                     self.subs.remove(i);
                     self.update_counts();
                     reply_ok(out, req, &Empty {});
@@ -1494,6 +1522,7 @@ impl Owner {
             },
             TermOp::Detach => {
                 if let Some(i) = self.sub_index(conn) {
+                    self.end_paste_of(conn, "its writer's connection closed");
                     self.subs.remove(i);
                     self.update_counts();
                 }
@@ -1668,50 +1697,7 @@ impl Owner {
                 };
                 self.written(out, req, i, &bytes)
             }
-            TermOp::Paste { text, allow_unsafe } => {
-                let i = match self.writer(conn, "paste") {
-                    Ok(i) => i,
-                    Err((code, msg)) => {
-                        reply_err(out, req, code, msg);
-                        return false;
-                    }
-                };
-                // libghostty's paste writes through the terminal's pty callback, where query
-                // answers collect too: send any waiting first, so the paste's bytes are its own.
-                self.flush_replies();
-                // Outside a bracket each line break is Enter: a `\r\n` is one (WezTerm's
-                // canonicalize_pasted_newlines), not the two libghostty's `\n` → `\r` makes of it.
-                let text = if self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false) {
-                    text
-                } else {
-                    text.replace("\r\n", "\n")
-                };
-                let mimes = [ClipboardMime::new(b"text/plain")];
-                let options = PasteOptions::new().with_source(PasteSource::Clipboard).with_allow_unsafe(allow_unsafe);
-                let r = self.term.paste(options, &mimes, |_, w| w.write_all(text.as_bytes()));
-                let bytes = std::mem::take(&mut *self.fx.replies.borrow_mut());
-                match r {
-                    Ok(_) => self.written(out, req, i, &bytes),
-                    Err(libghostty_vt::Error::Rejected) => {
-                        let why = if self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false) {
-                            "it holds the bracketed-paste end (ESC [ 201 ~)"
-                        } else {
-                            "it holds a line break and the program hasn't asked for bracketed paste, so each line would run"
-                        };
-                        reply_err(
-                            out,
-                            req,
-                            code::UNSAFE_PASTE,
-                            format!("paste refused: {why}; allow_unsafe pastes it"),
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        reply_err(out, req, code::BAD_REQUEST, format!("paste: {e}"));
-                        false
-                    }
-                }
-            }
+            TermOp::Paste { text, allow_unsafe, more } => self.paste(conn, out, req, &text, allow_unsafe, !more, done),
             TermOp::Kill { signal, reply } => {
                 if self.cut && reply {
                     reply_err(out, req, code::BUSY, "termd is upgrading; kill after it");
@@ -1734,6 +1720,7 @@ impl Owner {
                 true
             }
             TermOp::Cut { snapshot } => {
+                self.cut_paste();
                 self.flush_input();
                 self.cut = true;
                 let kind = if snapshot { blob::KIND_SNAPSHOT } else { blob::KIND_VT };
@@ -1750,6 +1737,160 @@ impl Owner {
                 true
             }
         }
+    }
+
+    /// One chunk of a paste (`last`: its final one): framed and checked by the whole paste's rules
+    /// (paste.rs), then into the input buffer, or held until it has room (the flow control: its
+    /// reply, and so the client's next chunk, waits for the program to read).
+    #[allow(clippy::too_many_arguments)]
+    fn paste(
+        &mut self,
+        conn: ConnId,
+        out: &Arc<ConnOut>,
+        req: u64,
+        text: &str,
+        allow_unsafe: bool,
+        last: bool,
+        done: &mut Option<oneshot::Sender<bool>>,
+    ) -> bool {
+        let i = match self.writer(conn, "paste") {
+            Ok(i) => i,
+            Err((code, msg)) => {
+                reply_err(out, req, code, msg);
+                return false;
+            }
+        };
+        if let Some(k) = self.paste_over.iter().position(|(c, ..)| *c == conn) {
+            let (_, code, why) = if last { self.paste_over.remove(k) } else { self.paste_over[k].clone() };
+            reply_err(out, req, code, why);
+            return false;
+        }
+        if self.cut {
+            reply_err(out, req, code::BUSY, format!("termd is upgrading; the paste into {} is dropped", self.tref.id));
+            return false;
+        }
+        if let Some(p) = &self.pasting
+            && p.conn != conn
+        {
+            reply_err(out, req, code::BUSY, format!("another writer's paste into {} is streaming", self.tref.id));
+            return false;
+        }
+        if self.pasting.is_none() {
+            if self.subs[i].view.take().is_some() {
+                self.push_live_repaint(i, 0);
+            }
+            // Query answers waiting go first: the paste's bytes are its own.
+            self.flush_replies();
+            let bracketed = self.term.mode(VtMode::BRACKETED_PASTE).unwrap_or(false);
+            self.pasting = Some(Pasting {
+                conn,
+                stream: crate::paste::Stream::new(bracketed, allow_unsafe),
+                waiting: None,
+                held: Vec::new(),
+            });
+        }
+        let p = self.pasting.as_mut().expect("begun above");
+        match p.stream.chunk(text, last) {
+            Ok(bytes) => {
+                self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
+                p.waiting = Some(Waiting { bytes, last, out: out.clone(), req, done: done.take() });
+                self.pump_paste();
+                true
+            }
+            Err(r) => {
+                let written = p.stream.written;
+                let why = format!(
+                    "paste refused: {}{}; allow_unsafe pastes it",
+                    r.why,
+                    if written > 0 {
+                        format!(" ({written} B of it went before, typed and not run)")
+                    } else {
+                        String::new()
+                    }
+                );
+                self.input.extend_from_slice(&r.close);
+                self.release_paste();
+                if !last {
+                    self.paste_over.push((
+                        conn,
+                        code::UNSAFE_PASTE,
+                        "an earlier chunk of this paste was refused".into(),
+                    ));
+                }
+                self.flush_input();
+                reply_err(out, req, code::UNSAFE_PASTE, why);
+                false
+            }
+        }
+    }
+
+    /// Moves the paste's waiting chunk into the input buffer once it has room (or the buffer is
+    /// empty: a chunk bigger than the whole buffer still goes), and answers it.
+    fn pump_paste(&mut self) {
+        let max = self.reg.cfg.input_max;
+        let input = self.input.len();
+        let Some(p) = self.pasting.as_mut() else { return };
+        if !p.waiting.as_ref().is_some_and(|w| input == 0 || input + w.bytes.len() <= max) {
+            return;
+        }
+        let w = p.waiting.take().expect("checked above");
+        self.input.extend_from_slice(&w.bytes);
+        reply_ok(&w.out, w.req, &WrittenReply { written: w.bytes.len() as u64 });
+        if let Some(d) = w.done {
+            let _ = d.send(true);
+        }
+        if w.last {
+            self.release_paste();
+        }
+        self.flush_input();
+    }
+
+    /// The paste is over: what was held behind it follows it.
+    fn release_paste(&mut self) {
+        if let Some(mut p) = self.pasting.take() {
+            let close = p.stream.close();
+            self.input.extend_from_slice(&close);
+            self.input.append(&mut p.held);
+        }
+    }
+
+    /// The paste's writer is gone (`why`): the paste ends where it is, closed, so the program
+    /// isn't left inside a bracket, and a chunk still waiting is answered.
+    fn end_paste_of(&mut self, conn: ConnId, why: &str) {
+        self.paste_over.retain(|(c, ..)| *c != conn);
+        if !self.pasting.as_ref().is_some_and(|p| p.conn == conn) {
+            return;
+        }
+        if let Some(w) = self.pasting.as_mut().and_then(|p| p.waiting.take()) {
+            reply_err(&w.out, w.req, code::BAD_REQUEST, format!("the paste ended: {why}"));
+            if let Some(d) = w.done {
+                let _ = d.send(false);
+            }
+        }
+        crate::log(&format!("terminal {}: a paste ended unfinished: {why}", self.tref.id));
+        self.release_paste();
+        self.flush_input();
+    }
+
+    /// An upgrade's cut during a paste: the paste ends here, closed (its bytes so far, and what was
+    /// held behind it, ride the handoff); input is at most once, so its later chunks are refused
+    /// with `busy` until its last.
+    fn cut_paste(&mut self) {
+        let Some(p) = self.pasting.as_mut() else { return };
+        let why = format!("termd upgraded during the paste into {}; the rest of it is dropped", self.tref.id);
+        let mut more = true;
+        if let Some(w) = p.waiting.take() {
+            more = !w.last;
+            reply_err(&w.out, w.req, code::BUSY, why.clone());
+            if let Some(d) = w.done {
+                let _ = d.send(false);
+            }
+        }
+        let conn = p.conn;
+        if more {
+            self.paste_over.push((conn, code::BUSY, why));
+        }
+        self.release_paste();
     }
 
     /// The subscription `conn` writes through (`attach` or `own`), for an op named `what`.
@@ -1780,13 +1921,25 @@ impl Owner {
             self.push_live_repaint(i, 0);
         }
         self.tref.stats.in_bytes.fetch_add(bytes.len() as u64, SeqCst);
-        if self.input.len() + bytes.len() > self.reg.cfg.input_max {
-            let msg = format!("{} has {} B of unread input; {} B refused", self.tref.id, self.input.len(), bytes.len());
+        let held = self.pasting.as_ref().map_or(0, |p| p.held.len());
+        if self.input.len() + held + bytes.len() > self.reg.cfg.input_max {
+            let msg = format!(
+                "{} has {} B of unread input; {} B refused",
+                self.tref.id,
+                self.input.len() + held,
+                bytes.len()
+            );
             self.reg.errors.record(code::INPUT_FULL, Some(&self.tref.id), msg.clone());
             return Err((code::INPUT_FULL, msg));
         }
-        self.input.extend_from_slice(bytes);
-        self.flush_input();
+        match self.pasting.as_mut() {
+            // A paste is streaming: this follows it.
+            Some(p) => p.held.extend_from_slice(bytes),
+            None => {
+                self.input.extend_from_slice(bytes);
+                self.flush_input();
+            }
+        }
         Ok(())
     }
 
@@ -1933,6 +2086,12 @@ impl Owner {
             if let Some(from) = self.subs[i].lag.take() {
                 let dropped = self.lag_dropped(i, from);
                 self.event_to(i, true, &Event::Lagged { dropped, seq: self.seq });
+            }
+        }
+        if let Some(w) = self.pasting.take().and_then(|p| p.waiting) {
+            reply_err(&w.out, w.req, code::NO_TERMINAL, format!("terminal {} ended during the paste", self.tref.id));
+            if let Some(d) = w.done {
+                let _ = d.send(false);
             }
         }
         self.event_all(true, &Event::Exit { code, signal, seq: self.seq });

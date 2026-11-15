@@ -1,4 +1,4 @@
-# The termd wire, version 1.4
+# The termd wire, version 1.5
 
 `g3d-termd` keeps terminals alive: it owns each terminal's pseudo-terminal (PTY), its
 process and a libghostty-vt emulator holding the terminal's screen and scrollback.
@@ -16,8 +16,9 @@ reply fields, the `env` op, and the status document (`status`, `status_follow`, 
 the `status` event). What is marked **(1.2)** is new in 1.2: key events and paste (`key`, `paste`,
 the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
 `key`'s `option_as_alt` and the feature of the same name. What is marked **(1.4)** is new in 1.4:
-pointer events (`mouse` and the feature of the same name). The daemon on branch `termd` speaks all
-of 1.4 and announces `proto` `[1, 4]`.
+pointer events (`mouse` and the feature of the same name). What is marked **(1.5)** is new in 1.5:
+a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`). The daemon
+on branch `termd` speaks all of 1.5 and announces `proto` `[1, 5]`.
 
 ## At a glance
 
@@ -102,8 +103,8 @@ only.
   `WELCOME.max_frame` says otherwise. A larger frame is a protocol error: the daemon answers
   `ERROR too_large` and closes the connection, every subscription on it with it. So a client
   measures a request before it sends one and refuses it itself (`g3d` and the relay say
-  `too_large`, naming `max_frame`): a paste of a few MB of control characters is six times
-  that as JSON.
+  `too_large`, naming `max_frame`): a control character is six bytes as JSON. A paste larger
+  than a frame streams in chunks ([`paste`](#paste-12), `more`), each well under it.
 - The header is 12 bytes, so a payload starts 4-byte aligned in a buffer that starts
   aligned. Binary prefixes below are laid out so their fields are naturally aligned.
 - A reader accumulates bytes until it holds `4 + len` of them, then handles one frame.
@@ -179,10 +180,10 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 4], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+{"proto": [1, 5], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse", "paste_stream"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -195,8 +196,8 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4), `cells`
-  (packed cells, reserved).
+  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4),
+  `paste_stream` (1.5), `cells` (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -222,7 +223,9 @@ a malformed frame: `ERROR` `bad_frame`, and the connection closes (see
 {"req": 5, "ok": false, "error": {"code": "no_terminal", "message": "no terminal 't9'"}}
 ```
 
-Replies to one connection come back in the order its requests were sent. A reply can
+Replies to one connection come back in the order its requests were sent, but for one: (1.5) a
+`paste` chunk is answered when its bytes are in the program's input buffer, which waits for the
+program to read, and replies to later requests may come first (match them by `req`). A reply can
 be preceded or followed by frames it causes (a `subscribe` reply comes before its
 `REPAINT`), and the per-op text says which.
 
@@ -242,7 +245,7 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
-| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
+| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`; (1.5) another writer's streaming `paste` into the same terminal), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
 | `unsafe_paste` | (1.2) a `paste` whose text could run commands, sent without `allow_unsafe` ([`paste`](#paste-12)) |
 
 ### `create`
@@ -645,8 +648,44 @@ dialog (`clipboard-paste-protection`): a client with a person to ask asks after 
 sends again, one whose paste is the person's own deliberate act may send it at once, and a
 script decides for itself. The bracket can't be broken either way, since the `ESC` is a space.
 
-Reply: `{"req": 18, "ok": true, "written": 14}`. The bytes join the program's input as `key`'s do,
-and the errors are the same, plus `unsafe_paste`.
+Reply: `{"req": 18, "ok": true, "written": 14}`, the bytes framed for the program. The bytes join
+the program's input as `key`'s do, and the errors are the same, plus `unsafe_paste`, but for one
+difference: a paste never fails `input_full`. When the program's input buffer has no room, the
+paste waits for the program to read, and its reply waits with it (a real terminal writes its
+clipboard through the PTY at the program's pace: xterm keeps what the PTY doesn't take and writes
+it as the PTY drains, Ghostty queues it on its IO thread). A paste bigger than the whole buffer
+goes once the buffer is empty.
+
+**A paste of any size (1.5).** Feature `paste_stream`. A paste larger than one frame goes as
+chunks of one paste, each a `paste` request, every one but the last with `"more": true`:
+
+```json
+{"req": 19, "op": "paste", "handle": 7, "text": "…the first MB…", "allow_unsafe": false, "more": true}
+{"req": 20, "op": "paste", "handle": 7, "text": "…the next…", "more": true}
+{"req": 21, "op": "paste", "handle": 7, "text": "…the rest"}
+```
+
+| field | default | meaning |
+|---|---|---|
+| `more` | `false` | more chunks of this paste follow. The paste stays open (one bracket, one set of rules) until a chunk without it |
+
+The program gets exactly what one `paste` of the whole text would give it: the framing is decided
+by the program's mode at the first chunk, `ESC [ 200 ~` comes before the first byte and
+`ESC [ 201 ~` after the last; `allow_unsafe` is the first chunk's; a `\r\n` split across two chunks
+is still one Enter; the stripping is byte by byte, so a boundary changes nothing. The unsafe rule is
+the whole paste's: a chunk that makes it unsafe (a line break; the bracket end, also when its `ESC`
+ends one chunk and `[201~` starts the next) is refused with `unsafe_paste` and none of it is
+written, the paste ends there (its bracket closed: what came before it was safe, so it sits typed,
+never run), and its later chunks are refused the same way, writing nothing, until the one without
+`more`. Send each chunk once the previous one's reply has come: that is the flow control (a chunk
+sent sooner waits on the connection, whose other requests then wait behind it). Keys, `INPUT` and
+pointer events reaching the terminal while a paste is open are held and follow the paste, as a key
+pressed during a paste follows it into a real terminal's PTY; they count against the input buffer
+and are refused `input_full` when it is full. One paste streams into a terminal at a time: another
+writer's `paste` is `busy` until it ends. A paste ends early, closed, when its writer's subscription
+ends (unsubscribe, the connection closes) or an upgrade's handoff cuts it (its later chunks are
+`busy`: input is at most once). A brain that crashes mid-paste can't close it: the program stays
+inside the bracket until a later paste's end, as it would if a terminal emulator crashed mid-paste.
 
 ### `mouse` (1.4)
 
@@ -762,7 +801,7 @@ Unix epoch milliseconds, sizes are bytes):
 ```json
 {"at": 1794519127407,
  "daemon": {
-   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 4],
+   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 5],
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
@@ -1236,6 +1275,9 @@ writes, and send keystrokes as `INPUT`.
 
 ## Versions
 
+- **1.5**: a paste of any size: `paste`'s `more`, the feature `paste_stream`; a `paste` waits for
+  room in the program's input buffer instead of failing `input_full`, and its reply waits with it.
+  Additive: a paste without `more` is the whole paste, as in 1.4.
 - **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
   is served as before.
 - **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is

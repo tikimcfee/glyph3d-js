@@ -305,7 +305,8 @@ daemon.
   removes it when this shell has none (docker's `-e NAME` passes; with no value here the
   terminal has none either); a `NAME` whose value here isn't UTF-8 is an error, since the
   person asked for it by name. A request larger than the daemon's `max_frame` is refused by
-  `g3d` before it is sent (`too_large`), so a huge `g3d paste` says so rather than a broken pipe. `g3d env <id> [--json]` prints the effective environment, each line
+  `g3d` before it is sent (`too_large`) rather than ending its connection; `g3d paste` streams a
+  paste of any size in chunks ([Keys and paste](#keys-and-paste-protocol-12)). `g3d env <id> [--json]` prints the effective environment, each line
   its source (and `via`) then `NAME=value`. `g3d` inside a termd terminal reaches that terminal's
   daemon through `G3D_TERMD_SOCKET` when given neither `--ns` nor `--socket`. The detach key also
   reads `G3D_DETACH_KEY`.
@@ -386,8 +387,9 @@ new file.
 ## Status as built (2026-11-12)
 
 What the branch has of [Status](#status), and where it departs from it. Protocol 1.1 is whole: the
-daemon announces `proto` `[1, 3]` (1.2 adds [keys and paste](#keys-and-paste-protocol-12), 1.3
-`key`'s `option_as_alt`) and the feature `status`.
+daemon announces `proto` `[1, 5]` (1.2 adds [keys and paste](#keys-and-paste-protocol-12), 1.3
+`key`'s `option_as_alt`, 1.4 [the mouse](#the-mouse-protocol-14), 1.5 a paste of any size) and the
+feature `status`.
 
 **The daemon** (`crates/g3d-termd/src/status.rs`, the types in `g3d-wire`'s `Status`):
 
@@ -1404,7 +1406,8 @@ in [Environment and defaults as built](#environment-and-defaults-as-built-2026-1
 | idle compression | after 30 s with no output | keep | libghostty's incremental compression; contents unchanged |
 | lossy queue | 4 MiB per subscription (`--lossy-queue`) | keep, now a setting | about a second of a flood at the browser's pace; hexe's ring and payload cap are 4 MiB too |
 | blocking owner | pause reads at 1 MiB queued, resume at 256 KiB (`--block-high`, `--block-low`) | keep, now a setting | high/low watermarks; the 4:1 gap avoids flapping |
-| PTY input buffer | 16 MiB per terminal (`--input-buffer`); a whole `INPUT` frame is accepted or refused (`input_full`) | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. 16 MiB matches `max_frame`, so any one paste fits; the memory is used only while a program stops reading |
+| PTY input buffer | 16 MiB per terminal (`--input-buffer`); a whole `INPUT` frame is accepted or refused (`input_full`); a paste waits for room instead | **change** (S1: 1 MiB) | hexe grows its PTY write buffer to 16 MiB "rather than dropping input": a torn bracketed paste (a lost `ESC [201~`) leaves the shell swallowing every later key. A paste larger than it streams through it at the program's pace (xterm's and Ghostty's write queues), so the buffer bounds memory, not a paste; the memory is used only while a program stops reading |
+| paste chunk | 1 MiB of text per `paste` request (`g3d paste --chunk`, the adapter's `attach --paste-chunk`; capped so a chunk of control characters fits `max_frame` as JSON); 1 Mi UTF-16 code units per display push (`TerminalGrid.pasteChunk`) | **new** | one chunk in flight per terminal, each a sixteenth of the input buffer: the flow control's step, small enough that no message holds a whole clipboard |
 | max frame | 16 MiB | keep | |
 | read chunk | 64 KiB | keep | one Linux pipe's worth; keeps a flood's per-read latency small |
 | continuation | 64 KiB | keep | needed for mid-sequence repaints and snapshots |
@@ -1619,20 +1622,55 @@ them: its `KittyMods.fromInput` carries caps_lock and num_lock into the Kitty mo
 128 in the Kitty spec), so Shift+Enter with NumLock on is `CSI 13;130u` to a Kitty program from the
 wall as from Ghostty. PROTOCOL.md's table of keys is checked against the encoder by a unit test.
 
-**Paste.** `paste` runs libghostty's `Terminal::paste`: bracketed in `ESC[200~`…`ESC[201~` when
-mode 2004 is on, else each `\n` as `\r` (xterm); xterm's strip list (NUL, BS, ENQ, EOT, ESC, DEL
-and the tty's control characters) made spaces in both, so pasted text can't close its bracket
-early or carry an escape sequence. Text that could run commands (a line break without bracketed
-paste; the bracket end with it) is refused with `unsafe_paste` unless `allow_unsafe`. Outside a
-bracket a `\r\n` is one `\r` (WezTerm's `canonicalize_pasted_newlines`, and the wall's own paste
-before termd encoded it): libghostty's `\n` → `\r` alone makes it `\r\r` (as xterm does), which
-runs an empty line after each line of Windows-origin text; inside a bracket the text is the
-program's, as it came. The refusal is Ghostty's
-`clipboard-paste-protection` rule, with the confirmation left to the client. `g3d paste` refuses
-it and says `--unsafe`; the browser's paste is the person's own paste chord in a focused terminal
-and the display has no confirmation dialog, so the adapter sends `allow_unsafe` (as xterm and
-WezTerm paste: the stripped bytes still protect the bracket). termd installs no clipboard-read
-callback, so a program's Kitty paste events (mode 5522) are never offered: a paste is text.
+**Paste.** A paste is framed as Ghostty frames one, by libghostty's paste encoder (Ghostty's
+`paste.zig`, `crates/g3d-termd/src/paste.rs`): bracketed in `ESC[200~`…`ESC[201~` when mode 2004 is
+on, else each `\n` as `\r` (xterm); xterm's strip list (NUL, BS, ENQ, EOT, ESC, DEL and the tty's
+control characters) made spaces in both, so pasted text can't close its bracket early or carry an
+escape sequence. Text that could run commands (a line break without bracketed paste; the bracket end
+with it) is refused with `unsafe_paste` unless `allow_unsafe`. Outside a bracket a `\r\n` is one
+`\r` (WezTerm's `canonicalize_pasted_newlines`, and the wall's own paste before termd encoded it):
+the encoder's `\n` → `\r` alone makes it `\r\r` (as xterm does), which runs an empty line after
+each line of Windows-origin text; inside a bracket the text is the program's, as it came. The
+refusal is Ghostty's `clipboard-paste-protection` rule (`isSafeWith`), with the confirmation left
+to the client. `g3d paste` refuses it and says `--unsafe`; the browser's paste is the person's own
+paste chord in a focused terminal and the display has no confirmation dialog, so the adapter sends
+`allow_unsafe` (as xterm and WezTerm paste: the stripped bytes still protect the bracket). termd
+installs no clipboard-read callback, so a program's Kitty paste events (mode 5522) are never
+offered: a paste is text.
+
+**A paste of any size (protocol 1.5).** A real terminal writes its clipboard through the PTY however
+long it is, at the program's pace: xterm keeps what the PTY doesn't take and writes it as the PTY
+drains, Ghostty queues it on its IO thread. termd does the same with a paste streamed in chunks
+(`paste` with `more`, feature `paste_stream`), which keeps every frame small:
+
+- **One paste, whatever its chunks.** The owner thread keeps one open paste per terminal (`Pasting`
+  in owner.rs, `paste::Stream`): the framing decided once from the mode at the first chunk, the
+  bracket's start before the first byte and its end after the last; the encoder runs per chunk, which
+  is exact because it works byte by byte; a `\r` ending one chunk and a `\n` starting the next are
+  one Enter; the unsafe rule is checked over the whole paste as it streams, the last five raw bytes
+  carried across each boundary so a bracket end split between chunks is caught. A refused chunk
+  writes nothing and ends the paste closed (the bracket's end written): nothing before it could run,
+  by the rule, so it sits typed. Every way a paste can end early closes it the same way (its writer
+  unsubscribes or disconnects, an upgrade cuts it), so a program is never left inside a bracket
+  swallowing keys; only a brain crash mid-paste can't (as a terminal emulator crashing mid-paste
+  couldn't).
+- **Flow control.** A chunk's bytes join the input buffer when it has room (or is empty, for a chunk
+  bigger than it), and only then is the chunk answered; the client sends the next chunk after the
+  reply, so a program that stops reading holds the paste back at the client, never in termd, whose
+  memory is the input buffer and one chunk. The connection doesn't wait for that reply (another
+  request, a `kill` among them, goes on); a chunk sent before its predecessor's reply waits at the
+  connection, one per terminal. This is the one reply that can arrive after a later request's.
+- **Order.** Input from anyone (a key, `INPUT`, the mouse) reaching a terminal while its paste is open
+  is held and follows the paste, as a key pressed during a paste follows it into the PTY; another
+  writer's paste is `busy` until the open one ends.
+- **Clients.** `g3d paste` streams stdin (or its argument) in 1 MiB chunks (`--chunk`, capped so a
+  chunk of control characters fits `max_frame` as JSON) cut on character boundaries, each after the
+  last one's reply. The display pushes a long paste in pieces of one paste (`TerminalGrid.pasteChunk`,
+  1 Mi UTF-16 code units, never splitting a surrogate pair; `terminal.paste` with `more`), and the
+  adapter (`cli/termdpaste.go`) streams them in order, one chunk in flight, re-cut to its own chunk
+  size (`attach --paste-chunk`); input is at most once, so a chunk that fails (a brain restart) drops
+  the rest of its paste. A brain without `paste_stream` gets each paste whole in one request, as
+  before, which `max_frame` bounds.
 
 **The browser.** `keyEncoding.js` (core, `services/interaction`) maps a `KeyboardEvent` to a key
 event (`keyEventFor`) and encodes nothing: modifiers held, `text` the one character `key` names,
@@ -1648,9 +1686,8 @@ logs that once per connection, never sends the op, and the status follower puts 
 `relay.lacks`, which the wall shows as a red notice ("typing can't reach termd … g3d upgrade") and
 `termd.status` as a line; before, every keystroke died as an `unknown_op` relay-log line and the
 wall showed nothing (the version numbers alone can't tell: both builds say `g3d-termd/0.1.0`). A
-request over the brain's `max_frame` (a paste of tens of MB, or a few MB of control characters,
-six bytes each as JSON) is refused unsent and logged, so the adapter's connection, which the
-daemon would end over it, stays. The wall (`WallKeys`) and the
+request over the brain's `max_frame` is refused unsent and logged, so the adapter's connection,
+which the daemon would end over it, stays; a paste streams in chunks under it. The wall (`WallKeys`) and the
 IDE (`keyboardRouter`'s terminal tier and paste tier) both take this path: they share the core
 grid and its owner route, so there is one. The wall also sends the release of a key whose press
 it sent, to the terminal that got the press (Kitty's event reporting reads releases); the IDE's
@@ -2001,15 +2038,25 @@ holder.
   Alt in all four under auto, and `true` makes Option+A Alt+A (unit tests); over the socket a
   modifyOtherKeys program reads `å` for auto and `false` and `CSI 27;3;97~` for `true`.
   `g3d send`/`key`/`paste` against a private daemon (`key --option-as-alt false alt+a` types
-  `a`), and a
-  17 MB `g3d paste` refused as `too_large` before it is sent. The relay's adapter sends no `key` or
+  `a`). A paste of any size (`tests/paste.rs`, `src/paste.rs`, `crates/g3d/tests/input.rs`,
+  `cli/termdpaste_test.go`): 64 MiB through `g3d paste` into `cat > file` arrives byte for byte,
+  bracketed and not; a streamed paste is one bracket; a bracket end split across two chunks is
+  refused and the bracket closed, and the paste's later chunks write nothing; a `\r\n` split across
+  chunks is one Enter and a key typed meanwhile follows the paste; a paste whose writer
+  unsubscribes is closed, and another writer's is `busy` meanwhile; a program that stops reading
+  holds the paste back at the client (a chunk's reply waits once the input buffer is full, the
+  brain's RSS stays within the buffer and a chunk) and loses nothing once it reads; the adapter
+  sends one chunk in flight, cut on character boundaries, drops the rest of a paste after a failed
+  chunk and gives an older brain each paste whole; the display's pushes split a long paste without
+  splitting a surrogate pair (`terminal-readopt.test.mjs`). The relay's adapter sends no `key` or
   `paste` to a brain whose features lack them, nor `option_as_alt` to one without that feature
   (`cli/attach_unix_test.go`), and refuses a request over `max_frame` unsent
   (`cli/termd_input_test.go`); the wall's notice says so (`wall-panels.test.mjs`). Every key the
   wall and the IDE send carries their Option-as-Alt setting as it is at that key
   (`terminal-input.test.mjs`, `wall-keys.test.mjs`). Through the relay
   (`termd-relay-check.mjs`): `terminal.key` Shift+Enter and Ctrl+C into a Kitty-mode program,
-  `terminal.paste` bracketed with its `ESC` a space, `relay.lacks` empty for a current brain. In
+  `terminal.paste` bracketed with its `ESC` a space and three pieces of one paste one bracket,
+  `relay.lacks` empty for a current brain. In
   the browser (`wall-e2e.mjs`): Enter running a typed line (its output, not the echo), a real
   Shift+Enter running a line in a plain shell and reaching a Kitty-mode program as `CSI 13;2u`, and
   a real paste event.
