@@ -541,7 +541,7 @@ func (k sessionPasteSink) paste(text string, more bool) (bool, error) {
 }
 
 // termdInputSince is the protocol version that brought each display input op.
-var termdInputSince = map[string]string{"key": "1.2", "paste": "1.2", "mouse": "1.4", "paste_stream": "1.5"}
+var termdInputSince = map[string]string{"key": "1.2", "paste": "1.2", "mouse": "1.4"}
 
 // offers reports whether this session's brain has `op` (WELCOME.features), as PROTOCOL.md asks of
 // a client before it uses anything newer than 1.0. A brain from an earlier build (a holder kept
