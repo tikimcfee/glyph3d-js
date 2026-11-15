@@ -141,8 +141,8 @@ export const KNOBS = Object.freeze({
         description: 'How much of its opacity dim (faint) text keeps: 1 draws it like plain text, lower lets the background show through it, 0 hides it.',
     },
     groupLayout: {
-        section: 'groups', label: 'New group layout', type: 'enum', options: ['tile', 'freeform'],
-        description: "A new group's layout: tile packs its members in columns; freeform leaves each where it is.",
+        section: 'groups', label: 'New group layout', type: 'enum', options: ['tile', 'freeform', 'split'],
+        description: "A new group's layout: tile packs its members in columns; freeform leaves each where it is; split cuts their union into panes, each re-wrapped to fill its own.",
     },
     groupColumns: {
         section: 'groups', label: 'New group columns', type: 'number', min: 0, whole: true, step: 1,
@@ -155,6 +155,18 @@ export const KNOBS = Object.freeze({
     groupPad: {
         section: 'groups', label: 'Backdrop margin', type: 'number', min: 0, step: 1, unit: 'world units',
         description: "How far a group's backdrop reaches past its members' windows.",
+    },
+    splitGap: {
+        section: 'groups', label: 'Split gap', type: 'number', min: 0, step: 0.1, unit: 'world units',
+        description: "Space between a split's panes; dividers are dragged in it.",
+    },
+    splitBarRows: {
+        section: 'groups', label: 'Split bar room', type: 'number', min: 0.5, max: 4, step: 0.05, unit: 'rows',
+        description: "Room above each split pane for its title bar, in the terminal's rows: the bar is never taller, so stacked panes never overlap. Larger keeps the name readable further out.",
+    },
+    splitBars: {
+        section: 'groups', label: 'Split title bars', type: 'bool',
+        description: "Whether a new split's panes each show a title bar; wall.group.bars (or the group's menu) turns one split's on or off.",
     },
     restartNoticeMs: {
         section: 'status', label: 'Restart notice after', type: 'number', min: 0, step: 50, unit: 'ms',

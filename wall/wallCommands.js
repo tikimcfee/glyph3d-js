@@ -35,6 +35,7 @@ import { AGENT_SIDES } from './wallAgentView.js';
  *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
  *   wall.help [toggle|open|close|left|right|float [x y]]   the keys, gestures and verbs
  *   wall.fullscreen [toggle|on|off] [id] · wall.fullscreen.text <bigger|smaller|reset>
+ *   wall.split <right|down> [id] · wall.pane <left|right|up|down> · wall.group.bars <gid> [toggle|on|off]
  *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
  *                                              the right-click menu, at canvas px (default: on the
  *                                              terminal, under the header, the view's centre)
@@ -204,9 +205,9 @@ export default function registerWallCommands(router, wall) {
         wall.groups.ungroup(args[0]);
         return OK(`dissolved ${args[0]}`, { gid: args[0] });
     });
-    verb('wall.group.layout', '<gid> tile [columns] [gap] | freeform', "Set a group's layout", (args) => {
+    verb('wall.group.layout', '<gid> tile [columns] [gap] | freeform | split [columns]', "Set a group's layout (split: one rect cut into panes, rows of columns)", (args) => {
         const [gid, layout, cols, gap] = args;
-        if (layout !== 'tile' && layout !== 'freeform') throw new Error(`a layout is 'tile' or 'freeform', not '${layout}'`);
+        if (layout !== 'tile' && layout !== 'freeform' && layout !== 'split') throw new Error(`a layout is 'tile', 'freeform' or 'split', not '${layout}'`);
         wall.groups.setLayout(gid, layout, {
             columns: cols != null ? intArg(cols, 'columns') : undefined,
             gap: gap != null ? numArg(gap, 'gap') : undefined,
@@ -219,6 +220,27 @@ export default function registerWallCommands(router, wall) {
         const cols = /^[+-]/.test(n ?? '') ? g.columns + intArg(n, 'columns') : intArg(n, 'columns');
         wall.groups.setColumns(gid, Math.max(1, Math.min(cols, Math.max(1, g.members.length))));
         return OK(`${gid} tiles in ${wall.groups.get(gid).columns}`, { gid, columns: wall.groups.get(gid).columns });
+    });
+    verb('wall.split', '<right|down> [id]', 'Split a terminal (default: the focused one): a new terminal takes the half to its right or below', async (args) => {
+        const [dir, named] = args;
+        if (dir !== 'right' && dir !== 'down') throw new Error(`a split goes right or down, not '${dir ?? ''}'`);
+        const id = named ? terminalIds([named])[0] : wall.focusedId;
+        const born = await wall.split(dir, id);
+        return OK(`split ${id} ${dir}: ${born}`, { id: born, gid: wall.groups.groupOf(born) });
+    });
+    verb('wall.pane', '<left|right|up|down>', "Focus the pane (or the nearest window) next to the focused terminal that way", (args) => {
+        const [dir] = args;
+        if (!['left', 'right', 'up', 'down'].includes(dir)) throw new Error(`a pane is left, right, up or down, not '${dir ?? ''}'`);
+        const to = wall.focusPane(dir);
+        return OK(to ? `focused ${to}` : `nothing ${dir} of ${wall.focusedId ?? 'nothing'}`, { id: to });
+    });
+    verb('wall.group.bars', '<gid> [toggle|on|off]', "Show or hide a split's pane title bars", (args) => {
+        const [gid, how = 'toggle'] = args;
+        if (how !== 'toggle' && how !== 'on' && how !== 'off') throw new Error(`bars take toggle|on|off, not '${how}'`);
+        const g = wall.groups.get(gid);
+        const on = how === 'toggle' ? !g.split?.bars : how === 'on';
+        wall.groups.setBars(gid, on);
+        return OK(`${gid} bars ${on ? 'shown' : 'hidden'}`, { gid, bars: on });
     });
     verb('wall.group.gap', '<gid> <n>', "Set a tiled group's gap (world units)", (args) => {
         wall.groups.setGap(args[0], numArg(args[1], 'gap'));

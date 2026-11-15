@@ -49,7 +49,7 @@ test('forget drops one terminal now', () => {
     expect(s.position('term-5')).toBeNull();
 });
 
-const group = (members, o = {}) => ({ name: '', layout: 'tile', columns: 2, gap: 2, origin: { x: 0, y: 0 }, members, ...o });
+const group = (members, o = {}) => ({ name: '', layout: 'tile', columns: 2, gap: 2, origin: { x: 0, y: 0 }, members, split: null, ...o });
 
 test('hidden terminals, groups and the sidebar round-trip through storage, per relay', () => {
     const s = new WallStore(8099);

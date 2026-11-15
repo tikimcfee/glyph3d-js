@@ -26,7 +26,7 @@ export const WALL_CONFIG = Object.freeze({
     agentViewHeight: 44,
     /** World gap between a terminal and its attached Agent View. */
     agentViewGap: 1.5,
-    /** A new group's layout: 'tile' (members packed in columns) or 'freeform' (members keep their spots). */
+    /** A new group's layout: 'tile' (members packed in columns), 'freeform' (members keep their spots) or 'split' (one rect cut into panes). */
     groupLayout: 'tile',
     /** A new tiled group's columns; 0 = the square root of its size, rounded up. */
     groupColumns: 0,
@@ -34,6 +34,12 @@ export const WALL_CONFIG = Object.freeze({
     groupGap: 2,
     /** World units the group's backdrop reaches past its members' windows. */
     groupPad: 3,
+    /** World units between a split's panes (WallGroups, splitTree.js). */
+    splitGap: 0.5,
+    /** The room above each split pane for its title bar, in the terminal's rows (the bar is capped to it). */
+    splitBarRows: 1.25,
+    /** Whether a new split's panes show title bars (`wall.group.bars` turns one split's on or off). */
+    splitBars: true,
     /**
      * A termd brain restart shows its notice only once it has lasted this long, ms: a crash restart
      * that comes back in a blink shows only the amber chip (docs/termd/DESIGN.md "Status: in the

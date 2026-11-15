@@ -24,7 +24,7 @@
  * contextmenu event that key also raises is ours (WallMenu marks it), whatever its Shift.
  */
 
-import { COPY_LABEL, PASTE_LABEL } from './chord.js';
+import { COPY_LABEL, PASTE_LABEL, chordLabel } from './chord.js';
 import { AGENT_SIDES } from './wallAgentView.js';
 
 /** @typedef {'ours'|'native'|'program'} Verdict */
@@ -126,8 +126,9 @@ export function parseSizes(s) {
 /**
  * The menu for a target, from the wall's snapshot: a terminal's (copy — with text selected in it —,
  * paste, frame, focus, rename, selection,
- * group, size, redraw, Option as Alt, hide, hold-to-close), a group header's (frame, rename,
- * layout, columns, select its members, hide them all, ungroup) or the canvas's (a new terminal at
+ * group, split right / down, size — not for a split's pane, whose split owns it —, redraw, Option as
+ * Alt, hide, hold-to-close), a group header's (frame, rename, layout, columns, a split's title bars,
+ * select its members, hide them all, ungroup) or the canvas's (a new terminal at
  * the point, fit all, select all, snap and the grid on or off, the sidebar, the status window, the
  * settings). Empty when the target is gone.
  * @param {MenuTarget & { world?: { x: number, y: number } }} target
@@ -176,7 +177,10 @@ function terminalItems(id, state, config) {
             options: state.groups.map((x) => ({ id: x.id, label: x.name, verb: ['wall.group.add', x.id, id] })),
         },
         { kind: 'sep', id: 's2' },
+        { kind: 'action', id: 'split-right', label: 'split right', detail: chordLabel(['D']), verb: ['wall.split', 'right', id] },
+        { kind: 'action', id: 'split-down', label: 'split down', detail: chordLabel(['D'], { shift: true }), verb: ['wall.split', 'down', id] },
     ];
+    if (g?.layout === 'split') { items.push(...tail(id, config)); return items.filter(Boolean); }
     const sizes = parseSizes(config.menuSizes).map((z) => ({
         id: `${z.cols}x${z.rows}`, label: `${z.cols}×${z.rows}`, verb: ['terminal.resize', id, String(z.cols), String(z.rows)], on: z.cols === t.cols && z.rows === t.rows,
     }));
@@ -187,7 +191,13 @@ function terminalItems(id, state, config) {
         edit: { verb: ['terminal.resize', id], cols: t.cols, rows: t.rows },
         ...(sizes.some((o) => o.on) ? {} : { detail: `${t.cols}×${t.rows}` }),   // its own size, when no offer is it
     });
-    items.push(
+    items.push(...tail(id, config));
+    return items.filter(Boolean);
+}
+
+/** A terminal menu's last items: redraw, Option as Alt, hide, close. */
+function tail(id, config) {
+    return [
         { kind: 'action', id: 'redraw', label: 'redraw', verb: ['terminal.refresh', id] },
         {
             kind: 'choice', id: 'option-as-alt', label: 'Option as Alt', detail: 'every terminal',
@@ -196,15 +206,14 @@ function terminalItems(id, state, config) {
         { kind: 'sep', id: 's3' },
         { kind: 'action', id: 'hide', label: 'hide', detail: 'keeps running', verb: ['wall.hide', id] },
         { kind: 'hold', id: 'close', label: 'close', detail: 'hold · kills the shell', verb: ['wall.close', id] },
-    );
-    return items.filter(Boolean);
+    ];
 }
 
 function groupItems(gid, state) {
     const g = state.groups.find((x) => x.id === gid);
     if (!g) return [];
     const shown = g.members.filter((id) => state.terminals.find((t) => t.id === id && !t.hidden));
-    const tile = g.layout === 'tile';
+    const tile = g.layout === 'tile', split = g.layout === 'split';
     /** @type {MenuItem[]} */
     const items = [
         { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.group.frame', gid] },
@@ -214,7 +223,15 @@ function groupItems(gid, state) {
             kind: 'choice', id: 'layout', label: 'layout',
             options: [
                 { id: 'tile', label: 'tile', verb: ['wall.group.layout', gid, 'tile'], on: tile },
-                { id: 'freeform', label: 'freeform', verb: ['wall.group.layout', gid, 'freeform'], on: !tile },
+                { id: 'freeform', label: 'freeform', verb: ['wall.group.layout', gid, 'freeform'], on: g.layout === 'freeform' },
+                { id: 'split', label: 'split', verb: ['wall.group.layout', gid, 'split'], on: split },
+            ],
+        },
+        split && {
+            kind: 'choice', id: 'bars', label: 'title bars',
+            options: [
+                { id: 'on', label: 'shown', verb: ['wall.group.bars', gid, 'on'], on: !!g.bars },
+                { id: 'off', label: 'hidden', verb: ['wall.group.bars', gid, 'off'], on: !g.bars },
             ],
         },
         tile && {

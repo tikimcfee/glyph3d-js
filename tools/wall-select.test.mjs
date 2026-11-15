@@ -60,7 +60,7 @@ async function standIn({ focused = null, text = 'hello world foo\r\nsecond (line
         selectionClipboard: '',
         config: { ...WALL_CONFIG },
         fitAll: () => {},
-        groups: { tiles: () => false },
+        groups: { tiles: () => false, splits: () => false },
         shownOrder: () => ['t'], canvasOrder: () => ['t'], windowRect: () => ({ ...body, maxY: body.maxY + 1 }),
     };
     const captured = new Set();

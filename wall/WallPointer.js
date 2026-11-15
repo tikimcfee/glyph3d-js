@@ -39,6 +39,11 @@ const CLICK_MODES = /** @type {const} */ (['cell', 'word', 'line']);
  *   middle on a terminal's body  paste the wall's selection    pan
  *                                clipboard into it
  *   a group's header             select the group's members    move the whole group
+ *   a split's divider (the gap   —                             move the cut: both sides re-wrap
+ *     between panes, or a pane's
+ *     inner border)
+ *   a split pane's outer border  focus                         resize the whole split (every pane re-wraps)
+ *   a split pane's title bar     focus                         move the whole split (⌥ anywhere on it too)
  *
  * Moves, resizes and group drags snap to the drafting grid while the `snap` knob is on (wallSnap.js
  * has the rule: a moved body's top-left lands on a crossing, a dragged edge on or just inside a
@@ -179,10 +184,20 @@ export default class WallPointer {
             if (hit?.id) this._start(e, { kind: 'shift', id: hit.id, ...(hit.part === 'body' ? this._anchor(hit.id, e) : null) });
             else this._start(e, { kind: 'lasso', points: [{ x: e.clientX, y: e.clientY }] });
         } else if (!hit) this._start(e, { kind: 'pan', pasteInto: e.button === 1 && at?.part === 'body' ? at.id : null });
+        else if (hit.part === 'divider') this._start(e, { kind: 'divider', group: hit.group, path: hit.divider.path, axis: hit.divider.axis });
         else if (hit.group) this._start(e, { kind: 'group', group: hit.group, groupDrag: this.wall.groups.dragStart(hit.group) });
         else if (hit.part === 'body' && (!e.altKey || blockSelects(e))) this._startText(e, hit.id, blockSelects(e));
-        else if (e.altKey || hit.part === 'title') this._start(e, { kind: 'press', id: hit.id });
-        else if (hit.part === 'edge') {
+        else if ((e.altKey || hit.part === 'title') && this.wall.groups.splits(hit.id)) {
+            // A pane moves its whole split; a click (no travel) just gives it the keys.
+            const gid = this.wall.groups.groupOf(hit.id);
+            this._start(e, { kind: 'group', group: gid, groupDrag: this.wall.groups.dragStart(gid), pane: hit.id });
+        } else if (e.altKey || hit.part === 'title') this._start(e, { kind: 'press', id: hit.id });
+        else if (hit.part === 'edge' && this.wall.groups.splits(hit.id)) {
+            const s = this.wall.groups.splitEdge(hit.id, hit.edges);
+            if (s.divider) this._start(e, { kind: 'divider', group: s.gid, path: s.divider.path, axis: s.divider.axis });
+            else this._start(e, { kind: 'splitResize', group: s.gid, edges: s.outer, startRect: this.wall.groups.splitRect(s.gid) });
+            this.wall.focus(hit.id);
+        } else if (hit.part === 'edge') {
             const grid = this.wall.terminal(hit.id);
             this._start(e, {
                 kind: 'resize', id: hit.id, edges: hit.edges, stride: grid.cellStride,
@@ -302,6 +317,18 @@ export default class WallPointer {
         }
         const p = this.camera.toWorld(e.clientX, e.clientY);
         const dx = p.x - d.startWorld.x, dy = p.y - d.startWorld.y;
+        if (d.kind === 'divider') {
+            if (!d.moved) return;   // a click's wobble moves nothing
+            if (!this.wall.store.group(d.group)) { this._end(); return; }   // the split went mid-drag
+            this.wall.groups.dragDivider(d.group, d.path, d.axis === 'x' ? p.x : p.y);
+            return;
+        }
+        if (d.kind === 'splitResize') {
+            if (!d.moved) return;   // a click's wobble moves nothing
+            if (!this.wall.store.group(d.group)) { this._end(); return; }
+            this.wall.groups.resizeSplit(d.group, this._splitRectFor(d, dx, dy, e));
+            return;
+        }
         if (d.kind === 'group') {
             if (!this.wall.store.group(d.group)) { this._end(); return; }   // the group went mid-drag
             if (d.moved) { const s = this._snapGroup(d, dx, dy, e); this.wall.groups.dragTo(d.groupDrag, s.x, s.y); }
@@ -343,9 +370,11 @@ export default class WallPointer {
             return;
         }
         if (d.kind === 'lasso') { if (d.moved) this._lassoSelect(d.points); return; }
+        if (d.kind === 'divider' || d.kind === 'splitResize') return;   // each step already re-wrapped and saved
         if (d.kind === 'group') {
             if (!this.wall.store.group(d.group)) return;
             if (d.moved) this.wall.groups.dragEnd(d.groupDrag);
+            else if (d.pane) this.wall.focus(d.pane);
             else this.wall.run(['wall.select', ...this.wall.groups.shownMembers(d.group)]);
             return;
         }
@@ -410,10 +439,39 @@ export default class WallPointer {
         this.mouse.hover(e, hit);
         this.canvas.style.cursor = !hit ? (e.shiftKey ? 'crosshair' : 'grab')
             : this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default'   // the program's pointer
+            : hit.part === 'divider' ? (hit.divider.axis === 'x' ? 'col-resize' : 'row-resize')
             : hit.group ? 'move'
             : e.shiftKey ? 'copy'
             : (e.altKey && !blockSelects(e)) || hit.part === 'title' ? 'move'
-            : hit.part === 'edge' ? edgeCursor(hit.edges) : 'text';
+            : hit.part === 'edge' ? this._edgeCursor(hit) : 'text';
+    }
+
+    /** A border's cursor: a split pane's inner edge drags its divider, its outer edge the split. */
+    _edgeCursor(hit) {
+        if (!this.wall.groups.splits(hit.id)) return edgeCursor(hit.edges);
+        const s = this.wall.groups.splitEdge(hit.id, hit.edges);
+        if (s.divider) return s.divider.axis === 'x' ? 'col-resize' : 'row-resize';
+        return edgeCursor(s.outer);
+    }
+
+    /**
+     * A split's rect as its outer edges are dragged (dx, dy world units from the press): the dragged
+     * edges move, snapped to the grid as a terminal's border is (the snap modifier inverts it).
+     */
+    _splitRectFor(d, dx, dy, e) {
+        const r = { ...d.startRect }, ed = d.edges;
+        if (ed.left) r.minX += dx;
+        if (ed.right) r.maxX += dx;
+        if (ed.top) r.maxY += dy;
+        if (ed.bottom) r.minY += dy;
+        const step = this.wall.config.snap === invertsSnap(e) ? 0 : snapStep(this.wall.config, this.camera.zoom);
+        if (step) {
+            if (ed.left) r.minX = snapTo(r.minX, step);
+            if (ed.right) r.maxX = snapTo(r.maxX, step);
+            if (ed.top) r.maxY = snapTo(r.maxY, step);
+            if (ed.bottom) r.minY = snapTo(r.minY, step);
+        }
+        return r;
     }
 
     // ── snapping ──────────────────────────────────────────────────────────────

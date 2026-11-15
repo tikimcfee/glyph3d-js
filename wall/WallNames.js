@@ -31,6 +31,8 @@ export default class WallNames {
         this._bars = new Map();
         /** Terminals whose name is currently a map label. @type {Set<string>} */
         this._mapMode = new Set();
+        /** Terminals whose bar a split governs: the room it may take, 0 for no bar (absent: BAR_ROOM). @type {Map<string, number>} */
+        this._room = new Map();
         this.mapLabels = new MapLabels(host, onLabelPress);
     }
 
@@ -39,17 +41,33 @@ export default class WallNames {
         const bar = new TitleBar({ atlas: this._atlas, maxWorldHeight: BAR_ROOM, minTextPx: this._minTextPx, reserveBars: BAR_BUTTON_ROOM });
         grid.add(bar);
         this._bars.set(id, bar);
+        if (this._room.has(id)) this.setBarRoom(id, this._room.get(id));   // a split set it before the grid arrived
     }
 
     /** Drop the bars of terminals that are gone. @param {(id: string) => boolean} isLive */
     prune(isLive) {
         for (const [id, bar] of this._bars) {
-            if (!isLive(id)) { bar.dispose(); this._bars.delete(id); this._mapMode.delete(id); }
+            if (!isLive(id)) { bar.dispose(); this._bars.delete(id); this._mapMode.delete(id); this._room.delete(id); }
         }
+    }
+
+    /**
+     * Give a terminal's bar the room a split pane leaves it (world units), or no bar at all (0), or
+     * back the room every other terminal's bar has (null).
+     * @param {string} id @param {number|null} room
+     */
+    setBarRoom(id, room) {
+        const bar = this._bars.get(id);
+        if (room == null) this._room.delete(id); else this._room.set(id, room);
+        if (!bar) return;
+        bar.setMaxWorldHeight(room || BAR_ROOM);
+        bar.visible = room !== 0;
+        if (room === 0) this._mapMode.delete(id);
     }
 
     /** The title bar's world height at `zoom` (0 for a terminal without one). */
     barHeight(id, zoom) {
+        if (this._room.get(id) === 0) return 0;
         return this._bars.get(id)?.worldHeight(zoom) ?? 0;
     }
 
@@ -63,7 +81,7 @@ export default class WallNames {
         const zoom = this._camera.zoom;
         for (const id of s.order) {
             const bar = this._bars.get(id), grid = s.terminals.get(id);
-            if (!bar || !grid) continue;
+            if (!bar || !grid || this._room.get(id) === 0) continue;
             bar.setName(s.nameOf(id));
             bar.setFocused(id === s.focusedId);
             const lb = grid.getLocalBounds();
@@ -73,6 +91,7 @@ export default class WallNames {
         const view = { w: this._camera.view.w, h: this._camera.view.h, margin: 4, gap: 4 };
         const boxes = new Map();
         for (const id of s.order) {
+            if (this._room.get(id) === 0) continue;   // a split pane without bars: its group's header names it
             const b = this._camera.toScreenBox(s.windowRect(id));
             if (b.right < 0 || b.left > view.w || b.bottom < 0 || b.top > view.h) continue;
             boxes.set(id, b);

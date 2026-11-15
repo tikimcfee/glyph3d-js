@@ -175,6 +175,28 @@ off (`wall.snap`, chord+'); Ctrl (⌃ on macOS) held during a drag inverts it fo
 press is a right-click (the menu's), so there it is pressed once the drag has begun. The grid shows or
 hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
+**Splits** (`wall/splitTree.js`, `WallGroups`' `split` layout): a group can be one rect cut into
+panes, as a terminal app's splits are. chord+D splits the focused terminal right, chord+⇧D down
+(`wall.split right|down [id]`, the terminal's menu): a terminal in no split becomes one first (a split
+group round its window; it leaves any other group), and the new terminal spawned for the other half
+lands as a pane (`TerminalWall._splitLanding`, read by the host's `landed`) instead of being framed.
+A cut that would leave a half under 20 × 5 cells is refused before anything spawns. The tree
+(`WallGroup.split`: the rect's size, `bars`, and `{dir: row|col, ratio, a, b}` nodes over `{id}`
+leaves; the group's `origin` is the rect's top-left) is what the store keeps; a pane that leaves —
+removed, hidden, closed for good, killed — gives its room to its sibling (`splitTree.remove`, in the
+store's member drop too). Each pane holds its title bar's room above its panel when the split shows
+bars (`splitBarRows` of its rows; the bar is capped to that room — `TitleBar.setMaxWorldHeight`,
+`WallNames.setBarRoom` — so stacked panes never overlap at any zoom, and past the text floor the map
+label takes over), then the panel: its cols × rows are what fit (the panel's frame measured off the
+grid), its top-left at the pane's. Panes are `splitGap` apart. The gap (or a pane's inner border) is a
+divider: dragging it moves the cut, held so each side keeps its minimum; a pane's outer border resizes
+the whole split; a pane's title bar (or ⌥ anywhere on it) moves the whole split. chord+arrows
+(`wall.pane`) move focus to the pane — or, outside a split, the nearest window — that way. Any group
+turns into a split (`wall.group.layout <gid> split`: rows of `columns`, equal shares, the members'
+union as the rect) and back (sizes and spots kept); `wall.group.bars` (the group's menu) shows or
+hides one split's bars, `splitBars` is what a new split is born with. A split's panes have no size
+presets in their menu: the split owns their size. Gate: `tools/wall-split.test.mjs`.
+
 **Fullscreen** (`wall/WallFullscreen.js`, chord+↵, `wall.fullscreen [toggle|on|off] [id]`): one
 terminal takes the screen as a terminal app's fullscreen does. It re-wraps (`terminal.resize`) to fill
 the canvas the docked panels leave (`dockLayout.js`), less `fullscreenPad`, at its text size, the

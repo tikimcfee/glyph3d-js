@@ -67,6 +67,13 @@ export default class TitleBar extends THREE.Object3D {
         this._key = '';         // layout inputs last applied — skip when unchanged
     }
 
+    /** The most world height the bar may take (a split's pane gives it the room above the pane). @param {number} h */
+    setMaxWorldHeight(h) {
+        if (h === this._maxWorldHeight) return;
+        this._maxWorldHeight = h;
+        this._key = '';   // lay out again at the new height
+    }
+
     /** The world height the bar occupies at `zoom` (CSS px per world unit). */
     worldHeight(zoom) {
         return Math.min(TITLE_BAR_PX / zoom, this._maxWorldHeight);

@@ -179,7 +179,7 @@ const byId = (items) => Object.fromEntries(items.filter((i) => i.kind !== 'sep')
 
 test('a terminal\'s menu: copy (text selected in it), paste, frame, focus, rename, agent view, selection, group, size, redraw, Option as Alt, hide, held close', () => {
     const items = byId(menuItems({ kind: 'terminal', id: 't1', part: 'body' }, snap, WALL_CONFIG));
-    expect(Object.keys(items)).toEqual(['paste', 'frame', 'focus', 'rename', 'agent-view', 'select', 'group', 'add-to', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
+    expect(Object.keys(items)).toEqual(['paste', 'frame', 'focus', 'rename', 'agent-view', 'select', 'group', 'add-to', 'split-right', 'split-down', 'size', 'redraw', 'option-as-alt', 'hide', 'close']);
     expect(items['agent-view'].options.map((o) => [o.id, !!o.on])).toEqual([['off', true], ['right', false], ['left', false], ['top', false], ['bottom', false]]);
     expect(items['agent-view'].options[1].verb).toEqual(['wall.agent.side', 't1', 'right']);
     expect(items.paste.verb).toEqual(['wall.paste', 't1']);
@@ -219,7 +219,7 @@ test('a terminal\'s menu: copy (text selected in it), paste, frame, focus, renam
 test('a group header\'s menu: frame, rename, layout, columns, select, hide all (shown members), ungroup', () => {
     const items = byId(menuItems({ kind: 'group', id: 'g-1' }, snap, WALL_CONFIG));
     expect(Object.keys(items)).toEqual(['frame', 'rename', 'layout', 'columns', 'select', 'hide-all', 'ungroup']);
-    expect(items.layout.options.map((o) => [o.verb, !!o.on])).toEqual([[['wall.group.layout', 'g-1', 'tile'], true], [['wall.group.layout', 'g-1', 'freeform'], false]]);
+    expect(items.layout.options.map((o) => [o.verb, !!o.on])).toEqual([[['wall.group.layout', 'g-1', 'tile'], true], [['wall.group.layout', 'g-1', 'freeform'], false], [['wall.group.layout', 'g-1', 'split'], false]]);
     expect(items.columns.options.map((o) => o.verb)).toEqual([['wall.group.columns', 'g-1', '-1'], ['wall.group.columns', 'g-1', '+1']]);
     expect(items['hide-all'].verb).toEqual(['wall.hide', 't3']);
     expect(items.ungroup.verb).toEqual(['wall.ungroup', 'g-1']);

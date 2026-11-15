@@ -281,7 +281,7 @@ test('agentViewRect, pickAgentSide and WallGroups tile footprints across all 4 s
             d: [100, 50, 200, -120],
         },
     });
-    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM });
+    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM, setBarRoom: () => {} });
 
     wall.agents.setSide('a', 'right');
     wall.agents.setSide('b', 'left');

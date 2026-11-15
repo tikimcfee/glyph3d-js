@@ -24,6 +24,7 @@ import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle } from './wallLayout.js';
+import { neighbor } from './splitTree.js';
 import { snapStep, snapTo } from './wallSnap.js';
 
 /** Border band width a pointer can grab, in CSS px (converted to world units per zoom). */
@@ -161,6 +162,8 @@ export default class TerminalWall {
         // The cell's own lines and dim are the glyph shader's: every terminal draws with them.
         setGlyphLineStyle(Object.fromEntries(LINE_STYLE_KNOBS.map((k) => [k, this.config[k]])));
         this.viewport = new WallCamera(camera, gl.domElement);
+        /** A split waiting for its new terminal to land (wall.split): which pane it cuts, and which way. */
+        this._splitLanding = null;
         /** One terminal fullscreen (WallFullscreen) — its state lives as long as the wall, as the store does. */
         this.fullscreen = new WallFullscreen(this);
 
@@ -434,10 +437,16 @@ export default class TerminalWall {
      * What's under a world point: each SHOWN terminal in stacking order (the focused one on top, then
      * the latest arrivals), tested whole — its border band (of the whole window, so the top edge is
      * the bar's top), then its title bar, then its body — before the one beneath it; then a group's
-     * header. A group's backdrop is canvas.
-     * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|{ group: string, part: 'header' }|null}
+     * header. A group's backdrop is canvas. A split's divider comes before any terminal under it.
+     * @returns {{ id: string, part: 'edge'|'title'|'body', edges?: object }|{ group: string, part: 'header' }
+     *   |{ group: string, part: 'divider', divider: { path: string[], axis: 'x'|'y' } }|null}
      */
     hit(p) {
+        // A split's dividers first: the gap between two panes is thin, and both panes' borders crowd it.
+        if (!this.fullscreen.id) {
+            const div = this.groups.dividerAt(p, EDGE_GRAB_PX / this.viewport.zoom);
+            if (div) return { group: div.gid, part: 'divider', divider: div.divider };
+        }
         const ids = this.canvasOrder().reverse();
         if (this.focusedId) ids.sort((a, b) => (b === this.focusedId) - (a === this.focusedId));
         const stack = ids.map((id) => ({ id, window: this.windowRect(id), body: this.terminalRect(id) }));
@@ -503,6 +512,7 @@ export default class TerminalWall {
         const grid = this.ctx.terminals.get(id);
         if (!grid || this.store.hidden(id)) return;
         if (this.fullscreen.id === id) this.fullscreen.exit();   // it hides at its canvas size
+        if (this.groups.splits(id)) this.groups.remove([id]);   // a hidden pane leaves its split: its sibling takes the room
         this.store.setHidden(id, true);
         grid.visible = false;
         if (this.focusedId === id) this.focus(null);
@@ -665,7 +675,7 @@ export default class TerminalWall {
      *   menu: TerminalWall['menu'],
      *   notice: string|null,
      *   terminals: {id:string, name:string, named:boolean, cols:number, rows:number, preview:string, hidden:boolean, group:string|null, selected:boolean}[],
-     *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform', columns:number, gap:number, members:string[]}[] }}
+     *   groups: {id:string, name:string, named:boolean, layout:'tile'|'freeform'|'split', columns:number, gap:number, bars:boolean|null, members:string[]}[] }}
      *   a group lists only its members on the wall
      */
     snapshot() {
@@ -698,7 +708,7 @@ export default class TerminalWall {
             groups: this.groups ? this.groups.ids().map((gid) => {
                 const g = this.groups.get(gid);
                 return {
-                    id: gid, name: this.groups.nameOf(gid), named: !!g.name, layout: g.layout, columns: g.columns, gap: g.gap,
+                    id: gid, name: this.groups.nameOf(gid), named: !!g.name, layout: g.layout, columns: g.columns, gap: g.gap, bars: g.split?.bars ?? null,
                     members: g.members.filter((id) => this.ctx.terminals.has(id)),
                 };
             }) : [],
@@ -774,6 +784,39 @@ export default class TerminalWall {
         }
         this._emit();
         return true;
+    }
+
+    /**
+     * Split a terminal (else the focused one): a new terminal takes the half to its right or below
+     * (WallGroups.insertPane). Refused before anything is spawned when a half wouldn't fit.
+     * @param {'right'|'down'} dir @param {string|null} [id] @returns {Promise<string>} the new terminal's id
+     */
+    async split(dir, id = this.focusedId) {
+        if (!id) throw new Error('no terminal to split: focus one, or name it');
+        if (!this.isShown(id)) throw new Error(this.ctx.terminals.has(id) ? `terminal '${id}' is hidden` : `no terminal '${id}'`);
+        this.groups.canSplit(id, dir);
+        if (this.fullscreen.id) this.fullscreen.exit();   // the split lands on the canvas
+        this._splitLanding = { at: id, dir };
+        try {
+            const r = await this.spawn();
+            if (!r.ok) throw new Error(r.reason || 'the new terminal did not land');
+            return /** @type {string} */ (r.id);
+        } finally { this._splitLanding = null; }
+    }
+
+    /**
+     * Move focus to the terminal on the canvas next to the focused one in a direction — a split's
+     * neighbouring pane, or the nearest window that way. Framed when it isn't already in view.
+     * @param {'left'|'right'|'up'|'down'} dir @returns {string|null} where focus went
+     */
+    focusPane(dir) {
+        if (!this.focusedId) return null;
+        const rects = new Map(this.canvasOrder().map((id) => [id, this.windowRect(id)]));
+        const next = neighbor(rects, this.focusedId, dir);
+        if (!next) return null;
+        const b = this.viewport.toScreenBox(this.windowRect(next)), v = this.viewport.view;
+        this.focus(next, { frame: b.left < 0 || b.top < 0 || b.right > v.w || b.bottom > v.h });
+        return next;
     }
 
     /** Cycle focus through the shown terminals in arrival order, framing the one it lands on. */
@@ -913,7 +956,16 @@ export default class TerminalWall {
                 selectionWordChars: this.config.selectionWordChars,
             }),
             place: (grid) => this._place(grid),
-            landed: (id) => { this.focus(id, { frame: true }); return 'focused + framed'; },
+            landed: (id) => {
+                const s = this._splitLanding;
+                if (s) {
+                    this._splitLanding = null;
+                    try { this.groups.insertPane(s.at, id, s.dir); this.focus(id); return `split ${s.dir} of ${s.at}`; }
+                    catch (e) { console.warn(`[wall] split ${s.dir} of ${s.at}: ${e.message} — ${id} stays a terminal of its own`); }
+                }
+                this.focus(id, { frame: true });
+                return 'focused + framed';
+            },
             focus: (id) => ({ ok: this.focus(id) }),
             release: () => {},
             resizing: () => '',

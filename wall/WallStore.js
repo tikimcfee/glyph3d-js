@@ -1,3 +1,4 @@
+import { remove as removePane } from './splitTree.js';
 /**
  * WallStore — the wall's durable per-browser state, in localStorage: where each terminal sits, the
  * names the person gave them and which are hidden (keyed by terminal id), the groups (keyed by group
@@ -16,10 +17,13 @@
  */
 
 /**
- * A group as stored. `members` is the tiling order. `origin` is the top-left of a tiled group's first
- * window (null until it first tiles).
- * @typedef {{ name: string, layout: 'tile'|'freeform', columns: number, gap: number,
- *             origin: { x: number, y: number }|null, members: string[] }} WallGroup
+ * A group as stored. `members` is the tiling order (a split's: its panes in reading order). `origin` is
+ * the top-left of a tiled group's first window, or of a split's rect (null until it first tiles).
+ * `split` is a split group's rect size (world units), whether its panes show title bars, and its
+ * tree of panes (splitTree.js); null for the other layouts.
+ * @typedef {{ w: number, h: number, bars: boolean, tree: import('./splitTree.js').SplitNode }} WallSplit
+ * @typedef {{ name: string, layout: 'tile'|'freeform'|'split', columns: number, gap: number,
+ *             origin: { x: number, y: number }|null, members: string[], split: WallSplit|null }} WallGroup
  */
 
 /**
@@ -83,6 +87,7 @@ export default class WallStore {
         this._hidden = new Set(read(this.keys.hidden, []));
         /** @type {Record<string, WallGroup>} */
         this._groups = read(this.keys.groups, {});
+        for (const g of Object.values(this._groups)) g.split ??= null;   // a group saved before splits
         /** @type {SidebarState} */
         this._sidebar = { ...SIDEBAR_DEFAULT, ...read(this.keys.sidebar, {}) };
         /** @type {StatusWindowState} */
@@ -196,7 +201,10 @@ export default class WallStore {
             const taken = og.members.filter((id) => g.members.includes(id));
             if (taken.length) this._dropMembers(other, taken, false);
         }
-        this._groups[gid] = { name: g.name, layout: g.layout, columns: g.columns, gap: g.gap, origin: g.origin ? { x: g.origin.x, y: g.origin.y } : null, members: [...g.members] };
+        this._groups[gid] = {
+            name: g.name, layout: g.layout, columns: g.columns, gap: g.gap, origin: g.origin ? { x: g.origin.x, y: g.origin.y } : null,
+            members: [...g.members], split: g.split ? structuredClone(g.split) : null,
+        };
         write(this.keys.groups, this._groups);
     }
 
@@ -212,6 +220,8 @@ export default class WallStore {
     _dropMembers(gid, ids, persist = true) {
         const g = this._groups[gid];
         g.members = g.members.filter((id) => !ids.includes(id));
+        // A pane that goes gives its room to its sibling.
+        if (g.split) for (const id of ids) g.split.tree = removePane(g.split.tree, id) ?? g.split.tree;
         if (!g.members.length) { delete this._groups[gid]; this._uncollapse(gid); }
         if (persist) write(this.keys.groups, this._groups);
     }

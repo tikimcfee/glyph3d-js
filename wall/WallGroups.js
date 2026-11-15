@@ -1,5 +1,11 @@
 import GroupFrame from './GroupFrame.js';
 import { tileLayout, nearestPlace, unionRect, padRect, BAR_ROOM } from './wallLayout.js';
+import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree } from './splitTree.js';
+
+/** The smallest a split pane makes its terminal (cells), as a border drag's floor. */
+const MIN_PANE = { cols: 20, rows: 5 };
+/** A split's rect within this much (world units) of a pane's edge is that edge. */
+const EDGE_EPS = 1e-6;
 
 /** A group's natural numeral, from its id (`g-3` → 3), for its default name and its sort. */
 const numeral = (gid) => Number(gid.slice(2)) || 0;
@@ -7,8 +13,18 @@ const numeral = (gid) => Number(gid.slice(2)) || 0;
 /**
  * WallGroups — terminals gathered into groups. A group has a name, members (in tiling order) and a
  * layout: `tile` packs its shown members in `columns` columns `gap` apart (wallLayout.tileLayout),
- * from the group's origin; `freeform` leaves each member at its own spot. Either way the members
- * move together when the group's header is dragged. A terminal is in one group at most.
+ * from the group's origin; `freeform` leaves each member at its own spot; `split` cuts one rect into
+ * panes, as a terminal app's splits do (splitTree.js), and each member re-wraps to fill its pane.
+ * Either way the members move together when the group's header is dragged. A terminal is in one
+ * group at most.
+ *
+ * A split pane holds its title bar's room above its panel when the split shows bars (`splitBarRows`
+ * of the terminal's rows; the bar is capped to it, so it never overlaps the pane above), then the
+ * panel: the cells plus the grid's own padding, measured off the grid. Its cols × rows are what fit
+ * (at least MIN_PANE), its panel's top-left at the pane's; panes sit `splitGap` apart. Splitting
+ * cuts a pane in two (refused when a half would fall under MIN_PANE); a pane that leaves (removed,
+ * hidden, closed, killed) gives its room to its sibling; a divider drag moves the cut, an outer edge
+ * drag resizes the whole split; any group turns into a split (rows of `columns`, equal shares) and back.
  *
  * The groups themselves live in the WallStore (durable, per relay, pruned with their members); this
  * is what acts on them — every change writes the store, re-tiles, persists the members' spots and
@@ -55,6 +71,12 @@ export default class WallGroups {
         return !!gid && this.get(gid).layout === 'tile';
     }
 
+    /** Whether a terminal is a pane of a split group. */
+    splits(id) {
+        const gid = this.groupOf(id);
+        return !!gid && this.get(gid).layout === 'split';
+    }
+
     /** A group's members that are on the wall and shown, in tiling order. */
     shownMembers(gid) { return this.get(gid).members.filter((id) => this.wall.isShown(id)); }
 
@@ -73,9 +95,10 @@ export default class WallGroups {
         const cfg = this.wall.config;
         const gid = this._store.newGroupId();
         const columns = o.columns ?? (cfg.groupColumns || Math.ceil(Math.sqrt(members.length)));
-        const g = { name: (o.name || '').trim(), layout: o.layout ?? cfg.groupLayout, columns, gap: o.gap ?? cfg.groupGap, origin: null, members };
-        this._check(g);
-        g.origin = this._originOf(members);
+        const layout = o.layout ?? cfg.groupLayout;
+        let g = { name: (o.name || '').trim(), layout, columns, gap: o.gap ?? cfg.groupGap, origin: null, members, split: null };
+        if (layout === 'split') g = this._asSplit({ ...g, layout: 'tile' });
+        else { this._check(g); g.origin = this._originOf(members); }
         this._commit(gid, g, ...this._groupsOf(members));
         return gid;
     }
@@ -84,6 +107,18 @@ export default class WallGroups {
     add(gid, ids) {
         const g = this.get(gid);
         const more = this._terminals(ids).filter((id) => !g.members.includes(id));
+        if (g.layout === 'split') {
+            let tree = g.split.tree;
+            for (const id of more) {
+                const last = leaves(tree).at(-1);
+                const r = this._paneRects({ ...g, split: { ...g.split, tree } }).get(last);
+                tree = insert(tree, last, id, r && r.maxX - r.minX >= r.maxY - r.minY ? 'row' : 'col');
+            }
+            const next = { ...g, members: leaves(tree), split: { ...g.split, tree } };
+            this._fits(next, `no room in group '${gid}' for ${more.length} more pane(s)`);
+            this._commit(gid, next, ...this._groupsOf(more));
+            return;
+        }
         this._commit(gid, { ...g, members: [...g.members, ...more] }, ...this._groupsOf(more));
     }
 
@@ -98,9 +133,11 @@ export default class WallGroups {
         for (const [gid, out] of byGroup) {
             const g = this.get(gid);
             const members = g.members.filter((id) => !out.includes(id));
-            if (members.length) this._commit(gid, { ...g, members });
-            else this._store.deleteGroup(gid);
+            if (!members.length) { this._store.deleteGroup(gid); continue; }
+            const split = g.split ? { ...g.split, tree: out.reduce((tr, id) => removePane(tr, id) ?? tr, g.split.tree) } : null;
+            this._commit(gid, { ...g, members, split });
         }
+        this._syncBars();
         this.wall._emit();
     }
 
@@ -108,21 +145,116 @@ export default class WallGroups {
     ungroup(gid) {
         this.get(gid);
         this._store.deleteGroup(gid);
+        this._syncBars();
         this.wall._emit();
     }
 
     /**
      * Set a group's layout. Switching to `tile` starts the tiling at the members' current top-left;
-     * to `freeform`, the members stay where the tiling put them.
-     * @param {string} gid @param {'tile'|'freeform'} layout @param {{ columns?: number, gap?: number }} [o]
+     * to `freeform`, the members stay where they are; to `split`, the members' union becomes the split's
+     * rect, cut into rows of `columns` equal panes (tiling order), each member re-wrapped to its pane.
+     * Leaving a split keeps each member's size and spot (a tiling then re-tiles them).
+     * @param {string} gid @param {'tile'|'freeform'|'split'} layout @param {{ columns?: number, gap?: number }} [o]
      */
     setLayout(gid, layout, o = {}) {
         const g = this.get(gid);
-        const next = { ...g, layout, columns: o.columns ?? g.columns, gap: o.gap ?? g.gap };
+        let next = { ...g, layout, columns: o.columns ?? g.columns, gap: o.gap ?? g.gap, split: layout === 'split' ? g.split : null };
+        if (layout === 'split' && g.layout !== 'split') next = this._asSplit({ ...next, layout: 'tile' });
         this._check(next);
         if (layout === 'tile' && g.layout !== 'tile') next.origin = this._originOf(g.members);
         this._commit(gid, next);
+        this._syncBars();
     }
+
+    // ── splits ───────────────────────────────────────────────────────────────
+
+    /**
+     * Throw unless `at` can be cut in two `dir`-wards with both halves at least MIN_PANE.
+     * @param {string} at @param {'right'|'down'} dir
+     */
+    canSplit(at, dir) { this._splitPlan(at, '\u0000new', dir); }
+
+    /**
+     * Cut the pane `at` in two and give `id` (a terminal just born) the half to the right or below.
+     * A terminal in no split becomes one first: a split group round its window (it leaves any other
+     * group). Throws, changing nothing, when a half would fall under MIN_PANE.
+     * @param {string} at @param {string} id @param {'right'|'down'} dir @returns {string} the split's group id
+     */
+    insertPane(at, id, dir) {
+        if (!this.wall.terminal(id)) throw new Error(`no terminal '${id}'`);
+        const { gid, next, touched } = this._splitPlan(at, id, dir);
+        this._commit(gid, next, ...touched);
+        return gid;
+    }
+
+    /** The divider under a world point in a split on the canvas, `tol` world units either side. */
+    dividerAt(p, tol) {
+        for (const gid of this.ids().reverse()) {
+            const g = this.get(gid);
+            if (g.layout !== 'split' || !g.members.some((id) => this.wall.onCanvas(id))) continue;
+            const d = dividerAt(g.split.tree, this._splitRect(g), this.wall.config.splitGap, p, tol);
+            if (d) return { gid, divider: d };
+        }
+        return null;
+    }
+
+    /** Drag a split's divider to `coord` (world x for an upright one, y for a level one). */
+    dragDivider(gid, path, coord) {
+        const g = this.get(gid);
+        const ratio = ratioFor(g.split.tree, this._splitRect(g), this.wall.config.splitGap, path, coord, this._minPane(g));
+        if (Math.abs(ratio - this._nodeRatio(g.split.tree, path)) < 1e-9) return;
+        this._commit(gid, { ...g, split: { ...g.split, tree: setRatio(g.split.tree, path, ratio) } });
+    }
+
+    /**
+     * What a border press on a split pane drags: an edge on the split's boundary resizes the whole
+     * split (`outer`, the edges that are), an inner one the divider on that side.
+     * @param {string} id @param {{ left?: boolean, right?: boolean, top?: boolean, bottom?: boolean }} edges
+     * @returns {{ gid: string, outer: { left: boolean, right: boolean, top: boolean, bottom: boolean }|null,
+     *             divider: { path: import('./splitTree.js').SplitPath, axis: 'x'|'y' }|null }}
+     */
+    splitEdge(id, edges) {
+        const gid = this.groupOf(id), g = this.get(gid);
+        const pr = this._paneRects(g).get(id), sr = this._splitRect(g);
+        const on = { left: pr.minX <= sr.minX + EDGE_EPS, right: pr.maxX >= sr.maxX - EDGE_EPS, top: pr.maxY >= sr.maxY - EDGE_EPS, bottom: pr.minY <= sr.minY + EDGE_EPS };
+        const outer = { left: !!edges.left && on.left, right: !!edges.right && on.right, top: !!edges.top && on.top, bottom: !!edges.bottom && on.bottom };
+        if (outer.left || outer.right || outer.top || outer.bottom) return { gid, outer, divider: null };
+        // An inner edge: the divider just beyond it (the pane's edge sits up to a cell inside its pane).
+        const gap = this.wall.config.splitGap, tol = gap + this._cellOf(g).x;
+        const probe = edges.right ? { x: pr.maxX + gap / 2, y: (pr.minY + pr.maxY) / 2 } : edges.left ? { x: pr.minX - gap / 2, y: (pr.minY + pr.maxY) / 2 }
+            : edges.bottom ? { x: (pr.minX + pr.maxX) / 2, y: pr.minY - gap / 2 } : { x: (pr.minX + pr.maxX) / 2, y: pr.maxY + gap / 2 };
+        const d = dividerAt(g.split.tree, sr, gap, probe, tol);
+        return { gid, outer: null, divider: d ? { path: d.path, axis: d.axis } : null };
+    }
+
+    /** A split's rect, world units. @param {string} gid */
+    splitRect(gid) { return this._splitRect(this.get(gid)); }
+
+    /**
+     * Give a split a new rect (an outer edge dragged), held at least big enough for every pane.
+     * @param {string} gid @param {import('./wallLayout.js').Rect} rect
+     */
+    resizeSplit(gid, rect) {
+        const g = this.get(gid);
+        const min = minSize(g.split.tree, this._minPane(g), this.wall.config.splitGap);
+        const w = Math.max(min.w, rect.maxX - rect.minX), h = Math.max(min.h, rect.maxY - rect.minY);
+        const old = this._splitRect(g);
+        // An edge held at its minimum stays where the far edge puts it, not where the pointer is.
+        const x = rect.minX !== old.minX ? rect.maxX - w : rect.minX;
+        const y = rect.maxY !== old.maxY ? rect.minY + h : rect.maxY;
+        if (x === g.origin.x && y === g.origin.y && w === g.split.w && h === g.split.h) return;
+        this._commit(gid, { ...g, origin: { x, y }, split: { ...g.split, w, h } });
+    }
+
+    /** Show or hide a split's pane title bars. @param {string} gid @param {boolean} on */
+    setBars(gid, on) {
+        const g = this.get(gid);
+        if (g.layout !== 'split') throw new Error(`group '${gid}' is not a split`);
+        this._commit(gid, { ...g, split: { ...g.split, bars: on } });
+    }
+
+    /** Each pane's rect in a split group. @param {string} gid @returns {Map<string, import('./wallLayout.js').Rect>} */
+    paneRects(gid) { return this._paneRects(this.get(gid)); }
 
     /** @param {string} gid @param {number} columns */
     setColumns(gid, columns) {
@@ -212,6 +344,7 @@ export default class WallGroups {
     /** Re-tile a tiled group over its shown members (a member came, went, hid, showed or resized). */
     relayout(gid) {
         const g = this.get(gid);
+        if (g.layout === 'split') { this._layoutSplit(g); return; }
         if (g.layout !== 'tile') return;
         // A member fullscreen re-wraps to the screen, not to its tile: the tiling waits for it to come back.
         const fs = this.wall.fullscreen?.id;
@@ -302,7 +435,11 @@ export default class WallGroups {
 
     /** Validate a group's layout fields; returns it. */
     _check(g) {
-        if (g.layout !== 'tile' && g.layout !== 'freeform') throw new Error(`a group's layout is 'tile' or 'freeform', not '${g.layout}'`);
+        if (g.layout !== 'tile' && g.layout !== 'freeform' && g.layout !== 'split') throw new Error(`a group's layout is 'tile', 'freeform' or 'split', not '${g.layout}'`);
+        if (g.layout === 'split') {
+            if (!g.split || !(g.split.w > 0) || !(g.split.h > 0) || !g.origin) throw new Error('a split needs its rect');
+            checkTree(g.split.tree, g.members);
+        }
         if (!Number.isInteger(g.columns) || g.columns < 1) throw new Error(`columns must be a whole number ≥ 1, not '${g.columns}'`);
         if (!Number.isFinite(g.gap) || g.gap < 0) throw new Error(`gap must be a number ≥ 0, not '${g.gap}'`);
         return g;
@@ -340,6 +477,113 @@ export default class WallGroups {
         this._store.setGroup(gid, g);
         this.relayout(gid);
         for (const other of touched) if (other !== gid && this._store.group(other)) this.relayout(other);
+        this._syncBars();
         this.wall._emit();
+    }
+
+    // ── split internals ──────────────────────────────────────────────────────
+
+    /** A split's rect: its origin is the top-left. */
+    _splitRect(g) {
+        return { minX: g.origin.x, maxX: g.origin.x + g.split.w, minY: g.origin.y - g.split.h, maxY: g.origin.y };
+    }
+
+    /** Each pane's rect. */
+    _paneRects(g) { return panes(g.split.tree, this._splitRect(g), this.wall.config.splitGap); }
+
+    /** A cell's world stride, read off one of the group's terminals (all share the wall's font). */
+    _cellOf(g) {
+        const grid = g.members.map((id) => this.wall.terminal(id)).find(Boolean);
+        return grid ? grid.cellStride : { x: 1, y: 1 };
+    }
+
+    /** The bar room above a pane: `splitBarRows` rows when the split shows bars. */
+    _barRoom(g) { return g.split.bars ? this.wall.config.splitBarRows * this._cellOf(g).y : 0; }
+
+    /** A terminal's frame: its panel less its cells (the grid's own padding), world units. */
+    _frameOf(id) {
+        const grid = this.wall.terminal(id), r = this.wall.terminalRect(id), s = grid.cellStride;
+        return { x: r.maxX - r.minX - grid.cols * s.x, y: r.maxY - r.minY - grid.rows * s.y };
+    }
+
+    /** The least a pane takes: MIN_PANE cells, the panel's frame and the bar room. */
+    _minPane(g) {
+        const s = this._cellOf(g), room = this._barRoom(g);
+        const ref = g.members.find((id) => this.wall.terminal(id));
+        const f = ref ? this._frameOf(ref) : { x: 0, y: 0 };
+        return () => ({ w: MIN_PANE.cols * s.x + f.x, h: MIN_PANE.rows * s.y + f.y + room });
+    }
+
+    /** Throw `why` unless every pane of `g` gets at least MIN_PANE. */
+    _fits(g, why) {
+        const min = minSize(g.split.tree, this._minPane(g), this.wall.config.splitGap);
+        if (min.w > g.split.w + EDGE_EPS || min.h > g.split.h + EDGE_EPS) throw new Error(`${why}: each pane needs at least ${MIN_PANE.cols}×${MIN_PANE.rows}`);
+    }
+
+    /** A node's ratio. */
+    _nodeRatio(tree, path) { let n = tree; for (const k of path) n = n[k]; return n.ratio; }
+
+    /**
+     * What splitting `at` would make: the split group (an existing one, or one born round `at`'s window)
+     * with `id` in the new half, checked to fit. Changes nothing.
+     */
+    _splitPlan(at, id, dir) {
+        if (dir !== 'right' && dir !== 'down') throw new Error(`a split goes right or down, not '${dir}'`);
+        if (!this.wall.terminal(at)) throw new Error(`no terminal '${at}'`);
+        let gid = this.groupOf(at);
+        let g = gid ? this.get(gid) : null;
+        const touched = [];
+        if (!g || g.layout !== 'split') {
+            if (gid) touched.push(gid);
+            gid = this._store.newGroupId();
+            g = this._asSplit({ name: '', layout: 'tile', columns: 1, gap: this.wall.config.groupGap, origin: null, members: [at], split: null });
+        }
+        const tree = insert(g.split.tree, at, id, dir === 'right' ? 'row' : 'col');
+        const next = { ...g, members: leaves(tree), split: { ...g.split, tree } };
+        this._fits(next, `no room to split '${at}' ${dir}`);
+        return { gid, next, touched };
+    }
+
+    /**
+     * A group (any layout, its members on the wall) as a split: its members' windows' union as the rect,
+     * cut in rows of `columns` equal panes in member order.
+     */
+    _asSplit(g) {
+        const bars = this.wall.config.splitBars;
+        const probe = { ...g, split: { w: 1, h: 1, bars, tree: { id: g.members[0] } } };
+        const room = this._barRoom(probe);
+        const rects = g.members.filter((id) => this.wall.terminal(id)).map((id) => this.wall.terminalRect(id));
+        const u = unionRect(rects);
+        if (!u) throw new Error('a split needs its terminals on the wall');
+        const columns = Math.max(1, Math.min(g.columns, g.members.length));
+        return {
+            ...g, layout: 'split', origin: { x: u.minX, y: u.maxY + room },
+            split: { w: u.maxX - u.minX, h: u.maxY - u.minY + room, bars, tree: fromMembers(g.members, columns) },
+        };
+    }
+
+    /** Lay a split out: each member on the wall re-wrapped to fit its pane, its panel at the pane's top-left. */
+    _layoutSplit(g) {
+        const fs = this.wall.fullscreen?.id;
+        if (fs && g.members.includes(fs)) return;   // a member fullscreen: the split waits for it
+        const room = this._barRoom(g);
+        for (const [id, pr] of this._paneRects(g)) {
+            const grid = this.wall.terminal(id);
+            if (!grid) continue;   // its grid isn't here (yet): its pane waits for it
+            const s = grid.cellStride, f = this._frameOf(id);
+            const cols = Math.max(MIN_PANE.cols, Math.floor((pr.maxX - pr.minX - f.x) / s.x + EDGE_EPS));
+            const rows = Math.max(MIN_PANE.rows, Math.floor((pr.maxY - pr.minY - room - f.y) / s.y + EDGE_EPS));
+            if (cols !== grid.cols || rows !== grid.rows) this.wall.router.execute(['terminal.resize', id, String(cols), String(rows)]);
+            this.wall.placeBody(id, { x: pr.minX, y: pr.maxY - room });
+            this.wall.rememberPosition(id);
+            this.wall.names?.setBarRoom(id, room);
+        }
+    }
+
+    /** Every terminal not in a split gets the usual title bar back. */
+    _syncBars() {
+        const names = this.wall.names;
+        if (!names) return;
+        for (const id of this.wall.order ?? []) if (!this.splits(id)) names.setBarRoom(id, null);
     }
 }

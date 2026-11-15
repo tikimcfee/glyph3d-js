@@ -28,7 +28,8 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   Ctrl held mid-drag inverts), and every knob is searchable in the settings panel (chord+,; one
   schema, `wallSettings`; dialled knobs persist per relay), and every key, gesture and verb in the
   help panel (chord+/ or the topbar's ?; the chords are ONE table, `wall/wallKeymap.js`, that
-  `WallKeys` dispatches from). chord+↵ puts the focused terminal fullscreen (`WallFullscreen`: it
+  `WallKeys` dispatches from). A group can be a split (chord+D / ⇧D: Ghostty-style panes, a tree in
+  `wall/splitTree.js`; dividers drag, chord+arrows move between panes). chord+↵ puts the focused terminal fullscreen (`WallFullscreen`: it
   re-wraps to fill the canvas, its own text size on chord+= / - / 0, everything given back on leaving)
   — the terminals' font family
   (`fontFamily`, live) among them. A drag on a terminal's body selects its text (twice a word, three

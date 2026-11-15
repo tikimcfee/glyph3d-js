@@ -147,6 +147,7 @@ function standIn({ tracking = 'button', focused = 't' } = {}) {
     };
     const body = { minX: 0, maxX: 80, minY: -47, maxY: 1 };
     const wall = {
+        groups: { splits: () => false, tiles: () => false },
         focusedId: focused,
         terminal: (id) => (id === 't' ? grid : null),
         terminalRect: () => body,
