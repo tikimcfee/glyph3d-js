@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { chordLabel, isChord } from './chord.js';
-import { DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
+import { DockButtons, useHeadDrag } from './Panel.jsx';
+import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
 import { KEYMAP, PLAIN_KEYS, HELP_SECTIONS, chordText, gestures } from './wallKeymap.js';
 
 const C = { border: '#2a303c', text: '#c8ced8', muted: '#6b7383', label: '#d4d9e2', key: '#8ab4f8', field: '#0b0d13' };

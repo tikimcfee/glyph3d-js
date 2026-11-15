@@ -212,6 +212,9 @@ export default class WallGroups {
     relayout(gid) {
         const g = this.get(gid);
         if (g.layout !== 'tile') return;
+        // A member fullscreen re-wraps to the screen, not to its tile: the tiling waits for it to come back.
+        const fs = this.wall.fullscreen?.id;
+        if (fs && g.members.includes(fs)) return;
         const shown = this.shownMembers(gid);
         if (!shown.length) return;
         const origin = g.origin ?? this._originOf(shown);
@@ -258,14 +261,15 @@ export default class WallGroups {
         return null;
     }
 
-    /** Per frame: one frame per group, laid over its shown members; none for a group with none shown. */
-    update(zoom, focusedId) {
+    /** Per frame: one frame per group, laid over its shown members; none for a group with none shown,
+     *  and none at all while a terminal is fullscreen (`hidden`). */
+    update(zoom, focusedId, hidden = false) {
         const ids = this.ids();
         for (const [gid, frame] of this._frames) if (!ids.includes(gid)) { frame.dispose(); this._frames.delete(gid); }
         for (const gid of ids) {
             let frame = this._frames.get(gid);
             if (!frame) { frame = new GroupFrame({ atlas: this._atlas }); this._scene.add(frame); this._frames.set(gid, frame); }
-            const rect = this.frameRect(gid, zoom);
+            const rect = hidden ? null : this.frameRect(gid, zoom);
             frame.visible = !!rect;
             if (rect) frame.layout(rect, zoom, this.nameOf(gid), !!focusedId && this.groupOf(focusedId) === gid);
         }

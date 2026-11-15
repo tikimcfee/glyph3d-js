@@ -31,6 +31,7 @@ import { parseZoomKeys } from './chord.js';
 export const SECTIONS = Object.freeze([
     { id: 'canvas', title: 'Canvas', subtitle: 'background · drafting grid · snapping' },
     { id: 'terminals', title: 'Terminals', subtitle: 'closing · title-bar buttons' },
+    { id: 'fullscreen', title: 'Fullscreen', subtitle: 'text size · room at the edge' },
     { id: 'text', title: 'Text', subtitle: 'font family · bold · underline · strikethrough · overline · dim' },
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
     { id: 'status', title: 'Status', subtitle: 'the termd status window · notices' },
@@ -84,6 +85,18 @@ export const KNOBS = Object.freeze({
     barButtonsMinPx: {
         section: 'terminals', label: 'Bar buttons from', type: 'number', min: 0, step: 1, unit: 'px',
         description: "A hovered title bar shows its hide and close buttons only when the bar is at least this tall on screen.",
+    },
+    fullscreenMinLinePx: {
+        section: 'fullscreen', label: 'Smallest entry text', type: 'number', min: 4, max: 200, step: 1, unit: 'px a row',
+        description: 'A terminal going fullscreen keeps the text size it had on the canvas, so it shows more text; from far out it starts at least this tall instead.',
+    },
+    fullscreenPad: {
+        section: 'fullscreen', label: 'Edge room', type: 'number', min: 0, step: 1, unit: 'px',
+        description: 'Space kept between a fullscreen terminal and the edge of the canvas (or a docked panel).',
+    },
+    fullscreenTextStep: {
+        section: 'fullscreen', label: 'Text size step', type: 'number', min: 1.01, max: 3, step: 0.01, unit: '×',
+        description: 'How much one bigger or smaller text key (chord + = / chord + -) changes a fullscreen terminal\'s text; it re-wraps to the new size.',
     },
     fontFamily: {
         section: 'text', label: 'Font family', type: 'enum', options: FONT_FAMILY_IDS,

@@ -84,7 +84,7 @@ export default class WallKeys {
             return;
         }
         if (isChord(e)) {
-            const chord = chordFor(e);
+            const chord = chordFor(e, wall.fullscreen?.id ? 'fullscreen' : 'canvas');
             if (chord) {
                 if (chord.run) { e.preventDefault(); e.stopPropagation(); chord.run(wall, e); }
                 return;   // a chord with no run is another part's (K: the palette, main.jsx)

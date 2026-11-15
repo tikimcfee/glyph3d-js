@@ -61,7 +61,7 @@ async function standIn({ focused = null, text = 'hello world foo\r\nsecond (line
         config: { ...WALL_CONFIG },
         fitAll: () => {},
         groups: { tiles: () => false },
-        shownOrder: () => ['t'], windowRect: () => ({ ...body, maxY: body.maxY + 1 }),
+        shownOrder: () => ['t'], canvasOrder: () => ['t'], windowRect: () => ({ ...body, maxY: body.maxY + 1 }),
     };
     const captured = new Set();
     const canvas = { style: {}, setPointerCapture: (id) => captured.add(id), releasePointerCapture: (id) => captured.delete(id), hasPointerCapture: (id) => captured.has(id) };

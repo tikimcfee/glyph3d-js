@@ -33,6 +33,7 @@ import { searchSettings, SECTIONS } from './wallSettings.js';
  *   wall.snap [toggle|on|off] · wall.grid [toggle|on|off]   snapping to the grid · drawing it
  *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
  *   wall.help [toggle|open|close|left|right|float [x y]]   the keys, gestures and verbs
+ *   wall.fullscreen [toggle|on|off] [id] · wall.fullscreen.text <bigger|smaller|reset>
  *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
  *                                              the right-click menu, at canvas px (default: on the
  *                                              terminal, under the header, the view's centre)
@@ -101,6 +102,25 @@ export default function registerWallCommands(router, wall) {
         const r = await wall.spawn({ at });
         if (!r.ok) throw new Error(r.reason || 'the spawn did not land');
         return OK(`spawned ${r.id}${at ? ` at (${at.x}, ${at.y})` : ''}`, { id: r.id, at });
+    });
+    verb('wall.fullscreen', '[toggle|on|off] [id]', 'Put a terminal fullscreen — it re-wraps to fill the canvas — or back on the canvas', (args) => {
+        const [what = 'toggle', named] = args;
+        const id = named ? terminalIds([named])[0] : null;
+        const fs = wall.fullscreen;
+        if (what === 'off' || (what === 'toggle' && fs.id && (!id || id === fs.id))) fs.exit();
+        else if (what === 'on' || what === 'toggle') {
+            const target = id ?? wall.focusedId;
+            if (!target) throw new Error('no terminal to put fullscreen: focus one, or name it');
+            if (!fs.enter(target)) throw new Error(`terminal '${target}' is hidden`);
+        } else throw new Error(`fullscreen takes toggle|on|off, not '${what}'`);
+        return OK(fs.id ? `fullscreen ${fs.id}: ${fs.state.linePx.toFixed(1)} px a row` : 'fullscreen off', { fullscreen: fs.state });
+    });
+    verb('wall.fullscreen.text', '<bigger|smaller|reset>', "The fullscreen terminal's text size: it re-wraps, and the size is remembered for it (reset: the canvas's size)", (args) => {
+        const dir = { bigger: 1, smaller: -1, reset: 0 }[args[0]];
+        if (dir === undefined) throw new Error(`fullscreen text takes bigger|smaller|reset, not '${args[0] ?? ''}'`);
+        const px = wall.fullscreen.text(/** @type {-1|0|1} */ (dir));
+        if (px == null) throw new Error('no terminal is fullscreen');
+        return OK(`fullscreen text ${px.toFixed(1)} px a row`, { linePx: px });
     });
     verb('wall.fit', '', 'Ease the camera to fit every shown terminal', () => {
         if (!wall.shownOrder().length) throw new Error('no shown terminal to fit');

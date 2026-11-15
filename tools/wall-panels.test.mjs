@@ -3,7 +3,7 @@
 // topbar and hint clear whatever is docked), and the status window's knobs living in WALL_CONFIG
 // (wall.config checks them). Run: bun test tools/wall-panels.test.mjs
 import { test, expect } from 'bun:test';
-import { dockLayout, DOCK_WIDTHS } from '../wall/Panel.jsx';
+import { dockLayout, DOCK_WIDTHS } from '../wall/dockLayout.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from '../wall/wallConfig.js';
 import { GLYPH_LINE_DEFAULTS } from '../packages/glyph3d-core/src/core/glyphMaterial.js';
 import { noticeFor } from '../wall/StatusWindow.jsx';

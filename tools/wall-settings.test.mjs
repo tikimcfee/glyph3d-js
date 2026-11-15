@@ -18,7 +18,7 @@ globalThis.location ??= /** @type {any} */ ({ hostname: 'localhost' });
 const { WALL_CONFIG, checkConfig } = await import('../wall/wallConfig.js');
 const { KNOBS, SECTIONS, searchSettings, hitsIn } = await import('../wall/wallSettings.js');
 const { default: TerminalWall } = await import('../wall/TerminalWall.js');
-const { dockLayout, DOCK_WIDTHS } = await import('../wall/Panel.jsx');
+const { dockLayout, DOCK_WIDTHS } = await import('../wall/dockLayout.js');
 
 beforeEach(() => mem.clear());
 

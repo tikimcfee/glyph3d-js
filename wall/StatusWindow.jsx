@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { chordLabel } from './chord.js';
-import { DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
+import { DockButtons, useHeadDrag } from './Panel.jsx';
+import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
 
 /**
  * termd on the wall (docs/termd/DESIGN.md, "Status: in the app") — three small pieces, every number

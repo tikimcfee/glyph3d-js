@@ -74,6 +74,7 @@ export default class WallStore {
         this.keys = {
             positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status'),
             config: k('config'), settings: k('settings'), help: k('help'),
+            fullscreen: k('fullscreen'), fullscreenText: k('fullscreenText'),
         };
         this._positions = read(this.keys.positions, {});
         this._names = read(this.keys.names, {});
@@ -91,6 +92,10 @@ export default class WallStore {
         this._settings = { ...SETTINGS_PANEL_DEFAULT, ...read(this.keys.settings, {}) };
         /** @type {HelpPanelState} */
         this._help = { ...HELP_PANEL_DEFAULT, ...read(this.keys.help, {}) };
+        /** The terminal fullscreen now, and how to give it back (WallFullscreen). @type {import('./WallFullscreen.js').FullscreenState|null} */
+        this._fullscreen = read(this.keys.fullscreen, null);
+        /** Each terminal's fullscreen text size, CSS px per row, once the text keys set one. @type {Record<string, number>} */
+        this._fullscreenText = read(this.keys.fullscreenText, {});
     }
 
     // ── terminals ─────────────────────────────────────────────────────────────
@@ -131,6 +136,8 @@ export default class WallStore {
         this.setHidden(id, false);
         const gid = this.groupOf(id);
         if (gid) this._dropMembers(gid, [id]);
+        this.setFullscreenText(id, null);
+        if (this._fullscreen?.id === id) this.setFullscreen(null);
     }
 
     /**
@@ -139,7 +146,8 @@ export default class WallStore {
      * @param {Set<string>} live @returns {string[]} the terminal ids forgotten
      */
     prune(live) {
-        const known = new Set([...Object.keys(this._positions), ...Object.keys(this._names), ...this._hidden]);
+        const known = new Set([...Object.keys(this._positions), ...Object.keys(this._names), ...this._hidden, ...Object.keys(this._fullscreenText)]);
+        if (this._fullscreen) known.add(this._fullscreen.id);
         for (const g of Object.values(this._groups)) for (const id of g.members) known.add(id);
         const gone = [...known].filter((id) => !live.has(id));
         for (const id of gone) this.forget(id);
@@ -260,5 +268,26 @@ export default class WallStore {
     setHelpPanel(patch) {
         this._help = { ...this._help, ...patch };
         write(this.keys.help, this._help);
+    }
+
+    // ── fullscreen ────────────────────────────────────────────────────────────
+
+    /** The terminal fullscreen now (survives a reload). @returns {import('./WallFullscreen.js').FullscreenState|null} */
+    fullscreen() { return this._fullscreen; }
+
+    /** @param {import('./WallFullscreen.js').FullscreenState|null} s */
+    setFullscreen(s) {
+        this._fullscreen = s ? { ...s, canvas: { ...s.canvas }, camera: { ...s.camera } } : null;
+        write(this.keys.fullscreen, this._fullscreen);
+    }
+
+    /** A terminal's fullscreen text size, if the text keys set one. @param {string} id @returns {number|null} */
+    fullscreenText(id) { return this._fullscreenText[id] ?? null; }
+
+    /** @param {string} id @param {number|null} px - null forgets it */
+    setFullscreenText(id, px) {
+        if (px == null) { if (!(id in this._fullscreenText)) return; delete this._fullscreenText[id]; }
+        else this._fullscreenText[id] = px;
+        write(this.keys.fullscreenText, this._fullscreenText);
     }
 }

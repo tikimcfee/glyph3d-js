@@ -10,7 +10,7 @@ import StatusWindow, { TermdChip, TermdNotice } from './StatusWindow.jsx';
 import SettingsPanel from './SettingsPanel.jsx';
 import HelpPanel from './HelpPanel.jsx';
 import ContextMenu from './ContextMenu.jsx';
-import { dockLayout } from './Panel.jsx';
+import { dockLayout } from './dockLayout.js';
 import { isChord, chordLabel } from './chord.js';
 
 // The font chain (fonts/families.js): the families a terminal can draw in (the `fontFamily` knob),
@@ -79,7 +79,7 @@ function Chrome({ wall }) {
   const inset = dockLayout(state).inset;
   return (
     <>
-      <div style={{ ...styles.topbar, right: inset.right }}>
+      {!state.fullscreen && <div style={{ ...styles.topbar, right: inset.right }}>
         <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
         <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
         <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
@@ -91,7 +91,7 @@ function Chrome({ wall }) {
           {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
         </span>
         <TermdChip wall={wall} />
-      </div>
+      </div>}
       <TermdNotice wall={wall} />
       {state.notice && <div data-wall-notice style={{ ...styles.notice, left: inset.left, right: inset.right }}>{state.notice}</div>}
       <Sidebar wall={wall} state={state} />

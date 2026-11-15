@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { chordLabel, isChord } from './chord.js';
-import { Btn, DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
+import { Btn, DockButtons, useHeadDrag } from './Panel.jsx';
+import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
 import { searchSettings } from './wallSettings.js';
 
 const C = {

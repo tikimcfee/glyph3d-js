@@ -175,6 +175,26 @@ off (`wall.snap`, chord+'); Ctrl (⌃ on macOS) held during a drag inverts it fo
 press is a right-click (the menu's), so there it is pressed once the drag has begun. The grid shows or
 hides by `gridShow` (`wall.grid`, chord+⇧+'); snapping works with it hidden.
 
+**Fullscreen** (`wall/WallFullscreen.js`, chord+↵, `wall.fullscreen [toggle|on|off] [id]`): one
+terminal takes the screen as a terminal app's fullscreen does. It re-wraps (`terminal.resize`) to fill
+the canvas the docked panels leave (`dockLayout.js`), less `fullscreenPad`, at its text size, the
+leftover under a cell split evenly round it; the camera sits on it at that size (the pose is known at
+once: the body grows right and down from its top-left, so the camera eases while termd re-wraps);
+nothing else is drawn — the wall's "on the canvas now" (`onCanvas`, `canvasOrder`: shown, and while a
+terminal is fullscreen that one alone) is what drawing, naming, hitting and the lasso read, and group
+frames and the topbar go. The hidden set is untouched, so the sidebar and the tilings never see it; a
+tiled member's group holds its tiling until it comes back. Leaving gives the terminal its canvas
+cols × rows and spot back and the camera its canvas pose. Its text size is its own: entering keeps
+the size it had on the canvas (at least `fullscreenMinLinePx`), so it shows more text, not bigger
+text; chord+= / chord+- (× `fullscreenTextStep`) re-wrap it at a new size, remembered per terminal
+(`WallStore.fullscreenText`), and chord+0 puts it back to the canvas's (`wall.fullscreen.text
+bigger|smaller|reset`) — on the canvas, - still hides and 0 still fits all (the chord table's `mode`).
+Focusing another terminal while fullscreen (cycling, the palette, the sidebar, a new terminal) moves
+fullscreen to it, a tab switch; leaving then returns to the first entry's canvas pose. A window or dock
+change re-fits once it has held still 150 ms. The state is saved (`WallStore.fullscreen`), so a
+reload comes back fullscreen rather than leaving a terminal at its fullscreen size; hiding it leaves
+fullscreen first; one closed or killed ends it. Gate: `tools/wall-fullscreen.test.mjs`.
+
 **The help panel** (`wall/HelpPanel.jsx`, chord+/, the topbar's ?, the palette, `wall.help`) lists
 the wall's keys, gestures and verbs, searchable (every word must match somewhere; Escape clears the
 search, then closes), floating or docked like the other panels. Nothing in it is written twice: the

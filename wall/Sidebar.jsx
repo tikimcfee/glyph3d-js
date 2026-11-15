@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 import { chordLabel } from './chord.js';
 import { holdPress } from './holdPress.js';
 import FitText from './FitText.jsx';
-import { Btn, DockButtons, useHeadDrag, dockLayout, DOCK_WIDTHS } from './Panel.jsx';
+import { Btn, DockButtons, useHeadDrag } from './Panel.jsx';
+import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
 
 /** The close button: held over closeHoldMs (its ring fills), then the terminal is killed. */
 function HoldClose({ wall, id }) {

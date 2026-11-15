@@ -48,6 +48,14 @@ export const WALL_CONFIG = Object.freeze({
      */
     zoomKeys: 'ctrl alt meta',
 
+    // ── fullscreen (WallFullscreen.js) ──
+    /** A terminal going fullscreen keeps its canvas text size, but at least this many CSS px a row (from far out). */
+    fullscreenMinLinePx: 14,
+    /** Room kept inside the canvas edge round a fullscreen terminal, CSS px. */
+    fullscreenPad: 6,
+    /** The factor one bigger / smaller text key changes a fullscreen terminal's text size by. */
+    fullscreenTextStep: 1.1,
+
     // ── selecting text in a terminal: the drag, a word, a line; copy and paste (WallPointer, TerminalGrid) ──
     /** A selected cell's fill, sRGB. Ghostty's default: the terminal's own text colour (its colours inverted). */
     selectionColor: TERMINAL_SELECTION_DEFAULTS.background,

@@ -366,7 +366,7 @@ export default class WallPointer {
     /** A lasso was let go: every shown terminal whose window it touches joins the selection. */
     _lassoSelect(points) {
         const poly = points.map((p) => this.camera.toWorld(p.x, p.y));
-        const touched = this.wall.shownOrder().filter((id) => lassoTouches(poly, this.wall.windowRect(id)));
+        const touched = this.wall.canvasOrder().filter((id) => lassoTouches(poly, this.wall.windowRect(id)));
         if (touched.length) this.wall.run(['wall.select.add', ...touched]);
     }
 

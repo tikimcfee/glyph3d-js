@@ -7,19 +7,26 @@ import { ALT_LABEL, SNAP_INVERT_LABEL, COPY_LABEL, BLOCK_SELECT_LABEL, chordLabe
 
 /**
  * One chord: the physical key (`code`, so layouts never rewrite it), whether Shift must be held
- * (true), must not be (false) or doesn't matter (absent), the key as the help shows it, what it does,
- * and how — `run` null for a chord another part of the wall answers (the palette's, in main.jsx).
- * @typedef {{ code: string, shift?: boolean, key: string, does: string, section: string,
- *             run: ((wall: any, e: KeyboardEvent) => void)|null }} WallChord
+ * (true), must not be (false) or doesn't matter (absent), when it applies — while a terminal is
+ * fullscreen, on the canvas otherwise, or always (absent) — the key as the help shows it, what it
+ * does, and how: `run` null for a chord another part of the wall answers (the palette's, main.jsx).
+ * @typedef {{ code: string, shift?: boolean, mode?: 'fullscreen'|'canvas', key: string, does: string,
+ *             section: string, run: ((wall: any, e: KeyboardEvent) => void)|null }} WallChord
  */
 
 /** @type {readonly WallChord[]} */
 export const KEYMAP = Object.freeze([
     { section: 'terminals', code: 'BracketRight', key: ']', does: 'focus the next terminal', run: (w) => w.cycleFocus(+1) },
     { section: 'terminals', code: 'BracketLeft', key: '[', does: 'focus the previous terminal', run: (w) => w.cycleFocus(-1) },
-    { section: 'terminals', code: 'Enter', shift: false, key: '↵', does: 'frame the focused terminal; again: fit them all', run: (w) => w.toggleFrame() },
+    {
+        section: 'fullscreen', code: 'Enter', shift: false, key: '↵', does: 'fullscreen the focused terminal (it re-wraps to fill the canvas); again: back to the canvas',
+        run: (w) => { if (w.fullscreen.id || w.focusedId) w.run(['wall.fullscreen', 'toggle']); else w.fitAll(); },
+    },
+    { section: 'fullscreen', mode: 'fullscreen', code: 'Equal', key: '=', does: 'bigger text (re-wraps; remembered for this terminal)', run: (w) => w.run(['wall.fullscreen.text', 'bigger']) },
+    { section: 'fullscreen', mode: 'fullscreen', code: 'Minus', key: '-', does: 'smaller text', run: (w) => w.run(['wall.fullscreen.text', 'smaller']) },
+    { section: 'fullscreen', mode: 'fullscreen', code: 'Digit0', key: '0', does: "text back to the size it had on the canvas", run: (w) => w.run(['wall.fullscreen.text', 'reset']) },
     { section: 'terminals', code: 'Enter', shift: true, key: '↵', does: 'open a new terminal', run: (w) => w.spawn() },
-    { section: 'terminals', code: 'Minus', key: '-', does: 'hide the focused terminal (it keeps running)', run: (w) => { if (w.focusedId) w.run(['wall.hide', w.focusedId]); } },
+    { section: 'terminals', mode: 'canvas', code: 'Minus', key: '-', does: 'hide the focused terminal (it keeps running)', run: (w) => { if (w.focusedId) w.run(['wall.hide', w.focusedId]); } },
     { section: 'terminals', code: 'KeyX', key: 'X', does: 'hold: close the focused terminal (ends it)', run: (w, e) => { if (!e.repeat && w.focusedId) w.barButtons.holdKey(w.focusedId); } },
     { section: 'terminals', code: 'KeyK', key: 'K', does: 'find a terminal by name, or run a verb', run: null },
     { section: 'groups', code: 'KeyG', shift: false, key: 'G', does: 'group the selection (or the focused terminal)', run: (w) => w.run(w.selection.size || !w.focusedId ? ['wall.group'] : ['wall.group', w.focusedId]) },
@@ -27,7 +34,7 @@ export const KEYMAP = Object.freeze([
         section: 'groups', code: 'KeyG', shift: true, key: 'G', does: "ungroup the focused terminal's group",
         run: (w) => { const gid = w.focusedId && w.groups.groupOf(w.focusedId); if (gid) w.run(['wall.ungroup', gid]); },
     },
-    { section: 'canvas', code: 'Digit0', key: '0', does: 'fit every terminal in view', run: (w) => w.fitAll() },
+    { section: 'canvas', mode: 'canvas', code: 'Digit0', key: '0', does: 'fit every terminal in view', run: (w) => w.fitAll() },
     { section: 'canvas', code: 'Quote', shift: false, key: "'", does: 'snap moves and resizes to the grid, or not', run: (w) => w.run(['wall.snap', 'toggle']) },
     { section: 'canvas', code: 'Quote', shift: true, key: "'", does: 'show or hide the drafting grid', run: (w) => w.run(['wall.grid', 'toggle']) },
     { section: 'panels', code: 'KeyB', key: 'B', does: 'the sidebar: every terminal and group', run: (w) => w.run(['wall.sidebar', 'toggle']) },
@@ -37,12 +44,15 @@ export const KEYMAP = Object.freeze([
 ]);
 
 /**
- * The chord a key event names, if any (the caller has checked it carries the chord).
+ * The chord a key event names in this mode, if any (the caller has checked it carries the chord).
  * @param {{ code: string, shiftKey: boolean }} e
+ * @param {'fullscreen'|'canvas'} mode - whether a terminal is fullscreen
  * @returns {WallChord|null}
  */
-export function chordFor(e) {
-    for (const c of KEYMAP) if (c.code === e.code && (c.shift === undefined || c.shift === e.shiftKey)) return c;
+export function chordFor(e, mode) {
+    for (const c of KEYMAP) {
+        if (c.code === e.code && (c.shift === undefined || c.shift === e.shiftKey) && (c.mode === undefined || c.mode === mode)) return c;
+    }
     return null;
 }
 
@@ -82,6 +92,7 @@ export function gestures(config) {
 /** The help's sections, in order. */
 export const HELP_SECTIONS = Object.freeze([
     { id: 'terminals', title: 'Terminals' },
+    { id: 'fullscreen', title: 'Fullscreen' },
     { id: 'text', title: 'Text' },
     { id: 'groups', title: 'Groups' },
     { id: 'canvas', title: 'Canvas' },

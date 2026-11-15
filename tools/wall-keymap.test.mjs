@@ -1,6 +1,6 @@
-// wall-keymap.test.mjs — the wall's chords as one table (wall/wallKeymap.js): no two chords share a
-// key, Shift is matched as each entry says (held, not held, or either), WallKeys dispatches from the
-// table on a stand-in wall (a chord with a run claims the key and runs; K, the palette's, is left
+// wall-keymap.test.mjs — the wall's chords as one table (wall/wallKeymap.js): no two chords can both
+// answer one key (Shift and the mode — fullscreen or canvas — are matched as each entry says: held,
+// not held, or either), WallKeys dispatches from the table on a stand-in wall in the wall's mode (a chord with a run claims the key and runs; K, the palette's, is left
 // alone), and the help (HelpPanel.helpSections) lists every chord and every verb the router holds,
 // its search keeping only rows with every word. Run: bun test tools/wall-keymap.test.mjs
 import { test, expect } from 'bun:test';
@@ -22,27 +22,35 @@ function chordKey(code, { shift = false } = {}) {
     return ev;
 }
 
-test('no two chords share a key: Shift splits an entry or is ignored, never both', () => {
-    for (const c of KEYMAP) {
-        const same = KEYMAP.filter((o) => o.code === c.code);
-        if (same.length > 1) expect(same.every((o) => o.shift !== undefined)).toBe(true);
-        expect(new Set(same.map((o) => o.shift)).size).toBe(same.length);
-        expect(HELP_SECTIONS.map((s) => s.id)).toContain(c.section);
-    }
+/** Whether two entries could both answer one key event: the same key, Shift and mode not told apart. */
+const overlap = (a, b) => a.code === b.code
+    && (a.shift === undefined || b.shift === undefined || a.shift === b.shift)
+    && (a.mode === undefined || b.mode === undefined || a.mode === b.mode);
+
+test('no two chords can both answer one key', () => {
+    KEYMAP.forEach((a, i) => KEYMAP.forEach((b, j) => { if (i < j) expect({ a: a.does, overlaps: overlap(a, b) }).toEqual({ a: a.does, overlaps: false }); }));
+    for (const c of KEYMAP) expect(HELP_SECTIONS.map((s) => s.id)).toContain(c.section);
 });
 
-test('chordFor matches Shift as each entry says', () => {
-    expect(chordFor({ code: 'Enter', shiftKey: false }).does).toMatch(/frame/);
-    expect(chordFor({ code: 'Enter', shiftKey: true }).does).toMatch(/new terminal/);
-    expect(chordFor({ code: 'BracketRight', shiftKey: true })).toBe(chordFor({ code: 'BracketRight', shiftKey: false }));
-    expect(chordFor({ code: 'KeyQ', shiftKey: false })).toBe(null);
+test('chordFor matches Shift and the mode as each entry says', () => {
+    const at = (code, mode, shiftKey = false) => chordFor({ code, shiftKey }, mode);
+    expect(at('Enter', 'canvas').does).toMatch(/fullscreen/);
+    expect(at('Enter', 'fullscreen')).toBe(at('Enter', 'canvas'));
+    expect(at('Enter', 'canvas', true).does).toMatch(/new terminal/);
+    expect(at('BracketRight', 'canvas', true)).toBe(at('BracketRight', 'canvas'));
+    expect(at('Minus', 'canvas').does).toMatch(/hide/);
+    expect(at('Minus', 'fullscreen').does).toMatch(/smaller text/);
+    expect(at('Digit0', 'canvas').does).toMatch(/fit every/);
+    expect(at('Digit0', 'fullscreen').does).toMatch(/back to the size/);
+    expect(at('Equal', 'canvas')).toBe(null);
+    expect(at('KeyQ', 'canvas')).toBe(null);
 });
 
 test('WallKeys dispatches from the table: a chord runs and claims its key; the palette\'s K is left alone', () => {
     const ran = [];
     const wall = {
         focusedId: null, menu: null, config: { ...WALL_CONFIG }, selection: new Set(), terminal: () => null,
-        cycleFocus: (d) => ran.push(['cycle', d]), toggleFrame: () => ran.push(['frame']), spawn: () => ran.push(['spawn']),
+        fullscreen: { id: null }, cycleFocus: (d) => ran.push(['cycle', d]), fitAll: () => ran.push(['fit']), spawn: () => ran.push(['spawn']),
         run: (cmd) => ran.push(cmd),
     };
     const keys = new WallKeys(/** @type {any} */ (wall));
@@ -50,9 +58,15 @@ test('WallKeys dispatches from the table: a chord runs and claims its key; the p
     keys._key(next);
     keys._key(chordKey('Enter', { shift: true }));
     keys._key(chordKey('Slash'));
+    keys._key(chordKey('Enter'));   // nothing focused, nothing fullscreen: fit them all
+    keys._key(chordKey('Minus'));   // the canvas's: hide — nothing focused, so nothing
+    wall.fullscreen.id = 't1';
+    keys._key(chordKey('Minus'));   // fullscreen's: smaller text
+    keys._key(chordKey('Enter'));   // leave
     const k = chordKey('KeyK');
     keys._key(k);
-    expect(ran).toEqual([['cycle', 1], ['spawn'], ['wall.help', 'toggle']]);
+    expect(ran).toEqual([['cycle', 1], ['spawn'], ['wall.help', 'toggle'], ['fit'],
+        ['wall.fullscreen.text', 'smaller'], ['wall.fullscreen', 'toggle']]);
     expect(next.claimed).toBe(true);
     expect(k.claimed).toBe(false);
 });
