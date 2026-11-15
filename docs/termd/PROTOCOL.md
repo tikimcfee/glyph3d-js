@@ -811,7 +811,7 @@ Unix epoch milliseconds, sizes are bytes):
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
-   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [2, 1], "rss": 3145728},
+   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [2, 2], "rss": 3145728, "upgrades": 1},
    "brain": {"pid": 41200, "generation": 2, "started_at": 1794519100000, "rss": 41943040,
              "restarts": {"crash": 1, "watchdog": 0, "upgrade": 0},
              "last_start": {"reason": "crash", "at": 1794519100000, "exit": {"signal": "SEGV"},
@@ -850,7 +850,7 @@ Unix epoch milliseconds, sizes are bytes):
 | `exiting` | `true` only in the last document a follower gets before the namespace leaves (idle exit, `stop`, the holder's `SIGTERM`); the connection then closes. The socket is already gone by then: a `connect` finds nothing (`ENOENT`), and a new daemon can take the name at once. An empty namespace leaving, not a failure |
 | `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
 | `connections` | client connections open now, status followers included |
-| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
+| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured), (1.5) `upgrades` (times the holder has replaced itself in place with [`upgrade`](#upgrade-11)'s `holder`: the same `pid`, a new `version`) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
 | `trees` | (1.5) how the daemon knows each terminal's processes, its **tree**: `mode` `"cgroup"` (Linux, a namespace started with `--daemon` under a systemd user manager: each terminal its own cgroup, a leaf of the daemon's service's, `unit`), or `"session"` (each terminal's session: the processes whose session id is its program's pid; `why` says why not a cgroup). A cgroup holds everything the program started however it forked; a session loses a process that called `setsid` |

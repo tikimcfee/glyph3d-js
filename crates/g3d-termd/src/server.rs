@@ -26,6 +26,18 @@ pub const ENGINE: &str = "libghostty-vt/1.0.1";
 /// promise, so a snapshot restores only into exactly this).
 pub const SNAPSHOT_ENGINE: &str = "libghostty-vt/1.0.1 snapshot/1";
 
+/// The engine this build's snapshots restore into (a test hook can name another: the cross-engine
+/// handoff test).
+pub fn snapshot_engine() -> String {
+    #[cfg(feature = "test-hooks")]
+    if crate::test_hooks_armed()
+        && let Ok(p) = std::env::var("G3D_TERMD_TEST_ENGINE_FILE")
+    {
+        return std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into());
+    }
+    SNAPSHOT_ENGINE.into()
+}
+
 /// Test hook: the brain's heartbeat to the holder stops (the watchdog test).
 pub static WEDGED: AtomicBool = AtomicBool::new(false);
 
@@ -112,15 +124,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         crate::log(&format!("test hook: {p} exists; this brain exits at start"));
         std::process::exit(3);
     }
-    #[cfg(feature = "test-hooks")]
-    let engine = match std::env::var("G3D_TERMD_TEST_ENGINE_FILE") {
-        Ok(p) if test_hooks => {
-            std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into())
-        }
-        _ => SNAPSHOT_ENGINE.into(),
-    };
-    #[cfg(not(feature = "test-hooks"))]
-    let engine: String = SNAPSHOT_ENGINE.into();
+    let engine = snapshot_engine();
     let mut start = hold::start(fd, &engine);
     let w = &start.hold.welcome;
     crate::log(&format!(
@@ -217,6 +221,14 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         restored: restored_counts,
         unseen: unseen_total,
     };
+    if let Some(why) = &w.upgrade_failed {
+        errors.record_at(
+            "upgrade_failed",
+            None,
+            format!("a holder upgrade did not happen: {why}; this holder carries on"),
+            w.at,
+        );
+    }
     if let Some(since) = w.failed_at {
         let secs = w.at.saturating_sub(since) / 1000;
         errors.record_at(
@@ -261,6 +273,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         last_start,
         snapshot_interval_ms: args.snapshot_interval_ms,
         trees: w.trees.clone(),
+        holder_upgrades: w.upgrades,
     };
     let hub = Hub::new(
         info,
@@ -954,15 +967,6 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             return Flow::Close;
         }
         Op::Upgrade(u) => {
-            if u.holder == Some(true) {
-                reply_err(
-                    &c.out,
-                    req,
-                    code::UNSUPPORTED,
-                    "replacing the holder (g3d upgrade --holder) is not built yet",
-                );
-                return Flow::Continue;
-            }
             if let Some(b) = &u.binary {
                 use std::os::unix::fs::PermissionsExt;
                 let ok = std::fs::metadata(b).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
@@ -977,8 +981,8 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 return Flow::Continue;
             }
             reply_ok(&c.out, req, &UpgradeReply { generation: srv.hold.welcome.generation });
-            let (srv, out) = (srv.clone(), c.out.clone());
-            tokio::spawn(async move { upgrade(srv, u.binary, out).await });
+            let (srv, out, holder) = (srv.clone(), c.out.clone(), u.holder == Some(true));
+            tokio::spawn(async move { upgrade(srv, u.binary, holder, out).await });
         }
     }
     Flow::Continue
@@ -1005,14 +1009,23 @@ async fn to_all(reg: &Registry, op: impl Fn() -> TermOp) -> Vec<(String, bool)> 
 /// stops accepting, cuts every terminal between reads into a handoff blob, and waits. On
 /// `commit` it closes every connection with `ERROR restart` and exits; the candidate continues
 /// each terminal at exactly its cut. On failure everything resumes and the asker hears why.
-async fn upgrade(srv: Arc<Server>, binary: Option<String>, asker: Arc<ConnOut>) {
+/// With `holder`, the holder re-execs into the new binary at the commit (`g3d upgrade --holder`)
+/// and starts a brain of it from the handoff; to this brain it is the same handoff.
+async fn upgrade(srv: Arc<Server>, binary: Option<String>, holder: bool, asker: Arc<ConnOut>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     *srv.upgrade_tx.lock().unwrap() = Some(tx);
     let mut msg = json!({"m": "upgrade"});
     if let Some(b) = &binary {
         msg["binary"] = json!(b);
     }
-    crate::log(&format!("upgrade requested ({})", binary.as_deref().unwrap_or("the holder's binary")));
+    if holder {
+        msg["holder"] = json!(true);
+    }
+    crate::log(&format!(
+        "upgrade{} requested ({})",
+        if holder { " of the holder" } else { "" },
+        binary.as_deref().unwrap_or("the holder's binary")
+    ));
     srv.hold.send(&msg, &[]);
     let wait = srv.upgrade_deadline + Duration::from_secs(5);
     let Some(m) = next(&mut rx, wait).await else {

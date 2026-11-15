@@ -38,6 +38,9 @@ pub struct Welcome {
     pub trees: g3d_hold::tree::Trees,
     /// (hold 2.2) What ended terminals left running.
     pub leftovers: Vec<Leftover>,
+    /// (hold 2.2) Times the holder has re-exec'd, and why its last re-exec failed if it did.
+    pub upgrades: u64,
+    pub upgrade_failed: Option<String>,
 }
 
 /// What a terminal whose program ended left running, as the holder reports it (`leftover`).
@@ -218,6 +221,8 @@ pub fn start(fd: i32, engine: &str) -> Start {
         trees: w.get("trees").and_then(g3d_hold::tree::Trees::from_json).unwrap_or_else(|| {
             g3d_hold::tree::Trees::Session { why: "the holder predates process trees (hold 2.2)".into() }
         }),
+        upgrades: n("upgrades"),
+        upgrade_failed: w.get("upgrade_failed").and_then(Value::as_str).map(str::to_owned),
         leftovers: w
             .get("leftovers")
             .and_then(Value::as_array)

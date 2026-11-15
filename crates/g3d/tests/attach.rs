@@ -357,6 +357,19 @@ fn attach_and_watch_ride_an_upgrade_and_a_crash() {
     w.expect(b"upgraded-42", 10);
     assert!(w.child.try_wait().unwrap().is_none(), "watch left on the upgrade");
 
+    // The holder replaces itself in place (g3d upgrade --holder): the same holder pid, the same
+    // shell, and both clients ride it as they ride a brain upgrade.
+    let holder = d.child.id();
+    let old = brain_pid(&d.socket);
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let _: UpgradeReply = c.request(Op::Upgrade(Upgrade { binary: None, holder: Some(true) })).unwrap();
+    wait_new_brain(&d.socket, old);
+    typed(&mut a, "reexeced");
+    w.expect(b"reexeced-42", 10);
+    assert!(w.child.try_wait().unwrap().is_none(), "watch left on the holder's upgrade");
+    let h: StatusReply = Client::connect(&d.socket, "test").unwrap().request(Op::Status).unwrap();
+    assert_eq!((h.status.daemon.holder.pid, h.status.daemon.holder.upgrades), (holder, 1));
+
     // A crash: the connection drops with no word, and the holder starts a new brain.
     let old = brain_pid(&d.socket);
     unsafe { libc::kill(old, libc::SIGKILL) };

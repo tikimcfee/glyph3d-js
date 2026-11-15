@@ -12,11 +12,12 @@
 pub mod holder;
 pub mod link;
 pub mod log;
+pub mod record;
 pub mod shm;
 pub mod spawn;
 pub mod tree;
 
-pub use holder::{Config, run};
+pub use holder::{Config, resume, run};
 
 /// A pipe, both ends close-on-exec, both nonblocking when asked. Linux sets the flags with the
 /// pipe (`pipe2`); macOS has no `pipe2`, so they are set right after, which is exact in the
@@ -48,7 +49,8 @@ pub fn pipe(nonblock: bool) -> std::io::Result<(rustix::fd::OwnedFd, rustix::fd:
 /// 2.1: `welcome` carries `restarts` (brains replaced, by cause) and `last_start` (why this brain
 /// starts, and how the last one ended), for the status document. 2.2: process trees (tree.rs):
 /// `welcome` carries `trees` (cgroup or session) and `leftovers`; the holder tells the brain
-/// `killed` (a close's report), `leftover` and `leftover_gone`.
+/// `killed` (a close's report), `leftover` and `leftover_gone`; and the holder's re-exec (`upgrade`
+/// with `holder`, `candidate` with `holder`; `welcome` carries `upgrades` and `upgrade_failed`).
 pub const HOLD: [u64; 2] = [2, 2];
 
 /// Bytes per terminal in the `seq_marks` page: one little-endian `u64`, the terminal's `seq`

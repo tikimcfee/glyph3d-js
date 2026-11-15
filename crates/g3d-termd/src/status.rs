@@ -147,6 +147,8 @@ pub struct BrainInfo {
     pub snapshot_interval_ms: u64,
     /// How the namespace knows each terminal's processes.
     pub trees: Trees,
+    /// Times the holder has re-exec'd.
+    pub holder_upgrades: u64,
 }
 
 /// The status settings (`--status-*`).
@@ -456,6 +458,7 @@ impl Hub {
                     version: i.holder_version.clone(),
                     hold: i.hold,
                     rss: rss(i.holder_pid),
+                    upgrades: i.holder_upgrades,
                 },
                 brain: StatusBrain {
                     pid: std::process::id(),

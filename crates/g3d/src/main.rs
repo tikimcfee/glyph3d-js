@@ -11,7 +11,7 @@
 //!   g3d key [--option-as-alt auto|true|false] <id> <chord>...   (shift+enter, ctrl+c, alt+left)
 //!   g3d paste <id> [text] [--unsafe]   (stdin when no text)
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
-//!   g3d upgrade [--binary PATH]
+//!   g3d upgrade [--binary PATH] [--holder]
 //!   g3d status [--json] [--follow [--interval MS]]
 //!   g3d stop
 
@@ -183,6 +183,10 @@ enum Cmd {
         /// The new g3d-termd (default: the path the daemon was started from).
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Replace the holder too, in place (the same pid: every shell stays its child), and the
+        /// brain with it: for a holder fix or a new hold protocol.
+        #[arg(long)]
+        holder: bool,
     },
 }
 
@@ -355,7 +359,7 @@ fn main() {
             let mut c = connect(&target);
             let _: Empty = c.request(Op::Stop).unwrap_or_else(|e| die(e));
         }
-        Cmd::Upgrade { binary } => upgrade(&target, binary),
+        Cmd::Upgrade { binary, holder } => upgrade(&target, binary, holder),
         Cmd::Status { json, follow, interval } => status(&target, json, follow, interval, window),
         Cmd::Attach { id, take, detach_key } => {
             let role = if take { Role::Own } else { Role::Attach };
@@ -705,7 +709,7 @@ fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Clien
 
 /// `g3d upgrade`: the brain hands every terminal to a new one at an exact cut (DESIGN.md,
 /// "Screens after an upgrade"). A failed brain is retried instead: SIGHUP to the holder.
-fn upgrade(target: &Target, binary: Option<PathBuf>) {
+fn upgrade(target: &Target, binary: Option<PathBuf>, holder: bool) {
     let binary = binary.map(|b| std::fs::canonicalize(&b).unwrap_or_else(|e| die(format!("{}: {e}", b.display()))));
     let mut c = match start::connect(target, "g3d") {
         Ok(c) => c,
@@ -737,8 +741,13 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
         ));
     }
     let instance = c.welcome.instance.clone();
+    let before =
+        holder.then(|| c.request::<StatusReply>(Op::Status).map(|s| s.status.daemon.holder).unwrap_or_else(|e| die(e)));
     let r: UpgradeReply = c
-        .request(Op::Upgrade(Upgrade { binary: binary.map(|b| b.display().to_string()), holder: None }))
+        .request(Op::Upgrade(Upgrade {
+            binary: binary.map(|b| b.display().to_string()),
+            holder: holder.then_some(true),
+        }))
         .unwrap_or_else(|e| die(e));
     loop {
         match c.next_frame() {
@@ -752,7 +761,29 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
             Err(e) => die(format!("the daemon went away during the upgrade: {e}")),
         }
     }
-    let c = wait_brain(target, instance.as_deref(), r.generation);
+    // The old brain lets its connections drain before it exits: this one goes now.
+    drop(c);
+    let mut c = wait_brain(target, instance.as_deref(), r.generation);
+    if let Some(before) = before {
+        let st = c.request::<StatusReply>(Op::Status).map(|s| s.status).unwrap_or_else(|e| die(e));
+        let h = &st.daemon.holder;
+        if h.upgrades <= before.upgrades {
+            let why =
+                st.errors.iter().find(|e| e.code == "upgrade_failed").map_or("see the log", |e| e.message.as_str());
+            die(format!("the holder did not re-exec (a brain of its own took the terminals back): {why}"));
+        }
+        println!(
+            "upgraded the holder: pid {} now {} (hold {}.{}, was {}); brain generation {} (pid {}); every terminal carried over",
+            h.pid,
+            h.version,
+            h.hold[0],
+            h.hold[1],
+            before.version,
+            c.welcome.generation.unwrap_or(0),
+            c.welcome.pid.unwrap_or(0)
+        );
+        return;
+    }
     println!(
         "upgraded: {} brain generation {} (pid {}); every terminal carried over",
         c.welcome.daemon,

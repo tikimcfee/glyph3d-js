@@ -18,7 +18,8 @@
       "hold": [
         "int"
       ],
-      "rss": "int"
+      "rss": "int",
+      "upgrades": "int"
     },
     "brain": {
       "pid": "int",

@@ -563,6 +563,10 @@ pub struct StatusHolder {
     /// Resident memory, when it could be measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rss: Option<u64>,
+    /// (1.5) Times the holder has replaced itself in place (`upgrade` with `holder`): the same
+    /// pid, a new binary.
+    #[serde(default)]
+    pub upgrades: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
