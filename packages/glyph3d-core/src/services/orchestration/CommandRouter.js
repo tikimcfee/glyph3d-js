@@ -18,6 +18,7 @@
 import errorTracker from '../../utils/ErrorTracker.js';
 import metrics from '../../utils/Metrics.js';
 import { emitLogRecord } from './consoleForwarder.js';
+import { decodeBase64 } from '../../utils/encoding.js';
 
 /**
  * A command handler: `(args, ctx) => { text, data } | string`, sync or async.
@@ -46,6 +47,63 @@ export default class CommandRouter {
 
         /** @type {Array<Function>} Middleware called before each command: (name, args, ctx) => void */
         this._middleware = [];
+
+        // Every router answers `call`: it is how the CLI sends an arg that a typed line can't carry,
+        // so any app the CLI can reach (the IDE, the wall) must decode it.
+        this.register('call', (args, ctx) => this._call(args, ctx), {
+            description: 'Invoke any command from a base64-encoded JSON bundle ([name,...args] or {cmd,args})',
+            usage: '<base64-json>',
+        });
+    }
+
+    /**
+     * `call <base64-json>` — the structured side-hatch: any command, invoked from a base64'd bundle
+     * instead of a space-delimited line. The bundle decodes to the SAME [name, ...args] vector a typed
+     * line produces — a serialization of the call, NOT a second calling convention, so handlers are
+     * untouched (they still read positional args).
+     *
+     * Why base64 and not raw JSON on the line: the bus tokenizer (parse) strips quotes and splits on
+     * spaces, so a JSON payload typed inline loses its structure. base64's alphabet (A-Za-z0-9+/=) has
+     * neither spaces nor quotes, so a bundle survives the tokenizer AND any args.join(' ') intact —
+     * transport-agnostic across CLI/hook/agent. The CLI sends one whenever an arg carries
+     * spaces, quotes or newlines (cli/client.go).
+     *
+     * Payload (after decode) is JSON, either form:
+     *   ["grid.layout", "3", "--mode", "newspaper"]        positional array
+     *   {"cmd": "grid.layout", "args": ["3", "--mode"]}    object form
+     * The object form reserves a "kwargs" slot for a future named-param layer; it is NOT interpreted.
+     * @param {string[]} args
+     * @param {{ sender?: string }} ctx
+     */
+    _call(args, ctx) {
+        if (args.length < 1) {
+            return { text: 'ERR: usage: call <base64-json>  (JSON: [name, ...args] or {cmd, args})', data: null };
+        }
+        let spec;
+        try {
+            spec = JSON.parse(decodeBase64(args[0]));
+        } catch (e) {
+            return { text: `ERR: call payload must be base64-encoded JSON: ${e.message}`, data: null };
+        }
+        let invocation;
+        if (Array.isArray(spec)) {
+            invocation = spec;
+        } else if (spec && typeof spec === 'object' && typeof spec.cmd === 'string') {
+            invocation = [spec.cmd, ...(Array.isArray(spec.args) ? spec.args : [])];
+        } else {
+            return { text: 'ERR: call payload must be [name, ...args] or {cmd, args}', data: null };
+        }
+        if (!invocation.length || typeof invocation[0] !== 'string') {
+            return { text: 'ERR: call payload has no command name', data: null };
+        }
+        // A bundle that wraps `call` is a recursion bomb (and pointless) — refuse it.
+        if (invocation[0].toLowerCase() === 'call') {
+            return { text: 'ERR: call cannot wrap call', data: null };
+        }
+        // Coerce non-string args to strings: handlers read positional string tokens, and the
+        // typed-CLI path always delivers strings — keep the hatch byte-identical to it.
+        const argv = [invocation[0], ...invocation.slice(1).map((a) => (typeof a === 'string' ? a : String(a)))];
+        return this.execute(argv, { sender: ctx?.sender });
     }
 
     /**
