@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The protocol version this crate speaks: `[major, minor]`.
-pub const PROTO: [u32; 2] = [1, 4];
+pub const PROTO: [u32; 2] = [1, 5];
 /// The features of the 1.0 core.
 pub const FEATURES: [&str; 3] = ["raw", "view", "capture"];
 /// The features this daemon announces: the core plus `status`, `upgrade` and `env` (1.1), `key`
-/// and `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4).
-pub const DAEMON_FEATURES: [&str; 10] =
-    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"];
+/// and `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4), `paste_stream` (1.5).
+pub const DAEMON_FEATURES: [&str; 11] =
+    ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse", "paste_stream"];
 
 /// `HELLO`, the first frame a client sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +93,9 @@ pub mod code {
     /// (1.2) A `paste` whose text could run commands (a line break the program would read as
     /// Enter, or the bracketed-paste end), refused without `allow_unsafe`.
     pub const UNSAFE_PASTE: &str = "unsafe_paste";
+    /// (1.5) A chunk of a streamed paste termd ended because its writer sent no next chunk within
+    /// the paste timeout (`--paste-timeout-ms`).
+    pub const PASTE_TIMEOUT: &str = "paste_timeout";
     // Connection-level (ERROR frames).
     pub const BAD_FRAME: &str = "bad_frame";
     pub const VERSION: &str = "version";
@@ -290,8 +293,13 @@ pub struct Paste {
     pub handle: u32,
     pub text: String,
     /// Paste text that could run commands (Ghostty's `clipboard-paste-protection` answered yes).
+    /// Read from a paste's first chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_unsafe: Option<bool>,
+    /// (1.5, feature `paste_stream`) More chunks of this paste follow: the paste stays open (one
+    /// bracket, one set of rules) until a chunk without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<bool>,
 }
 
 /// (1.4) `mouse`: one pointer event on the terminal's cells (PROTOCOL.md, "`mouse`").
@@ -490,6 +498,63 @@ pub struct StatusDaemon {
     pub brain: StatusBrain,
     pub snapshots: StatusSnapshots,
     pub env: StatusEnv,
+    /// (1.5) How the daemon knows each terminal's processes (DESIGN.md, "Process trees").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trees: Option<StatusTrees>,
+    /// (1.5) What terminals whose programs ended left running (a `nohup` job), until it ends.
+    #[serde(default)]
+    pub leftovers: Vec<StatusLeftover>,
+    /// (1.5) The latest closes, newest first: each signal of the close rule and who it reached.
+    #[serde(default)]
+    pub closes: Vec<StatusClose>,
+}
+
+/// (1.5) `daemon.trees`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusTrees {
+    /// `"cgroup"`: each terminal its own cgroup, a leaf of the daemon's systemd user service's;
+    /// `"session"`: each terminal's session.
+    pub mode: String,
+    /// With `cgroup`: the service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// With `session`: why not a cgroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// (1.5) A process in a tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusProc {
+    pub pid: u32,
+    pub comm: String,
+}
+
+/// (1.5) One of `daemon.leftovers`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusLeftover {
+    pub id: String,
+    /// The program's pid (its session id).
+    pub pid: u32,
+    /// When the program ended.
+    pub since: u64,
+    pub processes: Vec<StatusProc>,
+}
+
+/// (1.5) One of `daemon.closes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusClose {
+    pub id: String,
+    /// When the tree was empty.
+    pub at: u64,
+    pub steps: Vec<StatusCloseStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusCloseStep {
+    /// `"HUP"`, `"TERM"`, `"KILL"` (or the signal `kill` asked for).
+    pub signal: String,
+    pub procs: Vec<StatusProc>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +566,10 @@ pub struct StatusHolder {
     /// Resident memory, when it could be measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rss: Option<u64>,
+    /// (1.5) Times the holder has replaced itself in place (`upgrade` with `holder`): the same
+    /// pid, a new binary.
+    #[serde(default)]
+    pub upgrades: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -623,7 +692,29 @@ pub struct StatusTerminal {
     /// first save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_seq: Option<u64>,
+    /// (1.5) Processes in its tree now (its program and everything it started); absent when it
+    /// couldn't be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processes: Option<u64>,
+    /// (1.5) The paste streaming into it now, absent when none is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<StatusPaste>,
     pub subscribers: Vec<StatusSubscriber>,
+}
+
+/// (1.5) A paste streaming into a terminal: whose, since when, how far.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusPaste {
+    /// The writer's connection (its `conn` among the subscribers).
+    pub conn: u64,
+    /// When its first chunk came (ms since the epoch).
+    pub since: u64,
+    /// Bytes of its text the program has been given so far.
+    pub written: u64,
+    /// When termd answered its last chunk and began waiting for the writer's next (ms since the
+    /// epoch); absent while a chunk waits for room in the input buffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

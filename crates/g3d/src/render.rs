@@ -123,6 +123,9 @@ pub fn notes(t: &StatusTerminal) -> (Vec<String>, Vec<String>) {
     if t.alt {
         quiet.push("alt".to_owned());
     }
+    if let Some(n) = t.processes.filter(|&n| n > 1) {
+        quiet.push(format!("{n} processes"));
+    }
     if let Some(r) = &t.restored {
         match t.unseen.filter(|&n| n > 0) {
             Some(n) => quiet.push(format!("restored: {r}, {} unseen", bytes(n))),
@@ -171,8 +174,15 @@ pub fn status(doc: &Status, st: Style) -> String {
         ));
     }
     line(format!("holder {}{}   {brain}", d.holder.pid, rss(d.holder.rss)));
+    let trees = match &d.trees {
+        Some(t) if t.mode == "cgroup" => {
+            format!(" · trees cgroup{}", t.unit.as_deref().map_or_else(String::new, |u| format!(" ({u})")))
+        }
+        Some(t) => format!(" · trees {}", t.mode),
+        None => String::new(),
+    };
     line(format!(
-        "{}env {}{} · snapshots {} every {} · {} connection{} · log {}{}",
+        "{}env {}{}{trees} · snapshots {} every {} · {} connection{} · log {}{}",
         st.dim,
         d.env.source,
         if d.env.config.state == "absent" { String::new() } else { format!(" · termd.toml {}", d.env.config.state) },
@@ -230,6 +240,17 @@ pub fn status(doc: &Status, st: Style) -> String {
             .trim_end()
             .to_owned(),
         );
+    }
+    for l in &d.leftovers {
+        let who: Vec<String> = l.processes.iter().map(|p| format!("{} {}", p.pid, p.comm)).collect();
+        line(format!(
+            "{}left running by {} (ended {}): {}{}",
+            st.attention,
+            l.id,
+            clock(l.since, now),
+            who.join(", "),
+            st.reset
+        ));
     }
     if !doc.errors.is_empty() {
         line(String::new());

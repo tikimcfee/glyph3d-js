@@ -11,7 +11,7 @@
 //!   g3d key [--option-as-alt auto|true|false] <id> <chord>...   (shift+enter, ctrl+c, alt+left)
 //!   g3d paste <id> [text] [--unsafe]   (stdin when no text)
 //!   g3d kill <id> [--signal HUP|TERM|KILL]
-//!   g3d upgrade [--binary PATH]
+//!   g3d upgrade [--binary PATH] [--holder]
 //!   g3d status [--json] [--follow [--interval MS]]
 //!   g3d stop
 
@@ -151,6 +151,11 @@ enum Cmd {
         /// or the bracketed-paste end.
         #[arg(long = "unsafe")]
         allow_unsafe: bool,
+        /// Send the text in chunks of at most this many bytes (one paste, streamed: each chunk
+        /// waits for the program to have room, as a terminal's paste does). Capped so a chunk of
+        /// control characters still fits the daemon's max_frame as JSON.
+        #[arg(long, default_value_t = 1 << 20)]
+        chunk: usize,
     },
     /// Kill a terminal's program.
     Kill {
@@ -178,6 +183,10 @@ enum Cmd {
         /// The new g3d-termd (default: the path the daemon was started from).
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Replace the holder too, in place (the same pid: every shell stays its child), and the
+        /// brain with it: for a holder fix or a new hold protocol.
+        #[arg(long)]
+        holder: bool,
     },
 }
 
@@ -333,22 +342,13 @@ fn main() {
             }
             done_writing(&mut c, handle);
         }
-        Cmd::Paste { id, text, allow_unsafe } => {
-            let text = text.unwrap_or_else(|| {
-                String::from_utf8(stdin_all())
-                    .unwrap_or_else(|_| die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"))
-            });
+        Cmd::Paste { id, text, allow_unsafe, chunk } => {
             let (mut c, handle) = writer(&target, &id, Some("paste"));
-            let r = c.request::<WrittenReply>(Op::Paste(Paste {
-                handle,
-                text,
-                allow_unsafe: allow_unsafe.then_some(true),
-            }));
-            match r {
-                Ok(_) => {}
-                Err(e) if e.code() == Some(code::UNSAFE_PASTE) => die(format!("{e} (g3d paste --unsafe)")),
-                Err(e) => die(e),
-            }
+            let src: Box<dyn Read> = match text {
+                Some(t) => Box::new(std::io::Cursor::new(t.into_bytes())),
+                None => Box::new(std::io::stdin()),
+            };
+            paste(&mut c, handle, src, chunk, allow_unsafe);
             done_writing(&mut c, handle);
         }
         Cmd::Kill { id, signal } => {
@@ -359,7 +359,7 @@ fn main() {
             let mut c = connect(&target);
             let _: Empty = c.request(Op::Stop).unwrap_or_else(|e| die(e));
         }
-        Cmd::Upgrade { binary } => upgrade(&target, binary),
+        Cmd::Upgrade { binary, holder } => upgrade(&target, binary, holder),
         Cmd::Status { json, follow, interval } => status(&target, json, follow, interval, window),
         Cmd::Attach { id, take, detach_key } => {
             let role = if take { Role::Own } else { Role::Attach };
@@ -367,6 +367,67 @@ fn main() {
         }
         Cmd::Watch { id, detach_key } => attach(&target, &id, Role::Watch, parse_key(&detach_key), window),
     }
+}
+
+/// `g3d paste`: the text streamed as one paste in chunks (PROTOCOL.md "`paste`", `more`), each sent
+/// once the last one's bytes are in termd's input buffer, so a paste of any size goes through at
+/// the program's pace with bounded memory on both sides. A daemon without `paste_stream` (before
+/// protocol 1.5) gets the whole text as one request, which `max_frame` bounds.
+fn paste(c: &mut Client, handle: u32, mut src: Box<dyn Read>, chunk: usize, allow_unsafe: bool) {
+    let send = |c: &mut Client, text: String, more: bool| {
+        let op =
+            Op::Paste(Paste { handle, text, allow_unsafe: allow_unsafe.then_some(true), more: more.then_some(true) });
+        match c.request::<WrittenReply>(op) {
+            Ok(_) => {}
+            Err(e) if e.code() == Some(code::UNSAFE_PASTE) => die(format!("{e} (g3d paste --unsafe)")),
+            Err(e) => die(e),
+        }
+    };
+    if !c.welcome.features.iter().any(|f| f == "paste_stream") {
+        let mut b = Vec::new();
+        src.read_to_end(&mut b).unwrap_or_else(|e| die(format!("stdin: {e}")));
+        let text =
+            String::from_utf8(b).unwrap_or_else(|_| die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"));
+        return send(c, text, false);
+    }
+    // A control character is six bytes as JSON (`\u0003`): a chunk of them must still fit.
+    let chunk = chunk.clamp(4, (c.welcome.max_frame as usize).saturating_sub(1024) / 6);
+    let mut buf: Vec<u8> = Vec::with_capacity(chunk + 4);
+    let mut ready: Option<String> = None;
+    loop {
+        let have = buf.len();
+        buf.resize(chunk, 0);
+        let n = match src.read(&mut buf[have..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                buf.truncate(have);
+                continue;
+            }
+            Err(e) => die(format!("stdin: {e}")),
+        };
+        buf.truncate(have + n);
+        if n == 0 && buf.is_empty() {
+            break;
+        }
+        // A chunk ends on a character's boundary; the rest of a character waits for the next.
+        let cut = match std::str::from_utf8(&buf) {
+            Ok(_) => buf.len(),
+            Err(e) if e.error_len().is_none() && n > 0 => e.valid_up_to(),
+            Err(_) => die("paste takes text: stdin isn't UTF-8 (g3d send writes bytes)"),
+        };
+        if cut == 0 && n > 0 {
+            continue;
+        }
+        let rest = buf.split_off(cut);
+        let text = String::from_utf8(std::mem::replace(&mut buf, rest)).expect("checked above");
+        if let Some(prev) = ready.replace(text) {
+            send(c, prev, true);
+        }
+        if n == 0 {
+            break;
+        }
+    }
+    send(c, ready.unwrap_or_default(), false);
 }
 
 fn stdin_all() -> Vec<u8> {
@@ -627,7 +688,9 @@ fn attach(target: &Target, id: &str, role: Role, detach: u8, window: Duration) {
     }
 }
 
-/// Waits up to 15 s for a brain of `instance` newer than `generation` to answer.
+/// Waits up to 15 s for a brain of `instance` newer than `generation` to answer. Nothing listening
+/// means the namespace ended meanwhile: its holder keeps its socket across a brain's restart and
+/// its own re-exec.
 fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Client {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
@@ -639,6 +702,9 @@ fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Clien
                 return c;
             }
             Ok(_) => {}
+            Err(e) if start::not_running(&e) => {
+                die(format!("the namespace ended meanwhile: nothing listens at {}", target.socket().display()))
+            }
             Err(e) if std::time::Instant::now() >= until => die(format!("no new brain answered: {e}")),
             Err(_) => {}
         }
@@ -648,7 +714,7 @@ fn wait_brain(target: &Target, instance: Option<&str>, generation: u64) -> Clien
 
 /// `g3d upgrade`: the brain hands every terminal to a new one at an exact cut (DESIGN.md,
 /// "Screens after an upgrade"). A failed brain is retried instead: SIGHUP to the holder.
-fn upgrade(target: &Target, binary: Option<PathBuf>) {
+fn upgrade(target: &Target, binary: Option<PathBuf>, holder: bool) {
     let binary = binary.map(|b| std::fs::canonicalize(&b).unwrap_or_else(|e| die(format!("{}: {e}", b.display()))));
     let mut c = match start::connect(target, "g3d") {
         Ok(c) => c,
@@ -680,8 +746,13 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
         ));
     }
     let instance = c.welcome.instance.clone();
+    let before =
+        holder.then(|| c.request::<StatusReply>(Op::Status).map(|s| s.status.daemon.holder).unwrap_or_else(|e| die(e)));
     let r: UpgradeReply = c
-        .request(Op::Upgrade(Upgrade { binary: binary.map(|b| b.display().to_string()), holder: None }))
+        .request(Op::Upgrade(Upgrade {
+            binary: binary.map(|b| b.display().to_string()),
+            holder: holder.then_some(true),
+        }))
         .unwrap_or_else(|e| die(e));
     loop {
         match c.next_frame() {
@@ -695,7 +766,29 @@ fn upgrade(target: &Target, binary: Option<PathBuf>) {
             Err(e) => die(format!("the daemon went away during the upgrade: {e}")),
         }
     }
-    let c = wait_brain(target, instance.as_deref(), r.generation);
+    // The old brain lets its connections drain before it exits: this one goes now.
+    drop(c);
+    let mut c = wait_brain(target, instance.as_deref(), r.generation);
+    if let Some(before) = before {
+        let st = c.request::<StatusReply>(Op::Status).map(|s| s.status).unwrap_or_else(|e| die(e));
+        let h = &st.daemon.holder;
+        if h.upgrades <= before.upgrades {
+            let why =
+                st.errors.iter().find(|e| e.code == "upgrade_failed").map_or("see the log", |e| e.message.as_str());
+            die(format!("the holder did not re-exec (a brain of its own took the terminals back): {why}"));
+        }
+        println!(
+            "upgraded the holder: pid {} now {} (hold {}.{}, was {}); brain generation {} (pid {}); every terminal carried over",
+            h.pid,
+            h.version,
+            h.hold[0],
+            h.hold[1],
+            before.version,
+            c.welcome.generation.unwrap_or(0),
+            c.welcome.pid.unwrap_or(0)
+        );
+        return;
+    }
     println!(
         "upgraded: {} brain generation {} (pid {}); every terminal carried over",
         c.welcome.daemon,

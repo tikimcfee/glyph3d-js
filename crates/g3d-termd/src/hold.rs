@@ -34,6 +34,35 @@ pub struct Welcome {
     /// When the namespace's brain was last failed before this one (epoch ms).
     pub failed_at: Option<u64>,
     pub exit: Option<g3d_wire::ExitStatus>,
+    /// (hold 2.2) How the namespace knows each terminal's processes.
+    pub trees: g3d_hold::tree::Trees,
+    /// (hold 2.2) What ended terminals left running.
+    pub leftovers: Vec<Leftover>,
+    /// (hold 2.2) Times the holder has re-exec'd, and why its last re-exec failed if it did.
+    pub upgrades: u64,
+    pub upgrade_failed: Option<String>,
+}
+
+/// What a terminal whose program ended left running, as the holder reports it (`leftover`).
+#[derive(Clone, Debug)]
+pub struct Leftover {
+    pub handle: u32,
+    pub id: String,
+    pub pid: u32,
+    pub tree: g3d_hold::tree::Tree,
+    pub since: u64,
+}
+
+impl Leftover {
+    pub fn from_msg(m: &Value) -> Option<Self> {
+        Some(Leftover {
+            handle: m.get("handle")?.as_u64()? as u32,
+            id: m.get("id")?.as_str()?.to_owned(),
+            pid: m.get("pid")?.as_u64()? as u32,
+            tree: g3d_hold::tree::Tree::from_json(m.get("tree")?)?,
+            since: m.get("since").and_then(Value::as_u64).unwrap_or(0),
+        })
+    }
 }
 
 /// One terminal the holder keeps, as it handed it to this brain.
@@ -116,8 +145,25 @@ pub struct Start {
     ctl_tx: mpsc::UnboundedSender<Value>,
 }
 
+/// What the brain does when the holder is gone, before it exits (`on_holder_gone`).
+static HOLDER_GONE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Sets what runs when the holder closes the link (its death): the trees' end.
+pub fn on_holder_gone(f: Box<dyn Fn() + Send + Sync>) {
+    let _ = HOLDER_GONE.set(f);
+}
+
 fn fail(msg: impl std::fmt::Display) -> ! {
     crate::log(&format!("hold link: {msg}; exiting"));
+    std::process::exit(1);
+}
+
+/// The holder closed the link: it is gone, and every shell's parent with it.
+fn holder_gone() -> ! {
+    crate::log("hold link: the holder closed the link; exiting");
+    if let Some(f) = HOLDER_GONE.get() {
+        f();
+    }
     std::process::exit(1);
 }
 
@@ -131,7 +177,7 @@ fn recv(sock: &OwnedFd, rd: &mut Reader) -> (Value, Vec<OwnedFd>) {
         }
         match rd.fill(sock.as_fd()) {
             Ok(Fill::Data) | Ok(Fill::Empty) => {}
-            Ok(Fill::Eof) => fail("the holder closed the link"),
+            Ok(Fill::Eof) => holder_gone(),
             Err(e) => fail(e),
         }
     }
@@ -172,6 +218,16 @@ pub fn start(fd: i32, engine: &str) -> Start {
             let e = Exit::from_msg(e);
             g3d_wire::ExitStatus { code: e.code, signal: e.signal.map(crate::spawn::signal_name) }
         }),
+        trees: w.get("trees").and_then(g3d_hold::tree::Trees::from_json).unwrap_or_else(|| {
+            g3d_hold::tree::Trees::Session { why: "the holder predates process trees (hold 2.2)".into() }
+        }),
+        upgrades: n("upgrades"),
+        upgrade_failed: w.get("upgrade_failed").and_then(Value::as_str).map(str::to_owned),
+        leftovers: w
+            .get("leftovers")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Leftover::from_msg).collect())
+            .unwrap_or_default(),
     };
     let mut fds = fds.into_iter();
     let listener = fds.next().expect("listener");
@@ -271,7 +327,8 @@ impl Hold {
     pub fn send(&self, msg: &Value, fds: &[OwnedFd]) {
         let _g = self.wmu.lock().unwrap();
         if let Err(e) = link::send_blocking(self.sock.as_fd(), msg, &link::borrow(fds)) {
-            fail(format!("send {:?}: {e}", link::name(msg)));
+            crate::log(&format!("hold link: send {:?}: {e}", link::name(msg)));
+            holder_gone();
         }
     }
 

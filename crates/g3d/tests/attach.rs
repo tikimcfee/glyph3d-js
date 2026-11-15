@@ -357,6 +357,19 @@ fn attach_and_watch_ride_an_upgrade_and_a_crash() {
     w.expect(b"upgraded-42", 10);
     assert!(w.child.try_wait().unwrap().is_none(), "watch left on the upgrade");
 
+    // The holder replaces itself in place (g3d upgrade --holder): the same holder pid, the same
+    // shell, and both clients ride it as they ride a brain upgrade.
+    let holder = d.child.id();
+    let old = brain_pid(&d.socket);
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let _: UpgradeReply = c.request(Op::Upgrade(Upgrade { binary: None, holder: Some(true) })).unwrap();
+    wait_new_brain(&d.socket, old);
+    typed(&mut a, "reexeced");
+    w.expect(b"reexeced-42", 10);
+    assert!(w.child.try_wait().unwrap().is_none(), "watch left on the holder's upgrade");
+    let h: StatusReply = Client::connect(&d.socket, "test").unwrap().request(Op::Status).unwrap();
+    assert_eq!((h.status.daemon.holder.pid, h.status.daemon.holder.upgrades), (holder, 1));
+
     // A crash: the connection drops with no word, and the holder starts a new brain.
     let old = brain_pid(&d.socket);
     unsafe { libc::kill(old, libc::SIGKILL) };
@@ -514,4 +527,52 @@ fn the_socket_path_does_not_depend_on_the_environment() {
     });
     assert!(stripped.contains("no daemon at /"), "{stripped}");
     assert_eq!(stripped, desktop);
+}
+
+/// `g3d upgrade --holder` while the namespace ends under it (SIGTERM to the holder in the commit's
+/// drain): it says the namespace ended and fails, at once, rather than waiting out its window or
+/// claiming every terminal carried over.
+#[test]
+fn upgrade_says_so_when_the_namespace_ends_during_it() {
+    let mut d = Daemon::start();
+    let mut c = Client::connect(&d.socket, "test").unwrap();
+    let _: CreateReply = c
+        .request(Op::Create(Create {
+            id: "a".into(),
+            argv: Some(vec!["sleep".into(), "1793".into()]),
+            cols: 40,
+            rows: 5,
+            ..Default::default()
+        }))
+        .unwrap();
+    // A client that never reads nor closes holds the old brain's drain open for its second.
+    let _idle = Client::connect(&d.socket, "idle").unwrap();
+    let out = d.dir.join("upgrade.out");
+    let mut up = Command::new(env!("CARGO_BIN_EXE_g3d"))
+        .arg("--socket")
+        .arg(&d.socket)
+        .args(["upgrade", "--holder"])
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(d.dir.join("upgrade.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let log = d.dir.join("daemon.log");
+    let until = Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("upgrade: handed over; closing") {
+        assert!(Instant::now() < until, "no commit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    unsafe { libc::kill(d.child.id() as i32, libc::SIGTERM) };
+    let at = Instant::now();
+    let st = loop {
+        if let Some(st) = up.try_wait().unwrap() {
+            break st;
+        }
+        assert!(at.elapsed() < Duration::from_secs(10), "g3d upgrade waits on a namespace that ended");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let err = std::fs::read_to_string(d.dir.join("upgrade.err")).unwrap();
+    assert!(!st.success(), "it claimed success: {}", std::fs::read_to_string(&out).unwrap());
+    assert!(err.contains("the namespace ended meanwhile"), "{err}");
+    let _ = d.child.wait();
 }

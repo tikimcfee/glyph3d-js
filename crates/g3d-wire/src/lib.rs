@@ -195,7 +195,7 @@ mod tests {
                 option_as_alt: OptionAsAlt::True,
                 ..Default::default()
             }),
-            Op::Paste(Paste { handle: 3, text: "a\nb".into(), allow_unsafe: Some(true) }),
+            Op::Paste(Paste { handle: 3, text: "a\nb".into(), allow_unsafe: Some(true), more: Some(true) }),
             Op::Mouse(Mouse {
                 handle: 3,
                 action: MouseAction::Move,

@@ -73,6 +73,17 @@ test('a re-create from a new adapter takes the grid: owner, input, repaint, resi
         { to: 'ctrl-1', event: 'terminal.paste', data: { terminalId: 'term-3', text: 'one\ntwo' } },
     ]);
 
+    // A long paste goes as pieces of one paste (`more` on all but the last), never splitting a
+    // surrogate pair, so no one push holds the whole clipboard; termd streams it as one paste.
+    pushed.length = 0;
+    grid.pasteChunk = 4;
+    grid.paste('abcdefghij');
+    grid.paste('abc😀d');
+    expect(pushed.map((p) => [p.data.text, p.data.more ?? false])).toEqual([
+        ['abcd', true], ['efgh', true], ['ij', false],
+        ['abc', true], ['😀d', false],
+    ]);
+
     pushed.length = 0;
     await router.execute('terminal.resize term-3 30 8');
     await router.execute('terminal.kill term-3');

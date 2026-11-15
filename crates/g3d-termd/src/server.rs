@@ -26,6 +26,18 @@ pub const ENGINE: &str = "libghostty-vt/1.0.1";
 /// promise, so a snapshot restores only into exactly this).
 pub const SNAPSHOT_ENGINE: &str = "libghostty-vt/1.0.1 snapshot/1";
 
+/// The engine this build's snapshots restore into (a test hook can name another: the cross-engine
+/// handoff test).
+pub fn snapshot_engine() -> String {
+    #[cfg(feature = "test-hooks")]
+    if crate::test_hooks_armed()
+        && let Ok(p) = std::env::var("G3D_TERMD_TEST_ENGINE_FILE")
+    {
+        return std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into());
+    }
+    SNAPSHOT_ENGINE.into()
+}
+
 /// Test hook: the brain's heartbeat to the holder stops (the watchdog test).
 pub static WEDGED: AtomicBool = AtomicBool::new(false);
 
@@ -112,15 +124,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         crate::log(&format!("test hook: {p} exists; this brain exits at start"));
         std::process::exit(3);
     }
-    #[cfg(feature = "test-hooks")]
-    let engine = match std::env::var("G3D_TERMD_TEST_ENGINE_FILE") {
-        Ok(p) if test_hooks => {
-            std::fs::read_to_string(&p).map(|s| s.trim().to_owned()).unwrap_or_else(|_| SNAPSHOT_ENGINE.into())
-        }
-        _ => SNAPSHOT_ENGINE.into(),
-    };
-    #[cfg(not(feature = "test-hooks"))]
-    let engine: String = SNAPSHOT_ENGINE.into();
+    let engine = snapshot_engine();
     let mut start = hold::start(fd, &engine);
     let w = &start.hold.welcome;
     crate::log(&format!(
@@ -167,6 +171,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             kill_grace: Duration::from_secs(args.kill_grace),
             engine,
             input_max: args.input_buffer,
+            paste_timeout: Duration::from_millis(args.paste_timeout_ms),
             env: env_policy.clone(),
         },
         start.hold.clone(),
@@ -217,6 +222,14 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         restored: restored_counts,
         unseen: unseen_total,
     };
+    if let Some(why) = &w.upgrade_failed {
+        errors.record_at(
+            "upgrade_failed",
+            None,
+            format!("a holder upgrade did not happen: {why}; this holder carries on"),
+            w.at,
+        );
+    }
     if let Some(since) = w.failed_at {
         let secs = w.at.saturating_sub(since) / 1000;
         errors.record_at(
@@ -260,6 +273,8 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         restarts: w.restarts,
         last_start,
         snapshot_interval_ms: args.snapshot_interval_ms,
+        trees: w.trees.clone(),
+        holder_upgrades: w.upgrades,
     };
     let hub = Hub::new(
         info,
@@ -271,7 +286,33 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             rate_window: Duration::from_millis(args.status_rate_window_ms.max(1)),
         },
         errors,
+        w.leftovers.clone(),
+        args.status_closes,
     );
+    // The holder's death ends every tree. A systemd service's manager does that for the holder
+    // (its cgroup), and this brain, which outlives it by a moment, does it too: at once for a
+    // cgroup, and the only way for a session (DESIGN.md, "Process trees").
+    {
+        let (hub, reg, grace) = (hub.clone(), reg.clone(), Duration::from_secs(args.kill_grace));
+        hold::on_holder_gone(Box::new(move || {
+            let trees = hub.all_trees(&reg);
+            crate::log(&format!("the holder is gone: ending {} terminal tree(s) by the close rule", trees.len()));
+            let t = &hub.info.trees;
+            let mut pids = Vec::new();
+            for tree in &trees {
+                t.signal(tree, libc::SIGHUP);
+                pids.extend(t.signal(tree, libc::SIGTERM).into_iter().map(|p| p.pid));
+            }
+            g3d_hold::tree::wait_gone(&pids, Instant::now() + grace);
+            for tree in &trees {
+                let left = t.signal(tree, libc::SIGKILL);
+                if !left.is_empty() {
+                    let who: Vec<String> = left.iter().map(|p| format!("{} {}", p.pid, p.comm)).collect();
+                    crate::log(&format!("outlived SIGHUP and SIGTERM; SIGKILL: {}", who.join(", ")));
+                }
+            }
+        }));
+    }
     if candidate {
         if !not_exact.is_empty() {
             let why = format!("terminals not handed over exactly: {}", not_exact.join(", "));
@@ -422,6 +463,15 @@ async fn run(
                             let _ = tx.send(m);
                         }
                     }
+                    "killed" => srv.hub.closed(&m),
+                    "leftover" => {
+                        if let Some(l) = hold::Leftover::from_msg(&m) {
+                            srv.hub.leftover(l);
+                        }
+                    }
+                    "leftover_gone" => {
+                        srv.hub.leftover_gone(m.get("handle").and_then(Value::as_u64).unwrap_or(0) as u32)
+                    }
                     other => crate::log(&format!("hold link: unexpected {other:?}")),
                 }
             }
@@ -434,12 +484,15 @@ async fn run(
             let mut idle_since: Option<Instant> = None;
             loop {
                 tokio::time::sleep(Duration::from_millis(500).min(idle_exit)).await;
-                if srv.reg.len() == 0 && srv.active_conns() == 0 {
+                // A leftover keeps the namespace: its end would end the person's job.
+                if srv.reg.len() == 0 && srv.active_conns() == 0 && !srv.hub.has_leftovers() {
                     let since = *idle_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= idle_exit {
                         end_namespace(
                             &srv,
-                            &format!("no terminals and no connections but status followers for {idle_exit:?}"),
+                            &format!(
+                                "no terminals, no leftovers and no connections but status followers for {idle_exit:?}"
+                            ),
                         )
                         .await;
                     }
@@ -487,6 +540,9 @@ struct Conn {
     passive: bool,
     /// It has asked for something other than status or ping.
     active: bool,
+    /// Per terminal, the last paste chunk sent on: answered once its bytes are in the input
+    /// buffer. The next chunk waits for it, so at most one chunk per terminal waits in termd.
+    pasting: HashMap<u32, oneshot::Receiver<bool>>,
 }
 
 enum Flow {
@@ -532,6 +588,7 @@ async fn conn_task(srv: &Arc<Server>, stream: UnixStream) {
         pid,
         passive: false,
         active: false,
+        pasting: HashMap::new(),
     };
     srv.outs.lock().unwrap().insert(c.id, out.clone());
     let mut dec = FrameDecoder::default();
@@ -876,8 +933,23 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
         }
         Op::Paste(p) => {
             if let Some(t) = subscribed(srv, c, req, p.handle).cloned() {
-                let allow_unsafe = p.allow_unsafe == Some(true);
-                to_owner(c, &t, req, TermOp::Paste { text: p.text, allow_unsafe }).await;
+                // A chunk's reply comes once its bytes are in the input buffer (the program reads
+                // them): that is a paste's flow control. Other requests go on meanwhile; a client
+                // that sends the next chunk before that reply waits here, its socket backing up.
+                if let Some(prev) = c.pasting.remove(&p.handle) {
+                    let _ = prev.await;
+                }
+                let op = TermOp::Paste {
+                    text: p.text,
+                    allow_unsafe: p.allow_unsafe == Some(true),
+                    more: p.more == Some(true),
+                };
+                let (tx, rx) = oneshot::channel();
+                if t.send(Cmd { conn: c.id, out: c.out.clone(), req, op, done: Some(tx) }).is_err() {
+                    reply_err(&c.out, req, code::NO_TERMINAL, format!("terminal {} is gone", t.id));
+                } else {
+                    c.pasting.insert(p.handle, rx);
+                }
             }
         }
         Op::Capture(cp) => {
@@ -899,15 +971,6 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
             return Flow::Close;
         }
         Op::Upgrade(u) => {
-            if u.holder == Some(true) {
-                reply_err(
-                    &c.out,
-                    req,
-                    code::UNSUPPORTED,
-                    "replacing the holder (g3d upgrade --holder) is not built yet",
-                );
-                return Flow::Continue;
-            }
             if let Some(b) = &u.binary {
                 use std::os::unix::fs::PermissionsExt;
                 let ok = std::fs::metadata(b).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
@@ -922,8 +985,8 @@ async fn handle_request(srv: &Arc<Server>, c: &mut Conn, payload: &[u8]) -> Flow
                 return Flow::Continue;
             }
             reply_ok(&c.out, req, &UpgradeReply { generation: srv.hold.welcome.generation });
-            let (srv, out) = (srv.clone(), c.out.clone());
-            tokio::spawn(async move { upgrade(srv, u.binary, out).await });
+            let (srv, out, holder) = (srv.clone(), c.out.clone(), u.holder == Some(true));
+            tokio::spawn(async move { upgrade(srv, u.binary, holder, out).await });
         }
     }
     Flow::Continue
@@ -950,14 +1013,23 @@ async fn to_all(reg: &Registry, op: impl Fn() -> TermOp) -> Vec<(String, bool)> 
 /// stops accepting, cuts every terminal between reads into a handoff blob, and waits. On
 /// `commit` it closes every connection with `ERROR restart` and exits; the candidate continues
 /// each terminal at exactly its cut. On failure everything resumes and the asker hears why.
-async fn upgrade(srv: Arc<Server>, binary: Option<String>, asker: Arc<ConnOut>) {
+/// With `holder`, the holder re-execs into the new binary at the commit (`g3d upgrade --holder`)
+/// and starts a brain of it from the handoff; to this brain it is the same handoff.
+async fn upgrade(srv: Arc<Server>, binary: Option<String>, holder: bool, asker: Arc<ConnOut>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     *srv.upgrade_tx.lock().unwrap() = Some(tx);
     let mut msg = json!({"m": "upgrade"});
     if let Some(b) = &binary {
         msg["binary"] = json!(b);
     }
-    crate::log(&format!("upgrade requested ({})", binary.as_deref().unwrap_or("the holder's binary")));
+    if holder {
+        msg["holder"] = json!(true);
+    }
+    crate::log(&format!(
+        "upgrade{} requested ({})",
+        if holder { " of the holder" } else { "" },
+        binary.as_deref().unwrap_or("the holder's binary")
+    ));
     srv.hold.send(&msg, &[]);
     let wait = srv.upgrade_deadline + Duration::from_secs(5);
     let Some(m) = next(&mut rx, wait).await else {

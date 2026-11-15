@@ -12,5 +12,6 @@ publish.workspace = true
 [dependencies]
 g3d-wire.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 rustix.workspace = true
 libc = "0.2.177"

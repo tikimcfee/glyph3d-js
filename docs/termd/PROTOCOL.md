@@ -1,4 +1,4 @@
-# The termd wire, version 1.4
+# The termd wire, version 1.5
 
 `g3d-termd` keeps terminals alive: it owns each terminal's pseudo-terminal (PTY), its
 process and a libghostty-vt emulator holding the terminal's screen and scrollback.
@@ -16,8 +16,10 @@ reply fields, the `env` op, and the status document (`status`, `status_follow`, 
 the `status` event). What is marked **(1.2)** is new in 1.2: key events and paste (`key`, `paste`,
 the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
 `key`'s `option_as_alt` and the feature of the same name. What is marked **(1.4)** is new in 1.4:
-pointer events (`mouse` and the feature of the same name). The daemon on branch `termd` speaks all
-of 1.4 and announces `proto` `[1, 4]`.
+pointer events (`mouse` and the feature of the same name). What is marked **(1.5)** is new in 1.5:
+a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`), process
+trees (what a `kill` ends and the status document reports), and `upgrade`'s `holder`. The daemon
+on branch `termd` speaks all of 1.5 and announces `proto` `[1, 5]`.
 
 ## At a glance
 
@@ -67,8 +69,8 @@ explicit socket path instead (`g3d-termd --socket <path>`); it then has no names
 
 If nothing listens there, a client that wants a daemon starts one:
 `g3d-termd --ns <namespace> --daemon` (or `--socket <path> --daemon`) detaches into the
-background and serves until it has had no terminals and no connections (other than status
-followers) for 5 minutes. Then
+background and serves until it has had no terminals, no leftovers (what ended terminals left
+running) and no connections (other than status followers) for 5 minutes. Then
 retry the connection for a few seconds. (1.1) The process that listens is the namespace's
 holder, which keeps the terminals alive across restarts of the daemon's engine; see
 [Restarts](#restarts-11). Starting a second daemon on a socket that already
@@ -102,8 +104,8 @@ only.
   `WELCOME.max_frame` says otherwise. A larger frame is a protocol error: the daemon answers
   `ERROR too_large` and closes the connection, every subscription on it with it. So a client
   measures a request before it sends one and refuses it itself (`g3d` and the relay say
-  `too_large`, naming `max_frame`): a paste of a few MB of control characters is six times
-  that as JSON.
+  `too_large`, naming `max_frame`): a control character is six bytes as JSON. A paste larger
+  than a frame streams in chunks ([`paste`](#paste-12), `more`), each well under it.
 - The header is 12 bytes, so a payload starts 4-byte aligned in a buffer that starts
   aligned. Binary prefixes below are laid out so their fields are naturally aligned.
 - A reader accumulates bytes until it holds `4 + len` of them, then handles one frame.
@@ -179,10 +181,10 @@ The first frame a client sends is `HELLO`:
 The daemon replies `WELCOME`:
 
 ```json
-{"proto": [1, 4], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
+{"proto": [1, 5], "daemon": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1",
  "ns": "default", "pid": 41200, "instance": "8c1f0e7a9b2d4c55", "generation": 2,
  "holder": {"pid": 41190, "version": "g3d-termd/0.2.0"},
- "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"], "max_frame": 16777216}
+ "features": ["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse", "paste_stream"], "max_frame": 16777216}
 ```
 
 - `proto`: the daemon's `[major, minor]`.
@@ -195,8 +197,8 @@ The daemon replies `WELCOME`:
 - `holder` (1.1): the holder's `pid` and `version`.
 - `features`: what this daemon supports beyond the 1.0 core. A client checks a feature
   before using it. Known features: `raw`, `view`, `capture` (all in 1.0), `status`,
-  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4), `cells`
-  (packed cells, reserved).
+  `upgrade`, `env` (1.1), `key`, `paste` (1.2), `option_as_alt` (1.3), `mouse` (1.4),
+  `paste_stream` (1.5), `cells` (packed cells, reserved).
 - `max_frame`: the largest payload either side may send.
 
 If the majors differ, the daemon sends `ERROR` with code `version` instead and closes.
@@ -222,7 +224,9 @@ a malformed frame: `ERROR` `bad_frame`, and the connection closes (see
 {"req": 5, "ok": false, "error": {"code": "no_terminal", "message": "no terminal 't9'"}}
 ```
 
-Replies to one connection come back in the order its requests were sent. A reply can
+Replies to one connection come back in the order its requests were sent, but for one: (1.5) a
+`paste` chunk is answered when its bytes are in the program's input buffer, which waits for the
+program to read, and replies to later requests may come first (match them by `req`). A reply can
 be preceded or followed by frames it causes (a `subscribe` reply comes before its
 `REPAINT`), and the per-op text says which.
 
@@ -242,8 +246,9 @@ Error codes, the same for every op:
 | `alt_screen` | `view` on a terminal showing its alternate screen, which has no scrollback |
 | `spawn_failed` | the program could not be started; `message` says why |
 | `too_large` | a frame or a field exceeded a limit |
-| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
+| `busy` | (1.1) the op can't run now: another one of its kind is running (`upgrade`; (1.5) another writer's streaming `paste` into the same terminal), or an upgrade is handing the terminals over (`create`, `resize`, `kill`, and (1.2) `key` and `paste` and (1.4) `mouse`, during the handoff) |
 | `unsafe_paste` | (1.2) a `paste` whose text could run commands, sent without `allow_unsafe` ([`paste`](#paste-12)) |
+| `paste_timeout` | (1.5) a chunk of a streamed `paste` that termd ended because its writer sent no next chunk within the paste timeout ([`paste`](#paste-12)) |
 
 ### `create`
 
@@ -391,9 +396,13 @@ terminals are listed: a terminal leaves the list when its program exits.
 {"req": 3, "op": "kill", "id": "t1"}
 ```
 
-Sends `SIGHUP` to the terminal's process group, closes the PTY, and replies once the
-terminal is gone. Its subscribers first get `exit` and `closed` events. `"signal":
-"TERM"` or `"KILL"` sends that signal instead of `HUP`.
+Closes the terminal by the close rule and replies once its program is gone: `SIGHUP` to every
+process of the terminal's tree (its program and everything it started; `daemon.trees` in the
+[status](#status_follow-status_unfollow-11) says how termd knows it) and to the PTY's foreground
+group, the PTY closed (a hangup), then (1.5) `SIGTERM` to whatever is left of the tree, and
+`SIGKILL` to what is still left after a grace (2 s by default). Its subscribers first get `exit`
+and `closed` events. `"signal": "TERM"` or `"KILL"` sends that signal first instead of `HUP`
+(`KILL`: the whole tree at once). The status document's `closes` says what each step reached.
 
 ### `subscribe`
 
@@ -645,8 +654,48 @@ dialog (`clipboard-paste-protection`): a client with a person to ask asks after 
 sends again, one whose paste is the person's own deliberate act may send it at once, and a
 script decides for itself. The bracket can't be broken either way, since the `ESC` is a space.
 
-Reply: `{"req": 18, "ok": true, "written": 14}`. The bytes join the program's input as `key`'s do,
-and the errors are the same, plus `unsafe_paste`.
+Reply: `{"req": 18, "ok": true, "written": 14}`, the bytes framed for the program. The bytes join
+the program's input as `key`'s do, and the errors are the same, plus `unsafe_paste`, but for one
+difference: a paste never fails `input_full`. When the program's input buffer has no room, the
+paste waits for the program to read, and its reply waits with it (a real terminal writes its
+clipboard through the PTY at the program's pace: xterm keeps what the PTY doesn't take and writes
+it as the PTY drains, Ghostty queues it on its IO thread). A paste bigger than the whole buffer
+goes once the buffer is empty.
+
+**A paste of any size (1.5).** Feature `paste_stream`. A paste larger than one frame goes as
+chunks of one paste, each a `paste` request, every one but the last with `"more": true`:
+
+```json
+{"req": 19, "op": "paste", "handle": 7, "text": "…the first MB…", "allow_unsafe": false, "more": true}
+{"req": 20, "op": "paste", "handle": 7, "text": "…the next…", "more": true}
+{"req": 21, "op": "paste", "handle": 7, "text": "…the rest"}
+```
+
+| field | default | meaning |
+|---|---|---|
+| `more` | `false` | more chunks of this paste follow. The paste stays open (one bracket, one set of rules) until a chunk without it |
+
+The program gets exactly what one `paste` of the whole text would give it: the framing is decided
+by the program's mode at the first chunk, `ESC [ 200 ~` comes before the first byte and
+`ESC [ 201 ~` after the last; `allow_unsafe` is the first chunk's; a `\r\n` split across two chunks
+is still one Enter; the stripping is byte by byte, so a boundary changes nothing. The unsafe rule is
+the whole paste's: a chunk that makes it unsafe (a line break; the bracket end, also when its `ESC`
+ends one chunk and `[201~` starts the next) is refused with `unsafe_paste` and none of it is
+written, the paste ends there (its bracket closed: what came before it was safe, so it sits typed,
+never run), and its later chunks are refused the same way, writing nothing, until the one without
+`more`. Send each chunk once the previous one's reply has come: that is the flow control (a chunk
+sent sooner waits on the connection, whose other requests then wait behind it). Keys, `INPUT` and
+pointer events reaching the terminal while a paste is open are held and follow the paste, as a key
+pressed during a paste follows it into a real terminal's PTY; they count against the input buffer
+and are refused `input_full` when it is full. One paste streams into a terminal at a time: another
+writer's `paste` is `busy` until it ends. A paste ends early, closed, when its writer's subscription
+ends (unsubscribe, the connection closes), an upgrade's handoff cuts it (its later chunks are
+`busy`: input is at most once), or its writer sends no next chunk within the paste timeout
+(`g3d-termd --paste-timeout-ms`, 60,000; 0 = never) once termd has answered the last one (its later
+chunks are `paste_timeout`). A writer whose paste ended early sends its chunk without `more` (empty
+will do) to end the refusal. The status document shows an open paste (`terminals[].paste`). A brain
+that crashes mid-paste can't close it: the program stays inside the bracket, reading what is typed
+as pasted text (a shell's Enter doesn't run the line), until a later paste's end; nothing reports it.
 
 ### `mouse` (1.4)
 
@@ -744,7 +793,8 @@ Reply: `{"req": 13, "ok": true, "status": {…}}`, the document below.
 `interval_ms` is clamped to 250–60000; default 1000; the daemon's settings may move all three),
 then sends an `EVENT` `status` on stream 0 at once, and again whenever the document has changed,
 no sooner than the interval after the previous one. Changes are any field except the sampled
-gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates), or
+gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates, a
+terminal's `processes` and a leftover's `processes`), or
 a rate crossing zero; an interval in which any terminal produced output or took input counts as a
 change, so a moving rate stays current. A rate still decaying over its 5 s window after the bytes
 stopped is not a change until it reaches zero (one burst of output costs a document or two, not
@@ -762,25 +812,32 @@ Unix epoch milliseconds, sizes are bytes):
 ```json
 {"at": 1794519127407,
  "daemon": {
-   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 4],
+   "version": "g3d-termd/0.2.0", "engine": "libghostty-vt/1.0.1", "proto": [1, 5],
    "ns": "default", "socket": "/run/user/1000/g3d/termd-default.sock",
    "log": "/home/user/.local/state/g3d/termd-default.log", "exiting": false,
    "instance": "8c1f0e7a9b2d4c55", "started_at": 1794518713751, "connections": 4,
-   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [2, 1], "rss": 3145728},
+   "holder": {"pid": 41190, "version": "g3d-termd/0.2.0", "hold": [2, 2], "rss": 3145728, "upgrades": 1},
    "brain": {"pid": 41200, "generation": 2, "started_at": 1794519100000, "rss": 41943040,
              "restarts": {"crash": 1, "watchdog": 0, "upgrade": 0},
              "last_start": {"reason": "crash", "at": 1794519100000, "exit": {"signal": "SEGV"},
                             "restored": {"exact": 0, "snapshot": 3, "blank": 0}, "unseen": 512}},
    "snapshots": {"interval_ms": 2000, "bytes": 1835008},
    "env": {"source": "systemd-user",
-           "config": {"path": "/home/user/.config/g3d/termd.toml", "state": "loaded"}, "warnings": []}},
+           "config": {"path": "/home/user/.config/g3d/termd.toml", "state": "loaded"}, "warnings": []},
+   "trees": {"mode": "cgroup", "unit": "g3d-termd-default-41180.service"},
+   "leftovers": [
+     {"id": "t3", "pid": 41260, "since": 1794519000000, "processes": [{"pid": 41266, "comm": "sleep"}]}],
+   "closes": [
+     {"id": "t4", "at": 1794519050000, "steps": [
+       {"signal": "HUP", "procs": [{"pid": 41270, "comm": "bash"}, {"pid": 41275, "comm": "vim"}]},
+       {"signal": "TERM", "procs": [{"pid": 41275, "comm": "vim"}]}]}]},
  "terminals": [
    {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src",
     "pwd": "/srv/src/app", "title": "~/src/app", "cols": 120, "rows": 40, "alt": false,
     "created_at": 1794480000123, "seq": 18211, "saved_seq": 17904, "out_bps": 1253000, "in_bps": 12,
     "last_output_at": 1794519127390, "flow": "live", "input_queued": 0,
     "scrollback_rows": 1567, "memory": {"resident": 1986560, "compressed": 0},
-    "restored": "snapshot",
+    "restored": "snapshot", "processes": 3,
     "subscribers": [
       {"conn": 12, "client": "glyph3d-cli/0.2.0", "pid": 5011, "role": "own", "mode": "raw",
        "flow": "block", "queued": 0, "lagging": false, "lags": 0, "view": 0}]}],
@@ -798,9 +855,12 @@ Unix epoch milliseconds, sizes are bytes):
 | `exiting` | `true` only in the last document a follower gets before the namespace leaves (idle exit, `stop`, the holder's `SIGTERM`); the connection then closes. The socket is already gone by then: a `connect` finds nothing (`ENOENT`), and a new daemon can take the name at once. An empty namespace leaving, not a failure |
 | `started_at` | when the holder started: the namespace's age. Uptime is `at − started_at` |
 | `connections` | client connections open now, status followers included |
-| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
+| `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured), (1.5) `upgrades` (times the holder has replaced itself in place with [`upgrade`](#upgrade-11)'s `holder`: the same `pid`, a new `version`) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
+| `trees` | (1.5) how the daemon knows each terminal's processes, its **tree**: `mode` `"cgroup"` (Linux, a namespace started with `--daemon` under a systemd user manager: each terminal its own cgroup, a leaf of the daemon's service's, `unit`), or `"session"` (each terminal's session: the processes whose session id is its program's pid; `why` says why not a cgroup). A cgroup holds everything the program started however it forked; a session loses a process that called `setsid` |
+| `leftovers` | (1.5) what terminals whose programs exited on their own left running (a `nohup` job), each `id`, the program's `pid`, `since` (when it exited) and `processes` (`pid`, `comm`); listed until they end, which is with the namespace at the latest; a namespace holding them is not idle |
+| `closes` | (1.5) the latest closes (`kill`, a namespace's end), newest first: each step of the close rule (`HUP` to every process in the tree, `TERM` to what was left, `KILL` to what was still left) with the processes it reached (`procs`). A close that needed `KILL` is also an error, `killed` |
 | `env` | `source`: where a terminal whose creator sends no environment looks the session's names up (`"systemd-user"`, `"launchd"`, or `"daemon"`: the daemon's start values, when no session source answers or the daemon is set so); `config`: the daemon's `termd.toml`, its `path`, its `state` (`"absent"`, `"loaded"`, `"error"`) and, while it is bad, its `error` (naming the line); `warnings` (strings: no UTF-8 locale to fill, the session source unreachable while it is, a bad config file, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
 Each of `terminals` (one per live terminal; the count is the array's length):
@@ -814,11 +874,13 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `out_bps`, `in_bps` | output and input bytes per second over the last 5 s |
 | `last_output_at` | when output last arrived; absent until this brain has seen output from the terminal (one with no output yet, or one restored after a restart and quiet since: the time is not carried across a restart) |
 | `flow` | `"live"` (termd reads the program's output as it comes), `"blocked"` (a `block` owner is behind and termd has stopped reading; the program waits), `"paused"` (an upgrade's cut) |
-| `input_queued` | input bytes waiting for the program to read them |
+| `input_queued` | input bytes waiting for the program to read them: the input buffer's, (1.5) an open paste's chunk waiting for room, and the input held behind the paste |
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
 | `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain). A terminal restored from a snapshot saves a new one at the next interval even while quiet, so a second crash restores it exact |
 | `unseen` | with `restored`: this terminal's output the previous brain read and never saved (0 when `exact`) |
-| `saved_seq` | the `seq` a crash now would bring it back to: its newest crash-restore save's (a snapshot, every `snapshots.interval_ms` while its `seq` moves; an upgrade's handoff), so a crash now loses `seq − saved_seq`. A change like any other field: a follower hears the save. Absent while a terminal restored from a snapshot or blank waits for its first save |
+| `saved_seq` | (1.5) the `seq` a crash now would bring it back to: its newest crash-restore save's (a snapshot, every `snapshots.interval_ms` while its `seq` moves; an upgrade's handoff), so a crash now loses `seq − saved_seq`. A change like any other field: a follower hears the save. Absent while a terminal restored from a snapshot or blank waits for its first save |
+| `processes` | (1.5) how many processes its tree holds now (its program and everything it started); a gauge, like `memory` |
+| `paste` | (1.5) the paste streaming into it now, absent when none is: `conn` (its writer's connection), `since` (its first chunk), `written` (bytes of its text the program has been given), `idle_since` (when termd answered its last chunk and began waiting for the writer's next; absent while a chunk waits for room). An `idle_since` long ago is a writer gone quiet, which the paste timeout ends |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
 `errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,
@@ -826,7 +888,8 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 the request and event codes above (`spawn_failed`, `input_full`, `panic`) plus `lagged` (a lossy
 subscriber fell behind and was resynced), `restore` (a terminal that could not come back),
 `upgrade_failed`, `brain_crash`, `brain_watchdog` and `brain_failed` (why this brain started, and
-that no brain ran for a while before it). The list is the
+that no brain ran for a while before it), and (1.5) `killed` (a close whose processes outlived
+`SIGHUP` and `SIGTERM`). The list is the
 current brain's: a restart starts it over with the reason for the restart. They are for people;
 nothing depends on reading them.
 
@@ -854,8 +917,12 @@ the handoff didn't carry is not kept. New connections wait in the socket's backl
 upgrade doesn't happen, the connection that asked gets an `EVENT` on stream 0:
 `{"ev": "upgrade_failed", "message": "…"}`, and everything carries on.
 
-Replacing the holder itself is `g3d upgrade --holder` (DESIGN.md); it will use the same op with
-`"holder": true`, which the daemon on branch `termd` answers `unsupported`.
+(1.5) `"holder": true` replaces the holder too (`g3d upgrade --holder`, DESIGN.md "Upgrading the
+holder"): the process that keeps every terminal re-execs into `binary` in place, the same `pid`, so
+no program notices. To a client it is the same upgrade: the same reply, `busy` window, `ERROR`
+`restart` and `upgrade_failed`, a `WELCOME` with the same `instance` and a higher `generation`
+after it, and the status document's `daemon.holder.upgrades` one higher (its `version` the new
+binary's). A holder from before 1.5 answers `holder: true` with `unsupported`.
 
 ## Data frames
 
@@ -1237,6 +1304,16 @@ writes, and send keystrokes as `INPUT`.
 
 ## Versions
 
+- **1.5**: a paste of any size: `paste`'s `more`, the feature `paste_stream`; a `paste` waits for
+  room in the program's input buffer instead of failing `input_full`, and its reply waits with it.
+  Process trees: `kill` ends a terminal's whole tree by the close rule (`SIGHUP`, then `SIGTERM`,
+  then `SIGKILL`), and the status document's `daemon.trees`, `daemon.leftovers`, `daemon.closes`,
+  `terminals[].processes` and the `killed` error say what runs and what a close reached. `upgrade`
+  with `holder` replaces the holder in place (`daemon.holder.upgrades`). A streamed paste whose
+  writer goes quiet ends at the paste timeout (`paste_timeout`), and the status document shows an
+  open paste (`terminals[].paste`) and where a crash now would restore each terminal to
+  (`terminals[].saved_seq`). Additive: a paste without
+  `more` is the whole paste, as in 1.4, and a 1.4 client ignores the new fields.
 - **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
   is served as before.
 - **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is

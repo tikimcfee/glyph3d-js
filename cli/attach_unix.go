@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -270,6 +271,9 @@ func runTerminal(cfg terminalConfig) {
 		send("resize", map[string]any{"handle": sess.Load().handle, "cols": c, "rows": r})
 	}
 
+	// The display's pastes: one at a time, each chunk once termd has room for it.
+	paster := newTermdPaster(sessionPasteSink{sess: &sess, done: done}, done)
+
 	// INPUT goroutine: drain the relay. Carries terminal.bytes (→ termd), resize, scroll,
 	// refresh, shutdown, and the ping bounce that triggers re-adoption.
 	go func() {
@@ -293,15 +297,12 @@ func runTerminal(cfg terminalConfig) {
 						send("key", s.keyFields(k))
 					}
 				},
-				// The display's paste is the person's own (a paste chord in a focused terminal),
-				// and the display has no confirmation dialog: it pastes as xterm and WezTerm do
-				// (allow_unsafe), with termd's Ghostty encoding still making control bytes spaces.
-				paste: func(text string) {
-					s := sess.Load()
-					if s.offers("paste") {
-						send("paste", map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true})
-					}
-				},
+				// The display's paste streams into termd as one paste (termdPaster), in order and
+				// at the program's pace.
+				paste: paster.add,
+				// The display left (the relay's word): a paste of its that is still arriving
+				// never will, so it ends with what came.
+				displayGone: paster.displayGone,
 				// A pointer event on the focused terminal of a program that hears the mouse; termd
 				// encodes it in the program's live mouse modes and drops what they don't report.
 				mouse: func(m termdMouse) {
@@ -527,6 +528,40 @@ type termdSession struct {
 	said sync.Map
 }
 
+// sessionPasteSink sends a paste's chunks on the adapter's current termd session. The display's
+// paste is the person's own (a paste chord in a focused terminal), and the display has no
+// confirmation dialog: it pastes as xterm and WezTerm do (allow_unsafe), with termd's Ghostty
+// encoding still making control bytes spaces, so a pasted bracket end can't break the bracket.
+type sessionPasteSink struct {
+	sess *atomic.Pointer[termdSession]
+	done <-chan struct{}
+}
+
+func (k sessionPasteSink) streams() bool { return k.sess.Load().tc.Has("paste_stream") }
+func (k sessionPasteSink) maxFrame() int { return k.sess.Load().tc.maxFrame() }
+func (k sessionPasteSink) session() any  { return k.sess.Load() }
+
+func (k sessionPasteSink) paste(text string, more bool) (bool, error) {
+	s := k.sess.Load()
+	if !s.offers("paste") {
+		return false, nil
+	}
+	f := map[string]any{"handle": s.handle, "text": text, "allow_unsafe": true}
+	if more {
+		f["more"] = true
+	}
+	ch, err := s.tc.Send("paste", f)
+	if err != nil {
+		return true, err
+	}
+	select {
+	case r := <-ch:
+		return true, r.err
+	case <-k.done:
+		return true, errors.New("the adapter is closing")
+	}
+}
+
 // termdInputSince is the protocol version that brought each display input op.
 var termdInputSince = map[string]string{"key": "1.2", "paste": "1.2", "mouse": "1.4"}
 
@@ -596,7 +631,7 @@ func encodeOutputFrame(id string, cols, rows int, payload []byte) []byte {
 type inboundHandlers struct {
 	bytes    func([]byte)
 	key      func(termdKey)
-	paste    func(text string)
+	paste    func(text string, more bool)
 	mouse    func(termdMouse)
 	resize   func(cols, rows int)
 	scroll   func(lines int, at *cellPoint)
@@ -604,6 +639,8 @@ type inboundHandlers struct {
 	refresh  func()
 	kill     func()
 	recreate func()
+	// displayGone: the display this adapter's input came from left (the relay's `display.gone`).
+	displayGone func()
 }
 
 // termdKey is a display's key event, termd's `key` op as is (W3C KeyboardEvent semantics:
@@ -683,6 +720,8 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			Col    *float64 `json:"col"`
 			Row    *float64 `json:"row"`
 			Button any      `json:"button"`
+			// A paste piece's `more`: another piece of the same paste follows.
+			More bool `json:"more"`
 			// A key event's fields; its `text` is a paste's too (one field: a second `text` here
 			// would shadow the key's and drop every key's text), its `action` and `mods` a
 			// pointer event's too.
@@ -701,7 +740,7 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 		case "terminal.key":
 			h.key(ev.Data.termdKey)
 		case "terminal.paste":
-			h.paste(ev.Data.Text)
+			h.paste(ev.Data.Text, ev.Data.More)
 		case "terminal.resize":
 			h.resize(ev.Data.Cols, ev.Data.Rows)
 		case "terminal.mouse":
@@ -726,6 +765,8 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 			h.scroll(ev.Data.Lines, at)
 		case "terminal.refresh": // display rebuilt our grid (re-adoption) + is ready — repaint into it NOW
 			h.refresh()
+		case "display.gone":
+			h.displayGone()
 		case "terminal.shutdown":
 			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — ending the terminal")
 			h.kill()

@@ -94,6 +94,9 @@ export const TERMINAL_CURSOR_DEFAULTS = Object.freeze({
 // same band CodeGrid's caret uses. A compositing constant, not a taste knob, so it stays baked.
 const CURSOR_RENDER_ORDER = 5;
 
+/** A paste push's default size, in UTF-16 code units (TerminalGrid#pasteChunk). */
+export const PASTE_CHUNK = 1 << 20;
+
 export default class TerminalGrid extends FramedGlyphField {
     static CONTROL_SPEC = TERMINAL_CONTROL_SPEC;
 
@@ -217,6 +220,14 @@ export default class TerminalGrid extends FramedGlyphField {
          * @type {((input: {bytes?: string, key?: import('../services/interaction/keyEncoding.js').TerminalKeyEvent, paste?: string, mouse?: TerminalMouseEvent}, terminalId: string) => void)|null}
          */
         this.onInput = null;
+
+        /**
+         * The most UTF-16 code units one paste push carries to the owning adapter; a longer paste
+         * goes as several pieces of one paste (`more`), which termd streams into the program as one
+         * (PROTOCOL.md "`paste`", 1.5), so no single message holds a whole clipboard.
+         * @type {number}
+         */
+        this.pasteChunk = options.pasteChunk ?? PASTE_CHUNK;
 
         const worldScale = options.worldScale ?? 0.025;
         this._gridScale = options.gridScale ?? 1.0;

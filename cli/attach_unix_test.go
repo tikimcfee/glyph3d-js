@@ -102,7 +102,9 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 		key: func(k termdKey) {
 			got = append(got, fmt.Sprintf("key:%s/%s/%v/%q/%s", k.Code, k.Key, k.Mods, k.Text, k.Action))
 		},
-		paste:  func(text string) { got = append(got, "paste:"+text) },
+		paste: func(text string, more bool) {
+			got = append(got, fmt.Sprintf("paste:%s%s", text, map[bool]string{true: "+", false: ""}[more]))
+		},
 		resize: func(c, r int) { got = append(got, "resize") },
 		mouse: func(m termdMouse) {
 			got = append(got, fmt.Sprintf("mouse:%s/%v/%g,%g/%v", m.Action, m.Button, m.Col, m.Row, m.Mods))
@@ -127,6 +129,7 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 	handleInbound([]byte(`{"event":"terminal.key","data":{"terminalId":"t1","code":"KeyA","key":"a","mods":["Control"],"text":"a"}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.key","data":{"terminalId":"t2","code":"KeyA","key":"a","text":"a"}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.paste","data":{"terminalId":"t1","text":"one\ntwo"}}`), "t1", h)
+	handleInbound([]byte(`{"event":"terminal.paste","data":{"terminalId":"t1","text":"thr","more":true}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.mouse","data":{"terminalId":"t1","action":"press","button":"left","col":3.5,"row":0,"mods":["Control"]}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.mouse","data":{"terminalId":"t1","action":"move","button":"none","col":1,"row":2}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.mouse","data":{"terminalId":"t1","action":"press","button":8}}`), "t1", h)
@@ -138,7 +141,7 @@ func TestHandleInboundRoutesOnlyItsOwnTerminal(t *testing.T) {
 	handleInbound([]byte(`{"event":"terminal.scroll","data":{"terminalId":"t2","live":true,"offset":10}}`), "t1", h)
 	handleInbound([]byte(`{"event":"terminal.refresh","data":{"terminalId":"t1"}}`), "t1", h)
 	handleInbound([]byte(`ERR: no terminal 't1'`), "t1", h)
-	want := []string{"bytes:hi", `key:Enter/Enter/[Shift]/""/press`, `key:KeyA/a/[Control]/"a"/`, "paste:one\ntwo",
+	want := []string{"bytes:hi", `key:Enter/Enter/[Shift]/""/press`, `key:KeyA/a/[Control]/"a"/`, "paste:one\ntwo", "paste:thr+",
 		"mouse:press/left/3.5,0/[Control]", "mouse:move/none/1,2/[]", "scroll:-2", "scroll:3@10.5,4", "scrollTo:0", "scrollTo:42", "refresh", "recreate"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)

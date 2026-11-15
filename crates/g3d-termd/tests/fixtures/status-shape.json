@@ -18,7 +18,8 @@
       "hold": [
         "int"
       ],
-      "rss": "int"
+      "rss": "int",
+      "upgrades": "int"
     },
     "brain": {
       "pid": "int",
@@ -52,7 +53,13 @@
         "state": "string"
       },
       "warnings": []
-    }
+    },
+    "trees": {
+      "mode": "string",
+      "why": "string"
+    },
+    "leftovers": [],
+    "closes": []
   },
   "terminals": [
     {
@@ -94,7 +101,8 @@
           "lags": "int",
           "view": "int"
         }
-      ]
+      ],
+      "processes": "int"
     }
   ],
   "errors": [
