@@ -82,9 +82,16 @@ Canvas, Terminals, Text, Groups, Status, Input, Menu — from ONE schema, `wall/
 section, label, type, range, a sentence saying what changing it does; the IDE Settings schema's type
 vocabulary: bool, number, color, enum — plus text, a line of words its knob's `parse` checks, edited
 as one value: `wall.config menuSizes 80x24 120x36` joins the words).
-The Text section's four knobs (`lineThickness`, `underlineRaise`, `curlyAmplitude`, `dimAlpha`) are
-the glyph shader's line style (`setGlyphLineStyle`, born from core's `GLYPH_LINE_DEFAULTS`): a
-set or a reset reaches every terminal's underlines, strikethroughs and dim text at once.
+The Text section holds the terminals' text. `fontFamily` (an enum of the font chain's families:
+core `fonts/families.js` — Cousine, Monaspace Neon, Monaspace Argon; Monaspace Neon by default) is
+the family every terminal draws in: a set or a reset calls each terminal's `setFontFamily` — live,
+cols × rows unchanged, its size on the canvas following the family's cell (a tiled group re-tiles)
+— and a new terminal is born in it (the TerminalHost's theme). `boldIsBright` (off by default:
+bold is the bold face, in the colour the program named) gives bold text in a standard colour its
+bright twin, on every terminal at once. The other four (`lineThickness`, `underlineRaise`,
+`curlyAmplitude`, `dimAlpha`) are the glyph shader's line style (`setGlyphLineStyle`, born from
+core's `GLYPH_LINE_DEFAULTS`): a set or a reset reaches every terminal's underlines,
+strikethroughs and dim text at once.
 `wall.config` checks every value by that schema (refused naming the knob, never clamped) and every
 WALL_CONFIG knob must have an entry (wallConfig fails loudly as it loads). The search box takes the
 keys when the panel opens; typing filters knobs by label, key, description and section title (every

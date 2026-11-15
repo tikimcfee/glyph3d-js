@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import {
     InstancedSlotBuffer, packRgba8, groupOf, SLOT_FLOATS, LANE_ADVANCE, LANE_HEIGHT, LANE_COLOR, LANE_GROUP_ID, GROUP_ID_BITS,
 } from '../core/InstancedSlotBuffer.js';
-import { createGlyphMaterial, createGlyphFillMaterial, GROUP_STRIDE } from '../core/glyphMaterial.js';
+import { createGlyphMaterial, createGlyphFillMaterial, setMaterialLineMetrics, GROUP_STRIDE } from '../core/glyphMaterial.js';
 import { generateLayout } from '../core/LayoutGenerator.js';
 import { computeCellMetrics } from '../core/cellMetrics.js';
 import { PERF_THRESHOLDS } from '../core/constants.js';
@@ -199,6 +199,8 @@ export default class InstancedField {
      * @param {Object} [options.slugData]
      * @param {Object} [options.shaper]
      * @param {number} [options.worldScale=0.025]
+     * @param {{width:number, height:number}} [options.charSize]  the field's cell, when it is not
+     *   the atlas's own (a font family other than the default: GlyphAtlas.fontFamily)
      * @param {Object} [options.defaultColor]
      * @param {boolean} [options.frustumCulled=true]
      */
@@ -210,6 +212,8 @@ export default class InstancedField {
         this._shaper   = options.shaper   || (atlas && (atlas._shapeCache || atlas._shaper)) || null;
 
         this.worldScale = options.worldScale || 0.025;
+        /** @private the field's own cell (null: the atlas's) */
+        this._charSize = options.charSize || null;
         this.maxInstances = options.maxInstances || PERF_THRESHOLDS.maxInstancesPerMesh || 50000;
         // The group table's live rows (its texture height — the shaders clamp to it). Most fields only
         // ever use group 0, so a table starts at the rows asked for and grows on demand.
@@ -1053,13 +1057,34 @@ export default class InstancedField {
         }
     }
 
-    /** Cell metrics computed from atlas char size and worldScale */
+    /** Cell metrics computed from the field's cell (its own, else the atlas's char size) and worldScale */
     get metrics() {
         if (!this._cachedMetrics) {
-            const charSize = this.atlas?.getCharSize?.() || { width: 9.6, height: 18 };
+            const charSize = this._charSize || this.atlas?.getCharSize?.() || { width: 9.6, height: 18 };
             this._cachedMetrics = computeCellMetrics(charSize, this.worldScale);
         }
         return this._cachedMetrics;
+    }
+
+    /**
+     * Give the field another cell (a font family's: GlyphAtlas.fontFamily(id).charSize; null: the
+     * atlas's own). `metrics` answers for it from now on; the slots already written keep the
+     * positions and sizes they were written with — their owner rewrites them.
+     * @param {{width:number, height:number}|null} charSize
+     */
+    setCharSize(charSize) {
+        if (charSize && !(charSize.width > 0 && charSize.height > 0)) throw new Error(`InstancedField.setCharSize: a cell needs a width and a height > 0, got ${JSON.stringify(charSize)}`);
+        this._charSize = charSize || null;
+        this._cachedMetrics = null;
+    }
+
+    /**
+     * Where this field's cells draw their own lines (underline, strikethrough), when that is not
+     * where the default font puts them: a font family's line metrics (null: the shared ones).
+     * @param {{ underlineY: number, strikeY: number, thickness: number }|null} m
+     */
+    setLineMetrics(m) {
+        setMaterialLineMetrics(this.material, m);
     }
 
     get glyphMapTexture() {

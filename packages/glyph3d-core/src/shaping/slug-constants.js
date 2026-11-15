@@ -30,6 +30,14 @@ export const CURVE_INITIAL_ROWS = 64;
 export const MAP_INITIAL_ROWS = 4;
 
 /**
+ * Values per part of a COMPOSITE glyph (a shaped cluster — a base and its combining marks —
+ * drawn as one cell's outline): fontIdx, gid, x, y (the part's origin, in its font's units),
+ * unitsPerCell (how many of those units span the cell's width). FontChain.compositeOf makes
+ * them; slugData.encodeGlyphBatch draws from them.
+ */
+export const COMPOSITE_PART_STRIDE = 5;
+
+/**
  * Pack a [0,1] normalized float to uint16.
  * @param {number} value - Normalized value in [0,1]
  * @returns {number} Integer in [0, 65535]

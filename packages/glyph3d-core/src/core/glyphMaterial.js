@@ -371,7 +371,11 @@ void main() {
                 coverage += computeCoverage(lo.x, invW.x, p0, p1, p2);
                 coverage += computeCoverage(lo.y, invW.y, rot90(p0), rot90(p1), rot90(p2));
             }
-            cov = clamp(coverage * 0.5, 0.0, 1.0);
+            // The non-zero winding rule, whichever way a contour runs: a font may wind some of
+            // its contours the other way (Monaspace's combining accents, and so its é) and
+            // overlap others (a variable font's strokes) — both are ink, as every rasterizer
+            // fills them.
+            cov = clamp(abs(coverage) * 0.5, 0.0, 1.0);
             if (sprite) cov *= float(vGlyphArg) / 255.0;
         }
     }
@@ -540,17 +544,41 @@ const _lineMetrics = { underlineY: 0.12, strikeY: 0.42, thickness: 0.05 };
 const _lineA = new THREE.Vector4();
 const _lineB = new THREE.Vector4();
 
-/** @private Fold the font's line metrics and the tuning into the two uniforms every ink material shares. */
-function refreshLines() {
-    const t = _lineMetrics.thickness * _lineStyle.lineThickness;
-    const underlineY = Math.min(1 - t / 2, Math.max(_lineMetrics.underlineY + _lineStyle.underlineRaise, t / 2));
+/**
+ * @private A material's OWN line metrics (a field drawing in another font family than the
+ * default: InstancedField.setLineMetrics) and the two vectors its uniforms then hold.
+ * @type {WeakMap<THREE.ShaderMaterial, { metrics: { underlineY: number, strikeY: number, thickness: number }, a: THREE.Vector4, b: THREE.Vector4 }>}
+ */
+const _ownLines = new WeakMap();
+
+/** @private Fold a font's line metrics and the tuning into the two line uniforms' vectors. */
+function foldLines(metrics, a, b) {
+    const t = metrics.thickness * _lineStyle.lineThickness;
+    const underlineY = Math.min(1 - t / 2, Math.max(metrics.underlineY + _lineStyle.underlineRaise, t / 2));
     const amp = t * _lineStyle.curlyAmplitude;
     const lower = Math.max(underlineY - t, t / 2);
-    _lineA.set(underlineY, t, _lineMetrics.strikeY, 0);
-    _lineB.set(lower, lower + 2 * t, Math.max(underlineY, amp + t / 2), amp);
-    for (const mat of _activeMaterials) mat.uniforms.uDimAlpha.value = _lineStyle.dimAlpha;
+    a.set(underlineY, t, metrics.strikeY, 0);
+    b.set(lower, lower + 2 * t, Math.max(underlineY, amp + t / 2), amp);
+}
+
+/** @private Refresh the shared line uniforms (the default family's), every material's own, and dim. */
+function refreshLines() {
+    foldLines(_lineMetrics, _lineA, _lineB);
+    for (const mat of _activeMaterials) {
+        mat.uniforms.uDimAlpha.value = _lineStyle.dimAlpha;
+        const own = _ownLines.get(mat);
+        if (own) foldLines(own.metrics, own.a, own.b);
+    }
 }
 refreshLines();
+
+/** @private Throw unless `m` is a set of line metrics in cell units. */
+function checkLineMetrics(m, who) {
+    for (const k of ['underlineY', 'strikeY', 'thickness']) {
+        if (!Number.isFinite(m?.[k]) || m[k] < 0 || m[k] > 1) throw new Error(`${who}: ${k} is a fraction of the cell's height, got ${m?.[k]}`);
+        if (k === 'thickness' && !(m[k] > 0)) throw new Error(`${who}: thickness must be > 0, got ${m[k]}`);
+    }
+}
 
 /** Set the greeking size live on every glyph material (and those created after). */
 export function setGlyphGreekPx(px) {
@@ -570,14 +598,40 @@ export function getGlyphGreekPx() {
  * @param {{ underlineY: number, strikeY: number, thickness: number }} m
  */
 export function setGlyphLineMetrics(m) {
-    for (const k of ['underlineY', 'strikeY', 'thickness']) {
-        if (!Number.isFinite(m?.[k]) || m[k] < 0 || m[k] > 1) throw new Error(`setGlyphLineMetrics: ${k} is a fraction of the cell's height, got ${m?.[k]}`);
-        if (k === 'thickness' && !(m[k] > 0)) throw new Error(`setGlyphLineMetrics: thickness must be > 0, got ${m[k]}`);
-    }
+    checkLineMetrics(m, 'setGlyphLineMetrics');
     _lineMetrics.underlineY = m.underlineY;
     _lineMetrics.strikeY = m.strikeY;
     _lineMetrics.thickness = m.thickness;
     refreshLines();
+}
+
+/**
+ * Give ONE ink material its own line metrics — a field whose cells are another font family's
+ * (its underline and strikethrough sit where that family's font puts them); the tuning
+ * (setGlyphLineStyle) still applies. `null` hands it back to the shared ones.
+ * @param {THREE.ShaderMaterial} material  an ink material (createGlyphMaterial)
+ * @param {{ underlineY: number, strikeY: number, thickness: number }|null} m
+ */
+export function setMaterialLineMetrics(material, m) {
+    if (!material?.uniforms?.uLineA) throw new Error('setMaterialLineMetrics: not a glyph ink material');
+    if (m === null) {
+        _ownLines.delete(material);
+        material.uniforms.uLineA.value = _lineA;
+        material.uniforms.uLineB.value = _lineB;
+        return;
+    }
+    checkLineMetrics(m, 'setMaterialLineMetrics');
+    let own = _ownLines.get(material);
+    if (!own) {
+        own = { metrics: { underlineY: 0, strikeY: 0, thickness: 0 }, a: new THREE.Vector4(), b: new THREE.Vector4() };
+        _ownLines.set(material, own);
+        material.uniforms.uLineA.value = own.a;
+        material.uniforms.uLineB.value = own.b;
+    }
+    own.metrics.underlineY = m.underlineY;
+    own.metrics.strikeY = m.strikeY;
+    own.metrics.thickness = m.thickness;
+    foldLines(own.metrics, own.a, own.b);
 }
 
 /** The line metrics in force (see setGlyphLineMetrics). */
@@ -635,7 +689,7 @@ export function createGlyphMaterial(options = {}) {
         decorTexture: { value: null },
         hasDecor: { value: 0 },
         uGreekPx: { value: _greekPx },
-        uLineA: { value: _lineA },   // shared: refreshLines writes them in place
+        uLineA: { value: _lineA },   // shared (refreshLines writes them in place) unless the material has its own: setMaterialLineMetrics
         uLineB: { value: _lineB },
         uDimAlpha: { value: _lineStyle.dimAlpha },
     };

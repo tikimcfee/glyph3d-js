@@ -17,16 +17,21 @@
  * The read allocates nothing: it fills one reused TerminalScreen (typed arrays, sized to the
  * reader's cols × rows) from xterm's buffer lines through one reused cell. Colors arrive
  * PACKED the way the slot buffer's color lane holds them (RGB888, red in the low byte), as
- * DRAWN — bold already brightened, inverse already swapped — so the renderer compares and
- * copies integers.
+ * DRAWN — inverse already swapped, bold's bright twin already taken where `boldIsBright` asks
+ * for it — so the renderer compares and copies integers.
  *
  * TerminalScreen (what readScreen fills and applyScreen consumes):
  *   { cols, rows,
- *     cp: Uint32Array  — the codepoint per cell, row-major; 0 (empty, a wide char's trailing
- *                        slot) reads as 32, a space, and so does a concealed cell (SGR 8),
+ *     cp: Uint32Array  — the cell's content, row-major: its codepoint, or — a cell holding a
+ *                        base and combining marks (`e` + U+0301) — its cluster id
+ *                        (core/cellClusters.js: a number above every codepoint, interned once
+ *                        per distinct cluster); 0 (empty, a wide char's trailing slot) reads as
+ *                        32, a space, and so does a concealed cell (SGR 8),
  *     fg: Uint32Array  — the packed colour the text draws in (RGB888, r low byte): the
- *                        foreground, bold ×1.4 clamped; under inverse (SGR 7) the background
- *                        (the terminal's own, setDefaultBackground, where the cell names none),
+ *                        foreground — with `boldIsBright`, a bold cell in one of the eight
+ *                        standard colours takes its bright twin; under inverse (SGR 7) the
+ *                        background (the terminal's own, setDefaultBackground, where the cell
+ *                        names none),
  *     bg: Uint32Array  — 0 for the DEFAULT background (no per-cell fill), else BG_SET | the packed
  *                        RGB888 the cell fills with: an explicit ANSI background, or under
  *                        inverse the foreground,
@@ -46,6 +51,7 @@
 import { Terminal } from '@xterm/headless/lib-headless/xterm-headless.mjs';
 import { RESET_FG, ansi256toRGB } from './terminalPalette.js';
 import { isWideCodepoint } from './terminalWidths.js';
+import { clusterId } from '../core/cellClusters.js';
 import {
     CELL_BOLD, CELL_DIM, CELL_ITALIC, CELL_BLINK, CELL_INVERSE, CELL_CONCEAL, CELL_STRIKE, CELL_OVERLINE,
     CELL_UNDERLINE_SHIFT, CELL_UNDERLINE_COLOR, UNDERLINE,
@@ -56,24 +62,25 @@ export const BG_SET = 0x1000000;
 
 /** A 0..1 channel as the slot buffer's byte: round(v × 255). */
 const byteOf = (v) => (v * 255 + 0.5) | 0;
-/** Bold brightens a channel by 40%, clamped. */
-const boldOf = (v) => Math.min(v * 1.4, 1.0);
 /** Pack 0..1 RGB the way the slot color lane holds it (r in the low byte). */
 const pack = (r, g, b) => (byteOf(r) & 0xff) | ((byteOf(g) & 0xff) << 8) | ((byteOf(b) & 0xff) << 16);
 
-// The palette and the default fg, packed once (normal and bold), so a read does no float work and
-// allocates no color objects. A true-color channel's bold byte comes from BOLD_BYTE.
+// The palette and the default fg, packed once, so a read does no float work and allocates no
+// color objects.
 const PALETTE = new Uint32Array(256);
-const PALETTE_BOLD = new Uint32Array(256);
 for (let i = 0; i < 256; i++) {
     const c = ansi256toRGB(i);
     PALETTE[i] = pack(c.r, c.g, c.b);
-    PALETTE_BOLD[i] = pack(boldOf(c.r), boldOf(c.g), boldOf(c.b));
 }
-const BOLD_BYTE = new Uint8Array(256);
-for (let v = 0; v < 256; v++) BOLD_BYTE[v] = byteOf(boldOf(v / 255));
 const RESET = pack(RESET_FG.r, RESET_FG.g, RESET_FG.b);
-const RESET_BOLD = pack(boldOf(RESET_FG.r), boldOf(RESET_FG.g), boldOf(RESET_FG.b));
+
+/**
+ * Whether bold text in one of the eight standard colours (SGR 30–37) draws in its bright twin
+ * (90–97) — the old way to show bold with no bold face. Off by default, as Ghostty's
+ * `bold-is-bright` is: bold is the bold FACE (core/cellAttrs.js `cellFace`) and the colour is
+ * the one the program named. Per emulator: `setBoldIsBright`.
+ */
+export const BOLD_IS_BRIGHT_DEFAULT = false;
 
 /** The packed default foreground — what a blank cell (and a padded one) carries. */
 export const DEFAULT_FG = RESET;
@@ -122,6 +129,8 @@ export default class TerminalEmulator {
         this._cell = undefined; // reusable CellData, filled by the line's loadCell
         /** @private the terminal's own background, packed: what inverse text draws in over a default background */
         this._defaultBg = 0;
+        /** @private bold text in a standard colour draws in its bright twin (setBoldIsBright) */
+        this._boldIsBright = BOLD_IS_BRIGHT_DEFAULT;
 
         // scrollback 0: we mirror the visible screen only (termd owns scrollback and sends a
         // scrolled-back view as a repaint), so the active buffer == the viewport.
@@ -147,7 +156,7 @@ export default class TerminalEmulator {
         this._cell = view.getLine(0).getCell(0);   // a CellData; loadCell refills it
         // The attribute reads below are xterm's AttributeData methods; one that moved would read
         // as "never set", so check them here too.
-        for (const m of ['isAttributeDefault', 'isInverse', 'isDim', 'isItalic', 'isBlink', 'isInvisible', 'isStrikethrough', 'isOverline',
+        for (const m of ['isCombined', 'getChars', 'getCode', 'isBold', 'isFgRGB', 'isFgPalette', 'getFgColor', 'isAttributeDefault', 'isInverse', 'isDim', 'isItalic', 'isBlink', 'isInvisible', 'isStrikethrough', 'isOverline',
             'isUnderline', 'getUnderlineStyle', 'isUnderlineColorDefault', 'isUnderlineColorRGB', 'isUnderlineColorPalette', 'getUnderlineColor']) {
             if (typeof this._cell[m] !== 'function') throw new Error(`[TerminalEmulator] xterm's cell has no ${m}(): the attribute read needs it — check the @xterm/headless version`);
         }
@@ -166,6 +175,23 @@ export default class TerminalEmulator {
         this.dirty = true;
         this._onDirty?.();
     }
+
+    /**
+     * Whether bold text in one of the eight standard colours draws in its bright twin
+     * (BOLD_IS_BRIGHT_DEFAULT). A change marks the screen dirty.
+     * @param {boolean} on
+     */
+    setBoldIsBright(on) {
+        on = !!on;
+        if (on === this._boldIsBright) return;
+        this._boldIsBright = on;
+        if (this._disposed) return;
+        this.dirty = true;
+        this._onDirty?.();
+    }
+
+    /** @returns {boolean} see setBoldIsBright */
+    get boldIsBright() { return this._boldIsBright; }
 
     /**
      * Cell widths as termd and the programs count them: xterm's own table (Unicode 6) under a
@@ -292,6 +318,7 @@ export default class TerminalEmulator {
         const cell = this._cell;
         const CP = s.cp, FG = s.fg, BG = s.bg, AT = s.at, UL = s.ul;
         const defaultBg = this._defaultBg;
+        const bright = this._boldIsBright;
         // Alt-screen apps (vim/htop/less) repaint the whole pane each frame, not a line-shift — so
         // depth-history capture must NOT treat their redraws as scroll. TerminalGrid reads this.
         s.alt = view.type === 'alternate';
@@ -302,26 +329,28 @@ export default class TerminalEmulator {
             let i = y * cols;
             for (let x = 0; x < n; x++, i++) {
                 line.loadCell(x, cell);
-                // getCode() is the cell's codepoint (0 = empty / a wide char's trailing slot → a
-                // space; the wide glyph's own quad covers it).
-                const code = cell.getCode();
+                // The cell's content: its codepoint (0 = empty / a wide char's trailing slot → a
+                // space; the wide glyph's own quad covers it) — or, where xterm holds a base and
+                // its combining marks in the cell, that cluster's id (interned once; afterwards
+                // one Map read on the string xterm already holds).
+                const code = cell.isCombined() ? clusterId(cell.getChars()) : cell.getCode();
                 // Most cells carry nothing: the default colours, no attribute. One test, and done.
                 if (cell.isAttributeDefault()) {
                     CP[i] = code === 0 ? 32 : code;
                     FG[i] = RESET; BG[i] = 0; AT[i] = 0; UL[i] = 0;
                     continue;
                 }
+                // Bold is the glyph's face, not its colour — except, with boldIsBright, a bold
+                // cell in a standard colour (palette 0–7), which takes its bright twin (8–15).
                 const bold = cell.isBold();
                 let fg, bg;
                 if (cell.isFgRGB()) {
-                    const c = cell.getFgColor();
-                    fg = bold
-                        ? BOLD_BYTE[(c >> 16) & 0xff] | (BOLD_BYTE[(c >> 8) & 0xff] << 8) | (BOLD_BYTE[c & 0xff] << 16)
-                        : rgbOf(c);
+                    fg = rgbOf(cell.getFgColor());
                 } else if (cell.isFgPalette()) {
-                    fg = (bold ? PALETTE_BOLD : PALETTE)[cell.getFgColor() & 0xff];
+                    const idx = cell.getFgColor() & 0xff;
+                    fg = PALETTE[bright && bold && idx < 8 ? idx + 8 : idx];
                 } else {
-                    fg = bold ? RESET_BOLD : RESET;
+                    fg = RESET;
                 }
                 // The background: 0 for the default (no per-cell fill — the terminal's own panel
                 // shows); only an explicit ANSI background (git-diff bars, ls --color, selections)

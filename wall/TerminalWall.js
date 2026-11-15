@@ -31,7 +31,8 @@ const BORDER_STYLE = { color: 0x3b4352, width: 1.5, intensity: 1 };
 const RECOVER_REPLY_MS = 15000;
 /**
  * What a terminal on the wall is born with (the TerminalHost's theme, over TerminalGrid's defaults):
- * an opaque panel, so the canvas's grid never shows through a terminal.
+ * an opaque panel, so the canvas's grid never shows through a terminal — plus the knobs' font family
+ * and bold colour (_terminalHost).
  */
 const TERMINAL_THEME = Object.freeze({ backgroundOpacity: 1 });
 
@@ -464,7 +465,7 @@ export default class TerminalWall {
     setConfig(key, value) {
         this.config[key] = value;
         this.store.setConfig(key, value);
-        if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: value });   // live on every terminal
+        this._applyKnob(key);
         this._emit();
         return value;
     }
@@ -476,9 +477,22 @@ export default class TerminalWall {
     resetConfig(key) {
         this.config[key] = this._born[key];
         this.store.clearConfig(key);
-        if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: this.config[key] });
+        this._applyKnob(key);
         this._emit();
         return this.config[key];
+    }
+
+    /**
+     * Push a knob whose value lives outside the wall onto what holds it: the glyph shader's line
+     * style, and every terminal's font family and bold colour (a new terminal is born with them:
+     * the TerminalHost's theme).
+     * @param {keyof import('./wallConfig.js').WallConfig} key
+     */
+    _applyKnob(key) {
+        const value = this.config[key];
+        if (LINE_STYLE_KNOBS.includes(key)) setGlyphLineStyle({ [key]: value });
+        else if (key === 'fontFamily') for (const grid of this.ctx.terminals.values()) grid.setFontFamily(value);
+        else if (key === 'boldIsBright') for (const grid of this.ctx.terminals.values()) grid.setBoldIsBright(value);
     }
 
     /**
@@ -749,7 +763,7 @@ export default class TerminalWall {
      */
     _terminalHost() {
         return {
-            theme: () => ({ ...TERMINAL_THEME }),
+            theme: () => ({ ...TERMINAL_THEME, fontFamily: this.config.fontFamily, boldIsBright: this.config.boldIsBright }),
             place: (grid) => this._place(grid),
             landed: (id) => { this.focus(id, { frame: true }); return 'focused + framed'; },
             focus: (id) => ({ ok: this.focus(id) }),

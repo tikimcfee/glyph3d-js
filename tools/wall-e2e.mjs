@@ -18,8 +18,8 @@
  * started and that namespace's termd daemon.
  * On macOS the browser launches headed (headless is a software renderer there) — a window opens.
  *
- * Covers: spawn, typing, coloured text in the page's pixels (white, bold default or 38;2, is near
- * white; magenta is magenta; the default grey shows over the panel — each read where the grid's own
+ * Covers: spawn, typing, coloured text in the page's pixels (white, bright 97 or 38;2, is near
+ * white; bold text keeps its colour; magenta is magenta; the default grey shows over the panel — each read where the grid's own
  * metrics and pose put its cells), the specified colours themselves (CLAUDE.md "Colour": solid runs
  * of the default grey, a true colour, a 256-palette colour, pure white and a cell background, the
  * terminal's panel and the focused title bar's strip, each within ±2 a channel), Shift+Enter into a Kitty-keyboard program (CSI 13;2u: termd encodes the
@@ -148,8 +148,8 @@ try {
     ok(shiftOk, `Shift+Enter runs the line in a plain shell${shiftOk ? '' : ` (screen: ${await lastLines(A)})`}`);
 
     // ── coloured text reaches the pixels ────────────────────────────────────
-    // Pure white is the colour lane's top value (0xFFFFFF: bold default text, the default grey
-    // brightened; an explicit 38;2;255;255;255, as Claude Code's ● bullet). A shader that decodes
+    // Pure white is the colour lane's top value (0xFFFFFF: bright white, SGR 97; an explicit
+    // 38;2;255;255;255, as Claude Code's ● bullet). A shader that decodes
     // the lane with int(x + 0.5) rounds it to 0x1000000 — black ink on the dark panel. Magenta
     // (red 255, blue ≥ 128) rounds to blue the same way. Each word gets its own line; its cells'
     // screen rect comes from the grid's own metrics and pose, and the page's pixels there are read.
@@ -161,7 +161,8 @@ try {
     // background — and so must the terminal's own panel and its title bar's strip.
     {
         const words = [
-            { word: 'BOLDWHITE', sgr: '1', want: 'white' },
+            { word: 'BRIGHTWHITE', sgr: '97', want: 'white' },
+            { word: 'BOLDGREY', sgr: '1', want: 'ink' },   // bold is the bold face: the default grey, not white
             { word: 'RGBWHITE', sgr: '38;2;255;255;255', want: 'white' },
             { word: 'RGBMAGENTA', sgr: '38;2;255;0;255', want: 'magenta' },
             { word: 'PLAINGREY', sgr: null, want: 'ink' },

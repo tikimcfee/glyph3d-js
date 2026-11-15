@@ -30,9 +30,10 @@ export { LARGE_CORE_RANGES };
 
 /**
  * @typedef {Object} GlyphEngineOptions
- * @property {string}   [fontUrl]    - URL to the PRIMARY .ttf/.otf font.
- * @property {Array<{url?:string, buffer?:ArrayBuffer|Uint8Array, name?:string, italic?:{url?:string, buffer?:ArrayBuffer|Uint8Array}}>} [fonts]
- *   - Full font-fallback chain; a font's `italic` is its italic face (FontChain).
+ * @property {string}   [fontUrl]    - URL to the PRIMARY .ttf font (a chain of one).
+ * @property {import('./shaping/FontChain.js').FontSpec[]} [fonts]
+ *   - The font chain: families (each with its faces) and fallbacks (FontChain; the package's own
+ *     is fonts/families.js `fontChain()`).
  * @property {string}   [wasmUrl]    - URL to hb.wasm override.
  * @property {ArrayBuffer|Uint8Array} [wasmBinary] - Raw WASM bytes for offline/embedded usage.
  * @property {string}   [fontFamily] - CSS font stack for the Canvas2D atlas.

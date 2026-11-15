@@ -26,7 +26,8 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   `bun tools/wall-e2e.mjs` (own relay, termd namespace and terminals; `--reuse-relay`).
   The canvas is drafting paper (`WallPaper`; moves and resizes snap to it: `wallSnap`, chord+' /
   Ctrl held mid-drag inverts), and every knob is searchable in the settings panel (chord+,; one
-  schema, `wallSettings`; dialled knobs persist per relay).
+  schema, `wallSettings`; dialled knobs persist per relay) — the terminals' font family
+  (`fontFamily`, live) among them.
   Details: `docs/architecture/wall.md`.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.
@@ -151,7 +152,11 @@ Each line is an index entry; the detail lives in the named doc. Read the doc bef
 that subsystem.
 
 - **Rendering** (`docs/architecture/rendering.md`): text is one instanced draw per field
-  (`InstancedField`, `InstancedSlotBuffer`); cells — a background pass for fills, SGR styles
+  (`InstancedField`, `InstancedSlotBuffer`); fonts — one `FontChain` of font FAMILIES
+  (`fonts/families.js`: Cousine, Monaspace Neon and Argon as variable-font instances, then the
+  fallbacks), each with its regular / bold / italic / bold-italic FACES, and cell CLUSTERS (a base
+  + combining marks as one precomposed or composite glyph, `core/cellClusters.js`); cells — a
+  background pass for fills, SGR styles
   (`core/cellAttrs.js`), box/block/braille/powerline sprites generated to the cell
   (`shaping/cellSprites.js`), seamless at shared edges; `CodeGrid` (a source file as an `Object3D`);
   layout through the `LayoutDescription` seam (`core/LayoutGenerator.js`, `core/foldGeometry.js`);
@@ -167,8 +172,9 @@ that subsystem.
   wire `docs/termd/PROTOCOL.md`): terminals live in `g3d-termd` (holder + restartable brain,
   one daemon per namespace, outlives the relay); the relay's forked adapters turn termd's events
   into size-stamped frames; `TerminalGrid`s render them through the frame-pulled
-  `TerminalScreenQueue`; what a cell draws (attributes, fonts, `tools/term-test-pattern.sh`) is
-  its "Cells" section.
+  `TerminalScreenQueue`; what a cell draws (attributes, faces, clusters, the terminal's font
+  family — live: `setFontFamily` — `boldIsBright`, `tools/term-test-pattern.sh`,
+  `tools/font-faces-shots.mjs`) is its "Cells" section.
 - **Agents** (`docs/architecture/agents.md`): agent sessions and events over relay↔display
   JSON-RPC (`cli/agentevents.go`), agent books (`app/client/SessionBooks.js`), the agents desk,
   hidden agents, the gomuxai hub (`app/client/GomuxHub.js`, `cli/gomux.go`).

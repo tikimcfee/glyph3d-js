@@ -19,6 +19,7 @@ import {
     CURVE_INITIAL_ROWS,
     MAP_INITIAL_ROWS,
     TEXTURE_WIDTH,
+    COMPOSITE_PART_STRIDE,
     packUint16,
 } from './slug-constants.js';
 
@@ -336,21 +337,22 @@ function _validateDescriptor(d) {
  * @param {Uint32Array|number[]} items - triplets [slot, fontIdx, gid]
  * @param {(fontIdx:number) => {glyphOutline:Function, glyphAdvance:Function, fontExtents:Function, glyphName:Function}} shaperOf
  *   the shaper that owns `gid` in font `fontIdx`
+ * @param {Int32Array|number[]} [composites] - COMPOSITE glyphs (a shaped cluster: a base and its
+ *   marks drawn as one), each `[slot, n, (fontIdx, gid, x, y, unitsPerCell) × n]`: part k is glyph
+ *   `gid` of font `fontIdx` with its origin at (x, y) in that font's units, `unitsPerCell` of
+ *   which span the cell's width (FontChain.compositeOf). They follow the plain glyphs in the batch.
  * @returns {EncodedBatch}
  */
-export function encodeGlyphBatch(items, shaperOf) {
-    const n = (items.length / 3) | 0;
-    const slots = new Uint32Array(n);
-    const counts = new Uint32Array(n);
-    const glyphs = new Array(n);
+export function encodeGlyphBatch(items, shaperOf, composites) {
+    const plain = (items.length / 3) | 0;
+    /** @type {Array<{slot:number, curves:Array<Object>}>} */
+    const glyphs = [];
     let total = 0;
     const overhang = { count: 0, worstSlot: -1, worstFrac: 0, worstName: '' };
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < plain; i++) {
         const slot = items[i * 3], fontIdx = items[i * 3 + 1], gid = items[i * 3 + 2];
         const data = encodeGlyph(shaperOf(fontIdx), gid);
-        slots[i] = slot;
-        counts[i] = data.curves.length;
-        glyphs[i] = data.curves;
+        glyphs.push({ slot, curves: data.curves });
         total += data.curves.length;
         if (data.overhang) {
             overhang.count++;
@@ -361,10 +363,22 @@ export function encodeGlyphBatch(items, shaperOf) {
             }
         }
     }
+    for (let o = 0; composites && o < composites.length;) {
+        const slot = composites[o], n = composites[o + 1];
+        const curves = encodeComposite(composites, o + 2, n, shaperOf);
+        glyphs.push({ slot, curves });
+        total += curves.length;
+        o += 2 + n * COMPOSITE_PART_STRIDE;
+    }
+    const n = glyphs.length;
+    const slots = new Uint32Array(n);
+    const counts = new Uint32Array(n);
     const texels = new Uint32Array(total * CURVE_U32_PER_CURVE);
     let o = 0;
     for (let i = 0; i < n; i++) {
-        for (const c of glyphs[i]) {
+        slots[i] = glyphs[i].slot;
+        counts[i] = glyphs[i].curves.length;
+        for (const c of glyphs[i].curves) {
             // texel 0: [P0.x, P0.y, P1.x, P1.y]   texel 1: [P2.x, P2.y, _, _]
             texels[o + 0] = packUint16(c.p0x);
             texels[o + 1] = packUint16(c.p0y);
@@ -376,6 +390,39 @@ export function encodeGlyphBatch(items, shaperOf) {
         }
     }
     return { slots, counts, texels, overhang };
+}
+
+/**
+ * Encode a composite glyph — a cluster's base and marks as ONE cell's outline: each part's
+ * curves, moved to where shaping put the part and normalized to the cell as a lone glyph of its
+ * font is (X by the units that span the cell, Y by its own font's ascender and descender).
+ * @param {Int32Array|number[]} parts  the composites array
+ * @param {number} at  where this composite's parts start in it
+ * @param {number} n   its part count
+ * @param {(fontIdx:number) => {glyphOutline:Function, fontExtents:Function}} shaperOf
+ * @returns {Array<{p0x: number, p0y: number, p1x: number, p1y: number, p2x: number, p2y: number}>}
+ */
+export function encodeComposite(parts, at, n, shaperOf) {
+    const out = [];
+    for (let k = 0; k < n; k++) {
+        const o = at + k * COMPOSITE_PART_STRIDE;
+        const fontIdx = parts[o], gid = parts[o + 1], x = parts[o + 2], y = parts[o + 3], unitsPerCell = parts[o + 4];
+        const shaper = shaperOf(fontIdx);
+        const segments = shaper.glyphOutline(gid);
+        if (!segments || segments.length === 0) continue;
+        const ext = shaper.fontExtents(gid);
+        const yRange = ext.ascender - ext.descender;
+        if (!(unitsPerCell > 0) || !(yRange > 0)) throw new Error(`[slugData] composite part ${k} (font ${fontIdx}, glyph ${gid}): no cell to normalize to (unitsPerCell ${unitsPerCell}, em ${yRange})`);
+        const xs = 1 / unitsPerCell, ys = 1 / yRange, y0 = y - ext.descender;
+        for (const c of _parseSegments(gid, segments)) {
+            out.push({
+                p0x: (c.p0x + x) * xs, p0y: (c.p0y + y0) * ys,
+                p1x: (c.p1x + x) * xs, p1y: (c.p1y + y0) * ys,
+                p2x: (c.p2x + x) * xs, p2y: (c.p2y + y0) * ys,
+            });
+        }
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------

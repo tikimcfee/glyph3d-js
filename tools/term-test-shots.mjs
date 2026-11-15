@@ -6,7 +6,7 @@
  *
  * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own relay on --relay
  * (tools/lib/wall-relay.mjs: its own termd namespace, no gomuxai; refuses a port something already
- * listens on), spawns ONE 80 × 23 terminal that runs the pattern and then sleeps (no prompt under
+ * listens on), spawns ONE 80 × 24 terminal that runs the pattern and then sleeps (no prompt under
  * it), and saves, into DIR:
  *
  *   fit.png             the terminal framed as the wall frames it (wall.frame)
@@ -16,6 +16,7 @@
  *   close-box.png       61.7 px lines over the box drawing and the table
  *   close-styles.png    61.7 px lines over the styles
  *   close-emoji.png     61.7 px lines over the powerline row and the emoji on a fill
+ *   close-marks.png     61.7 px lines over the letters with combining marks, in every face
  *   far.png             6.3 px lines: under the greek tier's size
  *
  * An instrument: it judges nothing (tools/wall-cells-check.mjs reads the pixels).
@@ -33,7 +34,7 @@ const OUT = arg('--out', null);
 if (!OUT) { console.error('usage: bun tools/term-test-shots.mjs --url <wall vite> --relay <free port> --out <dir>'); process.exit(2); }
 mkdirSync(OUT, { recursive: true });
 const PATTERN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'term-test-pattern.sh');
-const COLS = 80, ROWS = 23;
+const COLS = 80, ROWS = 24;
 
 /** The shots: a name, the line height on screen (CSS px; null = the wall's own framing) and the cells to centre on. */
 const SHOTS = [
@@ -43,6 +44,7 @@ const SHOTS = [
     { name: 'close-box', linePx: 61.7, col: 23, row: 7.6 },
     { name: 'close-styles', linePx: 61.7, col: 23, row: 18 },
     { name: 'close-emoji', linePx: 61.7, col: 56, row: 15 },
+    { name: 'close-marks', linePx: 61.7, col: 23, row: 21 },
     { name: 'far', linePx: 6.3, col: COLS / 2, row: ROWS / 2 - 0.5 },
 ];
 

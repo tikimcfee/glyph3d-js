@@ -6,6 +6,8 @@ import {
 import { setTabParam, TAB_DEFAULTS } from '@glyph3d/core/components/Tab3D.js';
 import { setStrataParam, STRATA_DEFAULTS } from '@glyph3d/core/collections/StrataLayout.js';
 import { TERMINAL_CURSOR_DEFAULTS } from '@glyph3d/core/collections/TerminalGrid.js';
+import { BOLD_IS_BRIGHT_DEFAULT } from '@glyph3d/core/collections/TerminalEmulator.js';
+import { FONT_FAMILY_IDS, DEFAULT_FONT_FAMILY } from '@glyph3d/core/fonts/families.js';
 import { OPTION_AS_ALT } from '@glyph3d/core/services/interaction/keyEncoding.js';
 import { FAR_LOD_DEFAULTS } from '@glyph3d/core/collections/GlyphFarLod.js';
 import { JELLYFISH_DEFAULTS, LIBRARY_DEFAULTS, schemeNameOf } from '@glyph3d/core/collections/layouts/index.js';
@@ -301,7 +303,7 @@ export const GROUPS = [
   { name: 'Theme & appearance', subtitle: 'code & terminal backgrounds · set-back · cursor · focus / hover / input colors', columns: 2 },
   { name: 'Display & glyph LOD', subtitle: 'font size · greeking · far-LOD backdrops', columns: 2 },
   { name: 'Code grids',         subtitle: 'default fold for new grids · tab width · syntax re-color pause', columns: 2 },
-  { name: 'Terminals',          subtitle: 'keyboard · Option as Alt' },
+  { name: 'Terminals',          subtitle: 'font family · bold · keyboard · Option as Alt' },
   { name: 'Layout',             subtitle: 'the scheme in view', columns: 2,
     mode: 'tabs',
     subs: [
@@ -583,6 +585,22 @@ export const SETTINGS = [
     key: 'terminal.cursorOutline', label: 'Terminal cursor outline (px)', group: 'Theme & appearance',
     type: 'number', default: TERMINAL_CURSOR_DEFAULTS.borderWidth, min: 0.5, max: 6, step: 0.1,
     apply: (ctx, v) => cursorStyleAll(ctx, { borderWidth: v }),
+  },
+  // Terminal text — the font family every terminal draws in (the chain's families: fonts/
+  // families.js, each with its regular, bold, italic and bold-italic faces), live: each terminal
+  // takes the family's cell (its size changes; cols × rows stay) and rewrites its glyphs. Code,
+  // labels and books stay on the chain's default family, which is the terminals' default too.
+  {
+    key: 'terminal.fontFamily', group: 'Terminals', type: 'enum', options: [...FONT_FAMILY_IDS], default: DEFAULT_FONT_FAMILY,
+    label: 'Terminal font family — its regular, bold, italic and bold-italic faces; live (a terminal keeps its columns × rows, its size follows the family’s cell)',
+    apply: (ctx, v) => { for (const e of ctx?.registry?.findByType?.('terminal') ?? []) e.grid?.setFontFamily?.(v); },
+  },
+  // Bold is the bold face. Whether it ALSO changes the colour — a bold cell in one of the eight
+  // standard colours taking its bright twin — is this (off, as Ghostty's bold-is-bright is).
+  {
+    key: 'terminal.boldIsBright', group: 'Terminals', type: 'bool', default: BOLD_IS_BRIGHT_DEFAULT,
+    label: 'Bold is bright — bold text in a standard colour (SGR 30–37) draws in its bright twin (90–97); off: bold is only the bold face',
+    apply: (ctx, v) => { for (const e of ctx?.registry?.findByType?.('terminal') ?? []) e.grid?.setBoldIsBright?.(v); },
   },
   // Terminal keyboard — whether Alt that typed a character (macOS Option) is still Alt. Each key
   // event carries it (keyEncoding.keyEventFor) and termd applies it, so it is read per key: no
@@ -1118,9 +1136,11 @@ export function gridTheme() {
   };
 }
 
-/** Background + cursor options for a NEW TerminalGrid — so it spawns in the current scheme. */
+/** Background, cursor and text options for a NEW TerminalGrid — so it spawns in the current scheme. */
 export function terminalTheme() {
   return {
+    fontFamily: getSetting('terminal.fontFamily'),
+    boldIsBright: getSetting('terminal.boldIsBright'),
     backgroundColor: getSetting('terminal.backgroundColor'),
     backgroundOpacity: getSetting('terminal.backgroundOpacity'),
     cursorColor: getSetting('terminal.cursorColor'),

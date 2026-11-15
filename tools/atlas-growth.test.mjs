@@ -30,9 +30,9 @@
  */
 
 import * as THREE from 'three';
-import { ROOT, bootHeadlessFontChain, FONTS } from './headlessFontChain.mjs';
+import { ROOT, bootHeadlessFontChain } from './headlessFontChain.mjs';
 
-const { chain } = await bootHeadlessFontChain();
+const { chain, fonts: FONTS } = await bootHeadlessFontChain();
 const S = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
 const { default: SlugEncodeClient } = await import(`${ROOT}/packages/glyph3d-core/src/workers/SlugEncodeClient.js`);
 const { default: EmojiAtlas } = await import(`${ROOT}/packages/glyph3d-core/src/EmojiAtlas.js`);
@@ -201,7 +201,7 @@ console.log('\n[4] persistence');
     // End to end through bootGlyphEngine (no GPU, no emoji rasterizer in bun).
     const { bootGlyphEngine, disposeGlyphEngine } = await import(`${ROOT}/packages/glyph3d-core/src/glyphEngine.js`);
     await blobStore.clearNamespace('slug-core');
-    const fonts = FONTS.map((f) => ({ url: `file://${ROOT}/${f.file}`, name: f.name }));
+    const fonts = FONTS;
     const boot = quiet(() => bootGlyphEngine({ fonts, encodeRanges: [[0x20, 0x7e]], primeRanges: [[0x20, 0x7e]] }));
 
     const a1 = await boot();

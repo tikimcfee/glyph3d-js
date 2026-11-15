@@ -7,7 +7,7 @@
 // Ground truth is what the GPU would draw, read back implementation-blind: every slot through its
 // group-table row (offset, tint, alpha), its style byte (the group lane's high bits), its
 // highlight texel and its decoration texel, gathered into rows by where they land. A random walk
-// of screens (scrolls, edits, recolors, backgrounds, attributes — italic, dim, strike, overline,
+// of screens (scrolls, edits, recolors, backgrounds, attributes — bold, italic, dim, strike, overline,
 // every underline style, underline colours —, alt-screen, clears,
 // depth toggles, seeds, depth and size changes) is checked against a reference model of the
 // terminal's documented semantics after every step. Uploads are observed the way three takes
@@ -30,21 +30,37 @@ let pass = 0, fail = 0;
 const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.log(`  ✗ ${msg}`); } };
 const eq = (a, b, msg) => ok(a === b, `${msg} — got ${a}, want ${b}`);
 
-// An atlas with a shape cache (glyph id = codepoint + GID; its italic face's = that + ITALIC) and
-// a live atlas that records what it is asked to encode.
-const GID = 10000, ITALIC = 500000;
-const ensured = [], ensuredItalic = [];
+// An atlas with two font families — the default and 'wide', a bigger cell — each a shape cache
+// (glyph id = codepoint + GID + its face × FACE + its family × FAMILY), and a live atlas that
+// records the glyphs it is asked to encode.
+const GID = 10000, FACE = 500000, FAMILY = 4000000;
+const ensured = [];
+const familyOf = (index, charSize) => ({
+    id: index ? 'wide' : null, index, charSize,
+    lineMetrics: { underlineY: 0.1 + index * 0.05, strikeY: 0.4, thickness: 0.05 },
+    shapeCache: {
+        lookup: (cp) => ({ g: cp + GID + index * FAMILY, ax: 8 }),
+        lookupFace: (cp, face) => ({ g: cp + GID + face * FACE + index * FAMILY, ax: 8 }),
+    },
+});
+const FAMILIES = { default: familyOf(0, { width: 8, height: 16 }), wide: familyOf(1, { width: 10, height: 20 }) };
 const atlas = {
-    getCharSize: () => ({ width: 8, height: 16 }),
+    getCharSize: () => FAMILIES.default.charSize,
+    fontFamily: (id) => {
+        const f = FAMILIES[id ?? 'default'];
+        if (!f) throw new Error(`no font family '${id}'`);
+        return f;
+    },
     _shaper: null, _slugData: null,
-    _shapeCache: { lookup: (cp) => ({ g: cp + GID, ax: 8 }), lookupItalic: (cp) => ({ g: cp + GID + ITALIC, ax: 8 }) },
+    _shapeCache: FAMILIES.default.shapeCache,
     _live: {
-        ensureCodepoints(cps) { ensured.push(...cps); },
-        ensureGlyphsEncoded(gids) { ensuredItalic.push(...gids); },
+        ensureGlyphsEncoded(gids) { ensured.push(...gids); },
         registerField() {}, unregisterField() {},
     },
     _textureUploads: { flush() {} },   // SceneSystems flushes it at the renderer seam; nothing queued here
 };
+/** The face a cell's attributes ask for, written plainly: bold 1, italic 2, both 3. */
+const faceOf = (at) => ((at & CELL_BOLD) ? 1 : 0) | ((at & CELL_ITALIC) ? 2 : 0);
 
 // ── the renderer's side of an upload ─────────────────────────────────────────────────────────
 // What three does for a field it draws: a target whose version moved uploads its pending ranges
@@ -83,8 +99,8 @@ function upload(field) {
 
 // ── what the GPU would draw ──────────────────────────────────────────────────────────────────
 // Every slot whose group row is shown, placed by its group's offset, gathered into rows keyed by
-// where they land. Each cell: codepoint (glyph id − GID) and whether its glyph is the italic
-// face's, effective color bytes (slot color × group tint), its highlight word, its style byte and,
+// where they land. Each cell: codepoint (glyph id − GID), the face its glyph is drawn in and the
+// font family it comes from, effective color bytes (slot color × group tint), its highlight word, its style byte and,
 // where the style says the underline has its own colour, its decoration word.
 const key = (y, z) => `${Math.round(y * 1000)}|${Math.round(z * 1000)}`;
 function drawn(grid) {
@@ -98,12 +114,13 @@ function drawn(grid) {
         if (G[g + 11] <= 0.01) continue;
         const k = key(f32[o + 1] + G[g + 1], f32[o + 2] + G[g + 2]);
         let r = rows.get(k);
-        if (!r) rows.set(k, r = { cp: [], italic: [], rgb: [], bg: [], style: [], ul: [] });
+        if (!r) rows.set(k, r = { cp: [], face: [], family: [], rgb: [], bg: [], style: [], ul: [] });
         const col = Math.round((f32[o] + G[g]) / strideX);
         const c = Math.round(f32[o + 4]), t = G[g + 8];
         const gid = Math.round(f32[o + 3]) - GID;
-        r.italic[col] = gid >= ITALIC;
-        r.cp[col] = gid % ITALIC;
+        r.family[col] = Math.floor(gid / FAMILY);
+        r.face[col] = Math.floor((gid % FAMILY) / FACE);
+        r.cp[col] = gid % FACE;
         r.rgb[col] = [(c & 0xff) * t, ((c >> 8) & 0xff) * t, ((c >> 16) & 0xff) * t];
         r.bg[col] = words ? words[i] : 0;
         r.style[col] = style;
@@ -120,8 +137,8 @@ function drawn(grid) {
 // newest first, at most depthMax. History draws behind in pages (rows lines each), page p one
 // pitch further back and faded per page; hidden while off or in the alt screen; it keeps no
 // background, but keeps its attributes (a struck-through line is still struck through in history).
-// A cell's attributes draw as its style byte (cellStyle), its italic bit as the italic face's
-// glyph, and an underline's own colour as its decoration texel. Colors are bytes; a faded history
+// A cell's attributes draw as its style byte (cellStyle), its bold and italic bits as the glyph's
+// face (bold, italic, bold-italic), and an underline's own colour as its decoration texel. Colors are bytes; a faded history
 // cell is its bytes × the page's fade.
 class Ref {
     constructor(cols, rows, depthMax, metrics, zFactor, fadeMin) {
@@ -197,7 +214,8 @@ function compare(grid, ref, label) {
             if (g.bg[x] !== wantBg) { problems.push(`${k} col ${x}: bg ${g.bg[x]?.toString(16)} ≠ ${wantBg.toString(16)}`); break; }
             const at = w.at[x];
             if (g.style[x] !== cellStyle(at)) { problems.push(`${k} col ${x}: style ${g.style[x]} ≠ ${cellStyle(at)} (attrs ${at.toString(2)})`); break; }
-            if (g.italic[x] !== !!(at & CELL_ITALIC)) { problems.push(`${k} col ${x}: italic glyph ${g.italic[x]} for attrs ${at.toString(2)}`); break; }
+            if (g.face[x] !== faceOf(at)) { problems.push(`${k} col ${x}: face ${g.face[x]} for attrs ${at.toString(2)} (want ${faceOf(at)})`); break; }
+            if (g.family[x] !== (ref.family ?? 0)) { problems.push(`${k} col ${x}: a glyph of family ${g.family[x]}, the terminal draws in ${ref.family ?? 0}`); break; }
             if ((at & CELL_UNDERLINE_COLOR) && (at >> CELL_UNDERLINE_SHIFT & 7) && g.ul[x] !== w.ul[x]) { problems.push(`${k} col ${x}: underline colour ${g.ul[x]?.toString(16)} ≠ ${w.ul[x].toString(16)}`); break; }
         }
     }
@@ -217,11 +235,12 @@ function screenFrom(prev, cols, rows) {
     if (prev && prev.cols === cols && prev.rows === rows) { s.cp.set(prev.cp); s.fg.set(prev.fg); s.bg.set(prev.bg); s.at.set(prev.at); s.ul.set(prev.ul); s.alt = prev.alt; }
     return s;
 }
-/** Random attributes a renderer draws: any of italic, dim, strike, overline, an underline style, its colour. */
+/** Random attributes a renderer draws: any of bold, italic, dim, strike, overline, an underline style, its colour. */
 function attrs() {
     const ul = rnd() < 0.5 ? 1 + ri(5) : 0;
     return (rnd() < 0.3 ? CELL_ITALIC : 0) | (rnd() < 0.3 ? CELL_DIM : 0) | (rnd() < 0.3 ? CELL_STRIKE : 0) | (rnd() < 0.3 ? CELL_OVERLINE : 0)
-        | (rnd() < 0.2 ? CELL_BOLD : 0) | (rnd() < 0.2 ? CELL_INVERSE : 0)   // already in the colours: they must not reach the style byte
+        | (rnd() < 0.3 ? CELL_BOLD : 0)      // the glyph's face, with italic: never the style byte
+        | (rnd() < 0.2 ? CELL_INVERSE : 0)   // already in the colours: it must not reach the style byte
         | (ul << CELL_UNDERLINE_SHIFT) | (ul && rnd() < 0.5 ? CELL_UNDERLINE_COLOR : 0);
 }
 function randomLine(s, y, blankTail = true) {
@@ -404,17 +423,29 @@ console.log('only changed cells are written and uploaded');
     const upU = upload(f);
     ok(upU.decorBytes === 4 && upU.decorRanges[0][0] === (grid._liveRowBase[8] + 5) * 4 && upU.slotBytes === 0, `a changed underline colour uploads its one texel (${upU.decorBytes} B) and no slot`);
 
-    // Italic: the italic face's glyph, asked of the atlas once.
-    ensuredItalic.length = 0;
-    const ni = screenFrom(nu2, cols, rows);
-    ni.cp[9 * cols + 1] = 0x51; ni.at[9 * cols + 1] = CELL_ITALIC;
-    grid.applyScreen(ni);
-    eq(Math.round(f.slotBuffer.f32[(grid._liveRowBase[9] + 1) * SLOT_FLOATS + 3]), 0x51 + GID + ITALIC, 'an italic cell takes the italic face\'s glyph');
-    ok(ensuredItalic.length === 1 && ensuredItalic[0] === 0x51 + GID + ITALIC, 'which the atlas is asked for');
-    const ni2 = screenFrom(ni, cols, rows);
-    ni2.cp[9 * cols + 2] = 0x51; ni2.at[9 * cols + 2] = CELL_ITALIC;
-    grid.applyScreen(ni2);
-    eq(ensuredItalic.length, 1, 'once');
+    // Faces: bold, italic and bold-italic each take their face's glyph, asked of the atlas once.
+    const glyphAt = (row, col) => Math.round(f.slotBuffer.f32[(grid._liveRowBase[row] + col) * SLOT_FLOATS + 3]);
+    let nf = nu2;
+    for (const [face, at, what] of [[1, CELL_BOLD, 'bold'], [2, CELL_ITALIC, 'italic'], [3, CELL_BOLD | CELL_ITALIC, 'bold italic']]) {
+        ensured.length = 0;
+        const a = screenFrom(nf, cols, rows);
+        a.cp[9 * cols + face] = 0x51; a.at[9 * cols + face] = at;
+        grid.applyScreen(a);
+        eq(glyphAt(9, face), 0x51 + GID + face * FACE, `a ${what} cell takes the ${what} face's glyph`);
+        ok(ensured.length === 1 && ensured[0] === 0x51 + GID + face * FACE, `which the atlas is asked for (${ensured})`);
+        const b = screenFrom(a, cols, rows);
+        b.cp[8 * cols + face] = 0x51; b.at[8 * cols + face] = at;
+        grid.applyScreen(b);
+        eq(ensured.length, 1, 'once');
+        upload(f);
+        nf = b;
+    }
+    // The same letter plain is another glyph, asked for on its own.
+    ensured.length = 0;
+    const np = screenFrom(nf, cols, rows);
+    np.cp[9 * cols + 6] = 0x51;
+    grid.applyScreen(np);
+    ok(glyphAt(9, 6) === 0x51 + GID && ensured.length === 1 && ensured[0] === 0x51 + GID, 'the same letter with no attribute is the regular face\'s glyph, asked for on its own');
     upload(f);
     s = n3;
 
@@ -434,6 +465,82 @@ console.log('only changed cells are written and uploaded');
     ok(up4.slotBytes <= 2 * cols * 32 && up4.slotBytes > 0, `and uploads ${up4.slotBytes} B of slots (the full rewrite was ${(rows + D) * cols * 32})`);
     ok(up4.groupBytes > 0, 'the row poses go up instead (the group table)');
     grid.dispose();
+}
+
+// ── 2b. a font family switch: the cell changes, cols × rows stay, every glyph is the family's ──
+console.log('font family switch');
+{
+    const { computeCellMetrics } = await import('../packages/glyph3d-core/src/core/cellMetrics.js');
+    const { getGlyphLineMetrics } = await import('../packages/glyph3d-core/src/core/glyphMaterial.js');
+    const scene = new THREE.Scene();
+    new TerminalScreenQueue(scene);
+    const cols = 12, rows = 5, D = 6;
+    const grid = new TerminalGrid(scene, atlas, { id: 'family', cols, rows, depthMax: D });
+    const f = grid._renderer;
+    const ref = new Ref(cols, rows, D, grid._metrics, grid._depthZFactor, grid._depthFadeMin);
+    // Some history, then a screen with every face, a fill and an underline colour.
+    let s = createTerminalScreen(cols, rows);
+    for (let y = 0; y < rows - 1; y++) randomLine(s, y, false);
+    grid.applyScreen(s); ref.apply(s);
+    for (let k = 0; k < 4; k++) {
+        const n = screenFrom(s, cols, rows);
+        n.cp.copyWithin(0, cols); n.fg.copyWithin(0, cols); n.bg.copyWithin(0, cols); n.at.copyWithin(0, cols); n.ul.copyWithin(0, cols);
+        randomLine(n, rows - 2, false); n.cp.fill(32, (rows - 1) * cols); n.bg.fill(0, (rows - 1) * cols); n.at.fill(0, (rows - 1) * cols);
+        grid.applyScreen(n); ref.apply(n); s = n;
+    }
+    const n = screenFrom(s, cols, rows);
+    [0, CELL_BOLD, CELL_ITALIC, CELL_BOLD | CELL_ITALIC].forEach((at, x) => { n.cp[x] = 0x41 + x; n.at[x] = at; });
+    n.bg[5] = BG_SET | 0x102030; n.cp[6] = 0x55; n.at[6] = (3 << CELL_UNDERLINE_SHIFT) | CELL_UNDERLINE_COLOR; n.ul[6] = 0x2040ff;
+    grid.applyScreen(n); ref.apply(n); s = n;
+    upload(f);
+    ok(compare(grid, ref, 'before the switch') && ref.history.length > 0, 'a terminal with history, faces, a fill and an underline colour, in the default family');
+    eq(grid.fontFamily, null, 'it is born in the chain\'s default family');
+    const was = { w: grid._metrics.charWidth, h: grid._metrics.charHeight, box: grid.getLocalBounds().clone(), lineA: f.material.uniforms.uLineA.value };
+
+    let taps = 0;
+    grid.onResize((c, r) => { if (c === cols && r === rows) taps++; });
+    ensured.length = 0;
+    grid.setFontFamily('wide');
+    const want = computeCellMetrics(FAMILIES.wide.charSize, f.worldScale);
+    ok(grid.cols === cols && grid.rows === rows && grid._emulator.cols === cols && grid._emulator.rows === rows, 'cols × rows stay');
+    ok(grid._metrics.charWidth === want.charWidth && grid._metrics.charHeight === want.charHeight && want.charWidth > was.w && want.charHeight > was.h,
+        `the cell is the family's (${grid._metrics.charWidth} × ${grid._metrics.charHeight}, was ${was.w} × ${was.h})`);
+    eq(grid.fontFamily, 'wide', 'the grid names its family');
+    ref.metrics = grid._metrics; ref.family = 1;
+    ok(compare(grid, ref, 'after the switch'), 'every cell — live and history, each face, fills and underline colours — is drawn in the family, on its cell');
+    const lb = grid.getLocalBounds();
+    ok(lb.max.x - lb.min.x > was.box.max.x - was.box.min.x && lb.max.y - lb.min.y > was.box.max.y - was.box.min.y, 'the terminal\'s bounds follow the cell');
+    eq(taps, 1, 'the size-change tap fires once (the size moved; cols × rows did not)');
+    const asked = new Set(ensured);
+    ok(ensured.length > 0 && asked.size === ensured.length && ensured.every((g) => g >= FAMILY), `the atlas is asked for the family's glyphs, each once (${ensured.length})`);
+    ok([0, 1, 2, 3].every((face) => asked.has(0x41 + face + GID + face * FACE + FAMILY)), 'in each cell\'s face');
+    const up = upload(f);
+    eq(up.slotBytes, (rows + D) * cols * 32, 'every slot uploads (positions, sizes and glyphs all moved)');
+    const la = f.material.uniforms.uLineA.value, shared = getGlyphLineMetrics();
+    ok(la !== was.lineA && Math.abs(la.x - FAMILIES.wide.lineMetrics.underlineY) < 1e-6 && Math.abs(shared.underlineY - FAMILIES.wide.lineMetrics.underlineY) > 1e-3,
+        `its lines sit where the family's font puts them (underline at ${la.x.toFixed(3)}; the shared metrics keep ${shared.underlineY.toFixed(3)})`);
+
+    // New output after the switch is the family's too, and steady again.
+    ensured.length = 0;
+    const n2 = screenFrom(s, cols, rows);
+    n2.cp[cols + 1] = 0x41;
+    grid.applyScreen(n2); ref.apply(n2); s = n2;
+    ok(compare(grid, ref, 'output after the switch') && ensured.length === 0, 'new output draws in the family; a glyph already asked for is not asked for again');
+
+    let threw = '';
+    try { grid.setFontFamily('nope'); } catch (e) { threw = e.message; }
+    ok(/nope/.test(threw) && grid.fontFamily === 'wide' && compare(grid, ref, 'after a refused switch'), `an unknown family is refused, naming it, and nothing changes (${threw})`);
+
+    grid.setFontFamily(null);
+    ref.metrics = grid._metrics; ref.family = 0;
+    ok(grid._metrics.charWidth === was.w && compare(grid, ref, 'back in the default family') && f.material.uniforms.uLineA.value === was.lineA,
+        'back in the default family: its cell, its glyphs, the shared line metrics');
+    eq(taps, 2, 'and the tap fires again');
+    grid.dispose();
+
+    const born = new TerminalGrid(scene, atlas, { id: 'born-wide', cols: 4, rows: 2, depthMax: 0, fontFamily: 'wide' });
+    ok(born.fontFamily === 'wide' && born._metrics.charWidth === want.charWidth, 'a terminal can be born in a family (the host\'s theme)');
+    born.dispose();
 }
 
 // ── 3. range bookkeeping in InstancedField ───────────────────────────────────────────────────
@@ -482,7 +589,7 @@ console.log('zero allocation per steady-state update');
     const feed = async (bytes) => { grid.writeBytes(bytes); await parsed(); queue.flush(); upload(f); };
     // The workload: typing, colored output, scrolling. Warm it once (every glyph seen, the ring
     // wrapped, the range pool at the most this workload ever holds pending), then run it again.
-    const work = async () => { for (let i = 0; i < 300; i++) await feed(i % 3 ? 'x' : `line ${i % 10} \x1b[3${i % 8}mcolor\x1b[0m \x1b[3;4:3;58:2::255:${i % 200}:0;9;4${i % 8}mstyled\x1b[0m\r\n`); };
+    const work = async () => { for (let i = 0; i < 300; i++) await feed(i % 3 ? 'x' : `line ${i % 10} \x1b[3${i % 8}mcolor\x1b[0m \x1b[3;4:3;58:2::255:${i % 200}:0;9;4${i % 8}mstyled\x1b[0m \x1b[1mbold\x1b[3mboth\x1b[0m caf\u0065\u0301 x\u0301\r\n`); };
     await work();
     ensured.length = 0;
     const ids = () => [emu._screen, emu._screen.cp, emu._screen.fg, emu._screen.bg, emu._screen.at, emu._screen.ul,

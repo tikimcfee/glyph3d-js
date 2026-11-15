@@ -15,7 +15,8 @@ import WorkerRpc from './WorkerRpc.js';
 export default class SlugEncodeClient {
     /**
      * @param {Object} opts
-     * @param {Array<{name:string, bytes:ArrayBuffer}>} opts.fonts - the chain's fonts, in order
+     * @param {Array<{name:string, bytes:ArrayBuffer|null, variations?:Record<string, number>|null, lineGap?:boolean, instanceOf?:number}>} opts.fonts
+     *   - the chain's fonts, in order (FontChain.fontSources)
      * @param {string} [opts.wasmUrl] - hb.wasm override (else the worker resolves its own)
      * @param {ArrayBuffer|Uint8Array} [opts.wasmBinary] - hb.wasm bytes
      */
@@ -39,10 +40,14 @@ export default class SlugEncodeClient {
     /**
      * Encode glyphs off the main thread.
      * @param {Uint32Array} items - triplets [slot, fontIdx, gid]; transferred (unusable after)
+     * @param {Int32Array|null} [composites] - composite glyphs (slugData.encodeGlyphBatch); transferred
      * @returns {Promise<{ batch: import('../shaping/slugData.js').EncodedBatch, ms: number }>}
      */
-    async encode(items) {
-        const { batch, ms } = await this._rpc.request({ type: 'encode', items }, [items.buffer]);
+    async encode(items, composites = null) {
+        const { batch, ms } = await this._rpc.request(
+            composites ? { type: 'encode', items, composites } : { type: 'encode', items },
+            composites ? [items.buffer, composites.buffer] : [items.buffer],
+        );
         return { batch, ms };
     }
 

@@ -7,9 +7,9 @@
  *
  *   installDiskFetch   FontChain and emscripten's hb.wasm loader both fetch();
  *                      this maps file:// and /-prefixed URLs to readFileSync.
- *   FONTS              MUST match app/main.jsx FONT_CHAIN names, ORDER and italic faces —
- *                      routing takes the first covering cmap, so a different
- *                      list resolves different glyphs/advances.
+ *   fontChain()        the package's own chain (fonts/families.js: the families, their
+ *                      faces and the fallbacks) — the list the IDE and the wall boot,
+ *                      so routing resolves the same glyphs and advances here.
  *   stubEmojiAtlas     the runtime's EmojiAtlas allocates BITMAP slots for
  *                      emoji-presentable codepoints no outline font covers, from
  *                      the same dense counter as outline glyphs — and FontChain
@@ -24,15 +24,6 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-
-/** MUST match app/main.jsx FONT_CHAIN names/order. A drift here costs a stale
- *  slug-core key (runtime 404 → live encode) and a metrics-hash miss (full rebake)
- *  — loud and fail-safe, never wrong glyphs. */
-export const FONTS = [
-    { name: 'Cousine',          file: 'packages/glyph3d-core/src/fonts/Cousine-Regular.ttf', italic: 'packages/glyph3d-core/src/fonts/Cousine-Italic.ttf' },
-    { name: 'MesloLGS NF Mono', file: 'packages/glyph3d-core/src/fonts/MesloLGS-NF-Mono.ttf' },
-    { name: 'DejaVu Sans',      file: 'packages/glyph3d-core/src/fonts/DejaVuSans.ttf' },
-];
 
 /** Disk-backed fetch so FontChain (and emscripten's wasm load) read the filesystem. */
 export function installDiskFetch() {
@@ -72,7 +63,8 @@ export function stubEmojiAtlas() {
 export async function bootHeadlessFontChain() {
     installDiskFetch();
     const { FontChain } = await import(`${ROOT}/packages/glyph3d-core/src/shaping/index.js`);
-    const fonts = FONTS.map((f) => ({ url: `file://${ROOT}/${f.file}`, name: f.name, ...(f.italic ? { italic: { url: `file://${ROOT}/${f.italic}` } } : {}) }));
+    const { fontChain } = await import(`${ROOT}/packages/glyph3d-core/src/fonts/families.js`);
+    const fonts = fontChain();   // file:// urls here (import.meta.url), read by the disk fetch
     const chain = new FontChain();
     await chain.init(fonts);
     chain.setEmojiAtlas(stubEmojiAtlas());

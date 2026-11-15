@@ -869,22 +869,35 @@ PRIVATE relay (`--relay`), never the one a person's display is on.
   shows): █ cells joined across and down (the darkest pixel inside a 2 × 8 block is the ink), a
   ─ run continuous along its own pixel row, an underline and a strikethrough unbroken under
   blank cells, a curly underline in its SGR 58 colour, inverse swapping fill and ink, dim darker
-  than plain and still drawn, a wide emoji on a cell background keeping its right half; then a
-  resize makes termd repaint the screen and every attribute must read the same; last, the
-  settings panel (chord + ,) lists the four text knobs under Text, and dim opacity set there shows
+  than plain and still drawn, a wide emoji on a cell background keeping its right half, bold as
+  the bold FACE (a run of bold l inks at least 1.2 × a plain run, each counted against its own
+  brightest pixel, in the text's colour), a letter + combining mark showing the letter (the ink
+  over its own pixel rows) and the mark above it, and e + U+0301 drawing as é; then a
+  resize makes termd repaint the screen and every attribute must read the same, the marks still
+  in their letters' cells; then `wall.config fontFamily` moves the terminal to another family live
+  (cols × rows unchanged, the cell and size changed, █ and ─ still joined, the face and cluster
+  cases again) and back; last, the
+  settings panel (chord + ,) lists the four line knobs under Text, and dim opacity set there shows
   in the pixels. Its own relay (termd namespace
   `glyph-cells-check`) and one terminal that prints the cases and sleeps. Blind to the shapes
   beyond those cases and to HiDPI. `--shots DIR` saves the page at each size.
   ```
   bun tools/wall-cells-check.mjs --url http://localhost:5180/ --relay 8099 [--shots DIR]
   ```
-- **`term-test-pattern.sh`** — for the EYE, not a check: one screenful (80 columns, 22 lines,
+- **`term-test-pattern.sh`** — for the EYE, not a check: one screenful (80 columns, 23 lines,
   POSIX sh) of block art, blocks and shades, box drawing, a divider, braille, sextants and
   wedges, powerline separators, every SGR style alone and combined, inverse and dim, a wide
-  emoji on a fill, plain text. Run it in any terminal on the wall (`--keep` prints below what is
+  emoji on a fill, letters with combining marks in every face, plain text. Run it in any terminal on the wall (`--keep` prints below what is
   there). **`term-test-shots.mjs`** runs it in one terminal on its own relay and saves the wall's
   page at the wall's own framing, at 16.3 px lines, in 61.7 px close-ups and at 6.3 px (under
   the greek tier): `bun tools/term-test-shots.mjs --url <wall vite> --relay <free port> --out DIR`.
+- **`font-faces-shots.mjs`** — for the EYE: the wall's terminals in each font family. Two
+  terminals on its own relay — the pattern above and `font-sample.sh` (the four faces, code,
+  prose, look-alikes, accents precomposed and as letter + combining marks; 80 columns, 23 lines)
+  — moved from family to family with `wall.config fontFamily`, each saved at the wall's framing,
+  at 16.3 px lines and in 61.7 px close-ups, plus `sheet-reading.png` and
+  `sheet-faces-close.png` with every family side by side:
+  `bun tools/font-faces-shots.mjs --url <wall vite> --relay <free port> --out DIR [--families a,b]`.
 - **`wall-gpu-attribution.mjs`** — where the wall's GPU frame goes: one layer toggled at a
   time (glyph fields, panels, scrollback depth) at OVERVIEW and FRAMED, timing the main pass
   with `EXT_disjoint_timer_query_webgl2` and counting its draws. `--fill 'cmd'` is what each

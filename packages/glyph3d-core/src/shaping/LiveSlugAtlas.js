@@ -27,9 +27,12 @@
  *      rasterized) with { slots, codepoints, version } — for callers that cache anything per
  *      glyph or render on demand. Nothing needs it to draw correctly.
  *   6. A SPRITE slot (a codepoint the terminal draws itself: FontChain.isSpriteSlot) is never in
- *      flight: its outline is generated to the cell right here (cellSprites — a few rectangles)
- *      and lands in the same textures before ensure*() returns. It is not persisted as growth
- *      (it is regenerated; the core cache holds the core's).
+ *      flight: its outline is generated to its family's cell right here (cellSprites — a few
+ *      rectangles) and lands in the same textures before ensure*() returns. It is not persisted
+ *      as growth (it is regenerated; the core cache holds the core's).
+ *   7. A COMPOSITE slot (a shaped cluster — a base and its combining marks: FontChain.compositeOf)
+ *      is encoded by the worker from its parts like any outline, and is not persisted either (a
+ *      slot is its cluster's shaping, redone when the cluster is next seen).
  *
  * A texture is REBORN only when its array doubles (it fills its capacity): then every
  * registered field gets setSlugData() with the new pair — rare and amortized, never per glyph —
@@ -42,9 +45,10 @@
  */
 
 import SlugTextures from './SlugTextures.js';
-import { CURVE_U32_PER_CURVE } from './slug-constants.js';
+import { CURVE_U32_PER_CURVE, COMPOSITE_PART_STRIDE } from './slug-constants.js';
 import { encodeSprites } from './cellSprites.js';
 import { loadStats } from '../core/loadStats.js';
+import { cellText } from '../core/cellClusters.js';
 
 /** The glyph-map mode a cell sprite draws in (core/glyphMaterial.js GLYPH_MODE.SPRITE; shaping imports no three). */
 const SPRITE_MODE = 3;
@@ -68,8 +72,9 @@ export default class LiveSlugAtlas {
      * @param {Object}   opts
      * @param {Object}   opts.atlas        - GlyphAtlas the fields read `_slugData` off of.
      * @param {Object}   opts.shaper       - FontChain: slot routing (slotSource / slotFor /
-     *           isBitmapSlot / emojiCellOf / bitmapSlotOf / describeSlot).
-     * @param {{encode:(items:Uint32Array)=>Promise<{batch:Object, ms:number}>, dispose?:()=>void}} opts.encoder
+     *           isBitmapSlot / emojiCellOf / bitmapSlotOf / isSpriteSlot / spriteFamilyOf /
+     *           compositeOf / describeSlot).
+     * @param {{encode:(items:Uint32Array, composites?:Int32Array|null)=>Promise<{batch:Object, ms:number}>, dispose?:()=>void}} opts.encoder
      *           - the off-thread encoder (SlugEncodeClient)
      * @param {import('../core/TextureUploads.js').default} opts.uploads - the texture-upload queue
      *           the renderer seam flushes (shared with the emoji atlas)
@@ -344,8 +349,18 @@ export default class LiveSlugAtlas {
      */
     _landSprites(slots) {
         if (!slots.length) return 0;
-        const items = slots.map((slot) => ({ slot, cp: this._shaper.spriteCodepointOf(slot) }));
-        const { added } = this._textures.buffer.appendEncoded(encodeSprites(items, this._shaper.spriteMetrics(), SPRITE_MODE));
+        // A sprite is drawn to its family's cell (its aspect, its line weights): one batch per family.
+        const byFamily = new Map();
+        for (const slot of slots) {
+            const fam = this._shaper.spriteFamilyOf(slot);
+            let items = byFamily.get(fam);
+            if (!items) byFamily.set(fam, items = []);
+            items.push({ slot, cp: this._shaper.spriteCodepointOf(slot) });
+        }
+        let added = 0;
+        for (const [fam, items] of byFamily) {
+            added += this._textures.buffer.appendEncoded(encodeSprites(items, this._shaper.spriteMetrics(fam), SPRITE_MODE)).added;
+        }
         return added;
     }
 
@@ -357,20 +372,28 @@ export default class LiveSlugAtlas {
         this._queueProv = new Map();
         if (!ids.length) return;
         const items = new Uint32Array(ids.length * 3);
-        let n = 0;
+        /** @type {number[]|null} composite glyphs: [slot, n, …parts] each */
+        let composites = null;
+        let n = 0, sent = 0;
         for (const id of ids) {
             const src = this._shaper.slotSource(id);
-            if (!src) {
-                console.error(`[LiveSlugAtlas] slot ${id} has no font glyph (not outline, not bitmap) — it stays blank`);
-                this._inFlight.delete(id);
+            if (src) {
+                items[n++] = id; items[n++] = src.fontIdx; items[n++] = src.gid;
+                sent++;
                 continue;
             }
-            items[n++] = id; items[n++] = src.fontIdx; items[n++] = src.gid;
+            const parts = this._shaper.compositeOf?.(id);
+            if (parts) {
+                (composites ?? (composites = [])).push(id, parts.length / COMPOSITE_PART_STRIDE, ...parts);
+                sent++;
+                continue;
+            }
+            console.error(`[LiveSlugAtlas] slot ${id} has no font glyph (not outline, not composite, not bitmap) — it stays blank`);
+            this._inFlight.delete(id);
         }
-        if (!n) return this._settle();
-        const sent = n / 3;
+        if (!sent) return this._settle();
         this._batches++;
-        this._encoder.encode(items.subarray(0, n).slice())
+        this._encoder.encode(items.subarray(0, n).slice(), composites ? Int32Array.from(composites) : null)
             .then(({ batch, ms }) => this._land(batch, ms, prov))
             .catch((err) => {
                 console.error(`[LiveSlugAtlas] growth of ${sent} glyph(s) failed (${err.message}) — ` +
@@ -385,7 +408,8 @@ export default class LiveSlugAtlas {
         const t0 = performance.now();
         const { added, addedIds } = this._textures.buffer.appendEncoded(batch);
         for (const slot of batch.slots) this._inFlight.delete(slot);
-        for (const id of addedIds) this._grown.add(id);
+        // What persists is keyed by font glyph: a composite (a cluster's shaping) is not.
+        for (const id of addedIds) if (this._shaper.slotSource(id)) this._grown.add(id);
         const { bytes, reborn, rebound } = this._sync();
         this._version++;
         this._logOverhang(batch);
@@ -483,8 +507,9 @@ export default class LiveSlugAtlas {
     _describe(id, prov) {
         const d = this._shaper.describeSlot?.(id);
         const cp = prov?.get(id);
+        // A cell's content: a codepoint, or a cluster (core/cellClusters.js) — named by its codepoints.
         const src = cp != null
-            ? `U+${cp.toString(16).toUpperCase().padStart(4, '0')} ${JSON.stringify(String.fromCodePoint(cp))}`
+            ? `${Array.from(cellText(cp), (ch) => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join('+')} ${JSON.stringify(cellText(cp))}`
             : `slot ${id}`;
         return d ? `${src}→${d.font}:${d.gid} "${d.name}"` : `${src}→${id}`;
     }

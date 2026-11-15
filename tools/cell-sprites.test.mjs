@@ -3,7 +3,7 @@
 // a font's outline is; shapes reach the cell edges they must join across and stay clear of the
 // ones they must not; and they land in the Slug atlas as one more glyph source — routed by the
 // font chain before any font, encoded synchronously, in glyph-map mode 3 with their ink alpha.
-// Also here: the italic face's routing, the font's line metrics, and the cell lattice that makes
+// Also here: the font's line metrics, the cache keys, and the cell lattice that makes
 // neighbouring cells share their edge to the bit.
 //
 //   bun tools/cell-sprites.test.mjs
@@ -242,32 +242,22 @@ console.log('the atlas');
     live.dispose();
 }
 
-// ── 6. the italic face, the font's lines, the cache keys ────────────────────────────────────
-console.log('italic face, line metrics, keys');
+// ── 6. the font's lines, the cache keys (faces and families: font-faces.test.mjs) ───────────
+console.log('line metrics, keys');
 {
-    const up = chain.lookup(0x61), it = chain.lookupItalic(0x61);
-    ok(it.g !== up.g && chain.describeSlot(it.g).font === 'Cousine Italic' && chain.describeSlot(up.g).font === 'Cousine', 'an italic a is the italic face\'s glyph; a plain one still the upright font\'s');
-    eq(it.ax, up.ax, 'at the same advance');
-    eq(chain.routeCodepoint(0x61), 0, 'the italic face takes no part in routing');
-    eq(chain.fontCount, fonts.length + 1, 'it is one more font of the chain, after the upright ones (their indices unmoved)');
-    eq(chain.slotSource(it.g).fontIdx, fonts.length, 'at the last index');
-    eq(chain.lookupItalic(0xE0A0).g, chain.lookup(0xE0A0).g, 'a glyph from a font with no italic face stays upright (no slant is synthesized)');
-    eq(chain.lookupItalic(0x2500).g, chain.lookup(0x2500).g, 'a sprite has no italic');
-    ok(chain.fontSources().length === chain.fontCount && chain.fontSources().at(-1).name === 'Cousine Italic', 'the encode worker is handed the italic face too');
-
     const L = chain.lineMetrics(), raw = readFontLines(chain._fonts[0].bytes), ext = chain._fonts[0].shaper.fontExtents();
     const em = ext.ascender - ext.descender;
     ok(raw.underlineThickness > 0 && raw.underlineTop < 0 && raw.strikeoutTop > 0, `the font's post and OS/2 tables are read (underline ${raw.underlineTop}/${raw.underlineThickness}, strikeout ${raw.strikeoutTop}/${raw.strikeoutSize})`);
     ok(Math.abs(L.thickness - raw.underlineThickness / em) < 1e-12, 'line thickness is the font\'s underline thickness over the cell\'s height');
     ok(L.underlineY > 0 && L.underlineY < -ext.descender / em, 'the underline sits below the baseline, inside the cell');
     ok(L.strikeY > -ext.descender / em && L.strikeY < 0.6, 'the strikethrough sits above the baseline, through the x-height');
-    ok(Math.abs(M.aspect - chain._primaryAx() / em) < 1e-12 && M.light > 0 && M.heavy >= 2 * M.light - 1e-12, `sprites are drawn to the font's cell and weights (aspect ${M.aspect.toFixed(4)}, light ${M.light}, heavy ${M.heavy})`);
+    ok(Math.abs(M.aspect - chain.cellAdvance() / em) < 1e-12 && M.light > 0 && M.heavy >= 2 * M.light - 1e-12, `sprites are drawn to the font's cell and weights (aspect ${M.aspect.toFixed(4)}, light ${M.light}, heavy ${M.heavy})`);
     let threw = false;
     try { readFontLines(new Uint8Array(64)); } catch { threw = true; }
     ok(threw, 'bytes that are not a font are refused loudly');
 
     const plain = fonts.map((f) => ({ name: f.name, url: f.url }));
-    ok(slugCoreKey({ fonts, encodeRanges: [[32, 126]] }) !== slugCoreKey({ fonts: plain, encodeRanges: [[32, 126]] }), 'the core cache key knows the italic face');
+    ok(slugCoreKey({ fonts, encodeRanges: [[32, 126]] }) !== slugCoreKey({ fonts: plain, encodeRanges: [[32, 126]] }), 'the core cache key knows the fonts\' faces and families');
     ok(slugGrowthKey({ fonts }) !== slugGrowthKey({ fonts: plain }), 'and so does the growth key');
     ok(SPRITE_VERSION >= 1, 'the sprite version is part of the core key');
 }

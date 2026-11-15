@@ -17,8 +17,9 @@
  *     markDecorDirty);
  *   - nothing is allocated in steady state.
  *
- * What a cell draws (docs/architecture/terminals.md "Cells"): its glyph — the italic face's under
- * SGR 3, a cell sprite for what a terminal draws itself — in the colour lane; its attributes'
+ * What a cell draws (docs/architecture/terminals.md "Cells"): its glyph — in the bold, italic or
+ * bold-italic face under SGR 1 / 3, a cell sprite for what a terminal draws itself, a base and
+ * its combining marks as one glyph — in the terminal's font family and in the colour lane; its attributes'
  * style byte (dim, strike, overline, the underline style) in the spare bits of its group lane; an
  * underline's own colour in the field's decoration texel; its background as the highlight texel's
  * fill, which the field's fill pass draws under every cell's ink.
@@ -30,7 +31,7 @@
 
 import * as THREE from 'three';
 import InstancedField from './InstancedField.js';
-import TerminalEmulator, { DEFAULT_FG } from './TerminalEmulator.js';
+import TerminalEmulator, { DEFAULT_FG, BOLD_IS_BRIGHT_DEFAULT } from './TerminalEmulator.js';
 import TerminalScreenQueue from './TerminalScreenQueue.js';
 import {
     detectVerticalScroll,
@@ -39,7 +40,7 @@ import {
     computeTerminalGlyphExtent,
 } from './terminalDepthHistory.js';
 import { SLOT_FLOATS, LANE_GLYPH_ID, LANE_COLOR, LANE_GROUP_ID, packGroupStyle } from '../core/InstancedSlotBuffer.js';
-import { CELL_ITALIC, CELL_UNDERLINE_COLOR, cellStyle } from '../core/cellAttrs.js';
+import { CELL_UNDERLINE_COLOR, FACE_COUNT, cellFace, cellStyle } from '../core/cellAttrs.js';
 import {
     computeCellGridLayout,
     GridChrome,
@@ -48,7 +49,6 @@ import {
 } from './grid/index.js';
 import { RENDER_ORDER } from '../core/renderOrder.js';
 import { LAYER_BAND, getBandDistance } from '../core/layerBands.js';
-import MonospaceShapeCache from '../shaping/MonospaceShapeCache.js';
 import FramedGlyphField from './FramedGlyphField.js';
 import { createPanelMaterial } from './panelMaterial.js';
 import { enrollPanel } from './PanelBatch.js';
@@ -86,6 +86,10 @@ export default class TerminalGrid extends FramedGlyphField {
      * @param {number} [options.cols=80]        Terminal width in columns
      * @param {number} [options.rows=24]        Terminal height in rows
      * @param {number} [options.worldScale=0.025] World units per atlas pixel
+     * @param {string|null} [options.fontFamily]  The font family the terminal draws in (an id of
+     *   the atlas's font chain; default: the chain's default family). Live: setFontFamily.
+     * @param {boolean} [options.boldIsBright]  Bold text in a standard colour draws in its bright
+     *   twin (default BOLD_IS_BRIGHT_DEFAULT: off — bold is the bold face). Live: setBoldIsBright.
      * @param {{x:number,y:number,z:number}} [options.position]  Initial world position
      * @param {string} [options.title='TerminalGrid']  Debug name
      * @param {number|string} [options.cursorColor]  Cursor block color (default TERMINAL_CURSOR_DEFAULTS.color)
@@ -105,20 +109,21 @@ export default class TerminalGrid extends FramedGlyphField {
         // (Object.defineProperty, writable:false), so assigning it throws in strict mode.
         this.terminalId = options.id ?? null;
 
-        // The GPU attribute is `instanceGlyphId` (a font glyph index used to index
-        // the Slug glyphMapTexture), NOT a Unicode codepoint. The normal render
-        // path shapes text through HarfBuzz to get glyph IDs; we bypass shaping, so
-        // we map each codepoint → glyphId through the atlas's primed shape cache
-        // (its IDs are exactly the ones the glyphMapTexture is keyed by). Reuse the
-        // shared cache when present; otherwise build one from the shaper.
-        this._shapeCache = atlas?._shapeCache
-            || (atlas?._shaper ? new MonospaceShapeCache(atlas._shaper) : null);
+        // The font family the terminal draws in: its shape cache, its cell, its line metrics
+        // (GlyphAtlas.fontFamily). The GPU attribute is `instanceGlyphId` (a slot of the font
+        // chain, which indexes the Slug glyphMapTexture), NOT a Unicode codepoint: each cell's
+        // content — a codepoint, or a cluster id — maps to its slot through the family's shape
+        // cache, in the cell's face.
+        /** @type {import('../GlyphAtlas.js').AtlasFontFamily} */
+        this._fontFamily = atlas.fontFamily(options.fontFamily);
+        this._shapeCache = this._fontFamily.shapeCache;
 
-        // Codepoints we've already handed to the live Slug atlas for curve encoding.
-        // Steady-state, every cell's codepoint is already in here, so per-frame work
-        // is just a Set membership check — no calls into the encoder until a genuinely
-        // new glyph (box-drawing, spinner star, …) shows up.
-        this._liveEnsured = new Set();
+        // Per face (core/cellAttrs.js FACE_*), the cell contents already handed to the live Slug
+        // atlas for curve encoding. Steady-state, every cell's content is already in its face's
+        // set, so per-frame work is just a Set membership check — no calls into the encoder until
+        // a genuinely new glyph (box-drawing, spinner star, a first bold letter, …) shows up.
+        /** @type {Set<number>[]} */
+        this._ensured = Array.from({ length: FACE_COUNT }, () => new Set());
 
         this.cols = options.cols ?? 80;
         this.rows = options.rows ?? 24;
@@ -171,12 +176,8 @@ export default class TerminalGrid extends FramedGlyphField {
         // Per live row, this update's changed spans (first/last column; last < first = none):
         // glyph, color or style; background; underline colour. Scratch, reused every update.
         this._spanLo = this._spanHi = this._bgLo = this._bgHi = this._ulLo = this._ulHi = null;
-        /** @type {number[]} codepoints first seen this update (empty in steady state) */
-        this._fresh = [];
-        /** @type {number[]} codepoints first seen ITALIC this update */
-        this._freshItalic = [];
-        /** codepoints whose italic glyph the live atlas has been asked for */
-        this._italicEnsured = new Set();
+        /** @type {number[][]} per face: cell contents first seen in it this update (empty in steady state) */
+        this._fresh = Array.from({ length: FACE_COUNT }, () => []);
         this._screenQueued = false;   // waiting in the scene's TerminalScreenQueue
 
         /**
@@ -210,6 +211,7 @@ export default class TerminalGrid extends FramedGlyphField {
             worldScale,
             defaultColor: { r: 0.0, g: 1.0, b: 0.0 },
         });
+        this._applyFamilyToField();
 
         // Derive world-unit metrics from the renderer so glyph sizes match the atlas.
         this._metrics = this._renderer.metrics;
@@ -281,6 +283,7 @@ export default class TerminalGrid extends FramedGlyphField {
         // emulator is one source feeding it (file-slice / graphics are others, later).
         this._emulator = new TerminalEmulator(this.cols, this.rows, () => this._screenChanged());
         this._emulator.setDefaultBackground(this._packedBackground());
+        this._emulator.setBoldIsBright(options.boldIsBright ?? BOLD_IS_BRIGHT_DEFAULT);
 
         /**
          * The window title the terminal's program last set (OSC 0/2: the shell's prompt path or the
@@ -329,8 +332,7 @@ export default class TerminalGrid extends FramedGlyphField {
         }
 
         this._diffLive(screen);
-        if (this._fresh.length) this._ensureAtlasCodepoints(this._fresh);
-        if (this._freshItalic.length) this._ensureAtlasItalics(this._freshItalic);
+        this._ensureFresh();
         this._writeSpans();
         this._showFills();
         if (repose) this._poseRows();
@@ -407,8 +409,8 @@ export default class TerminalGrid extends FramedGlyphField {
 
     /**
      * Compare the screen with the live rows' canonical cells, copy what differs, and record each
-     * row's changed span (glyph/color/style, background, underline colour). New codepoints go to
-     * _fresh (and those first seen italic to _freshItalic) for the atlas.
+     * row's changed span (glyph/color/style, background, underline colour). Contents first seen
+     * in a face go to that face's _fresh list, for the atlas.
      * @private
      */
     _diffLive(screen) {
@@ -416,11 +418,8 @@ export default class TerminalGrid extends FramedGlyphField {
         const CP = this._cp, FG = this._fg, BG = this._bg, AT = this._at, UL = this._ul;
         const sCP = screen.cp, sFG = screen.fg, sBG = screen.bg, sAT = screen.at, sUL = screen.ul;
         const lo = this._spanLo, hi = this._spanHi, blo = this._bgLo, bhi = this._bgHi, ulo = this._ulLo, uhi = this._ulHi;
-        const seen = this._liveEnsured, seenItalic = this._italicEnsured;
-        const fresh = this._fresh, freshItalic = this._freshItalic;
-        fresh.length = 0;
-        freshItalic.length = 0;
-        const ensure = !!(this.atlas && this.atlas._live && this._shapeCache);
+        const ensured = this._ensured, fresh = this._fresh;
+        const ensure = !!this.atlas._live;
         for (let y = 0; y < rows; y++) {
             const base = this._liveRowBase[y];
             let l = cols, h = -1, bl = cols, bh = -1, ul = cols, uh = -1, anyBg = 0;
@@ -431,8 +430,8 @@ export default class TerminalGrid extends FramedGlyphField {
                     if (l === cols) l = x;
                     h = x;
                     if (ensure && c > 32) {
-                        if (a & CELL_ITALIC) { if (!seenItalic.has(c)) { seenItalic.add(c); freshItalic.push(c); } }
-                        else if (!seen.has(c)) { seen.add(c); fresh.push(c); }
+                        const face = cellFace(a), seen = ensured[face];
+                        if (!seen.has(c)) { seen.add(c); fresh[face].push(c); }
                     }
                 } else if (f !== FG[i]) {
                     FG[i] = f;
@@ -676,9 +675,8 @@ export default class TerminalGrid extends FramedGlyphField {
         if (D === 0) return;
         const cols = this.cols, P = this.rows + D;
         const n = Math.min(lines.length, D);
-        const live = this.atlas && this.atlas._live;
-        const seen = this._liveEnsured;
-        let fresh = null;
+        const live = this.atlas._live;
+        const seen = this._ensured[0], fresh = this._fresh[0];
 
         for (let h = 0; h < D; h++) {
             const base = ((this._ringStart + D - 1 - h) % P) * cols;
@@ -691,14 +689,14 @@ export default class TerminalGrid extends FramedGlyphField {
                 if (x >= cols) break;
                 const code = ch.codePointAt(0);
                 this._cp[base + x] = code;
-                if (live && this._shapeCache && code > 32 && !seen.has(code)) {
+                if (live && code > 32 && !seen.has(code)) {
                     seen.add(code);
-                    (fresh ?? (fresh = [])).push(code);
+                    fresh.push(code);
                 }
                 x++;
             }
         }
-        if (fresh) this._ensureAtlasCodepoints(fresh);
+        this._ensureFresh();
         this._writeSeqRows(0, D);
     }
 
@@ -1190,21 +1188,6 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Window chrome spec: a row of bottom-edge controls, laid out right→left from the SE
-     * corner. Each becomes a labeled Button3D that is BOTH a visible affordance and a
-     * 'handle'-channel pick target whose token carries `role` + the button. `grab:true` marks
-     * the two DRAG grips (the ResizeDragger turns them into a live resize/scale drag); the rest
-     * are CLICK buttons. A `popupOf` entry is a confirm popup for another control: it starts
-     * HIDDEN (so it's inert — an invisible mesh isn't pick-rendered) and is placed ABOVE its
-     * anchor; the shell toggles it visible on demand (setControlVisible). 'close' mirrors the
-     * terminal-tab × (terminal.kill) and arms the red 'close-confirm' "Sure?" popup.
-     * @private
-     */
-    get _controls() {
-        return this._chrome ? this._chrome.controls : [];
-    }
-
-    /**
      * Build the chrome control row from CONTROL_SPEC.
      * @private
      */
@@ -1317,62 +1300,118 @@ export default class TerminalGrid extends FramedGlyphField {
     }
 
     /**
-     * Map a Unicode codepoint to a font glyph ID for the instanceGlyphId attribute.
-     * Uses the primed shape cache (O(1), HarfBuzz fallback on miss). Without a
-     * shaper (e.g. degraded boot), falls back to the codepoint so output is at
-     * least stable rather than crashing.
-     * An italic cell (SGR 3) takes its font's italic face's glyph, where the chain has one.
+     * A cell's glyph for the instanceGlyphId attribute: its content (a codepoint, or a cluster
+     * id) through the family's shape cache (O(1); the font chain on a miss), in the face its
+     * attributes ask for — bold (SGR 1), italic (SGR 3) or both; a font with no such face draws
+     * its upright.
      * @private
-     * @param {number} codepoint
+     * @param {number} codepoint  the cell's content
      * @param {number} [attrs=0]  the cell's attrs word (core/cellAttrs.js)
      * @returns {number}
      */
     _glyphId(codepoint, attrs = 0) {
-        if (this._shapeCache) {
-            const entry = (attrs & CELL_ITALIC) ? this._shapeCache.lookupItalic(codepoint) : this._shapeCache.lookup(codepoint);
-            if (entry) return entry.g;
-        }
-        return codepoint;
+        return this._shapeCache.lookupFace(codepoint, cellFace(attrs)).g;
     }
 
     /**
-     * Ask the live Slug atlas for glyphs this terminal is about to draw for the first time,
-     * before their slots are written.
+     * Ask the live Slug atlas for the glyphs this terminal is about to draw for the first time
+     * (the _fresh lists, per face), before their slots are written, and empty the lists.
      *
-     * Each new codepoint is routed through the font chain and gets its slot synchronously (the
-     * slot never moves); its outline is encoded in a worker and lands in the shared textures a
-     * frame or two later. Until then the glyph-map texel is zero and the cell draws its background
-     * with no ink; when it lands only the textures change, so the cell needs no rewrite.
-     * Callers pass only codepoints this terminal has never drawn (its `_liveEnsured` set, which
-     * they add them to): a cell whose codepoint didn't change was ensured when it first did, so a
-     * screen update hands over nothing at all in steady state.
-     *
+     * Each new content is routed through the font chain and gets its slot synchronously (the slot
+     * never moves); its outline is encoded in a worker and lands in the shared textures a frame
+     * or two later. Until then the glyph-map texel is zero and the cell draws its background with
+     * no ink; when it lands only the textures change, so the cell needs no rewrite. The lists hold
+     * only contents this terminal has never drawn in that face (its `_ensured` sets): a cell
+     * whose content didn't change was ensured when it first did, so a screen update hands over
+     * nothing at all in steady state.
      * @private
-     * @param {number[]} codepoints  first-seen codepoints (> 32)
      */
-    _ensureAtlasCodepoints(codepoints) {
-        const live = this.atlas && this.atlas._live;
-        if (!live || !this._shapeCache) return; // degraded boot: nothing to encode
-        // ensureCodepoints dedups globally (its encoded set), so codepoints another
-        // grid already encoded are a cheap no-op here.
-        live.ensureCodepoints(codepoints.slice(), this._shapeCache);
+    _ensureFresh() {
+        const live = this.atlas._live;
+        for (let face = 0; face < FACE_COUNT; face++) {
+            const fresh = this._fresh[face];
+            if (!fresh.length) continue;
+            if (live) {
+                // ensureGlyphsEncoded dedups globally (its encoded set), so glyphs another grid
+                // already asked for are a cheap no-op here.
+                const gids = [], provenance = new Map();
+                for (const cp of fresh) {
+                    const g = this._shapeCache.lookupFace(cp, face).g;
+                    if (g > 0) { gids.push(g); if (!provenance.has(g)) provenance.set(g, cp); }
+                }
+                live.ensureGlyphsEncoded(gids, provenance);
+            }
+            fresh.length = 0;
+        }
     }
 
     /**
-     * The same for codepoints this terminal is about to draw ITALIC for the first time: their
-     * italic face's glyphs (the upright one's where the chain has no italic for it).
-     * @private
-     * @param {number[]} codepoints  codepoints first seen italic (> 32)
+     * The font family this terminal draws in (GlyphAtlas.fontFamily).
+     * @returns {string|null} its id (null: a chain that names no families)
      */
-    _ensureAtlasItalics(codepoints) {
-        const live = this.atlas && this.atlas._live;
-        if (!live || !this._shapeCache) return;
-        const gids = [], provenance = new Map();
-        for (const cp of codepoints) {
-            const g = this._shapeCache.lookupItalic(cp).g;
-            if (g > 0) { gids.push(g); if (!provenance.has(g)) provenance.set(g, cp); }
+    get fontFamily() {
+        return this._fontFamily.id;
+    }
+
+    /**
+     * Draw the terminal in another font family of the atlas's chain, live: its cells take the
+     * family's cell (so the terminal's size on the canvas changes; cols × rows stay), every
+     * glyph is rewritten in the family — faces, sprites and clusters included — and its lines
+     * sit where the family's font puts them. The size-change tap fires (the size moved, though
+     * cols × rows did not), so whoever lays things out around the terminal follows.
+     * @param {string|null} id  a family id of the chain (null: its default family); unknown throws
+     */
+    setFontFamily(id) {
+        const family = this.atlas.fontFamily(id);
+        if (family === this._fontFamily) return;
+        this._fontFamily = family;
+        this._shapeCache = family.shapeCache;
+        this._applyFamilyToField();
+        this._metrics = this._renderer.metrics;
+        this._depthYStep = this._metrics.lineSpacing * this._depthYFactor;
+        this._depthZStep = this._metrics.lineSpacing * this._depthZFactor;
+        this._localBoundsDirty = true;
+
+        // Every glyph the cells hold, asked of the atlas in the new family.
+        for (const seen of this._ensured) seen.clear();
+        if (this.atlas._live) {
+            const CP = this._cp, AT = this._at;
+            for (let i = 0, n = CP.length; i < n; i++) {
+                const c = CP[i];
+                if (c <= 32) continue;
+                const face = cellFace(AT[i]), seen = this._ensured[face];
+                if (!seen.has(c)) { seen.add(c); this._fresh[face].push(c); }
+            }
+            this._ensureFresh();
         }
-        live.ensureGlyphsEncoded(gids, provenance);
+
+        this._layoutRows();
+        this._pushAll();
+        this._updateBackground();
+        // The chrome and the cursor follow the cell (the control pills keep the height they were built at).
+        if (this._chrome) this._chrome.metrics = this._metrics;
+        this._layoutControls();
+        this._registerControls();
+        if (this._cursorBlock) this._cursorBlock.metrics = this._metrics;
+        this._updateCursorMesh();
+        this._emitResize(this.cols, this.rows);
+    }
+
+    /** @private Give the field the family's cell and line metrics (the default family's are the field's own defaults). */
+    _applyFamilyToField() {
+        const own = this._fontFamily.index !== 0;
+        this._renderer.setCharSize(own ? this._fontFamily.charSize : null);
+        this._renderer.setLineMetrics(own ? this._fontFamily.lineMetrics : null);
+    }
+
+    /**
+     * Whether bold text in one of the eight standard colours draws in its bright twin
+     * (TerminalEmulator.setBoldIsBright; off by default — bold is the bold face). Live: the next
+     * frame redraws the screen with it.
+     * @param {boolean} on
+     */
+    setBoldIsBright(on) {
+        this._emulator?.setBoldIsBright(on);
     }
 
     // ================================================================

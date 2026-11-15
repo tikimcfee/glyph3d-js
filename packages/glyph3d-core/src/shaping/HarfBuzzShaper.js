@@ -31,6 +31,14 @@ export default class HarfBuzzShaper {
         this._firstShapeLogged = false;
         /** @private Track first outline call for logging */
         this._firstOutlineLogged = false;
+        /** @private the font's name, for logs and errors */
+        this._name = 'font';
+        /** @private the variation instance this font is set to (null: the file's default) */
+        this._variations = null;
+        /** @private whether fontExtents() takes in the font's line gap (half above, half below) */
+        this._lineGap = false;
+        /** @private false for an instance(): the blob and face are another shaper's to destroy */
+        this._ownsFace = true;
     }
 
     /**
@@ -45,10 +53,15 @@ export default class HarfBuzzShaper {
      * @param {ArrayBuffer|Uint8Array} [options.wasmBinary] - Raw WASM bytes for offline/embedded usage
      * @param {Object}  [options.hb]         - An already-initialized hbjs module to reuse
      * @param {string}  [options.name]       - Human-readable font name (logging only)
+     * @param {Record<string, number>} [options.variations] - the instance of a VARIABLE font to
+     *   draw and shape, by axis tag (`{ wght: 400, slnt: 0 }`); an axis the font lacks, or a value
+     *   outside its range, throws
+     * @param {boolean} [options.lineGap=false] - fontExtents() takes in the font's line gap
+     *   (see fontExtents)
      * @returns {Promise<void>}
      */
     async init(fontBuffer, options = {}) {
-        const { wasmUrl, wasmBinary, hb, name = 'font' } = options;
+        const { wasmUrl, wasmBinary, hb, name = 'font', variations = null, lineGap = false } = options;
         if (hb) {
             this._hb = hb;
         } else {
@@ -61,6 +74,9 @@ export default class HarfBuzzShaper {
         this._face = this._hb.createFace(this._blob, 0);
         this._font = this._hb.createFont(this._face);
         this._upem = this._face.upem;
+        this._name = name;
+        this._lineGap = !!lineGap;
+        if (variations) this._setVariations(variations);
 
         // Collect supported unicodes to get glyph count
         const unicodes = this._face.collectUnicodes();
@@ -71,6 +87,50 @@ export default class HarfBuzzShaper {
         );
 
         this._ready = true;
+    }
+
+    /**
+     * Another instance of this shaper's VARIABLE font — the same file and face (no second copy
+     * of its bytes), drawn and shaped at other axis values: a family's bold is `{ wght: 700 }` of
+     * the file its regular is `{ wght: 400 }` of. This shaper owns the face: destroy it last.
+     * @param {Record<string, number>} variations  by axis tag
+     * @param {string} [name]  for logs
+     * @returns {HarfBuzzShaper}
+     */
+    instance(variations, name = `${this._name} instance`) {
+        if (!this._ready) throw new Error('HarfBuzzShaper.instance: the shaper is not initialized');
+        const s = new HarfBuzzShaper();
+        s._hb = this._hb;
+        s._blob = this._blob;
+        s._face = this._face;
+        s._ownsFace = false;
+        s._font = this._hb.createFont(this._face);
+        s._upem = this._upem;
+        s._glyphCount = this._glyphCount;
+        s._name = name;
+        s._lineGap = this._lineGap;
+        s._firstShapeLogged = s._firstOutlineLogged = true;
+        s._setVariations(variations);
+        s._ready = true;
+        return s;
+    }
+
+    /** @returns {Record<string, number>|null} the variation instance this font is set to */
+    get variations() { return this._variations; }
+
+    /**
+     * @private Set the font's variation instance, checked against the file's own axes: a typo'd
+     * tag or an out-of-range value would otherwise draw the default instance, silently.
+     */
+    _setVariations(variations) {
+        const axes = this._face.getAxisInfos();
+        for (const [tag, value] of Object.entries(variations)) {
+            const axis = axes[tag];
+            if (!axis) throw new Error(`[HarfBuzz] "${this._name}" has no '${tag}' axis (its axes: ${Object.keys(axes).join(', ') || 'none — not a variable font'})`);
+            if (!Number.isFinite(value) || value < axis.min || value > axis.max) throw new Error(`[HarfBuzz] "${this._name}": ${tag} = ${value} is outside the axis (${axis.min} … ${axis.max})`);
+        }
+        this._font.setVariations(variations);
+        this._variations = { ...variations };
     }
 
     /** @returns {Object} the underlying hbjs module (shareable across faces) */
@@ -184,11 +244,17 @@ export default class HarfBuzzShaper {
     }
 
     /**
-     * Get font horizontal extents (ascender, descender, lineGap) in font units.
+     * The font's horizontal extents (ascender, descender, lineGap) in font units — the vertical
+     * span a glyph's cell is normalized to. A font loaded with `lineGap` has its line gap taken
+     * in, half above the ascender and half below the descender: its cell is then the line the
+     * font was designed to be set on (ascender − descender + lineGap), as terminals lay it out.
      * @returns {{ascender: number, descender: number, lineGap: number}}
      */
     fontExtents() {
-        return this._font.hExtents();
+        const e = this._font.hExtents();
+        if (!this._lineGap || !(e.lineGap > 0)) return e;
+        const half = e.lineGap / 2;
+        return { ascender: e.ascender + half, descender: e.descender - half, lineGap: e.lineGap };
     }
 
     /**
@@ -206,8 +272,12 @@ export default class HarfBuzzShaper {
      */
     destroy() {
         if (this._font) { this._font.destroy(); this._font = null; }
-        if (this._face) { this._face.destroy(); this._face = null; }
-        if (this._blob) { this._blob.destroy(); this._blob = null; }
+        if (this._ownsFace) {
+            if (this._face) this._face.destroy();
+            if (this._blob) this._blob.destroy();
+        }
+        this._face = null;
+        this._blob = null;
         this._hb = null;
         this._ready = false;
     }

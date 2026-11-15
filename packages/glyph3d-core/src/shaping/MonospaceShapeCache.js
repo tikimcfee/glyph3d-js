@@ -6,9 +6,13 @@
  * class caches those mappings after a single priming pass, eliminating all
  * runtime WASM calls.
  *
- * Unknown codepoints (emoji, combining marks, CJK) fall back to HarfBuzz on
- * first encounter and are cached for subsequent hits, so correctness is
- * preserved for any character encountered in practice.
+ * Unknown codepoints (emoji, CJK) fall back to HarfBuzz on first encounter and are
+ * cached for subsequent hits, so correctness is preserved for any character
+ * encountered in practice.
+ *
+ * A lookup's key is a CELL'S CONTENT: a codepoint, or a cluster id (core/cellClusters.js — a
+ * base and its combining marks), which resolves through the shaper's `lookupCluster`. A FACE
+ * (bold, italic, bold-italic: `lookupFace`) has its own table per face.
  *
  * Memory: ~256 entries x ~50 bytes (Map entry overhead) ≈ 12KB. Trivial.
  *
@@ -20,6 +24,9 @@
  * ASCII/Latin-1 probe set).
  */
 
+import { CLUSTER_BASE, clusterText } from '../core/cellClusters.js';
+import { FACE_COUNT } from '../core/cellAttrs.js';
+
 export default class MonospaceShapeCache {
     /**
      * @param {import('./HarfBuzzShaper.js').default} shaper - Initialized HarfBuzzShaper
@@ -27,8 +34,8 @@ export default class MonospaceShapeCache {
     constructor(shaper = null) {
         /** @private @type {Map<number, {g: number, ax: number}>} codepoint → {glyphId, xAdvance} */
         this._map = new Map();
-        /** @private @type {Map<number, {g: number, ax: number}>} codepoint → its ITALIC glyph */
-        this._italic = new Map();
+        /** @private @type {Array<Map<number, {g: number, ax: number}>>} per face (1 bold · 2 italic · 3 both): cell content → its glyph in that face */
+        this._faces = Array.from({ length: FACE_COUNT }, () => new Map());
         /** @private — null in worker-side instances (no WASM available there) */
         this._shaper = shaper;
         /** @private — miss fallback advance when there's no shaper (worker side) */
@@ -79,7 +86,9 @@ export default class MonospaceShapeCache {
         let entry = this._map.get(codepoint);
         if (entry !== undefined) return entry;
 
-        if (this._shaper) {
+        if (codepoint >= CLUSTER_BASE) {
+            entry = this._cluster(codepoint, 0);
+        } else if (this._shaper) {
             // Main-thread miss: resolve the single character via HarfBuzz, cache it.
             const ch = String.fromCodePoint(codepoint);
             const shaped = this._shaper.shape(ch);
@@ -98,17 +107,32 @@ export default class MonospaceShapeCache {
     }
 
     /**
-     * Look up a codepoint's ITALIC glyph (SGR 3): the italic face's, where the shaper has one for
-     * it (FontChain.lookupItalic); else its upright glyph. Cached like `lookup`.
-     * @param {number} codepoint
+     * Look up a cell's glyph in a FACE (core/cellAttrs.js FACE_*: SGR 1 bold, SGR 3 italic, both):
+     * that face's glyph where the shaper has one for it (FontChain.lookupFace); else its upright
+     * glyph. Cached like `lookup`; face 0 is `lookup`.
+     * @param {number} codepoint  a codepoint or a cluster id
+     * @param {number} face  0 regular · 1 bold · 2 italic · 3 bold-italic
      * @returns {{g: number, ax: number}}
      */
-    lookupItalic(codepoint) {
-        let entry = this._italic.get(codepoint);
+    lookupFace(codepoint, face) {
+        if (face === 0) return this.lookup(codepoint);
+        const table = this._faces[face];
+        let entry = table.get(codepoint);
         if (entry !== undefined) return entry;
-        entry = typeof this._shaper?.lookupItalic === 'function' ? this._shaper.lookupItalic(codepoint) : this.lookup(codepoint);
-        this._italic.set(codepoint, entry);
+        if (codepoint >= CLUSTER_BASE) entry = this._cluster(codepoint, face);
+        else entry = typeof this._shaper?.lookupFace === 'function' ? this._shaper.lookupFace(codepoint, face) : this.lookup(codepoint);
+        table.set(codepoint, entry);
         return entry;
+    }
+
+    /**
+     * @private A cluster's glyph: the shaper's (FontChain.lookupCluster — precomposed, or shaped
+     * into a composite); with no shaper that shapes clusters, its first codepoint's.
+     */
+    _cluster(id, face) {
+        const text = clusterText(id);
+        if (typeof this._shaper?.lookupCluster === 'function') return this._shaper.lookupCluster(text, face);
+        return this.lookupFace(text.codePointAt(0), face);
     }
 
     /**
@@ -197,6 +221,6 @@ export default class MonospaceShapeCache {
      */
     invalidate() {
         this._map.clear();
-        this._italic.clear();
+        for (const table of this._faces) table.clear();
     }
 }

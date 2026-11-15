@@ -2,10 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, useGridRegistry } from '@glyph3d/r3f';
-import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
-import italicUrl from '@glyph3d/core/fonts/Cousine-Italic.ttf?url';
-import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
-import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
+import { fontChain } from '@glyph3d/core/fonts/families.js';
 import TerminalWall from './TerminalWall.js';
 import Palette from './Palette.jsx';
 import Sidebar from './Sidebar.jsx';
@@ -15,11 +12,9 @@ import ContextMenu from './ContextMenu.jsx';
 import { dockLayout } from './Panel.jsx';
 import { isChord, chordLabel, ALT_LABEL, SNAP_INVERT_LABEL } from './chord.js';
 
-const FONT_CHAIN = [
-  { url: fontUrl, name: 'Cousine', italic: { url: italicUrl } },
-  { url: mesloUrl, name: 'MesloLGS NF Mono' },
-  { url: dejavuUrl, name: 'DejaVu Sans' },
-];
+// The font chain (fonts/families.js): the families a terminal can draw in (the `fontFamily` knob),
+// each with its four faces, then the fallbacks.
+const FONT_CHAIN = fontChain();
 
 // ?relay=PORT — where the Go relay is (it forks the terminals). Defaults to the dev relay's 8080,
 // which the IDE dials too — and a relay takes ONE display, so the second to connect is refused
@@ -112,7 +107,7 @@ function Chrome({ wall }) {
 }
 
 function App() {
-  const { atlas, stage, error } = useGlyphEngine({ fontUrl, fonts: FONT_CHAIN });
+  const { atlas, stage, error } = useGlyphEngine({ fonts: FONT_CHAIN });
   const [wall, setWall] = useState(null);
   return (
     <div style={{ position: 'absolute', inset: 0 }}>

@@ -13,19 +13,13 @@ import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
 import { stateController } from '@glyph3d/core/services/state';
-// Font fallback chain, priority order: clean code monospace first, then fonts
-// that cover what it lacks (Nerd-Font icons/powerline/rounded box/stars, then
-// braille + broad symbols), then "oh well" (a blank cell) for the rare holdout.
-import fontUrl from '@glyph3d/core/fonts/Cousine-Regular.ttf?url';
-import italicUrl from '@glyph3d/core/fonts/Cousine-Italic.ttf?url';
-import mesloUrl from '@glyph3d/core/fonts/MesloLGS-NF-Mono.ttf?url';
-import dejavuUrl from '@glyph3d/core/fonts/DejaVuSans.ttf?url';
+// The font chain (fonts/families.js): the families a terminal can draw in, each with its four
+// faces — the first is the cell code, labels and books are laid out on — then the fallbacks that
+// cover what they lack (Nerd-Font icons/powerline/stars, then broad symbols), then "oh well" (a
+// blank cell) for the rare holdout.
+import { fontChain } from '@glyph3d/core/fonts/families.js';
 
-const FONT_CHAIN = [
-  { url: fontUrl,   name: 'Cousine', italic: { url: italicUrl } },
-  { url: mesloUrl,  name: 'MesloLGS NF Mono' },
-  { url: dejavuUrl, name: 'DejaVu Sans' },
-];
+const FONT_CHAIN = fontChain();
 
 // Boot stamp — "what code am I running?", answered by the page itself and kept by the
 // relay's log store (so `log.search boot` answers page-less from the CLI). Dev fetches the
@@ -80,7 +74,7 @@ function App() {
   // The engine derives its cell metrics once at boot, so the font-size setting is read
   // here (a change persists and takes hold on the next reload — the Settings panel says so).
   const { atlas, stage, error } = useGlyphEngine({
-    fontUrl, fonts: FONT_CHAIN,
+    fonts: FONT_CHAIN,
     fontSize: getSetting('glyph.fontSize'),
     // Base path for the prebaked slug-core asset, so a sub-path deploy (/ide/) fetches
     // /ide/slug-core/<key>.bin and not /slug-core/<key>.bin.

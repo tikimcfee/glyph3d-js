@@ -1,15 +1,17 @@
 #!/bin/sh
-# term-test-pattern.sh — one screenful (80 columns, 22 lines) of what a terminal draws itself rather than
+# term-test-pattern.sh — one screenful (80 columns, 23 lines) of what a terminal draws itself rather than
 # taking from a font, for a person to judge by eye: block art, blocks and shades, box drawing, a divider,
 # braille, sextants and wedges, powerline separators, every SGR style, inverse and dim, a wide
-# emoji on a coloured background, and plain text beside them.
+# emoji on a coloured background, the bold and italic faces, letters with combining marks, and plain
+# text beside them.
 #
 #   sh tools/term-test-pattern.sh          print it (the screen is cleared first)
 #   sh tools/term-test-pattern.sh --keep   print it below what is already on screen
 #
 # What to look for: no dark seams between █ cells (across or down), ─ and │ runs unbroken, corners
 # meeting their lines, underlines / strikes / overlines continuous across cells, the curly underline
-# in its own colour, the emoji whole on its background.
+# in its own colour, the emoji whole on its background, bold visibly bolder (in the text's own colour),
+# every accented letter whole — the letter AND its mark(s), typed precomposed or as letter + mark.
 
 e=$(printf '\033')
 r="${e}[0m"
@@ -17,6 +19,10 @@ r="${e}[0m"
 pl() { printf "\\356\\202\\$1"; }
 P0=$(pl 260) P1=$(pl 261) P2=$(pl 262) P3=$(pl 263) P4=$(pl 264) P5=$(pl 265) P6=$(pl 266) P7=$(pl 267)
 P8=$(pl 270) P9=$(pl 271) PA=$(pl 272) PB=$(pl 273) PC=$(pl 274) PD=$(pl 275) PE=$(pl 276) PF=$(pl 277)
+# Combining marks (U+0301 acute, 0302 circumflex, 0303 tilde, 0304 macron, 0308 diaeresis, 0323 dot
+# below), spelled as bytes so an editor can't compose them into their letters.
+ACUTE=$(printf '\314\201') CIRC=$(printf '\314\202') TILDE=$(printf '\314\203') MACRON=$(printf '\314\204')
+DIAER=$(printf '\314\210') DOTBELOW=$(printf '\314\243')
 [ "$1" = "--keep" ] || printf '%s' "${e}[H${e}[2J"
 
 # 1-3: block art (the Claude Code figure), blocks, shades, eighths, quadrants
@@ -57,6 +63,10 @@ printf '%s\n' "${e}[7;4minverse underline${r} ${e}[2;7mdim inverse${r} ${e}[38;5
 # 21: lines run unbroken across cells, gaps and colour changes
 printf '%s\n' "${e}[4munderline across   gaps and ${e}[38;5;114mcolours${e}[38;5;203m joined${r}  ${e}[4:3;58:2::255:80:80mcurly  under  spaces${r}  ${e}[9mstrike  thru${r}"
 
-# 22: plain text for comparison
+# 22: letters with combining marks: one cell each — precomposed where the font has the pair (é, ệ),
+# else the letter with its mark(s) placed over or under it (x́, q̈̄) — in every face
+printf '%s\n' "marks café cafe${ACUTE} Vie${DOTBELOW}${CIRC}t x${ACUTE} q${DIAER}${MACRON} n${TILDE} a${CIRC}${ACUTE} ${e}[1mbold e${ACUTE} x${ACUTE}${r} ${e}[3mitalic e${ACUTE} x${ACUTE}${r} ${e}[1;3mboth e${ACUTE} x${ACUTE}${r} ${e}[4mu${DIAER}nder x${ACUTE}${r} ${e}[7minv x${ACUTE}${r}|"
+
+# 23: plain text for comparison
 printf '%s\n' "The quick brown fox jumps over the lazy dog 0123456789 {}[]()<>|/\\ il1I O0o"
 exit 0

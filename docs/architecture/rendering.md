@@ -1,6 +1,6 @@
 # Rendering
 
-The glyph renderer in `@glyph3d/core`: draw, cells (fills, styles, sprites), layout, picking, culling, LOD, batching, transforms, uploads.
+The glyph renderer in `@glyph3d/core`: draw, fonts (families, faces, clusters), cells (fills, styles, sprites), layout, picking, culling, LOD, batching, transforms, uploads.
 
 ## Single instanced draw call
 
@@ -14,6 +14,67 @@ material. Gate: `tools/group-table.test.mjs`.
 A slot is 32 bytes, eight float lanes (`core/InstancedSlotBuffer.js`): pen x y z, glyph slot,
 colour (RGB888), group row, advance, height. The group lane holds the row in its low 16 bits and
 the cell's STYLE BYTE above them (below); a slot with no style holds its bare row.
+
+## Fonts: families, faces, clusters
+
+**One chain.** Every font the renderer draws is a font of one `FontChain` (`shaping/FontChain.js`)
+on one Slug atlas; a glyph is a SLOT, a dense integer for a (font, glyph id) pair. The package's
+fonts are `fonts/families.js` (`fontChain()`, which the IDE, the wall, the headless bakes and the
+tests all boot): the FAMILIES — Cousine (Apache 2.0, v1.21: regular, bold, italic and bold-italic,
+a file each) and GitHub Next's Monaspace Neon and Monaspace Argon (SIL OFL 1.1, v1.400) — then
+the fallbacks every family routes after its own font, MesloLGS NF Mono and DejaVu Sans. Licenses
+sit beside the files.
+
+**Format.** The Slug encoder takes quadratic outlines (TrueType `glyf`); a cubic (CFF) outline
+throws in `slugData._parseSegments`. Monaspace's static release is CFF; its variable release is
+`glyf`, one file per family (axes `wght` 200–800, `wdth` 100–125, `slnt` −11–0), shipped as
+released. A font spec's `variations` picks the instance HarfBuzz shapes and draws
+(`HarfBuzzShaper.init` / `.instance` → `hb_font_set_variations`, checked against the file's own
+axes: a wrong tag or value throws) — `fonts/families.js` sets regular `wght 400`, bold
+`wght 700`, italic `slnt −11`, bold-italic both. An instance shares its file's bytes and HarfBuzz
+face on the main thread and in the encode worker (`fontSources()` names the font it is an
+instance of). A variable font's overlapping strokes need the non-zero winding rule (Glyph tiers).
+
+**Faces.** A font spec's `faces: { bold, italic, boldItalic }` are each one more font of the chain
+(after every listed font, so a listed font's index is its place in the list), taking no part in
+routing. A cell's face is two bits of its attributes (`core/cellAttrs.js` `cellFace`: bold 1,
+italic 2, both 3); `FontChain.lookupFace(cp, face)` answers that face's glyph for a codepoint its
+font routes, and the upright glyph for a fallback font's glyph, a sprite and an emoji (no face
+is synthesized; a font with no bold-italic draws it in its italic, else its bold).
+`MonospaceShapeCache.lookupFace` caches it per face.
+
+**Families.** A listed font that names a `family` is routed only for that family, ahead of the
+fallbacks; the family's cell (its advance × its ascender-to-descender em; with a spec's `lineGap`,
+the font's line gap too, half above and half below), its line metrics and its sprites are that
+font's. Family 0 — `DEFAULT_FONT_FAMILY`, the first listed font's — is the cell labels, code grids
+and books are laid out on (`atlas.getCharSize()`, `atlas._shapeCache`). A field draws in another
+family through `atlas.fontFamily(id)`: that family's shape cache (`FontChain.view(id)`), cell and
+line metrics; `InstancedField` takes the cell (`charSize` / `setCharSize`) and the lines
+(`setLineMetrics`). Families share the atlas, the slots and the fallbacks' glyphs, so text in two
+families draws side by side and switching a field's family is a rewrite of its slots — what
+`TerminalGrid.setFontFamily` does, live (docs/architecture/terminals.md "Cells"). The cache keys
+(`slugCoreKey`, `slugGrowthKey`) are the chain's identity: every font it loads, by name,
+variation instance, line-gap choice and family (`fontChainIdentity`).
+
+**Clusters.** A cell holding a base and combining marks (`e` + U+0301, a Vietnamese stack) is one
+number: a cluster id above every codepoint, interned once per distinct text
+(`core/cellClusters.js`). `FontChain.lookupCluster(text, face)` draws it as the precomposed glyph
+where the cluster composes to one codepoint a font covers (NFC); else HarfBuzz shapes it in the
+base's font (in the cell's face) and the base plus its marks become one COMPOSITE slot, whose
+outline the encode worker builds from its parts (`slugData.encodeComposite`; composites are not
+persisted as growth). A mark the font's own anchors place stays where HarfBuzz put it; one it
+left where the font drew it is placed by its ink — centred over the base's ink, a sixteenth of
+an em clear of what is under it, marks stacking — which is HarfBuzz's fallback mark positioning
+(the vendored build leaves it out) and is what makes Cousine's marks (drawn over the previous
+letter) and Monaspace's (drawn inside their own cell) land alike. A mark the base's font lacks
+comes from the font that has it; one no font has is left out and the base still draws. Variation
+selectors and joiners are dropped (an emoji sequence draws its first emoji).
+
+Gates: `tools/font-faces.test.mjs` (the chain, face routing, instances, families, clusters and
+their ink, the reader), `tools/terminal-text-path.test.mjs` (a grid's faces and a live family
+switch), `tools/wall-cells-check.mjs` (pixels: the bold face inks more, a cluster shows its base
+and its mark, a live family switch). For the eye: `tools/font-faces-shots.mjs` photographs the
+test pattern and `tools/font-sample.sh` in every family, with two side-by-side sheets.
 
 ## Cells: fills, styles, sprites
 
@@ -45,20 +106,22 @@ WHOLE cell, so a run of cells draws one unbroken line, in the text's colour or t
 own; dim keeps `dimAlpha` of the ink's opacity. Where the lines sit and how thick they are comes
 from the primary font (`FontChain.lineMetrics`: the post and OS/2 tables, `shaping/fontTables.js`
 → `setGlyphLineMetrics`); `lineThickness`, `underlineRaise`, `curlyAmplitude` and `dimAlpha` are
-tuned live (`setGlyphLineStyle`: Settings ▸ Display & glyph LOD, `wall.config`). A line is never
-thinner than a pixel; lines draw in the exact tier only. Italic is a glyph, not a style bit: the
-italic face's slot (`FontChain.lookupItalic`; a font spec's `italic` — Cousine Italic for
-Cousine; a glyph from a font with no italic face stays upright, none is synthesized). Bold
-brightens the colour.
+tuned live (`setGlyphLineStyle`: Settings ▸ Display & glyph LOD, `wall.config`); a field drawing
+in another font family than the default has that family's line metrics
+(`InstancedField.setLineMetrics`). A line is never thinner than a pixel; lines draw in the exact
+tier only. Bold and italic are a glyph, not a style bit: the slot of the cell's FACE (`cellFace` →
+`FontChain.lookupFace`; "Fonts" below). Bold changes no colour unless the reader's `boldIsBright`
+is on.
 
 **Sprites.** The glyphs a terminal draws itself come from no font: box drawing U+2500–257F,
 block elements U+2580–259F, braille U+2800–28FF, the legacy-computing sextants, wedges and eighth
 blocks (U+1FB00–1FB90, 1FB9A–1FB9B) and powerline U+E0B0–E0BF are OUTLINES GENERATED TO THE CELL
 (`shaping/cellSprites.js`, after Ghostty's sprite font: lines centred, light the weight of the
-primary font's ─, heavy its ━ or twice light, a double line two light lines a light gap apart,
+family's font's ─, heavy its ━ or twice light, a double line two light lines a light gap apart,
 rounded corners arcs, a shade a full cell at 25/50/75 % ink). They are one more glyph source of
 the Slug atlas, as an emoji's bitmap is: `FontChain` routes those codepoints to a sprite slot
-before any font, `LiveSlugAtlas` generates and lands their curves synchronously (a few
+before any font — one per font family, since a sprite is drawn to its family's cell —
+`LiveSlugAtlas` generates and lands their curves synchronously (a few
 rectangles — never in flight, never persisted as growth; the core cache holds the core's, keyed
 by `SPRITE_VERSION`), and the glyph shader draws them in glyph-map mode 3.
 
@@ -154,7 +217,9 @@ ink and cell fills stay opaque.
 ## Glyph tiers
 
 **Glyph tiers** by on-screen size, nothing in between: exact Slug coverage (counted once,
-premultiplied); under `glyph.greekPx` (default 8 px tall) a glyph is a bar through the
+premultiplied, by the non-zero winding rule: a contour wound either way is ink, and overlapping
+contours are ink once — a variable font overlaps its strokes, and Monaspace winds its accents
+against its letters); under `glyph.greekPx` (default 8 px tall) a glyph is a bar through the
 x-height where its ink would be (`core/glyphMaterial.js`, about as much light as the text) —
 a cell sprite stays exact at every size (a block or a rule is its own bar, and a few curves), and
 the cell's lines are not drawn; under far-LOD's size, one box per file.
@@ -235,3 +300,29 @@ allocated but unfilled (`source.dataReady = false`) and its old rows are copied 
 queue before every top-level render (never a nested one), so a landing is drawn in the next
 frame. Gates: `tools/texture-uploads.test.mjs` (bytes per event, against a model of three's
 WebGL path), `tools/atlas-growth.test.mjs`; `atlas-cold-perf` measures it in a browser.
+
+
+## Open items
+
+**Run shaping (ligatures, texture healing).** A terminal's cells are shaped one by one: a cell's
+content → one slot (`MonospaceShapeCache`), so Monaspace's `calt` (texture healing: a narrow
+letter beside a wide one trade room) and its `liga` / `ss01`–`ss10` coding ligatures never fire —
+both are contextual substitutions over a RUN of cells. What it would take:
+- **Runs.** In `TerminalGrid`, shape each row's maximal runs of same-face, same-family cells
+  through HarfBuzz with the features on (`FontFamilyView.shape(text, features)`), keyed by the
+  run's text in a per-family run cache (a prompt's rows repeat), and re-shape a row only where
+  the diff's changed span touches a run (a substitution reaches a few cells either side, so the
+  dirty span widens to the run's ends).
+- **Glyphs per cell.** Texture healing keeps one glyph per cell (an alternate of the same
+  advance, `m.alt`), so the per-cell slot write stays; a ligature is N cells drawn by one wide
+  glyph — either the first cell's quad N cells wide and the rest blank (the emoji path's
+  two-cell quad, generalized; the cursor and selection still address cells) or the font's own
+  per-cell pieces where it has them.
+- **Cost.** Shaping is a WASM call per changed run on the main thread, in the frame's pull: it
+  has to stay inside the text path's budget (`tools/wall-text-perf.mjs`), which means the run
+  cache must hit for steady output and a flood must fall back to per-cell lookups for the frame
+  and heal on the next quiet one.
+- **Choice.** Ligatures change what a cell shows (`!=` → `≠`-like), so they are a per-terminal
+  setting, off by default, like Ghostty's `font-feature`; texture healing changes only spacing.
+The fonts are shipped whole (their `calt` / `liga` tables and alternates included), so none of
+this needs new font files.

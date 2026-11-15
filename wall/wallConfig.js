@@ -1,10 +1,11 @@
 import { GLYPH_LINE_DEFAULTS } from '@glyph3d/core/core/glyphMaterial.js';
+import { BOLD_IS_BRIGHT_DEFAULT } from '@glyph3d/core/collections/TerminalEmulator.js';
 import { KNOBS, checkKnob } from './wallSettings.js';
 
 /**
  * wallConfig — the wall's knobs for hiding, closing, selecting and grouping, the termd status
  * window's, the keyboard's, the right-click menu's, the canvas's (its colour, the drafting grid,
- * snapping) and the text's (the cell's own lines, dim), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
+ * snapping) and the text's (the font family, bold's colour, the cell's own lines, dim), born configurable: `new TerminalWall({ …, config })` overrides any of them, and `wall.config <key>
  * <value>` dials one live and remembers it per relay (WallStore; `wall.config <key> default` hands it
  * back). A group's own columns and gap live on the group; these are what a new group is born with.
  * What each knob is — its type, range, section and description — is wallSettings.KNOBS.
@@ -63,6 +64,21 @@ export const WALL_CONFIG = Object.freeze({
     menuHint: true,
     /** The sizes a terminal's right-click menu offers, as COLSxROWS, space-separated ('' offers none). */
     menuSizes: '80x24 120x36 160x48',
+
+    // ── text: the font family and what bold does (live on every terminal) ──
+    /**
+     * The font family every terminal draws in — an id of the font chain (core fonts/families.js),
+     * with its regular, bold, italic and bold-italic faces. Live: each terminal takes the family's
+     * cell (its size on the canvas changes; cols × rows stay) and rewrites its glyphs. Monaspace
+     * Neon by default: sturdier strokes and opener letterforms than Cousine's hold up at the small
+     * sizes a wall of terminals is read at, and it carries its own arrows, checks and icons.
+     */
+    fontFamily: 'monaspace-neon',
+    /**
+     * Bold text in one of the eight standard colours (SGR 30–37) draws in its bright twin (90–97).
+     * Off, as Ghostty's bold-is-bright is: bold is the bold face, in the colour the program named.
+     */
+    boldIsBright: BOLD_IS_BRIGHT_DEFAULT,
 
     // ── text: the lines a cell draws itself, and dim (core/glyphMaterial.js GLYPH_LINE_DEFAULTS; live on every terminal) ──
     /** The thickness of underline, strikethrough and overline, × the font's own underline thickness. */

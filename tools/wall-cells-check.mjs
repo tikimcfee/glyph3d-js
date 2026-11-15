@@ -22,10 +22,18 @@
  *     draws its ink in the background's colour over a fill of the foreground's;
  *   - dim is darker than plain, and still there;
  *   - a wide emoji on a cell background is whole: its right half (which lies over the next cell)
- *     shows the emoji's own colours, not that cell's fill.
+ *     shows the emoji's own colours, not that cell's fill;
+ *   - bold is the bold FACE: a run of bold l inks measurably more of its cells than a plain run
+ *     (stems thicker), in the same colour (boldIsBright is off);
+ *   - a base letter and its combining mark share the cell: a run of x + U+0301 shows the x (as
+ *     much ink over the x's own rows as a plain x run) AND the mark over it; and e + U+0301 draws
+ *     as the precomposed é does.
  * Then the terminal is resized, which makes termd REPAINT the screen from its own emulator's cells
  * rather than the program's bytes: every attribute read before (underline styles and colour,
- * strike, dim, inverse) reads the same after.
+ * strike, dim, inverse) reads the same after, and the combining-mark cells are still clusters.
+ * Then the font family: `wall.config fontFamily` moves every terminal to another family live —
+ * cols × rows stay, the cell (and so the terminal's size on the canvas) changes, █ cells still
+ * join, bold is still the bolder face and a cluster still shows its base — and back.
  * Last, the knobs: the settings panel (chord + ,) lists the four text knobs in its Text section;
  * dim opacity set to 1 in its field makes dim text read as plain in the pixels, and handing the
  * knob back (`wall.config dimAlpha default`) makes it dim again.
@@ -38,6 +46,7 @@ import { privateRelay } from './lib/wall-relay.mjs';
 import { RESET_FG } from '../packages/glyph3d-core/src/collections/terminalPalette.js';
 import { searchSettings } from '../wall/wallSettings.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS } from '../wall/wallConfig.js';
+import { FONT_FAMILY_IDS } from '../packages/glyph3d-core/src/fonts/families.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const URL_ = arg('--url', 'http://localhost:5180/');
@@ -51,7 +60,7 @@ const info = (msg) => console.log(`info  ${msg}`);
 const rgb = (c) => `rgb(${c.join(',')})`;
 const sum = (c) => c[0] + c[1] + c[2];
 
-const COLS = 60, ROWS = 14, RUN = 8, LINE = 12;
+const COLS = 60, ROWS = 20, RUN = 8, LINE = 12;
 const FILL = [40, 90, 160], INV_FG = [200, 100, 50], INV_BG = [10, 20, 30], CURLY = [255, 80, 0];
 const sgr = (codes, text) => `\\033[${codes}m${text}\\033[0m`;
 /** The cases, one labelled line each (the label finds its row; the cells start two past it). */
@@ -67,6 +76,12 @@ const LINES = [
     `PLAIN ${'█'.repeat(RUN)}`,
     `DIMMD ${sgr('2', '█'.repeat(RUN))}`,
     `EMOJI ${sgr(`48;2;${FILL.join(';')}`, '😀      ')}`,
+    `STEMR ${'l'.repeat(RUN)}`,
+    `STEMB ${sgr('1', 'l'.repeat(RUN))}`,
+    `BASEX ${'x'.repeat(RUN)}`,
+    `MARKX ${'x\u0301'.repeat(RUN)}`,
+    `PRECO ${'\u00e9'.repeat(RUN)}`,
+    `DECOM ${'e\u0301'.repeat(RUN)}`,
     'CELLS-DONE',
 ];
 const C0 = 6;   // the column the cells start at
@@ -75,7 +90,7 @@ const relay = await privateRelay({ port: RELAY, ns: 'glyph-cells-check' });
 let browser = null;
 try {
     browser = await launchGpuBrowser({});
-    const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 3000, viewport: { width: 1400, height: 900 } });
+    const app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 3000, viewport: { width: 1400, height: 1100 } });
     const page = app.page;
     const W = (fn, a) => app.evalPage(fn, a);
     const until = async (fn, a, ms = 20000) => {
@@ -133,7 +148,8 @@ try {
 
     /**
      * Read rects off one screenshot: per rect its pixel count, per-channel median, the darkest and
-     * brightest pixel (by channel sum), and per pixel ROW the darkest and brightest sum along it.
+     * brightest pixel (by channel sum), and per pixel ROW the darkest and brightest sum along it,
+     * the row's total (`sum`, every pixel's channel sum) and its width in pixels (`w`).
      */
     const read = async (list) => {
         const all = list.filter(Boolean);
@@ -156,17 +172,18 @@ try {
                 let dark = [255, 255, 255], bright = [0, 0, 0], n = 0;
                 const ch = [[], [], []], rows = [];
                 for (let y = y0; y < y1; y++) {
-                    let lo = 766, hi = -1;
+                    let lo = 766, hi = -1, total = 0;
                     for (let x = x0; x < x1; x++) {
                         const k = (y * img.width + x) * 4, c = [d[k], d[k + 1], d[k + 2]], s = c[0] + c[1] + c[2];
                         if (s < dark[0] + dark[1] + dark[2]) dark = c;
                         if (s > bright[0] + bright[1] + bright[2]) bright = c;
                         if (s < lo) lo = s;
                         if (s > hi) hi = s;
+                        total += s;
                         for (let j = 0; j < 3; j++) ch[j].push(c[j]);
                         n++;
                     }
-                    rows.push({ lo, hi });
+                    rows.push({ lo, hi, sum: total, w: x1 - x0 });
                 }
                 const med = ch.map((a) => (a.sort((p, q) => p - q), a.length ? a[a.length >> 1] : -1));
                 return { n, med, dark, bright, rows };
@@ -177,8 +194,8 @@ try {
     const ink = [Math.round(RESET_FG.r * 255), Math.round(RESET_FG.g * 255), Math.round(RESET_FG.b * 255)];
     const near = (a, b, tol) => Math.max(...a.map((v, j) => Math.abs(v - b[j]))) <= tol;
 
-    for (const linePx of [17.37, 41.83]) {
-        // The camera: this line height, centred on the cases, the grid's origin off the pixel grid.
+    /** The camera: this line height, centred on the cases, the grid's origin off the pixel grid. */
+    const look = async (linePx) => {
         await W(([i, linePx, cols, rows]) => {
             const w = window.__wall, g = w.terminal(i), v = w.viewport, st = g.cellStride;
             v.camera.zoom = linePx / st.y;
@@ -187,6 +204,60 @@ try {
         }, [id, linePx, COLS, ROWS]);
         await until(() => !window.__wall.viewport.moving);
         await drawn();
+    };
+
+    /**
+     * A run's INK per pixel row: how many pixels' worth of full ink the row holds (its lift over
+     * the panel, over the lift a full-ink pixel has), from a rect read over the run's whole cells.
+     * @returns {number[]} top row first
+     */
+    const inkRows = (r, panel, full) => r.rows.map((row) => (row.sum - row.w * panel) / (full - panel));
+    const total = (a) => a.reduce((s, v) => s + v, 0);
+
+    /**
+     * The faces and clusters, read at the camera's pose: the bold face inks more than the regular
+     * (in the same colour), a cluster shows its base letter and its mark, and e + U+0301 is é.
+     */
+    const facesAndClusters = async (at) => {
+        const whole = (label) => ({ label, n: RUN });
+        const g = await rects(['STEMR', 'STEMB', 'BASEX', 'MARKX', 'PRECO', 'DECOM'].map(whole));
+        ok(g.rects.every(Boolean), `${at}: the face and cluster cases are on screen`);
+        const px = await read(g.rects);
+        // Each run's ink is counted against ITS OWN brightest pixel (its full ink): a run drawn
+        // brighter is not thereby drawn thicker.
+        const panel = sum(g.panel);
+        const [stemR, stemB, baseX, markX, preco, decom] = px.map((r) => inkRows(r, panel, Math.max(sum(r.bright), panel + 90)));
+
+        // Bold is the bold face: more ink in the same cells, in the same colour.
+        const r = total(stemR), b = total(stemB);
+        ok(r > 0 && b >= 1.2 * r,
+            `${at}: bold is the bold face — a run of ${RUN} bold l inks ${b.toFixed(0)} px of full ink, the plain run ${r.toFixed(0)} (stems thicker: ≥ 1.2 × wanted; the same glyph brightened reads 1.0 ×)`);
+        ok(near(px[1].bright, ink, 6) && near(px[0].bright, ink, 6),
+            `${at}: and bold keeps the text's colour (boldIsBright is off) — its brightest pixel is ${rgb(px[1].bright)}, the plain run's ${rgb(px[0].bright)}, the ink ${rgb(ink)}`);
+
+        // A cluster: the base letter's own rows hold the base letter's ink, and the mark sits above.
+        const rowsOfX = baseX.map((v, y) => (v > 0.5 ? y : -1)).filter((y) => y >= 0);
+        const top = rowsOfX[0];
+        const baseInk = total(rowsOfX.map((y) => baseX[y])), underMark = total(rowsOfX.map((y) => markX[y]));
+        ok(rowsOfX.length > 0 && underMark >= 0.9 * baseInk,
+            `${at}: x + U+0301 shows its base letter — over the x's own ${rowsOfX.length} pixel rows the cluster run holds ${underMark.toFixed(0)} px of ink, the plain x run ${baseInk.toFixed(0)} (a missing base reads near 0)`);
+        const above = total(markX.slice(0, top)), plainAbove = total(baseX.slice(0, top));
+        ok(above >= 0.08 * baseInk && above >= plainAbove + 0.05 * baseInk,
+            `${at}: and its mark over it — ${above.toFixed(0)} px of ink above the x-height, where the plain run has ${plainAbove.toFixed(0)}`);
+        const below = total(markX.slice(rowsOfX[rowsOfX.length - 1] + 1)), plainBelow = total(baseX.slice(rowsOfX[rowsOfX.length - 1] + 1));
+        ok(Math.abs(below - plainBelow) <= 0.03 * baseInk + 2, `${at}: nothing under the letter (${below.toFixed(0)} px; the plain run ${plainBelow.toFixed(0)})`);
+
+        // NFC: e + U+0301 draws as the precomposed é — as much ink, over the same rows (the two
+        // runs sit on different pixel phases, so they are compared by extent, not pixel by pixel).
+        const extent = (rows) => { const y = rows.map((v, k) => (v > 0.5 ? k : -1)).filter((k) => k >= 0); return [y[0] ?? -1, y[y.length - 1] ?? -1]; };
+        const [pTop, pFoot] = extent(preco), [dTop, dFoot] = extent(decom);
+        const eTop = extent(baseX)[0];
+        ok(total(preco) > 0 && Math.abs(total(decom) - total(preco)) <= 0.03 * total(preco) && Math.abs(dTop - pTop) <= 1 && Math.abs(dFoot - pFoot) <= 1 && pTop < eTop - 1,
+            `${at}: e + U+0301 draws as the precomposed é — ${total(decom).toFixed(0)} px of ink over pixel rows ${dTop}–${dFoot}, the é run ${total(preco).toFixed(0)} px over ${pTop}–${pFoot} (its accent reaches above the x-height, row ${eTop})`);
+    };
+
+    for (const linePx of [17.37, 41.83]) {
+        await look(linePx);
         if (SHOTS) { const f = path.join(SHOTS, `cells-${linePx}.png`); await page.screenshot({ path: f }); info(`screenshot ${f}`); }
 
         const g = await rects([
@@ -246,6 +317,8 @@ try {
         const notFill = right && !near(right.med, FILL, 24);
         ok(fill.n > 0 && near(fill.med, FILL, 2) && right.n > 0 && emojiLift >= 80 && notFill,
             `${at}: a wide emoji on a cell background is whole — over the next cell (its right half) the median is ${rgb(right.med)} and the pixel farthest from the fill ${rgb(right.bright)}; the fill beside it reads ${rgb(fill.med)} for ${rgb(FILL)}`);
+
+        await facesAndClusters(at);
     }
 
     // A repaint keeps the styles: a resize makes termd repaint from its own emulator's cells (the
@@ -271,6 +344,45 @@ try {
     ok(repaints.rows === ROWS + 3 && repaints.bytes > 0, `a resize to ${ROWS + 3} rows brought a repaint from termd (${repaints.bytes} B; ${repaints.text})`);
     const now = await attrs();
     ok(!!now && JSON.stringify(now) === JSON.stringify(was), `and every attribute reads the same after it: ${JSON.stringify(now)}`);
+    const clusters = await W(([i, C0]) => {
+        const g = window.__wall.terminal(i), s = g._emulator.readScreen(g.cols, g.rows), lines = g.readText();
+        return ['MARKX', 'DECOM'].map((label) => { const row = lines.findIndex((x) => x.startsWith(label)); return row < 0 ? null : [...lines[row].slice(C0, C0 + 2)].map((ch) => ch.codePointAt(0).toString(16)).join('+') + (s.cp[row * g.cols + C0] > 0x10FFFF ? ' (a cluster)' : ' (one codepoint)'); });
+    }, [id, C0]);
+    ok(clusters[0] === '78+301 (a cluster)' && /^(65\+301 \(a cluster\)|e9\+e9 \(one codepoint\))$/.test(clusters[1]),
+        `and the combining marks are still in their letters' cells after the repaint (x + U+0301: ${clusters[0]}; e + U+0301: ${clusters[1]})`);
+
+    // The font family, live: every terminal moves to another family of the chain — cols × rows
+    // stay, the cell changes — and what a cell draws still holds in it; then back.
+    {
+        const state = () => W((i) => {
+            const w = window.__wall, g = w.terminal(i), r = w.terminalRect(i);
+            return { family: g.fontFamily, config: w.config.fontFamily, cols: g.cols, rows: g.rows, w: r.maxX - r.minX, h: r.maxY - r.minY, cell: [g._metrics.charWidth, g._metrics.charHeight], text: g.readText().length };
+        }, id);
+        const born = await state();
+        ok(born.family === WALL_CONFIG.fontFamily && born.config === WALL_CONFIG.fontFamily, `a terminal is born in the wall's font family (${born.family})`);
+        const other = FONT_FAMILY_IDS.find((f) => f !== born.family);
+        const said = await W(async (f) => (await window.__wall.router.execute(['wall.config', 'fontFamily', f])).text, other);
+        await look(41.83);
+        const moved = await state();
+        ok(moved.family === other && moved.cols === born.cols && moved.rows === born.rows && (moved.cell[0] !== born.cell[0] || moved.cell[1] !== born.cell[1]) && (moved.w !== born.w || moved.h !== born.h),
+            `wall.config fontFamily ${other} (${said}) moves the terminal to it live: still ${moved.cols} × ${moved.rows}, its cell ${born.cell.map((v) => v.toFixed(4)).join(' × ')} → ${moved.cell.map((v) => v.toFixed(4)).join(' × ')} and its size ${born.w.toFixed(1)} × ${born.h.toFixed(1)} → ${moved.w.toFixed(1)} × ${moved.h.toFixed(1)}`);
+        const at = `in ${other}, lines 41.83 px`;
+        const g = await rects([{ label: 'SOLID', n: RUN, inX: 0.5, y0: 0.25, y1: 1.75 }, { label: 'RULE ', n: LINE, inX: 1 }]);
+        const px = await read(g.rects);
+        ok(px[0].n > 0 && sum(px[0].dark) >= sum(ink) - 12, `${at}: █ cells still join across and down on the family's cell — the darkest of ${px[0].n} px inside the block is ${rgb(px[0].dark)}`);
+        const best = px[1].rows.reduce((a, b) => (b.hi > a.hi ? b : a), { lo: 0, hi: -1 });
+        ok(best.hi - sum(g.panel) >= 90 && best.lo - sum(g.panel) >= 0.85 * (best.hi - sum(g.panel)), `${at}: a ─ run is still one line (sprites are drawn to the family's cell)`);
+        await facesAndClusters(at);
+        if (SHOTS) { const f = path.join(SHOTS, `cells-${other}.png`); await page.screenshot({ path: f }); info(`screenshot ${f}`); }
+        await W(async () => { await window.__wall.router.execute(['wall.config', 'fontFamily', 'default']); });
+        await look(41.83);
+        const back = await state();
+        ok(back.family === born.family && back.cell[0] === born.cell[0] && back.cell[1] === born.cell[1] && back.w === born.w && back.h === born.h,
+            `wall.config fontFamily default hands it back: ${back.family}, the cell and the size it had`);
+        await facesAndClusters(`back in ${back.family}, lines 41.83 px`);
+        const refused = await W(async () => { try { return (await window.__wall.router.execute(['wall.config', 'fontFamily', 'helvetica'])).text; } catch (e) { return `threw: ${e.message}`; } });
+        ok(/fontFamily is /.test(refused) && (await state()).family === born.family, `an unknown family is refused, naming the ones there are (${refused})`);
+    }
 
     // The knobs, through the settings panel: listed under Text, edited in the field, in the pixels.
     {

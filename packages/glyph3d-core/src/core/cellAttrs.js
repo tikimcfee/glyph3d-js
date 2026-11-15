@@ -20,9 +20,10 @@
  *
  * What each attribute becomes:
  *   - INVERSE and CONCEAL are resolved where the cell is READ (TerminalEmulator): inverse swaps the
- *     drawn fg and bg, conceal draws the text in its own background's colour. BOLD brightens the
- *     drawn fg there too.
- *   - ITALIC picks the glyph: the italic face's slot for the codepoint (FontChain), no shader bit.
+ *     drawn fg and bg, conceal draws the text in its own background's colour.
+ *   - BOLD and ITALIC pick the glyph's FACE (`cellFace`): the bold, italic or bold-italic face's
+ *     slot for the codepoint (FontChain.lookupFace), no shader bit. Whether bold also changes the
+ *     colour is the reader's `boldIsBright` (TerminalEmulator; off by default).
  *   - DIM, STRIKE, OVERLINE and the UNDERLINE style ride to the GPU as the slot's STYLE BYTE
  *     (`cellStyle`), in the spare high bits of the slot's group lane (InstancedSlotBuffer); an
  *     underline's own colour goes in the field's decoration texel (InstancedField.decorWords).
@@ -47,6 +48,27 @@ export const CELL_OVERLINE = 1 << 7;
 export const CELL_UNDERLINE_SHIFT = 8;
 export const CELL_UNDERLINE_MASK = 7 << CELL_UNDERLINE_SHIFT;
 export const CELL_UNDERLINE_COLOR = 1 << 11;
+
+/**
+ * A glyph's face, two bits: which of a font's four faces draws it. FACE_BOLD | FACE_ITALIC is the
+ * bold-italic face. (FontChain.lookupFace routes it; a font with no such face draws its upright.)
+ */
+export const FACE_REGULAR = 0;
+export const FACE_BOLD = 1;
+export const FACE_ITALIC = 2;
+export const FACE_BOLD_ITALIC = FACE_BOLD | FACE_ITALIC;
+/** Faces a font can have, the regular included. */
+export const FACE_COUNT = 4;
+
+/**
+ * The face a cell's attrs ask for: bold → FACE_BOLD, italic → FACE_ITALIC, both → both.
+ * @param {number} attrs  a cell's attrs word
+ * @returns {number} 0..3
+ */
+export function cellFace(attrs) {
+    // CELL_BOLD is bit 0 (= FACE_BOLD); CELL_ITALIC is bit 2, FACE_ITALIC bit 1.
+    return (attrs & CELL_BOLD) | ((attrs & CELL_ITALIC) >> 1);
+}
 
 /** Underline styles (the value in a cell's UNDERLINE bits, and in the style byte's). */
 export const UNDERLINE = Object.freeze({ NONE: 0, SINGLE: 1, DOUBLE: 2, CURLY: 3, DOTTED: 4, DASHED: 5 });
@@ -76,8 +98,8 @@ export function packCellAttrs(a) {
 
 /**
  * The style byte the shader draws for a cell's attrs: dim, strike, overline, the underline style
- * and whether the underline has its own colour. (Bold, inverse and conceal are in the colours
- * already; italic is in the glyph.)
+ * and whether the underline has its own colour. (Inverse and conceal are in the colours already;
+ * bold and italic are in the glyph's face.)
  * @param {number} attrs  a cell's attrs word
  * @returns {number} 0..127
  */

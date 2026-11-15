@@ -49,6 +49,9 @@ test('values are checked by type and refused naming the knob', () => {
     expect(() => checkConfig('gridMajorEvery', '0')).toThrow(/≥ 1/);
     expect(() => checkConfig('gridLinePx', 'thin')).toThrow(/gridLinePx takes a number/);
     expect(() => checkConfig('groupLayout', 'grid')).toThrow(/groupLayout is tile, freeform/);
+    expect(checkConfig('fontFamily', 'cousine')).toBe('cousine');
+    expect(() => checkConfig('fontFamily', 'helvetica')).toThrow(/fontFamily is cousine, monaspace-neon, monaspace-argon, not 'helvetica'/);
+    expect(checkConfig('boldIsBright', 'on')).toBe(true);
     expect(() => checkConfig('nope', '1')).toThrow(/unknown wall knob 'nope'/);
 });
 
@@ -58,7 +61,9 @@ test('search: words match label, key, description or section title; empty sectio
     expect(keys('')).toEqual(Object.keys(KNOBS).filter((k) => SECTIONS.some((s) => s.id === KNOBS[k].section)));
     expect(keys('snap')).toContain('snap');                      // label / key
     expect(sections('snap')).toEqual(['canvas']);                // only sections with a match show
-    expect(keys('colour').sort()).toEqual(['background', 'gridMajorColor', 'gridMinorColor']);   // description
+    expect(keys('colour').sort()).toEqual(['background', 'boldIsBright', 'gridMajorColor', 'gridMinorColor']);   // description
+    expect(keys('font')).toEqual(['fontFamily', 'lineThickness', 'underlineRaise']);   // label, and descriptions that say "font"
+    expect(sections('font family')).toEqual(['text']);
     expect(keys('GROUPS')).toEqual(Object.keys(KNOBS).filter((k) => KNOBS[k].section === 'groups'));   // the section's title, any case
     expect(keys('major colour')).toEqual(['gridMajorColor']);    // every word, anywhere
     expect(keys('closehold')).toEqual(['closeHoldMs']);          // the key
