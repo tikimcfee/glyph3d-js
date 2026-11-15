@@ -41,8 +41,8 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
 - **`crates/`** — the Rust workspace: `g3d-termd`, the terminal daemon (PTYs + one libghostty-vt
   emulator per terminal; outlives the relay) in two processes, the holder (`g3d-hold`: the shells'
   parent and their PTY fds) and the brain (everything else, restartable), `g3d` (attach to / watch /
-  list / start / upgrade terminals and read termd's status from any real terminal) and `g3d-wire`
-  (the public protocol, `docs/termd/PROTOCOL.md`).
+  list / start / upgrade terminals and read termd's status from any real terminal), `g3d-wire`
+  (the public protocol, `docs/termd/PROTOCOL.md`) and `g3d-vendor` (the build's minisign check).
 
 ## Tech stack
 
@@ -90,6 +90,7 @@ cli/
   gomux.go agentevents.go                           gomuxai: hub tree, agent sessions + events
 crates/
   g3d-wire/  g3d-hold/  g3d-termd/  g3d/            protocol · termd's holder · the daemon · its client
+  g3d-vendor/                                       the minisign check on vendor/'s downloads
 docs/termd/  PROTOCOL.md DESIGN.md                  the termd wire (public) and its design
 Makefile  tools/dev.sh  tools/termd-vendor.sh
 ```
@@ -110,8 +111,12 @@ namespace `wall` (page `http://localhost:5180/?relay=8180`); both can run at onc
 
 **Build / serve**: `make build` runs the app's Vite production build, stages
 `app/dist/` into `cli/web/`, and bakes it into the binary; `make termd` (part of it) builds
-`g3d-termd` and `g3d` beside it (Linux; first run `tools/termd-vendor.sh`, which fetches and
-verifies libghostty-vt's release tarballs and Zig into `vendor/`). `./glyph3d-cli serve
+`g3d-termd` and `g3d` beside it (Linux and macOS). It fills `vendor/` (gitignored, the
+checkout's own) first through `tools/termd-vendor.sh`: libghostty-vt's release tarballs and the
+host's Zig, kept once per user in `${XDG_CACHE_HOME:-~/.cache}/glyph3d/termd-vendor/`
+(`~/Library/Caches/…` on macOS) and checked on every unpack against pinned SHA-256s and their
+minisign signatures (`crates/g3d-vendor`) — no setup step; the network only on a user's first
+build. `./glyph3d-cli serve
 ~/project` then serves the built IDE + relay + fs-RPC from one binary at `/`. The app
 bundles its deps at build (no importmap). `make all` cross-compiles all platforms.
 
