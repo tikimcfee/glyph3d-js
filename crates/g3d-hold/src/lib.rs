@@ -14,6 +14,7 @@ pub mod link;
 pub mod log;
 pub mod shm;
 pub mod spawn;
+pub mod tree;
 
 pub use holder::{Config, run};
 
@@ -45,8 +46,10 @@ pub fn pipe(nonblock: bool) -> std::io::Result<(rustix::fd::OwnedFd, rustix::fd:
 /// minor only adds messages and fields. 2: `spawn` names the program's `path` apart from its
 /// `argv` (a login shell execs `/bin/bash` as `-bash`), and the holder no longer searches `PATH`.
 /// 2.1: `welcome` carries `restarts` (brains replaced, by cause) and `last_start` (why this brain
-/// starts, and how the last one ended), for the status document.
-pub const HOLD: [u64; 2] = [2, 1];
+/// starts, and how the last one ended), for the status document. 2.2: process trees (tree.rs):
+/// `welcome` carries `trees` (cgroup or session) and `leftovers`; the holder tells the brain
+/// `killed` (a close's report), `leftover` and `leftover_gone`.
+pub const HOLD: [u64; 2] = [2, 2];
 
 /// Bytes per terminal in the `seq_marks` page: one little-endian `u64`, the terminal's `seq`
 /// after the brain's latest read.

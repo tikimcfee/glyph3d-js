@@ -17,7 +17,8 @@ the `status` event). What is marked **(1.2)** is new in 1.2: key events and past
 the features of the same names, the `unsafe_paste` code). What is marked **(1.3)** is new in 1.3:
 `key`'s `option_as_alt` and the feature of the same name. What is marked **(1.4)** is new in 1.4:
 pointer events (`mouse` and the feature of the same name). What is marked **(1.5)** is new in 1.5:
-a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`). The daemon
+a paste of any size, streamed in chunks (`paste`'s `more`, the feature `paste_stream`), and process
+trees (what a `kill` ends and the status document reports). The daemon
 on branch `termd` speaks all of 1.5 and announces `proto` `[1, 5]`.
 
 ## At a glance
@@ -394,9 +395,13 @@ terminals are listed: a terminal leaves the list when its program exits.
 {"req": 3, "op": "kill", "id": "t1"}
 ```
 
-Sends `SIGHUP` to the terminal's process group, closes the PTY, and replies once the
-terminal is gone. Its subscribers first get `exit` and `closed` events. `"signal":
-"TERM"` or `"KILL"` sends that signal instead of `HUP`.
+Closes the terminal by the close rule and replies once its program is gone: `SIGHUP` to every
+process of the terminal's tree (its program and everything it started; `daemon.trees` in the
+[status](#status_follow-status_unfollow-11) says how termd knows it) and to the PTY's foreground
+group, the PTY closed (a hangup), then (1.5) `SIGTERM` to whatever is left of the tree, and
+`SIGKILL` to what is still left after a grace (2 s by default). Its subscribers first get `exit`
+and `closed` events. `"signal": "TERM"` or `"KILL"` sends that signal first instead of `HUP`
+(`KILL`: the whole tree at once). The status document's `closes` says what each step reached.
 
 ### `subscribe`
 
@@ -783,7 +788,8 @@ Reply: `{"req": 13, "ok": true, "status": {…}}`, the document below.
 `interval_ms` is clamped to 250–60000; default 1000; the daemon's settings may move all three),
 then sends an `EVENT` `status` on stream 0 at once, and again whenever the document has changed,
 no sooner than the interval after the previous one. Changes are any field except the sampled
-gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates), or
+gauges (`at`, `rss`, `memory`, `snapshots.bytes`, a subscriber's `queued`, the `*_bps` rates, a
+terminal's `processes` and a leftover's `processes`), or
 a rate crossing zero; an interval in which any terminal produced output or took input counts as a
 change, so a moving rate stays current. A rate still decaying over its 5 s window after the bytes
 stopped is not a change until it reaches zero (one burst of output costs a document or two, not
@@ -812,14 +818,21 @@ Unix epoch milliseconds, sizes are bytes):
                             "restored": {"exact": 0, "snapshot": 3, "blank": 0}, "unseen": 512}},
    "snapshots": {"interval_ms": 2000, "bytes": 1835008},
    "env": {"source": "systemd-user",
-           "config": {"path": "/home/user/.config/g3d/termd.toml", "state": "loaded"}, "warnings": []}},
+           "config": {"path": "/home/user/.config/g3d/termd.toml", "state": "loaded"}, "warnings": []},
+   "trees": {"mode": "cgroup", "unit": "g3d-termd-default-41180.service"},
+   "leftovers": [
+     {"id": "t3", "pid": 41260, "since": 1794519000000, "processes": [{"pid": 41266, "comm": "sleep"}]}],
+   "closes": [
+     {"id": "t4", "at": 1794519050000, "steps": [
+       {"signal": "HUP", "procs": [{"pid": 41270, "comm": "bash"}, {"pid": 41275, "comm": "vim"}]},
+       {"signal": "TERM", "procs": [{"pid": 41275, "comm": "vim"}]}]}]},
  "terminals": [
    {"id": "t1", "handle": 7, "pid": 41234, "argv": ["/bin/bash"], "login": true, "cwd": "/srv/src",
     "pwd": "/srv/src/app", "title": "~/src/app", "cols": 120, "rows": 40, "alt": false,
     "created_at": 1794480000123, "seq": 18211, "out_bps": 1253000, "in_bps": 12,
     "last_output_at": 1794519127390, "flow": "live", "input_queued": 0,
     "scrollback_rows": 1567, "memory": {"resident": 1986560, "compressed": 0},
-    "restored": "snapshot",
+    "restored": "snapshot", "processes": 3,
     "subscribers": [
       {"conn": 12, "client": "glyph3d-cli/0.2.0", "pid": 5011, "role": "own", "mode": "raw",
        "flow": "block", "queued": 0, "lagging": false, "lags": 0, "view": 0}]}],
@@ -840,6 +853,9 @@ Unix epoch milliseconds, sizes are bytes):
 | `holder` | `pid`, `version`, `hold` (the internal holder/brain protocol version), `rss` (absent when it can't be measured) |
 | `brain` | `pid`, `generation`, `started_at`, `rss`; `restarts` counts brain starts by cause (`crash`: exited without a handoff; `watchdog`: killed for not answering; `upgrade`: replaced on purpose); `last_start`: why the current brain started (`"first"`, `"crash"`, `"watchdog"`, `"upgrade"`), when, how the previous one ended (`exit`: `code` or `signal`, as in the `exit` event), `failed_at` when the brain had been failed before this one started (no brain ran from then until `at`; absent otherwise), and how many terminals came back each way (`restored`, below). `unseen` is the total output the previous brain read but never saved (0 after an upgrade): missing from screens and history, and each terminal's share is its own `unseen`. A client that was subscribed may have received some of it live before the crash; its own loss is the gap between the last `seq` it saw and the `seq` of its re-subscribe's `REPAINT` |
 | `snapshots` | crash-restore saving: the interval and the bytes held |
+| `trees` | (1.5) how the daemon knows each terminal's processes, its **tree**: `mode` `"cgroup"` (Linux, a namespace started with `--daemon` under a systemd user manager: each terminal its own cgroup, a leaf of the daemon's service's, `unit`), or `"session"` (each terminal's session: the processes whose session id is its program's pid; `why` says why not a cgroup). A cgroup holds everything the program started however it forked; a session loses a process that called `setsid` |
+| `leftovers` | (1.5) what terminals whose programs exited on their own left running (a `nohup` job), each `id`, the program's `pid`, `since` (when it exited) and `processes` (`pid`, `comm`); listed until they end, which is with the namespace at the latest |
+| `closes` | (1.5) the latest closes (`kill`, a namespace's end), newest first: each step of the close rule (`HUP` to every process in the tree, `TERM` to what was left, `KILL` to what was still left) with the processes it reached (`procs`). A close that needed `KILL` is also an error, `killed` |
 | `env` | `source`: where a terminal whose creator sends no environment looks the session's names up (`"systemd-user"`, `"launchd"`, or `"daemon"`: the daemon's start values, when no session source answers or the daemon is set so); `config`: the daemon's `termd.toml`, its `path`, its `state` (`"absent"`, `"loaded"`, `"error"`) and, while it is bad, its `error` (naming the line); `warnings` (strings: no UTF-8 locale to fill, the session source unreachable while it is, a bad config file, the last terminal whose set locale doesn't load or isn't UTF-8) |
 
 Each of `terminals` (one per live terminal; the count is the array's length):
@@ -857,6 +873,7 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 | `scrollback_rows`, `memory` | history rows held; the emulator's `resident` and `compressed` bytes |
 | `restored` | how this terminal came back at the current brain's start: `"exact"` (an upgrade's handoff, or a crash while it had been quiet since its last snapshot), `"snapshot"` (a crash, from a saved snapshot), `"blank"` (a crash with no usable snapshot: the program's own redraw is all there is), or absent (started under this brain). A terminal restored from a snapshot saves a new one at the next interval even while quiet, so a second crash restores it exact |
 | `unseen` | with `restored`: this terminal's output the previous brain read and never saved (0 when `exact`) |
+| `processes` | (1.5) how many processes its tree holds now (its program and everything it started); a gauge, like `memory` |
 | `subscribers` | one per subscription: `conn` (the connection's number in this daemon), `client` (its `HELLO` name), `pid` (the peer's, from its credentials), `role`, `mode`, `flow`, `queued` (bytes waiting to be written to it), `lagging` (dropping until it catches up), `lags` (resyncs so far), `view` (its `view` offset, 0 = live) |
 
 `errors`: the last 32 distinct errors (by `code` and terminal), newest first, each `code`,
@@ -864,7 +881,8 @@ Each of `terminals` (one per live terminal; the count is the array's length):
 the request and event codes above (`spawn_failed`, `input_full`, `panic`) plus `lagged` (a lossy
 subscriber fell behind and was resynced), `restore` (a terminal that could not come back),
 `upgrade_failed`, `brain_crash`, `brain_watchdog` and `brain_failed` (why this brain started, and
-that no brain ran for a while before it). The list is the
+that no brain ran for a while before it), and (1.5) `killed` (a close whose processes outlived
+`SIGHUP` and `SIGTERM`). The list is the
 current brain's: a restart starts it over with the reason for the restart. They are for people;
 nothing depends on reading them.
 
@@ -1277,7 +1295,10 @@ writes, and send keystrokes as `INPUT`.
 
 - **1.5**: a paste of any size: `paste`'s `more`, the feature `paste_stream`; a `paste` waits for
   room in the program's input buffer instead of failing `input_full`, and its reply waits with it.
-  Additive: a paste without `more` is the whole paste, as in 1.4.
+  Process trees: `kill` ends a terminal's whole tree by the close rule (`SIGHUP`, then `SIGTERM`,
+  then `SIGKILL`), and the status document's `daemon.trees`, `daemon.leftovers`, `daemon.closes`,
+  `terminals[].processes` and the `killed` error say what runs and what a close reached. Additive: a
+  paste without `more` is the whole paste, as in 1.4, and a 1.4 client ignores the new fields.
 - **1.4**: pointer events: the `mouse` op and the feature of the same name. Additive: a 1.3 client
   is served as before.
 - **1.3**: `key`'s `option_as_alt` and the feature of the same name. Additive: a key without it is

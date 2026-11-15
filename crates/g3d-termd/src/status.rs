@@ -8,8 +8,10 @@
 //! change, no sooner than the follower's interval, a keepalive with fresh gauges when nothing
 //! changes, and dropped (never queued) for a follower still behind on its previous one.
 
+use crate::hold::Leftover;
 use crate::out::{ConnOut, Kind, SubShared, Wake};
 use crate::owner::Registry;
+use g3d_hold::tree::{Proc, Tree, Trees};
 use g3d_wire::frame::{self, ty};
 use g3d_wire::*;
 use std::collections::{HashMap, VecDeque};
@@ -143,6 +145,8 @@ pub struct BrainInfo {
     pub restarts: BrainRestarts,
     pub last_start: BrainStart,
     pub snapshot_interval_ms: u64,
+    /// How the namespace knows each terminal's processes.
+    pub trees: Trees,
 }
 
 /// The status settings (`--status-*`).
@@ -191,10 +195,25 @@ pub struct Hub {
     followers: Mutex<HashMap<u64, Follower>>,
     joined: tokio::sync::Notify,
     rates: Mutex<Rates>,
+    /// What ended terminals left running, as the holder reports it.
+    leftovers: Mutex<Vec<Leftover>>,
+    /// The latest closes, newest first, at most `closes_max`.
+    closes: Mutex<VecDeque<StatusClose>>,
+    closes_max: usize,
+}
+
+fn status_procs(p: &[Proc]) -> Vec<StatusProc> {
+    p.iter().map(|p| StatusProc { pid: p.pid as u32, comm: p.comm.clone() }).collect()
 }
 
 impl Hub {
-    pub fn new(info: BrainInfo, settings: Settings, errors: Arc<Errors>) -> Arc<Self> {
+    pub fn new(
+        info: BrainInfo,
+        settings: Settings,
+        errors: Arc<Errors>,
+        leftovers: Vec<Leftover>,
+        closes_max: usize,
+    ) -> Arc<Self> {
         Arc::new(Hub {
             info,
             settings,
@@ -203,7 +222,68 @@ impl Hub {
             followers: Mutex::new(HashMap::new()),
             joined: tokio::sync::Notify::new(),
             rates: Mutex::new(Rates::default()),
+            leftovers: Mutex::new(leftovers),
+            closes: Mutex::new(VecDeque::new()),
+            closes_max,
         })
+    }
+
+    /// The holder's `killed`: one close's report.
+    pub fn closed(&self, m: &serde_json::Value) {
+        let steps: Vec<StatusCloseStep> = m
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|s| StatusCloseStep {
+                        signal: s.get("signal").and_then(|x| x.as_str()).unwrap_or("?").to_owned(),
+                        procs: s
+                            .get("procs")
+                            .and_then(|p| p.as_array())
+                            .map(|p| {
+                                p.iter()
+                                    .map(|p| StatusProc {
+                                        pid: p.get("pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                                        comm: p.get("comm").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("?").to_owned();
+        if let Some(k) = steps.iter().find(|s| s.signal == "KILL" && !s.procs.is_empty()) {
+            let who: Vec<String> = k.procs.iter().map(|p| format!("{} {}", p.pid, p.comm)).collect();
+            self.errors.record(
+                "killed",
+                Some(&id),
+                format!("{} outlived SIGHUP and SIGTERM when it closed and was SIGKILLed: {}", id, who.join(", ")),
+            );
+        }
+        let close = StatusClose { id, at: m.get("at").and_then(|x| x.as_u64()).unwrap_or_else(ms_now), steps };
+        let mut c = self.closes.lock().unwrap();
+        c.push_front(close);
+        c.truncate(self.closes_max);
+    }
+
+    pub fn leftover(&self, l: Leftover) {
+        let mut v = self.leftovers.lock().unwrap();
+        v.retain(|x| x.handle != l.handle);
+        v.push(l);
+    }
+
+    pub fn leftover_gone(&self, handle: u32) {
+        self.leftovers.lock().unwrap().retain(|x| x.handle != handle);
+    }
+
+    /// Every tree the namespace holds: the live terminals' (their pids) and the leftovers'.
+    pub fn all_trees(&self, reg: &Registry) -> Vec<Tree> {
+        let mut t: Vec<Tree> =
+            reg.all().iter().map(|t| self.info.trees.tree_of(t.handle, t.info.lock().unwrap().pid as i32)).collect();
+        t.extend(self.leftovers.lock().unwrap().iter().map(|l| l.tree.clone()));
+        t
     }
 
     pub fn conn_open(&self, conn: u64, client: &str, pid: Option<u32>) {
@@ -292,12 +372,18 @@ impl Hub {
 
     /// The document now.
     pub fn build(&self, reg: &Registry, connections: u64, env: StatusEnv, exiting: bool) -> Status {
+        let live = reg.all();
+        let leftovers = self.leftovers.lock().unwrap().clone();
+        let mut trees: Vec<Tree> =
+            live.iter().map(|t| self.info.trees.tree_of(t.handle, t.info.lock().unwrap().pid as i32)).collect();
+        trees.extend(leftovers.iter().map(|l| l.tree.clone()));
+        let mut members = self.info.trees.members_many(&trees).into_iter();
         let conns = self.conns.lock().unwrap();
         let mut snapshot_bytes = 0;
-        let terminals = reg
-            .all()
+        let terminals = live
             .into_iter()
             .map(|t| {
+                let processes = Some(members.next().map_or(0, |m| m.len() as u64));
                 let i = t.info.lock().unwrap().clone();
                 let s = &t.stats;
                 snapshot_bytes += s.snapshot_bytes.load(SeqCst);
@@ -327,6 +413,7 @@ impl Hub {
                     memory: slow.memory,
                     restored: slow.restored.map(Into::into),
                     unseen: slow.restored.map(|_| slow.unseen),
+                    processes,
                     subscribers: slow
                         .subs
                         .iter()
@@ -380,6 +467,25 @@ impl Hub {
                 },
                 snapshots: StatusSnapshots { interval_ms: i.snapshot_interval_ms, bytes: snapshot_bytes },
                 env,
+                trees: Some(match &i.trees {
+                    Trees::Cgroup { unit, .. } => {
+                        StatusTrees { mode: "cgroup".into(), unit: Some(unit.clone()), why: None }
+                    }
+                    Trees::Session { why } => {
+                        StatusTrees { mode: "session".into(), unit: None, why: Some(why.clone()) }
+                    }
+                }),
+                leftovers: leftovers
+                    .iter()
+                    .map(|l| StatusLeftover {
+                        id: l.id.clone(),
+                        pid: l.pid,
+                        since: l.since,
+                        processes: status_procs(&members.next().unwrap_or_default()),
+                    })
+                    .filter(|l| !l.processes.is_empty())
+                    .collect(),
+                closes: self.closes.lock().unwrap().iter().cloned().collect(),
             },
             terminals,
             errors: self.errors.list(),
@@ -471,7 +577,12 @@ pub fn change_key(doc: &Status) -> u64 {
     d.daemon.holder.rss = None;
     d.daemon.brain.rss = None;
     d.daemon.snapshots.bytes = 0;
+    for l in &mut d.daemon.leftovers {
+        l.processes.clear();
+    }
     for t in &mut d.terminals {
+        // A gauge: a shell's commands come and go.
+        t.processes = None;
         t.memory = TermMemory::default();
         t.out_bps = u64::from(t.out_bps > 0);
         t.in_bps = u64::from(t.in_bps > 0);

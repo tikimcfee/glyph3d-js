@@ -52,7 +52,13 @@
         "state": "string"
       },
       "warnings": []
-    }
+    },
+    "trees": {
+      "mode": "string",
+      "why": "string"
+    },
+    "leftovers": [],
+    "closes": []
   },
   "terminals": [
     {
@@ -93,7 +99,8 @@
           "lags": "int",
           "view": "int"
         }
-      ]
+      ],
+      "processes": "int"
     }
   ],
   "errors": [

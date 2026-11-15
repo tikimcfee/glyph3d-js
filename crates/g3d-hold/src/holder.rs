@@ -14,6 +14,7 @@
 
 use crate::link::{self, Fill, Reader};
 use crate::log::log;
+use crate::tree::{Proc, Tree, Trees};
 use crate::{HOLD, MARK_BYTES, shm, spawn};
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use serde_json::{Value, json};
@@ -52,7 +53,13 @@ pub struct Config {
     /// Zero turns the watchdog off.
     pub watchdog: Duration,
     pub upgrade_deadline: Duration,
+    /// The close rule (DESIGN.md, "Process trees"): the asked signal (`SIGHUP`) to the whole tree
+    /// at once, `SIGTERM` to what is left after `kill_term_after`, `SIGKILL` after `kill_grace`.
+    pub kill_term_after: Duration,
     pub kill_grace: Duration,
+    /// The systemd user service this holder runs as (`g3d-termd --daemon` asks for one with
+    /// `Delegate=yes`): its cgroup is this namespace's process trees.
+    pub unit: Option<String>,
     pub max_terminals: usize,
     /// Rotate the namespace's log past this many bytes (0 = never).
     pub log_max_bytes: u64,
@@ -248,8 +255,10 @@ struct Term {
     master: Option<OwnedFd>,
     meta: Value,
     exit: Option<Value>,
-    /// `kill` asked: when, the groups signalled, whether `SIGKILL` has followed.
-    kill: Option<(Instant, Vec<i32>, bool)>,
+    /// Its processes: a cgroup leaf or its session (tree.rs).
+    tree: Tree,
+    /// `kill` asked: the close rule runs on its tree (`Holder::closing`).
+    killed: bool,
     /// Newest first, at most two.
     snaps: VecDeque<OwnedFd>,
     /// The brain released it; it goes once its program has been reaped.
@@ -261,6 +270,8 @@ struct Term {
 /// A brain process (the running brain, or an upgrade's candidate) and its link.
 struct Peer {
     pid: i32,
+    /// Its cgroup leaf, removed once it has been reaped.
+    leaf: Option<String>,
     sock: OwnedFd,
     rd: Reader,
     out: VecDeque<(Vec<u8>, Vec<OwnedFd>, usize)>,
@@ -341,8 +352,57 @@ impl Restarts {
     }
 }
 
+/// A terminal's tree being ended by the close rule: the asked signal, then `SIGTERM`, then
+/// `SIGKILL`, until nothing of it is left.
+struct Closing {
+    handle: u32,
+    id: String,
+    tree: Tree,
+    at: Instant,
+    /// 0: the asked signal sent; 1: `SIGTERM`; 2: `SIGKILL`.
+    stage: u8,
+    /// Each step: the signal and who got it.
+    steps: Vec<(&'static str, Vec<Proc>)>,
+}
+
+/// Processes left in a terminal's tree after its program exited on its own (a `nohup` job): kept
+/// running, as a terminal leaves them, reported, and ended with the namespace.
+struct Leftover {
+    handle: u32,
+    id: String,
+    pid: i32,
+    tree: Tree,
+    since: u64,
+}
+
+fn sig_name(sig: i32) -> &'static str {
+    match sig {
+        libc::SIGHUP => "HUP",
+        libc::SIGTERM => "TERM",
+        libc::SIGKILL => "KILL",
+        libc::SIGINT => "INT",
+        libc::SIGQUIT => "QUIT",
+        _ => "?",
+    }
+}
+
+fn procs_text(p: &[Proc]) -> String {
+    p.iter().map(|p| format!("{} {}", p.pid, p.comm)).collect::<Vec<_>>().join(", ")
+}
+
 struct Holder {
     cfg: Config,
+    /// How this namespace knows each terminal's processes (tree.rs).
+    trees: Trees,
+    /// inotify on every leaf's `cgroup.events` (cgroup mode): a leaf emptying is an event.
+    inotify: Option<OwnedFd>,
+    closing: Vec<Closing>,
+    leftovers: Vec<Leftover>,
+    /// The namespace is ending (why, and the latest it waits for its trees): it exits once every
+    /// tree is gone.
+    ending: Option<(String, Instant)>,
+    /// Brains started, for their leaves' names.
+    brain_leaves: u64,
     exe: PathBuf,
     listener: OwnedFd,
     /// The namespace's lock, held until the namespace leaves ([`Holder::leave_path`]).
@@ -423,8 +483,14 @@ pub fn run(cfg: Config) -> ! {
     rustix::fs::fcntl_setfl(&listener, rustix::fs::OFlags::NONBLOCK).unwrap_or_else(|e| die(&format!("listener: {e}")));
     if cfg.daemon {
         daemonize(&cfg.log, &[listener.as_raw_fd(), lock.as_raw_fd()]);
-        crate::log::set_file(&cfg.log, cfg.log_max_bytes);
+    } else if cfg.unit.is_some() {
+        // A systemd user service: the manager made it a daemon (its own session, no terminal, the
+        // log on stdout and stderr); what it doesn't set, the holder does.
+        // SAFETY: plain umask(2).
+        unsafe { libc::umask(0o077) };
+        let _ = std::env::set_current_dir("/");
     }
+    crate::log::set_file(&cfg.log, cfg.log_max_bytes);
     let _ = lock.set_len(0);
     let _ = lock.rewind();
     let _ = writeln!(lock, "{}", std::process::id());
@@ -439,8 +505,21 @@ pub fn run(cfg: Config) -> ! {
     }
     let serving = cfg.ns.as_ref().map_or_else(|| "its own socket".to_owned(), |n| format!("namespace {n:?}"));
     log(&format!("{} holder serving {serving} at {}", cfg.version, cfg.socket.display()));
+    let (trees, inotify) = process_trees(cfg.unit.as_deref());
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_CHILD_SUBREAPER on this process: a terminal's orphans are reparented to the
+    // holder, which reaps them and hears each one end (a session tree's end is an event).
+    unsafe {
+        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+    }
     let max = cfg.max_terminals as u32;
     let mut h = Holder {
+        trees,
+        inotify,
+        closing: Vec::new(),
+        leftovers: Vec::new(),
+        ending: None,
+        brain_leaves: 0,
         exe,
         listener,
         lock: Some(lock),
@@ -475,6 +554,39 @@ pub fn run(cfg: Config) -> ! {
     h.run()
 }
 
+/// This namespace's process trees: its delegated cgroup when it runs as the systemd service it
+/// asked for (the holder moved into its leaf, an inotify for the leaves' events), else sessions.
+fn process_trees(unit: Option<&str>) -> (Trees, Option<OwnedFd>) {
+    let trees = Trees::detect(unit);
+    if let Trees::Cgroup { root, unit } = &trees {
+        #[cfg(target_os = "linux")]
+        let ino = rustix::fs::inotify::init(
+            rustix::fs::inotify::CreateFlags::CLOEXEC | rustix::fs::inotify::CreateFlags::NONBLOCK,
+        )
+        .map_err(std::io::Error::from);
+        #[cfg(not(target_os = "linux"))]
+        let ino: std::io::Result<OwnedFd> = Err(std::io::Error::other("no inotify"));
+        match (trees.enter("holder"), ino) {
+            (Ok(()), Ok(ino)) => {
+                log(&format!(
+                    "process trees: each terminal its own cgroup under {} ({unit}, delegated)",
+                    root.display()
+                ));
+                return (trees, Some(ino));
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                let why = format!("the service's cgroup {} can't be used: {e}", root.display());
+                log(&format!("process trees: sessions ({why})"));
+                return (Trees::Session { why }, None);
+            }
+        }
+    }
+    if let Trees::Session { why } = &trees {
+        log(&format!("process trees: each terminal's session ({why})"));
+    }
+    (trees, None)
+}
+
 impl Holder {
     fn run(&mut self) -> ! {
         loop {
@@ -501,6 +613,10 @@ impl Holder {
             if listening {
                 fds.push(pfd(self.listener.as_fd(), libc::POLLIN));
             }
+            let watching = self.inotify.is_some();
+            if let Some(ino) = &self.inotify {
+                fds.push(pfd(ino.as_fd(), libc::POLLIN));
+            }
             let ms = timeout.map_or(-1, |t| t.as_millis().min(60_000) as i32);
             // SAFETY: poll over a vector of pollfds we own.
             let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, ms) };
@@ -524,8 +640,12 @@ impl Holder {
             let ready: Vec<bool> =
                 fds[first_refused..first_refused + self.refused.len()].iter().map(|f| f.revents != 0).collect();
             self.drain_refused(&ready);
-            if listening && fds.last().is_some_and(|f| f.revents & libc::POLLIN != 0) {
+            let ino_at = fds.len() - usize::from(watching);
+            if listening && fds[ino_at - 1].revents & libc::POLLIN != 0 {
                 self.refuse_connections();
+            }
+            if watching && fds[ino_at].revents != 0 {
+                self.leaf_events();
             }
         }
     }
@@ -539,17 +659,24 @@ impl Holder {
 
     fn next_timeout(&self) -> Option<Duration> {
         let now = Instant::now();
+        if self.ending.is_some() && self.closing.is_empty() {
+            return Some(Duration::ZERO);
+        }
         let mut at: Vec<Instant> = Vec::new();
         at.extend(self.restart_at);
         at.extend(self.failed.as_ref().map(|f| f.1));
         at.extend(self.refused.front().map(|r| r.1));
         at.extend(self.shutdown_at);
         at.extend(self.upgrade.as_ref().map(|u| u.deadline));
-        for t in self.terms.values() {
-            if let Some((when, _, false)) = &t.kill {
-                at.push(*when + self.cfg.kill_grace);
+        for c in &self.closing {
+            if c.stage == 0 {
+                at.push(c.at + self.cfg.kill_term_after);
+            }
+            if c.stage <= 1 {
+                at.push(c.at + self.cfg.kill_grace);
             }
         }
+        at.extend(self.ending.as_ref().map(|e| e.1));
         if !self.cfg.watchdog.is_zero() {
             for p in [&self.brain, &self.candidate].into_iter().flatten() {
                 at.push(p.aborted.map_or(p.last_alive + self.cfg.watchdog, |a| a + Duration::from_secs(5)));
@@ -571,7 +698,7 @@ impl Holder {
         while self.refused.front().is_some_and(|r| now >= r.1) {
             self.refused.pop_front();
         }
-        if self.restart_at.is_some_and(|t| now >= t) && self.brain.is_none() {
+        if self.restart_at.is_some_and(|t| now >= t) && self.brain.is_none() && self.ending.is_none() {
             self.restart_at = None;
             self.start_brain();
         }
@@ -586,7 +713,8 @@ impl Holder {
         if let Some(t) = self.shutdown_at
             && now >= t
         {
-            self.finish("SIGTERM (the brain did not shut down in time)");
+            self.shutdown_at = None;
+            self.end("SIGTERM (the brain did not shut down in time)");
         }
         if let Some(u) = &self.upgrade
             && now >= u.deadline
@@ -619,20 +747,19 @@ impl Holder {
                 }
             }
         }
-        let grace = self.cfg.kill_grace;
-        for t in self.terms.values_mut() {
-            if let Some((when, groups, escalated)) = &mut t.kill
-                && !*escalated
-                && now.duration_since(*when) >= grace
-                && t.exit.is_none()
-            {
-                log(&format!("terminal {}: program outlived its hangup; SIGKILL", t.id));
-                for g in groups.iter() {
-                    // SAFETY: signalling a process group we started.
-                    unsafe { libc::kill(-*g, libc::SIGKILL) };
-                }
-                *escalated = true;
+        self.advance_closings(now);
+        if let Some((why, until)) = &self.ending
+            && (self.closing.is_empty() || now >= *until)
+        {
+            if !self.closing.is_empty() {
+                let left: Vec<String> = self.closing.iter().map(|c| c.id.clone()).collect();
+                log(&format!(
+                    "exiting with trees not yet empty: {} (the service manager ends the rest)",
+                    left.join(", ")
+                ));
             }
+            log(&format!("exited: {why}"));
+            std::process::exit(0);
         }
         if now.duration_since(self.restamped) >= Duration::from_secs(3600) && self.lock.is_some() {
             self.restamped = now;
@@ -647,7 +774,7 @@ impl Holder {
         if self.brain.is_none() && self.terms.is_empty() {
             let s = *self.idle_since.get_or_insert(now);
             if !self.cfg.idle_exit.is_zero() && now.duration_since(s) >= self.cfg.idle_exit {
-                self.finish(&format!("no terminals and no brain for {:?}", self.cfg.idle_exit));
+                self.end(&format!("no terminals and no brain for {:?}", self.cfg.idle_exit));
             }
         } else {
             self.idle_since = None;
@@ -687,7 +814,7 @@ impl Holder {
                             b.queue(json!({"m": "shutdown"}), vec![]);
                             self.shutdown_at = Some(Instant::now() + self.cfg.kill_grace + Duration::from_secs(2));
                         }
-                        _ => self.finish("SIGTERM"),
+                        _ => self.end("SIGTERM"),
                     }
                 }
                 _ => {}
@@ -697,7 +824,10 @@ impl Holder {
 
     // ── the brain ──────────────────────────────────────────────────────────────────────────
 
-    fn fork_brain(&self, binary: &Path, candidate: bool) -> std::io::Result<Peer> {
+    fn fork_brain(&mut self, binary: &Path, candidate: bool) -> std::io::Result<Peer> {
+        self.brain_leaves += 1;
+        let leaf = format!("brain-{}", self.brain_leaves);
+        let cgroup = self.trees.make_leaf(&leaf)?;
         let (mine, theirs) = link::pair()?;
         let mut args: Vec<CString> = vec![
             CString::new("g3d-termd").expect("no NUL"),
@@ -723,6 +853,12 @@ impl Holder {
         }
         if pid == 0 {
             unsafe {
+                if let Some(procs) = &cgroup
+                    && let Err(e) = spawn::enter_cgroup(procs)
+                {
+                    libc::write(err_fd, (&raw const e).cast(), 4);
+                    libc::_exit(127);
+                }
                 libc::fcntl(child_fd, libc::F_SETFD, 0);
                 for sig in 1..32 {
                     if sig != libc::SIGKILL && sig != libc::SIGSTOP {
@@ -758,6 +894,7 @@ impl Holder {
         let now = Instant::now();
         Ok(Peer {
             pid,
+            leaf: cgroup.map(|_| leaf),
             sock: mine,
             rd: Reader::default(),
             out: VecDeque::new(),
@@ -925,6 +1062,10 @@ impl Holder {
             "candidate": candidate, "max_terminals": self.cfg.max_terminals,
             "log": self.cfg.log.display().to_string(),
             "restarts": restarts.json(), "last_start": last_start,
+            "trees": self.trees.json(),
+            "leftovers": self.leftovers.iter().map(|l| json!({
+                "handle": l.handle, "id": l.id, "pid": l.pid, "tree": l.tree.json(), "since": l.since,
+            })).collect::<Vec<_>>(),
         });
         (msg, vec![dup(&self.listener), dup(&self.marks)])
     }
@@ -1022,23 +1163,7 @@ impl Holder {
             "kill" if w == Who::Brain => {
                 let handle = m.get("handle").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let sig = m.get("signal").and_then(Value::as_i64).unwrap_or(libc::SIGHUP as i64) as i32;
-                if let Some(t) = self.terms.get_mut(&handle)
-                    && t.exit.is_none()
-                {
-                    let mut groups = vec![t.pid];
-                    if let Some(fg) = t.master.as_ref().and_then(|m| rustix::termios::tcgetpgrp(m).ok()) {
-                        let fg = fg.as_raw_nonzero().get();
-                        if fg != t.pid {
-                            groups.push(fg);
-                        }
-                    }
-                    for g in &groups {
-                        // SAFETY: signalling process groups we started.
-                        unsafe { libc::kill(-*g, sig) };
-                    }
-                    t.master = None;
-                    t.kill = Some((Instant::now(), groups, false));
-                }
+                self.close(handle, sig);
             }
             "release" if w == Who::Brain => {
                 let handle = m.get("handle").and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -1138,9 +1263,21 @@ impl Holder {
             .ok_or_else(|| format!("{} terminals is the most this daemon holds", self.cfg.max_terminals))?;
         let path = s("path").ok_or("spawn without a path")?;
         let plan = spawn::Plan::new(path, &argv, &env, s("cwd"), cols, rows).map_err(|e| e.to_string())?;
-        let (master, pid) = spawn::spawn(&plan, self.nofile).map_err(|e| e.to_string())?;
-        self.free_slots.pop();
         let handle = self.next_handle;
+        let leaf = format!("term-{handle}");
+        let cgroup = self.trees.make_leaf(&leaf).map_err(|e| format!("its cgroup: {e}"))?;
+        let (master, pid) = match spawn::spawn(&plan, self.nofile, cgroup.as_deref()) {
+            Ok(x) => x,
+            Err(e) => {
+                self.trees.remove_leaf(&leaf);
+                return Err(e.to_string());
+            }
+        };
+        if cgroup.is_some() {
+            self.watch_leaf(&leaf);
+        }
+        let tree = self.trees.tree_of(handle, pid);
+        self.free_slots.pop();
         self.next_handle += 1;
         let dup = rustix::io::fcntl_dupfd_cloexec(&master, 3).map_err(|e| e.to_string())?;
         self.terms.insert(
@@ -1153,7 +1290,8 @@ impl Holder {
                 master: Some(master),
                 meta: m.get("meta").cloned().unwrap_or(Value::Null),
                 exit: None,
-                kill: None,
+                tree,
+                killed: false,
                 snaps: VecDeque::new(),
                 released: false,
                 known: true,
@@ -1227,6 +1365,13 @@ impl Holder {
                 return;
             }
             let (st, text) = describe_status(status);
+            for p in [&self.brain, &self.candidate].into_iter().flatten() {
+                if p.pid == pid
+                    && let Some(l) = &p.leaf
+                {
+                    self.trees.remove_leaf(l);
+                }
+            }
             if self.brain.as_ref().is_some_and(|b| b.pid == pid) {
                 self.brain_exited(&text, status);
             } else if self.candidate.as_ref().is_some_and(|c| c.pid == pid) {
@@ -1250,6 +1395,10 @@ impl Holder {
                 t.exit = Some(st.clone());
                 let handle = t.handle;
                 let (known, released) = (t.known, t.released);
+                let (killed, tree, id) = (t.killed, t.tree.clone(), t.id.clone());
+                if !killed {
+                    self.program_ended(handle, &id, pid, tree);
+                }
                 let mut msg = json!({"m": "exited", "handle": handle});
                 if let Some(o) = st.as_object() {
                     for (k, v) in o {
@@ -1265,6 +1414,11 @@ impl Holder {
                     self.remove(handle);
                 }
             }
+            // Anything else is an orphan of a terminal's (the holder is their subreaper), reaped
+            // here; a session tree may have just emptied.
+            if !self.trees.is_cgroup() {
+                self.check_trees();
+            }
         }
     }
 
@@ -1272,7 +1426,10 @@ impl Holder {
         let old = self.brain.take().expect("a brain");
         let generation = self.generation;
         if let Some(why) = self.exiting.take() {
-            self.finish(&why);
+            self.end(&why);
+        }
+        if self.ending.is_some() {
+            return;
         }
         if self.upgrade.as_ref().is_some_and(|u| u.stage == Stage::Committing) && self.candidate.is_some() {
             // The handoff: the candidate becomes the brain.
@@ -1289,8 +1446,9 @@ impl Holder {
             self.brain = Some(c);
             return;
         }
-        if self.shutdown_at.is_some() {
-            self.finish("SIGTERM");
+        if self.shutdown_at.take().is_some() {
+            self.end("SIGTERM");
+            return;
         }
         let watchdog = old.aborted.is_some();
         if let Some((cand, cand_status)) = self.candidate_lost.take() {
@@ -1337,46 +1495,197 @@ impl Holder {
         self.schedule_restart();
     }
 
-    /// Ends the namespace: every program is hung up (SIGKILL after the grace), the brain and any
-    /// candidate are killed, the socket is removed.
-    fn finish(&mut self, why: &str) -> ! {
+    /// Ends the namespace: the socket goes, the brain and any candidate are killed, and every
+    /// terminal's tree (and every leftover) gets the close rule; the holder exits once they are
+    /// all gone, or `kill_grace` + 2 s on, whichever is first (a systemd service's manager then
+    /// ends what is left of its cgroup).
+    fn end(&mut self, why: &str) {
+        if self.ending.is_some() {
+            return;
+        }
         log(&format!("exiting: {why}"));
         self.leave_path();
-        let mut groups = Vec::new();
-        for t in self.terms.values_mut() {
-            if t.exit.is_none() {
-                groups.push(t.pid);
-                if let Some(fg) = t.master.as_ref().and_then(|m| rustix::termios::tcgetpgrp(m).ok()) {
-                    groups.push(fg.as_raw_nonzero().get());
-                }
-            }
-            t.master = None;
-        }
+        self.ending = Some((why.to_owned(), Instant::now() + self.cfg.kill_grace + Duration::from_secs(2)));
+        self.restart_at = None;
+        self.failed = None;
         for p in [&self.brain, &self.candidate].into_iter().flatten() {
             // SAFETY: our own children.
             unsafe { libc::kill(p.pid, libc::SIGKILL) };
         }
-        for g in &groups {
-            // SAFETY: process groups we started.
-            unsafe { libc::kill(-*g, libc::SIGHUP) };
+        let live: Vec<u32> = self.terms.values().filter(|t| t.exit.is_none() && !t.killed).map(|t| t.handle).collect();
+        for h in live {
+            self.close(h, libc::SIGHUP);
         }
-        let until = Instant::now() + self.cfg.kill_grace;
-        let pids: Vec<i32> = self.terms.values().filter(|t| t.exit.is_none()).map(|t| t.pid).collect();
-        let alive = |pid: i32| {
-            let mut st = 0;
-            // SAFETY: reaping our own children.
-            unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) == 0 }
-        };
-        let mut left: Vec<i32> = pids;
-        while !left.is_empty() && Instant::now() < until {
-            left.retain(|&p| alive(p));
-            std::thread::sleep(Duration::from_millis(10));
+        for t in self.terms.values_mut() {
+            t.master = None;
         }
-        for g in &groups {
-            // SAFETY: as above.
-            unsafe { libc::kill(-*g, libc::SIGKILL) };
+        for l in std::mem::take(&mut self.leftovers) {
+            self.start_closing(l.handle, l.id, l.tree, libc::SIGHUP, None);
         }
-        std::process::exit(0);
+    }
+
+    // ── process trees ──────────────────────────────────────────────────────────────────────
+
+    /// `kill`: the close rule on a terminal's tree. The asked signal goes to every process in it
+    /// and to the PTY's foreground group, the holder's copy of the PTY closes (the brain closes
+    /// its own: the last close hangs the PTY up), then `SIGTERM` to what is left after
+    /// `kill_term_after`, `SIGKILL` after `kill_grace`.
+    fn close(&mut self, handle: u32, sig: i32) {
+        let Some(t) = self.terms.get_mut(&handle) else { return };
+        if t.exit.is_some() || t.killed {
+            return;
+        }
+        t.killed = true;
+        let fg = t.master.as_ref().and_then(|m| rustix::termios::tcgetpgrp(m).ok()).map(|p| p.as_raw_nonzero().get());
+        t.master = None;
+        let (id, tree) = (t.id.clone(), t.tree.clone());
+        self.start_closing(handle, id, tree, sig, fg);
+    }
+
+    fn start_closing(&mut self, handle: u32, id: String, tree: Tree, sig: i32, fg: Option<i32>) {
+        if let Some(fg) = fg {
+            // SAFETY: the PTY's foreground group, one of the tree's.
+            unsafe { libc::kill(-fg, sig) };
+        }
+        let who = self.trees.signal(&tree, sig);
+        self.closing.push(Closing {
+            handle,
+            id,
+            tree,
+            at: Instant::now(),
+            stage: if sig == libc::SIGKILL { 2 } else { 0 },
+            steps: vec![(sig_name(sig), who)],
+        });
+        self.check_trees();
+    }
+
+    /// The close rule's next steps for every tree being closed whose time has come.
+    fn advance_closings(&mut self, now: Instant) {
+        let (term_after, grace) = (self.cfg.kill_term_after, self.cfg.kill_grace);
+        let mut stepped = false;
+        for c in &mut self.closing {
+            let elapsed = now.duration_since(c.at);
+            if c.stage == 0 && elapsed >= term_after {
+                c.stage = 1;
+                let who = self.trees.signal(&c.tree, libc::SIGTERM);
+                if !who.is_empty() {
+                    c.steps.push(("TERM", who));
+                }
+                stepped = true;
+            }
+            if c.stage == 1 && elapsed >= grace {
+                c.stage = 2;
+                let who = self.trees.signal(&c.tree, libc::SIGKILL);
+                if !who.is_empty() {
+                    log(&format!("terminal {}: {} outlived SIGHUP and SIGTERM; SIGKILL", c.id, procs_text(&who)));
+                    c.steps.push(("KILL", who));
+                }
+                stepped = true;
+            }
+        }
+        if stepped {
+            self.check_trees();
+        }
+    }
+
+    /// Trees that have emptied: a close is done (reported), a leftover is gone.
+    fn check_trees(&mut self) {
+        let trees = &self.trees;
+        let mut done = Vec::new();
+        self.closing.retain(|c| {
+            // A session's last SIGKILL is the end: the processes it reached are gone, and one that
+            // left the session isn't the tree's.
+            let over = !trees.populated(&c.tree) || (c.stage == 2 && !trees.is_cgroup());
+            if over {
+                done.push((c.handle, c.id.clone(), c.tree.clone(), c.steps.clone()));
+            }
+            !over
+        });
+        for (handle, id, tree, steps) in done {
+            if let Tree::Leaf(l) = &tree {
+                self.trees.remove_leaf(l);
+            }
+            let text: Vec<String> = steps
+                .iter()
+                .filter(|s| !s.1.is_empty())
+                .map(|(sig, p)| format!("SIG{sig} → {}", procs_text(p)))
+                .collect();
+            log(&format!(
+                "terminal {id} closed: {}",
+                if text.is_empty() { "nothing was running".to_owned() } else { text.join("; ") }
+            ));
+            let steps: Vec<Value> = steps
+                .iter()
+                .map(|(sig, p)| json!({"signal": sig, "procs": p.iter().map(Proc::json).collect::<Vec<_>>()}))
+                .collect();
+            let msg = json!({"m": "killed", "handle": handle, "id": id, "at": ms_now(), "steps": steps});
+            if let Some(b) = &mut self.brain {
+                b.queue(msg, vec![]);
+            }
+        }
+        let mut gone = Vec::new();
+        self.leftovers.retain(|l| {
+            let alive = trees.populated(&l.tree);
+            if !alive {
+                gone.push((l.handle, l.id.clone(), l.tree.clone()));
+            }
+            alive
+        });
+        for (handle, id, tree) in gone {
+            if let Tree::Leaf(l) = &tree {
+                self.trees.remove_leaf(l);
+            }
+            log(&format!("terminal {id}: what its program left running has ended"));
+            if let Some(b) = &mut self.brain {
+                b.queue(json!({"m": "leftover_gone", "handle": handle}), vec![]);
+            }
+        }
+    }
+
+    /// A terminal's program exited on its own: what it left running in its tree (a `nohup` job)
+    /// keeps running, as a terminal leaves it, and is reported until it ends (with the namespace,
+    /// at the latest).
+    fn program_ended(&mut self, handle: u32, id: &str, pid: i32, tree: Tree) {
+        let left = self.trees.members(&tree);
+        if left.is_empty() {
+            if let Tree::Leaf(l) = &tree {
+                self.trees.remove_leaf(l);
+            }
+            return;
+        }
+        log(&format!("terminal {id}: its program ended, leaving {} running", procs_text(&left)));
+        let since = ms_now();
+        let msg = json!({"m": "leftover", "handle": handle, "id": id, "pid": pid, "tree": tree.json(), "since": since});
+        for p in [&mut self.brain, &mut self.candidate].into_iter().flatten() {
+            p.queue(msg.clone(), vec![]);
+        }
+        self.leftovers.push(Leftover { handle, id: id.to_owned(), pid, tree, since });
+    }
+
+    /// Watches a leaf's `cgroup.events`: it changes when the leaf empties.
+    fn watch_leaf(&mut self, leaf: &str) {
+        #[cfg(target_os = "linux")]
+        if let (Some(ino), Some(dir)) = (&self.inotify, self.trees.leaf_dir(leaf)) {
+            // The watch goes with the leaf when it is removed.
+            if let Err(e) =
+                rustix::fs::inotify::add_watch(ino, dir.join("cgroup.events"), rustix::fs::inotify::WatchFlags::MODIFY)
+            {
+                log(&format!("inotify on {}: {e}", dir.display()));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = leaf;
+    }
+
+    /// inotify says leaves changed: check the trees.
+    fn leaf_events(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(ino) = &self.inotify {
+            let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 4096];
+            let mut rd = rustix::fs::inotify::Reader::new(ino, &mut buf);
+            while rd.next().is_ok() {}
+        }
+        self.check_trees();
     }
 
     /// The namespace is leaving: its name goes at once, before the shells are hung up and the

@@ -11,7 +11,8 @@ import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
  *                 the namespace is idle (no daemon), amber while it restarts, red when it's
  *                 unreachable, failed or lost. A click opens the window.
  *   StatusWindow  the daemon (version, engine, namespace, uptime, holder and brain, restarts) and its
- *                 terminals, one row each, then the latest errors. Floats (drag its head) or sticks to
+ *                 terminals, one row each (a tree of several processes says how many), what ended
+ *                 terminals left running, then the latest errors. Floats (drag its head) or sticks to
  *                 the left or right edge, like the sidebar (Panel.jsx); open, side and spot persist
  *                 per relay. A row's click reveals its terminal (wall.reveal: shown, focused, framed).
  *                 Toggled by the chord + S or `wall.status`.
@@ -110,6 +111,7 @@ function notes(t) {
   if (t.subscribers.some((s) => s.lagging)) loud.push('lagging');
   if (t.input_queued > 0) loud.push(`${bytes(t.input_queued)} input queued`);
   if (t.alt) quiet.push('alt');
+  if (t.processes > 1) quiet.push(`${t.processes} processes`);
   if (t.restored) quiet.push(t.unseen > 0 ? `restored: ${t.restored}, ${bytes(t.unseen)} unseen` : `restored: ${t.restored}`);
   return { loud, quiet };
 }
@@ -276,6 +278,23 @@ function Terminals({ wall, termd, now, stale }) {
   );
 }
 
+/** What terminals whose programs ended left running (a nohup job), until it ends. */
+function Leftovers({ termd }) {
+  const ls = termd.doc?.daemon?.leftovers ?? [];
+  if (!ls.length) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      {ls.map((l) => (
+        <div key={l.id} style={styles.err} title={l.processes.map((p) => `${p.pid} ${p.comm}`).join('\n')}>
+          <span style={{ color: C.amber }}>left running</span>
+          <span style={styles.muted}> {l.id} · ended {clock(l.since)}</span>{' '}
+          <span>{l.processes.map((p) => p.comm).join(', ')}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The latest errors, newest first. */
 function Errors({ termd, shown }) {
   const es = (termd.doc?.errors ?? []).slice(0, shown);
@@ -324,6 +343,7 @@ export default function StatusWindow({ wall, state }) {
       <div style={styles.body}>
         <Daemon termd={termd} now={now} />
         <Terminals wall={wall} termd={termd} now={now} stale={stale} />
+        <Leftovers termd={termd} />
         <Errors termd={termd} shown={wall.config.errorsShown} />
       </div>
     </div>

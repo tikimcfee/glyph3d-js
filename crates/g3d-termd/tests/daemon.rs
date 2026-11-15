@@ -43,9 +43,21 @@ fn handshake_refuses_another_major() {
     assert_eq!(c.welcome.proto, PROTO);
     assert_eq!(
         c.welcome.features,
-        vec!["raw", "view", "capture", "status", "upgrade", "env", "key", "paste", "option_as_alt", "mouse"]
+        vec![
+            "raw",
+            "view",
+            "capture",
+            "status",
+            "upgrade",
+            "env",
+            "key",
+            "paste",
+            "option_as_alt",
+            "mouse",
+            "paste_stream"
+        ]
     );
-    assert_eq!(c.welcome.proto, [1, 4]);
+    assert_eq!(c.welcome.proto, [1, 5]);
     // 1.1: the namespace's identity, the brain's generation, the holder.
     assert_eq!(c.welcome.instance.as_ref().map(String::len), Some(16));
     assert_eq!(c.welcome.generation, Some(1));

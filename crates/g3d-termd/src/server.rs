@@ -260,6 +260,7 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
         restarts: w.restarts,
         last_start,
         snapshot_interval_ms: args.snapshot_interval_ms,
+        trees: w.trees.clone(),
     };
     let hub = Hub::new(
         info,
@@ -271,7 +272,33 @@ pub fn brain(args: crate::Args, fd: i32, ns: Option<String>, socket: PathBuf, lo
             rate_window: Duration::from_millis(args.status_rate_window_ms.max(1)),
         },
         errors,
+        w.leftovers.clone(),
+        args.status_closes,
     );
+    // The holder's death ends every tree. A systemd service's manager does that for the holder
+    // (its cgroup), and this brain, which outlives it by a moment, does it too: at once for a
+    // cgroup, and the only way for a session (DESIGN.md, "Process trees").
+    {
+        let (hub, reg, grace) = (hub.clone(), reg.clone(), Duration::from_secs(args.kill_grace));
+        hold::on_holder_gone(Box::new(move || {
+            let trees = hub.all_trees(&reg);
+            crate::log(&format!("the holder is gone: ending {} terminal tree(s) by the close rule", trees.len()));
+            let t = &hub.info.trees;
+            let mut pids = Vec::new();
+            for tree in &trees {
+                t.signal(tree, libc::SIGHUP);
+                pids.extend(t.signal(tree, libc::SIGTERM).into_iter().map(|p| p.pid));
+            }
+            g3d_hold::tree::wait_gone(&pids, Instant::now() + grace);
+            for tree in &trees {
+                let left = t.signal(tree, libc::SIGKILL);
+                if !left.is_empty() {
+                    let who: Vec<String> = left.iter().map(|p| format!("{} {}", p.pid, p.comm)).collect();
+                    crate::log(&format!("outlived SIGHUP and SIGTERM; SIGKILL: {}", who.join(", ")));
+                }
+            }
+        }));
+    }
     if candidate {
         if !not_exact.is_empty() {
             let why = format!("terminals not handed over exactly: {}", not_exact.join(", "));
@@ -421,6 +448,15 @@ async fn run(
                         if let Some(tx) = srv.upgrade_tx.lock().unwrap().as_ref() {
                             let _ = tx.send(m);
                         }
+                    }
+                    "killed" => srv.hub.closed(&m),
+                    "leftover" => {
+                        if let Some(l) = hold::Leftover::from_msg(&m) {
+                            srv.hub.leftover(l);
+                        }
+                    }
+                    "leftover_gone" => {
+                        srv.hub.leftover_gone(m.get("handle").and_then(Value::as_u64).unwrap_or(0) as u32)
                     }
                     other => crate::log(&format!("hold link: unexpected {other:?}")),
                 }

@@ -18,6 +18,8 @@ mod owner;
 mod paste;
 mod repaint;
 mod server;
+#[cfg(target_os = "linux")]
+mod service;
 mod spawn;
 mod status;
 
@@ -122,9 +124,23 @@ pub struct Args {
     /// A candidate brain must be ready within this many seconds or the upgrade fails.
     #[arg(long, default_value_t = 10)]
     pub upgrade_deadline: u64,
-    /// After `kill`'s signal, SIGKILL a program still running this many seconds later.
+    /// The close rule: `kill`'s signal (SIGHUP) to every process in the terminal's tree, SIGTERM
+    /// to what is left this many ms later (0: at once, as systemd's SendSIGHUP sends SIGHUP right
+    /// after its SIGTERM)...
+    #[arg(long, default_value_t = 0)]
+    pub kill_term_after_ms: u64,
+    /// ...and SIGKILL to what is left this many seconds after the first signal.
     #[arg(long, default_value_t = 2)]
     pub kill_grace: u64,
+    /// Process trees (Linux): `auto` runs a --daemon namespace as a systemd user service with its
+    /// own cgroup (each terminal's tree a leaf of it) when the user manager answers; `off`, or no
+    /// manager, keeps each terminal's session as its tree.
+    #[arg(long, value_enum, default_value_t = Cgroups::Auto)]
+    pub cgroups: Cgroups,
+    /// How long --daemon waits for the user manager to start the service before daemonizing
+    /// itself instead, in ms.
+    #[arg(long, default_value_t = 3000)]
+    pub service_start_timeout_ms: u64,
     /// The most terminals one namespace holds (the size of the seq_marks page).
     #[arg(long, default_value_t = 8192)]
     max_terminals: usize,
@@ -149,6 +165,9 @@ pub struct Args {
     /// The status document keeps this many distinct recent errors.
     #[arg(long, default_value_t = 32)]
     pub status_errors: usize,
+    /// The status document keeps this many of the latest closes (what each signal reached).
+    #[arg(long, default_value_t = 16)]
+    pub status_closes: usize,
     /// Internal: run as the brain on this hold-link fd.
     #[arg(long, hide = true)]
     brain: bool,
@@ -157,6 +176,15 @@ pub struct Args {
     /// Internal: this brain is an upgrade's candidate.
     #[arg(long, hide = true, requires = "brain")]
     pub candidate: bool,
+    /// Internal: the holder runs as this systemd user service (its cgroup is delegated to it).
+    #[arg(long, hide = true)]
+    systemd_unit: Option<String>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cgroups {
+    Auto,
+    Off,
 }
 
 /// The test hooks (owner.rs, server.rs, env.rs) exist only in a build with the `test-hooks`
@@ -252,12 +280,32 @@ fn main() {
         brain_args.push("--socket".into());
         brain_args.push(socket.clone().into_os_string());
     }
+    let mut daemon = args.daemon;
+    #[cfg(target_os = "linux")]
+    if daemon && args.cgroups == Cgroups::Auto && args.systemd_unit.is_none() {
+        match service::start(&args, ns.as_deref(), &socket, &log_path) {
+            Ok(()) => std::process::exit(0),
+            Err(why) => {
+                // The fallback is the double fork; the starter's log says why (a relay keeps it).
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!(
+                        "g3d-termd: no systemd user service ({why}); daemonizing, each terminal's session its tree\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+    }
+    if args.systemd_unit.is_some() {
+        daemon = false;
+    }
     let s = Duration::from_secs;
     g3d_hold::run(g3d_hold::Config {
         ns,
         socket,
         log: log_path,
-        daemon: args.daemon,
+        daemon,
         version: VERSION.to_owned(),
         brain_args,
         idle_exit: s(args.idle_exit),
@@ -270,7 +318,9 @@ fn main() {
         refused_max: args.brain_failed_linger_max,
         watchdog: s(args.brain_watchdog),
         upgrade_deadline: s(args.upgrade_deadline.max(1)),
+        kill_term_after: Duration::from_millis(args.kill_term_after_ms).min(s(args.kill_grace)),
         kill_grace: s(args.kill_grace),
+        unit: if args.cgroups == Cgroups::Auto { args.systemd_unit.clone() } else { None },
         max_terminals: args.max_terminals.max(1),
         log_max_bytes: args.log_max_bytes,
     });

@@ -28,6 +28,8 @@ pub struct Daemon {
     pub dir: PathBuf,
     pub socket: PathBuf,
     pub child: Option<Child>,
+    /// A daemonized holder (`--daemon`): not this test's child; its pid is in the lock file.
+    pub detached: Option<u32>,
 }
 
 pub fn bin() -> &'static str {
@@ -106,7 +108,7 @@ impl Daemon {
             });
         }
         let child = cmd.spawn().unwrap();
-        let d = Daemon { dir, socket, child: Some(child) };
+        let d = Daemon { dir, socket, child: Some(child), detached: None };
         let until = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(&d.socket).is_err() {
             assert!(Instant::now() < until, "daemon did not come up: {}", d.log());
@@ -122,12 +124,48 @@ impl Daemon {
     }
 
     pub fn log(&self) -> String {
+        if self.detached.is_some() {
+            return std::fs::read_to_string(format!("{}.log", self.socket.display())).unwrap_or_default();
+        }
         std::fs::read_to_string(self.dir.join("daemon.log")).unwrap_or_default()
     }
 
-    /// The holder's pid (the process the test started).
+    /// A daemonized namespace (`--daemon`): on Linux a systemd user service when the user
+    /// manager answers (its holder and brain in their own cgroup), else a double fork. Its log
+    /// is `<socket>.log`.
+    pub fn start_daemonized(args: &[&str]) -> Self {
+        let dir = Self::fresh_dir();
+        let socket = dir.join("termd-test.sock");
+        let st = Command::new(bin())
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--env-source", "daemon", "--daemon"])
+            .arg("--config")
+            .arg(dir.join("termd.toml"))
+            .args(args)
+            .env("G3D_TERMD_TEST_HOOKS", "1")
+            .stdin(Stdio::null())
+            .stderr(std::fs::File::create(dir.join("start.log")).unwrap())
+            .status()
+            .unwrap();
+        assert!(
+            st.success(),
+            "--daemon failed: {}",
+            std::fs::read_to_string(dir.join("start.log")).unwrap_or_default()
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(Instant::now() < until, "daemon did not come up");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lock = std::fs::read_to_string(format!("{}.lock", socket.display())).unwrap();
+        let pid: u32 = lock.trim().parse().unwrap();
+        Daemon { dir, socket, child: None, detached: Some(pid) }
+    }
+
+    /// The holder's pid (the process the test started, or a daemonized one's).
     pub fn pid(&self) -> u32 {
-        self.child.as_ref().unwrap().id()
+        self.detached.unwrap_or_else(|| self.child.as_ref().unwrap().id())
     }
 
     /// Connects again after a brain restart (the holder's backlog holds the connection until the
@@ -156,6 +194,17 @@ impl Daemon {
 
     /// Stops with SIGTERM (a clean shutdown), SIGKILL after 5 s.
     pub fn stop(&mut self) {
+        if let Some(pid) = self.detached.take() {
+            let alive = |p: u32| unsafe { libc::kill(p as i32, 0) } == 0;
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+            let until = Instant::now() + Duration::from_secs(5);
+            while alive(pid) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if alive(pid) {
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }
         if let Some(mut c) = self.child.take() {
             unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
             let until = Instant::now() + Duration::from_secs(5);

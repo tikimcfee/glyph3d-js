@@ -88,10 +88,30 @@ fn open_fds() -> Vec<i32> {
     v
 }
 
-/// Starts `plan` on a new PTY as a session leader with the PTY as its controlling terminal.
-/// `nofile` is the soft `RLIMIT_NOFILE` the holder started with. Returns the master and the pid;
-/// an exec failure comes back as the child's errno.
-pub fn spawn(plan: &Plan, nofile: libc::rlim_t) -> io::Result<(OwnedFd, i32)> {
+/// Moves the calling process into the cgroup whose `cgroup.procs` is `procs` (writing `0` names
+/// the writer). Async-signal-safe: a forked child calls it before `exec`, so nothing the program
+/// forks can start outside its tree. Answers the errno on failure.
+///
+/// # Safety
+/// Only `open`, `write` and `close` on a path prepared before the fork.
+pub unsafe fn enter_cgroup(procs: &std::ffi::CStr) -> Result<(), i32> {
+    unsafe {
+        let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return Err(*errno_ptr());
+        }
+        let ok = libc::write(fd, b"0".as_ptr().cast(), 1) == 1;
+        let e = *errno_ptr();
+        libc::close(fd);
+        if ok { Ok(()) } else { Err(e) }
+    }
+}
+
+/// Starts `plan` on a new PTY as a session leader with the PTY as its controlling terminal, in the
+/// cgroup whose `cgroup.procs` is `cgroup` when given (its process tree: tree.rs). `nofile` is the
+/// soft `RLIMIT_NOFILE` the holder started with. Returns the master and the pid; an exec failure
+/// comes back as the child's errno.
+pub fn spawn(plan: &Plan, nofile: libc::rlim_t, cgroup: Option<&std::ffi::CStr>) -> io::Result<(OwnedFd, i32)> {
     let (master, slave) = open_pty(plan.cols, plan.rows)?;
     let (err_r, err_w) = crate::pipe(false)?;
     let mut argv: Vec<*const libc::c_char> = plan.argv.iter().map(|a| a.as_ptr()).collect();
@@ -117,6 +137,12 @@ pub fn spawn(plan: &Plan, nofile: libc::rlim_t) -> io::Result<(OwnedFd, i32)> {
                 libc::write(err_fd, msg.as_ptr().cast(), 8);
                 libc::_exit(127);
             };
+            if let Some(procs) = cgroup
+                && let Err(e) = enter_cgroup(procs)
+            {
+                *errno_ptr() = e;
+                fail(6);
+            }
             // Every disposition back to default and the mask cleared: an ignored signal stays
             // ignored across exec, and the holder ignores SIGINT.
             for sig in 1..32 {
@@ -182,7 +208,10 @@ pub fn spawn(plan: &Plan, nofile: libc::rlim_t) -> io::Result<(OwnedFd, i32)> {
         let mut status = 0;
         // SAFETY: reaping our own child, which has already called _exit.
         unsafe { libc::waitpid(pid, &mut status, 0) };
-        let step = ["", "setsid", "TIOCSCTTY", "dup2", "chdir", "exec"].get(msg[0] as usize).copied().unwrap_or("?");
+        let step = ["", "setsid", "TIOCSCTTY", "dup2", "chdir", "exec", "joining its cgroup"]
+            .get(msg[0] as usize)
+            .copied()
+            .unwrap_or("?");
         let e = io::Error::from_raw_os_error(msg[1]);
         return Err(io::Error::new(e.kind(), format!("{step} {}: {e}", plan.path.to_string_lossy())));
     }
@@ -190,12 +219,12 @@ pub fn spawn(plan: &Plan, nofile: libc::rlim_t) -> io::Result<(OwnedFd, i32)> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-unsafe fn errno_ptr() -> *mut i32 {
+pub(crate) unsafe fn errno_ptr() -> *mut i32 {
     unsafe { libc::__errno_location() }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-unsafe fn errno_ptr() -> *mut i32 {
+pub(crate) unsafe fn errno_ptr() -> *mut i32 {
     unsafe { libc::__error() }
 }
 
@@ -211,7 +240,7 @@ mod tests {
         let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
         // SAFETY: getrlimit into a struct we own.
         unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
-        let (master, pid) = spawn(&plan, rl.rlim_cur).unwrap();
+        let (master, pid) = spawn(&plan, rl.rlim_cur, None).unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         let until = Instant::now() + Duration::from_secs(10);
