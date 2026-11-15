@@ -24,8 +24,8 @@
  *                                   [--cmd 'layout.scheme library']… [--width W --height H] [--shots DIR]
  *
  * Needs Vite and a PRIVATE relay serving a scratch root that can reach --dir (frame-profile's
- * setup). Exits 1 when no pose has a visible label to compare (vacuous), a pose draws no fewer
- * calls batched, or BATCHED differs from SHIFTED on more than 1% of the pixels BARE does.
+ * setup). Exits 1 when no pose has a visible label to compare (vacuous), a pose with two or more
+ * labels draws no fewer calls batched (or one with a single label draws more), or BATCHED differs from SHIFTED on more than 1% of the pixels BARE does.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -160,7 +160,8 @@ try {
         const share = r.bareVsOwn.changed ? r.vsShifted.changed / r.bareVsOwn.changed : 0;
         const vacuous = r.stats.drawn === 0 || r.bareVsOwn.changed === 0;
         if (!vacuous) compared++;
-        const bad = r.calls.batched >= r.calls.own || share > 0.01;
+        // Batching saves a draw from the second label on: one label is one draw either way.
+        const bad = (r.stats.drawn > 1 ? r.calls.batched >= r.calls.own : r.calls.batched > r.calls.own) || share > 0.01;
         const pct = (n) => `${(100 * n / r.total).toFixed(3)}%`;
         if (bad) failed++;
         console.log(`${bad ? '✗' : '✓'} ${name}: ${r.stats.drawn} labels batched (${r.stats.glyphs} glyphs; ${r.stats.hidden} hidden, ${r.stats.culled} culled, ${r.stats.own} own)`
