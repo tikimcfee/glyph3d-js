@@ -69,8 +69,10 @@ termd:
 ifneq ($(filter linux darwin,$(HOST_OS)),)
 	@{ test -e vendor/ghostty/build.zig && test -x vendor/zig/zig; } || { echo "$$TERMD_VENDOR_MISSING" >&2; exit 1; }
 	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
-	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd
-	cp $(CARGO_OUT)/release/g3d ./g3d
+	# Copy, then rename over: a running daemon holds ./g3d-termd ("text file busy" for a cp onto
+	# it), and a rename leaves its inode running while the next start (or `g3d upgrade`) gets the new.
+	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd.new && mv -f ./g3d-termd.new ./g3d-termd
+	cp $(CARGO_OUT)/release/g3d ./g3d.new && mv -f ./g3d.new ./g3d
 	@echo "Built ./g3d-termd ./g3d"
 else
 	@echo "g3d-termd: not built on $(HOST_OS) (no PTYs; see docs/termd/DESIGN.md) — this relay will have no terminals"

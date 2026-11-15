@@ -82,7 +82,9 @@ start_vite() {
   echo "→ vite: clear cache + (re)start on :$VITE_PORT"
   kill_port "$VITE_PORT" vite
   rm -rf "$APP_DIR/node_modules/.vite"
-  ( cd "$APP_DIR" && VITE_PORT="$VITE_PORT" nohup bun run dev >"$VITE_LOG" 2>&1 & disown )
+  # exec: the server replaces the subshell, so no wrapper shell lingers holding this script's
+  # stdout (a caller piping dev.sh's output would otherwise wait on it forever).
+  ( cd "$APP_DIR" && VITE_PORT="$VITE_PORT" exec nohup bun run dev >"$VITE_LOG" 2>&1 </dev/null ) & disown
   sleep 2
   if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
     echo "  vite up → $(page_url)   (log: $VITE_LOG)"
@@ -97,7 +99,7 @@ start_relay() {
   echo "→ relay: rebuild Go + termd, (re)start on :$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && nohup ./glyph3d-cli serve --port "$RELAY_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 & disown )
+  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServe), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
