@@ -20,6 +20,7 @@ import SelectionOverlay from './SelectionOverlay.js';
 import WallPaper from './WallPaper.js';
 import WallFullscreen from './WallFullscreen.js';
 import WallAgentViews from './WallAgentViews.js';
+import WallBus, { attachArgv, busAttachable, busStatus, isBusTarget } from './WallBus.js';
 import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
@@ -181,6 +182,8 @@ export default class TerminalWall {
         this.termd = new TermdStatus();
         /** Per-terminal Agent Views: categorized gomuxai event streams attached alongside terminals. */
         this.agents = new WallAgentViews(this);
+        /** The gomuxai agents the relay sees, to attach to (wall.attach, wall.bus). */
+        this.bus = new WallBus(() => this._emit());
         registerWallCommands(this.router, this);
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
@@ -240,6 +243,7 @@ export default class TerminalWall {
         routeTerminalOutput(this.bridge, this.ctx);
         this._offTermd = this.termd.attach(this.bridge);
         this.agents.start(this.bridge);
+        this.bus.start(this.bridge);
         this.bridge.onConnectionChange((up) => this._onConnection(up));
         this._running = true;
         this.bridge.connect();
@@ -248,6 +252,7 @@ export default class TerminalWall {
     stop() {
         this._running = false;
         this.agents.stop();
+        this.bus.stop();
         this._offTermd();
         this.termd.clear();
         this._offTrace();
@@ -288,7 +293,7 @@ export default class TerminalWall {
         this.fullscreen.tick(performance.now());
         this.names.update({
             order: this.canvasOrder(), terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
-            nameOf: (id) => this.nameOf(id), windowRect: (id) => this.windowRect(id),
+            nameOf: (id) => this.titleOf(id), windowRect: (id) => this.windowRect(id),
         });
         this.groups.update(this.viewport.zoom, this.focusedId, !!this.fullscreen.id);
         this.paper.update(this.viewport, this.config);
@@ -368,6 +373,7 @@ export default class TerminalWall {
                 this._setRelay('up', '');
                 this.termd.request(this.bridge);
                 this.agents.onRelayUp();
+                this.bus.refresh();
                 this._recover();
             } else {
                 const why = String(m.error || 'refused');
@@ -492,9 +498,17 @@ export default class TerminalWall {
         if (grid) this.store.setPosition(id, grid.position);
     }
 
-    /** A terminal's name: the one the person gave it, else its shell's title, else its id. */
+    /** A terminal's name: the one the person gave it, else the agent it attaches to, else its shell's title, else its id. */
     nameOf(id) {
-        return this.store.name(id) || shortTitle(this.ctx.terminals.get(id)?.windowTitle) || id;
+        return this.store.name(id) || this.store.attached(id) || shortTitle(this.ctx.terminals.get(id)?.windowTitle) || id;
+    }
+
+    /** What a terminal's title bar says: its name, and for one attached to an agent the bus lists, that agent's status. */
+    titleOf(id) {
+        const name = this.nameOf(id);
+        const target = this.store.attached(id);
+        const a = target ? this.bus.find(target) : null;
+        return a ? `${name} · ${busStatus(a.status).word}` : name;
     }
 
     /** Name a terminal; an empty name clears it back to the shell's title. */
@@ -699,11 +713,12 @@ export default class TerminalWall {
                 let preview = '';
                 for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { preview = lines[i].trim(); break; } }
                 return {
-                    id, name: this.nameOf(id), named: !!this.store.name(id), cols: g.cols, rows: g.rows, preview,
+                    id, name: this.nameOf(id), named: !!this.store.name(id), attached: this.store.attached(id), cols: g.cols, rows: g.rows, preview,
                     hidden: this.store.hidden(id), group: this.store.groupOf(id), selected: g.hasSelection,
                     agentView: this.agents.isOpen(id) ? { open: true, side: this.agents.sideOf(id) } : null,
                 };
             }),
+            bus: { reason: this.bus.reason, hosts: this.bus.hosts() },
             agentViews: this.order.filter((id) => this.agents.isOpen(id)).map((id) => this.agents.describe(id)).filter(Boolean),
             groups: this.groups ? this.groups.ids().map((gid) => {
                 const g = this.groups.get(gid);
@@ -891,6 +906,35 @@ export default class TerminalWall {
             this.frame(id);
         }
         return { ok: true, id };
+    }
+
+    /**
+     * Attach to a gomuxai agent: the terminal already attached to it, revealed (shown, focused,
+     * framed); else a new terminal running `agent attach <target>` (attachArgv), remembered as that
+     * agent's. An agent the bus lists without a tmux session is refused, with its status; one it
+     * doesn't list (another host's, before the relay follows the bus) is tried as named.
+     * @param {string} target - `name` or `name@host`
+     * @returns {Promise<{ id: string, existing: boolean }>}
+     */
+    async attach(target) {
+        if (!isBusTarget(target)) throw new Error(`'${target ?? ''}' isn't an agent name (name or name@host)`);
+        const open = this.store.attachedTo(target).find((id) => this.ctx.terminals.has(id));
+        if (open) {
+            this.show(open);
+            this.focus(open, { frame: true });
+            return { id: open, existing: true };
+        }
+        const a = this.bus.find(target);
+        if (a && !busAttachable(a)) {
+            const why = a.status === 'ended' ? `ended${a.endReason ? ` (${a.endReason})` : ''}` : a.status || 'unknown';
+            throw new Error(`${target} has no tmux session to attach to (${why})`);
+        }
+        const r = await this.router.execute(['terminal.spawn', '--', ...attachArgv(target)]);
+        if (!r.data?.id) throw new Error(r.text.replace(/^(OK|ERR): /, '') || 'the spawn did not land');
+        this.store.setAttached(r.data.id, target);
+        this.termd.dismissLost();
+        this._emit();
+        return { id: r.data.id, existing: false };
     }
 
     /** Fully close a terminal — its program in termd too — and forget it now: its name, spot,

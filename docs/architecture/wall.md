@@ -217,6 +217,20 @@ change re-fits once it has held still 150 ms. The state is saved (`WallStore.ful
 reload comes back fullscreen rather than leaving a terminal at its fullscreen size; hiding it leaves
 fullscreen first; one closed or killed ends it. Gate: `tools/wall-fullscreen.test.mjs`.
 
+**gomuxai's agents** (`wall/WallBus.js`, `wall.bus`, `wall.attach <name[@host]>`): the wall lists the
+agents the relay's `agent export` follows (`gomux/list`, pushed as `gomux/changed`; nothing when the
+relay runs `--no-gomuxai`) — live ones, by host (the bus's name for it, this one's included: a target
+reads `name@host`, and `agent attach` keeps this host's local; another host's agents once the relay's
+export follows the bus with `--hosts`), each with its status, in the sidebar's agents section and the
+palette. Attaching opens an ORDINARY terminal running `agent attach <name>[@<host>]` — gomuxai's own
+way in: tmux here, ssh to the far host's `agent attach` there (`agent bus ssh` says where), so the
+network hop is ssh and termd stays local. The store remembers which terminal attaches to which agent
+(`attached`, pruned with the terminal), so a second attach reveals the first; its title bar reads
+`<name> · <status>`. A failed attach holds its reason on screen until Enter; a clean detach (tmux's
+prefix d) or the session ending closes the terminal. An agent the bus lists with no tmux session is
+refused. Attaching resizes the agent's tmux window to the terminal, as any client's attach does.
+Gate: `tools/wall-bus.test.mjs`.
+
 **The help panel** (`wall/HelpPanel.jsx`, chord+/, the topbar's ?, the palette, `wall.help`) lists
 the wall's keys, gestures and verbs, searchable (every word must match somewhere; Escape clears the
 search, then closes), floating or docked like the other panels. Nothing in it is written twice: the

@@ -1,7 +1,7 @@
 import { remove as removePane } from './splitTree.js';
 /**
  * WallStore — the wall's durable per-browser state, in localStorage: where each terminal sits, the
- * names the person gave them and which are hidden (keyed by terminal id), the groups (keyed by group
+ * names the person gave them, the gomuxai agent each attaches to, and which are hidden (keyed by terminal id), the groups (keyed by group
  * id), and how the sidebar and the termd status window stand. Storage can be unavailable (private
  * windows, blocked site data); then nothing persists and the wall still works.
  *
@@ -79,10 +79,12 @@ export default class WallStore {
             positions: k('positions'), names: k('names'), hidden: k('hidden'), groups: k('groups'), sidebar: k('sidebar'), status: k('status'),
             config: k('config'), settings: k('settings'), help: k('help'),
             fullscreen: k('fullscreen'), fullscreenText: k('fullscreenText'),
-            agentViews: k('agentViews'),
+            agentViews: k('agentViews'), attached: k('attached'),
         };
         this._positions = read(this.keys.positions, {});
         this._names = read(this.keys.names, {});
+        /** The gomuxai agent each terminal was opened to attach to (`name` or `name@host`; wall.attach). @type {Record<string, string>} */
+        this._attached = read(this.keys.attached, {});
         /** @type {Set<string>} */
         this._hidden = new Set(read(this.keys.hidden, []));
         /** @type {Record<string, WallGroup>} */
@@ -127,6 +129,18 @@ export default class WallStore {
         write(this.keys.names, this._names);
     }
 
+    /** @param {string} id @returns {string|null} the gomuxai agent it attaches to (`name` or `name@host`), if wall.attach opened it */
+    attached(id) { return this._attached[id] || null; }
+
+    /** @param {string} id @param {string|null} target - null forgets it */
+    setAttached(id, target) {
+        if (target) this._attached[id] = target; else delete this._attached[id];
+        write(this.keys.attached, this._attached);
+    }
+
+    /** @param {string} target - `name` or `name@host` @returns {string[]} the terminals attached to it */
+    attachedTo(target) { return Object.keys(this._attached).filter((id) => this._attached[id] === target); }
+
     /** @param {string} id @returns {boolean} */
     hidden(id) { return this._hidden.has(id); }
 
@@ -137,10 +151,11 @@ export default class WallStore {
         write(this.keys.hidden, [...this._hidden]);
     }
 
-    /** Forget a terminal for good — its spot, its name, its hiding, its place in a group, its agent view. @param {string} id */
+    /** Forget a terminal for good — its spot, its name, the agent it attaches to, its hiding, its place in a group, its agent view. @param {string} id */
     forget(id) {
         if (id in this._positions) { delete this._positions[id]; write(this.keys.positions, this._positions); }
         if (id in this._names) { delete this._names[id]; write(this.keys.names, this._names); }
+        if (id in this._attached) this.setAttached(id, null);
         this.setHidden(id, false);
         const gid = this.groupOf(id);
         if (gid) this._dropMembers(gid, [id]);
@@ -158,6 +173,7 @@ export default class WallStore {
         const known = new Set([
             ...Object.keys(this._positions),
             ...Object.keys(this._names),
+            ...Object.keys(this._attached),
             ...this._hidden,
             ...Object.keys(this._fullscreenText),
             ...Object.keys(this._agentViews),

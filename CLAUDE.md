@@ -36,6 +36,9 @@ terminals in 3D space. The repo is organized as **packages, two apps, a cli and 
   times a line, Ctrl+Alt / ⌘⌥ a block, ⇧-drag over a program that hears the mouse), drawn through the
   cell fills (core `terminalSelection.js` + `TerminalGrid`); ⌘C / Ctrl+Shift+C or the menu copies
   (`wall.copy`), `copyOnSelect` fills the wall's own selection clipboard that a middle-click pastes.
+  gomuxai's agents (every host the relay's export names) are listed by host with their status in the
+  sidebar and palette; `wall.attach <name[@host]>` opens an ordinary terminal running `agent attach`
+  (`wall/WallBus.js`; ssh does the far hop, termd stays local).
   Details: `docs/architecture/wall.md`.
 - **`cli/`** — a Go single binary that bakes in the built app and serves it alongside
   a WebSocket relay + sandboxed filesystem RPC.

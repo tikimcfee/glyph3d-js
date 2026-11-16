@@ -4,6 +4,7 @@ import { holdPress } from './holdPress.js';
 import FitText from './FitText.jsx';
 import { Btn, DockButtons, useHeadDrag } from './Panel.jsx';
 import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
+import { busStatus, busAttachable } from './WallBus.js';
 
 /** The close button: held over closeHoldMs (its ring fills), then the terminal is killed. */
 function HoldClose({ wall, id }) {
@@ -63,12 +64,56 @@ function GroupRow({ wall, g, collapsed }) {
   );
 }
 
+/** One gomuxai agent's row: its status dot, its name, its status; click attaches (wall.attach). */
+function AgentRow({ wall, a, on, focused }) {
+  const st = busStatus(a.status);
+  const can = busAttachable(a);
+  const title = [a.target, st.word + (a.endReason ? ` (${a.endReason})` : ''), a.detail, a.cwd, on ? `attached in ${on}` : can ? 'click to attach' : 'no tmux session to attach to']
+    .filter(Boolean).join('\n');
+  return (
+    <div data-row={`agent:${a.target}`} data-status={a.status || 'unknown'} title={title} className="wall-sidebar-row"
+      onClick={() => wall.run(['wall.attach', a.target])}
+      style={{ ...styles.row, paddingLeft: 16, background: focused ? '#16251e' : undefined, cursor: can || on ? 'pointer' : 'default' }}>
+      <span style={{ ...styles.dot, background: st.colour }} />
+      <FitText text={a.name} maxPx={12.5} style={{ color: !can && !on ? '#6b7383' : focused ? '#8ef0b8' : '#d4d9e2' }} />
+      {on && <span style={styles.tag}>on wall</span>}
+      <span style={{ ...styles.tag, color: st.colour }}>{st.word}</span>
+    </div>
+  );
+}
+
+/** The gomuxai agents the relay sees (WallBus), under a header per host. */
+function AgentsSection({ wall, state }) {
+  const { hosts, reason } = state.bus;
+  const attachedTo = new Map();
+  for (const t of state.terminals) if (t.attached) attachedTo.set(t.attached, t.id);
+  return (
+    <div data-agents="">
+      <div style={{ ...styles.section }}>agents</div>
+      {hosts.map((h) => (
+        <div key={h.host} data-host={h.host || 'local'}>
+          <div style={{ ...styles.row, paddingLeft: 8, cursor: 'default', color: '#aeb7c6' }}>
+            <FitText text={h.host || 'this host'} maxPx={12.5} />
+            <span style={styles.count}>{h.agents.length}</span>
+          </div>
+          {h.agents.map((a) => {
+            const on = attachedTo.get(a.target);
+            return <AgentRow key={a.target} wall={wall} a={a} on={on} focused={!!on && on === state.focusedId} />;
+          })}
+        </div>
+      ))}
+      {!hosts.length && <div style={{ ...styles.row, color: '#6b7383', cursor: 'default' }} title={reason}>{reason ? 'no gomuxai on this relay' : 'no live agents'}</div>}
+    </div>
+  );
+}
+
 /**
  * The sidebar — every terminal as a list of tabs: groups first, as top-level rows that fold, their
  * members under them, then the terminals in no group. Hidden terminals stay listed (dimmed, marked).
  * A row's click reveals its terminal (or frames its group); its tools — hide/show, hold-to-close,
  * take out of a group, a group's columns, layout and ungroup — run the same wall verbs as the canvas
- * buttons and the palette. It floats (drag its head) or sticks to the left or right edge (Panel.jsx);
+ * buttons and the palette. Below them, the gomuxai agents the relay sees, by host, each with its
+ * status; a click attaches (wall.attach). It floats (drag its head) or sticks to the left or right edge (Panel.jsx);
  * open, side, float spot and folded groups persist per relay (WallStore). Toggled by the chord + B or
  * `wall.sidebar`.
  */
@@ -106,6 +151,7 @@ export default function Sidebar({ wall, state }) {
         })}
         {loose.map((t) => <TermRow key={t.id} wall={wall} t={t} depth={0} focused={t.id === state.focusedId} />)}
         {!state.terminals.length && <div style={{ ...styles.row, color: '#6b7383', cursor: 'default' }}>no terminals</div>}
+        <AgentsSection wall={wall} state={state} />
       </div>
     </div>
   );
@@ -123,4 +169,6 @@ const styles = {
   tag: { color: '#5d6574', fontSize: 10.5, flex: '0 0 auto' },
   count: { color: '#5d6574', fontSize: 11, flex: '0 0 auto', minWidth: 14, textAlign: 'right' },
   cols: { color: '#8b95a7', fontSize: 11, minWidth: 10, textAlign: 'center' },
+  section: { color: '#7c8596', padding: '10px 10px 4px', marginTop: 6, borderTop: '1px solid #1e2430' },
+  dot: { width: 7, height: 7, borderRadius: '50%', flex: '0 0 auto', marginRight: 2 },
 };

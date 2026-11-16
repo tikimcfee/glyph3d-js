@@ -1,6 +1,7 @@
 import { checkConfig } from './wallConfig.js';
 import { searchSettings, SECTIONS } from './wallSettings.js';
 import { AGENT_SIDES } from './wallAgentView.js';
+import { busStatus, busAttachable } from './WallBus.js';
 
 /**
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
@@ -39,6 +40,10 @@ import { AGENT_SIDES } from './wallAgentView.js';
  *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
  *                                              the right-click menu, at canvas px (default: on the
  *                                              terminal, under the header, the view's centre)
+ *   wall.bus                                   the gomuxai agents the relay sees, by host, with status
+ *                                              and the terminal attached to each
+ *   wall.attach <name[@host]>                  attach to an agent: reveal its terminal, else open one
+ *                                              running `agent attach` (WallBus.js)
  *
  * termd's state itself comes from the relay (`./glyph3d-cli termd.status` answers page-less); the
  * status verbs only show it.
@@ -376,6 +381,31 @@ export default function registerWallCommands(router, wall) {
         if (on) set.add(id); else set.delete(id);
         wall.setSettingsPanel({ collapsed: [...set] });
         return OK(`${id} ${on ? 'folded' : 'unfolded'}`, { section: id, collapsed: on });
+    });
+
+    // ── the gomuxai agents (WallBus.js) ──────────────────────────────────────
+    verb('wall.bus', '', 'The gomuxai agents the relay sees, by host, with their status and the terminal attached to each', () => {
+        const hosts = wall.bus.hosts();
+        if (!wall.bus.snapshot) throw new Error(`no gomuxai agents: ${wall.bus.reason}`);
+        const out = [];
+        for (const h of hosts) {
+            out.push(h.host || 'this host');
+            for (const a of h.agents) {
+                const on = wall.store.attachedTo(a.target).filter((id) => wall.terminal(id));
+                const status = busStatus(a.status).word + (a.endReason ? ` (${a.endReason})` : '');
+                const notes = [a.detail, !busAttachable(a) ? 'no tmux session' : null, on.length ? `on ${on.join(', ')}` : null].filter(Boolean);
+                out.push(`  ${a.target} ${status}${notes.length ? ` · ${notes.join(' · ')}` : ''}`);
+            }
+        }
+        return {
+            text: out.join('\n') || '(no live agents)',
+            data: { hosts: hosts.map((h) => ({ host: h.host, agents: h.agents.map((a) => ({ target: a.target, status: a.status ?? null, attachable: busAttachable(a), terminals: wall.store.attachedTo(a.target).filter((id) => wall.terminal(id)) })) })) },
+        };
+    });
+    verb('wall.attach', '<name[@host]>', "Attach to a gomuxai agent: reveal the terminal attached to it, else open one running `agent attach`", async (args) => {
+        if (!args[0]) throw new Error('name an agent: name, or name@host for one on another host');
+        const r = await wall.attach(args[0]);
+        return OK(r.existing ? `revealed ${r.id}, attached to ${args[0]}` : `${r.id} attaches to ${args[0]}`, { id: r.id, target: args[0], existing: r.existing });
     });
 
     // ── agent views (WallAgentViews.js, AgentViewOverlay.jsx) ────────────────

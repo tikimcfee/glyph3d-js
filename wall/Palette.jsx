@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { chordLabel } from './chord.js';
 import FitText from './FitText.jsx';
+import { busStatus, busAttachable } from './WallBus.js';
 
 /** Subsequence match score: lower is better, null when `q` isn't a subsequence of `s`. */
 function score(q, s) {
@@ -21,7 +22,9 @@ const layoutText = (g) => (g.layout === 'tile' ? `tile · ${g.columns} col${g.co
  * The floating find-by-name palette — the omnibar. FIND mode lists every terminal, shown or hidden
  * (marked), under its group: with no query, as the tree (each group, then its members, then the
  * terminals in no group); typing filters terminals (by name, id, group and last screen line) and
- * groups (by name), best first. ↑/↓ choose, Enter: a terminal is revealed (shown if hidden, focused,
+ * groups (by name), best first; then the gomuxai agents the relay sees (WallBus: `name`, or `name@host`
+ * on another host), whose Enter attaches (wall.attach — the agent's terminal if one is attached, else
+ * a new one running `agent attach`). ↑/↓ choose, Enter: a terminal is revealed (shown if hidden, focused,
  * framed), a group framed. Actions ride along — new terminal, fit all, the sidebar, the settings,
  * snapping and the grid, and for the focused terminal and the selection: hide, close, rename, group,
  * add to / take out of a group, ungroup, tile columns, layout. RENAME mode edits the name of the terminal or group that rename
@@ -55,6 +58,20 @@ export default function Palette({ wall, state, onClose }) {
     });
     const groupItem = (g) => ({ kind: 'group', id: g.id, label: g.name, depth: 0, detail: `${g.members.length} · ${layoutText(g)}` });
 
+    const attachedTo = new Map();
+    for (const t of state.terminals) if (t.attached) attachedTo.set(t.attached, t.id);
+    const agentItems = [];
+    for (const h of state.bus.hosts) {
+      for (const a of h.agents) {
+        const on = attachedTo.get(a.target);
+        agentItems.push({
+          kind: 'agent', id: a.target, label: a.target, depth: 0, status: a.status, dim: !busAttachable(a),
+          detail: [busStatus(a.status).word, on ? `on ${on}` : !busAttachable(a) ? 'no session' : null, a.detail].filter(Boolean).join(' · '),
+          text: `${a.target} ${h.host} ${a.status ?? ''} ${a.detail ?? ''} ${a.cwd ?? ''}`,
+        });
+      }
+    }
+
     let listed;
     if (!query) {
       listed = [];
@@ -63,6 +80,7 @@ export default function Palette({ wall, state, onClose }) {
         for (const id of g.members) { const t = termById.get(id); if (t) listed.push(termItem(t, 1)); }
       }
       for (const t of state.terminals) if (!t.group) listed.push(termItem(t, 0));
+      listed.push(...agentItems);
     } else {
       const scored = [];
       for (const t of state.terminals) {
@@ -73,6 +91,10 @@ export default function Palette({ wall, state, onClose }) {
       for (const g of state.groups) {
         const s = score(query, g.name);
         if (s != null) scored.push({ ...groupItem(g), s });
+      }
+      for (const it of agentItems) {
+        const s = score(query, it.text);
+        if (s != null) scored.push({ ...it, s });
       }
       listed = scored.sort((x, y) => x.s - y.s);
     }
@@ -115,6 +137,7 @@ export default function Palette({ wall, state, onClose }) {
     if (!item) return;
     if (item.kind === 'terminal') { wall.run(['wall.reveal', item.id]); onClose(); }
     else if (item.kind === 'group') { wall.run(['wall.group.frame', item.id]); onClose(); }
+    else if (item.kind === 'agent') { wall.run(['wall.attach', item.id]); onClose(); }
     else item.run();
   };
 
@@ -133,7 +156,7 @@ export default function Palette({ wall, state, onClose }) {
     else if (e.key === 'Enter') { e.preventDefault(); choose(items[Math.min(index, items.length - 1)]); }
   };
 
-  const labelColor = (it) => (it.kind === 'action' ? '#8ab4f8' : it.kind === 'group' ? '#aeb7c6' : it.hidden ? '#6b7383' : '#e6e9ef');
+  const labelColor = (it) => (it.kind === 'agent' ? (it.dim ? '#6b7383' : busStatus(it.status).colour) : it.kind === 'action' ? '#8ab4f8' : it.kind === 'group' ? '#aeb7c6' : it.hidden ? '#6b7383' : '#e6e9ef');
   return (
     <div style={styles.scrim} onMouseDown={onClose}>
       <div style={styles.box} onMouseDown={(e) => e.stopPropagation()} data-palette="">
@@ -143,7 +166,7 @@ export default function Palette({ wall, state, onClose }) {
           value={query}
           onChange={(e) => { setQuery(e.target.value); setIndex(0); }}
           onKeyDown={onKeyDown}
-          placeholder={target ? target.name : 'find a terminal or group…'}
+          placeholder={target ? target.name : 'find a terminal, group or agent…'}
           style={styles.input}
         />
         {mode === 'find' && (
@@ -157,7 +180,7 @@ export default function Palette({ wall, state, onClose }) {
                 onMouseDown={() => choose(it)}
                 style={{ ...styles.row, paddingLeft: 12 + it.depth * 14, background: i === index ? '#1b2130' : 'transparent' }}
               >
-                <FitText text={it.kind === 'group' ? `▤ ${it.label}` : it.label} style={{ color: labelColor(it), fontStyle: it.hidden ? 'italic' : 'normal' }} />
+                <FitText text={it.kind === 'group' ? `▤ ${it.label}` : it.kind === 'agent' ? `◆ ${it.label}` : it.label} style={{ color: labelColor(it), fontStyle: it.hidden ? 'italic' : 'normal' }} />
                 <span style={styles.detail}>{it.detail}</span>
               </div>
             ))}

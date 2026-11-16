@@ -9,6 +9,7 @@
  *
  * @typedef {Object} GomuxAgent
  * @property {string} name
+ * @property {string} [host]          the bus's name for the machine it runs on
  * @property {string} parent          spawner's name ('' = a person)
  * @property {string} backend         claude | agy | aider | custom
  * @property {string} session         tmux session (agent-<name>)
