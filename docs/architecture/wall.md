@@ -219,10 +219,12 @@ fullscreen first; one closed or killed ends it. Gate: `tools/wall-fullscreen.tes
 
 **gomuxai's agents** (`wall/WallBus.js`, `wall.bus`, `wall.attach <name[@host]>`): the wall lists the
 agents the relay's `agent export` follows (`gomux/list`, pushed as `gomux/changed`; nothing when the
-relay runs `--no-gomuxai`) — live ones, by host (the bus's name for it, this one's included: a target
-reads `name@host`, and `agent attach` keeps this host's local; another host's agents once the relay's
-export follows the bus with `--hosts`), each with its status, in the sidebar's agents section and the
-palette. Attaching opens an ORDINARY terminal running `agent attach <name>[@<host>]` — gomuxai's own
+relay runs `--no-gomuxai`) — live ones, by host (the bus's name for it, this one's included and listed
+first: a target reads `name@host`, and `agent attach` keeps this host's local), each with its status,
+in the sidebar's agents section and the palette. Every host on the agent bus is there when the relay
+follows it: `serve --gomuxai-hosts all|<h1,h2>` (export's `--hosts`; `tools/dev.sh wall` passes `all`,
+the IDE profile leaves it off), one agent per (host, name), and a far host's `attached` left out when
+it couldn't say (unknown attaches; only a stated false refuses). Attaching opens an ORDINARY terminal running `agent attach <name>[@<host>]` — gomuxai's own
 way in: tmux here, ssh to the far host's `agent attach` there (`agent bus ssh` says where), so the
 network hop is ssh and termd stays local. The store remembers which terminal attaches to which agent
 (`attached`, pruned with the terminal), so a second attach reveals the first; its title bar reads

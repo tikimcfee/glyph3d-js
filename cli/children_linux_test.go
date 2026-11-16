@@ -87,7 +87,7 @@ func TestChildren_HelperRelay(t *testing.T) {
 		t.Skip("the helper process of TestChildren_DieWithASIGKILLedRelay")
 	}
 	bin := filepath.Join(dir, "agent")
-	w := NewGomuxWatcher(nil)
+	w := NewGomuxWatcher(nil, "")
 	w.tmuxBin, w.agent = "", bin
 	w.Start(context.Background())
 	a := NewAgentEvents(time.Hour, 4)

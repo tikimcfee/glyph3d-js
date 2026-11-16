@@ -198,6 +198,7 @@ func serveCmd() {
 	flagSet.Var(&reach, "reach", "Extra directory the relay may read/write outside the project root (repeatable). Temp dirs are always reachable.")
 	var gomuxDirs stringListFlag
 	flagSet.Var(&gomuxDirs, "gomuxai", "Extra gomuxai store to watch: a .gomuxai dir, the dir holding one, or an `agent` binary (repeatable). The PATH agent's store and every live agent session's are found on their own.")
+	gomuxHosts := flagSet.String("gomuxai-hosts", "", "Also list other hosts' gomuxai agents over the agent bus: \"all\" (every trusted peer) or host,host (export's --hosts). They have no transcript or screen here; the wall attaches to one through 'agent attach name@host' (ssh)")
 	noGomux := flagSet.Bool("no-gomuxai", false, "Don't use gomuxai: no agent hub tree, no agent sessions or events")
 	sessionsInterval := flagSet.Duration("sessions-interval", 10*time.Second, "How often 'agent sessions --json' re-runs while a display is connected (agentSessions/changed)")
 	maxFollowers := flagSet.Int("max-followers", 64, "Most 'agent transcript --follow' processes at once (agentEvents/follow past it fails)")
@@ -229,7 +230,7 @@ func serveCmd() {
 			log.Fatalf("[relay] project path: %v", err)
 		}
 		if !*noGomux {
-			fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
+			fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
 		if err := RunRelay(*listen, *p, fsHandler); err != nil {
@@ -244,7 +245,7 @@ func serveCmd() {
 		log.Fatalf("[serve] project path: %v", err)
 	}
 	if !*noGomux {
-		fsHandler.gomux = NewGomuxWatcher(gomuxDirs)
+		fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 		fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 	}
 

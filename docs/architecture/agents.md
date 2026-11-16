@@ -85,7 +85,13 @@ never opens a hidden agent. `agent.hidden` reports it. Gates: `tools/session-boo
 **gomuxai hub** (`app/client/GomuxHub.js`, relay `cli/gomux.go`): the relay keeps one
 `agent export --json --follow --all` running (gomuxai's own read-only feed of every store it can
 find; `--gomuxai <dir>` adds a `--store`), folds its lines into the agent tree, and pushes it
-(`gomux/changed`; `gomux/list`). Each agent shown (live, or finished within
+(`gomux/changed`; `gomux/list`). The tree names this machine (`host`, the bus's name for it) and
+has one node per (host, name). `serve --gomuxai-hosts all|<h1,h2>` (off by default; the wall's
+dev profile turns it on) adds export's `--hosts`: other hosts' agents over the agent bus, each with
+no store, transcript or screen here and only what its host could say — an `attached` it left out
+stays out of the node (unknown, not false). Screens (`gomux.attach`, pane sizes) and the file
+handler's reach are this machine's agents only, and the hub keeps only this machine's
+(`localTree`), so a far namesake never takes a local agent's book or screen. Each agent shown (live, or finished within
 `gomux.historyHours`) is an agent book whose lane id is its gomuxai name, opened from its
 current session (the node's `sessionId`, else its transcript's path) through SessionBooks
 (`agentEvents/*`: gomuxai's events, never the transcript itself); an

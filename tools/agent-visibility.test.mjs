@@ -13,6 +13,8 @@
 //     ended ones (and one that ends later); shown drops the members' own overrides;
 //   - agent.clear on a book the hub or the desk opened = hide (durable); on one opened from
 //     history it only closes;
+//   - the hub is this machine's agents: another host's (a relay following the bus) open no
+//     book and never take a local namesake's node;
 //   - capture saves the set (agentVisibility), and a fresh page restoring it opens none of it.
 
 import './headless-canvas.mjs';
@@ -265,6 +267,22 @@ let savedSnap;
     await settle(w);
     eq(lanes(w), ['A', 'B'], 'shown again, it opens in its slot');
     resetSetting(w.ctx, 'agents.maxBooks');
+}
+
+// ── 7. a relay following the bus: the hub is this machine's agents only ──────────────
+{
+    const w = makeWorld();
+    w.vis.settle();
+    const { S, tree } = host(w);
+    w.relay.list(Object.values(S));
+    const far = node('lead', 'FAR', { host: 'laptop', dataDir: '', attached: undefined });   // a far namesake
+    w.hub.apply({ ...tree, host: 'workstation', agents: [...tree.agents.map((a) => ({ ...a, host: 'workstation' })), far,
+        node('elsewhere', 'FAR2', { host: 'laptop' })] });
+    await settle(w);
+    eq(lanes(w).filter((n) => n !== 'L1' && n !== 'L2'), ['helper', 'lead'], "another host's agents open no book");
+    ok(w.hub.nodes.get('lead')?.host === 'workstation' && !w.hub.nodes.has('elsewhere'), "a far namesake never takes a local agent's node");
+    ok(w.hub.rows().every((r) => r.agent.host === 'workstation'), 'gomux.list rows are this machine\'s');
+    eq([reads(w, 'FAR'), reads(w, 'FAR2')], [0, 0], "and nothing is read for them");
 }
 
 console.log(`agent-visibility: ${pass} passed, ${fail} failed`);

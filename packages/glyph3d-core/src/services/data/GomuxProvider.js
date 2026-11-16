@@ -9,15 +9,15 @@
  *
  * @typedef {Object} GomuxAgent
  * @property {string} name
- * @property {string} [host]          the bus's name for the machine it runs on
+ * @property {string} [host]          the bus's name for the machine it runs on (the snapshot's `host`: this one)
  * @property {string} parent          spawner's name ('' = a person)
  * @property {string} backend         claude | agy | aider | custom
  * @property {string} session         tmux session (agent-<name>)
- * @property {string} dataDir         the .gomuxai store recording it
+ * @property {string} dataDir         the .gomuxai store recording it ('' for another host's agent)
  * @property {string} [cwd]
  * @property {string} createdAt       RFC3339 UTC
  * @property {boolean} live           not cleaned up
- * @property {boolean} attached       its tmux session exists now
+ * @property {boolean} [attached]     its tmux session exists now; absent when its host couldn't say
  * @property {string} [status]        idle|processing|waiting|error|ended|unknown (gomuxai's `agent statuses`)
  * @property {string} [endReason]     with ended: quit|gone|replaced|finished|parent|closed
  * @property {string} [event] @property {string} [detail] @property {string} [tool]
@@ -28,7 +28,9 @@
  * @property {string} [harness]       claude | agy — the harness writing it
  * @property {number} [transcriptSize] @property {number} [transcriptMtime]
  *
- * @typedef {{gen: number, dirs: string[], agents: GomuxAgent[]}} GomuxSnapshot
+ * @typedef {{gen: number, host?: string, dirs: string[], agents: GomuxAgent[]}} GomuxSnapshot
+ *   `host`: this machine's name on the bus. A relay following the bus (`serve --gomuxai-hosts`)
+ *   lists other hosts' agents too: no store, transcript or screen here, one node per (host, name).
  */
 
 export class GomuxProvider {

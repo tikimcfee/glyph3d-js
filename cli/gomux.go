@@ -13,8 +13,13 @@ package main
 // The watcher keeps ONE such follower running (restarting it, with a fresh snapshot,
 // if it exits), folds its lines into the tree, and pushes `gomux/changed` (the whole
 // snapshot — a few KB) to the display whenever the tree it serves moves. Agents are
-// keyed host+store+name; the served tree has one node per name (a live agent beats a
-// departed namesake, then the newest run).
+// keyed host+store+name; the served tree has one node per (host, name) (within a host, a
+// live agent beats a departed namesake, then the newest run).
+//
+// Following the bus (`serve --gomuxai-hosts`, export's --hosts) adds other hosts' agents:
+// no store, transcript or screen here, and only what that host could say (an `attached`
+// it left out stays out: unknown, not false). The snapshot's `host` names this machine;
+// screens (gomux.attach) and reach are this machine's agents only.
 //
 // RPCs (fs.go dispatch):
 //   gomux/list  {}  → snapshot
@@ -57,7 +62,7 @@ type gomuxAgent struct {
 	EndedAt   string `json:"endedAt,omitempty"`   // departed agents: when it was cleaned up
 	Run       int64  `json:"run,omitempty"`       // spawn id within its store (two runs of one name)
 	Live      bool   `json:"live"`                // not cleaned up
-	Attached  bool   `json:"attached"`            // its tmux session exists right now
+	Attached  *bool  `json:"attached,omitempty"`  // its tmux session exists right now; absent = its host couldn't say
 	Status    string `json:"status,omitempty"`    // idle|processing|waiting|error|ended|unknown (agent statuses)
 	EndReason string `json:"endReason,omitempty"` // with ended: quit|gone|replaced|finished|parent|closed
 	Event     string `json:"event,omitempty"`     // last hook event (PostToolUse, Stop, …)
@@ -75,6 +80,7 @@ type gomuxAgent struct {
 
 type gomuxSnapshot struct {
 	Gen    uint64       `json:"gen"`
+	Host   string       `json:"host,omitempty"` // this machine's name on the bus (export's)
 	Dirs   []string     `json:"dirs"`
 	Agents []gomuxAgent `json:"agents"`
 }
@@ -93,7 +99,7 @@ type exportAgent struct {
 	CreatedAt       string `json:"created_at"`
 	EndedAt         string `json:"ended_at"`
 	Live            bool   `json:"live"`
-	Attached        bool   `json:"attached"`
+	Attached        *bool  `json:"attached,omitempty"` // nil: a far host couldn't say
 	Status          string `json:"status"`
 	EndReason       string `json:"end_reason"`
 	Event           string `json:"event"`
@@ -131,11 +137,13 @@ type GomuxWatcher struct {
 	mu      sync.Mutex
 	agents  map[string]exportAgent // by host|store|name
 	stores  []string
+	host    string // this machine's name on the bus (export's snapshot line)
 	snap    gomuxSnapshot
 	notify  func(method string, params any)
 	reach   func(dir string) // widens the file handler's reach to an agent's cwd
 	reached map[string]bool
 	stores0 []string // operator-supplied stores (--gomuxai), passed as --store
+	hosts   string   // other hosts to follow over the bus (--gomuxai-hosts: all | h1,h2), passed as --hosts; "" = this one only
 	tmuxBin string   // "" = no tmux: screens can't be drawn
 	agent   string   // the `agent` binary export runs from ("" = look it up on PATH)
 	// paneSizes: each screened agent's pane size as last seen or set (watchPaneSizes)
@@ -143,13 +151,15 @@ type GomuxWatcher struct {
 }
 
 // NewGomuxWatcher builds a watcher whose export also reads `dirs` (each a .gomuxai dir,
-// the dir holding one, or an agent binary — export's --store). No I/O until Start.
-func NewGomuxWatcher(dirs []string) *GomuxWatcher {
+// the dir holding one, or an agent binary — export's --store) and lists `hosts`' agents
+// over the bus ("all", or host,host — export's --hosts; "" for none). No I/O until Start.
+func NewGomuxWatcher(dirs []string, hosts string) *GomuxWatcher {
 	tmuxBin, _ := exec.LookPath("tmux")
 	return &GomuxWatcher{
 		agents:  map[string]exportAgent{},
 		reached: map[string]bool{},
 		stores0: dirs,
+		hosts:   hosts,
 		tmuxBin: tmuxBin,
 	}
 }
@@ -180,8 +190,8 @@ func (w *GomuxWatcher) Start(ctx context.Context) {
 	}()
 }
 
-// follow runs one `agent export --json --follow --all` and folds its lines in until it
-// exits. A restart begins with a fresh snapshot, which replaces the whole tree.
+// follow runs one `agent export --json --follow --all [--hosts …]` and folds its lines in
+// until it exits. A restart begins with a fresh snapshot, which replaces the whole tree.
 func (w *GomuxWatcher) follow(ctx context.Context) error {
 	bin := w.agent
 	if bin == "" {
@@ -193,6 +203,9 @@ func (w *GomuxWatcher) follow(ctx context.Context) error {
 	args := []string{"export", "--json", "--follow", "--all", "-q"}
 	for _, d := range w.stores0 {
 		args = append(args, "--store", d)
+	}
+	if w.hosts != "" {
+		args = append(args, "--hosts", w.hosts)
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	var stderr strings.Builder
@@ -234,6 +247,7 @@ func (w *GomuxWatcher) applyLine(raw []byte) error {
 	switch l.Type {
 	case "snapshot":
 		w.agents = map[string]exportAgent{}
+		w.host, _ = l.Host.(string)
 		w.stores = w.stores[:0]
 		for _, s := range l.Stores {
 			w.stores = append(w.stores, s.Dir)
@@ -287,24 +301,23 @@ func (w *GomuxWatcher) applyLine(raw []byte) error {
 
 func exportKey(a exportAgent) string { return a.Host + "|" + a.Store + "|" + a.Name }
 
-// publish rebuilds the served tree (one node per name) and pushes it when it moved.
+// publish rebuilds the served tree (one node per (host, name)) and pushes it when it moved.
 func (w *GomuxWatcher) publish() {
 	w.mu.Lock()
-	byName := map[string]exportAgent{}
+	byHostName := map[string]exportAgent{}
 	for _, a := range w.agents {
-		if a.Store == "" {
-			continue // another host's agent: no store, transcript, or screen to serve
-		}
-		if prev, ok := byName[a.Name]; ok && !exportPrefer(a, prev) {
+		k := a.Host + "|" + a.Name
+		if prev, ok := byHostName[k]; ok && !exportPrefer(a, prev) {
 			continue
 		}
-		byName[a.Name] = a
+		byHostName[k] = a
 	}
 	dirs := append([]string{}, w.stores...)
+	host := w.host
 	w.mu.Unlock()
 
-	agents := make([]gomuxAgent, 0, len(byName))
-	for _, a := range byName {
+	agents := make([]gomuxAgent, 0, len(byHostName))
+	for _, a := range byHostName {
 		agents = append(agents, w.toNode(a))
 	}
 	sort.Slice(agents, func(i, j int) bool {
@@ -312,13 +325,17 @@ func (w *GomuxWatcher) publish() {
 		if !ti.Equal(tj) {
 			return ti.Before(tj)
 		}
-		return agents[i].Name < agents[j].Name
+		if agents[i].Name != agents[j].Name {
+			return agents[i].Name < agents[j].Name
+		}
+		return agents[i].Host < agents[j].Host
 	})
 	sort.Strings(dirs)
 
 	if w.reach != nil {
 		for _, a := range agents {
-			if a.Cwd != "" && !w.reached[a.Cwd] {
+			// another host's cwd names a path THERE: never widen this machine's reach by it
+			if a.Host == host && a.Cwd != "" && !w.reached[a.Cwd] {
 				w.reached[a.Cwd] = true
 				w.reach(a.Cwd)
 			}
@@ -326,9 +343,9 @@ func (w *GomuxWatcher) publish() {
 	}
 
 	w.mu.Lock()
-	changed := !reflect.DeepEqual(agents, w.snap.Agents) || !reflect.DeepEqual(dirs, w.snap.Dirs)
+	changed := host != w.snap.Host || !reflect.DeepEqual(agents, w.snap.Agents) || !reflect.DeepEqual(dirs, w.snap.Dirs)
 	if changed {
-		w.snap = gomuxSnapshot{Gen: w.snap.Gen + 1, Dirs: dirs, Agents: agents}
+		w.snap = gomuxSnapshot{Gen: w.snap.Gen + 1, Host: host, Dirs: dirs, Agents: agents}
 	}
 	snap := w.snap
 	w.mu.Unlock()
@@ -337,7 +354,7 @@ func (w *GomuxWatcher) publish() {
 	}
 }
 
-// exportPrefer: should a replace b for the same name? A live agent beats a departed
+// exportPrefer: should a replace b for the same host and name? A live agent beats a departed
 // namesake, then the newer run.
 func exportPrefer(a, b exportAgent) bool {
 	if a.Live != b.Live {
@@ -435,17 +452,22 @@ func (w *GomuxWatcher) tmux(args ...string) (string, error) {
 	return string(b), err
 }
 
-// agentByName returns the served node for a name.
-func (w *GomuxWatcher) agentByName(name string) (gomuxAgent, bool) {
+// localAgent returns the served node for an agent on THIS machine — the only ones a screen
+// can show (its tmux pane and its store's pane log are here) — never a far namesake.
+func (w *GomuxWatcher) localAgent(name string) (gomuxAgent, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for _, a := range w.snap.Agents {
-		if a.Name == name {
+		if a.Name == name && a.Host == w.snap.Host {
 			return a, true
 		}
 	}
 	return gomuxAgent{}, false
 }
+
+// hasSession: the agent's host said its tmux session exists. Unknown (nil) is not a session
+// to act on.
+func (a gomuxAgent) hasSession() bool { return a.Attached != nil && *a.Attached }
 
 // notePaneSize records an agent pane's size as seen (so a size we set isn't echoed back).
 func (w *GomuxWatcher) notePaneSize(name string, cols, rows int) {
@@ -475,8 +497,9 @@ func (w *GomuxWatcher) watchPaneSizes(ctx context.Context) {
 				screens[t.ID] = true
 			}
 		}
-		for _, a := range w.Snapshot().Agents {
-			if !a.Attached || !screens[gomuxTerminalID(a.Name)] {
+		snap := w.Snapshot()
+		for _, a := range snap.Agents {
+			if a.Host != snap.Host || !a.hasSession() || !screens[gomuxTerminalID(a.Name)] {
 				continue
 			}
 			out, err := w.tmux("display-message", "-p", "-t", a.Session, "#{pane_width} #{pane_height}")
@@ -558,19 +581,12 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		reply("gomuxai watcher not running")
 		return
 	}
-	var agent *gomuxAgent
-	for _, a := range r.fs.gomux.Snapshot().Agents {
-		if a.Name == name {
-			a := a
-			agent = &a
-			break
-		}
-	}
-	if agent == nil {
-		reply("no gomuxai agent named " + name)
+	agent, ok := r.fs.gomux.localAgent(name)
+	if !ok {
+		reply("no gomuxai agent named " + name + " on this machine")
 		return
 	}
-	if !agent.Attached {
+	if !agent.hasSession() {
 		reply("agent " + name + " has no tmux session (" + agent.Session + ")")
 		return
 	}
@@ -626,8 +642,8 @@ func (r *Relay) resizeGomuxAgent(send func(any), name string, cols, rows int) {
 		reply(fmt.Sprintf("size %dx%d out of range", cols, rows))
 		return
 	}
-	a, ok := r.fs.gomux.agentByName(name)
-	if !ok || !a.Attached {
+	a, ok := r.fs.gomux.localAgent(name)
+	if !ok || !a.hasSession() {
 		reply("agent " + name + " has no tmux session")
 		return
 	}

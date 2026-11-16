@@ -47,6 +47,12 @@ test('hosts: live agents only, this host first, then by name; waiting first with
     expect(hosts[0].agents.map((a) => a.name)).toEqual(['c', 'b', 'd', 'a']);
     expect(hosts[2].agents[0].target).toBe('zeta@workstation');
     expect(busHosts(null)).toEqual([]);
+    // the relay names this machine (the snapshot's host) and its agents: it still lists first
+    const named = busHosts({ gen: 1, host: 'workstation', dirs: [], agents: [
+        agent('far', { host: 'aardvark' }), agent('here', { host: 'workstation' }), agent('far', { host: 'laptop', attached: undefined }),
+    ] });
+    expect(named.map((h) => h.host)).toEqual(['workstation', 'aardvark', 'laptop']);
+    expect(named.map((h) => h.agents[0].target)).toEqual(['here@workstation', 'far@aardvark', 'far@laptop']);
 });
 
 test('attachable unless a host says the session is gone; an unknown status reads as unknown', () => {

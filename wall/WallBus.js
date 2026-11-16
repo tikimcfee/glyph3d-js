@@ -9,8 +9,10 @@ import GomuxProvider from '@glyph3d/core/services/data/GomuxProvider.js';
  * terminal is the person's, as if they had typed the attach themselves.
  *
  * An agent's `host` is the bus's name for the machine it runs on (the relay names this one's too, so
- * a target here reads `name@<this host>`, which `agent attach` keeps local); absent means this machine.
- * The relay's export lists only its own host's agents until it follows the bus (`--hosts`).
+ * a target here reads `name@<this host>`, which `agent attach` keeps local; the snapshot's `host` is
+ * this machine's name); absent means this machine. The relay's export lists only its own host's
+ * agents until it follows the bus (`serve --gomuxai-hosts`, export's `--hosts`); then one node per
+ * (host, name), and a far host that couldn't say whether a session exists leaves `attached` out.
  *
  * The pure helpers (busTarget, busHosts, attachArgv, …) take no wall and touch no DOM, so the unit
  * test imports them as they are.
@@ -53,8 +55,8 @@ export const busTarget = (a) => (a.host ? `${a.name}@${a.host}` : a.name);
 export const busAttachable = (a) => a.attached !== false;
 
 /**
- * The live agents (not cleaned up) by host: this machine's first (host ''), then the others by
- * name; each host's agents those waiting on a person first, then by status, then by name.
+ * The live agents (not cleaned up) by host: this machine's first (the snapshot's `host`, or an
+ * agent naming none), then the others by name; each host's agents those waiting on a person first, then by status, then by name.
  * @param {import('@glyph3d/core/services/data/GomuxProvider.js').GomuxSnapshot|null} snap
  * @returns {{ host: string, agents: (import('@glyph3d/core/services/data/GomuxProvider.js').GomuxAgent & { host?: string, target: string })[] }[]}
  */
@@ -69,8 +71,9 @@ export function busHosts(snap) {
     for (const list of by.values()) {
         list.sort((x, y) => busStatus(x.status).rank - busStatus(y.status).rank || x.name.localeCompare(y.name));
     }
+    const here = (/** @type {string} */ h) => (h === '' || h === snap?.host ? 0 : 1);
     return [...by.keys()]
-        .sort((x, y) => (x === '' ? -1 : y === '' ? 1 : x.localeCompare(y)))
+        .sort((x, y) => here(x) - here(y) || x.localeCompare(y))
         .map((host) => ({ host, agents: by.get(host) }));
 }
 

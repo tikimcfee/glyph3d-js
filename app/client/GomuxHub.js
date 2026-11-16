@@ -11,7 +11,9 @@ import { getSetting } from './settings.js';
  * GomuxHub — the gomuxai agent tree, as books at desks.
  *
  * gomuxai (the `agent` CLI) runs agents in tmux sessions and records who spawned whom; the
- * relay watches its stores (cli/gomux.go) and pushes the tree. Here each agent becomes an
+ * relay watches its stores (cli/gomux.go) and pushes the tree. The hub is THIS machine's agents
+ * (localTree): a relay following the bus also lists other hosts' agents, which have no
+ * transcript or screen here and may share a name with one of ours. Here each agent becomes an
  * agent BOOK (lane id = its gomuxai name) opened from its session's event stream through
  * SessionBooks — the one open path (tail read → hydrate → follow; live lines append, a tool's
  * result updates its sheet in place) — and the tree becomes DESKS (DeskTree):
@@ -65,6 +67,17 @@ import { getSetting } from './settings.js';
  *
  * Read-only by construction: nothing here types into, starts, or stops an agent.
  */
+
+/**
+ * The tree's agents on THIS machine (the snapshot's `host`; an agent naming no host is this
+ * one's): every name in it is one agent, a lane id, a screen. Another host's agents (a relay
+ * following the bus) are left out. A tree with none of them is returned as it is.
+ * @param {GomuxSnapshot} snap @returns {GomuxSnapshot}
+ */
+export function localTree(snap) {
+    const here = (/** @type {GomuxAgent} */ a) => !a.host || a.host === snap.host;
+    return snap.agents.every(here) ? snap : { ...snap, agents: snap.agents.filter(here) };
+}
 
 /** Desk name of the hub. */
 export const GOMUX_HUB = 'gomux';
@@ -160,6 +173,7 @@ export default class GomuxHub {
     apply(snap) {
         if (this._disposed || !snap || !Array.isArray(snap.agents) || !this.ctx.agentBooks) return;
         if (getSetting('gomux.enabled') === false) return;
+        snap = localTree(snap);
         this.snapshot = snap;
         // Nothing opens before the hidden set is known (the restore's first stage puts it back).
         const vis = this.ctx.agentVisibility;

@@ -13,7 +13,7 @@ import (
 // newGomuxTestWatcher: no tmux, so no screens are asked about.
 func newGomuxTestWatcher(t *testing.T) *GomuxWatcher {
 	t.Helper()
-	w := NewGomuxWatcher(nil)
+	w := NewGomuxWatcher(nil, "")
 	w.tmuxBin = ""
 	return w
 }
@@ -75,7 +75,7 @@ func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
 	s := w.Snapshot()
 	got := gomuxByName(s)
 	c := got["coord"]
-	if !c.Live || !c.Attached || c.Status != "processing" || c.Detail != "Bash: rg foo" || c.Harness != "claude" ||
+	if !c.Live || !c.hasSession() || c.Status != "processing" || c.Detail != "Bash: rg foo" || c.Harness != "claude" ||
 		c.DataDir != "/s/a" || c.Cwd != "/w/coord" || c.TranscriptSize != 3 || c.Run != 3 ||
 		c.TranscriptMtime != time.Date(2026, 10, 25, 1, 30, 0, 5e8, time.UTC).UnixMilli() {
 		t.Errorf("coord = %+v", c)
@@ -131,11 +131,7 @@ func TestGomuxExport_SnapshotEventsAndStores(t *testing.T) {
 		t.Errorf("store line replaces that store's agents")
 	}
 
-	// another host's agents (no store) aren't served; unknown types fail loud
-	mustApply(t, w, `{"type":"host","host":{"host":"mac","agents":1},"agents":[{"name":"far","host":"mac","live":true,"status":"idle"}]}`)
-	if _, ok := gomuxByName(w.Snapshot())["far"]; ok {
-		t.Errorf("another host's agent has no transcript or screen to serve")
-	}
+	// unknown types fail loud
 	if err := w.applyLine([]byte(`{"type":"mystery"}`)); err == nil {
 		t.Errorf("an unknown line type must error")
 	}
@@ -204,5 +200,86 @@ func TestGomuxList_ServesTheTree(t *testing.T) {
 	json.Unmarshal(c.Result, &s)
 	if len(s.Agents) != 1 || s.Agents[0].Name != "a" {
 		t.Errorf("list = %+v", s)
+	}
+}
+
+// Following the bus: another host's agents are served beside this one's, one node per
+// (host, name) — a namesake on each host is two agents — and an `attached` the far host
+// left out stays out (unknown, not false). Screens and reach stay this machine's.
+func TestGomuxExport_OtherHostsBesideThisOne(t *testing.T) {
+	w := newGomuxTestWatcher(t)
+	reached := map[string]int{}
+	w.SetReachHook(func(dir string) { reached[dir]++ })
+	mustApply(t, w, `{"type":"snapshot","host":"workstation","stores":[{"dir":"/s"}],"agents":[`+
+		`{"name":"helper","host":"workstation","store":"/s","cwd":"/w/here","session":"agent-helper","live":true,"attached":true,"status":"idle","created_at":"2026-11-15T01:00:00Z"}]}`)
+	mustApply(t, w, `{"type":"host","host":{"host":"laptop","agents":2},"agents":[`+
+		`{"name":"helper","host":"laptop","cwd":"/w/there","session":"agent-helper","live":true,"status":"processing","created_at":"2026-11-15T02:00:00Z"},`+
+		`{"name":"gone","host":"laptop","live":true,"attached":false,"status":"idle","created_at":"2026-11-15T03:00:00Z"}]}`)
+
+	s := w.Snapshot()
+	if s.Host != "workstation" {
+		t.Errorf("the snapshot names this machine: %q", s.Host)
+	}
+	by := map[string]gomuxAgent{}
+	for _, a := range s.Agents {
+		by[a.Name+"@"+a.Host] = a
+	}
+	here, there, gone := by["helper@workstation"], by["helper@laptop"], by["gone@laptop"]
+	if len(s.Agents) != 3 || here.DataDir != "/s" || !here.hasSession() || there.Status != "processing" || there.DataDir != "" {
+		t.Fatalf("both helpers served, each its own host's: %+v", s.Agents)
+	}
+	if there.Attached != nil || there.hasSession() {
+		t.Errorf("an attached the far host left out is unknown, not false: %v", there.Attached)
+	}
+	if gone.Attached == nil || *gone.Attached {
+		t.Errorf("a stated attached:false stays false: %v", gone.Attached)
+	}
+	b, _ := json.Marshal(there)
+	if strings.Contains(string(b), `"attached"`) {
+		t.Errorf("the node leaves an unknown attached out: %s", b)
+	}
+	if b, _ := json.Marshal(gone); !strings.Contains(string(b), `"attached":false`) {
+		t.Errorf("the node says a stated false: %s", b)
+	}
+	if reached["/w/here"] != 1 || reached["/w/there"] != 0 {
+		t.Errorf("only this machine's cwds widen reach: %v", reached)
+	}
+	if a, ok := w.localAgent("helper"); !ok || a.Host != "workstation" {
+		t.Errorf("a screen's agent is this machine's, never a far namesake: %+v", a)
+	}
+	if _, ok := w.localAgent("gone"); ok {
+		t.Errorf("a far agent has no screen here")
+	}
+
+	// a host line replaces that host's agents, leaving this one's
+	mustApply(t, w, `{"type":"host","host":{"host":"laptop","agents":0},"agents":[]}`)
+	if s := w.Snapshot(); len(s.Agents) != 1 || s.Agents[0].Host != "workstation" {
+		t.Errorf("host line replaces only that host's agents: %+v", s.Agents)
+	}
+}
+
+// --gomuxai-hosts rides to export as --hosts; without it export lists this machine only.
+func TestGomuxExport_HostsFlagReachesExport(t *testing.T) {
+	dir := t.TempDir()
+	argsOut := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "agent")
+	os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" > '"+argsOut+"'\n"+
+		`echo '{"type":"snapshot","host":"workstation","stores":[],"agents":[]}'`+"\nsleep 30\n"), 0o755)
+	for hosts, want := range map[string]string{"all": "export --json --follow --all -q --hosts all", "": "export --json --follow --all -q"} {
+		w := NewGomuxWatcher(nil, hosts)
+		w.tmuxBin = ""
+		w.agent = script
+		os.Remove(argsOut)
+		ctx, cancel := context.WithCancel(context.Background())
+		w.Start(ctx)
+		deadline := time.Now().Add(5 * time.Second)
+		for w.Snapshot().Host == "" && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+		got, _ := os.ReadFile(argsOut)
+		if strings.TrimSpace(string(got)) != want {
+			t.Errorf("hosts %q: export ran with %q, want %q", hosts, strings.TrimSpace(string(got)), want)
+		}
 	}
 }
