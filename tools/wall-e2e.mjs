@@ -1159,10 +1159,10 @@ try {
         await toCustom();
         await page.keyboard.type('0'); await page.keyboard.press('Enter');
         const refused = await until(() => document.querySelector('[data-wall-menu] [data-menu-refused]')?.textContent, null, 3000);
-        await page.keyboard.press('Control+A'); await page.keyboard.type('97');
+        await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.type('97');
         await page.keyboard.press('Tab');
         const inRows = await until(() => document.activeElement?.dataset.menuField === 'rows', null, 3000);
-        await page.keyboard.press('Control+A'); await page.keyboard.type('31');
+        await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.type('31');
         await page.keyboard.press('Enter');
         const sized = await until((i) => { const g = window.__wall.terminal(i); return g.cols === 97 && g.rows === 31 && !window.__wall.menu; }, M2, 10000);
         ok(refused === 'cols: at least 1' && !!inRows && !!sized,
@@ -1467,7 +1467,7 @@ try {
         await shot('settings-search');
         /** Search, then ↓ to `key` (where the search lists it), checking the panel's choice follows. */
         const choose = async (q, key) => {
-            await page.keyboard.press('Control+A'); await page.keyboard.type(q);
+            await page.keyboard.press('ControlOrMeta+A'); await page.keyboard.type(q);
             const order = searchSettings(q).flatMap((x) => x.items.map((it) => it.key));
             for (let k = 0; k < order.indexOf(key); k++) await page.keyboard.press('ArrowDown');
             return until((want) => document.querySelector('[data-settings] [data-setting][data-active]')?.dataset.setting === want, key, 4000);
