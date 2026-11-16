@@ -68,9 +68,9 @@ What exists on branch `termd`, and where it departs from the plan below:
   with everything that renders it ([below](#status-as-built-2026-11-12)), and so are process trees
   and the holder's re-exec ([Process trees and the holder's re-exec as built](#process-trees-and-the-holders-re-exec-as-built-2026-11-14)).
   Not built yet: the config file and `g3d config`.
-- **macOS (darwin-arm64)** builds and passes every gate on branch `termd-macos`, which is this design
-  plus its platform seams ([Linux and macOS](#linux-and-macos); MACOS.md has what macOS does
-  differently). The code lands with the merge.
+- **macOS (darwin-arm64)** builds and passes every termd gate, process trees and the holder's
+  re-exec included ([Linux and macOS](#linux-and-macos); MACOS.md has what macOS does differently
+  and the measurements).
 
 ## Holder and brain as built (2026-11-12)
 
@@ -1138,8 +1138,8 @@ all of it, and the status says what runs (PROTOCOL.md's `daemon.trees`, `termina
 ### Linux and macOS
 
 One design; the platform seams are `cfg`-gated modules with one interface each. The macOS column is
-proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-relay-check` and
-`wall-e2e` pass there.
+proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace` (`tests/trees.rs`' session
+tests and `tests/holder.rs` among them), `termd-relay-check` and `wall-e2e` pass there.
 
 | Seam | Linux | macOS |
 |---|---|---|
@@ -1149,11 +1149,11 @@ proven on darwin-arm64 (macOS 27.2, the M2): `cargo test --workspace`, `termd-re
 | closing fds in a child | `close_range` | the pre-fork list ([Spawning a terminal](#spawning-a-terminal)) |
 | `TIOCSWINSZ` on a fresh master | works at once | `ENOTTY` until the slave is opened: open the slave first, on both |
 | process RSS (status) | `/proc/<pid>/statm` | `proc_pidinfo(PROC_PIDTASKINFO)`; tests use `ps -o rss=` on both and fail loud when it can't measure |
-| process trees | a cgroup leaf per terminal in the namespace's delegated user service (`systemd-run --user`, [Process trees](#process-trees)) | the session (`proc_listallpids` + `getsid`, `proc_pidinfo` for names and zombies); not proven on the M2 yet (MACOS.md) |
+| process trees | a cgroup leaf per terminal in the namespace's delegated user service (`systemd-run --user`, [Process trees](#process-trees)) | the session (`proc_listallpids` + `getsid`, `proc_pidinfo` for names and zombies); a leftover's end is kqueue `NOTE_EXIT` on each member (`tree::ExitWatch`: no subreaper). Proven on the M2: a close ends the whole session, the holder's death every session, `processes` matches `ps` on the tty, a leftover holds an idle namespace until it ends, a `setsid`'d child leaves the tree (MACOS.md) |
 | OOM preference | brain raises `oom_score_adj` | none |
 | process names | `PR_SET_NAME` | none (no `prctl`) |
 | parent death | not `PR_SET_PDEATHSIG` (it reaches only direct children): the service manager ends the holder's cgroup when it dies, and the brain, seeing the hold link close, ends every tree | the brain ends every session tree; waiting on a process that isn't its child: `pidfd_open` + `poll` on Linux, kqueue `EVFILT_PROC` `NOTE_EXIT` on macOS |
-| the holder's re-exec | `execv` keeping the record's fds; the listener checked with `SO_ACCEPTCONN` | the same; macOS declares `SO_ACCEPTCONN` and doesn't answer it, so the check reads the socket type |
+| the holder's re-exec | `execv` keeping the record's fds; the listener checked with `SO_ACCEPTCONN` | the same; macOS declares `SO_ACCEPTCONN` and doesn't answer it, so the check reads the socket type. Proven on the M2: six re-execs keep the holder's pid, every shell's parent and tty, and its fd count flat after the second |
 | `SCM_RIGHTS` receive | `MSG_CMSG_CLOEXEC` | no `MSG_CMSG_CLOEXEC`: the hold link sets `FD_CLOEXEC` right after `recvmsg`, in the holder and in the brain (no race: the row above) |
 | peer credentials | `SO_PEERCRED` | `getpeereid`, which answers `ENOTCONN` once the client has closed (Linux still answers): such a connection is dropped without a log line |
 | bytes queued on a PTY master (a read's bound, so the high-water mark is exact) | `FIONREAD` | `TIOCOUTQ` on the master: `FIONREAD` there answers 0 whatever is queued, which made every read and every `OUTPUT` frame one byte (floods about 50× slower; found on the M2) |

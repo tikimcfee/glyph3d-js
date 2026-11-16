@@ -1,9 +1,10 @@
 # g3d-termd on macOS
 
 What macOS does differently from Linux under termd, and how termd meets it. darwin-arm64 builds
-natively and passes every gate: `cargo test --workspace --features g3d-termd/test-hooks`, clippy,
-`go test ./...`, `termd-relay-check` and `wall-e2e`. Measured on an Apple Silicon Mac (the M2),
-macOS 27.2, Rust 1.98.0 (Homebrew), Zig 0.17.0, libghostty-vt 1.0.1. The platform seams are listed
+natively and passes every termd gate: `cargo test --workspace --features g3d-termd/test-hooks`,
+clippy, `go test ./...`, `termd-relay-check` and `wall-e2e`. `wall-cells-check` passes all but its
+wide-emoji case ("Testing", below). Measured on an Apple Silicon Mac (the M2), macOS 27.2,
+Rust 1.98.0 (Homebrew), Zig 0.17.0, libghostty-vt 1.0.1. The platform seams are listed
 in DESIGN.md, "Linux and macOS"; this file has the why and the measurements behind them.
 
 ## Building
@@ -170,6 +171,17 @@ Paste: bracketed (`ESC[200~ … ESC[201~`) when the program asked for it (zsh's 
 program), plain otherwise; refused (`unsafe_paste`) when it holds a line break the program would
 read as Enter, or the bracket's end; `--unsafe` sends it (a line break as `\r`).
 
+A paste of any size is one stream (`paste` with `more`, protocol 1.5). 64 MiB (1,048,576 lines of 63
+base64 characters) through `g3d paste --unsafe` into `stty -echo; cat > file` arrived
+byte-identical (the same SHA-256) in 8.2 s. A line has to stay under 1,024 bytes in canonical
+mode (`MAX_CANON`, DESIGN.md "Linux and macOS"); a raw-mode program takes any length.
+
+Mouse (protocol 1.4), with `g3d mouse` into a program that set 1000 + 1006: a left press and
+release at (5, 3) read `ESC[<0;6;4M` `ESC[<0;6;4m`, right `ESC[<2;1;1M`/`m`, wheel-up
+`ESC[<64;11;3M`, middle at the far corner `ESC[<1;80;24M`, Shift+Control `ESC[<20;2;2M`. Under 1000
+a move, with or without a button held, isn't reported, and `g3d` says the program didn't ask, as
+it does for a program with no mouse mode set.
+
 **Option on a Mac.** Chrome and Safari report Option+A on a US layout as `key: "å"`, `code:
 "KeyA"`, `altKey: true`, and the wall sends exactly that (`text: "å"`, `mods: ["Alt"]`) with its
 `optionAsAlt` setting (`option_as_alt`, protocol 1.3). Under `auto`, the default, an Alt that typed
@@ -213,6 +225,18 @@ a_macos_option_character_is_its_text_and_alt_as_alt_is_alt` and the forced `true
   when the holder leaves the starter's ignored `SIGINT` in place (checked).
 - **The passwd entry** comes from `getpwuid` (Node's `os.userInfo()` in the relay check): macOS
   has no `getent`.
+- **The browser checks run headed** on macOS (headless is a software renderer there), so a person's
+  pointer over the window reaches the page. One wall-e2e run read a drag under 1000 as a press and
+  release per step: moves with no button held, from the real cursor, came between Playwright's.
+  The re-run passed, and a bare page under the same drag sees only Playwright's moves.
+- **Select-all in a text field is ⌘A on macOS.** Ctrl+A moves the caret to the line's start, so
+  wall-e2e selects with `ControlOrMeta+A`.
+- **`wall-cells-check`'s wide-emoji case fails at 41.83 px lines** (passes at 17.37). The emoji is
+  whole, but it is drawn smaller than its two cells: the emoji tile draws at `0.82 × cellPx`
+  (`EmojiRasterWorker`). Apple Color Emoji's 😀 has about 1 em of ink (measured), so the face fills
+  about 82% of its tile and leaves most of the second cell to the fill, which is what the case's
+  median reads. Noto Color Emoji, which Linux uses, isn't installed here, so this wasn't checked
+  against it. Not a termd seam: fitting the tile to the measured ink would be the renderer's fix.
 
 ## A daemon an unwritable log can't stop
 
@@ -223,44 +247,57 @@ In the holder, whose panic hook aborts, it would hang up every shell. A failed l
 dropped. Gate: `an_unwritable_log_does_not_wedge_the_daemon`, which fails with `eprintln!`. Not
 macOS-specific.
 
-## Process trees and the holder's re-exec: what the M2 must prove
+## Process trees and the holder's re-exec
 
-Written on Linux and compiled for `aarch64-apple-darwin` (`cargo check -p g3d-hold --target
-aarch64-apple-darwin`), never run on a Mac. macOS has no cgroups, so a terminal's tree is its
-session (DESIGN.md, "Process trees"); the code behind `cfg(not(target_os = "linux"))` in
-`crates/g3d-hold/src/tree.rs`:
+macOS has no cgroups, so a terminal's tree is its session (DESIGN.md, "Process trees"). The code is
+behind `cfg(not(target_os = "linux"))` in `crates/g3d-hold/src/tree.rs`:
 
 - the session's members: `proc_listallpids`, each pid's `getsid`, its name and whether it is a
   zombie from `proc_pidinfo(PROC_PIDTBSDINFO)` (`pbi_comm`, `pbi_status == SZOMB`);
 - waiting for a process that isn't the brain's child to end: kqueue `EVFILT_PROC` `NOTE_EXIT`;
-- a leftover's end (macOS has no subreaper, so a `nohup` job that outlives its program is
-  launchd's child and its end no reap of the holder's): `tree::ExitWatch`, a kqueue the holder's
-  poll loop waits on, `NOTE_EXIT` on each member, re-armed at every scan;
+- a leftover's end: `tree::ExitWatch`, a kqueue the holder's poll loop waits on, `NOTE_EXIT` on
+  each member, re-armed at every scan. macOS has no subreaper, so a `nohup` job that outlives its
+  program is launchd's child (ppid 1), and its end is no reap of the holder's;
 - the holder record's listener check reads `SO_TYPE` (macOS declares `SO_ACCEPTCONN` and doesn't
   answer it).
 
-What the M2 must run and see:
+Proven on the M2 (macOS 27.2) with `cargo test --workspace --features g3d-termd/test-hooks` and by
+hand on a private namespace:
 
-1. `cargo test --workspace --features g3d-termd/test-hooks` green, `tests/trees.rs`' session tests
-   and `tests/holder.rs` among them (the cgroup tests say "no systemd user manager" and stop).
-2. `tests/trees.rs` `a_close_ends_the_whole_session`: a program that ignores `SIGHUP` and `SIGTERM`
-   with a job of its own process group (`set -m`) is gone 2 s after `kill`, and `daemon.closes`
-   lists both under `HUP`, `TERM` and `KILL`. If it isn't, `getsid` or `proc_listallpids` is the
-   seam to look at.
-3. `the_holders_death_ends_every_session`: after `kill -9` of the holder the brain logs `the holder
-   is gone: ending 1 terminal tree(s)` and nothing of the session survives `--kill-grace`.
-4. `status`'s `terminals[].processes` equals the processes `ps -ax -o pid=,tty=` shows on the
-   terminal's tty (every member of a fresh session has it as its controlling terminal).
-5. `tests/holder.rs` whole: the re-exec keeps the holder's pid and every shell's parent and tty
-   (`ps -o ppid=,tty=`), and six re-execs keep `lsof -p <holder>`'s fd count flat.
-6. A `setsid`'d child leaves its session on macOS as on Linux: it is not in the tree there, by
-   design (no cgroups), and `kill` doesn't reach it; say so if it does.
-7. `tests/trees.rs` `a_leftover_keeps_an_idle_namespace_until_it_ends`: the namespace exits within
-   its 10 s once the `nohup` sleep is killed. If it doesn't, `ExitWatch` is the seam: whether
-   `poll` on the kqueue's fd wakes on a `NOTE_EXIT`, and the log's `what its program left running
-   has ended`.
-8. `a_stopped_process_is_continued_and_ends_at_the_first_signal`: `SIGCONT` after `SIGHUP` ends a
-   stopped job at once there too.
+- **A close ends the whole session.** A program ignoring `SIGHUP` and `SIGTERM`, with a `set -m`
+  job doing the same, is gone 2.09 s after `g3d kill`. `daemon.closes` lists both pids under
+  `HUP`, `TERM` and `KILL`, and the errors hold `killed` (`tests/trees.rs`
+  `a_close_ends_the_whole_session`).
+- **The holder's death ends every session.** After `kill -9` of the holder, the brain logs `the
+  holder is gone: ending 3 terminal tree(s) by the close rule`, `SIGKILL`s the stubborn pair at
+  +2.0 s, and nothing of the three sessions is left (`the_holders_death_ends_every_session`).
+- **`terminals[].processes` is what `ps -ax -o pid=,tty=` shows on the terminal's tty**: 6 for a
+  shell with two background sleeps and a `sleep | cat` pipeline, and 1 for a program whose child
+  left the session.
+- **The holder's re-exec** (`tests/holder.rs` whole). Six `g3d upgrade --holder` runs by hand kept
+  the holder's pid and each shell's parent and tty (`ps -o ppid=,tty=`). No shell saw a hangup, and
+  the terminals came back `exact`. `lsof -p <holder>` counts 12 fds, then 14 and 16 after the
+  first two re-execs (the handoff's blobs), then 16 through the sixth.
+- **A `setsid`'d child leaves the session, as on Linux**: its own session, no tty (`??`), not in
+  `processes`, not a leftover, and `kill` doesn't reach it. After the close it ran on as launchd's
+  child (ppid 1). That is by design: with no cgroups, the session is as far as termd follows.
+  macOS has no `setsid(1)`; the check used `perl -MPOSIX -e 'setsid()'`.
+- **A leftover keeps an idle namespace until it ends**, through the kqueue. A `nohup sleep` held
+  a `--idle-exit 2` namespace for 6 s. Once it was killed, the holder logged `terminal n: what
+  its program left running has ended`, and the namespace exited 2.3 s later. With the
+  `NOTE_EXIT` registration disabled (`EV_DISABLE`, one run), `a_leftover_keeps_an_idle_namespace_until_it_ends`
+  times out: nothing else wakes the holder for it.
+- **`SIGCONT` ends a stopped job at the first signal.** A sleep in state `T` is gone 48 ms after
+  `kill`: `SIGHUP` alone, no `SIGKILL`, no `killed` error.
+
+The cgroup tests (`*_in_its_cgroup`, `a_holder_upgrade_in_its_service_keeps_every_tree`) say "no
+systemd user manager answers" and stop. `ps -o sess` is always 0 on macOS: `getsid` is the way to
+read a session.
+
+**Seen, not macOS-specific.** After the holder's death, the brain ran the close rule twice. The
+reader thread's EOF calls `holder_gone()`, then the keepalive's failed send calls it again while
+the first is still in its grace. The second run sends `SIGHUP`/`SIGTERM` to the same pids again
+and logs again, and the first one's `exit(1)` ends both. Harmless.
 
 ## Not verified here
 
