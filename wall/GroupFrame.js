@@ -12,22 +12,24 @@ const HEADER_STYLE = Object.freeze({
     fill: Object.freeze({ idle: 0x121722, focused: 0x12261d }),
     text: Object.freeze({ idle: 0x8b95a7, focused: 0x8ef0b8 }),
 });
-/** World depth of a group under the terminals (they sit at 0, the focused one at 1). */
-const GROUP_Z = -1;
+/** Fallback world depth before `WallGroups.setDepths` places the group in the canvas Z-stack. */
+export const DEFAULT_GROUP_Z = -4;
+/** Local Z offset of the header strip above its own backdrop so their shared top edge never Z-fights. */
+const HEADER_Z_OFFSET = 0.2;
 
 /**
  * GroupFrame — how a group shows on the canvas: a quiet backdrop behind its members' windows and a
  * header strip above them carrying its name (a TitleBar, so the name is whole and shrinks to fit
  * like a terminal's). Both are batched panels; the name a batched label. Sits directly under the
- * scene at unit scale, so its local units are world units. The header is the group's handle
- * (WallPointer drags it).
+ * scene at unit scale, so its local units are world units; its world Z sits immediately behind its
+ * own members and strictly in front of any older window or group beneath it.
  */
 export default class GroupFrame extends THREE.Object3D {
     /** @param {{ atlas: any }} o */
     constructor({ atlas }) {
         super();
         this.name = 'GroupFrame';
-        this.position.z = GROUP_Z;
+        this.position.z = DEFAULT_GROUP_Z;
         this._panel = createPanelMaterial({ color: BACKDROP.fill, opacity: 1, depthWrite: true });
         this._panel.setBorder(BACKDROP.border);
         this._panel.setBorderFlag(BORDER_FLAGS.EDGE, true);
@@ -35,6 +37,7 @@ export default class GroupFrame extends THREE.Object3D {
         this.backdrop.renderOrder = RENDER_ORDER.BACKDROP_BASE;
         this.add(this.backdrop);
         this.header = new TitleBar({ atlas, maxWorldHeight: BAR_ROOM, minTextPx: 0, style: HEADER_STYLE });
+        this.header.position.z = HEADER_Z_OFFSET;
         this.add(this.header);
         this._key = '';
     }

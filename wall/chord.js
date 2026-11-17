@@ -84,6 +84,41 @@ export const COPY_LABEL = IS_MAC ? '⌘C' : 'Ctrl+Shift+C';
 export const PASTE_LABEL = IS_MAC ? '⌘V' : 'Ctrl+Shift+V';
 
 /**
+ * Focus-history chords: Ctrl+, / Ctrl+. (and Ctrl+< / Ctrl+> with Shift) — back (−1) and forward (+1)
+ * through previously focused terminals. Never carries Alt or Meta, so ⌘, (settings) and Ctrl+Alt+,
+ * (settings off macOS) stay untouched, and neither , nor . is a shell control byte.
+ * @param {{ ctrlKey: boolean, altKey: boolean, metaKey: boolean, code: string }} e
+ * @returns {-1|1|0}
+ */
+export function focusHistoryDir(e) {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return 0;
+    if (e.code === 'Comma') return -1;
+    if (e.code === 'Period') return 1;
+    return 0;
+}
+
+/** The focus-history keys as the help names them. */
+export const FOCUS_HISTORY_LABEL = IS_MAC ? '⌃, · ⌃.' : 'Ctrl+, · Ctrl+.';
+
+/**
+ * Group-cycling chords: Ctrl+Shift+[ (−1) / Ctrl+Shift+] (+1) — unreserved across browsers (unlike
+ * ⌘⇧[ / ⌘⇧], which browsers reserve for tab switching). Requires Shift and excludes Alt/Meta, so
+ * unshifted Ctrl+[ (`^[` = ESC) and Ctrl+] (`^]`) still reach the shell/vim, and ⌘[ / ⌘] (Ctrl+Alt+[ / ]
+ * off macOS) cycle panes through KEYMAP.
+ * @param {{ ctrlKey: boolean, shiftKey: boolean, altKey: boolean, metaKey: boolean, code: string }} e
+ * @returns {-1|1|0}
+ */
+export function groupCycleDir(e) {
+    if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return 0;
+    if (e.code === 'BracketLeft') return -1;
+    if (e.code === 'BracketRight') return 1;
+    return 0;
+}
+
+/** The group-cycling keys as the help names them. */
+export const GROUP_CYCLE_LABEL = IS_MAC ? '⌃⇧[ · ⌃⇧]' : 'Ctrl+Shift+[ · ]';
+
+/**
  * The block-selection modifiers, held at a press on a terminal's body: the drag selects a rectangle of
  * columns. Ghostty's rule off macOS (Ctrl or Super, with Alt — kitty's Ctrl+Alt too); on macOS ⌘⌥,
  * since ⌥ alone is the wall's drag-to-move (Ghostty's macOS ⌥-drag) and ⌃ at a press is the secondary click.

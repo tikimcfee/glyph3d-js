@@ -1,5 +1,5 @@
 import { keyEventFor } from '@glyph3d/core/services/interaction/keyEncoding.js';
-import { isChord, IS_MAC, CHORD_KEYS, isCopyChord } from './chord.js';
+import { isChord, IS_MAC, CHORD_KEYS, isCopyChord, focusHistoryDir, groupCycleDir } from './chord.js';
 import { chordFor } from './wallKeymap.js';
 
 /**
@@ -8,6 +8,16 @@ import { chordFor } from './wallKeymap.js';
  * @param {KeyboardEvent} e
  */
 function noMenuBar(e) { if (e.key === 'Alt') e.preventDefault(); }
+
+/** Cancel a browser shortcut and stop any later window or document listener from seeing it. @param {KeyboardEvent} e */
+function claim(e) {
+    e.preventDefault();
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    else e.stopPropagation();
+}
+
+/** Chords that have no meaning in a text field (so a docked panel's search input never leaks them to the browser). */
+const GLOBAL_NAV_CODES = new Set(['BracketLeft', 'BracketRight']);
 
 /**
  * WallKeys — the keyboard. Wall chords take the platform's chord modifier (chord.js: ⌘ on macOS,
@@ -37,6 +47,7 @@ export default class WallKeys {
         /** The chord's modifiers as Playwright key names — the e2e presses the platform's chord. */
         this.chordKeys = CHORD_KEYS;
         this._onKey = (e) => this._key(e);
+        this._onKeyPress = (e) => this._keyPress(e);
         this._onKeyUp = (e) => this._keyUp(e);
         this._onPaste = (e) => this._paste(e);
         /** Physical keys whose press went to a terminal → that terminal: where the release goes. */
@@ -45,21 +56,38 @@ export default class WallKeys {
 
     install() {
         window.addEventListener('keydown', this._onKey, true);
+        window.addEventListener('keypress', this._onKeyPress, true);
         window.addEventListener('keyup', this._onKeyUp, true);
         document.addEventListener('paste', this._onPaste);
     }
 
     uninstall() {
         window.removeEventListener('keydown', this._onKey, true);
+        window.removeEventListener('keypress', this._onKeyPress, true);
         window.removeEventListener('keyup', this._onKeyUp, true);
         document.removeEventListener('paste', this._onPaste);
     }
 
+    /** True when `e` matches an active wall chord with its own handler, a focus-history key, or Ctrl+Shift+[ / ]. */
+    _claimsShortcut(e) {
+        if (this.wall.menu) return false;
+        if (focusHistoryDir(e) || groupCycleDir(e)) return true;
+        if (!isChord(e)) return false;
+        const chord = chordFor(e, this.wall.fullscreen?.id ? 'fullscreen' : 'canvas');
+        return !!chord?.run;
+    }
+
+    /** Cancel `keypress` on claimed chords too (Firefox's non-reserved XUL bindings listen on keypress). */
+    _keyPress(e) {
+        if (this._claimsShortcut(e)) claim(e);
+    }
+
     /** The held close chord ends when X or the chord comes up (or the window loses the keys). A
-     *  key whose press a terminal got sends that terminal its release. */
+     *  key whose press a terminal got sends that terminal its release; a claimed chord cancels keyup too. */
     _keyUp(e) {
         noMenuBar(e);
         if (e.code === 'KeyX' || !isChord(e)) this.wall.barButtons?.releaseKey();
+        if (this._claimsShortcut(e)) { claim(e); return; }
         const id = this._down.get(e.code);
         if (id === undefined) return;
         this._down.delete(e.code);
@@ -69,24 +97,56 @@ export default class WallKeys {
 
     _key(e) {
         noMenuBar(e);
-        const t = e.target;
-        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
         const wall = this.wall;
         if (wall.menu) return;   // the open right-click menu has the keys (ContextMenu.jsx)
+        const t = e.target;
+        const inField = !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable));
+        if (inField) {
+            // Bracket navigation chords have no meaning inside a panel's search or select control:
+            // intercept them here too so a focused panel input never leaks them to the window.
+            const gDir = groupCycleDir(e);
+            if (gDir) {
+                claim(e);
+                if (t.closest?.('[data-help], [data-settings]')) t.blur?.();
+                wall.cycleGroupFocus?.(gDir);
+                return;
+            }
+            if (isChord(e) && GLOBAL_NAV_CODES.has(e.code)) {
+                const chord = chordFor(e, wall.fullscreen?.id ? 'fullscreen' : 'canvas');
+                if (chord?.run) {
+                    claim(e);
+                    if (t.closest?.('[data-help], [data-settings]')) t.blur?.();
+                    chord.run(wall, e);
+                }
+            }
+            return;
+        }
+        const histDir = focusHistoryDir(e);
+        if (histDir) {
+            claim(e);
+            wall.stepFocusHistory?.(histDir);
+            return;
+        }
+        const groupDir = groupCycleDir(e);
+        if (groupDir) {
+            claim(e);
+            wall.cycleGroupFocus?.(groupDir);
+            return;
+        }
         if (isCopyChord(e) && wall.focusedId && wall.terminal(wall.focusedId)?.hasSelection) {
-            e.preventDefault(); e.stopPropagation();
+            claim(e);
             if (!e.repeat) wall.run(['wall.copy', wall.focusedId]);
             return;
         }
         if (!isChord(e) && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey))) {
-            e.preventDefault(); e.stopPropagation();
+            claim(e);
             wall.menuInput.openByKey();
             return;
         }
         if (isChord(e)) {
             const chord = chordFor(e, wall.fullscreen?.id ? 'fullscreen' : 'canvas');
             if (chord) {
-                if (chord.run) { e.preventDefault(); e.stopPropagation(); chord.run(wall, e); }
+                if (chord.run) { claim(e); chord.run(wall, e); }
                 return;   // a chord with no run is another part's (K: the palette, main.jsx)
             }
             if (IS_MAC) return;   // ⌘C/V/… stay with the browser and the DOM chrome
@@ -100,6 +160,7 @@ export default class WallKeys {
         if (!key) return;
         e.preventDefault();
         e.stopPropagation();
+        wall.pointer?.cancelScroll?.();
         if (grid.sendKey(key) && key.code) this._down.set(key.code, wall.focusedId);
         if (wall.config.selectionClearOnTyping) grid.clearSelection();
     }

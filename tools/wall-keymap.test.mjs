@@ -37,7 +37,11 @@ test('chordFor matches Shift and the mode as each entry says', () => {
     expect(at('Enter', 'canvas').does).toMatch(/fullscreen/);
     expect(at('Enter', 'fullscreen')).toBe(at('Enter', 'canvas'));
     expect(at('Enter', 'canvas', true).does).toMatch(/new terminal/);
-    expect(at('BracketRight', 'canvas', true)).toBe(at('BracketRight', 'canvas'));
+    expect(at('BracketRight', 'canvas', false).does).toMatch(/next pane/);
+    expect(at('BracketRight', 'canvas', true)).toBe(null);
+    expect(at('BracketLeft', 'canvas', false).does).toMatch(/previous pane/);
+    expect(at('BracketLeft', 'canvas', true)).toBe(null);
+    expect(at('ArrowLeft', 'canvas', true)).toBe(at('ArrowLeft', 'canvas'));
     expect(at('Minus', 'canvas').does).toMatch(/hide/);
     expect(at('Minus', 'fullscreen').does).toMatch(/smaller text/);
     expect(at('Digit0', 'canvas').does).toMatch(/fit every/);
@@ -46,29 +50,98 @@ test('chordFor matches Shift and the mode as each entry says', () => {
     expect(at('KeyQ', 'canvas')).toBe(null);
 });
 
-test('WallKeys dispatches from the table: a chord runs and claims its key; the palette\'s K is left alone', () => {
+test('WallKeys dispatches from the table: pane bracket chords and Ctrl+Shift+[ / ] claim the key; ⌘⇧[ / ] is left to the browser; Ctrl+,/. steps focus history; K is left alone', () => {
     const ran = [];
     const wall = {
         focusedId: null, menu: null, config: { ...WALL_CONFIG }, selection: new Set(), terminal: () => null,
-        fullscreen: { id: null }, cycleFocus: (d) => ran.push(['cycle', d]), fitAll: () => ran.push(['fit']), spawn: () => ran.push(['spawn']),
+        fullscreen: { id: null },
+        cycleFocus: (d) => ran.push(['cycle', d]),
+        cycleGroupFocus: (d) => ran.push(['cycleGroup', d]),
+        stepFocusHistory: (d) => ran.push(['history', d]),
+        fitAll: () => ran.push(['fit']), spawn: () => ran.push(['spawn']),
         run: (cmd) => ran.push(cmd),
     };
     const keys = new WallKeys(/** @type {any} */ (wall));
     const next = chordKey('BracketRight');
+    const prevPane = chordKey('BracketLeft');
+    const browserTabNext = chordKey('BracketRight', { shift: true });
+    const browserTabPrev = chordKey('BracketLeft', { shift: true });
     keys._key(next);
+    keys._key(prevPane);
+    keys._key(browserTabNext);
+    keys._key(browserTabPrev);
+    // Ctrl+, / Ctrl+. (and Ctrl+< / Ctrl+> with Shift) step focus history and preventDefault, never touching ⌘, settings.
+    const ctrlKey = (code, shiftKey = false) => {
+        const ev = {
+            type: 'keydown', key: '', code, repeat: false, isComposing: false, target: null, shiftKey,
+            ctrlKey: true, altKey: false, metaKey: false, getModifierState: () => false, claimed: false,
+            preventDefault() { ev.claimed = true; }, stopPropagation() {},
+        };
+        return ev;
+    };
+    const back = ctrlKey('Comma');
+    const fwd = ctrlKey('Period', true);   // Ctrl+> works identically
+    const ctrlPrevGroup = ctrlKey('BracketLeft', true);    // Ctrl+Shift+[ group cycling
+    const ctrlNextGroup = ctrlKey('BracketRight', true);   // Ctrl+Shift+] group cycling
+    keys._key(back);
+    keys._key(fwd);
+    keys._key(ctrlPrevGroup);
+    keys._key(ctrlNextGroup);
+    keys._key(chordKey('Comma'));          // platform chord + Comma still toggles settings
     keys._key(chordKey('Enter', { shift: true }));
     keys._key(chordKey('Slash'));
-    keys._key(chordKey('Enter'));   // nothing focused, nothing fullscreen: fit them all
-    keys._key(chordKey('Minus'));   // the canvas's: hide — nothing focused, so nothing
+    keys._key(chordKey('Enter'));          // nothing focused, nothing fullscreen: fit them all
+    keys._key(chordKey('Minus'));          // the canvas's: hide — nothing focused, so nothing
     wall.fullscreen.id = 't1';
-    keys._key(chordKey('Minus'));   // fullscreen's: smaller text
-    keys._key(chordKey('Enter'));   // leave
+    keys._key(chordKey('Minus'));          // fullscreen's: smaller text
+    keys._key(chordKey('Enter'));          // leave
     const k = chordKey('KeyK');
     keys._key(k);
-    expect(ran).toEqual([['cycle', 1], ['spawn'], ['wall.help', 'toggle'], ['fit'],
-        ['wall.fullscreen.text', 'smaller'], ['wall.fullscreen', 'toggle']]);
+    expect(ran).toEqual([
+        ['cycle', 1], ['cycle', -1],
+        ['history', -1], ['history', 1], ['cycleGroup', -1], ['cycleGroup', 1],
+        ['wall.settings', 'toggle'],
+        ['spawn'], ['wall.help', 'toggle'], ['fit'],
+        ['wall.fullscreen.text', 'smaller'], ['wall.fullscreen', 'toggle'],
+    ]);
     expect(next.claimed).toBe(true);
+    expect(prevPane.claimed).toBe(true);
+    expect(browserTabNext.claimed).toBe(false);
+    expect(browserTabPrev.claimed).toBe(false);
+    expect(back.claimed).toBe(true);
+    expect(fwd.claimed).toBe(true);
+    expect(ctrlPrevGroup.claimed).toBe(true);
+    expect(ctrlNextGroup.claimed).toBe(true);
     expect(k.claimed).toBe(false);
+
+    // Keypress, keyup and a focused panel search <input> claim ⌘] and Ctrl+Shift+[ with stopImmediatePropagation.
+    const makePhase = (type, target = null) => {
+        const ev = chordKey('BracketRight');
+        ev.type = type;
+        ev.target = target;
+        ev.immediate = false;
+        ev.stopImmediatePropagation = () => { ev.immediate = true; };
+        return ev;
+    };
+    const kp = makePhase('keypress');
+    const ku = makePhase('keyup');
+    let blurred = false;
+    const panelInput = { tagName: 'INPUT', closest: () => ({}), blur() { blurred = true; } };
+    const kdInPanel = makePhase('keydown', panelInput);
+    const ctrlInPanel = ctrlKey('BracketLeft', true);
+    ctrlInPanel.target = panelInput;
+    ctrlInPanel.immediate = false;
+    ctrlInPanel.stopImmediatePropagation = () => { ctrlInPanel.immediate = true; };
+    keys._keyPress(kp);
+    keys._keyUp(ku);
+    keys._key(kdInPanel);
+    expect([kp.claimed, kp.immediate, ku.claimed, ku.immediate, kdInPanel.claimed, kdInPanel.immediate, blurred])
+        .toEqual([true, true, true, true, true, true, true]);
+    expect(ran.at(-1)).toEqual(['cycle', 1]);
+    blurred = false;
+    keys._key(ctrlInPanel);
+    expect([ctrlInPanel.claimed, ctrlInPanel.immediate, blurred]).toEqual([true, true, true]);
+    expect(ran.at(-1)).toEqual(['cycleGroup', -1]);
 });
 
 test('the help lists every chord, plain key, gesture and verb; its search keeps rows with every word', () => {

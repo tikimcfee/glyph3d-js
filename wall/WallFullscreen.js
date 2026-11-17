@@ -7,6 +7,9 @@ const MIN = { cols: 20, rows: 5 };
 const REFIT_SETTLE_MS = 150;
 /** The text sizes a fullscreen keeps between, CSS px per row. */
 const LINE_PX = { min: 4, max: 200 };
+/** Opacity of the frosted backing veil around a fullscreen terminal. */
+const BACKDROP_OPACITY = 0.9;
+const BACKDROP_BLUR_PX = 8;
 
 /**
  * One terminal fullscreen: where it goes back to on the canvas, the camera's canvas pose, and its text
@@ -16,11 +19,12 @@ const LINE_PX = { min: 4, max: 200 };
  */
 
 /**
- * WallFullscreen — one terminal takes the screen, as a terminal app's fullscreen does: it re-wraps to
- * fill the canvas the docked panels leave (cols × rows at its text size, the leftover under a cell
- * split evenly round it, `fullscreenPad` px inside the edge), the camera sits on it at that size, and
- * nothing else is drawn — no other terminal, title bar, group frame or topbar (TerminalWall.onCanvas).
- * Leaving gives the terminal back its canvas cols × rows and spot, and the camera its canvas pose.
+ * WallFullscreen — one terminal takes the screen, as a terminal app's fullscreen does: lifted above the
+ * canvas Z-stack (wallLayout.FULLSCREEN_Z), it re-wraps to fill the canvas the docked panels leave
+ * (cols × rows at its text size, the leftover under a cell split evenly round it, `fullscreenPad` px
+ * inside the edge), the camera eases onto it at that size, and a ~90%-opacity blurred backing plate
+ * veils the live canvas round it while keeping visual context as the camera glides between selections.
+ * Leaving gives the terminal back its canvas cols × rows, spot and Z-slot, and the camera its canvas pose.
  *
  * Its text size is its own. The first time a terminal goes fullscreen it keeps the size it had on
  * the canvas (at least `fullscreenMinLinePx`), so it shows more text, not bigger text; the text keys
@@ -43,10 +47,79 @@ export default class WallFullscreen {
         this._areaKey = '';
         /** When a pending re-fit runs (performance.now ms), or 0. */
         this._refitAt = 0;
+        /** @type {HTMLDivElement|null} */
+        this._backdrop = null;
+        this._backdropKey = '';
     }
 
     /** The fullscreen terminal's id, or null. */
     get id() { return this.state?.id ?? null; }
+
+    /**
+     * The fullscreen terminal's pre-fullscreen body rect on the canvas, reconstructed from `state.canvas`
+     * so directional navigation and group frames read where it lives on the canvas even while expanded.
+     * @returns {import('./wallLayout.js').Rect|null}
+     */
+    canvasBodyRect() {
+        const s = this.state, grid = s && this.wall.terminal(s.id);
+        if (!s || !grid) return null;
+        const r = this.wall.terminalRect(s.id), st = grid.cellStride;
+        const frameX = r.maxX - r.minX - grid.cols * st.x;
+        const frameY = r.maxY - r.minY - grid.rows * st.y;
+        const minX = r.minX + (s.canvas.x - grid.position.x);
+        const maxY = r.maxY + (s.canvas.y - grid.position.y);
+        return {
+            minX, maxX: minX + s.canvas.cols * st.x + frameX,
+            maxY, minY: maxY - (s.canvas.rows * st.y + frameY),
+        };
+    }
+
+    /** Mount the frosted backing plate inside the canvas host (DOM environments). @param {HTMLElement|null} host */
+    attachBackdrop(host) {
+        this.detachBackdrop();
+        if (!host || typeof document === 'undefined') return;
+        const el = document.createElement('div');
+        el.dataset.fullscreenBackdrop = '';
+        Object.assign(el.style, {
+            position: 'absolute', inset: '0', pointerEvents: 'none', zIndex: '3', display: 'none',
+            backdropFilter: `blur(${BACKDROP_BLUR_PX}px)`, WebkitBackdropFilter: `blur(${BACKDROP_BLUR_PX}px)`,
+        });
+        host.appendChild(el);
+        this._backdrop = el;
+        this._backdropKey = 'hidden';
+    }
+
+    /** Remove the frosted backing plate. */
+    detachBackdrop() {
+        this._backdrop?.remove();
+        this._backdrop = null;
+        this._backdropKey = '';
+    }
+
+    /**
+     * Per frame: veil and blur the canvas outside the fullscreen terminal's screen box, leaving the
+     * terminal's own panel crisp inside the cutout.
+     * @param {import('./WallCamera.js').default} viewport
+     * @param {string} background - canvas hex colour
+     */
+    updateBackdrop(viewport, background) {
+        const el = this._backdrop;
+        if (!el) return;
+        const id = this.id;
+        if (!id || !this.wall.terminal(id)) {
+            if (this._backdropKey !== 'hidden') { this._backdropKey = 'hidden'; el.style.display = 'none'; }
+            return;
+        }
+        const box = viewport.toScreenBox(this.wall.terminalRect(id));
+        const clip = backdropClipPath(box, viewport.view);
+        const bg = backdropColor(background, BACKDROP_OPACITY);
+        const key = `${bg}|${clip}`;
+        if (key === this._backdropKey) return;
+        this._backdropKey = key;
+        el.style.display = 'block';
+        el.style.background = bg;
+        el.style.clipPath = clip;
+    }
 
     /**
      * The canvas a fullscreen fills: the viewport less the docked panels, CSS px.
@@ -85,6 +158,7 @@ export default class WallFullscreen {
             linePx: w.store.fullscreenText(id) ?? entryLinePx,
         };
         w.store.setFullscreen(this.state);
+        w.pointer?.quenchWheel?.();
         if (w.focusedId !== id) w.focus(id);
         w.applyCanvas();
         this.refit();
@@ -98,6 +172,7 @@ export default class WallFullscreen {
         if (!s) return;
         this.state = null;
         this.wall.store.setFullscreen(null);
+        this.wall.pointer?.quenchWheel?.();
         this._giveBack(s);
         this.wall.applyCanvas();
         this.wall.groups.relayoutOf(s.id);
@@ -115,6 +190,7 @@ export default class WallFullscreen {
         if (!s || s.id !== id) return;
         this.state = null;
         this.wall.store.setFullscreen(null);
+        this.wall.pointer?.quenchWheel?.();
         this.wall.applyCanvas();
         this.wall.viewport.easeTo(s.camera);
         this.wall._emit();
@@ -213,3 +289,28 @@ function clampLine(px) { return Math.min(LINE_PX.max, Math.max(LINE_PX.min, px))
 
 /** @param {{ left: number, top: number, width: number, height: number }} a */
 function areaKey(a) { return `${a.left},${a.top},${Math.round(a.width)},${Math.round(a.height)}`; }
+
+/**
+ * CSS `clip-path` covering the viewport except `box` (a counter-clockwise inner contour joined by a
+ * zero-width bridge, so the interior has winding 0 and stays completely unblurred). `'none'` when `box`
+ * lies wholly off-screen during the start of a camera glide.
+ * @param {{ left: number, right: number, top: number, bottom: number }} box
+ * @param {{ w: number, h: number }} view
+ */
+export function backdropClipPath(box, view) {
+    const L = Math.max(0, Math.min(view.w, box.left));
+    const R = Math.max(0, Math.min(view.w, box.right));
+    const T = Math.max(0, Math.min(view.h, box.top));
+    const B = Math.max(0, Math.min(view.h, box.bottom));
+    if (R - L <= 0.5 || B - T <= 0.5) return 'none';
+    const l = L.toFixed(1), r = R.toFixed(1), t = T.toFixed(1), b = B.toFixed(1);
+    return `polygon(0px 0px, 100% 0px, 100% 100%, 0px 100%, 0px 0px, ${l}px ${t}px, ${l}px ${b}px, ${r}px ${b}px, ${r}px ${t}px, ${l}px ${t}px, 0px 0px)`;
+}
+
+/** @param {string} hex @param {number} alpha */
+export function backdropColor(hex, alpha = BACKDROP_OPACITY) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return `rgba(7, 8, 11, ${alpha})`;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}

@@ -12,6 +12,12 @@ export const FLOW_COLUMNS = 3;
 /** The most world height a title bar takes above its terminal (TitleBar caps there) — the room a tiled
  *  row leaves above each body. */
 export const BAR_ROOM = FLOW_GAP * 0.8;
+/** World Z of a fullscreen terminal — well above the canvas stack and inside the ortho camera's z = 500. */
+export const FULLSCREEN_Z = 460;
+const Z_BASE = 2;
+const Z_MAX_STACK = 420;
+const Z_AIR = 1.5;
+const Z_MIN_AIR = 0.25;
 
 /**
  * @typedef {{ minX: number, minY: number, maxX: number, maxY: number }} Rect
@@ -126,6 +132,133 @@ export function cycle(order, current, dir) {
     const i = current == null ? -1 : order.indexOf(current);
     if (i < 0) return dir > 0 ? order[0] : order[order.length - 1];
     return order[(i + dir + order.length) % order.length];
+}
+
+/**
+ * Keep each group's members contiguous in back-to-front `zOrder`, anchored at that group's frontmost
+ * member (preserving relative member order within the group), so a group and its GroupFrame occupy one
+ * coherent slice of the Z-stack.
+ * @param {string[]} zOrder - back to front
+ * @param {((id: string) => string|null)|null} [groupOf]
+ * @returns {string[]}
+ */
+export function normalizeZOrder(zOrder, groupOf = null) {
+    if (!groupOf || zOrder.length <= 1) return [...zOrder];
+    /** @type {Map<string, string[]>} */
+    const byGroup = new Map();
+    for (const id of zOrder) {
+        const g = groupOf(id);
+        if (!g) continue;
+        let list = byGroup.get(g);
+        if (!list) { list = []; byGroup.set(g, list); }
+        list.push(id);
+    }
+    if (!byGroup.size) return [...zOrder];
+    const seen = new Set();
+    const rev = [];
+    for (let i = zOrder.length - 1; i >= 0; i--) {
+        const id = zOrder[i];
+        const g = groupOf(id);
+        if (!g) {
+            rev.push(id);
+        } else if (!seen.has(g)) {
+            seen.add(g);
+            const members = byGroup.get(g);
+            for (let k = members.length - 1; k >= 0; k--) rev.push(members[k]);
+        }
+    }
+    return rev.reverse();
+}
+
+/**
+ * Unified Z-stack layout for terminals AND group frames (`backdrop` at `groupZ`, `header` at
+ * `groupZ + 0.2..0.22`): each group's frame sits immediately behind its own backmost member and
+ * strictly in front of any older terminal or group beneath it, while each terminal clears its own
+ * `-0.5 * scaleZ` background and `+0.05 * scaleZ` cursor/label sandwich.
+ * @param {string[]} zOrder - back to front
+ * @param {{ fullscreenId?: string|null, scaleOf?: ((id: string) => number)|null, groupOf?: ((id: string) => string|null)|null }} [o]
+ * @returns {{ order: string[], terminals: Map<string, number>, groups: Map<string, number> }}
+ */
+export function zStackLayout(zOrder, { fullscreenId = null, scaleOf = null, groupOf = null } = {}) {
+    const order = normalizeZOrder(zOrder, groupOf);
+    const terminals = new Map();
+    const groups = new Map();
+    /** @type {{ kind: 'group'|'terminal', id: string, back: number, front: number }[]} */
+    const slices = [];
+    const seenGroups = new Set();
+    for (const id of order) {
+        const gid = groupOf ? groupOf(id) : null;
+        if (gid && !seenGroups.has(gid)) {
+            seenGroups.add(gid);
+            slices.push({ kind: 'group', id: gid, back: 0, front: 0.25 });
+        }
+        if (id === fullscreenId) {
+            terminals.set(id, FULLSCREEN_Z);
+        } else {
+            const sz = Math.max(1, Math.abs(scaleOf ? scaleOf(id) : 2) || 2);
+            slices.push({ kind: 'terminal', id, back: 0.5 * sz, front: 0.05 * sz });
+        }
+    }
+    if (!slices.length) return { order, terminals, groups };
+    const bodySum = slices.reduce((acc, s) => acc + s.back + s.front, 0);
+    const gaps = Math.max(1, slices.length - 1);
+    const air = bodySum + gaps * Z_AIR <= Z_MAX_STACK
+        ? Z_AIR
+        : Math.max(Z_MIN_AIR, (Z_MAX_STACK - bodySum) / gaps);
+    let cursor = Z_BASE;
+    for (const s of slices) {
+        const z = cursor + s.back;
+        if (s.kind === 'group') groups.set(s.id, z);
+        else terminals.set(s.id, z);
+        cursor = z + s.front + air;
+    }
+    return { order, terminals, groups };
+}
+
+/**
+ * World Z for each terminal in back-to-front `zOrder`, accounting for each terminal's `scale.z`
+ * (default 2: `terminal.create`'s `gridScale = 2.0`) and optional `groupOf` frame slices.
+ * @param {string[]} zOrder - back to front
+ * @param {string|null} [fullscreenId]
+ * @param {((id: string) => number)|null} [scaleOf]
+ * @param {((id: string) => string|null)|null} [groupOf]
+ * @returns {Map<string, number>}
+ */
+export function zPositions(zOrder, fullscreenId = null, scaleOf = null, groupOf = null) {
+    return zStackLayout(zOrder, { fullscreenId, scaleOf, groupOf }).terminals;
+}
+
+/**
+ * Sort `{ id, rect }` items in reading order: horizontal row bands from top to bottom (an item joins
+ * the current band while it vertically overlaps at least half of the shorter of the item and the band),
+ * and left to right (`minX` ascending) within each band.
+ * @param {{ id: string, rect: Rect }[]} items
+ * @returns {string[]}
+ */
+export function readingOrder(items) {
+    if (items.length <= 1) return items.map((x) => x.id);
+    const byTop = [...items].sort((a, b) => (b.rect.maxY - a.rect.maxY) || (a.rect.minX - b.rect.minX));
+    /** @type {{ minY: number, maxY: number, list: { id: string, rect: Rect }[] }[]} */
+    const bands = [];
+    for (const it of byTop) {
+        const r = it.rect, h = Math.max(0, r.maxY - r.minY);
+        const cur = bands[bands.length - 1];
+        const bh = cur ? Math.max(0, cur.maxY - cur.minY) : 0;
+        const overlap = cur ? Math.min(cur.maxY, r.maxY) - Math.max(cur.minY, r.minY) : -1;
+        if (cur && overlap >= 0.5 * Math.min(h, bh)) {
+            cur.minY = Math.min(cur.minY, r.minY);
+            cur.maxY = Math.max(cur.maxY, r.maxY);
+            cur.list.push(it);
+        } else {
+            bands.push({ minY: r.minY, maxY: r.maxY, list: [it] });
+        }
+    }
+    const out = [];
+    for (const b of bands) {
+        b.list.sort((x, y) => (x.rect.minX - y.rect.minX) || (y.rect.maxY - x.rect.maxY));
+        for (const it of b.list) out.push(it.id);
+    }
+    return out;
 }
 
 /**

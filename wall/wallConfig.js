@@ -63,6 +63,8 @@ export const WALL_CONFIG = Object.freeze({
      * through a remote desktop when macOS's screen zoom takes Ctrl+scroll.
      */
     zoomKeys: 'ctrl alt meta',
+    /** Scales how many lines a wheel or two-finger swipe scrolls inside a focused terminal (terminalScroll.js). */
+    scrollMultiplier: 1,
 
     // ── fullscreen (WallFullscreen.js) ──
     /** A terminal going fullscreen keeps its canvas text size, but at least this many CSS px a row (from far out). */
