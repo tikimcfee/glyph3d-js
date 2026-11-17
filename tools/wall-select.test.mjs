@@ -5,7 +5,8 @@
 // selects); a click with no travel clears it; presses within clickRepeatMs count up to a word (two)
 // and a line (three), a fourth starts again; ⇧-drag on the body selects (⇧-click still toggles the
 // terminal in the wall's selection, ⇧-drag off the body still lassoes); a focused program that
-// reports the mouse gets the plain drag and ⇧-drag selects anyway (Ghostty's rule); Ctrl+Alt-drag
+// reports the mouse gets the plain drag and ⇧-drag selects anyway (Ghostty's rule); a drag with the
+// platform's block modifiers (⌘⌥ on macOS, Ctrl+Alt elsewhere: the test holds the ones its host has)
 // selects a block, Alt-drag still moves; a middle-click on a body pastes the wall's selection
 // clipboard, a middle drag pans; a double-click on a body frames nothing (the title bar's does).
 // On a page-less TerminalWall: copyOnSelect (true: the selection clipboard; clipboard: the system
@@ -24,6 +25,7 @@ await import('./headless-canvas.mjs');
 const THREE = await import('three');
 const { HEADLESS_ATLAS } = await import('./headless-atlas.mjs');
 const { WALL_CONFIG } = await import('../wall/wallConfig.js');
+const { IS_MAC } = await import('../wall/chord.js');
 const { default: TerminalGrid } = await import('../packages/glyph3d-core/src/collections/TerminalGrid.js');
 const { default: TerminalScreenQueue } = await import('../packages/glyph3d-core/src/collections/TerminalScreenQueue.js');
 const { default: WallPointer } = await import('../wall/WallPointer.js');
@@ -173,9 +175,10 @@ test('a reporting program gets the plain drag; ⇧-drag selects anyway', async (
     expect(s.grid.selectionText()).toBe('hello');
 });
 
-test('Ctrl+Alt-drag selects a block; Alt-drag still moves the terminal', async () => {
+test('a drag with the block modifiers selects a block; Alt-drag still moves the terminal', async () => {
     const s = await standIn();
-    drag(s, s.at(1, 0, 0.1), s.at(5, 1, 0.1), { ctrlKey: true, altKey: true });
+    // chord.blockSelects: ⌘⌥ on macOS (⌃ at a press is its secondary click), Ctrl+Alt elsewhere.
+    drag(s, s.at(1, 0, 0.1), s.at(5, 1, 0.1), IS_MAC ? { metaKey: true, altKey: true } : { ctrlKey: true, altKey: true });
     expect(s.grid.selection).toMatchObject({ block: true, start: { col: 1, row: 0 }, end: { col: 5, row: 1 } });
     expect(s.grid.selectionText()).toBe('ello\necon');
     press(s, s.at(1, 0), { altKey: true });
