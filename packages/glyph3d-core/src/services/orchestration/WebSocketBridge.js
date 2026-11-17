@@ -14,9 +14,13 @@
 
 const TOKEN_STORAGE_PREFIX = 'g3d.relayToken.';
 
+// A token rides in a Sec-WebSocket-Protocol entry, so it must be an RFC 7230 token.
+const TOKEN_CHARS = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
 /**
  * Extract a relay token from either a bare hex token string or a URL/fragment
- * carrying `#token=<hex>`. Query-string `?token=` is never accepted.
+ * carrying `#token=<hex>`. Query-string `?token=` is never accepted, and neither is
+ * a URL with no `#token=` (a relay address is not a token: Go `parseRelayTokenValue`).
  * @param {string|null|undefined} input
  * @returns {string|null}
  */
@@ -24,18 +28,17 @@ export function parseRelayTokenInput(input) {
     if (typeof input !== 'string') return null;
     const trimmed = input.trim();
     if (!trimmed) return null;
+    let tok = trimmed;
     const hashIdx = trimmed.indexOf('#');
     if (hashIdx >= 0) {
-        const params = new URLSearchParams(trimmed.slice(hashIdx + 1));
-        const tok = (params.get('token') || '').trim();
-        return tok || null;
+        tok = new URLSearchParams(trimmed.slice(hashIdx + 1)).get('token') || '';
+    } else if (trimmed.startsWith('token=')) {
+        tok = new URLSearchParams(trimmed).get('token') || '';
+    } else if (trimmed.includes('://')) {
+        return null;
     }
-    if (trimmed.startsWith('token=')) {
-        const params = new URLSearchParams(trimmed);
-        const tok = (params.get('token') || '').trim();
-        return tok || null;
-    }
-    return trimmed;
+    tok = tok.trim();
+    return tok && TOKEN_CHARS.test(tok) ? tok : null;
 }
 
 /**
@@ -195,6 +198,19 @@ export default class WebSocketBridge {
             this._currentDelay = this._reconnectDelay;
             this.connect();
         }
+    }
+
+    /**
+     * Point the bridge at another relay port. Each relay has its own token, so the token
+     * follows the port: this tab's saved token for the new port, or none. Call it before
+     * setToken for that relay, so the token is saved under the new port's key.
+     * @param {number} port
+     */
+    usePort(port) {
+        const next = Number(port);
+        if (!Number.isInteger(next) || next <= 0 || next === this.port) return;
+        this.port = next;
+        this.token = consumeRelayTokenFromLocation(next);
     }
 
     /**

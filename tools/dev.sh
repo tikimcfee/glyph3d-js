@@ -32,6 +32,10 @@
 
 set -euo pipefail
 
+# Is stdout a terminal? Asked ONCE, here: inside $(…) fd 1 is always a pipe, so a check in the
+# function that prints the URL would never see the terminal.
+STDOUT_TTY=0; [ -t 1 ] && STDOUT_TTY=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE=ide
 if [ "${1:-}" = wall ]; then PROFILE=wall; shift; fi
@@ -103,7 +107,8 @@ start_relay() {
   echo "→ relay: rebuild Go + termd, (re)start on 127.0.0.1:$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
+  # --keep-token: a rebuild's restart keeps the port's token, so an open page reconnects by itself.
+  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --keep-token --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServeRelay), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
@@ -120,14 +125,14 @@ start_relay() {
 
 # The base page URL (no token): safe to echo anywhere.
 page_url() {
-  if [ "$PROFILE" = wall ]; then echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; else echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; fi
+  echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"
 }
 
 # Include `#token=<hex>` ONLY when stdout is an interactive terminal, keeping secrets out of logs.
 tty_page_url() {
   local base
   base="$(page_url)"
-  if [ -t 1 ] && [ -x "$ROOT/glyph3d-cli" ]; then
+  if [ "$STDOUT_TTY" = 1 ] && [ -x "$ROOT/glyph3d-cli" ]; then
     "$ROOT/glyph3d-cli" --port "$RELAY_PORT" url "$base" 2>/dev/null || echo "$base"
   else
     echo "$base   (run: ./glyph3d-cli --port $RELAY_PORT url '$base')"

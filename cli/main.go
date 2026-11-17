@@ -203,7 +203,8 @@ func serveCmd() {
 	p := flagSet.Int("port", 8080, "Port to listen on")
 	listen := flagSet.String("listen", defaultServeListen, "Address to listen on (non-loopback exposes the relay on the network; auth is always required)")
 	var origins stringListFlag
-	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 (repeatable)")
+	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 (repeatable). Its host:port also passes the Host check: the way to reach the relay through a port remap (ssh -L 9000:localhost:8080 → --origin http://localhost:9000) or by a LAN hostname")
+	keepToken := flagSet.Bool("keep-token", false, "Reuse this port's capability token across restarts and leave its 0600 file on exit, so open pages reconnect on their own (the dev loop). Default: a fresh token every start, removed on exit")
 	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	var reach stringListFlag
@@ -223,6 +224,7 @@ func serveCmd() {
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])
+	*listen = normalizeListenHost(*listen) // `[::1]` and `::1` alike; net.JoinHostPort brackets it
 	if *sessionsInterval <= 0 || *maxFollowers <= 0 {
 		log.Fatalf("[serve] --sessions-interval and --max-followers must be positive (got %s, %d)", *sessionsInterval, *maxFollowers)
 	}
@@ -245,7 +247,7 @@ func serveCmd() {
 			fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
-		if err := RunRelay(*listen, *p, origins, fsHandler); err != nil {
+		if err := RunRelay(*listen, *p, origins, *keepToken, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
 		return
@@ -265,6 +267,7 @@ func serveCmd() {
 		Host:      *listen,
 		Port:      *p,
 		Origins:   origins,
+		KeepToken: *keepToken,
 		FSHandler: fsHandler,
 	}
 

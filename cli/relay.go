@@ -91,14 +91,11 @@ type sourceConn struct {
 	lastTS      atomic.Int64 // unix millis of the most recent frame
 }
 
-func NewRelay() *Relay {
+// NewRelay builds a relay guarded by auth (newRelayAuth): every upgrade passes auth.verifyUpgrade.
+func NewRelay(auth *relayAuth) *Relay {
 	logs, err := NewLogStore()
 	if err != nil {
 		log.Fatalf("[relay] log store: %v", err)
-	}
-	auth, err := newRelayAuth("127.0.0.1", 0, nil)
-	if err != nil {
-		log.Fatalf("[relay] auth init: %v", err)
 	}
 	return &Relay{
 		controllers: make(map[string]*websocket.Conn),
@@ -107,12 +104,17 @@ func NewRelay() *Relay {
 		logSubs:     make(map[string]bool),
 		auth:        auth,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: auth.checkOriginBool,
+			// ServeHTTP is the one Upgrade call, and auth.verifyUpgrade has run the Origin
+			// allowlist (with Host and token) just before it. gorilla's default would refuse the
+			// allowlisted cross-origin pages (the Vite dev servers, --origin).
+			CheckOrigin: originCheckedByVerifyUpgrade,
 		},
 	}
 }
 
-// Token returns this relay instance's per-start capability token.
+func originCheckedByVerifyUpgrade(*http.Request) bool { return true }
+
+// Token returns the capability token this relay checks (fresh per start, or kept: relayAuth.bind).
 func (r *Relay) Token() string {
 	return r.auth.Token()
 }
@@ -1236,9 +1238,7 @@ func (r *Relay) startAdapter(id string, cols, rows int, argv []string) (int, err
 	if len(argv) > 0 {
 		args = append(append(args, "--"), argv...)
 	}
-	cmd := exec.Command(exePath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd := r.adapterCommand(exePath, args)
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
@@ -1316,6 +1316,16 @@ func (r *Relay) readoptOrphan(id string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	log.Printf("[relay] terminal '%s': its adapter died but another client owns the terminal; leaving it", id)
+}
+
+// adapterCommand is the `attach` adapter's command: this binary, the relay's stdio, and
+// adapterEnv, so the adapter presents the token this relay checks.
+func (r *Relay) adapterCommand(exePath string, args []string) *exec.Cmd {
+	cmd := exec.Command(exePath, args...)
+	cmd.Env = adapterEnv(os.Environ(), r.Token())
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd
 }
 
 // adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
@@ -1490,6 +1500,7 @@ type ServerConfig struct {
 	Host      string     // Listen address (default "127.0.0.1")
 	Port      int        // Listen port (default 8080)
 	Origins   []string   // Extra allowed browser Origins for WebSocket upgrade
+	KeepToken bool       // --keep-token: reuse this port's token across starts (relayAuth.bind)
 	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
 	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
 	StaticTag string     // Label for logs: "embedded" or the disk path
@@ -1503,13 +1514,11 @@ func isLoopbackListenHost(host string) bool {
 // RunServer starts a unified HTTP + WebSocket server on a single port.
 // WebSocket upgrade requests go to the relay; everything else serves static files.
 func RunServer(cfg ServerConfig) error {
-	auth, err := newRelayAuth(cfg.Host, cfg.Port, cfg.Origins)
+	auth, err := newRelayAuth(cfg.Host, cfg.Port, cfg.Origins, cfg.KeepToken)
 	if err != nil {
 		return err
 	}
-	relay := NewRelay()
-	relay.auth = auth
-	relay.upgrader.CheckOrigin = auth.checkOriginBool
+	relay := NewRelay(auth)
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
@@ -1625,8 +1634,7 @@ func listenAndServeRelay(addr string, relay *Relay, handler http.Handler, onBoun
 		actualPort = tcpAddr.Port
 	}
 	relay.port = actualPort
-	relay.auth.port = actualPort
-	tokenPath, cleanup, err := writeRelayTokenFile(actualPort, relay.Token())
+	tokenPath, cleanup, err := relay.auth.bind(actualPort)
 	if err != nil {
 		ln.Close()
 		return err
@@ -1652,14 +1660,12 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // RunRelay starts the relay-only server (no static files).
-func RunRelay(host string, port int, origins []string, fsHandler *FSHandler) error {
-	auth, err := newRelayAuth(host, port, origins)
+func RunRelay(host string, port int, origins []string, keepToken bool, fsHandler *FSHandler) error {
+	auth, err := newRelayAuth(host, port, origins, keepToken)
 	if err != nil {
 		return err
 	}
-	relay := NewRelay()
-	relay.auth = auth
-	relay.upgrader.CheckOrigin = auth.checkOriginBool
+	relay := NewRelay(auth)
 	relay.fs = fsHandler
 	relay.port = port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has

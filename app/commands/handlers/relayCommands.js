@@ -22,23 +22,28 @@ export default function registerRelayCommands(router) {
         const bridge = ctx.wsbridge;
         if (!bridge) return { text: 'ERR: no relay bridge', data: null };
         const [arg, tokenArg] = args;
-        if (tokenArg) bridge.setToken(tokenArg, { reconnect: false });
+        // The port first: the token belongs to a relay, so usePort brings the new port's saved
+        // token (or none), and a token given here is then saved under the new port's key.
         let url;
         if (arg) {
-            if (/^wss?:\/\//i.test(arg)) {
-                url = arg;
-            } else if (/^https?:\/\//i.test(arg)) {
+            if (/^(wss?|https?):\/\//i.test(arg)) {
                 const u = new URL(arg);
+                const secure = /^(wss|https):$/i.test(u.protocol);
+                bridge.usePort(Number(u.port) || (secure ? 443 : 80));
                 const tok = parseRelayTokenInput(arg);
                 if (tok) bridge.setToken(tok, { reconnect: false });
-                const wsProto = u.protocol === 'https:' ? 'wss:' : 'ws:';
-                bridge.port = Number(u.port) || bridge.port;
-                url = `${wsProto}//${u.host}`;
+                url = `${secure ? 'wss:' : 'ws:'}//${u.host}`;
             } else {
                 // Bare port → dial the relay on the page host at that port (the dev case).
-                bridge.port = Number(arg) || bridge.port;
-                url = `ws://${window.location.hostname}:${arg}`;
+                const port = Number(arg);
+                if (!Number.isInteger(port) || port <= 0) return { text: `ERR: relay.connect: '${arg}' is not a port or a URL`, data: null };
+                bridge.usePort(port);
+                url = `ws://${window.location.hostname}:${port}`;
             }
+        }
+        if (tokenArg) {
+            if (!parseRelayTokenInput(tokenArg)) return { text: 'ERR: relay.connect: the token is not a token or a #token=… URL', data: null };
+            bridge.setToken(tokenArg, { reconnect: false });
         }
         bridge.connect(url);  // undefined → the boot-resolved bridge.url
         const target = bridge.url;

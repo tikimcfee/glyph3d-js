@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// newTestAuth is the auth an in-process test relay runs with: loopback, any port, no --origin.
+func newTestAuth(t *testing.T) *relayAuth {
+	t.Helper()
+	auth, err := newRelayAuth("127.0.0.1", 0, nil, false)
+	if err != nil {
+		t.Fatalf("newRelayAuth: %v", err)
+	}
+	return auth
+}
+
 func TestServeDefaultListenIsLoopback(t *testing.T) {
 	if defaultServeListen != "127.0.0.1" {
 		t.Fatalf("defaultServeListen = %q, want 127.0.0.1", defaultServeListen)
@@ -20,7 +31,7 @@ func TestServeDefaultListenIsLoopback(t *testing.T) {
 }
 
 func TestNoTokenUpgradeIsRefused(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
@@ -47,7 +58,7 @@ func TestNoTokenUpgradeIsRefused(t *testing.T) {
 }
 
 func TestCrossOriginUpgradeIsRefused(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
@@ -79,7 +90,7 @@ func TestCrossOriginUpgradeIsRefused(t *testing.T) {
 }
 
 func TestQueryStringTokenUpgradeIsRefused(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/?token=" + r.Token()
@@ -101,7 +112,7 @@ func TestQueryStringTokenUpgradeIsRefused(t *testing.T) {
 }
 
 func TestDNSRebindingHostHeaderIsRefused(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
@@ -123,13 +134,11 @@ func TestDNSRebindingHostHeaderIsRefused(t *testing.T) {
 }
 
 func TestAllowedOriginsAndSubprotocolWorkAcrossAllRoles(t *testing.T) {
-	auth, err := newRelayAuth("127.0.0.1", 0, []string{"http://127.0.0.1:15190"})
+	auth, err := newRelayAuth("127.0.0.1", 0, []string{"http://127.0.0.1:15190"}, false)
 	if err != nil {
 		t.Fatalf("newRelayAuth: %v", err)
 	}
-	r := NewRelay()
-	r.auth = auth
-	r.upgrader.CheckOrigin = auth.checkOriginBool
+	r := NewRelay(auth)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
@@ -188,8 +197,8 @@ func TestTokenFileIs0600FreshRandomPerStartAndCleanedSafely(t *testing.T) {
 	t.Setenv("G3D_RELAY_TOKEN_DIR", dir)
 	t.Setenv("G3D_RELAY_TOKEN", "")
 
-	r1 := NewRelay()
-	r2 := NewRelay()
+	r1 := NewRelay(newTestAuth(t))
+	r2 := NewRelay(newTestAuth(t))
 	if len(r1.Token()) != 64 || r1.Token() == r2.Token() {
 		t.Fatalf("expected distinct 64-hex random tokens per start, got %q and %q", r1.Token(), r2.Token())
 	}
@@ -243,7 +252,7 @@ func TestFSRPCIsBehindUpgradeAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFSHandler: %v", err)
 	}
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	r.fs = fsh
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
@@ -329,3 +338,163 @@ func TestClientTokenResolutionAndURLFormatting(t *testing.T) {
 	}
 }
 
+// A port remap (ssh -L 9000:localhost:8080, docker -p 9000:8080) or a LAN hostname reaches the
+// relay under a Host it can't know: refused, unless the operator names that address with --origin.
+func TestHostRemapPassesOnlyWhenBlessedByOrigin(t *testing.T) {
+	host := func(h string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Host = h
+		return req
+	}
+	plain, err := newRelayAuth("127.0.0.1", 8080, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.checkHost(host("localhost:9000")); err == nil {
+		t.Fatal("a remapped port passed the Host check with no --origin naming it")
+	}
+	blessed, err := newRelayAuth("127.0.0.1", 8080, []string{"http://localhost:9000", "https://box.lan"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ok := range []string{"localhost:9000", "LOCALHOST:9000", "localhost:8080", "box.lan", "box.lan:443"} {
+		if err := blessed.checkHost(host(ok)); err != nil {
+			t.Errorf("Host %q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"localhost:9001", "127.0.0.1:9000", "evil.example:9000", "box.lan:8443", "evil.rebind.attacker"} {
+		if err := blessed.checkHost(host(bad)); err == nil {
+			t.Errorf("Host %q passed; only the --origin addresses are blessed", bad)
+		}
+	}
+	req := host("localhost:9000")
+	req.Header.Set("Origin", "http://localhost:9000")
+	if err := blessed.checkOrigin(req); err != nil {
+		t.Errorf("the blessed origin's own page refused: %v", err)
+	}
+
+	// --listen 0.0.0.0 reached by a hostname: the same blessing.
+	all, err := newRelayAuth("0.0.0.0", 8080, []string{"http://box.lan:8080"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := all.checkHost(host("box.lan:8080")); err != nil {
+		t.Errorf("--listen 0.0.0.0 refused its blessed hostname: %v", err)
+	}
+	if err := all.checkHost(host("other.lan:8080")); err == nil {
+		t.Error("--listen 0.0.0.0 passed a hostname no --origin names")
+	}
+}
+
+// `--listen [::1]` is the same address as `--listen ::1`: normalized once, so net.JoinHostPort
+// brackets it exactly once and the bind succeeds.
+func TestBracketedIPv6ListenHostBinds(t *testing.T) {
+	for in, want := range map[string]string{"[::1]": "::1", " [::] ": "::", "::1": "::1", "127.0.0.1": "127.0.0.1", "[FE80::1]": "fe80::1"} {
+		if got := normalizeListenHost(in); got != want {
+			t.Errorf("normalizeListenHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := net.JoinHostPort(normalizeListenHost("[::1]"), "8080"); got != "[::1]:8080" {
+		t.Fatalf("JoinHostPort = %q, want [::1]:8080", got)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(normalizeListenHost("[::1]"), "0"))
+	if err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	}
+	ln.Close()
+}
+
+// --keep-token: a restart on the same port adopts the token the previous start left, so an open
+// page's sessionStorage token still works; without it, every start is fresh and its file goes on exit.
+func TestKeepTokenSurvivesARestartAndDefaultDoesNot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "rt")
+	t.Setenv("G3D_RELAY_TOKEN_DIR", dir)
+	t.Setenv("G3D_RELAY_TOKEN", "")
+	const port = 18902
+
+	start := func(keep bool) (*relayAuth, func()) {
+		t.Helper()
+		a, err := newRelayAuth("127.0.0.1", port, nil, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, cleanup, err := a.bind(port)
+		if err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+		return a, cleanup
+	}
+
+	first, stop1 := start(true)
+	stop1()
+	if got, err := readRelayTokenFile(port); err != nil || got != first.Token() {
+		t.Fatalf("--keep-token's file after exit = %q (%v), want the token it served", got, err)
+	}
+	second, stop2 := start(true)
+	stop2()
+	if second.Token() != first.Token() {
+		t.Fatal("a --keep-token restart minted a new token; open pages would be refused")
+	}
+
+	fresh, stop3 := start(false)
+	if fresh.Token() == first.Token() {
+		t.Fatal("a default start reused the kept token")
+	}
+	stop3()
+	if _, err := os.Stat(relayTokenPath(port)); !os.IsNotExist(err) {
+		t.Fatalf("a default start left its token file on exit: %v", err)
+	}
+
+	// A relay a network can reach doesn't keep a token alive across restarts.
+	for _, host := range []string{"0.0.0.0", "::", "192.168.1.20", "[::]"} {
+		if _, err := newRelayAuth(host, port, nil, true); err == nil {
+			t.Errorf("--keep-token accepted with --listen %s", host)
+		}
+	}
+
+	// A kept file that holds no relay token is not adopted.
+	if _, _, err := writeRelayTokenFile(port, "not-a-token"); err != nil {
+		t.Fatal(err)
+	}
+	odd, _ := start(true)
+	if !isRelayTokenShape(odd.Token()) {
+		t.Fatalf("--keep-token adopted %q", odd.Token())
+	}
+}
+
+// A relay started from a shell that exported G3D_RELAY_TOKEN (for an earlier relay) still hands
+// its adapters ITS token: the inherited value would win in the client and be refused.
+func TestAdapterEnvCarriesTheRelaysOwnToken(t *testing.T) {
+	env := adapterEnv([]string{"HOME=/h", "G3D_RELAY_TOKEN=stale", "G3D_RELAY_TOKEN_DIR=/d"}, "fresh")
+	var toks []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "G3D_RELAY_TOKEN=") {
+			toks = append(toks, kv)
+		}
+	}
+	if len(toks) != 1 || toks[0] != "G3D_RELAY_TOKEN=fresh" {
+		t.Fatalf("adapter env tokens = %v, want exactly G3D_RELAY_TOKEN=fresh", toks)
+	}
+	if !strings.Contains(strings.Join(env, "\n"), "HOME=/h") || !strings.Contains(strings.Join(env, "\n"), "G3D_RELAY_TOKEN_DIR=/d") {
+		t.Fatalf("adapter env dropped the rest of the relay's environment: %v", env)
+	}
+
+	// The command startAdapter runs, from a relay whose own environment carries a stale token.
+	t.Setenv("G3D_RELAY_TOKEN", "stale")
+	r := NewRelay(newTestAuth(t))
+	var cmdToks []string
+	for _, kv := range r.adapterCommand("glyph3d-cli", []string{"attach", "term-1"}).Env {
+		if strings.HasPrefix(kv, "G3D_RELAY_TOKEN=") {
+			cmdToks = append(cmdToks, kv)
+		}
+	}
+	if len(cmdToks) != 1 || cmdToks[0] != "G3D_RELAY_TOKEN="+r.Token() {
+		t.Fatalf("the adapter's command carries %v, want only this relay's token", cmdToks)
+	}
+
+	t.Setenv("G3D_RELAY_TOKEN", "fresh") // what the adapter sees
+	_, hdr, err := resolveDialURLAndHeaders("ws://localhost:18903")
+	if err != nil || hdr.Get("Authorization") != "Bearer fresh" {
+		t.Fatalf("adapter dials with %q (%v), want Bearer fresh", hdr.Get("Authorization"), err)
+	}
+}

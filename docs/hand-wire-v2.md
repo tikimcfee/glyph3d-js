@@ -11,7 +11,15 @@ between the two sides and written into both.
 
 ## Transport
 
-WebSocket to the glyph3d relay. The first message is `SOURCE hand`; the relay acks
+WebSocket to the glyph3d relay, which authenticates every upgrade, a source's included
+(`docs/architecture/auth.md`): the relay binds loopback unless started with `--listen`, and the
+upgrade must carry the relay's capability token (`Authorization: Bearer <token>` or the
+subprotocols `glyph3d, g3d-token.<token>`); without it the relay answers `401`. How a capture
+device receives the token, and whether the link it crosses needs TLS, is not designed yet: the
+relay's security model is fixed, and the device's path to the token will be built around it. Until
+then a MotionSource build that dials without a token is refused.
+
+The first message is `SOURCE hand`; the relay acks
 `{"ok":true,"role":"source","sourceId":"src-hand-0",…}` and forwards each later text frame to
 the display as `{event:'source.frame', source, kind, data}`, dropping the oldest under
 backpressure.

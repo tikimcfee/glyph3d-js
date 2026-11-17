@@ -134,6 +134,12 @@ func readRelayToken(port int) (string, error) {
 	if envTok := strings.TrimSpace(os.Getenv("G3D_RELAY_TOKEN")); envTok != "" {
 		return parseRelayTokenValue(envTok)
 	}
+	return readRelayTokenFile(port)
+}
+
+// readRelayTokenFile reads relay-<port>.token from the owner-checked runtime dir, ignoring
+// $G3D_RELAY_TOKEN: the file is what the relay on that port published.
+func readRelayTokenFile(port int) (string, error) {
 	if port <= 0 {
 		return "", fmt.Errorf("invalid relay port %d", port)
 	}
@@ -192,24 +198,39 @@ func parseRelayTokenValue(raw string) (string, error) {
 	return s, nil
 }
 
-// relayAuth enforces Host, Origin, and per-start capability-token checks on the relay.
+// relayAuth enforces Host, Origin, and capability-token checks on the relay. It is built once,
+// before the relay, and completed by bind once the listener owns its port.
 type relayAuth struct {
 	token           string
 	listenHost      string // normalized listen host ("127.0.0.1", "0.0.0.0", "::", or specific IP/host)
-	port            int    // 0 in in-process httptest servers (any port on allowed host)
+	port            int    // set by bind; 0 in in-process httptest servers (any port on allowed host)
+	keepToken       bool   // serve --keep-token: reuse this port's token across starts
 	allowAllIfaces  bool   // true when listenHost is 0.0.0.0 or ::
 	allowedHosts    map[string]bool
 	explicitOrigins map[string]bool
+	// explicitHosts are the host:port pairs of the --origin list. An origin the operator names is
+	// an address a browser reaches this relay by (an ssh -L or docker -p remap, a LAN hostname), so
+	// its Host passes as is: the one blessed way past the hostname and port checks.
+	explicitHosts map[string]bool
 }
 
-func newRelayAuth(listenHost string, port int, extraOrigins []string) (*relayAuth, error) {
+// normalizeListenHost strips spaces and IPv6 brackets: `--listen [::1]` and `--listen ::1` are
+// one address, and net.JoinHostPort adds its own brackets.
+func normalizeListenHost(listenHost string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(listenHost), "[]"))
+}
+
+func newRelayAuth(listenHost string, port int, extraOrigins []string, keepToken bool) (*relayAuth, error) {
 	tok, err := generateRelayToken()
 	if err != nil {
 		return nil, err
 	}
-	cleanListen := strings.ToLower(strings.Trim(strings.TrimSpace(listenHost), "[]"))
+	cleanListen := normalizeListenHost(listenHost)
 	if cleanListen == "" {
 		cleanListen = "127.0.0.1"
+	}
+	if keepToken && !isLoopbackListenHost(cleanListen) {
+		return nil, fmt.Errorf("--keep-token keeps one token alive across restarts: it is for a loopback relay, not --listen %s", listenHost)
 	}
 	hosts := map[string]bool{
 		"localhost": true,
@@ -221,25 +242,88 @@ func newRelayAuth(listenHost string, port int, extraOrigins []string) (*relayAut
 		hosts[cleanListen] = true
 	}
 	explicit := make(map[string]bool, len(extraOrigins))
+	explicitHosts := make(map[string]bool, len(extraOrigins))
 	for _, raw := range extraOrigins {
 		canon, err := canonicalOrigin(raw)
 		if err != nil {
 			return nil, fmt.Errorf("--origin %q: %w", raw, err)
 		}
 		explicit[canon] = true
+		u, _ := url.Parse(canon) // canonicalOrigin parsed it already
+		p := u.Port()
+		if p == "" {
+			p = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+		}
+		explicitHosts[hostPortKey(u.Hostname(), p)] = true
 	}
 	return &relayAuth{
 		token:           tok,
 		listenHost:      cleanListen,
 		port:            port,
+		keepToken:       keepToken,
 		allowAllIfaces:  allowAllIfaces,
 		allowedHosts:    hosts,
 		explicitOrigins: explicit,
+		explicitHosts:   explicitHosts,
 	}, nil
+}
+
+func hostPortKey(host, port string) string {
+	return strings.ToLower(strings.Trim(host, "[]")) + "|" + port
 }
 
 func (a *relayAuth) Token() string {
 	return a.token
+}
+
+// bind completes the auth once the listener owns port: it records the port the Host and Origin
+// checks compare against and publishes the token file. With keepToken, a valid token a previous
+// start on this port left (owner-checked, 64 hex) is adopted instead of this start's fresh one, and
+// the file stays on exit, so an open page reconnects across a restart without a new #token=. It runs
+// before Serve: nothing reads the auth concurrently yet.
+func (a *relayAuth) bind(port int) (path string, cleanup func(), err error) {
+	a.port = port
+	if a.keepToken {
+		prev, err := readRelayTokenFile(port)
+		switch {
+		case err == nil && isRelayTokenShape(prev):
+			a.token = prev
+		case err == nil:
+			log.Printf("[relay] --keep-token: relay-%d.token holds no relay token; minted a fresh one", port)
+		case !os.IsNotExist(err):
+			log.Printf("[relay] --keep-token: not reusing relay-%d.token (%v); minted a fresh one", port, err)
+		}
+	}
+	path, cleanup, err = writeRelayTokenFile(port, a.token)
+	if err != nil {
+		return "", nil, err
+	}
+	if a.keepToken {
+		cleanup = func() {}
+	}
+	return path, cleanup, nil
+}
+
+// adapterEnv is the environment of an `attach` adapter the relay forks: the relay's own, with
+// G3D_RELAY_TOKEN set to the token this relay checks. The client prefers that variable over the
+// token file, so an inherited one (exported for an earlier relay) would otherwise win and be refused.
+func adapterEnv(base []string, token string) []string {
+	env := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if !strings.HasPrefix(kv, "G3D_RELAY_TOKEN=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "G3D_RELAY_TOKEN="+token)
+}
+
+// isRelayTokenShape reports whether tok looks like a token generateRelayToken minted.
+func isRelayTokenShape(tok string) bool {
+	if len(tok) != 2*relayTokenBytes {
+		return false
+	}
+	_, err := hex.DecodeString(tok)
+	return err == nil
 }
 
 func canonicalOrigin(raw string) (string, error) {
@@ -330,6 +414,13 @@ func (a *relayAuth) checkHost(req *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("malformed Host %q: %w", req.Host, err)
 	}
+	if p == "" {
+		if a.explicitHosts[hostPortKey(h, "80")] || a.explicitHosts[hostPortKey(h, "443")] {
+			return nil
+		}
+	} else if a.explicitHosts[hostPortKey(h, p)] {
+		return nil
+	}
 	if !a.isHostAllowed(h) {
 		return fmt.Errorf("disallowed Host %q", req.Host)
 	}
@@ -373,10 +464,6 @@ func (a *relayAuth) checkOrigin(req *http.Request) error {
 		return nil
 	}
 	return fmt.Errorf("origin %q is not allowed", origins[0])
-}
-
-func (a *relayAuth) checkOriginBool(req *http.Request) bool {
-	return a.checkOrigin(req) == nil
 }
 
 // extractUpgradeToken inspects Authorization: Bearer <tok> and Sec-WebSocket-Protocol

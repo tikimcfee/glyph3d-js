@@ -142,7 +142,7 @@ func TestSourceRecordNeverOverwrites(t *testing.T) {
 
 // A full queue (a disk that can't keep up) drops frames and counts them — never blocks the caller.
 func TestSourceRecordDropsRatherThanBlocks(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	rec := &recorder{q: make(chan []byte, 2), started: time.Now()} // no writer goroutine: the queue fills
 	r.rec = rec
 	done := make(chan struct{})

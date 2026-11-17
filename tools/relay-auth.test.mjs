@@ -122,6 +122,50 @@ test('WebSocketBridge consumes #token=, scrubs URL bar, keeps token out of local
         expect(dials[2].protocols).toEqual(['glyph3d', 'g3d-token.third_secret_333']);
         expect(localMap.size).toBe(0);
 
+        // A relay ADDRESS is not a token: a URL with no #token= parses to nothing (Go parseRelayTokenValue).
+        for (const notToken of ['http://localhost:8081/', 'ws://localhost:8081', 'http://localhost:5180/?relay=8180#view=grid', 'a b', 'tok,en']) {
+            expect(parseRelayTokenInput(notToken)).toBeNull();
+        }
+
+        // relay.connect — the verb the ButtonBar's port field and the CLI run.
+        const handlers = new Map();
+        const { default: registerRelayCommands } = await import('../app/commands/handlers/relayCommands.js');
+        registerRelayCommands({ register: (name, fn) => handlers.set(name, fn) });
+        const relayConnect = (...args) => handlers.get('relay.connect')(args, { wsbridge: bridge });
+
+        // A plain relay URL keeps the held token (it used to become the token and break the dial).
+        relayConnect('http://localhost:8180/');
+        expect(bridge.token).toBe('third_secret_333');
+        expect(sessionMap.get('g3d.relayToken.8180')).toBe('third_secret_333');
+        expect(dials.at(-1).protocols).toEqual(['glyph3d', 'g3d-token.third_secret_333']);
+
+        // Switching relays: the token follows the port, never relay A's token at relay B.
+        relayConnect('8181');
+        expect(bridge.port).toBe(8181);
+        expect(bridge.token).toBeNull();
+        expect(dials.at(-1)).toEqual({ url: 'ws://localhost:8181', protocols: ['glyph3d'] });
+
+        // A #token= URL for another relay saves the token under THAT relay's port.
+        relayConnect('http://localhost:8182/#token=fourth_secret_444');
+        expect(bridge.port).toBe(8182);
+        expect(sessionMap.get('g3d.relayToken.8182')).toBe('fourth_secret_444');
+        expect(sessionMap.get('g3d.relayToken.8180')).toBe('third_secret_333');
+        expect(dials.at(-1).protocols).toEqual(['glyph3d', 'g3d-token.fourth_secret_444']);
+
+        // ...and back: relay A's saved token comes back with its port.
+        relayConnect('8180');
+        expect(bridge.token).toBe('third_secret_333');
+        expect(dials.at(-1)).toEqual({ url: 'ws://localhost:8180', protocols: ['glyph3d', 'g3d-token.third_secret_333'] });
+
+        // An explicit second-argument token lands under the port being connected to.
+        relayConnect('8183', 'fifth_secret_555');
+        expect(sessionMap.get('g3d.relayToken.8183')).toBe('fifth_secret_555');
+        expect(sessionMap.get('g3d.relayToken.8180')).toBe('third_secret_333');
+
+        expect(handlers.get('relay.token')(['http://localhost:8183/'], { wsbridge: bridge }).text).toMatch(/^ERR/);
+        expect(bridge.token).toBe('fifth_secret_555');
+        expect(localMap.size).toBe(0);
+
         bridge.dispose();
         expect(listeners.has('hashchange')).toBe(false);
     } finally {
