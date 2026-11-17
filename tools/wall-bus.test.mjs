@@ -98,14 +98,15 @@ test('attachArgv refuses what is not an agent name', () => {
     expect(argv.at(-1)).toBe('helper@workstation');
 });
 
-test('the attach program: a clean detach exits, a failure holds its reason until Enter', () => {
+test('the attach program: a clean detach exits; a failure takes the terminal back, holds its reason, and Enter attaches again', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wall-bus-'));
     try {
         const log = join(dir, 'args');
-        // A stand-in `agent`: records its args, exits with $AGENT_EXIT.
-        writeFileSync(join(dir, 'agent'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\nexit "\${AGENT_EXIT:-0}"\n`);
+        // A stand-in `agent`: records its args (one run after another), exits with $AGENT_EXIT.
+        writeFileSync(join(dir, 'agent'), `#!/bin/sh\nprintf '%s\\n' "$@" >> "${log}"\nexit "\${AGENT_EXIT:-0}"\n`);
         chmodSync(join(dir, 'agent'), 0o755);
         const run = (exit, input) => {
+            rmSync(log, { force: true });
             const [cmd, ...args] = attachArgv('helper@workstation');
             return spawnSync(cmd, args, { env: { PATH: `${dir}:/usr/bin:/bin`, AGENT_EXIT: String(exit) }, input, encoding: 'utf8', timeout: 5000 });
         };
@@ -113,9 +114,19 @@ test('the attach program: a clean detach exits, a failure holds its reason until
         expect(ok.status).toBe(0);
         expect(ok.stdout).toBe('');
         expect(readFileSync(log, 'utf8')).toBe('attach\nhelper@workstation\n');
-        const failed = run(1, '\n');
-        expect(failed.status).toBe(0);                       // Enter closes it
-        expect(failed.stdout).toContain('[agent attach helper@workstation ended with status 1. Press Enter to close.]');
+        const reason = '[agent attach helper@workstation ended with status 255. Enter attaches again; q then Enter closes.]';
+        const closed = run(255, 'q\n');
+        expect(closed.status).toBe(0);                       // q closes it
+        expect(closed.stdout.split(reason).length - 1).toBe(1);
+        expect(readFileSync(log, 'utf8')).toBe('attach\nhelper@workstation\n');
+        // The dead client's modes are switched off BEFORE the reason: mouse reporting, focus, bracketed paste, the alternate screen; the cursor shown.
+        const before = closed.stdout.slice(0, closed.stdout.indexOf(reason));
+        for (const off of ['?1000l', '?1002l', '?1003l', '?1006l', '?1004l', '?2004l', '?1049l', '?25h']) expect(before).toContain(`\x1b[${off}`);
+        // Enter attaches again (here it fails again); the end of input closes.
+        const again = run(1, '\n');
+        expect(again.status).toBe(0);
+        expect(readFileSync(log, 'utf8')).toBe('attach\nhelper@workstation\nattach\nhelper@workstation\n');
+        expect(again.stdout.split('ended with status 1.').length - 1).toBe(2);
         // termd's PATH lacks `agent`: the login shell's PATH (here a stand-in $SHELL that knows dir) finds it.
         const bin = mkdtempSync(join(tmpdir(), 'wall-bus-sh-'));
         try {

@@ -78,12 +78,22 @@ export function busHosts(snap) {
 }
 
 /**
+ * What a dead attach client leaves switched on, switched off (printf's octal escapes): mouse
+ * reporting (1000, 1002, 1003) and its encodings (1006, 1015), focus events (1004), bracketed paste
+ * (2004), the alternate screen (1049), a hidden cursor (25), the last SGR.
+ */
+const ATTACH_RESET = ['?1000l', '?1002l', '?1003l', '?1006l', '?1015l', '?1004l', '?2004l', '?1049l', '?25h', '0m'].map((m) => `\\033[${m}`).join('');
+
+/**
  * The program a wall.attach terminal runs: `agent attach <target>` (with the login shell's PATH
- * when termd's lacks `agent`), and — when the attach fails
- * (no session, ssh refused, no `agent` on PATH) — its reason held on screen until Enter, rather than
- * a terminal that closes before anyone reads why. A clean detach (tmux's prefix d) or the agent's
- * session ending exits 0 and closes the terminal, as any program's end does. The target rides as
- * `$1`, never inside the script.
+ * when termd's lacks `agent`), and — when the attach fails or dies (no session, ssh refused or
+ * dropped, no `agent` on PATH) — its reason held on screen, rather than a terminal that closes
+ * before anyone reads why: Enter attaches again, `q` then Enter (or end of input) closes. A client
+ * that died (a dropped ssh, a killed tmux) never gave the terminal back, so the script takes it back
+ * first — mouse reporting, focus events and bracketed paste off, the main screen, a shown cursor, a
+ * sane tty — else the wall's wheel and clicks arrive as text over the reason, and a raw tty never
+ * hears the Enter. A clean detach (tmux's prefix d) or the agent's session ending exits 0 and closes
+ * the terminal, as any program's end does. The target rides as `$1`, never inside the script.
  * @param {string} target - `name` or `name@host` (isBusTarget)
  * @returns {string[]}
  */
@@ -93,10 +103,15 @@ export function attachArgv(target) {
         // termd starts this program, not the person's login shell, so the PATH that shell builds
         // (~/.local/bin from ~/.zprofile, say: where gomuxai installs `agent`) is borrowed from it.
         'command -v agent >/dev/null 2>&1 || PATH="$("${SHELL:-/bin/sh}" -lc \'printf %s "$PATH"\' 2>/dev/null):$PATH"',
-        'agent attach "$1"; s=$?',
-        '[ "$s" -eq 0 ] && exit 0',
-        `printf '\\r\\n[agent attach %s ended with status %d. Press Enter to close.]' "$1" "$s"`,
-        'read -r _',
+        'while :; do',
+        '  agent attach "$1"; s=$?',
+        '  [ "$s" -eq 0 ] && exit 0',
+        `  printf '${ATTACH_RESET}'`,
+        '  stty sane 2>/dev/null',
+        `  printf '\\r\\n[agent attach %s ended with status %d. Enter attaches again; q then Enter closes.]\\r\\n' "$1" "$s"`,
+        '  read -r a || exit 0',
+        '  [ "$a" = q ] && exit 0',
+        'done',
     ].join('\n');
     return ['sh', '-c', script, 'wall-attach', target];
 }

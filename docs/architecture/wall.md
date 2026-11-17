@@ -228,9 +228,10 @@ it couldn't say (unknown attaches; only a stated false refuses). Attaching opens
 way in: tmux here, ssh to the far host's `agent attach` there (`agent bus ssh` says where), so the
 network hop is ssh and termd stays local. The store remembers which terminal attaches to which agent
 (`attached`, pruned with the terminal), so a second attach reveals the first; its title bar reads
-`<name> · <status>`. A failed attach holds its reason on screen until Enter; a clean detach (tmux's
-prefix d) or the session ending closes the terminal. An agent the bus lists with no tmux session is
-refused. Attaching resizes the agent's tmux window to the terminal, as any client's attach does.
+`<name> · <status>`. An attach that fails or dies (a dropped ssh) takes the terminal back from the dead
+client (mouse reporting, the alternate screen) and holds its reason on screen: Enter attaches again, `q`
+closes; a clean detach (tmux's prefix d) or the session ending closes the terminal. An agent the bus lists with no tmux session is
+refused, and a refused attach says why in the wall's notice. Attaching resizes the agent's tmux window to the terminal, as any client's attach does.
 Gate: `tools/wall-bus.test.mjs`.
 
 **The help panel** (`wall/HelpPanel.jsx`, chord+/, the topbar's ?, the palette, `wall.help`) lists

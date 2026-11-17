@@ -404,7 +404,10 @@ export default function registerWallCommands(router, wall) {
     });
     verb('wall.attach', '<name[@host]>', "Attach to a gomuxai agent: reveal the terminal attached to it, else open one running `agent attach`", async (args) => {
         if (!args[0]) throw new Error('name an agent: name, or name@host for one on another host');
-        const r = await wall.attach(args[0]);
+        let r;
+        // A refusal (no tmux session, a spawn that didn't land) shows on the wall: the sidebar's and
+        // the palette's clicks have nowhere else to say it.
+        try { r = await wall.attach(args[0]); } catch (e) { wall.notify(`attach: ${e.message}`); throw e; }
         return OK(r.existing ? `revealed ${r.id}, attached to ${args[0]}` : `${r.id} attaches to ${args[0]}`, { id: r.id, target: args[0], existing: r.existing });
     });
 
