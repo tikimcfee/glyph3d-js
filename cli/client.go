@@ -15,9 +15,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,12 +30,67 @@ import (
 
 // --- Connection ---
 
+func portFromRelayURL(rawURL string) (int, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, err
+	}
+	if p := u.Port(); p != "" {
+		return strconv.Atoi(p)
+	}
+	return 8080, nil
+}
+
+func resolveDialURLAndHeaders(rawURL string) (string, http.Header, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid relay URL %q: %w", rawURL, err)
+	}
+	if u.Query().Has("token") {
+		return "", nil, fmt.Errorf("relay token in URL query string is forbidden; use #token= or G3D_RELAY_TOKEN")
+	}
+	var tok string
+	if u.Fragment != "" {
+		frag, _ := url.ParseQuery(u.Fragment)
+		tok = strings.TrimSpace(frag.Get("token"))
+		u.Fragment = ""
+	}
+	if tok == "" {
+		if envTok := strings.TrimSpace(os.Getenv("G3D_RELAY_TOKEN")); envTok != "" {
+			parsed, err := parseRelayTokenValue(envTok)
+			if err != nil {
+				return "", nil, err
+			}
+			tok = parsed
+		} else if isLoopbackListenHost(u.Hostname()) {
+			if p, err := portFromRelayURL(u.String()); err == nil && p > 0 {
+				if diskTok, err := readRelayToken(p); err == nil {
+					tok = diskTok
+				}
+			}
+		}
+	}
+	hdr := http.Header{}
+	if tok != "" {
+		hdr.Set("Authorization", "Bearer "+tok)
+	}
+	return u.String(), hdr, nil
+}
+
 // connect dials the relay and runs the controller handshake: send "ping", receive
 // "OK: connected as ctrl-N", receive "pong".
-func connect(url string) (*websocket.Conn, error) {
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+func connect(rawURL string) (*websocket.Conn, error) {
+	dialURL, hdr, err := resolveDialURLAndHeaders(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w (is a relay up? glyph3d-cli serve)", url, err)
+		return nil, err
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial(dialURL, hdr)
+	if err != nil {
+		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			p, _ := portFromRelayURL(dialURL)
+			return nil, fmt.Errorf("dial %s: HTTP %d (%s — check %s or G3D_RELAY_TOKEN)", dialURL, resp.StatusCode, http.StatusText(resp.StatusCode), relayTokenPath(p))
+		}
+		return nil, fmt.Errorf("dial %s: %w (is a relay up? glyph3d-cli serve)", dialURL, err)
 	}
 	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
 		conn.Close()
@@ -56,6 +114,53 @@ func connect(url string) (*websocket.Conn, error) {
 		return nil, fmt.Errorf("handshake pong: %w", err)
 	}
 	return conn, nil
+}
+
+func tokenCmd(rawURL string, args []string) int {
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli [--port N | --host url] token")
+		return 2
+	}
+	p, err := portFromRelayURL(rawURL)
+	if err != nil || p <= 0 {
+		fmt.Fprintf(os.Stderr, "token: cannot determine relay port from %q\n", rawURL)
+		return 2
+	}
+	tok, err := readRelayToken(p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token: %v\n", err)
+		return 1
+	}
+	fmt.Println(tok)
+	return 0
+}
+
+func urlCmd(rawURL string, args []string) int {
+	if len(args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli [--port N | --host url] url [base-url]")
+		return 2
+	}
+	p, err := portFromRelayURL(rawURL)
+	if err != nil || p <= 0 {
+		fmt.Fprintf(os.Stderr, "url: cannot determine relay port from %q\n", rawURL)
+		return 2
+	}
+	tok, err := readRelayToken(p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "url: %v\n", err)
+		return 1
+	}
+	base := fmt.Sprintf("http://localhost:%d/", p)
+	if len(args) == 1 {
+		base = args[0]
+	}
+	out, err := formatBrowserTokenURL(base, tok)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "url: %v\n", err)
+		return 2
+	}
+	fmt.Println(out)
+	return 0
 }
 
 // mustConnect is connect for the client commands: a relay that isn't there is fatal.

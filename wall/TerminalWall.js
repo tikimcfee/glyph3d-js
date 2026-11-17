@@ -392,6 +392,17 @@ export default class TerminalWall {
     }
 
     /**
+     * Set or replace the relay capability token (accepts a raw token or a `#token=…` URL) and
+     * reconnect immediately, reconciling a restarted relay's fresh random token with no reload.
+     * @param {string} token
+     */
+    setRelayToken(token) {
+        if (!this.bridge) throw new Error('the wall is not running');
+        this.bridge.setToken(token);
+        this._emit();
+    }
+
+    /**
      * Registered: re-adopt the relay's orphaned sessions (their adapters died with a relay restart),
      * then forget the names and spots of terminals whose sessions are gone — the reply lists every
      * live terminal (`live`), and an id whose session is gone will be minted again for a stranger.
@@ -695,7 +706,7 @@ export default class TerminalWall {
     snapshot() {
         return {
             connected: this.relay.state === 'up',
-            relay: this.relay,
+            relay: { ...this.relay, hasToken: !!this.bridge?.token },
             focusedId: this.focusedId,
             selection: [...this.selection],
             sidebar: this.store.sidebar(),

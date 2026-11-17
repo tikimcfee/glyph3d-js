@@ -45,6 +45,7 @@ type Relay struct {
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	gxMu          sync.Mutex
 	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
+	auth          *relayAuth
 	upgrader      websocket.Upgrader
 	fs            *FSHandler      // nil if --root not provided
 	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers
@@ -95,15 +96,25 @@ func NewRelay() *Relay {
 	if err != nil {
 		log.Fatalf("[relay] log store: %v", err)
 	}
+	auth, err := newRelayAuth("127.0.0.1", 0, nil)
+	if err != nil {
+		log.Fatalf("[relay] auth init: %v", err)
+	}
 	return &Relay{
 		controllers: make(map[string]*websocket.Conn),
 		sources:     make(map[string]*sourceConn),
 		logs:        logs,
 		logSubs:     make(map[string]bool),
+		auth:        auth,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			CheckOrigin: auth.checkOriginBool,
 		},
 	}
+}
+
+// Token returns this relay instance's per-start capability token.
+func (r *Relay) Token() string {
+	return r.auth.Token()
 }
 
 // sendToDisplay enqueues a text message for the display WebSocket writer goroutine.
@@ -337,7 +348,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 }
 
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	ws, err := r.upgrader.Upgrade(w, req, nil)
+	respHdr, ok := r.auth.verifyUpgrade(w, req)
+	if !ok {
+		return
+	}
+	ws, err := r.upgrader.Upgrade(w, req, respHdr)
 	if err != nil {
 		log.Printf("[relay] upgrade error: %v", err)
 		return
@@ -1472,17 +1487,29 @@ func (r *Relay) wireFS(h *FSHandler) {
 
 // ServerConfig holds all options for the unified server.
 type ServerConfig struct {
-	Host      string     // Listen address (default "0.0.0.0")
+	Host      string     // Listen address (default "127.0.0.1")
 	Port      int        // Listen port (default 8080)
+	Origins   []string   // Extra allowed browser Origins for WebSocket upgrade
 	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
 	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
 	StaticTag string     // Label for logs: "embedded" or the disk path
 }
 
+func isLoopbackListenHost(host string) bool {
+	h := strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	return h == "" || h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
 // RunServer starts a unified HTTP + WebSocket server on a single port.
 // WebSocket upgrade requests go to the relay; everything else serves static files.
 func RunServer(cfg ServerConfig) error {
+	auth, err := newRelayAuth(cfg.Host, cfg.Port, cfg.Origins)
+	if err != nil {
+		return err
+	}
 	relay := NewRelay()
+	relay.auth = auth
+	relay.upgrader.CheckOrigin = auth.checkOriginBool
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
@@ -1502,6 +1529,10 @@ func RunServer(cfg ServerConfig) error {
 		// WebSocket upgrade → relay
 		if isWebSocketUpgrade(r) {
 			relay.ServeHTTP(w, r)
+			return
+		}
+		if err := relay.auth.checkHost(r); err != nil {
+			http.Error(w, "forbidden: invalid host", http.StatusForbidden)
 			return
 		}
 
@@ -1524,40 +1555,52 @@ func RunServer(cfg ServerConfig) error {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	// Startup banner
-	log.Printf("[glyph3d] ══════════════════════════════════════")
-	log.Printf("[glyph3d] glyph3d-cli — single-binary server")
-	log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
-	if cfg.FSHandler != nil {
-		root, reach := cfg.FSHandler.Roots()
-		log.Printf("[glyph3d] Project: %s", root)
-		if len(reach) > 0 {
-			log.Printf("[glyph3d] Reach:   %s", strings.Join(reach, "  "))
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	return listenAndServeRelay(addr, relay, mux, func(actualPort int, tokenPath string) {
+		log.Printf("[glyph3d] ══════════════════════════════════════")
+		log.Printf("[glyph3d] glyph3d-cli — single-binary server")
+		log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
+		if cfg.FSHandler != nil {
+			root, reach := cfg.FSHandler.Roots()
+			log.Printf("[glyph3d] Project: %s", root)
+			if len(reach) > 0 {
+				log.Printf("[glyph3d] Reach:   %s", strings.Join(reach, "  "))
+			}
 		}
-	}
-	log.Printf("[glyph3d] ──────────────────────────────────────")
-	log.Printf("[glyph3d]   http://localhost:%d/", cfg.Port)
-	log.Printf("[glyph3d]   ws://localhost:%d  (relay)", cfg.Port)
-	if cfg.Host == "0.0.0.0" {
-		for _, a := range getLANAddresses() {
-			log.Printf("[glyph3d]   http://%s:%d/", a, cfg.Port)
+		log.Printf("[glyph3d] ──────────────────────────────────────")
+		log.Printf("[glyph3d]   http://localhost:%d/", actualPort)
+		log.Printf("[glyph3d]   ws://localhost:%d  (relay)", actualPort)
+		log.Printf("[glyph3d]   auth:  %s (0600)", tokenPath)
+		log.Printf("[glyph3d]   url:   glyph3d-cli --port %d url", actualPort)
+		if !isLoopbackListenHost(cfg.Host) {
+			log.Printf("[glyph3d]   note:  network listen (%s); ws:// is unencrypted on untrusted Wi-Fi", cfg.Host)
+			if cfg.Host == "0.0.0.0" || cfg.Host == "::" {
+				for _, a := range getLANAddresses() {
+					log.Printf("[glyph3d]   http://%s:%d/", a, actualPort)
+				}
+			} else {
+				log.Printf("[glyph3d]   http://%s:%d/", cfg.Host, actualPort)
+			}
 		}
-	}
-	log.Printf("[glyph3d] ══════════════════════════════════════")
-
-	return listenAndServe(addr, mux)
+		log.Printf("[glyph3d] ══════════════════════════════════════")
+		if isCharDeviceFile(os.Stdout) {
+			fmt.Fprintf(os.Stdout, "  open → http://localhost:%d/#token=%s\n", actualPort, relay.Token())
+			if !isLoopbackListenHost(cfg.Host) {
+				if cfg.Host == "0.0.0.0" || cfg.Host == "::" {
+					for _, a := range getLANAddresses() {
+						fmt.Fprintf(os.Stdout, "  lan  → http://%s:%d/#token=%s\n", a, actualPort, relay.Token())
+					}
+				} else {
+					fmt.Fprintf(os.Stdout, "  lan  → http://%s:%d/#token=%s\n", cfg.Host, actualPort, relay.Token())
+				}
+			}
+		}
+	})
 }
 
-// listenAndServe binds addr with a short retry window, then serves. The dev loop
-// restarts the relay by killing the old one and starting a new one; a just-killed
-// predecessor can hold the listen socket for a beat while it drains, so a fresh start
-// racing it would otherwise die instantly on EADDRINUSE and drop the display + every
-// terminal. Retrying the bind for ~5s turns that race into a brief wait. A genuine
-// second server already up will exhaust the window and fail loudly — the honest answer
-// (one port, one relay). Non-EADDRINUSE errors fail immediately (bad addr / perms).
-func listenAndServe(addr string, handler http.Handler) error {
+// listenAndServeRelay binds addr with a short retry window, writes the 0600 per-start
+// token file once this server genuinely owns the port, then serves.
+func listenAndServeRelay(addr string, relay *Relay, handler http.Handler, onBound func(port int, tokenPath string)) error {
 	const tries, gap = 25, 200 * time.Millisecond // ~5s total
 	var ln net.Listener
 	var err error
@@ -1577,8 +1620,24 @@ func listenAndServe(addr string, handler http.Handler) error {
 		return fmt.Errorf("listen %s: still in use after %v (another server already running?): %w",
 			addr, time.Duration(tries)*gap, err)
 	}
+	actualPort := relay.port
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && tcpAddr.Port > 0 {
+		actualPort = tcpAddr.Port
+	}
+	relay.port = actualPort
+	relay.auth.port = actualPort
+	tokenPath, cleanup, err := writeRelayTokenFile(actualPort, relay.Token())
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	registerTokenCleanup(cleanup)
+	defer cleanup()
+	if onBound != nil {
+		onBound(actualPort, tokenPath)
+	}
 	// The line a supervisor (or a test that started this relay) waits on: from here a connect is
-	// accepted (the backlog holds it until Serve takes it).
+	// accepted (the backlog holds it until Serve takes it), and the token file is already published.
 	log.Printf("[serve] listening on %s", ln.Addr())
 	return http.Serve(ln, handler)
 }
@@ -1593,8 +1652,14 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // RunRelay starts the relay-only server (no static files).
-func RunRelay(host string, port int, fsHandler *FSHandler) error {
+func RunRelay(host string, port int, origins []string, fsHandler *FSHandler) error {
+	auth, err := newRelayAuth(host, port, origins)
+	if err != nil {
+		return err
+	}
 	relay := NewRelay()
+	relay.auth = auth
+	relay.upgrader.CheckOrigin = auth.checkOriginBool
 	relay.fs = fsHandler
 	relay.port = port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
@@ -1603,12 +1668,13 @@ func RunRelay(host string, port int, fsHandler *FSHandler) error {
 		relay.wireFS(fsHandler)
 	}
 
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	mux := http.NewServeMux()
 	mux.Handle("/", relay)
 
-	log.Printf("[relay] glyph3d WebSocket relay on %s", addr)
-	return listenAndServe(addr, mux)
+	return listenAndServeRelay(addr, relay, mux, func(_ int, tokenPath string) {
+		log.Printf("[relay] glyph3d WebSocket relay on %s (token: %s)", addr, tokenPath)
+	})
 }
 
 func getLANAddresses() []string {

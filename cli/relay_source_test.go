@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -32,7 +33,8 @@ func newTestRelay(t *testing.T) (*Relay, func(t *testing.T) *websocket.Conn) {
 
 	return r, func(t *testing.T) *websocket.Conn {
 		t.Helper()
-		c, _, err := websocket.DefaultDialer.Dial(url, nil)
+		hdr := http.Header{"Authorization": []string{"Bearer " + r.Token()}}
+		c, _, err := websocket.DefaultDialer.Dial(url, hdr)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}

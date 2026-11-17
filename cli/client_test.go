@@ -52,8 +52,13 @@ func TestOneShotLine(t *testing.T) {
 // "OK: <line>" — except lines starting with "slow", which it never answers.
 func fakeRelay(t *testing.T) string {
 	t.Helper()
+	t.Setenv("G3D_RELAY_TOKEN", "fake-relay-secret")
 	up := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fake-relay-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		ws, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return

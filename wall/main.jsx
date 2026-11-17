@@ -87,9 +87,11 @@ function Chrome({ wall }) {
         <button style={styles.button} data-action="sidebar" onClick={() => wall.run(['wall.sidebar', 'toggle'])} title={`Every terminal and group (${chordLabel(['B'])})`}>list {chordLabel(['B'])}</button>
         <button style={styles.button} data-action="settings" onClick={() => wall.run(['wall.settings', 'toggle'])} title={`Every knob, searchable (${chordLabel([','])})`}>settings</button>
         <button style={styles.button} data-action="help" onClick={() => wall.run(['wall.help', 'toggle'])} title={`Keys, gestures and verbs (${chordLabel(['/'])})`}>?</button>
-        <span data-relay={relay.state} title={relay.state === 'refused' ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves` : ''}
+        <span data-relay={relay.state} title={relay.state === 'refused'
+          ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves`
+          : !relay.hasToken ? `open the URL from 'glyph3d-cli --port ${RELAY_PORT} url' or run 'wall.token <token>'` : ''}
           style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
-          {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : '○ relay offline'}
+          {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : !relay.hasToken ? `○ relay :${RELAY_PORT} — token needed` : '○ relay offline'}
         </span>
         <TermdChip wall={wall} />
       </div>}

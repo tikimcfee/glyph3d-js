@@ -12,12 +12,73 @@
  * - Status bar UI element showing connection state and address
  */
 
+const TOKEN_STORAGE_PREFIX = 'g3d.relayToken.';
+
+/**
+ * Extract a relay token from either a bare hex token string or a URL/fragment
+ * carrying `#token=<hex>`. Query-string `?token=` is never accepted.
+ * @param {string|null|undefined} input
+ * @returns {string|null}
+ */
+export function parseRelayTokenInput(input) {
+    if (typeof input !== 'string') return null;
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    const hashIdx = trimmed.indexOf('#');
+    if (hashIdx >= 0) {
+        const params = new URLSearchParams(trimmed.slice(hashIdx + 1));
+        const tok = (params.get('token') || '').trim();
+        return tok || null;
+    }
+    if (trimmed.startsWith('token=')) {
+        const params = new URLSearchParams(trimmed);
+        const tok = (params.get('token') || '').trim();
+        return tok || null;
+    }
+    return trimmed;
+}
+
+/**
+ * Read `#token=<hex>` from `window.location.hash` (scrubbing it from the address
+ * bar via `history.replaceState` and caching it in tab-scoped `sessionStorage` for
+ * same-tab reloads), or fall back to this tab's `sessionStorage` entry for `port`.
+ * Never touches `localStorage`, so closing the tab leaves no saved token state.
+ * @param {number|string|null} port
+ * @returns {string|null}
+ */
+export function consumeRelayTokenFromLocation(port) {
+    if (typeof window === 'undefined') return null;
+    const key = `${TOKEN_STORAGE_PREFIX}${port || 'default'}`;
+    const rawHash = typeof window.location?.hash === 'string' ? window.location.hash : '';
+    if (rawHash.length > 1) {
+        const params = new URLSearchParams(rawHash.startsWith('#') ? rawHash.slice(1) : rawHash);
+        if (params.has('token')) {
+            const tok = (params.get('token') || '').trim();
+            params.delete('token');
+            const rest = params.toString();
+            const clean = `${window.location.pathname || '/'}${window.location.search || ''}${rest ? `#${rest}` : ''}`;
+            try { window.history?.replaceState?.(window.history.state ?? null, '', clean); } catch { /* ignore */ }
+            if (tok) {
+                try { window.sessionStorage?.setItem?.(key, tok); } catch { /* ignore */ }
+                return tok;
+            }
+        }
+    }
+    try {
+        const saved = window.sessionStorage?.getItem?.(key);
+        return saved ? saved.trim() || null : null;
+    } catch {
+        return null;
+    }
+}
+
 export default class WebSocketBridge {
     /**
      * @param {import('./CommandRouter.js').default} router
      * @param {Object} [options]
      * @param {string} [options.url] - override relay URL (default auto-detect)
      * @param {number} [options.port=8080] - relay server port
+     * @param {string|null} [options.token] - override relay capability token (default: URL `#token=` / tab sessionStorage)
      * @param {boolean} [options.autoConnect=true] - connect on construction
      * @param {boolean} [options.showStatus=true] - show status bar element
      */
@@ -25,6 +86,14 @@ export default class WebSocketBridge {
         this.router = router;
         this.port = options.port || 8080;
         this.url = options.url || null;
+        this.token = options.token !== undefined
+            ? parseRelayTokenInput(options.token)
+            : consumeRelayTokenFromLocation(this.port);
+        if (this.url && this.url.includes('#')) {
+            const urlTok = parseRelayTokenInput(this.url);
+            if (urlTok) this.token = urlTok;
+            this.url = this.url.slice(0, this.url.indexOf('#'));
+        }
 
         this.ws = null;
         this.connected = false;
@@ -85,6 +154,15 @@ export default class WebSocketBridge {
         // envelopes meaning.
         this._sourceListeners = new Set();
 
+        // Reconcile a fresh `#token=...` pasted into an already-open tab with zero page reload.
+        this._onHashChange = () => {
+            const next = consumeRelayTokenFromLocation(this.port);
+            if (next && next !== this.token) this.setToken(next);
+        };
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('hashchange', this._onHashChange);
+        }
+
         if (options.autoConnect !== false) {
             this.connect();
         }
@@ -93,11 +171,45 @@ export default class WebSocketBridge {
     // ============ Connection ============
 
     /**
+     * Set or replace the relay capability token (accepts either a raw token or a
+     * URL carrying `#token=...`), update this tab's sessionStorage, and optionally
+     * reconnect immediately so a restarted relay's new random token reconciles in place.
+     * @param {string|null} token
+     * @param {{ reconnect?: boolean }} [opts]
+     */
+    setToken(token, { reconnect = true } = {}) {
+        const parsed = parseRelayTokenInput(token);
+        this.token = parsed;
+        if (typeof window !== 'undefined') {
+            const key = `${TOKEN_STORAGE_PREFIX}${this.port || 'default'}`;
+            try {
+                if (parsed) window.sessionStorage?.setItem?.(key, parsed);
+                else window.sessionStorage?.removeItem?.(key);
+            } catch { /* ignore */ }
+        }
+        if (reconnect && !this._intentionalClose) {
+            if (this._reconnectTimer) {
+                clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = null;
+            }
+            this._currentDelay = this._reconnectDelay;
+            this.connect();
+        }
+    }
+
+    /**
      * Connect to the relay server.
      * @param {string} [url] - override URL for this connection attempt
      */
     connect(url) {
-        if (url) this.url = url;
+        if (url) {
+            if (url.includes('#')) {
+                const urlTok = parseRelayTokenInput(url);
+                if (urlTok) this.setToken(urlTok, { reconnect: false });
+                url = url.slice(0, url.indexOf('#'));
+            }
+            this.url = url;
+        }
         if (!this.url) {
             // Auto-detect: if served from glyph3d-cli (unified server),
             // connect WebSocket to the same host:port as the page origin.
@@ -107,6 +219,9 @@ export default class WebSocketBridge {
             } else {
                 this.url = `ws://localhost:${this.port}`;
             }
+        }
+        if (!this.token) {
+            this.token = consumeRelayTokenFromLocation(this.port);
         }
         this._intentionalClose = false;
         this._doConnect();
@@ -364,7 +479,7 @@ export default class WebSocketBridge {
      */
     _detectLanAddress() {
         // If the page was loaded via a LAN IP, use that
-        const hostname = window.location.hostname;
+        const hostname = typeof window !== 'undefined' ? window.location?.hostname : '';
         if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' && !hostname.startsWith('[')) {
             this._lanAddress = hostname;
             return;
@@ -503,7 +618,8 @@ export default class WebSocketBridge {
         }
 
         try {
-            this.ws = new WebSocket(this.url);
+            const protocols = this.token ? ['glyph3d', `g3d-token.${this.token}`] : ['glyph3d'];
+            this.ws = new WebSocket(this.url, protocols);
             this.ws.binaryType = 'arraybuffer'; // terminal OUTPUT frames arrive as ArrayBuffer
         } catch (err) {
             console.warn(`[ws-bridge] failed to create WebSocket: ${err.message}`);
@@ -725,6 +841,11 @@ export default class WebSocketBridge {
             pending.reject(new Error('WebSocketBridge disposed'));
         }
         this._rpcPending.clear();
+
+        if (this._onHashChange && typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+            window.removeEventListener('hashchange', this._onHashChange);
+            this._onHashChange = null;
+        }
 
         this.disconnect();
         if (this._statusEl && this._statusEl.parentNode) {

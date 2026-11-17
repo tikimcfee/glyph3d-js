@@ -75,6 +75,7 @@ func watchShutdown() {
 	go func() {
 		sig := <-ch
 		n := killChildren()
+		cleanupRelayTokens()
 		log.Printf("[relay] %v: stopped %d agent child(ren), exiting", sig, n)
 		code := 128 + 15
 		if sig == os.Interrupt {

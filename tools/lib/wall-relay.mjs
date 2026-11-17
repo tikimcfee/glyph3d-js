@@ -19,6 +19,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { privateTermd, stopTermd, stopTermdSync } from './termd.mjs';
+import { readRelayToken } from './relay.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BIN = path.join(ROOT, 'glyph3d-cli');
@@ -48,26 +49,34 @@ const BIND_MS = 10_000;
 const EXIT_MS = 3000;
 
 /**
- * @typedef {{ port: number, ns: string|null, termdDir: string|null, started: boolean, log: () => string,
+ * @typedef {{ port: number, ns: string|null, termdDir: string|null, started: boolean, token: () => string|null, log: () => string,
  *   logged: (re: RegExp, ms?: number) => Promise<boolean>,
  *   restart: () => Promise<void>, stop: () => Promise<void> }} PrivateRelay
  */
 
 /**
- * @param {{ port: number, ns: string, reuse?: boolean, root?: string }} o
+ * @param {{ port: number, ns: string, reuse?: boolean, root?: string, origins?: string[] }} o
  *   ns: the termd namespace its terminals live in (in a scratch dir of its own)
  *   root: the directory it serves (the wall reads no files; any directory does)
+ *   origins: extra browser Origins allowed to upgrade (besides `--url` in argv and default Vite ports)
  * @returns {Promise<PrivateRelay>}
  */
-export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
+export async function privateRelay({ port, ns, reuse = false, root = ROOT, origins = [] }) {
     if (!ns || ns === 'default') throw new Error(`[wall-relay] a private relay needs its own termd namespace, not ${JSON.stringify(ns)}`);
     if (await listening(port)) {
         if (!reuse) {
             throw new Error(`[wall-relay] something already listens on :${port} — refusing to run against a relay this tool didn't start (a person's display may be on it). Pick a free --relay port, or pass --reuse-relay to run against a relay you started yourself.`);
         }
         console.log(`info  --reuse-relay: running against the relay already on :${port} — not started here, so not stopped (or its terminals killed) here`);
-        return { port, ns: null, termdDir: null, started: false, log: () => '', logged: async () => false, restart: async () => { throw new Error('[wall-relay] can\'t restart a reused relay'); }, stop: async () => {} };
+        return { port, ns: null, termdDir: null, started: false, token: () => readRelayToken(port), log: () => '', logged: async () => false, restart: async () => { throw new Error('[wall-relay] can\'t restart a reused relay'); }, stop: async () => {} };
     }
+
+    const originSet = new Set(origins);
+    const urlIdx = process.argv.indexOf('--url');
+    if (urlIdx >= 0 && process.argv[urlIdx + 1]) {
+        try { originSet.add(new URL(process.argv[urlIdx + 1]).origin); } catch { /* ignore */ }
+    }
+    const originArgs = [...originSet].flatMap((o) => ['--origin', o]);
 
     const termd = privateTermd(`w${process.pid}`); // short: the socket path must fit a sockaddr
     let child = null;
@@ -76,7 +85,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
     const watchers = new Set();
     const start = async () => {
         log = '';
-        child = spawn(BIN, ['serve', '--port', String(port), '--listen', '127.0.0.1', '--relay-only', '--termd-ns', ns, '--no-gomuxai', root],
+        child = spawn(BIN, ['serve', '--port', String(port), '--listen', '127.0.0.1', ...originArgs, '--relay-only', '--termd-ns', ns, '--no-gomuxai', root],
             { env: termd.env, stdio: ['ignore', 'pipe', 'pipe'] });
         // The relay logs `[serve] listening on <addr>` once its socket is bound: that line, or its
         // exit, is what start waits for (BIND_MS only bounds a relay that does neither).
@@ -122,6 +131,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT }) {
 
     return {
         port, ns, termdDir: termd.dir, started: true,
+        token: () => readRelayToken(port, termd.env),
         /** The relay's log so far (its last 32–64 KB), for a failure to show. */
         log: () => log,
         /**

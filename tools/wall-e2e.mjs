@@ -148,6 +148,7 @@ try {
     const shot = async (name) => { if (SHOTS) { await frame(); await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }); info(`screenshot ${path.join(SHOTS, `${name}.png`)}`); } };
 
     ok(app.booted && !!await until(() => window.__wall?.snapshot().connected), `boots and registers as the relay's display on :${RELAY}`);
+    ok(!page.url().includes('token='), 'the page scrubbed #token= out of the address bar on boot');
     ok((await W(() => document.querySelector('[data-relay]')?.dataset.relay)) === 'up', 'the relay chip reads up');
     const preexisting = await W(() => window.__wall.order.length);
     if (relay.started) ok(preexisting === 0, `the private relay adopted no live sessions (saw ${preexisting})`);
@@ -610,16 +611,22 @@ try {
         await W((i) => window.__wall.focus(i), A);   // as the steps below expect
     }
 
-    // ── a second display is refused, and says why ──────────────────────────
+    // ── a second display (first unauthenticated, then with token) is refused, and says why ──
     {
         const second = await browser.newPage({ viewport: { width: 900, height: 600 } });
         const u = new URL(URL_); u.searchParams.set('relay', String(RELAY));
         await second.goto(u.toString(), { waitUntil: 'load', timeout: 30000 });
+        const unauthChip = await second.waitForFunction(() => {
+            const el = document.querySelector('[data-relay]');
+            return window.__wall && el?.textContent?.includes('token needed') ? el.textContent : null;
+        }, null, { timeout: 15000 }).then((h) => h.jsonValue()).catch(() => null);
+        ok(!!unauthChip && !(await second.evaluate(() => window.__wall?.snapshot().connected)), `a browser tab with no token cannot connect ("${unauthChip}")`);
+        await second.evaluate((t) => window.__wall.run(['wall.token', t]), relay.token());
         const chip = await second.waitForFunction(() => {
             const el = document.querySelector('[data-relay]');
             return el?.dataset.relay === 'refused' ? el.textContent : null;
         }, null, { timeout: 15000 }).then((h) => h.jsonValue()).catch(() => null);
-        ok(!!chip && chip.includes('another display holds this relay'), `a second display is refused and its chip says why ("${chip}")`);
+        ok(!!chip && chip.includes('another display holds this relay'), `once authenticated, a second display is refused and its chip says why ("${chip}")`);
         await second.close();
         ok(await W(() => window.__wall.snapshot().connected), 'the first display keeps the relay');
     }
@@ -754,18 +761,22 @@ try {
         ok((await W(() => window.__wall.store.name('term-9999'))) === null, 'a remembered terminal the relay no longer has is forgotten on connect');
     }
 
-    // ── a relay restart: the re-adopted terminal takes typing again, no reload ──
+    // ── a relay restart: mints a fresh random token, reconciles in place, re-adopts with no reload ──
     if (relay.started) {
         await W((i) => window.__wall.focus(i), A);
         // Controller ids restart with the relay (the new adapter may well be ctrl-0 again), so the
         // re-adoption shows as the grid's input route being rebuilt, not as a new owner string.
         const owner0 = await W((i) => { window.__inputBefore = window.__wall.terminal(i).onInput; return window.__glyphClient.ctx.registry.get(i).meta.owner; }, A);
+        const tokBefore = relay.token();
         await relay.restart();
+        const tokAfter = relay.token();
+        ok(!!tokAfter && tokAfter !== tokBefore, 'a restarted relay mints a fresh per-start random token');
         // Take the new relay's first controller id before the adapters reconnect, so the old owner's
         // id now names a controller that isn't the terminal's adapter: input still addressed to the
         // old owner lands nowhere, as it does when a restarted relay hands the ids out in a new order.
         const squatter = await dialRelay(RELAY);
         info(`restarted the private relay on :${RELAY}; a bystander controller holds ${squatter.hello.replace('OK: connected as ', '')}`);
+        await W((t) => window.__wall.run(['wall.token', t]), tokAfter);
         const readopted = await until((i) => window.__wall.snapshot().connected && typeof window.__wall.terminal(i)?.onInput === 'function' && window.__wall.terminal(i).onInput !== window.__inputBefore, A, 25000);
         const owner1 = await W((i) => window.__glyphClient.ctx.registry.get(i)?.meta.owner, A);
         ok(!!readopted, `the wall reconnects and ${A} is re-adopted by a new adapter — its input route rebuilt (owner ${owner0} → ${owner1})`);

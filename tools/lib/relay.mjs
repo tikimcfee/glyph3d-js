@@ -7,8 +7,14 @@
 //   const { text, data } = await relay.request('log.stats');
 //   relay.close();
 //
-// Handshake: send "ping" → "OK: connected as ctrl-N" → "pong". A reply is the next
-// frame that isn't a pushed event ({"event": …} without "response").
+// Handshake: WebSocket upgrade carries `Sec-WebSocket-Protocol: glyph3d, g3d-token.<hex>`
+// read from the per-uid 0600 runtime token file (`relay-<port>.token`), then send "ping" →
+// "OK: connected as ctrl-N" → "pong". A reply is the next frame that isn't a pushed event
+// ({"event": …} without "response").
+
+import { lstatSync, readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 /**
  * @typedef {{ text: string|null, data: any }} RelayReply
@@ -18,6 +24,81 @@
  *   close: () => void,
  * }} RelayClient
  */
+
+/**
+ * Return the per-uid runtime directory holding `relay-<port>.token`, matching `cli/auth*.go`.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function relayTokenDir(env = process.env) {
+  const override = (env.G3D_RELAY_TOKEN_DIR || '').trim();
+  if (override) return override;
+  if (process.platform === 'win32') return path.join(os.tmpdir(), 'glyph3d-relay');
+  const uid = process.getuid();
+  if (process.platform === 'linux') {
+    const runDir = `/run/user/${uid}`;
+    try {
+      const st = lstatSync(runDir);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o077) === 0) {
+        return path.join(runDir, 'g3d');
+      }
+    } catch { /* fall back to /tmp/g3d-<uid> */ }
+  }
+  return `/tmp/g3d-${uid}`;
+}
+
+/**
+ * @param {number} port
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+export function relayTokenPath(port, env = process.env) {
+  return path.join(relayTokenDir(env), `relay-${port}.token`);
+}
+
+/**
+ * Read the capability token for a local relay on `port` (or `$G3D_RELAY_TOKEN` when set).
+ * Returns `null` when no token file exists yet; throws if permissions/ownership are unsafe.
+ * @param {number} port
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
+ */
+export function readRelayToken(port, env = process.env) {
+  const fromEnv = (env.G3D_RELAY_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  if (!Number.isInteger(Number(port)) || Number(port) <= 0) return null;
+  const dir = relayTokenDir(env);
+  const file = relayTokenPath(Number(port), env);
+  let dfi, ffi;
+  try {
+    dfi = lstatSync(dir);
+    ffi = lstatSync(file);
+  } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    throw e;
+  }
+  if (process.platform !== 'win32') {
+    const uid = process.getuid();
+    if (!dfi.isDirectory() || dfi.isSymbolicLink() || dfi.uid !== uid || (dfi.mode & 0o077) !== 0) {
+      throw new Error(`unsafe relay runtime dir ${dir}`);
+    }
+    if (!ffi.isFile() || ffi.isSymbolicLink() || ffi.uid !== uid || (ffi.mode & 0o077) !== 0) {
+      throw new Error(`unsafe relay token file ${file}`);
+    }
+  }
+  const tok = readFileSync(file, 'utf8').trim();
+  return tok || null;
+}
+
+/**
+ * Build the `Sec-WebSocket-Protocol` list carrying `token` (never in a query string).
+ * @param {string|null|undefined} token
+ * @returns {string[]}
+ */
+export function relayProtocols(token) {
+  const clean = typeof token === 'string' ? token.trim() : '';
+  return clean ? ['glyph3d', `g3d-token.${clean}`] : ['glyph3d'];
+}
 
 /** @param {string} raw @returns {RelayReply|null} null for a pushed event */
 function parseReply(raw) {
@@ -34,13 +115,14 @@ function parseReply(raw) {
 /**
  * Dial the relay on localhost:`port` as a controller.
  * @param {number} port
- * @param {{ handshakeMs?: number }} [opts]
+ * @param {{ handshakeMs?: number, token?: string|null }} [opts]
  * @returns {Promise<RelayClient>}
  */
-export function dialRelay(port, { handshakeMs = 5000 } = {}) {
+export function dialRelay(port, { handshakeMs = 5000, token = undefined } = {}) {
   const url = `ws://localhost:${port}`;
+  const tok = token !== undefined ? token : readRelayToken(port);
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url, relayProtocols(tok));
     /** @type {string[]} */
     const inbox = [];
     /** @type {{ resolve: (raw: string) => void, timer: any }[]} */

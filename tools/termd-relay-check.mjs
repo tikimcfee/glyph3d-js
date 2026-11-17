@@ -39,6 +39,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brainPid, g3dBeside, privateTermd, stopTermd, stopTermdSync, termdBeside, termdPid } from './lib/termd.mjs';
+import { readRelayToken, relayProtocols } from './lib/relay.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'glyph3d-cli');
@@ -109,7 +110,7 @@ const term = (id) => { if (!terms.has(id)) terms.set(id, { owner: null, text: ''
 let display = null;
 const events = [];
 async function connectDisplay(port = PORT) {
-    display = new WebSocket(`ws://127.0.0.1:${port}`);
+    display = new WebSocket(`ws://127.0.0.1:${port}`, relayProtocols(readRelayToken(port)));
     display.binaryType = 'arraybuffer';
     await new Promise((res, rej) => { display.onopen = res; display.onerror = () => rej(new Error('display could not connect')); });
     display.onmessage = (e) => {
@@ -184,6 +185,37 @@ const ALT_MOUSE = ['sh', '-c', "stty raw -echo; printf '\\033[?1049h\\033[?1000h
 try {
     await startRelay();
     info(`private relay on :${PORT}, termd namespace "${NS}" in ${termd.dir}`);
+    const tok0 = readRelayToken(PORT);
+    ok(typeof tok0 === 'string' && tok0.length === 64, 'relay published a 256-bit capability token in its 0600 runtime file');
+    ok(!relayLog.includes(tok0), 'relay log never prints the capability token');
+    {
+        // Upgrade auth gates: no-token, cross-origin (even with valid token), and ?token= query string are refused.
+        const rawHttpUpgrade = (pathAndQuery, headers) => new Promise((res, rej) => {
+            const c = net.connect(PORT, '127.0.0.1', () => {
+                const lines = [
+                    `GET ${pathAndQuery} HTTP/1.1`,
+                    `Host: 127.0.0.1:${PORT}`,
+                    'Upgrade: websocket',
+                    'Connection: Upgrade',
+                    'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+                    'Sec-WebSocket-Version: 13',
+                    ...headers,
+                    '', '',
+                ];
+                c.write(lines.join('\r\n'));
+            });
+            let data = '';
+            c.on('data', (b) => {
+                data += b.toString('utf8');
+                const nl = data.indexOf('\r\n');
+                if (nl >= 0) { c.destroy(); res(Number(data.slice(0, nl).split(' ')[1]) || 0); }
+            });
+            c.on('error', rej);
+        });
+        ok((await rawHttpUpgrade('/', ['Origin: http://localhost:5180'])) === 401, 'a no-token WebSocket upgrade is refused (401)');
+        ok((await rawHttpUpgrade('/', ['Origin: https://evil.example', `Authorization: Bearer ${tok0}`])) === 403, 'a cross-origin WebSocket upgrade is refused (403)');
+        ok((await rawHttpUpgrade(`/?token=${tok0}`, [`Authorization: Bearer ${tok0}`])) === 400, 'a query-string ?token= WebSocket upgrade is refused (400)');
+    }
     await connectDisplay();
 
     // ── spawn + typing ──

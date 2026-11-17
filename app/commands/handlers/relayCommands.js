@@ -8,8 +8,11 @@
  *
  * The relay URL is resolved at boot (same-origin for the binary, ?relay=PORT for
  * dev) and stashed on the bridge; relay.connect with no arg reuses it. A bare port
- * (or a full ws/wss URL) overrides it for this connection.
+ * (or a full ws/wss URL, optionally carrying `#token=…`) overrides it for this
+ * connection; an optional second argument sets the capability token explicitly.
  */
+
+import { parseRelayTokenInput } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 
 /**
  * @param {import('../../client/CommandProvider.jsx').AppRouter} router
@@ -18,11 +21,19 @@ export default function registerRelayCommands(router) {
     router.register('relay.connect', (args, ctx) => {
         const bridge = ctx.wsbridge;
         if (!bridge) return { text: 'ERR: no relay bridge', data: null };
-        const arg = args[0];
+        const [arg, tokenArg] = args;
+        if (tokenArg) bridge.setToken(tokenArg, { reconnect: false });
         let url;
         if (arg) {
             if (/^wss?:\/\//i.test(arg)) {
                 url = arg;
+            } else if (/^https?:\/\//i.test(arg)) {
+                const u = new URL(arg);
+                const tok = parseRelayTokenInput(arg);
+                if (tok) bridge.setToken(tok, { reconnect: false });
+                const wsProto = u.protocol === 'https:' ? 'wss:' : 'ws:';
+                bridge.port = Number(u.port) || bridge.port;
+                url = `${wsProto}//${u.host}`;
             } else {
                 // Bare port → dial the relay on the page host at that port (the dev case).
                 bridge.port = Number(arg) || bridge.port;
@@ -30,12 +41,25 @@ export default function registerRelayCommands(router) {
             }
         }
         bridge.connect(url);  // undefined → the boot-resolved bridge.url
-        const target = url || bridge.url;
-        return { text: `OK: connecting to ${target}`, data: { url: target } };
+        const target = bridge.url;
+        return { text: `OK: connecting to ${target}`, data: { url: target, hasToken: !!bridge.token } };
     }, {
         description: 'Connect to the local relay (no arg = the boot-resolved URL)',
-        usage: '[port | ws-url]',
-        returns: '{ url }',
+        usage: '[port | ws-url] [token]',
+        returns: '{ url, hasToken }',
+    });
+
+    router.register('relay.token', (args, ctx) => {
+        const bridge = ctx.wsbridge;
+        if (!bridge) return { text: 'ERR: no relay bridge', data: null };
+        const tok = parseRelayTokenInput(args[0]);
+        if (!tok) return { text: 'ERR: relay.token requires a token or #token=… URL', data: null };
+        bridge.setToken(tok);
+        return { text: `OK: relay token updated — reconnecting to ${bridge.url || `:${bridge.port}`}`, data: { port: bridge.port, hasToken: true } };
+    }, {
+        description: 'Set the relay capability token (raw token or #token=… URL) and reconnect',
+        usage: '<token | url#token=…>',
+        returns: '{ port, hasToken }',
     });
 
     router.register('relay.disconnect', (_args, ctx) => {
@@ -50,7 +74,7 @@ export default function registerRelayCommands(router) {
         const connected = !!bridge?.connected;
         return {
             text: connected ? `OK: connected — ${bridge.url}` : 'OK: disconnected',
-            data: { connected, url: bridge?.url || null, port: bridge?.port || null },
+            data: { connected, url: bridge?.url || null, port: bridge?.port || null, hasToken: !!bridge?.token },
         };
-    }, { description: 'Report relay connection state', returns: '{ connected, url, port }' });
+    }, { description: 'Report relay connection state', returns: '{ connected, url, port, hasToken }' });
 }

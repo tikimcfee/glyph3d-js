@@ -130,7 +130,7 @@ bundles its deps at build (no importmap). `make all` cross-compiles all platform
 as a typed line when its args are plain tokens (or the verb arg is itself a quoted line)
 and as a `call` bundle when an arg carries spaces/quotes/newlines (`call` is every router's own
 verb, `CommandRouter._call`, so the IDE and the wall both answer it; handlers take raw text —
-no per-verb base64), log replies render as records, and `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
+no per-verb base64), log replies render as records, and `token` / `url` / `screenshot [--cmd 'verb …']… [-o out.png]` / `log.follow` /
 `seed-history` are its client commands. JS that genuinely needs JS (Playwright, simulated
 displays) dials through `tools/lib/relay.mjs`.
 
@@ -243,5 +243,6 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 needs for terminals); `make all` cross-compiles
 linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub;
 `g3d-termd` is built for Linux so far — amd64 natively, arm64 through cargo-zigbuild; macOS is TODO in `docs/termd/DESIGN.md`); `make release VERSION=vX.Y.Z` cuts a GitHub release
-(`RELEASE_NOTES.md`). The single binary is a single-operator tool — shared relay state,
-no auth, trusts the operator. The product/demo web page is a separate repo.
+(`RELEASE_NOTES.md`). The single binary is a single-operator tool — `serve` binds `127.0.0.1` by
+default and gates every WebSocket upgrade on a `Host` + `Origin` allowlist and a per-start `0600`
+capability token (`docs/architecture/auth.md`). The product/demo web page is a separate repo.

@@ -2,6 +2,7 @@ import { checkConfig } from './wallConfig.js';
 import { searchSettings, SECTIONS } from './wallSettings.js';
 import { AGENT_SIDES } from './wallAgentView.js';
 import { busStatus, busAttachable } from './WallBus.js';
+import { parseRelayTokenInput } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 
 /**
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
@@ -473,5 +474,11 @@ export default function registerWallCommands(router, wall) {
         const [id] = terminalIds(args.slice(0, 1));
         const r = await wall.agents.loadEarlier(id);
         return OK(`loaded ${r.loaded} earlier event(s) on ${id}`, r);
+    });
+    verb('wall.token', '<token | url#token=…>', 'Set the relay capability token and reconnect without reloading the page', (args) => {
+        const tok = parseRelayTokenInput(args[0]);
+        if (!tok) throw new Error('wall.token takes a token or a URL carrying #token=…');
+        wall.setRelayToken(tok);
+        return OK('relay token updated; reconnecting', { hasToken: true });
     });
 }

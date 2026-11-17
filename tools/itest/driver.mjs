@@ -6,6 +6,7 @@
 
 import { chromium } from 'playwright';
 import { createRequire } from 'node:module';
+import { readRelayToken } from '../lib/relay.mjs';
 
 const isGpuNoise = (s) =>
   /webgpu|gpuadapter|gpudevice|requestadapter|gpu process|fallback to|swiftshader/i.test(s);
@@ -146,7 +147,7 @@ export async function launchGpuBrowser({ headed = null, extraArgs = [] } = {}) {
 // EVERY GL function of the context (a pre/post hook per call), so timings taken on such a page
 // carry that overhead — measure time and memory on separate pages when the time matters.
 export async function openApp(browser, {
-  url = 'http://localhost:5173/', relayPort = null, wait = 5000, bootTimeout = 20000,
+  url = 'http://localhost:5173/', relayPort = null, relayToken = undefined, wait = 5000, bootTimeout = 20000,
   session = null,
   viewport = { width: 1280, height: 800 },
   webglMemory = false,
@@ -182,6 +183,17 @@ export async function openApp(browser, {
     if (relayPort && !u.searchParams.has('relay')) u.searchParams.set('relay', String(relayPort));
     // session=off → ephemeral page: no restore, no autosave (see SessionStore).
     if (session) u.searchParams.set('session', session);
+    const effectivePort = relayPort || Number(u.searchParams.get('relay')) || null;
+    if (effectivePort) {
+      const tok = relayToken !== undefined ? relayToken : readRelayToken(effectivePort);
+      if (tok) {
+        const frag = new URLSearchParams(u.hash.startsWith('#') ? u.hash.slice(1) : u.hash);
+        if (!frag.has('token')) {
+          frag.set('token', tok);
+          u.hash = frag.toString();
+        }
+      }
+    }
     return u.toString();
   })();
   await page.goto(target, { waitUntil: 'load', timeout: 30000 });

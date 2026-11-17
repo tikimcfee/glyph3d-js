@@ -22,7 +22,7 @@
 import * as THREE from 'three';
 import SourceStream from '../packages/glyph3d-core/src/services/orchestration/SourceStream.js';
 import HandPresence from '../packages/glyph3d-core/src/hand/HandPresence.js';
-import { dialRelay } from './lib/relay.mjs';
+import { dialRelay, readRelayToken, relayProtocols } from './lib/relay.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
@@ -48,7 +48,7 @@ const camera = new THREE.PerspectiveCamera(50, 16 / 9, 4, 1000);   // near=4: th
 const scene = new THREE.Scene();
 const presence = new HandPresence({ stream, camera, scene });
 
-const display = new WebSocket(URL_);
+const display = new WebSocket(URL_, relayProtocols(readRelayToken(PORT)));
 display.onmessage = (e) => {
   let env; try { env = JSON.parse(e.data); } catch { return; }
   if (env.ok !== undefined) {
@@ -76,7 +76,7 @@ const handFrame = (z, spread = 0.01) => JSON.stringify({
 });
 
 console.log('handshake');
-const src = new WebSocket(URL_);
+const src = new WebSocket(URL_, relayProtocols(readRelayToken(PORT)));
 let hello = null;
 src.onmessage = (e) => { if (!hello) { try { hello = JSON.parse(e.data); } catch { /* ignore */ } } };
 await open(src);
@@ -162,7 +162,7 @@ if (relayRow) {
 }
 
 console.log('multi-device');
-const src2 = new WebSocket(URL_);
+const src2 = new WebSocket(URL_, relayProtocols(readRelayToken(PORT)));
 await open(src2);
 src2.send('SOURCE hand');
 await wait(400);

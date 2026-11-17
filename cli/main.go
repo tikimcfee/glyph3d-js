@@ -2,13 +2,15 @@
 //
 // Server side:
 //
-//	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--termd-ns default] [--termd path]
+//	glyph3d-cli serve [dir] [--port 8080] [--listen 127.0.0.1] [--origin url] [--termd-ns default] [--termd path]
 //	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
 //	glyph3d-cli version
 //
 // Client side — global flags go BEFORE the verb or client command:
 //
 //	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot (oneShotLine)
+//	glyph3d-cli [...] token                                                      print the relay's auth token
+//	glyph3d-cli [...] url [base-url]                                             print browser URL with #token=…
 //	glyph3d-cli [...] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
 //	glyph3d-cli [...] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
 //	glyph3d-cli [...] seed-history [--lines 300] [--termd-ns default] [id ...]
@@ -75,6 +77,10 @@ func main() {
 	args := flag.Args()
 	if len(args) > 0 {
 		switch args[0] {
+		case "token":
+			os.Exit(tokenCmd(url, args[1:]))
+		case "url":
+			os.Exit(urlCmd(url, args[1:]))
 		case "screenshot":
 			os.Exit(screenshotCmd(url, args[1:]))
 		case "log.follow":
@@ -125,6 +131,8 @@ func main() {
 
 func clientUsage() {
 	fmt.Fprint(os.Stderr, `usage: glyph3d-cli [flags] <verb args...>      run one verb (try: help)
+       glyph3d-cli [flags] token               print the relay's 0600 auth token
+       glyph3d-cli [flags] url [base-url]      print browser URL carrying #token=…
        glyph3d-cli [flags] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
        glyph3d-cli [flags] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
        glyph3d-cli [flags] seed-history [--lines 300] [--termd-ns default] [id ...]
@@ -188,10 +196,14 @@ func (s *stringListFlag) Set(v string) error {
 //	glyph3d-cli serve --port 3000        Custom port
 //	glyph3d-cli serve --local            IDE dev: serve app from disk instead of embedded
 //	glyph3d-cli serve --relay-only       WebSocket relay only, no static files
+const defaultServeListen = "127.0.0.1"
+
 func serveCmd() {
 	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
 	p := flagSet.Int("port", 8080, "Port to listen on")
-	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
+	listen := flagSet.String("listen", defaultServeListen, "Address to listen on (non-loopback exposes the relay on the network; auth is always required)")
+	var origins stringListFlag
+	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 (repeatable)")
 	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	var reach stringListFlag
@@ -233,7 +245,7 @@ func serveCmd() {
 			fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
-		if err := RunRelay(*listen, *p, fsHandler); err != nil {
+		if err := RunRelay(*listen, *p, origins, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
 		return
@@ -252,6 +264,7 @@ func serveCmd() {
 	cfg := ServerConfig{
 		Host:      *listen,
 		Port:      *p,
+		Origins:   origins,
 		FSHandler: fsHandler,
 	}
 

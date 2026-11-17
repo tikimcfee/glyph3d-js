@@ -89,7 +89,7 @@ start_vite() {
   # for several seconds.
   for _ in $(seq 1 60); do
     if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
-      echo "  vite up → $(page_url)   (log: $VITE_LOG)"
+      echo "  vite up → $(tty_page_url)   (log: $VITE_LOG)"
       echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
       return 0
     fi
@@ -100,16 +100,16 @@ start_vite() {
 }
 
 start_relay() {
-  echo "→ relay: rebuild Go + termd, (re)start on :$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
+  echo "→ relay: rebuild Go + termd, (re)start on 127.0.0.1:$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
-  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
+  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
-  # port (relay.go listenAndServe), so poll the window before declaring failure —
+  # port (relay.go listenAndServeRelay), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
   for _ in $(seq 1 14); do
     if [ -n "$(pid_on_port "$RELAY_PORT")" ]; then
-      echo "  relay up → http://localhost:$RELAY_PORT/   (log: $RELAY_LOG)"
+      echo "  relay up → $(tty_page_url)   (log: $RELAY_LOG)"
       return 0
     fi
     sleep 0.5
@@ -118,9 +118,20 @@ start_relay() {
   return 1
 }
 
-# The page to open: the wall names its relay in the URL; the IDE's Vite proxies to :8080.
+# The base page URL (no token): safe to echo anywhere.
 page_url() {
-  if [ "$PROFILE" = wall ]; then echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; else echo "http://localhost:$VITE_PORT/"; fi
+  if [ "$PROFILE" = wall ]; then echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; else echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"; fi
+}
+
+# Include `#token=<hex>` ONLY when stdout is an interactive terminal, keeping secrets out of logs.
+tty_page_url() {
+  local base
+  base="$(page_url)"
+  if [ -t 1 ] && [ -x "$ROOT/glyph3d-cli" ]; then
+    "$ROOT/glyph3d-cli" --port "$RELAY_PORT" url "$base" 2>/dev/null || echo "$base"
+  else
+    echo "$base   (run: ./glyph3d-cli --port $RELAY_PORT url '$base')"
+  fi
 }
 
 status() {
@@ -129,7 +140,7 @@ status() {
   rp="$(pid_on_port "$RELAY_PORT")"
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
-  echo "page  $(page_url)   (termd namespace $TERMD_NS)"
+  echo "page  $(tty_page_url)   (termd namespace $TERMD_NS)"
   echo "logs  $LOG_DIR/$PROFILE-{vite,relay}.log"
   echo "      structured app logs: ./glyph3d-cli log.follow  (and log.search / log.query / log.errors / log.stats)"
 }
