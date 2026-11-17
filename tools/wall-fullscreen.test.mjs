@@ -39,6 +39,9 @@ function standIn() {
         terminal: (id) => terminals.get(id),
         isShown: (id) => terminals.has(id),
         focus(id) { this.focusedId = id; },
+        nameOf: (id) => `name-${id}`,
+        notices: [],
+        notify(text) { this.notices.push(text); },
         applyCanvas() {},
         _emit() {},
         groups: { relayoutOf() {} },
@@ -158,9 +161,14 @@ test('a reload takes the saved fullscreen up when its terminal registers; a term
     expect(next.fs.id).toBe(null);
     next.fs.adopt('b');
     expect(next.fs.id).toBe(null);
+    expect(next.wall.notices).toEqual([]);
     next.fs.adopt('a');
     expect(next.fs.id).toBe('a');
     expect(next.fs.state.canvas).toEqual({ cols: 80, rows: 24, x: 0, y: 0 });
+    // The page loaded with one terminal on screen and the wall's chrome hidden: it says why, and the way out.
+    expect(next.wall.notices.length).toBe(1);
+    expect(next.wall.notices[0]).toMatch(/^fullscreen: name-a — .*↵ shows the whole wall again$/);
+    expect(first.wall.notices).toEqual([]);   // entering it by hand says nothing
     next.fs.gone('a');
     expect(next.fs.id).toBe(null);
     expect(next.wall.store.fullscreen()).toBe(null);

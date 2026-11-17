@@ -1,4 +1,5 @@
 import { dockLayout } from './dockLayout.js';
+import { chordLabel } from './chord.js';
 
 /** The smallest terminal fullscreen makes (a tiny window still gets a usable one). */
 const MIN = { cols: 20, rows: 5 };
@@ -120,7 +121,8 @@ export default class WallFullscreen {
     }
 
     /**
-     * A terminal registered: if it's the one a saved fullscreen named (a reload), take that up again.
+     * A terminal registered: if it's the one a saved fullscreen named (a reload), take that up again,
+     * and say so in the wall's notice.
      * @param {string} id
      */
     adopt(id) {
@@ -130,6 +132,9 @@ export default class WallFullscreen {
         this.state = { ...saved };
         this.wall.applyCanvas();
         this.refit();
+        // Fullscreen hides the wall's own chrome, so a page that loads into it says so: one terminal
+        // on screen is the saved fullscreen, not a wall that lost the rest.
+        this.wall.notify(`fullscreen: ${this.wall.nameOf(id)} — ${chordLabel(['↵'])} shows the whole wall again`);
         this.wall._emit();
     }
 

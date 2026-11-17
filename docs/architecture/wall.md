@@ -214,7 +214,8 @@ bigger|smaller|reset`) — on the canvas, - still hides and 0 still fits all (th
 Focusing another terminal while fullscreen (cycling, the palette, the sidebar, a new terminal) moves
 fullscreen to it, a tab switch; leaving then returns to the first entry's canvas pose. A window or dock
 change re-fits once it has held still 150 ms. The state is saved (`WallStore.fullscreen`), so a
-reload comes back fullscreen rather than leaving a terminal at its fullscreen size; hiding it leaves
+reload comes back fullscreen rather than leaving a terminal at its fullscreen size, and says so in the
+wall's notice (the one terminal on screen is the fullscreen one; the chord shows the rest); hiding it leaves
 fullscreen first; one closed or killed ends it. Gate: `tools/wall-fullscreen.test.mjs`.
 
 **gomuxai's agents** (`wall/WallBus.js`, `wall.bus`, `wall.attach <name[@host]>`): the wall lists the
