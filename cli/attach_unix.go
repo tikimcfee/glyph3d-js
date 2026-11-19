@@ -104,45 +104,65 @@ func runTerminal(cfg terminalConfig) {
 		log.Fatalf(format, a...)
 	}
 
-	tc, err := ensureTermd(termdNS)
-	if err != nil {
-		fail("attach: %v", err)
-	}
-	var created struct {
-		PID     int      `json:"pid"`
-		Created bool     `json:"created"`
-		Argv    []string `json:"argv"`
-		Login   bool     `json:"login"`
-		Cwd     string   `json:"cwd"`
-	}
-	if err := tc.Request("create", termdCreate(cfg), &created); err != nil {
-		fail("attach: termd create %s: %v", cfg.id, err)
-	}
-	// The display owns the size (DESIGN.md D11): subscribe as the owner, at its size.
+	var tc *termdClient
 	var sub struct {
 		Handle uint32 `json:"handle"`
 		Cols   int    `json:"cols"`
 		Rows   int    `json:"rows"`
 	}
-	if err := tc.Request("subscribe", map[string]any{
-		"id": cfg.id, "mode": "raw", "role": "own", "cols": cfg.cols, "rows": cfg.rows,
-	}, &sub); err != nil {
-		fail("attach: termd subscribe %s: %v", cfg.id, err)
+	remoteID := cfg.remoteTermdID()
+	if cfg.noCreate {
+		tc, err = dialTermd(termdNS)
+		if err != nil {
+			fail("attach: termd dial %s (namespace %q): %v", remoteID, termdNS, err)
+		}
+		if err := tc.Request("subscribe", termdSubscribe(cfg, cfg.cols, cfg.rows), &sub); err != nil {
+			tc.Close()
+			fail("attach: termd subscribe %s (namespace %q): %v", remoteID, termdNS, err)
+		}
+		if sub.Cols > 0 && sub.Rows > 0 {
+			size.Lock()
+			size.cols, size.rows = sub.Cols, sub.Rows
+			size.Unlock()
+		}
+		fmt.Fprintf(os.Stderr, "[attach] %s attached to %s in termd namespace %q (%s, %dx%d)\n",
+			cfg.id, remoteID, termdNS, tc.Welcome.Daemon, sub.Cols, sub.Rows)
+	} else {
+		tc, err = ensureTermd(termdNS)
+		if err != nil {
+			fail("attach: %v", err)
+		}
+		var created struct {
+			PID     int      `json:"pid"`
+			Created bool     `json:"created"`
+			Argv    []string `json:"argv"`
+			Login   bool     `json:"login"`
+			Cwd     string   `json:"cwd"`
+		}
+		if err := tc.Request("create", termdCreate(cfg), &created); err != nil {
+			tc.Close()
+			fail("attach: termd create %s: %v", remoteID, err)
+		}
+		// The display owns the size (DESIGN.md D11): subscribe as the owner, at its size.
+		if err := tc.Request("subscribe", termdSubscribe(cfg, cfg.cols, cfg.rows), &sub); err != nil {
+			tc.Close()
+			fail("attach: termd subscribe %s: %v", remoteID, err)
+		}
+		verb := "created"
+		if !created.Created {
+			verb = "adopted" // the program is whatever the terminal was started with
+		}
+		login := ""
+		if created.Login {
+			login = " (login shell)"
+		}
+		fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s%s in %s\n",
+			cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(created.Argv, " "), login, created.Cwd)
 	}
 	// The session: termd's connection and our handle on it. A brain restart (a crash, an
 	// upgrade) replaces both; everything below reads the current one.
 	var sess atomic.Pointer[termdSession]
 	sess.Store(&termdSession{tc: tc, handle: sub.Handle})
-	verb := "created"
-	if !created.Created {
-		verb = "adopted" // the program is whatever the terminal was started with
-	}
-	login := ""
-	if created.Login {
-		login = " (login shell)"
-	}
-	fmt.Fprintf(os.Stderr, "[attach] %s %s in termd namespace %q (%s, pid %d): %s%s in %s\n",
-		cfg.id, verb, termdNS, tc.Welcome.Daemon, created.PID, strings.Join(created.Argv, " "), login, created.Cwd)
 	defer func() { sess.Load().tc.Close() }()
 
 	// Lifecycle: signals, termd, the relay, liveness and the output pump all converge on `done`.
@@ -151,11 +171,20 @@ func runTerminal(cfg terminalConfig) {
 	shutdown := func() { closeOnce.Do(func() { close(done) }) }
 
 	// Only an EXPLICIT kill (terminal.kill → terminal.shutdown from the display) ends the termd
-	// terminal. EVERY other path to shutdown — relay-read error, SIGINT/SIGTERM, a dropped termd
+	// terminal (unless --detach-on-kill is set, e.g. for an agent screen whose terminal outlives
+	// the viewer). EVERY other path to shutdown — relay-read error, SIGINT/SIGTERM, a dropped termd
 	// connection, a browser reload that drops our conn — leaves the terminal ALIVE (detach), so
 	// running work survives an incidental disconnect and stays re-adoptable.
 	var killRequested atomic.Bool
-	requestKill := func() { killRequested.Store(true); shutdown() }
+	requestKill := func() {
+		if cfg.detachOnKill {
+			fmt.Fprintf(os.Stderr, "[attach] %s: close requested by display — detaching from %s (--detach-on-kill)\n", cfg.id, remoteID)
+		} else {
+			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — ending the terminal")
+		}
+		killRequested.Store(true)
+		shutdown()
+	}
 	var programEnded atomic.Bool
 
 	sigCh := make(chan os.Signal, 1)
@@ -447,9 +476,7 @@ func runTerminal(cfg terminalConfig) {
 				Cols   int    `json:"cols"`
 				Rows   int    `json:"rows"`
 			}
-			if err := nc.Request("subscribe", map[string]any{
-				"id": cfg.id, "mode": "raw", "role": "own", "cols": c, "rows": r,
-			}, &sub2); err != nil {
+			if err := nc.Request("subscribe", termdSubscribe(cfg, c, r), &sub2); err != nil {
 				nc.Close()
 				if isTermdCode(err, "no_terminal") {
 					fmt.Fprintf(os.Stderr, "[attach] %s: the program ended while termd restarted\n", cfg.id)
@@ -510,10 +537,10 @@ func runTerminal(cfg terminalConfig) {
 	<-done
 
 	// Teardown. DETACH by default: drop the display grid and our subscription, leave the termd
-	// terminal RUNNING. ONLY an explicit terminal.kill ends it.
-	if killRequested.Load() && !programEnded.Load() {
-		if err := sess.Load().tc.Request("kill", map[string]any{"id": cfg.id}, nil); err != nil {
-			log.Printf("[attach] termd kill %s: %v", cfg.id, err)
+	// terminal RUNNING. ONLY an explicit terminal.kill (without --detach-on-kill) ends it.
+	if killRequested.Load() && !programEnded.Load() && !cfg.detachOnKill {
+		if err := sess.Load().tc.Request("kill", map[string]any{"id": remoteID}, nil); err != nil {
+			log.Printf("[attach] termd kill %s: %v", remoteID, err)
 		}
 	}
 	conn.SetWriteDeadline(time.Now().Add(time.Second))
@@ -768,7 +795,6 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 		case "display.gone":
 			h.displayGone()
 		case "terminal.shutdown":
-			fmt.Fprintln(os.Stderr, "[attach] kill requested by display (terminal.kill) — ending the terminal")
 			h.kill()
 		}
 		return
@@ -791,7 +817,7 @@ func handleInbound(msg []byte, termID string, h inboundHandlers) {
 // creator with no shell, so the terminal gets the desktop session's environment, never the
 // relay's own (DESIGN.md, "Environment"), whatever started the relay.
 func termdCreate(cfg terminalConfig) map[string]any {
-	create := map[string]any{"id": cfg.id, "cols": cfg.cols, "rows": cfg.rows, "if_exists": "adopt"}
+	create := map[string]any{"id": cfg.remoteTermdID(), "cols": cfg.cols, "rows": cfg.rows, "if_exists": "adopt"}
 	if len(cfg.cmdArgs) > 0 {
 		create["argv"] = cfg.cmdArgs
 	}
@@ -799,4 +825,21 @@ func termdCreate(cfg terminalConfig) map[string]any {
 		create["cwd"] = cfg.cwd
 	}
 	return create
+}
+
+// termdSubscribe builds the adapter's termd `subscribe` request: size owner (`role: "own"`),
+// addressing cfg.remoteTermdID(), with explicit flow control when configured (e.g. `lossy` for
+// agent screens so a disconnected/slow viewer never stalls the agent's PTY).
+func termdSubscribe(cfg terminalConfig, cols, rows int) map[string]any {
+	sub := map[string]any{
+		"id":   cfg.remoteTermdID(),
+		"mode": "raw",
+		"role": "own",
+		"cols": cols,
+		"rows": rows,
+	}
+	if cfg.flow != "" {
+		sub["flow"] = cfg.flow
+	}
+	return sub
 }

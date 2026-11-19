@@ -160,24 +160,12 @@ func TestTermdSecurity_DialAndEnsureTermdWiring(t *testing.T) {
 
 func TestTermdSecurity_AttachGomuxAgentEnsuresTermdFirst(t *testing.T) {
 	storeDir := shortTempDir(t, "g3dgx-")
-	logsDir := filepath.Join(storeDir, "logs")
-	if err := os.MkdirAll(logsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logsDir, "worker.log"), []byte("hello\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fakeTmux := filepath.Join(storeDir, "tmux")
-	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\necho '80 24'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
 	w := NewGomuxWatcher(nil, "")
-	w.tmuxBin = fakeTmux
 	mustApply(t, w, `{"type":"snapshot","host":"h","stores":[{"dir":"`+storeDir+`"}],"agents":[{"name":"worker","host":"h","store":"`+storeDir+`","session":"agent-worker","live":true,"attached":true,"status":"idle"}]}`)
 
-	// Point G3D_TERMD_DIR at an unsafe 0755 directory: attachGomuxAgent must fail at ensureTermd
-	// before calling startAdapter, and must clear gxForked so a later retry isn't suppressed.
+	// Point G3D_TERMD_DIR at an unsafe 0755 directory: attachGomuxAgent must fail when querying
+	// the agent's termd namespace before calling startAdapterSpec, and must keep gxForked clear so
+	// a later retry isn't suppressed.
 	unsafeDir := shortTempDir(t, "g3dgx755-")
 	if err := os.Chmod(unsafeDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -192,12 +180,12 @@ func TestTermdSecurity_AttachGomuxAgentEnsuresTermdFirst(t *testing.T) {
 
 	errStr, _ := got["error"].(string)
 	if !strings.Contains(errStr, "unsafe termd socket") {
-		t.Fatalf("attachGomuxAgent error = %q, want unsafe termd socket error from ensureTermd", errStr)
+		t.Fatalf("attachGomuxAgent error = %q, want unsafe termd socket error", errStr)
 	}
 	r.gxMu.Lock()
 	_, stillForked := r.gxForked[gomuxTerminalID("worker")]
 	r.gxMu.Unlock()
 	if stillForked {
-		t.Fatal("attachGomuxAgent left gxForked populated after ensureTermd failure")
+		t.Fatal("attachGomuxAgent left gxForked populated after termd socket failure")
 	}
 }

@@ -10,12 +10,9 @@ import (
 	"time"
 )
 
-// newGomuxTestWatcher: no tmux, so no screens are asked about.
 func newGomuxTestWatcher(t *testing.T) *GomuxWatcher {
 	t.Helper()
-	w := NewGomuxWatcher(nil, "")
-	w.tmuxBin = ""
-	return w
+	return NewGomuxWatcher(nil, "")
 }
 
 func gomuxByName(s gomuxSnapshot) map[string]gomuxAgent {
@@ -267,7 +264,6 @@ func TestGomuxExport_HostsFlagReachesExport(t *testing.T) {
 		`echo '{"type":"snapshot","host":"workstation","stores":[],"agents":[]}'`+"\nsleep 30\n"), 0o755)
 	for hosts, want := range map[string]string{"all": "export --json --follow --all -q --hosts all", "": "export --json --follow --all -q"} {
 		w := NewGomuxWatcher(nil, hosts)
-		w.tmuxBin = ""
 		w.agent = script
 		os.Remove(argsOut)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -281,5 +277,41 @@ func TestGomuxExport_HostsFlagReachesExport(t *testing.T) {
 		if strings.TrimSpace(string(got)) != want {
 			t.Errorf("hosts %q: export ran with %q, want %q", hosts, strings.TrimSpace(string(got)), want)
 		}
+	}
+}
+
+func TestGomuxExport_NamespaceDefaultsToAgentsOnThisHostOnly(t *testing.T) {
+	w := newGomuxTestWatcher(t)
+	mustApply(t, w, `{"type":"snapshot","host":"workstation","stores":[{"dir":"/s"}],"agents":[`+
+		`{"name":"def","host":"workstation","store":"/s","session":"agent-def","live":true,"attached":true,"status":"idle","created_at":"2026-11-15T01:00:00Z"},`+
+		`{"name":"custom","host":"workstation","store":"/s","session":"agent-custom","namespace":"agents-ci","live":true,"attached":true,"status":"idle","created_at":"2026-11-15T01:01:00Z"}]}`)
+	mustApply(t, w, `{"type":"host","host":{"host":"remote","agents":1},"agents":[`+
+		`{"name":"far","host":"remote","session":"agent-far","live":true,"status":"idle","created_at":"2026-11-15T01:02:00Z"}]}`)
+
+	by := gomuxByName(w.Snapshot())
+	if by["def"].Namespace != "agents" {
+		t.Errorf("local default Namespace = %q, want \"agents\"", by["def"].Namespace)
+	}
+	if by["custom"].Namespace != "agents-ci" {
+		t.Errorf("local explicit Namespace = %q, want \"agents-ci\"", by["custom"].Namespace)
+	}
+	if by["far"].Namespace != "" {
+		t.Errorf("remote omitted Namespace = %q, want empty", by["far"].Namespace)
+	}
+}
+
+func TestGomuxResizeCommandRemoved(t *testing.T) {
+	r := NewRelay(newTestAuth(t))
+	srv := newRelayTestServer(t, r)
+	ws := dialTestController(t, srv, r.Token())
+	if err := ws.WriteMessage(1, []byte(`{"relay":"gomux.resize","name":"w","cols":100,"rows":30}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, resp, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(resp), "unknown relay command: gomux.resize") {
+		t.Fatalf("gomux.resize reply = %s, want unknown relay command", resp)
 	}
 }

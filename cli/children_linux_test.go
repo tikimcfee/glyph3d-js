@@ -88,7 +88,7 @@ func TestChildren_HelperRelay(t *testing.T) {
 	}
 	bin := filepath.Join(dir, "agent")
 	w := NewGomuxWatcher(nil, "")
-	w.tmuxBin, w.agent = "", bin
+	w.agent = bin
 	w.Start(context.Background())
 	a := NewAgentEvents(time.Hour, 4)
 	a.bin = bin
