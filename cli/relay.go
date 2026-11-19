@@ -62,7 +62,41 @@ type Relay struct {
 	// adapters counts this relay's live adapters per terminal id. While termd's brain restarts,
 	// every adapter is disconnected and termd lists each terminal with no owner; a terminal whose
 	// adapter is alive (riding the restart) is not vacant, so terminal.recover leaves it.
-	adapters map[string]int
+	adapters     map[string]int
+	adapterSpecs map[string]adapterSpec // per-display-id launch spec (guarded by readoptMu)
+	exePath      string                 // override for tests; empty = os.Executable()
+}
+
+// adapterSpec describes how this relay spawns (and re-adopts) an `attach` child for display id `id`.
+// Regular terminals leave termdNS and termdID empty (meaning the relay's termdNS and `id`);
+// gomux agent screens map display id `gx-<name>` onto `<agent.Namespace>/<agent.Session>` with
+// noCreate, detachOnKill, and lossy flow.
+type adapterSpec struct {
+	id           string
+	termdNS      string
+	termdID      string
+	noCreate     bool
+	detachOnKill bool
+	flow         string
+	argv         []string
+}
+
+func (s adapterSpec) effectiveNS() string {
+	if s.termdNS != "" {
+		return s.termdNS
+	}
+	return termdNS
+}
+
+func (s adapterSpec) effectiveTermdID() string {
+	if s.termdID != "" {
+		return s.termdID
+	}
+	return s.id
+}
+
+func (s adapterSpec) isMapped() bool {
+	return s.effectiveNS() != termdNS || s.effectiveTermdID() != s.id || s.noCreate || s.detachOnKill || s.flow != ""
 }
 
 // displayMsg is one queued write to the display WebSocket. binary marks RPC binary
@@ -941,9 +975,6 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 	case "gomux.attach":
 		r.attachGomuxAgent(reply, m.Name)
 
-	case "gomux.resize":
-		r.resizeGomuxAgent(reply, m.Name, m.Cols, m.Rows)
-
 	case "log.follow":
 		if role != "controller" || clientID == "" {
 			reply(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})
@@ -1239,53 +1270,80 @@ func (r *Relay) spawnTerminalAdapter(reply func(any), cols, rows int, argv []str
 }
 
 // startAdapter forks `attach <id>` against this relay (argv: the program for a new terminal;
-// empty adopts, or starts the account's shell) and watches it. The adapter's lifecycle is termd's
-// and the display's (terminal.kill → terminal.shutdown → a clean exit), not the relay's: the relay
-// waits on it to reap it and to notice one that DIED — killed by a signal or crashed (any exit but
-// its own 0, or 1 for a failure it reported). That leaves its terminal running in termd with no
-// owner and its grid frozen on the display, so the relay re-adopts it (readoptOrphan).
+// empty adopts, or starts the account's shell) and watches it.
 func (r *Relay) startAdapter(id string, cols, rows int, argv []string) (int, error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return 0, fmt.Errorf("cannot locate glyph3d-cli binary: %w", err)
+	return r.startAdapterSpec(adapterSpec{id: id, argv: argv}, cols, rows)
+}
+
+// startAdapterSpec forks `attach` from `spec` against this relay and watches it. The adapter's
+// lifecycle is termd's and the display's (terminal.kill → terminal.shutdown → a clean exit), not
+// the relay's: the relay waits on it to reap it and to notice one that DIED — killed by a signal
+// or crashed (any exit but its own 0, or 1 for a failure it reported). That leaves its terminal
+// running in termd with no owner and its grid frozen on the display, so the relay re-adopts it
+// in `spec.effectiveNS()` under `spec.effectiveTermdID()` (readoptOrphan).
+func (r *Relay) startAdapterSpec(spec adapterSpec, cols, rows int) (int, error) {
+	exePath := r.exePath
+	if exePath == "" {
+		var err error
+		exePath, err = os.Executable()
+		if err != nil {
+			return 0, fmt.Errorf("cannot locate glyph3d-cli binary: %w", err)
+		}
 	}
-	args := r.adapterArgs(id, cols, rows)
-	if len(argv) > 0 {
-		args = append(append(args, "--"), argv...)
-	}
+	args := r.adapterSpecArgs(spec, cols, rows)
 	cmd := r.adapterCommand(exePath, args)
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
 	pid := cmd.Process.Pid
+	id := spec.id
+	storedSpec := spec
+	storedSpec.argv = nil
 	r.readoptMu.Lock()
 	if r.adapters == nil {
 		r.adapters = map[string]int{}
 	}
+	if r.adapterSpecs == nil {
+		r.adapterSpecs = map[string]adapterSpec{}
+	}
 	r.adapters[id]++
+	r.adapterSpecs[id] = storedSpec
 	r.readoptMu.Unlock()
 	go func() {
 		err := cmd.Wait()
+		code := cmd.ProcessState.ExitCode()
+		crash := code == -1 || code >= 2
 		r.readoptMu.Lock()
 		if r.adapters[id]--; r.adapters[id] <= 0 {
 			delete(r.adapters, id)
+			if !crash {
+				delete(r.adapterSpecs, id)
+			}
 		}
 		r.readoptMu.Unlock()
 		log.Printf("[relay] terminal adapter '%s' (pid %d) exited: %v", id, pid, err)
-		if code := cmd.ProcessState.ExitCode(); code == -1 || code >= 2 {
+		if crash {
 			r.readoptOrphan(id)
 		}
 	}()
 	return pid, nil
 }
 
-// readoptOrphan gives a terminal whose adapter died a new adapter, once termd lists it with no
-// owner (termd drops a dead connection's subscription a moment after the process goes). A
-// terminal that ended with its adapter, or that someone else owns by then, is left alone. An
-// adapter that keeps dying is replaced at most 3 times a minute; then the relay says so and
-// stops (terminal.recover still re-adopts by hand).
+// readoptOrphan gives a terminal whose adapter died a new adapter, once its termd namespace lists
+// `spec.effectiveTermdID()` with no owner (termd drops a dead connection's subscription a moment
+// after the process goes). A terminal that ended with its adapter, or that someone else owns by
+// then, is left alone. An adapter that keeps dying is replaced at most 3 times a minute; then the
+// relay says so and stops (terminal.recover still re-adopts by hand).
 func (r *Relay) readoptOrphan(id string) {
 	r.readoptMu.Lock()
+	spec, hasSpec := r.adapterSpecs[id]
+	if !hasSpec {
+		if strings.HasPrefix(id, "gx-") {
+			r.readoptMu.Unlock()
+			return
+		}
+		spec = adapterSpec{id: id}
+	}
 	if r.readopted == nil {
 		r.readopted = map[string][]time.Time{}
 	}
@@ -1304,23 +1362,30 @@ func (r *Relay) readoptOrphan(id string) {
 	r.readopted[id] = append(recent, time.Now())
 	r.readoptMu.Unlock()
 
+	ns := spec.effectiveNS()
+	targetID := spec.effectiveTermdID()
 	for range 30 {
-		terms, err := termdList(termdNS)
+		terms, err := termdList(ns)
 		if err != nil {
-			log.Printf("[relay] terminal '%s': its adapter died and termd can't be listed: %v", id, err)
+			log.Printf("[relay] terminal '%s': its adapter died and termd (%s) can't be listed: %v", id, ns, err)
 			return
 		}
 		var t *termdTerminal
 		for i := range terms {
-			if terms[i].ID == id {
+			if terms[i].ID == targetID {
 				t = &terms[i]
 			}
 		}
 		if t == nil {
+			r.readoptMu.Lock()
+			if r.adapters[id] <= 0 {
+				delete(r.adapterSpecs, id)
+			}
+			r.readoptMu.Unlock()
 			return // the terminal ended with its adapter
 		}
 		if t.Subscribers.Own == 0 {
-			pid, err := r.startAdapter(id, t.Cols, t.Rows, nil)
+			pid, err := r.startAdapterSpec(spec, t.Cols, t.Rows)
 			if err != nil {
 				log.Printf("[relay] terminal '%s': re-adopting after its adapter died: %v", id, err)
 				return
@@ -1330,7 +1395,7 @@ func (r *Relay) readoptOrphan(id string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	log.Printf("[relay] terminal '%s': its adapter died but another client owns the terminal; leaving it", id)
+	log.Printf("[relay] terminal '%s': its adapter died but another client owns %s/%s; leaving it", id, ns, targetID)
 }
 
 // adapterCommand is the `attach` adapter's command: this binary, the relay's stdio, and
@@ -1345,7 +1410,13 @@ func (r *Relay) adapterCommand(exePath string, args []string) *exec.Cmd {
 
 // adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
 func (r *Relay) adapterArgs(id string, cols, rows int) []string {
-	args := []string{"attach", id}
+	return r.adapterSpecArgs(adapterSpec{id: id}, cols, rows)
+}
+
+// adapterSpecArgs builds `attach <spec.id> ...` pointed at this relay and `spec.effectiveNS()`.
+func (r *Relay) adapterSpecArgs(spec adapterSpec, cols, rows int) []string {
+	ns := spec.effectiveNS()
+	args := []string{"attach", spec.id}
 	if r.auth != nil && (r.auth.hasTLS || (r.auth.listenHost != "" && r.auth.listenHost != "127.0.0.1" && r.auth.listenHost != "localhost" && r.auth.listenHost != "0.0.0.0" && r.auth.listenHost != "::")) {
 		scheme := "ws"
 		if r.auth.hasTLS {
@@ -1359,8 +1430,20 @@ func (r *Relay) adapterArgs(id string, cols, rows int) []string {
 	} else {
 		args = append(args, "--port", strconv.Itoa(r.port))
 	}
-	args = append(args, "--termd-ns", termdNS)
-	if r.fs != nil {
+	args = append(args, "--termd-ns", ns)
+	if spec.termdID != "" && spec.termdID != spec.id {
+		args = append(args, "--termd-id", spec.termdID)
+	}
+	if spec.noCreate {
+		args = append(args, "--no-create")
+	}
+	if spec.detachOnKill {
+		args = append(args, "--detach-on-kill")
+	}
+	if spec.flow != "" {
+		args = append(args, "--flow", spec.flow)
+	}
+	if r.fs != nil && !spec.noCreate {
 		root, _ := r.fs.Roots()
 		args = append(args, "--cwd", root)
 	}
@@ -1373,6 +1456,9 @@ func (r *Relay) adapterArgs(id string, cols, rows int) []string {
 	}
 	if rows > 0 {
 		args = append(args, "--rows", strconv.Itoa(rows))
+	}
+	if len(spec.argv) > 0 {
+		args = append(append(args, "--"), spec.argv...)
 	}
 	return args
 }
@@ -1451,12 +1537,25 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		return
 	}
 	live := make([]string, 0, len(terms))
+	liveSet := make(map[string]bool, len(terms))
+	addLive := func(id string) {
+		if id != "" && !liveSet[id] {
+			liveSet[id] = true
+			live = append(live, id)
+		}
+	}
 	for _, t := range terms {
-		live = append(live, t.ID)
+		if strings.HasPrefix(t.ID, "gx-") {
+			continue // gomux screens map onto their own namespace via adapterSpec, never wall's termdNS
+		}
+		addLive(t.ID)
 	}
 	r.seedTermSeq(live)
 	recovered := []string{}
 	for _, t := range terms {
+		if strings.HasPrefix(t.ID, "gx-") {
+			continue
+		}
 		r.readoptMu.Lock()
 		riding := r.adapters[t.ID] > 0
 		r.readoptMu.Unlock()
@@ -1471,6 +1570,116 @@ func (r *Relay) recoverTerminals(reply func(any)) {
 		log.Printf("[relay] recovered terminal '%s' (pid %d)", t.ID, pid)
 		recovered = append(recovered, t.ID)
 	}
+
+	type nsList struct {
+		terms []termdTerminal
+		err   error
+	}
+	nsCache := map[string]nsList{termdNS: {terms: terms}}
+	listCached := func(ns string) ([]termdTerminal, error) {
+		if c, ok := nsCache[ns]; ok {
+			return c.terms, c.err
+		}
+		ts, e := termdList(ns)
+		nsCache[ns] = nsList{terms: ts, err: e}
+		return ts, e
+	}
+
+	// Cross-namespace / mapped adapterSpecs (e.g. gx-<name> → agents/agent-<name>): never probe
+	// gx-<name> in wall's termdNS; check their own namespace so live screens stay in `live` across
+	// page reloads and dead adapters are re-adopted against their real target terminal.
+	r.readoptMu.Lock()
+	mapped := make([]adapterSpec, 0, len(r.adapterSpecs))
+	for _, spec := range r.adapterSpecs {
+		if spec.isMapped() {
+			mapped = append(mapped, spec)
+		}
+	}
+	r.readoptMu.Unlock()
+	sort.Slice(mapped, func(i, j int) bool { return mapped[i].id < mapped[j].id })
+	for _, spec := range mapped {
+		ns := spec.effectiveNS()
+		targetID := spec.effectiveTermdID()
+		nsTerms, nsErr := listCached(ns)
+		if nsErr != nil {
+			log.Printf("[relay] recover: termd (%s) for %s: %v", ns, spec.id, nsErr)
+			addLive(spec.id) // unknown is not empty: keep remembered layout until ns answers
+			continue
+		}
+		var nt *termdTerminal
+		for i := range nsTerms {
+			if nsTerms[i].ID == targetID {
+				nt = &nsTerms[i]
+				break
+			}
+		}
+		if nt == nil {
+			r.readoptMu.Lock()
+			if r.adapters[spec.id] <= 0 {
+				delete(r.adapterSpecs, spec.id)
+			}
+			r.readoptMu.Unlock()
+			continue
+		}
+		addLive(spec.id)
+		r.readoptMu.Lock()
+		riding := r.adapters[spec.id] > 0
+		r.readoptMu.Unlock()
+		if nt.Subscribers.Own > 0 || riding {
+			continue
+		}
+		pid, e := r.startAdapterSpec(spec, nt.Cols, nt.Rows)
+		if e != nil {
+			log.Printf("[relay] recover: spawn %s (%s/%s) failed: %v", spec.id, ns, targetID, e)
+			continue
+		}
+		log.Printf("[relay] recovered terminal '%s' → %s/%s (pid %d)", spec.id, ns, targetID, pid)
+		recovered = append(recovered, spec.id)
+	}
+
+	// Also include `gx-<name>` in `live` for local gomux agents whose termd session is alive right
+	// now, even if this relay just restarted and `gomux.attach` hasn't populated adapterSpecs yet
+	// (prevents WallStore from pruning remembered gx-<name> tiles on reload after a relay restart).
+	if r.fs != nil && r.fs.gomux != nil {
+		snap := r.fs.gomux.Snapshot()
+		for _, a := range snap.Agents {
+			if a.Host != snap.Host || !a.hasSession() || a.Session == "" {
+				continue
+			}
+			ns := a.Namespace
+			if ns == "" {
+				ns = "agents"
+			}
+			if !validTerminalID(ns) || !validTerminalID(a.Session) {
+				continue
+			}
+			gxID := gomuxTerminalID(a.Name)
+			if liveSet[gxID] {
+				continue
+			}
+			nsTerms, nsErr := listCached(ns)
+			if nsErr != nil {
+				addLive(gxID)
+				continue
+			}
+			for i := range nsTerms {
+				if nsTerms[i].ID == a.Session {
+					addLive(gxID)
+					break
+				}
+			}
+		}
+		if len(snap.Agents) == 0 && termdNS != "agents" {
+			if nsTerms, nsErr := listCached("agents"); nsErr == nil {
+				for _, nt := range nsTerms {
+					if rest, ok := strings.CutPrefix(nt.ID, "agent-"); ok && rest != "" {
+						addLive(gomuxTerminalID(rest))
+					}
+				}
+			}
+		}
+	}
+
 	log.Printf("[relay] terminal.recover: %d terminal(s) re-adopted, %d live", len(recovered), len(live))
 	reply(map[string]any{"event": "terminal.recovered", "ids": recovered, "count": len(recovered), "live": live})
 }

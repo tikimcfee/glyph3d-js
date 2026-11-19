@@ -169,3 +169,59 @@ func TestTermdCreateSendsNoEnvironment(t *testing.T) {
 		t.Error("no command, yet an argv: termd chooses the account's shell")
 	}
 }
+
+func TestParseAttachArgsAndCrossNamespaceSubscribe(t *testing.T) {
+	r := NewRelay(newTestAuth(t))
+	r.port = 18180
+	spec := adapterSpec{
+		id:           "gx-worker",
+		termdNS:      "agents",
+		termdID:      "agent-worker",
+		noCreate:     true,
+		detachOnKill: true,
+		flow:         "lossy",
+	}
+	args := r.adapterSpecArgs(spec, 132, 42)
+	if len(args) == 0 || args[0] != "attach" {
+		t.Fatalf("adapterSpecArgs = %v, want leading 'attach'", args)
+	}
+
+	cfg, ns, err := parseAttachArgs(args[1:], "wall")
+	if err != nil {
+		t.Fatalf("parseAttachArgs(%v): %v", args[1:], err)
+	}
+	if ns != "agents" || cfg.id != "gx-worker" || cfg.termdID != "agent-worker" ||
+		!cfg.noCreate || !cfg.detachOnKill || cfg.flow != "lossy" || cfg.cols != 132 || cfg.rows != 42 {
+		t.Fatalf("parsed = (%+v, ns=%q)", cfg, ns)
+	}
+
+	sub := termdSubscribe(cfg, 132, 42)
+	wantSub := map[string]any{
+		"id":   "agent-worker",
+		"mode": "raw",
+		"role": "own",
+		"flow": "lossy",
+		"cols": 132,
+		"rows": 42,
+	}
+	if !reflect.DeepEqual(sub, wantSub) {
+		t.Fatalf("termdSubscribe = %v, want %v", sub, wantSub)
+	}
+
+	// Default flow omits explicit "flow" so termd uses its own default ("block" for own).
+	defSub := termdSubscribe(terminalConfig{id: "term-1"}, 80, 24)
+	if _, hasFlow := defSub["flow"]; hasFlow || defSub["id"] != "term-1" {
+		t.Fatalf("default termdSubscribe = %v", defSub)
+	}
+
+	// Reject bad flags loud.
+	for _, bad := range [][]string{
+		{"gx-w", "--flow", "invalid"},
+		{"gx-w", "--termd-id", "bad/slash"},
+		{"gx-w", "--no-create", "--", "sh"},
+	} {
+		if _, _, err := parseAttachArgs(bad, "wall"); err == nil {
+			t.Errorf("parseAttachArgs(%v) succeeded, want error", bad)
+		}
+	}
+}

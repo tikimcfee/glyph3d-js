@@ -2,9 +2,9 @@ package main
 
 // gomuxai — the agent orchestrator's tree, served to the display.
 //
-// gomuxai (the `agent` CLI) runs AI coding agents in their own tmux sessions and
-// records them in per-binary stores. Its `agent export --json --follow --all` is the
-// supported way to watch that: a snapshot line, then one JSON line per change
+// gomuxai (the `agent` CLI) runs AI coding agents in g3d-termd terminals (namespace `agents`
+// by default) and records them in per-binary stores. Its `agent export --json --follow --all`
+// is the supported way to watch that: a snapshot line, then one JSON line per change
 // (spawned / changed / removed agents, whole-store and whole-host replacements), each
 // carrying the whole agent. It reads every store it can find (the binary's own, and
 // each live agent-* session's spawning binary's), runs no backend CLI, and logs one
@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -55,14 +54,15 @@ type gomuxAgent struct {
 	Host      string `json:"host,omitempty"`
 	Parent    string `json:"parent"`              // spawner's name; "" = a person
 	Backend   string `json:"backend"`             // claude | agy | aider | custom
-	Session   string `json:"session"`             // tmux session (agent-<name>)
+	Session   string `json:"session"`             // termd terminal id (agent-<name>)
+	Namespace string `json:"namespace,omitempty"` // termd namespace (default "agents" on this host)
 	DataDir   string `json:"dataDir"`             // the .gomuxai store that records it
 	Cwd       string `json:"cwd,omitempty"`       // spawn cwd
 	CreatedAt string `json:"createdAt"`           // RFC3339, UTC
 	EndedAt   string `json:"endedAt,omitempty"`   // departed agents: when it was cleaned up
 	Run       int64  `json:"run,omitempty"`       // spawn id within its store (two runs of one name)
 	Live      bool   `json:"live"`                // not cleaned up
-	Attached  *bool  `json:"attached,omitempty"`  // its tmux session exists right now; absent = its host couldn't say
+	Attached  *bool  `json:"attached,omitempty"`  // its termd terminal exists right now; absent = its host couldn't say
 	Status    string `json:"status,omitempty"`    // idle|processing|waiting|error|ended|unknown (agent statuses)
 	EndReason string `json:"endReason,omitempty"` // with ended: quit|gone|replaced|finished|parent|closed
 	Event     string `json:"event,omitempty"`     // last hook event (PostToolUse, Stop, …)
@@ -94,6 +94,7 @@ type exportAgent struct {
 	Parent          string `json:"parent"`
 	Backend         string `json:"backend"`
 	Session         string `json:"session"`
+	Namespace       string `json:"namespace,omitempty"`
 	Store           string `json:"store"`
 	Cwd             string `json:"cwd"`
 	CreatedAt       string `json:"created_at"`
@@ -144,23 +145,18 @@ type GomuxWatcher struct {
 	reached map[string]bool
 	stores0 []string // operator-supplied stores (--gomuxai), passed as --store
 	hosts   string   // other hosts to follow over the bus (--gomuxai-hosts: all | h1,h2), passed as --hosts; "" = this one only
-	tmuxBin string   // "" = no tmux: screens can't be drawn
 	agent   string   // the `agent` binary export runs from ("" = look it up on PATH)
-	// paneSizes: each screened agent's pane size as last seen or set (watchPaneSizes)
-	paneSizes map[string][2]int
 }
 
 // NewGomuxWatcher builds a watcher whose export also reads `dirs` (each a .gomuxai dir,
 // the dir holding one, or an agent binary — export's --store) and lists `hosts`' agents
 // over the bus ("all", or host,host — export's --hosts; "" for none). No I/O until Start.
 func NewGomuxWatcher(dirs []string, hosts string) *GomuxWatcher {
-	tmuxBin, _ := exec.LookPath("tmux")
 	return &GomuxWatcher{
 		agents:  map[string]exportAgent{},
 		reached: map[string]bool{},
 		stores0: dirs,
 		hosts:   hosts,
-		tmuxBin: tmuxBin,
 	}
 }
 
@@ -171,12 +167,8 @@ func (w *GomuxWatcher) SetReachHook(fn func(dir string)) { w.reach = fn }
 // SetNotifyHook wires the display push channel (gomux/changed).
 func (w *GomuxWatcher) SetNotifyHook(fn func(method string, params any)) { w.notify = fn }
 
-// Start keeps one export follower running until ctx ends, and watches screened agents'
-// pane sizes.
+// Start keeps one export follower running until ctx ends.
 func (w *GomuxWatcher) Start(ctx context.Context) {
-	if w.tmuxBin != "" {
-		go w.watchPaneSizes(ctx)
-	}
 	go func() {
 		for ctx.Err() == nil {
 			if err := w.follow(ctx); err != nil && ctx.Err() == nil {
@@ -318,7 +310,7 @@ func (w *GomuxWatcher) publish() {
 
 	agents := make([]gomuxAgent, 0, len(byHostName))
 	for _, a := range byHostName {
-		agents = append(agents, w.toNode(a))
+		agents = append(agents, w.toNode(a, host))
 	}
 	sort.Slice(agents, func(i, j int) bool {
 		ti, tj := parseTime(agents[i].CreatedAt), parseTime(agents[j].CreatedAt)
@@ -364,10 +356,15 @@ func exportPrefer(a, b exportAgent) bool {
 }
 
 // toNode maps export's agent to the display's node.
-func (w *GomuxWatcher) toNode(a exportAgent) gomuxAgent {
+func (w *GomuxWatcher) toNode(a exportAgent, host string) gomuxAgent {
+	ns := a.Namespace
+	if ns == "" && (a.Host == "" || (host != "" && a.Host == host)) {
+		ns = "agents"
+	}
 	n := gomuxAgent{
 		Name: a.Name, Host: a.Host, Parent: a.Parent, Backend: a.Backend, Session: a.Session,
-		DataDir: a.Store, Cwd: a.Cwd, CreatedAt: a.CreatedAt, EndedAt: a.EndedAt, Run: a.Run,
+		Namespace: ns,
+		DataDir:   a.Store, Cwd: a.Cwd, CreatedAt: a.CreatedAt, EndedAt: a.EndedAt, Run: a.Run,
 		Live: a.Live, Attached: a.Attached, Status: a.Status, EndReason: a.EndReason, Event: a.Event, Detail: a.Detail,
 		Tool: a.Tool, ToolInput: a.ToolInput, StatusAt: a.StatusAt, SessionID: a.SessionID,
 		Transcript: a.Transcript, Harness: a.Dialect, TranscriptSize: a.TranscriptSize,
@@ -432,28 +429,8 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// tmux runs a read-only query against the DEFAULT tmux server (gomuxai's) — the
-// screens' pane size. TMUX is unset so a relay started inside another server asks the
-// default one.
-func (w *GomuxWatcher) tmux(args ...string) (string, error) {
-	if w.tmuxBin == "" {
-		return "", errMsg("tmux not on PATH")
-	}
-	cmd := exec.Command(w.tmuxBin, args...)
-	env := os.Environ()
-	out := env[:0]
-	for _, kv := range env {
-		if !strings.HasPrefix(kv, "TMUX=") {
-			out = append(out, kv)
-		}
-	}
-	cmd.Env = out
-	b, err := cmd.Output()
-	return string(b), err
-}
-
 // localAgent returns the served node for an agent on THIS machine — the only ones a screen
-// can show (its tmux pane and its store's pane log are here) — never a far namesake.
+// can attach to directly over this machine's termd socket — never a far namesake.
 func (w *GomuxWatcher) localAgent(name string) (gomuxAgent, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -465,69 +442,9 @@ func (w *GomuxWatcher) localAgent(name string) (gomuxAgent, bool) {
 	return gomuxAgent{}, false
 }
 
-// hasSession: the agent's host said its tmux session exists. Unknown (nil) is not a session
+// hasSession: the agent's host said its termd terminal exists. Unknown (nil) is not a session
 // to act on.
 func (a gomuxAgent) hasSession() bool { return a.Attached != nil && *a.Attached }
-
-// notePaneSize records an agent pane's size as seen (so a size we set isn't echoed back).
-func (w *GomuxWatcher) notePaneSize(name string, cols, rows int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.paneSizes == nil {
-		w.paneSizes = map[string][2]int{}
-	}
-	w.paneSizes[name] = [2]int{cols, rows}
-}
-
-// watchPaneSizes reads each SCREENED agent's pane size every 2s and pushes
-// `gomux/paneSize` when it moved — a screen follows its agent's pane wherever the size
-// was changed. Only agents with a screen terminal in our termd namespace are asked.
-func (w *GomuxWatcher) watchPaneSizes(ctx context.Context) {
-	t := time.NewTicker(2 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		screens := map[string]bool{}
-		if terms, err := termdList(termdNS); err == nil {
-			for _, t := range terms {
-				screens[t.ID] = true
-			}
-		}
-		snap := w.Snapshot()
-		for _, a := range snap.Agents {
-			if a.Host != snap.Host || !a.hasSession() || !screens[gomuxTerminalID(a.Name)] {
-				continue
-			}
-			out, err := w.tmux("display-message", "-p", "-t", a.Session, "#{pane_width} #{pane_height}")
-			if err != nil {
-				continue
-			}
-			f := strings.Fields(strings.TrimSpace(out))
-			if len(f) != 2 {
-				continue
-			}
-			c, e1 := strconv.Atoi(f[0])
-			r, e2 := strconv.Atoi(f[1])
-			if e1 != nil || e2 != nil {
-				continue
-			}
-			w.mu.Lock()
-			prev, seen := w.paneSizes[a.Name]
-			w.mu.Unlock()
-			if seen && prev == [2]int{c, r} {
-				continue
-			}
-			w.notePaneSize(a.Name, c, r)
-			if seen && w.notify != nil {
-				w.notify("gomux/paneSize", map[string]any{"name": a.Name, "id": gomuxTerminalID(a.Name), "cols": c, "rows": r})
-			}
-		}
-	}
-}
 
 // Snapshot returns the current tree.
 func (w *GomuxWatcher) Snapshot() gomuxSnapshot {
@@ -548,33 +465,15 @@ func (h *FSHandler) handleGomuxList(write writeFn, id json.RawMessage, _ json.Ra
 
 // ---- the agent's live screen ----
 
-// gomuxScreenScript draws an agent's screen with no tmux client on gomuxai's server:
-// $1 = tmux binary, $2 = the agent's session, $3 = its pipe-pane log. Input is ignored
-// (echo off; tail reads no stdin). Each captured row lands at its own position (so the
-// snapshot can't scroll), the cursor goes where the pane's is, then the log streams on.
-const gomuxScreenScript = `stty -echo -icanon 2>/dev/null
-printf '\033[2J\033[H'
-env -u TMUX "$1" capture-pane -e -p -t "$2" | awk '{ printf "\033[%d;1H%s", NR, $0 }'
-pos=$(env -u TMUX "$1" display-message -p -t "$2" '#{cursor_y} #{cursor_x}')
-set -- "$@" $pos
-printf '\033[%d;%dH' $(( $4 + 1 )) $(( $5 + 1 ))
-exec tail -c 0 -F "$3"
-`
-
 // gomuxTerminalID is the terminal an agent's screen shows in: `gx-<name>` (a termd id: at most
 // 64 bytes of [A-Za-z0-9._-]), so it never collides with a spawned term-N.
 func gomuxTerminalID(name string) string { return "gx-" + terminalIDPart(name, 61) }
 
-// attachGomuxAgent forks a terminal adapter that shows the agent's screen WITHOUT a tmux
-// client on gomuxai's server. Any client there — even a read-only one — becomes tmux's
-// "most recently active client", the default target of every CLI command, and a
-// read-only one makes gomuxai's own send-keys fail host-wide. So the screen is built
-// from what gomuxai already records: a capture-pane snapshot (each row positioned, then
-// the cursor), followed by `tail -F` of the pane's pipe-pane log (logs/<name>.log, the
-// raw byte stream the agent's terminal emits). That script runs in an ordinary terminal in our
-// termd namespace; it ignores input (echo off, tail reads no stdin), so keys typed at it go
-// nowhere, and nothing here can resize or touch the agent's window. The terminal opens at
-// the agent pane's own size. Killing it kills only our terminal.
+// attachGomuxAgent forks a `glyph3d-cli attach` adapter that subscribes directly to the agent's
+// native termd terminal (`--termd-ns <ns> --termd-id <agent.Session> --no-create --detach-on-kill
+// --flow lossy`) under display id `gx-<name>`. Because it subscribes as `role: "own"` with lossy
+// flow control, both Wall and IDE screens get native resize, scrollback, keys, and paste without
+// PTY-in-PTY nesting, stalling the agent's output, or killing the agent when the viewer closes.
 func (r *Relay) attachGomuxAgent(send func(any), name string) {
 	reply := func(err string) { send(map[string]any{"event": "gomux.attaching", "name": name, "error": err}) }
 	if r.fs == nil || r.fs.gomux == nil {
@@ -586,104 +485,86 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		reply("no gomuxai agent named " + name + " on this machine")
 		return
 	}
-	if !agent.hasSession() {
-		reply("agent " + name + " has no tmux session (" + agent.Session + ")")
+	if !agent.hasSession() || agent.Session == "" {
+		reply("agent " + name + " has no termd session (" + agent.Session + ")")
 		return
 	}
-	logPath := filepath.Join(agent.DataDir, "logs", name+".log")
-	if info, err := os.Stat(logPath); err != nil || info.IsDir() {
-		reply("no pane log for " + name + " at " + logPath + " (gomuxai pipes each agent's pane there)")
+	ns := agent.Namespace
+	if ns == "" {
+		ns = "agents"
+	}
+	if !validTerminalID(ns) {
+		reply(fmt.Sprintf("invalid termd namespace %q", ns))
 		return
 	}
-	cols, rows := 80, 24
-	if out, err := r.fs.gomux.tmux("display-message", "-p", "-t", agent.Session, "#{pane_width} #{pane_height}"); err == nil {
-		if f := strings.Fields(strings.TrimSpace(out)); len(f) == 2 {
-			if c, e := strconv.Atoi(f[0]); e == nil && c > 0 {
-				cols = c
-			}
-			if rr, e := strconv.Atoi(f[1]); e == nil && rr > 0 {
-				rows = rr
-			}
-		}
+	if !validTerminalID(agent.Session) {
+		reply(fmt.Sprintf("invalid termd session id %q", agent.Session))
+		return
 	}
 	id := gomuxTerminalID(name)
-	// ONE adapter per screen. A display reload asks for every screen again before the
-	// adapters it already has re-adopt their terminals; a second adapter would take the
-	// terminal's size from the first and the two would trade it back and forth. If the
-	// terminal has an owner, its adapter is alive and will re-create the grid itself —
-	// answer with its id. A request already in flight (no owner yet) is answered the same way.
-	if r.gomuxScreenLive(id) {
-		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "existing": true})
-		return
-	}
-	tc, err := ensureTermd(termdNS)
+	terms, err := termdList(ns)
 	if err != nil {
-		r.gxMu.Lock()
-		delete(r.gxForked, id)
-		r.gxMu.Unlock()
+		r.clearGomuxForked(id)
 		log.Printf("[gomux] %s: %v", name, err)
 		reply(err.Error())
 		return
 	}
-	tc.Close()
-	if r.termdStatus != nil {
-		r.termdStatus.Kick()
+	var term *termdTerminal
+	for i := range terms {
+		if terms[i].ID == agent.Session {
+			term = &terms[i]
+			break
+		}
 	}
-	pid, err := r.startAdapter(id, cols, rows,
-		[]string{"sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath})
+	if term == nil {
+		r.clearGomuxForked(id)
+		reply(fmt.Sprintf("no terminal %q in termd namespace %q", agent.Session, ns))
+		return
+	}
+	cols, rows := term.Cols, term.Rows
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	// ONE adapter per screen on this relay. A display reload asks for every screen again before
+	// existing adapters re-adopt their grids; a second adapter would fight the first over size
+	// ownership. If this relay already has a running adapter (or one being forked right now),
+	// answer with its id and current size so the existing adapter re-creates the grid itself.
+	if r.gomuxScreenLive(id) {
+		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows, "existing": true})
+		return
+	}
+	spec := adapterSpec{
+		id:           id,
+		termdNS:      ns,
+		termdID:      agent.Session,
+		noCreate:     true,
+		detachOnKill: true,
+		flow:         "lossy",
+	}
+	pid, err := r.startAdapterSpec(spec, cols, rows)
+	r.clearGomuxForked(id) // r.adapters[id] now tracks the live child (or start failed)
 	if err != nil {
-		r.gxMu.Lock()
-		delete(r.gxForked, id)
-		r.gxMu.Unlock()
 		reply("spawn failed: " + err.Error())
 		return
 	}
-	log.Printf("[gomux] %s: screen as terminal '%s' (pid %d, %dx%d, from its pane log)", name, id, pid, cols, rows)
+	log.Printf("[gomux] %s: screen as terminal '%s' → %s/%s (pid %d, %dx%d)", name, id, ns, agent.Session, pid, cols, rows)
 	send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "cols": cols, "rows": rows})
 }
 
-// resizeGomuxAgent resizes an agent's own tmux window (its pane) — a screen's resize
-// writing back, so the agent's CLI reflows to the size you're viewing it at. It's a
-// server command (resize-window), no client: nothing attaches to the agent's session.
-// The window's size goes manual, which is what a pane with no clients wants anyway.
-func (r *Relay) resizeGomuxAgent(send func(any), name string, cols, rows int) {
-	reply := func(err string) {
-		send(map[string]any{"event": "gomux.resized", "name": name, "cols": cols, "rows": rows, "error": err})
-	}
-	if r.fs == nil || r.fs.gomux == nil {
-		reply("gomuxai watcher not running")
-		return
-	}
-	if cols < 2 || rows < 2 || cols > 1000 || rows > 1000 {
-		reply(fmt.Sprintf("size %dx%d out of range", cols, rows))
-		return
-	}
-	a, ok := r.fs.gomux.localAgent(name)
-	if !ok || !a.hasSession() {
-		reply("agent " + name + " has no tmux session")
-		return
-	}
-	if _, err := r.fs.gomux.tmux("resize-window", "-t", a.Session, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows)); err != nil {
-		reply("resize-window: " + err.Error())
-		return
-	}
-	r.fs.gomux.notePaneSize(name, cols, rows)
-	reply("")
-}
-
-// gomuxScreenLive reports whether a screen's adapter exists — its termd terminal has an
-// owner, or one was forked moments ago and hasn't subscribed yet — and otherwise claims the
-// slot for the caller about to fork one.
+// gomuxScreenLive reports whether this relay already has a running (or in-flight) adapter for id,
+// and otherwise claims the fork slot for the caller about to spawn one.
 func (r *Relay) gomuxScreenLive(id string) bool {
-	if terms, err := termdList(termdNS); err == nil {
-		for _, t := range terms {
-			if t.ID == id && t.Subscribers.Own > 0 {
-				return true
-			}
-		}
-	}
 	r.gxMu.Lock()
 	defer r.gxMu.Unlock()
+	r.readoptMu.Lock()
+	live := r.adapters[id] > 0
+	r.readoptMu.Unlock()
+	if live {
+		return true
+	}
 	if r.gxForked == nil {
 		r.gxForked = map[string]time.Time{}
 	}
@@ -692,4 +573,10 @@ func (r *Relay) gomuxScreenLive(id string) bool {
 	}
 	r.gxForked[id] = time.Now()
 	return false
+}
+
+func (r *Relay) clearGomuxForked(id string) {
+	r.gxMu.Lock()
+	delete(r.gxForked, id)
+	r.gxMu.Unlock()
 }

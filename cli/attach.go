@@ -18,52 +18,83 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 // terminalConfig is the parsed invocation, handed to the platform-specific runTerminal
 // (attach_unix.go / attach_windows.go).
 type terminalConfig struct {
-	url     string
-	id      string
-	cols    int
-	rows    int
-	scale   float64
-	cmdArgs []string // empty: termd starts the account's shell (DESIGN.md, "The shell, and login or not")
-	cwd     string   // empty: termd starts it in the account's home
+	url          string
+	id           string
+	termdID      string
+	noCreate     bool
+	detachOnKill bool
+	flow         string
+	cols         int
+	rows         int
+	scale        float64
+	cmdArgs      []string // empty: termd starts the account's shell (DESIGN.md, "The shell, and login or not")
+	cwd          string   // empty: termd starts it in the account's home
 }
 
-// attachCmd is the entry point for `glyph3d-cli attach`.
-func attachCmd() {
-	fs := flag.NewFlagSet("attach", flag.ExitOnError)
+// remoteTermdID is the terminal id addressed inside termd (--termd-id when given, else id).
+// Display-facing messages always address cfg.id so a cross-namespace agent terminal (agent-foo)
+// can appear under a distinct display id (gx-foo).
+func (cfg terminalConfig) remoteTermdID() string {
+	if cfg.termdID != "" {
+		return cfg.termdID
+	}
+	return cfg.id
+}
+
+type attachGlobals struct {
+	ns         string
+	termd      string
+	reconnect  time.Duration
+	pasteChunk int
+	pasteQueue int
+}
+
+func parseAttachArgs(raw []string, defNS string) (terminalConfig, string, error) {
+	g := attachGlobals{
+		ns:         defNS,
+		termd:      termdBin,
+		reconnect:  termdReconnectWindow,
+		pasteChunk: termdPasteChunk,
+		pasteQueue: termdPasteQueue,
+	}
+	cfg, err := parseAttachArgsWithGlobals(raw, &g)
+	return cfg, g.ns, err
+}
+
+func parseAttachArgsWithGlobals(raw []string, g *attachGlobals) (terminalConfig, error) {
+	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	wsURL := fs.String("host", "ws://localhost:8080", "WebSocket relay URL")
 	p := fs.Int("port", 0, "Shorthand: ws://localhost:<port>")
 	cols := fs.Int("cols", 80, "Terminal columns")
 	rows := fs.Int("rows", 24, "Terminal rows")
 	scale := fs.Float64("scale", 2.0, "TerminalGrid size multiplier")
-	fs.StringVar(&termdNS, "termd-ns", termdNS, "termd namespace the terminal lives in")
-	fs.StringVar(&termdBin, "termd", termdBin, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
-	fs.DurationVar(&termdReconnectWindow, "termd-reconnect", termdReconnectWindow, "how long to ride out a termd brain restart before giving the terminal up as lost")
-	fs.IntVar(&termdPasteChunk, "paste-chunk", termdPasteChunk, "the most text, in bytes, one termd paste request carries (a longer paste streams as several)")
-	fs.IntVar(&termdPasteQueue, "paste-queue", termdPasteQueue, "the most of the display's pastes, in bytes, that waits here for a program that isn't reading; a paste past it is refused")
+	termdID := fs.String("termd-id", "", "termd terminal id when distinct from <id>")
+	noCreate := fs.Bool("no-create", false, "subscribe to an existing termd terminal without starting termd or calling create")
+	detachOnKill := fs.Bool("detach-on-kill", false, "close the display grid without killing the termd terminal on terminal.kill")
+	flow := fs.String("flow", "", "termd subscription flow control: block or lossy")
+	fs.StringVar(&g.ns, "termd-ns", g.ns, "termd namespace the terminal lives in")
+	fs.StringVar(&g.termd, "termd", g.termd, "g3d-termd binary to start when none runs (default: beside this binary, then PATH)")
+	fs.DurationVar(&g.reconnect, "termd-reconnect", g.reconnect, "how long to ride out a termd brain restart before giving the terminal up as lost")
+	fs.IntVar(&g.pasteChunk, "paste-chunk", g.pasteChunk, "the most text, in bytes, one termd paste request carries (a longer paste streams as several)")
+	fs.IntVar(&g.pasteQueue, "paste-queue", g.pasteQueue, "the most of the display's pastes, in bytes, that waits here for a program that isn't reading; a paste past it is refused")
 	cwd := fs.String("cwd", "", "Where a new terminal's program starts (default: the account's home)")
-
-	usage := func() {
-		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
-		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --cwd --termd-ns --termd --termd-reconnect")
-		fmt.Fprintln(os.Stderr, "  with no command, termd starts the account's shell as a login shell")
-		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
-	}
 
 	// Grammar: <id> [flags...] [-- <cmd...>]. The id comes first; flags may follow it;
 	// an explicit command goes after a bare "--" (or as trailing positionals). We pull
 	// the id out by hand and parse flags AFTER it — a plain flag.Parse(os.Args[2:])
 	// would stop dead at <id> and silently drop every flag.
-	raw := os.Args[2:]
 	if len(raw) < 1 || strings.HasPrefix(raw[0], "-") {
-		usage()
-		os.Exit(2)
+		return terminalConfig{}, fmt.Errorf("missing terminal id")
 	}
 	id := raw[0]
 	rest := raw[1:]
@@ -76,7 +107,9 @@ func attachCmd() {
 			break
 		}
 	}
-	fs.Parse(flagTokens)
+	if err := fs.Parse(flagTokens); err != nil {
+		return terminalConfig{}, err
+	}
 
 	cmdArgs := explicitCmd
 	if len(cmdArgs) == 0 {
@@ -84,12 +117,22 @@ func attachCmd() {
 	}
 
 	if *cols < 1 || *rows < 1 {
-		fmt.Fprintln(os.Stderr, "attach: cols and rows must be positive")
-		os.Exit(2)
+		return terminalConfig{}, fmt.Errorf("cols and rows must be positive")
 	}
 	if !validTerminalID(id) {
-		fmt.Fprintf(os.Stderr, "attach: terminal id %q must be 1 to 64 bytes of [A-Za-z0-9._-]\n", id)
-		os.Exit(2)
+		return terminalConfig{}, fmt.Errorf("terminal id %q must be 1 to 64 bytes of [A-Za-z0-9._-]", id)
+	}
+	if *termdID != "" && !validTerminalID(*termdID) {
+		return terminalConfig{}, fmt.Errorf("termd-id %q must be 1 to 64 bytes of [A-Za-z0-9._-]", *termdID)
+	}
+	if !validTerminalID(g.ns) {
+		return terminalConfig{}, fmt.Errorf("termd-ns %q must be 1 to 64 bytes of [A-Za-z0-9._-]", g.ns)
+	}
+	if *flow != "" && *flow != "block" && *flow != "lossy" {
+		return terminalConfig{}, fmt.Errorf("flow %q must be block or lossy", *flow)
+	}
+	if *noCreate && len(cmdArgs) > 0 {
+		return terminalConfig{}, fmt.Errorf("--no-create cannot be combined with a command")
 	}
 
 	url := *wsURL
@@ -97,15 +140,54 @@ func attachCmd() {
 		url = fmt.Sprintf("ws://localhost:%d", *p)
 	}
 
-	runTerminal(terminalConfig{
-		url:     url,
-		id:      id,
-		cols:    *cols,
-		rows:    *rows,
-		scale:   *scale,
-		cmdArgs: cmdArgs,
-		cwd:     *cwd,
-	})
+	return terminalConfig{
+		url:          url,
+		id:           id,
+		termdID:      *termdID,
+		noCreate:     *noCreate,
+		detachOnKill: *detachOnKill,
+		flow:         *flow,
+		cols:         *cols,
+		rows:         *rows,
+		scale:        *scale,
+		cmdArgs:      cmdArgs,
+		cwd:          *cwd,
+	}, nil
+}
+
+// attachCmd is the entry point for `glyph3d-cli attach`.
+func attachCmd() {
+	usage := func() {
+		fmt.Fprintln(os.Stderr, "usage: glyph3d-cli attach <id> [flags] [-- <cmd...>]")
+		fmt.Fprintln(os.Stderr, "  flags: --host --port --cols --rows --scale --cwd --termd-ns --termd-id --no-create --detach-on-kill --flow --termd --termd-reconnect")
+		fmt.Fprintln(os.Stderr, "  with no command, termd starts the account's shell as a login shell")
+		fmt.Fprintln(os.Stderr, "  e.g.:  glyph3d-cli attach t1 --cols 100 --rows 30 -- ssh host")
+	}
+
+	raw := os.Args[2:]
+	if len(raw) < 1 || strings.HasPrefix(raw[0], "-") {
+		usage()
+		os.Exit(2)
+	}
+	g := attachGlobals{
+		ns:         termdNS,
+		termd:      termdBin,
+		reconnect:  termdReconnectWindow,
+		pasteChunk: termdPasteChunk,
+		pasteQueue: termdPasteQueue,
+	}
+	cfg, err := parseAttachArgsWithGlobals(raw, &g)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "attach: %v\n", err)
+		os.Exit(2)
+	}
+	termdNS = g.ns
+	termdBin = g.termd
+	termdReconnectWindow = g.reconnect
+	termdPasteChunk = g.pasteChunk
+	termdPasteQueue = g.pasteQueue
+
+	runTerminal(cfg)
 }
 
 // decodeRelayText extracts human-readable text from a relay message that may be
