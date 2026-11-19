@@ -233,7 +233,7 @@ export default class WallAgentViews {
      */
     rect(id, zoom = this.wall.viewport.zoom) {
         if (!this.isOpen(id)) return null;
-        const body = this.wall.terminalRect(id);
+        const body = this.wall.canvasTerminalRect ? this.wall.canvasTerminalRect(id) : this.wall.terminalRect(id);
         const bar = this.wall.names ? this.wall.names.barHeight(id, zoom) : 0;
         return agentViewRect(body, bar, this._views.get(id).side, this.dims());
     }
@@ -243,7 +243,7 @@ export default class WallAgentViews {
      * @param {string} id
      */
     tileMetrics(id) {
-        const body = this.wall.terminalRect(id);
+        const body = this.wall.canvasTerminalRect ? this.wall.canvasTerminalRect(id) : this.wall.terminalRect(id);
         return footprintTileMetrics(body, this.sideOf(id), this.dims());
     }
 

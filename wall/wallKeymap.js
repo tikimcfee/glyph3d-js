@@ -3,7 +3,7 @@
  * and the help panel (HelpPanel.jsx) lists KEYMAP, PLAIN_KEYS and gestures(), so what the help says
  * is what the keys do. The chord's modifier is chord.js's (⌘ on macOS, Ctrl+Alt elsewhere).
  */
-import { ALT_LABEL, SNAP_INVERT_LABEL, COPY_LABEL, BLOCK_SELECT_LABEL, chordLabel, zoomWheelLabel } from './chord.js';
+import { ALT_LABEL, SNAP_INVERT_LABEL, COPY_LABEL, BLOCK_SELECT_LABEL, FOCUS_HISTORY_LABEL, GROUP_CYCLE_LABEL, chordLabel, zoomWheelLabel } from './chord.js';
 
 /**
  * One chord: the physical key (`code`, so layouts never rewrite it), whether Shift must be held
@@ -16,8 +16,8 @@ import { ALT_LABEL, SNAP_INVERT_LABEL, COPY_LABEL, BLOCK_SELECT_LABEL, chordLabe
 
 /** @type {readonly WallChord[]} */
 export const KEYMAP = Object.freeze([
-    { section: 'terminals', code: 'BracketRight', key: ']', does: 'focus the next terminal', run: (w) => w.cycleFocus(+1) },
-    { section: 'terminals', code: 'BracketLeft', key: '[', does: 'focus the previous terminal', run: (w) => w.cycleFocus(-1) },
+    { section: 'terminals', code: 'BracketRight', shift: false, key: ']', does: 'focus the next pane (reading order)', run: (w) => w.cycleFocus(+1) },
+    { section: 'terminals', code: 'BracketLeft', shift: false, key: '[', does: 'focus the previous pane (reading order)', run: (w) => w.cycleFocus(-1) },
     {
         section: 'fullscreen', code: 'Enter', shift: false, key: '↵', does: 'fullscreen the focused terminal (it re-wraps to fill the canvas); again: back to the canvas',
         run: (w) => { if (w.fullscreen.id || w.focusedId) w.run(['wall.fullscreen', 'toggle']); else w.fitAll(); },
@@ -69,6 +69,8 @@ export function chordText(c) { return chordLabel([c.key], { shift: !!c.shift });
 /** Keys without the chord that the wall answers (WallKeys). */
 export const PLAIN_KEYS = Object.freeze([
     { section: 'text', key: COPY_LABEL, does: "copy the focused terminal's selected text (Ctrl+C still reaches the program)" },
+    { section: 'terminals', key: FOCUS_HISTORY_LABEL, does: 'back / forward through focused terminals' },
+    { section: 'groups', key: GROUP_CYCLE_LABEL, does: 'focus the previous / next group or window' },
     { section: 'terminals', key: 'Esc', does: 'clear the selection (when no terminal has the keys)' },
     { section: 'terminals', key: 'Menu · ⇧F10', does: 'open the right-click menu from the keyboard' },
 ]);

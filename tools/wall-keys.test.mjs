@@ -96,3 +96,20 @@ test('selectionClearOnTyping off: a typed key leaves the selection', () => {
     keys._key(down('a', 'KeyA'));
     expect(grid.hasSelection).toBe(false);
 });
+
+test('unshifted Ctrl+[ (ESC) and Ctrl+] still reach the focused terminal while Ctrl+Shift+[ / ] cycles groups', () => {
+    const { wall, sent, keys } = standIn();
+    const groups = [];
+    wall.cycleGroupFocus = (d) => groups.push(d);
+    keys._key(down('[', 'BracketLeft', { ctrlKey: true }));
+    keys._key(down(']', 'BracketRight', { ctrlKey: true }));
+    expect(groups).toEqual([]);
+    expect(sent.map((k) => [k.code, k.mods])).toEqual([
+        ['BracketLeft', ['Control']],
+        ['BracketRight', ['Control']],
+    ]);
+    keys._key(down('{', 'BracketLeft', { ctrlKey: true, shiftKey: true }));
+    keys._key(down('}', 'BracketRight', { ctrlKey: true, shiftKey: true }));
+    expect(groups).toEqual([-1, 1]);
+    expect(sent.length).toBe(2);   // Ctrl+Shift+[ / ] never leak into the terminal
+});

@@ -58,6 +58,7 @@ export default class WallMenu {
         const el = /** @type {Element|null} */ (e.target instanceof Element ? e.target : null);
         const wall = this.wall;
         if (el === wall.viewport.canvas) {
+            if (wall.fullscreen?.id) return { chrome: false, target: { kind: 'terminal', id: wall.fullscreen.id, part: 'body' } };
             const hit = wall.hit(wall.viewport.toWorld(e.clientX, e.clientY));
             if (!hit) return { chrome: false, target: { kind: 'canvas' } };
             if ('group' in hit) return { chrome: false, target: { kind: 'group', id: hit.group } };

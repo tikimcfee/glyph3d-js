@@ -151,12 +151,15 @@ function terminalItems(id, state, config) {
     const selected = state.selection.includes(id);
     const others = state.selection.filter((x) => x !== id);
     const agentSide = t.agentView?.open ? t.agentView.side : 'off';
+    const isFs = state.fullscreen === id;
     /** @type {MenuItem[]} */
     const items = [
         t.selected && { kind: 'action', id: 'copy', label: 'copy', detail: COPY_LABEL, verb: ['wall.copy', id] },
         { kind: 'action', id: 'paste', label: 'paste', detail: PASTE_LABEL, verb: ['wall.paste', id] },
         { kind: 'sep', id: 's0' },
-        { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.reveal', id] },
+        isFs
+            ? { kind: 'action', id: 'fullscreen-off', label: 'exit fullscreen', detail: chordLabel(['↵']), verb: ['wall.fullscreen', 'off'] }
+            : { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.reveal', id] },
         state.focusedId !== id && { kind: 'action', id: 'focus', label: 'focus', verb: ['terminal.focus', id] },
         { kind: 'rename', id: 'rename', label: 'rename…', verb: ['wall.rename', id], value: t.named ? t.name : '', placeholder: t.name },
         {
@@ -180,7 +183,7 @@ function terminalItems(id, state, config) {
         { kind: 'action', id: 'split-right', label: 'split right', detail: chordLabel(['D']), verb: ['wall.split', 'right', id] },
         { kind: 'action', id: 'split-down', label: 'split down', detail: chordLabel(['D'], { shift: true }), verb: ['wall.split', 'down', id] },
     ];
-    if (g?.layout === 'split') { items.push(...tail(id, config)); return items.filter(Boolean); }
+    if (g?.layout === 'split' || isFs) { items.push(...tail(id, config)); return items.filter(Boolean); }
     const sizes = parseSizes(config.menuSizes).map((z) => ({
         id: `${z.cols}x${z.rows}`, label: `${z.cols}×${z.rows}`, verb: ['terminal.resize', id, String(z.cols), String(z.rows)], on: z.cols === t.cols && z.rows === t.rows,
     }));

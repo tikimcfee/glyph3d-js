@@ -1,4 +1,4 @@
-import GroupFrame from './GroupFrame.js';
+import GroupFrame, { DEFAULT_GROUP_Z } from './GroupFrame.js';
 import { tileLayout, nearestPlace, unionRect, padRect, BAR_ROOM } from './wallLayout.js';
 import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree } from './splitTree.js';
 
@@ -43,6 +43,8 @@ export default class WallGroups {
         this._scene = scene;
         /** @type {Map<string, GroupFrame>} */
         this._frames = new Map();
+        /** @type {Map<string, number>} world Z of each group's frame in the canvas Z-stack */
+        this._groupZ = new Map();
     }
 
     get _store() { return this.wall.store; }
@@ -138,6 +140,7 @@ export default class WallGroups {
             this._commit(gid, { ...g, members, split });
         }
         this._syncBars();
+        this.wall._applyZOrder?.();
         this.wall._emit();
     }
 
@@ -146,6 +149,7 @@ export default class WallGroups {
         this.get(gid);
         this._store.deleteGroup(gid);
         this._syncBars();
+        this.wall._applyZOrder?.();
         this.wall._emit();
     }
 
@@ -187,12 +191,18 @@ export default class WallGroups {
         return gid;
     }
 
-    /** The divider under a world point in a split on the canvas, `tol` world units either side. */
+    /** The divider under `p` inside split group `gid` on the canvas, `tol` world units either side. */
+    groupDividerAt(gid, p, tol) {
+        const g = this._store.group(gid);
+        if (!g || g.layout !== 'split' || !g.members.some((id) => this.wall.onCanvas(id))) return null;
+        return dividerAt(g.split.tree, this._splitRect(g), this.wall.config.splitGap, p, tol);
+    }
+
+    /** The divider under a world point in a split on the canvas (frontmost group first), `tol` world units either side. */
     dividerAt(p, tol) {
-        for (const gid of this.ids().reverse()) {
-            const g = this.get(gid);
-            if (g.layout !== 'split' || !g.members.some((id) => this.wall.onCanvas(id))) continue;
-            const d = dividerAt(g.split.tree, this._splitRect(g), this.wall.config.splitGap, p, tol);
+        const ordered = this.ids().sort((a, b) => this.depthOf(b) - this.depthOf(a));
+        for (const gid of ordered) {
+            const d = this.groupDividerAt(gid, p, tol);
             if (d) return { gid, divider: d };
         }
         return null;
@@ -378,7 +388,8 @@ export default class WallGroups {
     frameRect(gid, zoom) {
         const shown = this.shownMembers(gid);
         if (!shown.length) return null;
-        const rectOf = (id) => (this.wall.footprintRect ? this.wall.footprintRect(id, zoom) : this.wall.windowRect(id, zoom));
+        const rectOf = (id) => (this.wall.canvasFootprintRect ? this.wall.canvasFootprintRect(id, zoom)
+            : this.wall.footprintRect ? this.wall.footprintRect(id, zoom) : this.wall.windowRect(id, zoom));
         return padRect(unionRect(shown.map(rectOf)), this.wall.config.groupPad);
     }
 
@@ -390,9 +401,21 @@ export default class WallGroups {
         return { minX: f.minX, maxX: f.maxX, minY: f.maxY, maxY: f.maxY + frame.headerHeight(zoom) };
     }
 
-    /** The group whose header is under a world point — the latest group on top. @returns {string|null} */
+    /** Apply world Z positions for each group's frame (backdrop + header). @param {Map<string, number>} depths */
+    setDepths(depths) {
+        this._groupZ = new Map(depths);
+        for (const [gid, frame] of this._frames) {
+            frame.position.z = this._groupZ.get(gid) ?? DEFAULT_GROUP_Z;
+        }
+    }
+
+    /** World Z of group `gid`'s frame. @param {string} gid */
+    depthOf(gid) { return this._groupZ.get(gid) ?? DEFAULT_GROUP_Z; }
+
+    /** The group whose header is under a world point — the frontmost group in Z-order wins. @returns {string|null} */
     headerAt(p, zoom) {
-        for (const gid of this.ids().reverse()) {
+        const ordered = this.ids().sort((a, b) => this.depthOf(b) - this.depthOf(a));
+        for (const gid of ordered) {
             const h = this.headerRect(gid, zoom);
             if (h && p.x >= h.minX && p.x <= h.maxX && p.y >= h.minY && p.y <= h.maxY) return gid;
         }
@@ -407,6 +430,7 @@ export default class WallGroups {
         for (const gid of ids) {
             let frame = this._frames.get(gid);
             if (!frame) { frame = new GroupFrame({ atlas: this._atlas }); this._scene.add(frame); this._frames.set(gid, frame); }
+            frame.position.z = this.depthOf(gid);
             const rect = hidden ? null : this.frameRect(gid, zoom);
             frame.visible = !!rect;
             if (rect) frame.layout(rect, zoom, this.nameOf(gid), !!focusedId && this.groupOf(focusedId) === gid);
@@ -478,6 +502,7 @@ export default class WallGroups {
         this.relayout(gid);
         for (const other of touched) if (other !== gid && this._store.group(other)) this.relayout(other);
         this._syncBars();
+        this.wall._applyZOrder?.();
         this.wall._emit();
     }
 

@@ -244,6 +244,12 @@ export default function registerWallCommands(router, wall) {
         const to = wall.focusPane(dir);
         return OK(to ? `focused ${to}` : `nothing ${dir} of ${wall.focusedId ?? 'nothing'}`, { id: to });
     });
+    verb('wall.focus.history', '<back|forward>', 'Step back or forward through previously focused terminals', (args) => {
+        const dir = { back: -1, forward: 1 }[args[0]];
+        if (!dir) throw new Error(`focus history takes back or forward, not '${args[0] ?? ''}'`);
+        const to = wall.stepFocusHistory(/** @type {-1|1} */ (dir));
+        return OK(to ? `focused ${to}` : `no ${args[0]} terminal in focus history`, { id: to });
+    });
     verb('wall.group.bars', '<gid> [toggle|on|off]', "Show or hide a split's pane title bars", (args) => {
         const [gid, how = 'toggle'] = args;
         if (how !== 'toggle' && how !== 'on' && how !== 'off') throw new Error(`bars take toggle|on|off, not '${how}'`);

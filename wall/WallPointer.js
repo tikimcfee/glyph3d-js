@@ -1,4 +1,4 @@
-import { terminalWheelLines } from '@glyph3d/core/services/terminal/terminalCommands.js';
+import TerminalScroller, { WheelStreamGate } from './terminalScroll.js';
 import { edgeCursor, resizeFromDrag, lassoTouches, unionRect } from './wallLayout.js';
 import { snapStep, snapMove, snapResize, snapTo } from './wallSnap.js';
 import { invertsSnap, zoomsWheel, IS_MAC, blockSelects } from './chord.js';
@@ -92,6 +92,12 @@ export default class WallPointer {
         this._last = null;   // last pointer position, to re-evaluate the cursor when ⌥ changes
         /** The pointer for a program that hears the mouse. */
         this.mouse = new WallMouse(wall, camera);
+        /** Proportional sub-line accumulator + discrete wheel-notch momentum stepper. */
+        this._scroller = new TerminalScroller((id, lines, at) => {
+            this.wall.router.execute(['terminal.scroll', id, String(lines), String(at.x), String(at.y)]);
+        });
+        /** Latches continuous wheel gestures and quenches leftover OS momentum across mode switches. */
+        this._wheelGate = new WheelStreamGate();
         /** The last press on a terminal's body — its terminal, time and place, and how many it ends (a double / triple click). */
         this._clicks = { id: null, t: -Infinity, x: 0, y: 0, n: 0 };
         /** Scratch for a selection drag's pointer: its world point and its cell. */
@@ -135,7 +141,25 @@ export default class WallPointer {
         c.removeEventListener('lostpointercapture', h.cancel);
         window.removeEventListener('keydown', h.key);
         window.removeEventListener('keyup', h.key);
+        this._scroller.reset();
+        this._wheelGate.reset();
         this.wall.selectionOverlay?.setLasso(null);
+    }
+
+    /** Advance any in-flight wheel-notch scroll momentum by `dt` seconds. */
+    step(dt) {
+        const id = this._scroller.activeId;
+        if (id && !this.wall.isShown(id)) { this._scroller.reset(); return; }
+        this._scroller.step(dt);
+    }
+
+    /** Cancel any buffered terminal scroll momentum (e.g. when focus moves or a key is typed). */
+    cancelScroll() { this._scroller.reset(); }
+
+    /** Cancel synthetic scroll momentum AND absorb any active OS inertial wheel tail across a mode/frame jump. */
+    quenchWheel(now) {
+        this._scroller.reset();
+        this._wheelGate.quench(now);
     }
 
     /** A gesture is in hand (the hover buttons wait). */
@@ -167,10 +191,11 @@ export default class WallPointer {
 
     _onDown(e) {
         if (this._drag?.kind === 'program') return;   // another button joining the program's gesture comes as a move
+        const fsId = this.wall.fullscreen?.id;
         const at = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         if (this.mouse.down(e, at)) {
             e.preventDefault();   // the program's: no middle-click autoscroll, no back/forward navigation
-            this.camera.target = null;
+            if (!fsId) this.camera.target = null;
             this._start(e, { kind: 'program' });
             this.canvas.setPointerCapture(e.pointerId);
             this._drag.captured = true;
@@ -178,6 +203,24 @@ export default class WallPointer {
         }
         if (e.button !== 0 && e.button !== 1) return;
         if (IS_MAC && e.ctrlKey && e.button === 0) return;   // macOS: Ctrl+click is the secondary click (the menu's)
+        if (fsId) {
+            // Fullscreen locks the camera and window pose: clicks in the outer bezel keep focus on the
+            // fullscreen terminal without panning, blurring or lassoing; Alt-drag never moves it.
+            if (this.wall.focusedId !== fsId) this.wall.focus(fsId);
+            if (!at || at.id !== fsId) return;
+            if (e.button === 1) {
+                this._start(e, { kind: 'fsPaste', id: fsId });
+            } else if (e.shiftKey) {
+                this._start(e, { kind: 'text', id: fsId, block: false, mode: 'cell', selecting: false, ...this._anchor(fsId, e) });
+            } else if (e.altKey && !blockSelects(e)) {
+                return;
+            } else {
+                this._startText(e, fsId, blockSelects(e));
+            }
+            this.canvas.setPointerCapture(e.pointerId);
+            this._drag.captured = true;
+            return;
+        }
         this.camera.target = null;
         const hit = e.button === 0 ? at : null;
         if (e.button === 0 && e.shiftKey) {
@@ -331,12 +374,17 @@ export default class WallPointer {
         }
         if (d.kind === 'group') {
             if (!this.wall.store.group(d.group)) { this._end(); return; }   // the group went mid-drag
-            if (d.moved) { const s = this._snapGroup(d, dx, dy, e); this.wall.groups.dragTo(d.groupDrag, s.x, s.y); }
+            if (d.moved) {
+                if (!d.raised) { d.raised = true; this.wall.bringGroupToFront?.(d.group); }
+                const s = this._snapGroup(d, dx, dy, e);
+                this.wall.groups.dragTo(d.groupDrag, s.x, s.y);
+            }
             return;
         }
         const grid = this.wall.terminal(d.id);
         if (!grid) { this._end(); return; }   // its terminal went away mid-drag
         if (d.kind === 'press' && d.moved) {
+            if (!d.raised) { d.raised = true; this.wall.bringToFront?.(d.id); }
             const s = this._snapPress(d, dx, dy, e);
             grid.position.x = d.startPos.x + dx + s.x;
             grid.position.y = d.startPos.y + dy + s.y;
@@ -363,6 +411,10 @@ export default class WallPointer {
         if (!d || d.pointerId !== e.pointerId) return;
         this._end();
         if (d.kind === 'program') { this.mouse.up(e); return; }
+        if (d.kind === 'fsPaste') {
+            if (!d.moved && this.wall.terminal(d.id) && this.wall.selectionClipboard) this.wall.run(['wall.paste', d.id, 'selection']);
+            return;
+        }
         if (d.kind === 'pan') {
             if (d.moved) return;
             if (d.pasteInto) { if (this.wall.terminal(d.pasteInto) && this.wall.selectionClipboard) this.wall.run(['wall.paste', d.pasteInto, 'selection']); return; }
@@ -375,7 +427,10 @@ export default class WallPointer {
             if (!this.wall.store.group(d.group)) return;
             if (d.moved) this.wall.groups.dragEnd(d.groupDrag);
             else if (d.pane) this.wall.focus(d.pane);
-            else this.wall.run(['wall.select', ...this.wall.groups.shownMembers(d.group)]);
+            else {
+                this.wall.bringGroupToFront?.(d.group);
+                this.wall.run(['wall.select', ...this.wall.groups.shownMembers(d.group)]);
+            }
             return;
         }
         if (!this.wall.terminal(d.id)) return;   // its terminal went away
@@ -400,6 +455,7 @@ export default class WallPointer {
     }
 
     _onDouble(e) {
+        if (this.wall.fullscreen?.id) return;
         if (e.shiftKey) return;   // ⇧-clicks are selection
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         if (this.mouse.claims(e, hit)) return;   // the program's double-click (its two presses went to it)
@@ -412,29 +468,66 @@ export default class WallPointer {
         e.preventDefault();
         // The deltas before deltaMode: Firefox reports lines only to a listener that reads the mode first.
         const rawX = e.deltaX, rawY = e.deltaY;
-        const zoom = zoomsWheel(e, this.wall.config.zoomKeys);
-        const focused = this.wall.focusedId;
-        if (!zoom && focused) {
-            const r = this.wall.terminalRect(focused);
-            const p = this.camera.toWorld(e.clientX, e.clientY);
-            if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) {
-                const at = this.mouse.cellOf(focused, e);
-                this.wall.router.execute(['terminal.scroll', focused, String(terminalWheelLines(rawY)), String(at.x), String(at.y)]);
+        const px = e.deltaMode === 1 ? LINE_PX : e.deltaMode === 2 ? (this.camera.view?.h ?? 600) : 1;
+        const dx = rawX * px, dy = rawY * px;
+        const rawZoom = zoomsWheel(e, this.wall.config.zoomKeys);
+        const now = e._now ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        const gate = this._wheelGate.accept(dx, dy, { zoom: rawZoom, ctrlKey: !!e.ctrlKey, now });
+        if (!gate.ok) return;
+        const zoom = gate.zoom;
+
+        const fsId = this.wall.fullscreen?.id;
+        if (fsId) {
+            // Fullscreen disallows camera zoom and pan: plain wheels scroll the fullscreen terminal.
+            if (zoom) return;
+            this._scrollTerminal(fsId, rawY, e.deltaMode, e, now);
+            return;
+        }
+        if (!zoom) {
+            const focused = this.wall.focusedId;
+            let hitFocused = null;
+            if (focused && (typeof this.wall.isShown !== 'function' || this.wall.isShown(focused))) {
+                const r = this.wall.terminalRect(focused);
+                const p = this.camera.toWorld(e.clientX, e.clientY);
+                if (p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY) hitFocused = focused;
+            }
+            const target = this._wheelGate.canvasTarget(e.clientX, e.clientY, hitFocused);
+            if (target.kind === 'terminal') {
+                if (this.wall.focusedId === target.id && (typeof this.wall.isShown !== 'function' || this.wall.isShown(target.id))) {
+                    this._scrollTerminal(target.id, rawY, e.deltaMode, e, now);
+                }
                 return;
             }
+            this.camera.panBy(dx, dy);
+            return;
         }
-        const px = e.deltaMode === 1 ? LINE_PX : e.deltaMode === 2 ? this.camera.view.h : 1;
-        const dx = rawX * px, dy = rawY * px;
-        // panBy takes a screen delta and moves the camera by it: + deltaY (scroll down) shows what's
-        // below, so the content rises, as a page's does; + deltaX shows what's to the right.
-        if (!zoom) { this.camera.panBy(dx, dy); return; }
         if (!dy) return;
         if (Math.abs(dy) < PINCH_MAX_DELTA) this.camera.zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.01));
         else this.camera.wheelZoomAt(e.clientX, e.clientY, dy);
     }
 
+    _scrollTerminal(id, rawY, deltaMode, e, now) {
+        if (!rawY) return;
+        const grid = this.wall.terminal(id);
+        const rowPx = grid?.cellStride ? grid.cellStride.y * this.camera.zoom : null;
+        const at = this.mouse.cellOf(id, e);
+        this._scroller.wheel(id, rawY, deltaMode, at, {
+            rowPx,
+            rows: grid?.rows ?? 24,
+            multiplier: this.wall.config.scrollMultiplier ?? 1,
+            now,
+            glide: !!this.wall._running,
+        });
+    }
+
     _hover(e) {
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
+        if (this.wall.fullscreen?.id) {
+            this.wall.setHovered(null);
+            this.mouse.hover(e, hit);
+            this.canvas.style.cursor = !hit || this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default' : 'text';
+            return;
+        }
         this.wall.setHovered(hit?.id ?? null);
         this.mouse.hover(e, hit);
         this.canvas.style.cursor = !hit ? (e.shiftKey ? 'crosshair' : 'grab')

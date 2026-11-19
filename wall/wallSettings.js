@@ -37,7 +37,7 @@ export const SECTIONS = Object.freeze([
     { id: 'text', title: 'Text', subtitle: 'font family · bold · underline · strikethrough · overline · dim' },
     { id: 'groups', title: 'Groups', subtitle: 'what a new group is born with · backdrop' },
     { id: 'status', title: 'Status', subtitle: 'the termd status window · notices' },
-    { id: 'input', title: 'Input', subtitle: 'keyboard' },
+    { id: 'input', title: 'Input', subtitle: 'keyboard · wheel' },
     { id: 'selection', title: 'Selection', subtitle: 'selecting text · copy · paste' },
     { id: 'menu', title: 'Menu', subtitle: 'the right-click menu' },
 ]);
@@ -184,6 +184,10 @@ export const KNOBS = Object.freeze({
         section: 'input', label: 'Zoom keys', type: 'text',
         parse: (s) => parseZoomKeys(s).join(' '),
         description: "Held with the wheel, any of these zooms the canvas instead of panning it: ctrl, alt, meta, shift, separated by spaces. Keep ctrl for a trackpad pinch (it arrives as Ctrl+wheel); alt is Option and meta is ⌘ from a Mac.",
+    },
+    scrollMultiplier: {
+        section: 'input', label: 'Scroll speed', type: 'number', above: 0, max: 10, step: 0.1, unit: '×',
+        description: 'Scales how many lines a wheel or two-finger swipe scrolls inside a focused terminal (1 steps one line per row height of travel; higher scrolls faster).',
     },
     traceInput: {
         section: 'input', label: 'Trace input', type: 'bool',

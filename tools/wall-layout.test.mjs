@@ -3,7 +3,8 @@
 import { test, expect } from 'bun:test';
 import {
     freeFlowSlot, fitRect, unionRect, edgesAt, hitTest, cycle, resizeFromDrag, overlaps, FLOW_GAP, FLOW_COLUMNS,
-    tileLayout, nearestPlace, lassoTouches, pointInPolygon, padRect, BAR_ROOM,
+    tileLayout, nearestPlace, lassoTouches, pointInPolygon, padRect, BAR_ROOM, FULLSCREEN_Z,
+    normalizeZOrder, zStackLayout, zPositions, readingOrder,
 } from '../wall/wallLayout.js';
 
 const rect = (x, y, w, h) => ({ minX: x, maxX: x + w, maxY: y, minY: y - h });
@@ -144,4 +145,68 @@ test('a lasso touches a rect it crosses, encloses, or reaches into — and nothi
     expect(lassoTouches([{ x: 1, y: -1 }], r)).toBe(true);
     expect(pointInPolygon(around, 0, 0)).toBe(true);
     expect(padRect(r, 2)).toEqual({ minX: -2, maxX: 12, minY: -12, maxY: 2 });
+});
+
+test('readingOrder walks horizontal row bands top to bottom and left to right within each band', () => {
+    // Row 0: 'b' at x=120 y=0 and slightly nudged 'a' at x=0 y=-6 (88% vertical overlap → same band, a before b).
+    // Row 1: 'd' at x=120 y=-70 and 'c' at x=0 y=-72.
+    const items = [
+        { id: 'd', rect: rect(120, -70, 100, 50) },
+        { id: 'b', rect: rect(120, 0, 100, 50) },
+        { id: 'c', rect: rect(0, -72, 100, 50) },
+        { id: 'a', rect: rect(0, -6, 100, 50) },
+    ];
+    expect(readingOrder(items)).toEqual(['a', 'b', 'c', 'd']);
+    expect(readingOrder([])).toEqual([]);
+    expect(readingOrder([{ id: 'solo', rect: rect(0, 0, 10, 10) }])).toEqual(['solo']);
+});
+
+test('zPositions clears each window\'s scaled -0.5 background + +0.05 cursor sandwich, and lifts fullscreen to FULLSCREEN_Z', () => {
+    const scales = { a: 2, b: 2, c: 4, d: 2 };
+    const z4 = zPositions(['a', 'b', 'c', 'd'], 'b', (id) => scales[id]);
+    expect(z4.get('b')).toBe(FULLSCREEN_Z);
+    // Non-fullscreen order ['a', 'c', 'd']: each upper window's world background (z - 0.5*scaleZ) sits
+    // strictly ahead of the lower window's frontmost cursor/label (z + 0.05*scaleZ).
+    const order = ['a', 'c', 'd'];
+    expect(z4.get('a') - 0.5 * scales.a).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < order.length; i++) {
+        const lo = order[i - 1], hi = order[i];
+        const loFront = z4.get(lo) + 0.05 * scales[lo];
+        const hiBack = z4.get(hi) - 0.5 * scales[hi];
+        expect(hiBack - loFront).toBeGreaterThanOrEqual(1.49);
+    }
+    // Even with 250 live gridScale=2 terminals, every adjacent pair keeps >= 0.25 world units of pure air
+    // between their sandwiches, and stays strictly below FULLSCREEN_Z.
+    const many = Array.from({ length: 250 }, (_, i) => `t${i}`);
+    const zm = zPositions(many);
+    for (let i = 1; i < many.length; i++) {
+        const loFront = zm.get(many[i - 1]) + 0.05 * 2;
+        const hiBack = zm.get(many[i]) - 0.5 * 2;
+        expect(hiBack - loFront).toBeGreaterThanOrEqual(0.249);
+    }
+    expect(zm.get(many.at(-1))).toBeLessThan(FULLSCREEN_Z - 10);
+});
+
+test('normalizeZOrder and zStackLayout keep group members contiguous and sandwich group frames + headers cleanly', () => {
+    const groupsOf = { a: 'g1', b: 'g1', c: null, d: 'g2', e: 'g2' };
+    // Focusing 'b' after 'd' pulls all of g1 ([a, b]) ahead of g2 and c, preserving [a, b] within g1.
+    expect(normalizeZOrder(['a', 'c', 'd', 'e', 'b'], (id) => groupsOf[id])).toEqual(['c', 'd', 'e', 'a', 'b']);
+
+    const { order, terminals, groups } = zStackLayout(['a', 'c', 'd', 'e', 'b'], {
+        scaleOf: () => 2,
+        groupOf: (id) => groupsOf[id],
+    });
+    expect(order).toEqual(['c', 'd', 'e', 'a', 'b']);
+    // Back-to-front stack: loose 'c' < g2 frame+header < 'd' < 'e' < g1 frame+header < 'a' < 'b'.
+    const cFront = terminals.get('c') + 0.1;
+    const g2Back = groups.get('g2'), g2Front = g2Back + 0.25;
+    const dBack = terminals.get('d') - 1.0, eFront = terminals.get('e') + 0.1;
+    const g1Back = groups.get('g1'), g1Front = g1Back + 0.25;
+    const aBack = terminals.get('a') - 1.0, aFront = terminals.get('a') + 0.1, bBack = terminals.get('b') - 1.0;
+
+    expect(g2Back).toBeGreaterThan(cFront);     // g2's backdrop & header occlude loose 'c' behind it
+    expect(dBack).toBeGreaterThan(g2Front);     // g2's own members sit strictly in front of g2's header/backdrop
+    expect(g1Back).toBeGreaterThan(eFront);     // g1's backdrop & header occlude all of g2 (members + title)
+    expect(aBack).toBeGreaterThan(g1Front);     // g1's backmost member clears g1's header
+    expect(bBack).toBeGreaterThan(aFront);      // g1's frontmost member clears its sibling
 });
