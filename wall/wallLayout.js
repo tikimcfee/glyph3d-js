@@ -51,6 +51,55 @@ export function freeFlowSlot(w, h, taken, origin = { x: 0, y: 0 }) {
 }
 
 /**
+ * Make room for `claim` on the canvas: every item it covers is shoved out of its way along `dir`
+ * (the way the claim faces: an Agent View on a terminal's right shoves rightwards), just far enough
+ * to sit `gap` beyond it — and an item shoved onto another shoves that one on in turn, so nothing
+ * ends up under anything that moved. Items only ever move forward along `dir`, so it settles.
+ * With `step` (the snap step) each shove is rounded up to whole steps, so a snapped item stays on the
+ * grid. Items touching the claim's edge are left alone.
+ * @param {Rect} claim
+ * @param {'right'|'left'|'top'|'bottom'} dir
+ * @param {{ key: string, rect: Rect }[]} items
+ * @param {number} gap
+ * @param {number} [step=0]
+ * @returns {Map<string, { dx: number, dy: number }>} how far each shoved item moves, by key
+ */
+export function shoveAside(claim, dir, items, gap, step = 0) {
+    const ahead = {
+        right: (p) => ({ ...p, maxX: p.maxX + gap }), left: (p) => ({ ...p, minX: p.minX - gap }),
+        top: (p) => ({ ...p, maxY: p.maxY + gap }), bottom: (p) => ({ ...p, minY: p.minY - gap }),
+    }[dir];
+    if (!ahead) throw new Error(`a shove goes right, left, top or bottom, not '${dir}'`);
+    const need = {
+        right: (p, r) => p.maxX + gap - r.minX, left: (p, r) => r.maxX - (p.minX - gap),
+        top: (p, r) => p.maxY + gap - r.minY, bottom: (p, r) => r.maxY - (p.minY - gap),
+    }[dir];
+    const sign = dir === 'right' || dir === 'top' ? 1 : -1, horiz = dir === 'right' || dir === 'left';
+    const rects = new Map(items.map((it) => [it.key, it.rect]));
+    const moved = new Map();
+    const pushers = [{ key: null, rect: claim }];
+    for (let i = 0; i < pushers.length; i++) {
+        if (i > 10_000) throw new Error('[wall] shoveAside did not settle in 10k shoves — an item rect is malformed');
+        const { key: by, rect: p } = pushers[i];
+        if (by !== null && rects.get(by) !== p) continue;   // shoved on again since: its newer rect pushes instead
+        const zone = ahead(p);
+        for (const [key, r] of rects) {
+            if (key === by || !overlaps(r, zone)) continue;
+            let d = need(p, r);
+            if (!(d > 0)) continue;
+            if (step > 0) d = Math.ceil(d / step - 1e-9) * step;
+            const dx = horiz ? sign * d : 0, dy = horiz ? 0 : sign * d;
+            const nr = { minX: r.minX + dx, maxX: r.maxX + dx, minY: r.minY + dy, maxY: r.maxY + dy };
+            rects.set(key, nr);
+            const m = moved.get(key) ?? { dx: 0, dy: 0 };
+            moved.set(key, { dx: m.dx + dx, dy: m.dy + dy });
+            pushers.push({ key, rect: nr });
+        }
+    }
+    return moved;
+}
+
+/**
  * Camera placement that fits `rect` inside a viewport of (viewW × viewH) CSS px.
  * @param {Rect} rect @param {number} viewW @param {number} viewH
  * @param {number} [margin=0.94] - fraction of the viewport the rect may fill

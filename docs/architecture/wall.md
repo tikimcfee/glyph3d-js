@@ -197,6 +197,22 @@ union as the rect) and back (sizes and spots kept); `wall.group.bars` (the group
 hides one split's bars, `splitBars` is what a new split is born with. A split's panes have no size
 presets in their menu: the split owns their size. Gate: `tools/wall-split.test.mjs`.
 
+**An Agent View takes real room** (`TerminalWall.footprintChanged`, the one seam: `wall.agent` open /
+close / side, the header drag's `wall.agent.side`, the `agentViewWidth|Height|Gap` knobs). Its rect is
+`wallAgentView.agentViewRect`; where it goes depends on what lays the terminal out. In a tiled group the
+tile is the terminal's footprint (`footprintTileMetrics`), so the tiling makes room. In a split the pane
+keeps the view's share (`agentInset`) and the terminal re-wraps to the rest; a pane too small for it moves
+the dividers (`splitTree.fitRatios`) and, if it must, grows the split right and down — given back on
+close while nothing reshaped the split since. Ungrouped (or in a freeform group) whatever the view covers
+is shoved out of its way along its side (`wallLayout.shoveAside`: cascading, another group as one,
+`groupGap` beyond, snapped with snap on); a group that grew for a view shoves its canvas neighbours
+the same way (right for a side view, down for one above or below), leaving what already overlapped it.
+Closing or moving the view gives each shoved item its spot back unless it was moved since, its old spot is
+still taken, or the view's terminal (its group's origin) moved; that memory is the session's, not the
+store's. Fullscreen hides the views and shoves nothing. A split's frame is its own rect, padded (exact
+the moment it changes; its members re-wrap a frame later). Gates: `tools/wall-agent-view.test.mjs`,
+`tools/wall-split.test.mjs`, `tools/wall-layout.test.mjs`.
+
 **Fullscreen** (`wall/WallFullscreen.js`, chord+↵, `wall.fullscreen [toggle|on|off] [id]`): one
 terminal takes the screen as a terminal app's fullscreen does. It re-wraps (`terminal.resize`) to fill
 the canvas the docked panels leave (`dockLayout.js`), less `fullscreenPad`, at its text size, the

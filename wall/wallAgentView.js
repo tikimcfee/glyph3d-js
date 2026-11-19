@@ -601,6 +601,23 @@ export function footprintTileMetrics(bodyRect, side, dims) {
 }
 
 /**
+ * The room an Agent View on `side` takes beside its terminal's body, world units per edge (all zero
+ * when `side` is null: no view open). A split pane holding the terminal keeps this much of itself for
+ * the view, so the terminal re-wraps to what's left and the view sits inside the pane.
+ * @param {'right'|'left'|'top'|'bottom'|null} side
+ * @param {{ width: number, height: number, gap: number }} dims
+ * @returns {{ left: number, right: number, top: number, bottom: number }}
+ */
+export function agentInset(side, { width, height, gap }) {
+    return {
+        left: side === 'left' ? width + gap : 0,
+        right: side === 'right' ? width + gap : 0,
+        top: side === 'top' ? height + gap : 0,
+        bottom: side === 'bottom' ? height + gap : 0,
+    };
+}
+
+/**
  * Pick which side of `windowRect` a dragged world point `pt` is aiming for, using aspect-normalized
  * quadrants around the terminal window's center.
  * @param {import('./wallLayout.js').Rect} windowRect

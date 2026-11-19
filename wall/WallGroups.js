@@ -1,11 +1,13 @@
 import GroupFrame, { DEFAULT_GROUP_Z } from './GroupFrame.js';
 import { tileLayout, nearestPlace, unionRect, padRect, BAR_ROOM } from './wallLayout.js';
-import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree } from './splitTree.js';
+import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree, fitRatios } from './splitTree.js';
 
 /** The smallest a split pane makes its terminal (cells), as a border drag's floor. */
 const MIN_PANE = { cols: 20, rows: 5 };
 /** A split's rect within this much (world units) of a pane's edge is that edge. */
 const EDGE_EPS = 1e-6;
+/** A pane with no Agent View open keeps nothing beside its terminal. */
+const NO_INSET = Object.freeze({ left: 0, right: 0, top: 0, bottom: 0 });
 
 /** A group's natural numeral, from its id (`g-3` → 3), for its default name and its sort. */
 const numeral = (gid) => Number(gid.slice(2)) || 0;
@@ -25,6 +27,8 @@ const numeral = (gid) => Number(gid.slice(2)) || 0;
  * cuts a pane in two (refused when a half would fall under MIN_PANE); a pane that leaves (removed,
  * hidden, closed, killed) gives its room to its sibling; a divider drag moves the cut, an outer edge
  * drag resizes the whole split; any group turns into a split (rows of `columns`, equal shares) and back.
+ * A member's open Agent View is part of its footprint: its tile holds it, its pane keeps its share
+ * (the terminal re-wraps to the rest; the split moves a divider or grows when it must, and gives it back).
  *
  * The groups themselves live in the WallStore (durable, per relay, pruned with their members); this
  * is what acts on them — every change writes the store, re-tiles, persists the members' spots and
@@ -45,6 +49,10 @@ export default class WallGroups {
         this._frames = new Map();
         /** @type {Map<string, number>} world Z of each group's frame in the canvas Z-stack */
         this._groupZ = new Map();
+        /** What `_fitted` changed in each split to hold its panes' minimums: the split's shape before (to give back once
+         *  it fits again) and the shape it made (given back only while the split is still exactly that).
+         *  @type {Map<string, { before: { tree: object, w: number, h: number }, after: string }>} */
+        this._fitMemo = new Map();
     }
 
     get _store() { return this.wall.store; }
@@ -357,7 +365,7 @@ export default class WallGroups {
         const g = this.get(gid);
         const fs = this.wall.fullscreen;
         if (fs?.groupId === gid) { fs.refit(); return; }
-        if (g.layout === 'split') { this._layoutSplit(g); return; }
+        if (g.layout === 'split') { this._layoutSplit(this._fitted(gid, g)); return; }
         if (g.layout !== 'tile') return;
         // A member fullscreen re-wraps to the screen, not to its tile: the tiling waits for it to come back.
         if (fs?.id && g.members.includes(fs.id)) return;
@@ -385,22 +393,36 @@ export default class WallGroups {
 
     /**
      * A group's frame rect at `zoom`: its shown members' footprints (windows + open agent views at that zoom), padded.
-     * Null when no member is shown.
+     * Null when no member is shown. `bare` names a member whose Agent View is left out (its window alone).
+     * A split's is its rect on the canvas, padded: its panes hold every member's window and view, and the
+     * rect is exact the moment the split changes (its members re-wrap a frame or more later).
      */
-    frameRect(gid, zoom) {
+    frameRect(gid, zoom, bare = null) {
         const shown = this.shownMembers(gid);
         if (!shown.length) return null;
-        const rectOf = (id) => (this.wall.canvasFootprintRect ? this.wall.canvasFootprintRect(id, zoom)
-            : this.wall.footprintRect ? this.wall.footprintRect(id, zoom) : this.wall.windowRect(id, zoom));
+        const g = this.get(gid);
+        if (g.layout === 'split') {
+            const o = g.origin;
+            return padRect({ minX: o.x, maxX: o.x + g.split.w, minY: o.y - g.split.h, maxY: o.y }, this.wall.config.groupPad);
+        }
+        const rectOf = (id) => (id === bare ? this.wall.canvasWindowRect(id, zoom)
+            : this.wall.canvasFootprintRect ? this.wall.canvasFootprintRect(id, zoom)
+                : this.wall.footprintRect ? this.wall.footprintRect(id, zoom) : this.wall.windowRect(id, zoom));
         return padRect(unionRect(shown.map(rectOf)), this.wall.config.groupPad);
     }
 
     /** The header's rect at `zoom` (above the frame), or null. */
-    headerRect(gid, zoom) {
-        const f = this.frameRect(gid, zoom);
+    headerRect(gid, zoom, bare = null) {
+        const f = this.frameRect(gid, zoom, bare);
         const frame = this._frames.get(gid);
         if (!f || !frame) return null;
         return { minX: f.minX, maxX: f.maxX, minY: f.maxY, maxY: f.maxY + frame.headerHeight(zoom) };
+    }
+
+    /** All the canvas a group takes at `zoom`: its frame and header (`bare` as frameRect's), or null. */
+    boxRect(gid, zoom, bare = null) {
+        const f = this.frameRect(gid, zoom, bare), h = this.headerRect(gid, zoom, bare);
+        return f && h ? unionRect([f, h]) : f;
     }
 
     /** Apply world Z positions for each group's frame (backdrop + header). @param {Map<string, number>} depths */
@@ -535,12 +557,57 @@ export default class WallGroups {
         return { x: r.maxX - r.minX - grid.cols * s.x, y: r.maxY - r.minY - grid.rows * s.y };
     }
 
-    /** The least a pane takes: MIN_PANE cells, the panel's frame and the bar room. */
+    /** The least a pane takes: MIN_PANE cells, the panel's frame, the bar room and its open Agent View's room. */
     _minPane(g) {
         const s = this._cellOf(g), room = this._barRoom(g);
         const ref = g.members.find((id) => this.wall.terminal(id));
         const f = ref ? this._frameOf(ref) : { x: 0, y: 0 };
-        return () => ({ w: MIN_PANE.cols * s.x + f.x, h: MIN_PANE.rows * s.y + f.y + room });
+        return (id) => {
+            const ins = this._insetOf(id);
+            return { w: MIN_PANE.cols * s.x + f.x + ins.left + ins.right, h: MIN_PANE.rows * s.y + f.y + room + ins.top + ins.bottom };
+        };
+    }
+
+    /** The room a pane keeps beside its terminal for that terminal's open Agent View, per edge. */
+    _insetOf(id) {
+        return this.wall.agents?.inset?.(id) ?? NO_INSET;
+    }
+
+    /**
+     * A split whose panes can't all hold their minimum (an Agent View opened in a small pane): the
+     * dividers move so each pane keeps it (`fitRatios`), and when the whole split is too small it grows
+     * right and down first, as a resize to its minimum does. Once the old shape holds every pane again
+     * (the view closed) and nothing reshaped the split since, it goes back to it. Writes the store when
+     * anything changed; returns the split as it now is.
+     */
+    _fitted(gid, g) {
+        const minPane = this._minPane(g), gap = this.wall.config.splitGap;
+        const shape = (x) => JSON.stringify([x.split.tree, x.split.w, x.split.h]);
+        const memo = this._fitMemo.get(gid);
+        if (memo && memo.after === shape(g)) {
+            // Fitted before and untouched since: give the room back if the old shape holds every pane again.
+            const old = { ...g, split: { ...g.split, ...memo.before } };
+            const m = minSize(old.split.tree, minPane, gap);
+            if (m.w <= old.split.w + EDGE_EPS && m.h <= old.split.h + EDGE_EPS
+                && fitRatios(old.split.tree, this._splitRect(old), gap, minPane) === old.split.tree) {
+                this._fitMemo.delete(gid);
+                this._store.setGroup(gid, old);
+                return old;
+            }
+        } else if (memo) this._fitMemo.delete(gid);   // the split changed since (a drag, a pane): its shape is the person's now
+        const min = minSize(g.split.tree, minPane, gap);
+        let next = g;
+        if (min.w > g.split.w + EDGE_EPS || min.h > g.split.h + EDGE_EPS) {
+            next = { ...g, split: { ...g.split, w: Math.max(g.split.w, min.w), h: Math.max(g.split.h, min.h) } };
+        }
+        const tree = fitRatios(next.split.tree, this._splitRect(next), gap, minPane);
+        if (tree !== next.split.tree) next = { ...next, split: { ...next.split, tree } };
+        if (next !== g) {
+            const kept = this._fitMemo.get(gid)?.before ?? { tree: g.split.tree, w: g.split.w, h: g.split.h };
+            this._fitMemo.set(gid, { before: kept, after: shape(next) });
+            this._store.setGroup(gid, next);
+        }
+        return next;
     }
 
     /** Throw `why` unless every pane of `g` gets at least MIN_PANE. */
@@ -599,11 +666,12 @@ export default class WallGroups {
         for (const [id, pr] of this._paneRects(g)) {
             const grid = this.wall.terminal(id);
             if (!grid) continue;   // its grid isn't here (yet): its pane waits for it
-            const s = grid.cellStride, f = this._frameOf(id);
-            const cols = Math.max(MIN_PANE.cols, Math.floor((pr.maxX - pr.minX - f.x) / s.x + EDGE_EPS));
-            const rows = Math.max(MIN_PANE.rows, Math.floor((pr.maxY - pr.minY - room - f.y) / s.y + EDGE_EPS));
+            // An open Agent View keeps its share of the pane (its side, `agentInset`): the terminal fills the rest.
+            const s = grid.cellStride, f = this._frameOf(id), ins = this._insetOf(id);
+            const cols = Math.max(MIN_PANE.cols, Math.floor((pr.maxX - pr.minX - ins.left - ins.right - f.x) / s.x + EDGE_EPS));
+            const rows = Math.max(MIN_PANE.rows, Math.floor((pr.maxY - pr.minY - room - ins.top - ins.bottom - f.y) / s.y + EDGE_EPS));
             if (cols !== grid.cols || rows !== grid.rows) this.wall.router.execute(['terminal.resize', id, String(cols), String(rows)]);
-            this.wall.placeBody(id, { x: pr.minX, y: pr.maxY - room });
+            this.wall.placeBody(id, { x: pr.minX + ins.left, y: pr.maxY - room - ins.top });
             this.wall.rememberPosition(id);
             this.wall.names?.setBarRoom(id, room);
         }

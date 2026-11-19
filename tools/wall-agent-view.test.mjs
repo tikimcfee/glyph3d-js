@@ -305,6 +305,82 @@ test('agentViewRect, pickAgentSide and WallGroups tile footprints across all 4 s
     expect(frame.maxY).toBeGreaterThanOrEqual(allUnion.maxY + WALL_CONFIG.groupPad - 1e-6);
 });
 
+test('an ungrouped Agent View shoves what it covers aside (a group as one), and closing gives the room back', () => {
+    // a's view opens on its right, over b (alone) and the group {c, d}; e sits clear below.
+    const { wall } = makeHeadlessWall({
+        terminals: {
+            a: [100, 50, 0, 0],
+            b: [60, 40, 120, 0],
+            c: [40, 20, 150, -20],
+            d: [40, 20, 195, -20],
+            e: [60, 40, 0, -200],
+        },
+    });
+    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM, setBarRoom: () => {} });
+    wall.config.snap = false;
+    const gid = wall.groups.create(['c', 'd'], { layout: 'freeform' });
+    const at = (id) => ({ x: wall.terminal(id).position.x, y: wall.terminal(id).position.y });
+    const start = Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((id) => [id, at(id)]));
+
+    wall.agents.setOpen('a', 'open', 'right');
+    const view = wall.agentRect('a');
+    expect(at('a')).toEqual(start.a);                               // the terminal itself stays put
+    expect(at('e')).toEqual(start.e);                               // clear of the view: untouched
+    for (const id of ['b', 'c', 'd']) {
+        expect(overlaps(view, wall.footprintRect(id))).toBe(false);
+        expect(at(id).y).toBe(start[id].y);                         // shoved along the view's side only
+        expect(at(id).x).toBeGreaterThan(start[id].x);
+    }
+    expect(at('d').x - at('c').x).toBeCloseTo(start.d.x - start.c.x, 9);   // the group moved as one
+    expect(overlaps(wall.footprintRect('b'), wall.groups.frameRect(gid, wall.viewport.zoom))).toBe(false);
+
+    // Moving the view to the bottom gives the right-hand room back first; nothing sits under it there.
+    wall.agents.setSide('a', 'bottom');
+    for (const id of ['b', 'c', 'd']) expect(at(id)).toEqual(start[id]);
+    for (const id of ['b', 'c', 'd', 'e']) expect(overlaps(wall.agentRect('a'), wall.footprintRect(id))).toBe(false);
+
+    // Closing gives back what it shoved; one the person moved since stays where they put it.
+    wall.agents.setSide('a', 'right');
+    const shoved = at('b');
+    wall.agents.setOpen('a', 'close');
+    for (const id of ['b', 'c', 'd']) expect(at(id)).toEqual(start[id]);
+    wall.agents.setOpen('a', 'open');
+    wall.terminal('b').position.x += 7;                             // the person moves b
+    const moved = at('b');
+    wall.agents.setOpen('a', 'close');
+    expect(at('b')).toEqual(moved);
+    expect(shoved.x).toBeGreaterThan(start.b.x);
+    expect(at('c')).toEqual(start.c);
+});
+
+test('a tiled group that grows for an Agent View makes room round it on the canvas, and gives it back on close', () => {
+    const { wall } = makeHeadlessWall({
+        terminals: {
+            a: [100, 50, 0, 0],
+            b: [100, 50, 110, 0],
+            c: [60, 40, 260, 0],      // clear of the group now; under it once b's view widens it
+            far: [60, 40, 0, -300],   // below: untouched either way
+        },
+    });
+    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM, setBarRoom: () => {} });
+    wall.config.snap = false;
+    const gid = wall.groups.create(['a', 'b'], { layout: 'tile', columns: 2, gap: 4 });
+    const at = (id) => ({ x: wall.terminal(id).position.x, y: wall.terminal(id).position.y });
+    const zoom = wall.viewport.zoom;
+    expect(overlaps(wall.groups.boxRect(gid, zoom), wall.footprintRect('c'))).toBe(false);
+    const c0 = at('c'), far0 = at('far');
+
+    wall.run(['wall.agent', 'b', 'right']);
+    const box = wall.groups.boxRect(gid, zoom);
+    expect(overlaps(box, wall.footprintRect('c'))).toBe(false);
+    expect(at('c').x).toBeGreaterThan(c0.x);
+    expect(at('c').y).toBe(c0.y);
+    expect(at('far')).toEqual(far0);
+
+    wall.run(['wall.agent', 'b', 'close']);
+    expect(at('c')).toEqual(c0);
+});
+
 // ── 3. session pairing ───────────────────────────────────────────────────────
 
 test('matchTerminalSession pairs by pin, gx-<name> workgroup, then pwd/cwd preferring live & newest', () => {
