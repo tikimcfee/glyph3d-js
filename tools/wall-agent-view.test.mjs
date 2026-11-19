@@ -38,7 +38,7 @@ const {
     agentViewRect,
     footprintTileMetrics,
     pickAgentSide,
-    matchTerminalSession,
+    resolveTerminalSession,
     computeJumpOffset,
 } = await import('../wall/wallAgentView.js');
 const { overlaps, unionRect, BAR_ROOM } = await import('../wall/wallLayout.js');
@@ -307,24 +307,43 @@ test('agentViewRect, pickAgentSide and WallGroups tile footprints across all 4 s
 
 // ── 3. session pairing ───────────────────────────────────────────────────────
 
-test('matchTerminalSession pairs by pin, gx-<name> workgroup, then pwd/cwd preferring live & newest', () => {
+test("resolveTerminalSession finds the terminal's own agent, or says why it can't", () => {
     const sessions = [
         { session_id: 'ended-1', harness: 'claude', cwd: '/repo/app', status: 'ended', mtime: '2026-11-14T22:50:00Z' },
         { session_id: 'live-older', harness: 'claude', cwd: '/repo/app', status: 'idle', mtime: '2026-11-14T21:00:00Z' },
         { session_id: 'live-newer', harness: 'claude', cwd: '/repo/app', status: 'processing', mtime: '2026-11-14T22:10:00Z' },
-        { session_id: 'sub-child', harness: 'claude', cwd: '/repo/app', status: 'processing', mtime: '2026-11-14T22:55:00Z', parent_session: { session_id: 'live-newer' } },
+        { session_id: 'sub-child', harness: 'claude', cwd: '/repo/solo', status: 'processing', mtime: '2026-11-14T22:55:00Z', parent_session: { session_id: 'live-newer' } },
+        { session_id: 'solo', harness: 'claude', cwd: '/repo/solo', status: 'idle', mtime: '2026-11-14T22:00:00Z' },
+        { session_id: 'only-ended', harness: 'claude', cwd: '/repo/old', status: 'ended', mtime: '2026-11-14T20:00:00Z' },
+        { session_id: 'wg-old', harness: 'claude', cwd: '/workgroups/alpha', status: 'ended', mtime: '2026-11-14T19:00:00Z', workgroup: { name: 'alpha' } },
         { session_id: 'wg-sess', harness: 'claude', cwd: '/workgroups/alpha', status: 'idle', mtime: '2026-11-14T20:00:00Z', workgroup: { name: 'alpha' } },
     ];
+    const sid = (meta) => resolveTerminalSession(meta, sessions).session?.session_id ?? null;
 
-    // Auto-match ignores subagents (`parent_session`) and prefers live over ended, newest mtime first.
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app/', cwd: '/home/me' }, sessions)?.session_id).toBe('live-newer');
-    // Workgroup terminal convention `gx-<name>`, plus `attached` / exact `sessionId` from WallBus when multiple agents share one cwd.
-    expect(matchTerminalSession({ id: 'gx-alpha', cwd: '/tmp' }, sessions)?.session_id).toBe('wg-sess');
-    expect(matchTerminalSession({ id: 'term-9', attached: 'alpha@IL-Air-M2', cwd: '/repo/app' }, sessions)?.session_id).toBe('wg-sess');
-    expect(matchTerminalSession({ id: 'gx-alpha', sessionId: 'live-older', cwd: '/repo/app' }, sessions)?.session_id).toBe('live-older');
-    // Explicit pin can select a subagent or exact session id / prefix.
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'sub-child')?.session_id).toBe('sub-child');
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'ended')?.session_id).toBe('ended-1');
+    // The attached agent's exact session (WallBus) wins, even over its workgroup's newest.
+    expect(resolveTerminalSession({ id: 'gx-alpha', sessionId: 'live-older', cwd: '/repo/app' }, sessions))
+        .toEqual({ session: sessions[1], via: 'session', missing: null });
+    // Then its workgroup, live first: `attached` (any host), or the `gx-<name>` terminal convention.
+    expect(sid({ id: 'term-9', attached: 'alpha@far-host', cwd: '/repo/app' })).toBe('wg-sess');
+    expect(sid({ id: 'gx-alpha', cwd: '/tmp' })).toBe('wg-sess');
+    // An attached agent with no listed session is flagged, never swapped for its directory's agent.
+    const gone = resolveTerminalSession({ id: 'gx-beta', pwd: '/repo/solo' }, sessions);
+    expect(gone.session).toBeNull();
+    expect(gone.missing).toContain("'beta'");
+
+    // A plain terminal: the one live top-level agent in its directory (pwd over cwd, slashes normalized).
+    expect(resolveTerminalSession({ id: 't1', pwd: '/repo/solo/', cwd: '/home/me' }, sessions).via).toBe('directory');
+    expect(sid({ id: 't1', pwd: '/repo/solo/', cwd: '/home/me' })).toBe('solo');
+    // OSC 7 reports `pwd` as a file URL with the host in it.
+    expect(sid({ id: 't1', pwd: 'file://some-host/repo/so%6Co', cwd: '/home/me' })).toBe('solo');
+    // Two live agents in one directory can't be told apart: flagged, not guessed.
+    const two = resolveTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions);
+    expect(two.session).toBeNull();
+    expect(two.missing).toContain('2 live agents');
+    // Ended sessions don't stand in for a running agent; nor does a missing directory.
+    expect(sid({ id: 't1', pwd: '/repo/old' })).toBeNull();
+    expect(resolveTerminalSession({ id: 't1' }, sessions).missing).toContain('directory');
+    expect(resolveTerminalSession({ id: 't1', pwd: '/repo/solo' }, []).missing).toContain('no live agent');
 });
 
 // ── 4. end-to-end stream folding, live scrollback anchors & router verbs ─────
@@ -376,7 +395,7 @@ test('live event folding, write-time scrollback anchors, jump-to-terminal and wa
     wall.focus('t1');
     const chordA = chordFor({ code: 'KeyA', shiftKey: false }, 'canvas');
     expect(chordA).not.toBeNull();
-    expect((await wall.router.execute(['wall.agent'])).text).toBe('OK: agent view on t1: open (right)');
+    expect((await wall.router.execute(['wall.agent'])).text).toBe('OK: agent view on t1: open (right) · session sess-1');
 
     // Let async stream hydration + follow complete.
     await new Promise((r) => setTimeout(r, 10));
