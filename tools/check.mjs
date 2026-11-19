@@ -242,7 +242,7 @@ function buildFixture() {
 
 let relaySeq = 0;
 /** A private relay for one check: fresh root, its own port and termd namespace, no gomuxai. */
-async function startRelay(fixture, name) {
+async function startRelay(fixture, name, origins = []) {
     const port = await freePort();
     const tag = `${++relaySeq}`;
     const root = join(RUN_DIR, `root-${tag}-${name}`);
@@ -250,8 +250,9 @@ async function startRelay(fixture, name) {
     // Short: the namespace's socket path must fit a sockaddr.
     const ns = `c${tag}`;
     const termd = privateTermd(`ck-${process.pid}`);
+    const originArgs = [...new Set(origins)].flatMap((o) => ['--origin', o]);
     const log = [];
-    const p = spawn(CLI, ['serve', '--listen', '127.0.0.1', '--port', String(port), '--relay-only',
+    const p = spawn(CLI, ['serve', '--listen', '127.0.0.1', '--port', String(port), ...originArgs, '--relay-only',
         '--termd-ns', ns, '--no-gomuxai', root], { cwd: RUN_DIR, env: termd.env, stdio: ['ignore', 'pipe', 'pipe'] });
     p.stdout.on('data', (d) => log.push(String(d)));
     p.stderr.on('data', (d) => log.push(String(d)));
@@ -265,7 +266,7 @@ async function startRelay(fixture, name) {
         if (p.exitCode !== null) throw new Error(`relay exited ${p.exitCode}: ${log.join('').slice(-400)}`);
         return listening(port);
     }, 15_000, 'relay');
-    return { port, root, dir: join(root, 'src'), stop, log };
+    return { port, root, dir: join(root, 'src'), tokenDir: termd.dir, stop, log };
 }
 
 // ── running one check ────────────────────────────────────────────────────────────────────────
@@ -291,12 +292,17 @@ async function runOne(c, svc) {
     const out = [];
     try {
         if (c.needs?.includes('relay')) {
-            relay = await startRelay(svc.fixture, c.name);
+            const origins = [svc.url, svc.wallUrl].filter(Boolean).map((u) => new URL(u).origin);
+            relay = await startRelay(svc.fixture, c.name, origins);
             Object.assign(vars, { relay: relay.port, root: relay.root, dir: relay.dir });
         }
         if (c.needs?.includes('own-relay')) vars.port = await freePort();
         const cmd = c.cmd.map((a) => fill(a, vars));
         const env = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' };
+        if (relay) {
+            env.G3D_RELAY_TOKEN_DIR = relay.tokenDir;
+            delete env.G3D_RELAY_TOKEN;
+        }
         for (const [k, v] of Object.entries(c.env ?? {})) env[k] = fill(v, vars);
         const timeout = c.timeoutMs ?? DEFAULT_TIMEOUT[c.tier];
         const r = await new Promise((res) => {

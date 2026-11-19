@@ -80,7 +80,10 @@ fn ms_now() -> u64 {
 
 fn ensure_private_dir(dir: &Path) {
     use std::os::unix::fs::DirBuilderExt;
-    if !dir.exists() {
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    if matches!(std::fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -89,20 +92,26 @@ fn ensure_private_dir(dir: &Path) {
     }
 }
 
-/// The socket's directory must be ours and closed to writers but us: under the shared `/tmp`
-/// another user could have made it first, and a writer could swap the socket (tmux checks the
-/// same of `/tmp/tmux-<uid>`).
-fn check_socket_dir(dir: &Path) {
+fn validate_socket_dir(dir: &Path, uid: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let m = std::fs::metadata(dir).unwrap_or_else(|e| die(&format!("stat {}: {e}", dir.display())));
-    let uid = rustix::process::getuid().as_raw();
-    if !m.is_dir() || m.uid() != uid || m.mode() & 0o022 != 0 {
-        die(&format!(
-            "{} must be a directory owned by uid {uid} that only it can write (it is owned by uid {}, mode {:o})",
-            dir.display(),
+    let clean: PathBuf = if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.components().collect() };
+    let m = std::fs::symlink_metadata(&clean).map_err(|e| format!("stat {}: {e}", clean.display()))?;
+    if !m.file_type().is_dir() || m.uid() != uid || m.mode() & 0o077 != 0 {
+        return Err(format!(
+            "{} must be a directory owned by uid {uid} with mode 0700 (it is owned by uid {}, mode {:o})",
+            clean.display(),
             m.uid(),
             m.mode() & 0o7777
         ));
+    }
+    Ok(())
+}
+
+/// The socket's directory must be a real `0700` directory owned by us: under the shared `/tmp`
+/// another user could have made or symlinked it first (PROTOCOL.md, "Transport").
+fn check_socket_dir(dir: &Path) {
+    if let Err(msg) = validate_socket_dir(dir, rustix::process::getuid().as_raw()) {
+        die(&msg);
     }
 }
 
@@ -2355,5 +2364,41 @@ impl Holder {
         // Dropping the file closes it, which releases the flock; the lock file stays (a new
         // holder may already have opened it).
         self.lock = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_socket_dir;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::path::PathBuf;
+
+    #[test]
+    fn socket_dir_must_be_real_0700_dir_owned_by_uid() {
+        let uid = rustix::process::getuid().as_raw();
+        let base = std::env::temp_dir().join(format!("g3d-hold-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&base).unwrap();
+
+        let good = base.join("good");
+        std::fs::DirBuilder::new().mode(0o700).create(&good).unwrap();
+        validate_socket_dir(&good, uid).unwrap();
+        assert!(validate_socket_dir(&good, uid.wrapping_add(1)).is_err());
+
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert!(validate_socket_dir(&link, uid).is_err());
+        assert!(validate_socket_dir(&PathBuf::from(format!("{}/", link.display())), uid).is_err());
+
+        let mode755 = base.join("mode755");
+        std::fs::DirBuilder::new().mode(0o700).create(&mode755).unwrap();
+        std::fs::set_permissions(&mode755, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_socket_dir(&mode755, uid).is_err());
+
+        let reg = base.join("reg");
+        std::fs::write(&reg, b"x").unwrap();
+        assert!(validate_socket_dir(&reg, uid).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -2,13 +2,15 @@
 //
 // Server side:
 //
-//	glyph3d-cli serve [dir] [--port 8080] [--listen 0.0.0.0] [--termd-ns default] [--termd path]
+//	glyph3d-cli serve [dir] [--port 8080] [--listen 127.0.0.1] [--tls-cert cert.pem --tls-key key.pem] [--origin url] [--termd-ns default] [--termd path]
 //	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
 //	glyph3d-cli version
 //
 // Client side — global flags go BEFORE the verb or client command:
 //
 //	glyph3d-cli [--port N | --host url] [--json] [--timeout 5s] <verb args...>   one-shot (oneShotLine)
+//	glyph3d-cli [...] token                                                      print the relay's auth token
+//	glyph3d-cli [...] url [base-url]                                             print browser URL with #token=…
 //	glyph3d-cli [...] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
 //	glyph3d-cli [...] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
 //	glyph3d-cli [...] seed-history [--lines 300] [--termd-ns default] [id ...]
@@ -75,6 +77,10 @@ func main() {
 	args := flag.Args()
 	if len(args) > 0 {
 		switch args[0] {
+		case "token":
+			os.Exit(tokenCmd(url, args[1:]))
+		case "url":
+			os.Exit(urlCmd(url, args[1:]))
 		case "screenshot":
 			os.Exit(screenshotCmd(url, args[1:]))
 		case "log.follow":
@@ -125,6 +131,8 @@ func main() {
 
 func clientUsage() {
 	fmt.Fprint(os.Stderr, `usage: glyph3d-cli [flags] <verb args...>      run one verb (try: help)
+       glyph3d-cli [flags] token               print the relay's 0600 auth token
+       glyph3d-cli [flags] url [base-url]      print browser URL carrying #token=…
        glyph3d-cli [flags] screenshot [-o out.png] [--cmd 'verb …']... [--wait 300ms]
        glyph3d-cli [flags] log.follow [--filter s] [--level csv] [--scope s] [--level-set LVL]
        glyph3d-cli [flags] seed-history [--lines 300] [--termd-ns default] [id ...]
@@ -188,10 +196,17 @@ func (s *stringListFlag) Set(v string) error {
 //	glyph3d-cli serve --port 3000        Custom port
 //	glyph3d-cli serve --local            IDE dev: serve app from disk instead of embedded
 //	glyph3d-cli serve --relay-only       WebSocket relay only, no static files
+const defaultServeListen = "127.0.0.1"
+
 func serveCmd() {
 	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
 	p := flagSet.Int("port", 8080, "Port to listen on")
-	listen := flagSet.String("listen", "0.0.0.0", "Address to listen on")
+	listen := flagSet.String("listen", defaultServeListen, "Address to listen on (non-loopback/non-Tailscale requires --tls-cert and --tls-key; auth is always required)")
+	tlsCert := flagSet.String("tls-cert", "", "TLS certificate PEM file (enables HTTPS + WSS; required for non-loopback/non-Tailscale --listen)")
+	tlsKey := flagSet.String("tls-key", "", "TLS private key PEM file (paired with --tls-cert)")
+	var origins stringListFlag
+	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 or https://box.lan (repeatable; http:// is allowed only for loopback or Tailscale IPs)")
+	keepToken := flagSet.Bool("keep-token", false, "Reuse this port's capability token across restarts and leave its 0600 file on exit, so open pages reconnect on their own (loopback only). Default: a fresh token every start, removed on exit")
 	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	var reach stringListFlag
@@ -211,6 +226,7 @@ func serveCmd() {
 	flagSet.BoolVar(&relayDebug, "debug", false, "Log debug lines (e.g. each agentSessions/changed push's size)")
 	flagSet.StringVar(&recordDir, "record-dir", recordDir, "Where 'source.record' writes sensor recordings (default: the user cache dir's glyph3d/recordings)")
 	flagSet.Parse(os.Args[2:])
+	*listen = normalizeListenHost(*listen) // `[::1]` and `::1` alike; net.JoinHostPort brackets it
 	if *sessionsInterval <= 0 || *maxFollowers <= 0 {
 		log.Fatalf("[serve] --sessions-interval and --max-followers must be positive (got %s, %d)", *sessionsInterval, *maxFollowers)
 	}
@@ -233,7 +249,7 @@ func serveCmd() {
 			fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
-		if err := RunRelay(*listen, *p, fsHandler); err != nil {
+		if err := RunRelay(*listen, *p, origins, *keepToken, *tlsCert, *tlsKey, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
 		return
@@ -252,6 +268,10 @@ func serveCmd() {
 	cfg := ServerConfig{
 		Host:      *listen,
 		Port:      *p,
+		Origins:   origins,
+		KeepToken: *keepToken,
+		TLSCert:   *tlsCert,
+		TLSKey:    *tlsKey,
 		FSHandler: fsHandler,
 	}
 

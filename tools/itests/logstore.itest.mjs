@@ -12,7 +12,7 @@
 // Does NOT cover: log.follow push, log.dump, repeat-coalescing, --since windows —
 // those are exercised by hand via `glyph3d-cli log.follow` / `log.dump` (see tools/CHECKS.md).
 
-import { dialRelay } from '../lib/relay.mjs';
+import { dialRelay, readRelayToken } from '../lib/relay.mjs';
 
 const RELAY_PORT = 8080;
 
@@ -29,7 +29,8 @@ export default async ({ app, assert, url }) => {
 
   try {
     // (b) re-open the page WITH the relay (resolveRelay honors ?relay) so its records ingest.
-    const target = `${url}${url.includes('?') ? '&' : '?'}relay=${RELAY_PORT}`;
+    const tok = readRelayToken(RELAY_PORT);
+    const target = `${url}${url.includes('?') ? '&' : '?'}relay=${RELAY_PORT}${tok ? `#token=${encodeURIComponent(tok)}` : ''}`;
     await app.page.goto(target, { waitUntil: 'load', timeout: 30000 });
     await app.page.waitForFunction(() => !!window.__glyphClient, { timeout: 20000 });
     await app.waitFor(4000); // boot settle + relay dial

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -25,14 +26,15 @@ import (
 // newTestRelay starts a relay on an httptest server and returns a dialer for it.
 func newTestRelay(t *testing.T) (*Relay, func(t *testing.T) *websocket.Conn) {
 	t.Helper()
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	url := "ws://" + strings.TrimPrefix(srv.URL, "http://")
 
 	return r, func(t *testing.T) *websocket.Conn {
 		t.Helper()
-		c, _, err := websocket.DefaultDialer.Dial(url, nil)
+		hdr := http.Header{"Authorization": []string{"Bearer " + r.Token()}}
+		c, _, err := websocket.DefaultDialer.Dial(url, hdr)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -246,7 +248,7 @@ func TestManySourcesStreamConcurrently(t *testing.T) {
 // slow display. Driven directly against the send path — saturating a real
 // socket depends on kernel buffer sizes and would be flaky.
 func TestSourceFramesDropOldestWhenSaturated(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	const depth = 4
 	r.displayFrames = make(chan []byte, depth)
 
@@ -285,7 +287,7 @@ func TestSourceFramesDropOldestWhenSaturated(t *testing.T) {
 // be a harmless no-op rather than a panic or a block — and must say "no display",
 // never "dropped": a page reload is not the display falling behind.
 func TestSourceFramesWithNoDisplayAreHarmless(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	if got := r.sendFrameToDisplay([]byte(`{"type":"handFrame"}`)); got != frameNoDisplay {
 		t.Errorf("outcome %d with no display connected, want no-display", got)
 	}

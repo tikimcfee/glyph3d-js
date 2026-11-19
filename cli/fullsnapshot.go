@@ -92,7 +92,9 @@ func fullsnapshotCmd() {
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"))
 		conn.Close()
 	}()
-	if *verbose { fmt.Fprintf(os.Stderr, "connected: %s\n", url) }
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "connected: %s\n", url)
+	}
 
 	send := func(id int, method string, params map[string]interface{}) bidiResponse {
 		cmd := bidiCommand{ID: id, Method: method, Params: params}
@@ -110,13 +112,19 @@ func fullsnapshotCmd() {
 				log.Fatalf("read %s reply: %v", method, err)
 			}
 			var r bidiResponse
-			if err := json.Unmarshal(msg, &r); err != nil { continue }
+			if err := json.Unmarshal(msg, &r); err != nil {
+				continue
+			}
 			if *verbose {
 				fmt.Fprintf(os.Stderr, "← %s (type=%s id=%d)\n",
-					truncate(string(msg), 200), r.Type, r.ID)
+					truncate(scrubLogSecrets(string(msg), ""), 200), r.Type, r.ID)
 			}
-			if r.Type == "event" { continue }
-			if r.ID != id { continue }
+			if r.Type == "event" {
+				continue
+			}
+			if r.ID != id {
+				continue
+			}
 			if r.Type == "error" {
 				log.Fatalf("%s failed: %s — %s", method, r.Error, r.Message)
 			}
@@ -145,21 +153,27 @@ func fullsnapshotCmd() {
 	var targetCtx, targetURL string
 	var walk func(c browsingContextInfo)
 	walk = func(c browsingContextInfo) {
-		if targetCtx != "" { return }
+		if targetCtx != "" {
+			return
+		}
 		if strings.Contains(c.URL, *urlSubstr) {
 			targetCtx = c.Context
 			targetURL = c.URL
 			return
 		}
-		for _, ch := range c.Children { walk(ch) }
+		for _, ch := range c.Children {
+			walk(ch)
+		}
 	}
-	for _, c := range tree.Contexts { walk(c) }
+	for _, c := range tree.Contexts {
+		walk(c)
+	}
 	if targetCtx == "" {
 		fmt.Fprintf(os.Stderr, "no context matched %q. Available:\n", *urlSubstr)
 		for _, c := range tree.Contexts {
-			fmt.Fprintf(os.Stderr, "  %s — %s\n", c.Context, c.URL)
+			fmt.Fprintf(os.Stderr, "  %s — %s\n", c.Context, redactURLFragment(c.URL))
 			for _, ch := range c.Children {
-				fmt.Fprintf(os.Stderr, "    └ %s — %s\n", ch.Context, ch.URL)
+				fmt.Fprintf(os.Stderr, "    └ %s — %s\n", ch.Context, redactURLFragment(ch.URL))
 			}
 		}
 		os.Exit(1)
@@ -186,7 +200,7 @@ func fullsnapshotCmd() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Saved viewport snapshot to %s (%d bytes) — tab: %s\n",
-		*out, len(imgBytes), targetURL)
+		*out, len(imgBytes), redactURLFragment(targetURL))
 
 	// Tear down so Firefox doesn't accumulate sessions (it caps the count
 	// and rejects new connections after a few leaked).
@@ -194,6 +208,8 @@ func fullsnapshotCmd() {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n { return s }
+	if len(s) <= n {
+		return s
+	}
 	return s[:n] + "…"
 }

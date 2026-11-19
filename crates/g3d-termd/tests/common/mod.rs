@@ -55,13 +55,14 @@ impl Daemon {
     }
 
     fn fresh_dir() -> PathBuf {
+        use std::os::unix::fs::DirBuilderExt;
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "t{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
         dir
     }
 

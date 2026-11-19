@@ -18,6 +18,7 @@
 import errorTracker from '../../utils/ErrorTracker.js';
 import metrics from '../../utils/Metrics.js';
 import { emitLogRecord } from './consoleForwarder.js';
+import { redactCommandArgs, redactRelaySecrets } from './WebSocketBridge.js';
 import { decodeBase64 } from '../../utils/encoding.js';
 import { box } from '../../utils/formatResponse.js';
 
@@ -300,12 +301,12 @@ export default class CommandRouter {
             if (r.name) return this._run(r.name, r.args, options);
             if (r.matches.length > 0) {
                 return {
-                    text: `ERR: ambiguous command '${r.typed}'. Matches: ${r.matches.join(', ')}`,
+                    text: `ERR: ambiguous command '${redactRelaySecrets(r.typed)}'. Matches: ${r.matches.join(', ')}`,
                     data: { matches: r.matches }
                 };
             }
             return {
-                text: `ERR: unknown command '${name}'. Try 'help'.`,
+                text: `ERR: unknown command '${redactRelaySecrets(name)}'. Try 'help'.`,
                 data: null
             };
         }
@@ -417,6 +418,7 @@ export default class CommandRouter {
         // in the structured buffer the harness reads. (This is the seam Step 2's spans wrap.)
         // The dispatch trace is telemetry, not gated debug chatter: it emits structured
         // records directly (scope 'command'), bypassing Logger level gates entirely.
+        const safeArgs = redactCommandArgs(name, args);
         const t0 = performance.now();
         try {
             const result = await cmd.handler(args, ctx);
@@ -424,7 +426,7 @@ export default class CommandRouter {
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'ok' });
             emitLogRecord('trace', 'command', name, {
-                args, ms: Math.round(ms), status: 'ok', cid, sender: ctx.sender ?? null
+                args: safeArgs, ms: Math.round(ms), status: 'ok', cid, sender: ctx.sender ?? null
             });
             // Normalize: if handler returned a plain string, wrap it
             if (typeof result === 'string') {
@@ -433,16 +435,27 @@ export default class CommandRouter {
             return result || { text: 'OK', data: null };
         } catch (err) {
             const ms = performance.now() - t0;
+            const rawErrMsg = err?.message ?? String(err);
+            const safeErrMsg = redactRelaySecrets(rawErrMsg);
+            const safeStack = typeof err?.stack === 'string' ? redactRelaySecrets(err.stack) : err?.stack;
             metrics.timing('command.duration', ms, { command: name });
             metrics.counter('command.total', 1, { command: name, status: 'err' });
             emitLogRecord('trace', 'command', name, {
-                args, ms: Math.round(ms), status: 'err', cid, sender: ctx.sender ?? null,
-                error: err.message
+                args: safeArgs, ms: Math.round(ms), status: 'err', cid, sender: ctx.sender ?? null,
+                error: safeErrMsg
             });
             // Expected failures RETURN {text:'ERR:…'} and never reach here — only genuine
             // exceptions do, so route them to ErrorTracker (type: command_error).
-            errorTracker.captureException(err, { type: 'command_error', command: name, args });
-            return { text: `ERR: ${err.message}`, data: null };
+            let safeErr = err;
+            if (err instanceof Error && (safeErrMsg !== err.message || safeStack !== err.stack)) {
+                safeErr = new Error(safeErrMsg);
+                safeErr.name = err.name;
+                if (safeStack !== undefined) safeErr.stack = safeStack;
+            } else if (typeof err === 'string') {
+                safeErr = redactRelaySecrets(err);
+            }
+            errorTracker.captureException(safeErr, { type: 'command_error', command: name, args: safeArgs });
+            return { text: `ERR: ${safeErrMsg}`, data: null };
         }
     }
 }

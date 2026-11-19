@@ -678,9 +678,10 @@ fn idle_exit_removes_the_socket() {
 /// stopping: its idle exit still runs, and logs on the way out.
 #[test]
 fn an_unwritable_log_does_not_wedge_the_daemon() {
+    use std::os::unix::fs::DirBuilderExt;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ulog{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
     let socket = dir.join("t.sock");
     let mut child = std::process::Command::new(bin())
         .arg("--socket")
@@ -973,9 +974,10 @@ fn a_new_subscriber_learns_the_terminals_state() {
 /// brain, which shares the file, follows it to the new one.
 #[test]
 fn a_daemonized_log_rotates_and_the_brain_follows() {
+    use std::os::unix::fs::DirBuilderExt;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
     let (socket, log) = (dir.join("termd-rot.sock"), dir.join("termd-rot.log"));
     // Stops the namespace however the test ends: `stop`, else SIGKILL to the holder by its lock.
     struct Guard(std::path::PathBuf, std::path::PathBuf);

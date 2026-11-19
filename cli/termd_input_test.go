@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"glyph3d-cli/termdwire"
 )
 
 // pipeClient is a termdClient on one end of a pipe, with what the other end read.
@@ -28,10 +30,11 @@ func pipeClient(t *testing.T, features []string, maxFrame int) (*termdClient, fu
 			}
 		}
 	}()
-	c := &termdClient{conn: a, pending: map[uint64]chan termdReplyMsg{}}
-	c.Welcome.Features = features
-	c.Welcome.MaxFrame = maxFrame
-	c.Welcome.Daemon = "g3d-termd/test"
+	c := termdwire.NewConn(a, termdwire.Welcome{
+		Daemon:   "g3d-termd/test",
+		Features: features,
+		MaxFrame: maxFrame,
+	})
 	return c, func() int {
 		time.Sleep(50 * time.Millisecond)
 		mu.Lock()
@@ -72,11 +75,11 @@ func TestInputOpsFollowTheBrainsFeatures(t *testing.T) {
 	if read() != 0 {
 		t.Fatal("offers wrote to the daemon")
 	}
-	if got := old.lacks(termdInputOps); strings.Join(got, ",") != "key,paste" {
-		t.Fatalf("lacks = %v", got)
+	if got := old.Lacks(termdInputOps); strings.Join(got, ",") != "key,paste" {
+		t.Fatalf("Lacks = %v", got)
 	}
 	cur, _ := pipeClient(t, []string{"raw", "key", "paste"}, 0)
-	if !(&termdSession{tc: cur}).offers("key") || len(cur.lacks(termdInputOps)) != 0 {
+	if !(&termdSession{tc: cur}).offers("key") || len(cur.Lacks(termdInputOps)) != 0 {
 		t.Fatal("a 1.2 brain lacks key")
 	}
 

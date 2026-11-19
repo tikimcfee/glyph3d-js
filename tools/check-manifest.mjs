@@ -244,6 +244,7 @@ export const CHECKS = [
         blind: 'the browser (wall-e2e drives the same paths with pixels)',
     },
     h('bridge-binary.test.mjs', ['relay'], 'the RPC binary result plane: frame parse, header + payload, pending resolution', 'the Go encoder'),
+    bt('relay-auth.test.mjs', ['relay', 'shell'], 'relay capability token handling: #token= fragment consumption and history.replaceState scrubbing, tab sessionStorage (never localStorage), Sec-WebSocket-Protocol transport, live rotation via hashchange and setToken, and 0600 file permission checks', 'the Go relay upgrader (cli/auth_test.go and termd-relay-check cover it)'),
     h('source-stream.test.mjs', ['relay'], 'the sensor plane\'s browser half: frame decoders, presence, multi-device isolation, liveness', 'a real device'),
 
     // ── shell ────────────────────────────────────────────────────────────────────────────────

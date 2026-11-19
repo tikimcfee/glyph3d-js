@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,7 @@ type Relay struct {
 	displayGen    uint64          // the connected display's id (agentEvents subscriptions are per display)
 	nextDisplay   uint64          // display id source (guarded by mu)
 	controllers   map[string]*websocket.Conn
+	ctrlWriteMu   sync.Mutex // serializes writes to controller/source sockets across read + display push goroutines
 	sources       map[string]*sourceConn
 	nextID        atomic.Int64
 	recMu         sync.Mutex   // guards rec
@@ -45,6 +47,7 @@ type Relay struct {
 	termSeq       atomic.Int64 // monotonic id source for relay-spawned terminal adapters
 	gxMu          sync.Mutex
 	gxForked      map[string]time.Time // gomux screens forked but maybe not attached yet (gomuxScreenLive)
+	auth          *relayAuth
 	upgrader      websocket.Upgrader
 	fs            *FSHandler      // nil if --root not provided
 	lsp           *LSPSupervisor  // nil if --root not provided; hosts language servers
@@ -90,7 +93,8 @@ type sourceConn struct {
 	lastTS      atomic.Int64 // unix millis of the most recent frame
 }
 
-func NewRelay() *Relay {
+// NewRelay builds a relay guarded by auth (newRelayAuth): every upgrade passes auth.verifyUpgrade.
+func NewRelay(auth *relayAuth) *Relay {
 	logs, err := NewLogStore()
 	if err != nil {
 		log.Fatalf("[relay] log store: %v", err)
@@ -100,10 +104,33 @@ func NewRelay() *Relay {
 		sources:     make(map[string]*sourceConn),
 		logs:        logs,
 		logSubs:     make(map[string]bool),
+		auth:        auth,
 		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			// ServeHTTP is the one Upgrade call, and auth.verifyUpgrade has run the Origin
+			// allowlist (with Host and token) just before it. gorilla's default would refuse the
+			// allowlisted cross-origin pages (the Vite dev servers, --origin).
+			CheckOrigin: originCheckedByVerifyUpgrade,
 		},
 	}
+}
+
+func originCheckedByVerifyUpgrade(*http.Request) bool { return true }
+
+// Token returns the capability token this relay checks (fresh per start, or kept: relayAuth.bind).
+func (r *Relay) Token() string {
+	return r.auth.Token()
+}
+
+func (r *Relay) writePeerText(ws *websocket.Conn, data []byte) error {
+	r.ctrlWriteMu.Lock()
+	defer r.ctrlWriteMu.Unlock()
+	return ws.WriteMessage(websocket.TextMessage, data)
+}
+
+func (r *Relay) writePeerJSON(ws *websocket.Conn, v any) error {
+	r.ctrlWriteMu.Lock()
+	defer r.ctrlWriteMu.Unlock()
+	return ws.WriteJSON(v)
 }
 
 // sendToDisplay enqueues a text message for the display WebSocket writer goroutine.
@@ -337,7 +364,11 @@ func (r *Relay) startDisplayWriter(ws *websocket.Conn, control chan displayMsg, 
 }
 
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	ws, err := r.upgrader.Upgrade(w, req, nil)
+	respHdr, ok := r.auth.verifyUpgrade(w, req)
+	if !ok {
+		return
+	}
+	ws, err := r.upgrader.Upgrade(w, req, respHdr)
 	if err != nil {
 		log.Printf("[relay] upgrade error: %v", err)
 		return
@@ -470,7 +501,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				r.mu.Unlock()
 				role = "controller"
 				log.Printf("[relay] controller '%s' connected from %s", clientID, ws.RemoteAddr())
-				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("OK: connected as %s", clientID)))
+				r.writePeerText(ws, []byte(fmt.Sprintf("OK: connected as %s", clientID)))
 				r.notifyDisplay("client_connected", clientID)
 				// Fall through to process first message as command
 			}
@@ -481,7 +512,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 			if raw == "ping" {
-				ws.WriteMessage(websocket.TextMessage, []byte("pong"))
+				r.writePeerText(ws, []byte("pong"))
 				continue
 			}
 			// Frames are opaque to the relay: it stamps provenance and forwards.
@@ -525,7 +556,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				continue
 			}
 			if raw == "ping" {
-				ws.WriteMessage(websocket.TextMessage, []byte("pong"))
+				r.writePeerText(ws, []byte("pong"))
 				continue
 			}
 			if raw == "whoami" {
@@ -536,7 +567,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 				if hasDisplay {
 					ds = "connected"
 				}
-				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("You are %s. Display: %s", clientID, ds)))
+				r.writePeerText(ws, []byte(fmt.Sprintf("You are %s. Display: %s", clientID, ds)))
 				continue
 			}
 
@@ -552,7 +583,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 			r.mu.RUnlock()
 
 			if d == nil {
-				ws.WriteMessage(websocket.TextMessage, []byte("ERR: no display connected. Open the viewer in a browser first."))
+				r.writePeerText(ws, []byte("ERR: no display connected. Open the viewer in a browser first."))
 				continue
 			}
 
@@ -574,14 +605,15 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					rec.Level = "log"
 				}
 				rec.RTS = time.Now().UnixMilli()
+				scrubBrowserLogRec(rec, r.Token())
 				stored, err := r.logs.Ingest(rec)
 				if err != nil {
 					log.Printf("[relay] log ingest error: %v", err)
 					continue
 				}
-				switch rec.Level {
+				switch stored.Level {
 				case "log", "warn", "error":
-					log.Printf("[browser:%s] %s", rec.Level, rec.Msg)
+					log.Printf("[browser:%s] %s", stored.Level, stored.Msg)
 				}
 				r.pushLogToFollowers(stored)
 				continue
@@ -656,7 +688,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"event": envelope.Event,
 					"data":  data,
 				})
-				ctrl.WriteMessage(websocket.TextMessage, fwd)
+				r.writePeerText(ctrl, fwd)
 				pushedTo[envelope.To] = true
 				continue
 			}
@@ -667,9 +699,9 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 					"response": envelope.Response,
 					"data":     json.RawMessage(envelope.Data),
 				})
-				ctrl.WriteMessage(websocket.TextMessage, resp)
+				r.writePeerText(ctrl, resp)
 			} else {
-				ctrl.WriteMessage(websocket.TextMessage, []byte(envelope.Response))
+				r.writePeerText(ctrl, []byte(envelope.Response))
 			}
 		}
 	}
@@ -715,7 +747,7 @@ func (r *Relay) handleConnection(ws *websocket.Conn) {
 		}
 		r.mu.RUnlock()
 		for _, c := range told {
-			c.WriteMessage(websocket.TextMessage, gone)
+			r.writePeerText(c, gone)
 		}
 		log.Printf("[relay] display disconnected")
 	} else if role == "controller" && clientID != "" {
@@ -836,7 +868,7 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 			}
 			return
 		}
-		ws.WriteJSON(v)
+		r.writePeerJSON(ws, v)
 	}
 	if err := json.Unmarshal(msg, &m); err != nil {
 		reply(map[string]any{"error": "invalid relay message"})
@@ -917,11 +949,11 @@ func (r *Relay) handleRelayMessage(ws *websocket.Conn, msg []byte, clientID, rol
 			reply(map[string]any{"event": "log.follow", "ok": false, "error": "log.follow requires a controller connection"})
 			return
 		}
+		log.Printf("[relay] controller '%s' following logs", clientID)
+		reply(map[string]any{"event": "log.follow", "ok": true})
 		r.mu.Lock()
 		r.logSubs[clientID] = true
 		r.mu.Unlock()
-		log.Printf("[relay] controller '%s' following logs", clientID)
-		reply(map[string]any{"event": "log.follow", "ok": true})
 
 	case "log.unfollow":
 		r.mu.Lock()
@@ -954,7 +986,7 @@ func (r *Relay) pushLogToFollowers(rec *LogRec) {
 		return
 	}
 	for _, c := range conns {
-		c.WriteMessage(websocket.TextMessage, msg)
+		r.writePeerText(c, msg)
 	}
 }
 
@@ -1001,7 +1033,7 @@ func splitRelayVerb(raw string) (verb, rest string, ok bool) {
 // reply as plain "ERR: ..." text.
 func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 	fail := func(err error) {
-		ws.WriteMessage(websocket.TextMessage, []byte("ERR: "+err.Error()))
+		r.writePeerText(ws, []byte("ERR: "+err.Error()))
 	}
 	reply := func(text string, data any) {
 		msg, err := json.Marshal(map[string]any{"response": text, "data": data})
@@ -1009,7 +1041,7 @@ func (r *Relay) handleRelayCommand(ws *websocket.Conn, verb, rest string) {
 			fail(err)
 			return
 		}
-		ws.WriteMessage(websocket.TextMessage, msg)
+		r.writePeerText(ws, msg)
 	}
 
 	switch verb {
@@ -1221,9 +1253,7 @@ func (r *Relay) startAdapter(id string, cols, rows int, argv []string) (int, err
 	if len(argv) > 0 {
 		args = append(append(args, "--"), argv...)
 	}
-	cmd := exec.Command(exePath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd := r.adapterCommand(exePath, args)
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
@@ -1303,9 +1333,33 @@ func (r *Relay) readoptOrphan(id string) {
 	log.Printf("[relay] terminal '%s': its adapter died but another client owns the terminal; leaving it", id)
 }
 
+// adapterCommand is the `attach` adapter's command: this binary, the relay's stdio, and
+// adapterEnv, so the adapter presents the token this relay checks.
+func (r *Relay) adapterCommand(exePath string, args []string) *exec.Cmd {
+	cmd := exec.Command(exePath, args...)
+	cmd.Env = adapterEnv(os.Environ(), r.Token())
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd
+}
+
 // adapterArgs is `attach <id>` pointed at this relay and its termd namespace, at a size.
 func (r *Relay) adapterArgs(id string, cols, rows int) []string {
-	args := []string{"attach", id, "--port", strconv.Itoa(r.port), "--termd-ns", termdNS}
+	args := []string{"attach", id}
+	if r.auth != nil && (r.auth.hasTLS || (r.auth.listenHost != "" && r.auth.listenHost != "127.0.0.1" && r.auth.listenHost != "localhost" && r.auth.listenHost != "0.0.0.0" && r.auth.listenHost != "::")) {
+		scheme := "ws"
+		if r.auth.hasTLS {
+			scheme = "wss"
+		}
+		dialHost := r.auth.listenHost
+		if dialHost == "" || dialHost == "0.0.0.0" || dialHost == "::" {
+			dialHost = "localhost"
+		}
+		args = append(args, "--host", scheme+"://"+net.JoinHostPort(dialHost, strconv.Itoa(r.port)))
+	} else {
+		args = append(args, "--port", strconv.Itoa(r.port))
+	}
+	args = append(args, "--termd-ns", termdNS)
 	if r.fs != nil {
 		root, _ := r.fs.Roots()
 		args = append(args, "--cwd", root)
@@ -1472,8 +1526,12 @@ func (r *Relay) wireFS(h *FSHandler) {
 
 // ServerConfig holds all options for the unified server.
 type ServerConfig struct {
-	Host      string     // Listen address (default "0.0.0.0")
+	Host      string     // Listen address (default "127.0.0.1")
 	Port      int        // Listen port (default 8080)
+	Origins   []string   // Extra allowed browser Origins for WebSocket upgrade
+	KeepToken bool       // --keep-token: reuse this port's token across starts (relayAuth.bind)
+	TLSCert   string     // --tls-cert: PEM certificate file path (paired with TLSKey)
+	TLSKey    string     // --tls-key: PEM private key file path (paired with TLSCert)
 	FSHandler *FSHandler // Filesystem JSON-RPC handler (nil if no --root)
 	StaticFS  fs.FS      // Static file source: embedded FS or os.DirFS
 	StaticTag string     // Label for logs: "embedded" or the disk path
@@ -1482,18 +1540,15 @@ type ServerConfig struct {
 // RunServer starts a unified HTTP + WebSocket server on a single port.
 // WebSocket upgrade requests go to the relay; everything else serves static files.
 func RunServer(cfg ServerConfig) error {
-	relay := NewRelay()
+	cfg.Host = normalizeListenHost(cfg.Host)
+	auth, err := newRelayAuth(cfg.Host, cfg.Port, cfg.Origins, cfg.KeepToken, cfg.TLSCert, cfg.TLSKey)
+	if err != nil {
+		return err
+	}
+	relay := NewRelay(auth)
 	relay.fs = cfg.FSHandler
 	relay.port = cfg.Port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
-	relay.startTermdStatus()
-
-	// Wire the fs/writeFile notify hook so successful writes echo an
-	// fs/didChange to the display. Editable-3d-ide L0: lets the browser
-	// round-trip-confirm a save and reload the affected grid.
-	if cfg.FSHandler != nil {
-		relay.wireFS(cfg.FSHandler)
-	}
 
 	fileServer := http.FileServer(http.FS(cfg.StaticFS))
 
@@ -1502,6 +1557,15 @@ func RunServer(cfg ServerConfig) error {
 		// WebSocket upgrade → relay
 		if isWebSocketUpgrade(r) {
 			relay.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if r.URL != nil && hasQueryToken(r.URL.RawQuery) {
+			http.Error(w, "bad request: token in URL query string is forbidden", http.StatusBadRequest)
+			return
+		}
+		if err := relay.auth.checkHost(r); err != nil {
+			http.Error(w, "forbidden: invalid host", http.StatusForbidden)
 			return
 		}
 
@@ -1524,40 +1588,61 @@ func RunServer(cfg ServerConfig) error {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-
-	// Startup banner
-	log.Printf("[glyph3d] ══════════════════════════════════════")
-	log.Printf("[glyph3d] glyph3d-cli — single-binary server")
-	log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
-	if cfg.FSHandler != nil {
-		root, reach := cfg.FSHandler.Roots()
-		log.Printf("[glyph3d] Project: %s", root)
-		if len(reach) > 0 {
-			log.Printf("[glyph3d] Reach:   %s", strings.Join(reach, "  "))
-		}
+	httpScheme, wsScheme := "http", "ws"
+	if auth.hasTLS {
+		httpScheme, wsScheme = "https", "wss"
 	}
-	log.Printf("[glyph3d] ──────────────────────────────────────")
-	log.Printf("[glyph3d]   http://localhost:%d/", cfg.Port)
-	log.Printf("[glyph3d]   ws://localhost:%d  (relay)", cfg.Port)
-	if cfg.Host == "0.0.0.0" {
-		for _, a := range getLANAddresses() {
-			log.Printf("[glyph3d]   http://%s:%d/", a, cfg.Port)
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	return listenAndServeRelay(addr, cfg.TLSCert, cfg.TLSKey, relay, mux, func(actualPort int, tokenPath string) {
+		log.Printf("[glyph3d] ══════════════════════════════════════")
+		log.Printf("[glyph3d] glyph3d-cli — single-binary server")
+		log.Printf("[glyph3d] App:     %s", cfg.StaticTag)
+		if cfg.FSHandler != nil {
+			root, reach := cfg.FSHandler.Roots()
+			log.Printf("[glyph3d] Project: %s", root)
+			if len(reach) > 0 {
+				log.Printf("[glyph3d] Reach:   %s", strings.Join(reach, "  "))
+			}
 		}
-	}
-	log.Printf("[glyph3d] ══════════════════════════════════════")
-
-	return listenAndServe(addr, mux)
+		log.Printf("[glyph3d] ──────────────────────────────────────")
+		if isLoopbackListenHost(cfg.Host) || cfg.Host == "0.0.0.0" || cfg.Host == "::" {
+			log.Printf("[glyph3d]   %s://localhost:%d/", httpScheme, actualPort)
+			log.Printf("[glyph3d]   %s://localhost:%d  (relay)", wsScheme, actualPort)
+		} else {
+			hp := net.JoinHostPort(cfg.Host, strconv.Itoa(actualPort))
+			log.Printf("[glyph3d]   %s://%s/", httpScheme, hp)
+			log.Printf("[glyph3d]   %s://%s  (relay)", wsScheme, hp)
+		}
+		log.Printf("[glyph3d]   auth:  %s (0600)", tokenPath)
+		log.Printf("[glyph3d]   url:   glyph3d-cli --port %d url", actualPort)
+		log.Printf("[glyph3d] ══════════════════════════════════════")
+	})
 }
 
-// listenAndServe binds addr with a short retry window, then serves. The dev loop
-// restarts the relay by killing the old one and starting a new one; a just-killed
-// predecessor can hold the listen socket for a beat while it drains, so a fresh start
-// racing it would otherwise die instantly on EADDRINUSE and drop the display + every
-// terminal. Retrying the bind for ~5s turns that race into a brief wait. A genuine
-// second server already up will exhaust the window and fail loudly — the honest answer
-// (one port, one relay). Non-EADDRINUSE errors fail immediately (bad addr / perms).
-func listenAndServe(addr string, handler http.Handler) error {
+// listenAndServeRelay binds addr with a short retry window, verifies the bound socket IP,
+// writes the 0600 per-start token file once this server genuinely owns the port, starts
+// termd status + FS watchers, and serves HTTP/TLS with header and idle timeouts.
+func listenAndServeRelay(addr, tlsCert, tlsKey string, relay *Relay, handler http.Handler, onBound func(port int, tokenPath string)) error {
+	tlsCert = strings.TrimSpace(tlsCert)
+	tlsKey = strings.TrimSpace(tlsKey)
+	if (tlsCert == "") != (tlsKey == "") {
+		return fmt.Errorf("both --tls-cert and --tls-key are required when enabling TLS")
+	}
+	var tlsCfg *tls.Config
+	if tlsCert != "" {
+		cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
+		if err != nil {
+			return fmt.Errorf("load TLS key pair: %w", err)
+		}
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+	if relay.auth != nil && relay.auth.hasTLS && tlsCfg == nil {
+		return fmt.Errorf("relay auth expects TLS, but no --tls-cert/--tls-key were loaded")
+	}
+
 	const tries, gap = 25, 200 * time.Millisecond // ~5s total
 	var ln net.Listener
 	var err error
@@ -1577,10 +1662,61 @@ func listenAndServe(addr string, handler http.Handler) error {
 		return fmt.Errorf("listen %s: still in use after %v (another server already running?): %w",
 			addr, time.Duration(tries)*gap, err)
 	}
+
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		ln.Close()
+		return fmt.Errorf("unexpected listener address type %T", ln.Addr())
+	}
+	if relay.auth.keepToken && !tcpAddr.IP.IsLoopback() {
+		ln.Close()
+		return fmt.Errorf("refusing --keep-token on non-loopback bound address %s", tcpAddr.IP)
+	}
+	if tlsCfg == nil && !tcpAddr.IP.IsLoopback() && !isLocalTailscaleIP(tcpAddr.IP) {
+		ln.Close()
+		return fmt.Errorf("refusing plaintext listen on non-loopback bound address %s: configure --tls-cert and --tls-key", tcpAddr.IP)
+	}
+
+	actualPort := relay.port
+	if tcpAddr.Port > 0 {
+		actualPort = tcpAddr.Port
+	}
+	relay.port = actualPort
+	tokenPath, cleanup, err := relay.auth.bind(actualPort)
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	registerTokenCleanup(cleanup)
+	defer cleanup()
+
+	relay.startTermdStatus()
+	defer func() {
+		if relay.termdStatus != nil {
+			relay.termdStatus.Stop()
+		}
+	}()
+	// Wire the fs/writeFile notify hook and watchers once auth + port are bound.
+	if relay.fs != nil {
+		relay.wireFS(relay.fs)
+	}
+
+	boundAddr := ln.Addr()
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
+	}
+	if onBound != nil {
+		onBound(actualPort, tokenPath)
+	}
 	// The line a supervisor (or a test that started this relay) waits on: from here a connect is
-	// accepted (the backlog holds it until Serve takes it).
-	log.Printf("[serve] listening on %s", ln.Addr())
-	return http.Serve(ln, handler)
+	// accepted (the backlog holds it until Serve takes it), and the token file is already published.
+	log.Printf("[serve] listening on %s", boundAddr)
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.Serve(ln)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {
@@ -1593,45 +1729,24 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // RunRelay starts the relay-only server (no static files).
-func RunRelay(host string, port int, fsHandler *FSHandler) error {
-	relay := NewRelay()
+func RunRelay(host string, port int, origins []string, keepToken bool, tlsCert, tlsKey string, fsHandler *FSHandler) error {
+	host = normalizeListenHost(host)
+	auth, err := newRelayAuth(host, port, origins, keepToken, tlsCert, tlsKey)
+	if err != nil {
+		return err
+	}
+	relay := NewRelay(auth)
 	relay.fs = fsHandler
 	relay.port = port
 	relay.seedTermSeqFromTermd() // spawns start past every terminal the namespace already has
-	relay.startTermdStatus()
-	if fsHandler != nil {
-		relay.wireFS(fsHandler)
-	}
 
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	mux := http.NewServeMux()
 	mux.Handle("/", relay)
 
-	log.Printf("[relay] glyph3d WebSocket relay on %s", addr)
-	return listenAndServe(addr, mux)
-}
-
-func getLANAddresses() []string {
-	var addrs []string
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		ifAddrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range ifAddrs {
-			if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.To4() != nil {
-				addrs = append(addrs, ipnet.IP.String())
-			}
-		}
-	}
-	return addrs
+	return listenAndServeRelay(addr, tlsCert, tlsKey, relay, mux, func(_ int, tokenPath string) {
+		log.Printf("[relay] glyph3d WebSocket relay on %s (token: %s)", addr, tokenPath)
+	})
 }
 
 // gitRecent reports the served root's recently-touched files: the working

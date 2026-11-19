@@ -9,9 +9,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -400,25 +402,70 @@ func (s *LogStore) Stats() (*LogStats, error) {
 	return st, nil
 }
 
-// Dump snapshots the store to a file via VACUUM INTO and returns the row count
-// and resolved path. Empty path defaults to /tmp/glyph3d/logs-<unix-seconds>.db.
-// VACUUM INTO refuses an existing target, so any prior file is removed first.
+// Dump snapshots the store to a file via VACUUM INTO (mode 0600) and returns the row count
+// and resolved path. Empty path defaults to <userHome>/.local/state/g3d/logs/logs-<unix-seconds>.db
+// inside a 0700 uid-verified directory. Symlink targets are refused loudly.
 func (s *LogStore) Dump(path string) (int64, string, error) {
+	path = strings.TrimSpace(path)
 	if path == "" {
-		path = filepath.Join("/tmp", "glyph3d", fmt.Sprintf("logs-%d.db", time.Now().Unix()))
+		if runtime.GOOS == "windows" {
+			return 0, "", errWindowsUnsupported
+		}
+		dir := defaultLogDir()
+		if err := ensurePrivateDir(dir); err != nil {
+			return 0, "", err
+		}
+		if err := checkSecureRuntimeDir(dir); err != nil {
+			return 0, "", err
+		}
+		path = filepath.Join(dir, fmt.Sprintf("logs-%d.db", time.Now().Unix()))
+	} else {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return 0, "", err
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return 0, "", err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return 0, "", fmt.Errorf("refusing to dump logs to symlink %s", path)
+		}
+		if !fi.Mode().IsRegular() {
+			return 0, "", fmt.Errorf("refusing to dump logs to non-regular file %s", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return 0, "", err
 	}
 	var n int64
 	if err := s.db.QueryRow(`SELECT count(*) FROM logs`).Scan(&n); err != nil {
 		return 0, "", err
 	}
-	if _, err := s.db.Exec(`VACUUM INTO ?`, path); err != nil {
+	stageDir, err := os.MkdirTemp(filepath.Dir(path), ".g3d-logdump-*")
+	if err != nil {
 		return 0, "", err
+	}
+	defer os.RemoveAll(stageDir)
+	if err := os.Chmod(stageDir, 0o700); err != nil {
+		return 0, "", err
+	}
+	staged := filepath.Join(stageDir, "dump.db")
+	if _, err := s.db.Exec(`VACUUM INTO ?`, staged); err != nil {
+		return 0, "", err
+	}
+	if err := os.Chmod(staged, 0o600); err != nil {
+		return 0, "", err
+	}
+	// Re-check destination immediately before atomic rename so a symlink is refused loudly.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return 0, "", fmt.Errorf("refusing to dump logs to symlink %s", path)
+	}
+	if err := os.Rename(staged, path); err != nil {
+		return 0, "", err
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0, "", err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return 0, "", fmt.Errorf("dumped log file %s is not a regular file", path)
 	}
 	return n, path, nil
 }

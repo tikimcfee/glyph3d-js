@@ -155,7 +155,7 @@ func TestTermdStatusFollowsEveryState(t *testing.T) {
 // TestTermdStatusPlaneKeepsTheLatest: the display's status plane holds one notification; a newer
 // one replaces one not yet written, and pushing never blocks.
 func TestTermdStatusPlaneKeepsTheLatest(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	r.displayStatus = make(chan []byte, 1)
 	for _, s := range []string{"restarting", "unreachable", "ok"} {
 		r.pushTermdStatus(termdStatusParams{Relay: termdRelayState{State: s}, Status: json.RawMessage("null")})

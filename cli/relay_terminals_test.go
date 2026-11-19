@@ -12,7 +12,7 @@ import (
 )
 
 func TestSeedTermSeqSkipsPastLiveTermsAndNeverGoesBack(t *testing.T) {
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	r.seedTermSeq([]string{"term-2", "gx-claude", "term-9", "term-x", "termination-40"})
 	if n := r.termSeq.Load(); n != 9 {
 		t.Fatalf("seeded to %d, want 9 (only term-N counts)", n)
@@ -119,7 +119,7 @@ func TestLiveTerminalIDsSeedsAFreshRelay(t *testing.T) {
 	if err != nil || len(ids) != 3 {
 		t.Fatalf("live ids = %v (%v), want three", ids, err)
 	}
-	r := NewRelay()
+	r := NewRelay(newTestAuth(t))
 	r.seedTermSeqFromTermd()
 	if next := fmt.Sprintf("term-%d", r.termSeq.Add(1)); next != "term-42" {
 		t.Fatalf("first spawn after start mints %s, want term-42", next)

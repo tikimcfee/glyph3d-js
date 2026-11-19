@@ -174,8 +174,8 @@ func runTerminal(cfg terminalConfig) {
 			return
 		}
 		go func() {
-			if r := <-ch; r.err != nil {
-				log.Printf("[attach] termd %s: %v", op, r.err)
+			if r := <-ch; r.Err != nil {
+				log.Printf("[attach] termd %s: %v", op, r.Err)
 			}
 		}()
 	}
@@ -538,7 +538,7 @@ type sessionPasteSink struct {
 }
 
 func (k sessionPasteSink) streams() bool { return k.sess.Load().tc.Has("paste_stream") }
-func (k sessionPasteSink) maxFrame() int { return k.sess.Load().tc.maxFrame() }
+func (k sessionPasteSink) maxFrame() int { return k.sess.Load().tc.MaxFrame() }
 func (k sessionPasteSink) session() any  { return k.sess.Load() }
 
 func (k sessionPasteSink) paste(text string, more bool) (bool, error) {
@@ -556,7 +556,7 @@ func (k sessionPasteSink) paste(text string, more bool) (bool, error) {
 	}
 	select {
 	case r := <-ch:
-		return true, r.err
+		return true, r.Err
 	case <-k.done:
 		return true, errors.New("the adapter is closing")
 	}

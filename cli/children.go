@@ -67,18 +67,23 @@ func killChildren() int {
 	return n
 }
 
-// watchShutdown makes SIGINT/SIGTERM kill the relay's children before the relay exits
-// (128 + the signal, as the default disposition would report it).
+// watchShutdown makes SIGINT/SIGTERM/SIGHUP kill the relay's children and clean up
+// ephemeral token files before the relay exits (128 + the signal, as the default
+// disposition would report it).
 func watchShutdown() {
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		sig := <-ch
 		n := killChildren()
+		cleanupRelayTokens()
 		log.Printf("[relay] %v: stopped %d agent child(ren), exiting", sig, n)
 		code := 128 + 15
-		if sig == os.Interrupt {
+		switch sig {
+		case os.Interrupt:
 			code = 128 + 2
+		case syscall.SIGHUP:
+			code = 128 + 1
 		}
 		os.Exit(code)
 	}()
