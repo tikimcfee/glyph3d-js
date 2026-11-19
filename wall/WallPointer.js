@@ -43,7 +43,11 @@ const CLICK_MODES = /** @type {const} */ (['cell', 'word', 'line']);
  *     between panes, or a pane's
  *     inner border)
  *   a split pane's outer border  focus                         resize the whole split (every pane re-wraps)
- *   a split pane's title bar     focus                         move the whole split (⌥ anywhere on it too)
+ *   a split pane's title bar     focus                         rearrange: dropped on another pane it trades
+ *                                                              places with it, near that pane's edge it
+ *                                                              docks beside it (also while its group is
+ *                                                              fullscreen)
+ *   ⌥ + a split pane             focus                         move the whole split
  *
  * Moves, resizes and group drags snap to the drafting grid while the `snap` knob is on (wallSnap.js
  * has the rule: a moved body's top-left lands on a crossing, a dragged edge on or just inside a
@@ -78,6 +82,10 @@ const CLICK_MODES = /** @type {const} */ (['cell', 'word', 'line']);
  * Hover lights the border and sets the cursor (⌥ shows move).
  * A pointercancel or a lost pointer capture ends the gesture where it stands (no click), and so
  * does the gesture's terminal (or group) going away; either way the capture is given back.
+ *
+ * A member dragged within its group shows where it would land (`drop`, drawn by SelectionOverlay): a
+ * split pane the rect it would take (marked refused where the panes wouldn't fit), a tiled member the
+ * tile it would take.
  */
 export default class WallPointer {
     /**
@@ -165,6 +173,12 @@ export default class WallPointer {
     /** A gesture is in hand (the hover buttons wait). */
     get busy() { return !!this._drag; }
 
+    /** Where the member being dragged within its group would land, world units, and whether it can; null when none is. */
+    get drop() {
+        const d = this._drag?.drop;
+        return d ? { rect: d.rect, ok: d.fits ?? true } : null;
+    }
+
     /** A lasso is being drawn. */
     get lassoing() { return this._drag?.kind === 'lasso'; }
 
@@ -245,6 +259,8 @@ export default class WallPointer {
                 this.wall.focus(at.id);
             } else if (freeform && (at.part === 'title' || (e.altKey && !blockSelects(e)))) {
                 this._start(e, { kind: 'press', id: at.id });
+            } else if (at.part === 'title' && fs.groupLayout === 'split') {
+                this._start(e, { kind: 'pane', id: at.id });
             } else if (at.part === 'title') {
                 if (this.wall.focusedId !== at.id) this.wall.focus(at.id);
                 return;
@@ -270,8 +286,9 @@ export default class WallPointer {
         else if (hit.part === 'divider') this._start(e, { kind: 'divider', group: hit.group, path: hit.divider.path, axis: hit.divider.axis });
         else if (hit.group) this._start(e, { kind: 'group', group: hit.group, groupDrag: this.wall.groups.dragStart(hit.group) });
         else if (hit.part === 'body' && (!e.altKey || blockSelects(e))) this._startText(e, hit.id, blockSelects(e));
-        else if ((e.altKey || hit.part === 'title') && this.wall.groups.splits(hit.id)) {
-            // A pane moves its whole split; a click (no travel) just gives it the keys.
+        else if (hit.part === 'title' && !e.altKey && this.wall.groups.splits(hit.id)) this._start(e, { kind: 'pane', id: hit.id });
+        else if (e.altKey && this.wall.groups.splits(hit.id)) {
+            // ⌥ on a pane moves its whole split; a click (no travel) just gives it the keys.
             const gid = this.wall.groups.groupOf(hit.id);
             this._start(e, { kind: 'group', group: gid, groupDrag: this.wall.groups.dragStart(gid), pane: hit.id });
         } else if (e.altKey || hit.part === 'title') this._start(e, { kind: 'press', id: hit.id });
@@ -365,6 +382,7 @@ export default class WallPointer {
         this._end();
         if (d.kind === 'program') { this.mouse.cancel(); return; }
         if ((d.kind === 'press' || d.kind === 'resize') && d.moved && this.wall.terminal(d.id)) this._settle(d);
+        if (d.kind === 'pane' && d.moved && this.wall.terminal(d.id)) this.wall.groups.relayoutOf(d.id);   // back to its own pane
         if (d.kind === 'group' && d.moved) this.wall.groups.dragEnd(d.groupDrag);
     }
 
@@ -423,11 +441,19 @@ export default class WallPointer {
         }
         const grid = this.wall.terminal(d.id);
         if (!grid) { this._end(); return; }   // its terminal went away mid-drag
-        if (d.kind === 'press' && d.moved) {
+        if (d.kind === 'pane') {
+            if (!d.moved) return;   // a click's wobble moves nothing
+            if (!this.wall.groups.splits(d.id)) { this._end(); return; }   // it left its split mid-drag
+            if (!d.raised) { d.raised = true; this.wall.bringToFront?.(d.id); }
+            grid.position.x = d.startPos.x + dx;
+            grid.position.y = d.startPos.y + dy;
+            d.drop = this.wall.groups.paneDrop(d.id, p);
+        } else if (d.kind === 'press' && d.moved) {
             if (!d.raised) { d.raised = true; this.wall.bringToFront?.(d.id); }
             const s = this._snapPress(d, dx, dy, e);
             grid.position.x = d.startPos.x + dx + s.x;
             grid.position.y = d.startPos.y + dy + s.y;
+            if (this.wall.groups.tiles(d.id)) d.drop = this.wall.groups.tileDrop(d.id);
         } else if (d.kind === 'resize') {
             const step = this._snapStep(d, e);
             d.startRect ??= this.wall.terminalRect(d.id);   // first move: nothing has resized yet
@@ -476,6 +502,11 @@ export default class WallPointer {
         if (!this.wall.terminal(d.id)) return;   // its terminal went away
         if (d.kind === 'shift') { this.wall.run(['wall.select.toggle', d.id]); return; }
         if (d.kind === 'text') { if (d.selecting && this.wall.terminal(d.id).hasSelection) this.wall.selectionMade(d.id); return; }
+        if (d.kind === 'pane') {
+            if (!d.moved) { if (this.wall.focusedId !== d.id) this.wall.focus(d.id); return; }
+            if (this.wall.groups.splits(d.id)) this.wall.groups.dropPane(d.id, this.camera.toWorld(e.clientX, e.clientY));
+            return;
+        }
         if (d.kind === 'press' && !d.moved) { this.wall.focus(d.id, { frame: !!d.clickFrames }); return; }
         if (d.kind === 'press' || d.kind === 'resize') this._settle(d);
     }

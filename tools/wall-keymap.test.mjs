@@ -43,7 +43,9 @@ test('chordFor matches Shift and the mode as each entry says', () => {
     expect(at('BracketRight', 'canvas', true)).toBe(null);
     expect(at('BracketLeft', 'canvas', false).does).toMatch(/previous pane/);
     expect(at('BracketLeft', 'canvas', true)).toBe(null);
-    expect(at('ArrowLeft', 'canvas', true)).toBe(at('ArrowLeft', 'canvas'));
+    expect(at('ArrowLeft', 'canvas').does).toMatch(/focus the pane/);
+    expect(at('ArrowLeft', 'canvas', true).does).toMatch(/move the focused pane/);
+    expect(at('ArrowDown', 'fullscreen', true)).toBe(at('ArrowDown', 'canvas', true));
     expect(at('Minus', 'canvas').does).toMatch(/hide/);
     expect(at('Minus', 'fullscreen').does).toMatch(/smaller text/);
     expect(at('Digit0', 'canvas').does).toMatch(/fit every/);

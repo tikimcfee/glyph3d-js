@@ -41,7 +41,8 @@ import {
  *   wall.settings [toggle|open|close|left|right|float [x y]] · wall.settings.collapse <section> [toggle|on|off]
  *   wall.help [toggle|open|close|left|right|float [x y]]   the keys, gestures and verbs
  *   wall.fullscreen [toggle|on|off] [id] · wall.fullscreen.text <bigger|smaller|reset>
- *   wall.split <right|down> [id] · wall.pane <left|right|up|down> · wall.group.bars <gid> [toggle|on|off]
+ *   wall.split <right|down> [id] · wall.pane <left|right|up|down> · wall.pane.move <left|right|up|down> [id]
+ *   wall.group.bars <gid> [toggle|on|off]
  *   wall.menu terminal <id> [x y] | group <gid> [x y] | canvas [x y] | close
  *                                              the right-click menu, at canvas px (default: on the
  *                                              terminal, under the header, the view's centre)
@@ -277,6 +278,14 @@ export default function registerWallCommands(router, wall) {
         if (!['left', 'right', 'up', 'down'].includes(dir)) throw new Error(`a pane is left, right, up or down, not '${dir ?? ''}'`);
         const to = wall.focusPane(dir);
         return OK(to ? `focused ${to}` : `nothing ${dir} of ${wall.focusedId ?? 'nothing'}`, { id: to });
+    });
+    verb('wall.pane.move', '<left|right|up|down> [id]', "Move a terminal (default: the focused one) a step within its group: a split pane trades places with the pane that way, a tile with the next tile", (args) => {
+        const [dir, named] = args;
+        if (!['left', 'right', 'up', 'down'].includes(dir)) throw new Error(`a pane moves left, right, up or down, not '${dir ?? ''}'`);
+        const id = named ? terminalIds([named])[0] : wall.focusedId;
+        if (!id) throw new Error('no terminal to move: focus one, or name it');
+        const other = wall.groups.movePane(id, dir);
+        return OK(other ? `${id} traded places with ${other}` : `nothing ${dir} of ${id} in its group`, { id, with: other });
     });
     verb('wall.focus.history', '<back|forward>', 'Step back or forward through previously focused terminals', (args) => {
         const dir = { back: -1, forward: 1 }[args[0]];

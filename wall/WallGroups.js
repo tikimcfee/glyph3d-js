@@ -1,6 +1,6 @@
 import GroupFrame, { DEFAULT_GROUP_Z } from './GroupFrame.js';
 import { tileLayout, nearestPlace, unionRect, padRect, BAR_ROOM } from './wallLayout.js';
-import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree } from './splitTree.js';
+import { leaves, insert, remove as removePane, fromMembers, panes, minSize, dividerAt, setRatio, ratioFor, checkTree, swap, dock, dropZone, neighbor } from './splitTree.js';
 
 /** The smallest a split pane makes its terminal (cells), as a border drag's floor. */
 const MIN_PANE = { cols: 20, rows: 5 };
@@ -25,6 +25,12 @@ const numeral = (gid) => Number(gid.slice(2)) || 0;
  * cuts a pane in two (refused when a half would fall under MIN_PANE); a pane that leaves (removed,
  * hidden, closed, killed) gives its room to its sibling; a divider drag moves the cut, an outer edge
  * drag resizes the whole split; any group turns into a split (rows of `columns`, equal shares) and back.
+ *
+ * Members move within their group: a split pane dragged by its title bar and dropped on another pane
+ * trades places with it, or — dropped near one of that pane's edges — docks beside it there (the pane
+ * it left gives its room to its sibling); a tiled member dropped takes the nearest tile. `movePane`
+ * does the same a step at a time from the keys: a pane swaps with its neighbour that way, a tile with
+ * the next tile in its row or column.
  *
  * The groups themselves live in the WallStore (durable, per relay, pruned with their members); this
  * is what acts on them — every change writes the store, re-tiles, persists the members' spots and
@@ -238,6 +244,75 @@ export default class WallGroups {
         return { gid, outer: null, divider: d ? { path: d.path, axis: d.axis } : null };
     }
 
+    /**
+     * Where dropping split pane `id` at world point `p` would put it: the other pane under `p`, the
+     * zone (`center` trades places, a side docks beside it), the tree that makes, the rect `id` would
+     * land in, and whether every pane would still get MIN_PANE. Null off the split's other panes.
+     * @param {string} id @param {{ x: number, y: number }} p
+     * @returns {{ gid: string, at: string, zone: 'left'|'right'|'up'|'down'|'center', tree: import('./splitTree.js').SplitNode,
+     *             rect: import('./wallLayout.js').Rect, fits: boolean }|null}
+     */
+    paneDrop(id, p) {
+        const gid = this.groupOf(id);
+        const g = gid ? this.get(gid) : null;
+        if (!g || g.layout !== 'split') return null;
+        for (const [at, r] of this._paneRects(g)) {
+            if (at === id || p.x < r.minX || p.x > r.maxX || p.y < r.minY || p.y > r.maxY) continue;
+            const zone = dropZone(r, p);
+            const tree = zone === 'center' ? swap(g.split.tree, id, at) : dock(g.split.tree, id, at, zone);
+            const next = { ...g, members: leaves(tree), split: { ...g.split, tree } };
+            let fits = true;
+            try { this._fits(next, ''); } catch { fits = false; }
+            return { gid, at, zone, tree, rect: this._paneRects(next).get(id), fits };
+        }
+        return null;
+    }
+
+    /**
+     * Drop split pane `id` at world point `p` (paneDrop says where). Off the other panes, or where the
+     * panes wouldn't fit, it goes back to its own pane.
+     * @returns {ReturnType<WallGroups['paneDrop']>} what it did, or null when it went back
+     */
+    dropPane(id, p) {
+        const drop = this.paneDrop(id, p);
+        if (!drop?.fits) { this.relayoutOf(id); return null; }
+        const g = this.get(drop.gid);
+        this._commit(drop.gid, { ...g, members: leaves(drop.tree), split: { ...g.split, tree: drop.tree } });
+        return drop;
+    }
+
+    /**
+     * Move a member one step within its group: a split pane trades places with the pane next to it that
+     * way; a tiled member with the next tile in its row (left / right) or column (up / down).
+     * @param {string} id @param {'left'|'right'|'up'|'down'} dir
+     * @returns {string|null} the member it traded places with; null at the group's edge
+     */
+    movePane(id, dir) {
+        if (!['left', 'right', 'up', 'down'].includes(dir)) throw new Error(`a pane moves left, right, up or down, not '${dir}'`);
+        const gid = this.groupOf(id);
+        if (!gid) throw new Error(`'${id}' is in no group`);
+        const g = this.get(gid);
+        if (g.layout === 'split') {
+            const other = neighbor(this._paneRects(g), id, dir);
+            if (!other) return null;
+            const tree = swap(g.split.tree, id, other);
+            this._commit(gid, { ...g, members: leaves(tree), split: { ...g.split, tree } });
+            return other;
+        }
+        if (g.layout !== 'tile') throw new Error(`group '${gid}' is ${g.layout}: its members have no places to trade`);
+        const shown = this.shownMembers(gid);
+        const i = shown.indexOf(id);
+        if (i < 0) throw new Error(`'${id}' is hidden`);
+        const cols = Math.min(g.columns, shown.length);
+        const j = dir === 'left' ? (i % cols ? i - 1 : -1) : dir === 'right' ? ((i + 1) % cols && i + 1 < shown.length ? i + 1 : -1)
+            : dir === 'up' ? i - cols : i + cols;
+        if (j < 0 || j >= shown.length) return null;
+        const order = [...shown];
+        [order[i], order[j]] = [order[j], order[i]];
+        this._commit(gid, { ...g, members: this._withHidden(g, order) });
+        return shown[j];
+    }
+
     /** A split's rect, world units. @param {string} gid */
     splitRect(gid) { return this._splitRect(this.get(gid)); }
 
@@ -326,30 +401,37 @@ export default class WallGroups {
     }
 
     /**
+     * Where a tiled member dragged by its title bar would drop now: the index (in its shown members) of
+     * the tile whose centre is nearest its window's, and that tile's rect. Null outside a tiled group.
+     * @param {string} id @returns {{ to: number, rect: import('./wallLayout.js').Rect }|null}
+     */
+    tileDrop(id) {
+        const gid = this.groupOf(id);
+        if (!gid || this.get(gid).layout !== 'tile') return null;
+        const g = this.get(gid);
+        const shown = this.shownMembers(gid);
+        const { places, metrics } = this._tiling(g, shown);
+        const rects = shown.map((m, i) => {
+            const t = this.wall.terminalRect(m), x = places[i].x + metrics[i].shiftX, y = places[i].y - metrics[i].shiftY;
+            return { minX: x, maxX: x + t.maxX - t.minX, minY: y - (t.maxY - t.minY), maxY: y };
+        });
+        const r = this.wall.terminalRect(id);
+        const to = nearestPlace(rects.map((t) => ({ x: (t.minX + t.maxX) / 2, y: (t.minY + t.maxY) / 2 })), { x: (r.minX + r.maxX) / 2, y: (r.minY + r.maxY) / 2 });
+        return to < 0 ? null : { to, rect: rects[to] };
+    }
+
+    /**
      * A tiled member was dragged by its title bar and let go: it takes the tile nearest where it was
      * dropped (the others shift along), and the group tiles again. A freeform member just stays.
      * @param {string} id
      */
     dropMember(id) {
-        const gid = this.groupOf(id);
-        if (!gid || this.get(gid).layout !== 'tile') { this.wall.rememberPosition(id); return; }
-        const g = this.get(gid);
-        const shown = this.shownMembers(gid);
-        const { places, metrics } = this._tiling(g, shown);
-        const centres = shown.map((m, i) => {
-            const r = this.wall.terminalRect(m);
-            const mx = metrics[i].shiftX, my = metrics[i].shiftY;
-            return { x: places[i].x + mx + (r.maxX - r.minX) / 2, y: places[i].y - my - (r.maxY - r.minY) / 2 };
-        });
-        const r = this.wall.terminalRect(id);
-        const to = nearestPlace(centres, { x: (r.minX + r.maxX) / 2, y: (r.minY + r.maxY) / 2 });
-        const order = shown.filter((m) => m !== id);
-        order.splice(to, 0, id);
-        // Hidden members keep their places in the order relative to the shown ones they followed.
-        const members = [];
-        let k = 0;
-        for (const m of g.members) members.push(this.wall.isShown(m) ? order[k++] : m);
-        this._commit(gid, { ...g, members });
+        const drop = this.tileDrop(id);
+        if (!drop) { this.wall.rememberPosition(id); return; }
+        const gid = this.groupOf(id), g = this.get(gid);
+        const order = this.shownMembers(gid).filter((m) => m !== id);
+        order.splice(drop.to, 0, id);
+        this._commit(gid, { ...g, members: this._withHidden(g, order) });
     }
 
     /** Re-tile a tiled group over its shown members (a member came, went, hid, showed or resized). */
@@ -458,6 +540,12 @@ export default class WallGroups {
 
     /** The groups these terminals are in now (they may be emptied by a move to another group). */
     _groupsOf(ids) { return [...new Set(ids.map((id) => this.groupOf(id)).filter(Boolean))]; }
+
+    /** A group's members with its shown ones in `order`; hidden members keep their places relative to the shown ones they followed. */
+    _withHidden(g, order) {
+        let k = 0;
+        return g.members.map((m) => (this.wall.isShown(m) ? order[k++] : m));
+    }
 
     /** Validate a group's layout fields; returns it. */
     _check(g) {

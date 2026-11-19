@@ -2,14 +2,17 @@ import { chordLabel } from './chord.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const ACCENT = 'rgba(138, 180, 248, 0.85)';
+/** A drop that can't land (the panes wouldn't fit). */
+const REFUSED = 'rgba(240, 128, 112, 0.85)';
 /** How far a selection outline sits outside its window, CSS px. */
 const OUTLINE_GAP = 3;
 
 /**
  * SelectionOverlay — the screen-space marks of a selection: the lasso as it's drawn (a thin path
  * following the pointer), an outline around each selected terminal, and one small button by the
- * selection that gathers it into a group (with a × that clears it). DOM over the canvas, placed in
- * the wall's tick from the same camera the canvas renders with.
+ * selection that gathers it into a group (with a × that clears it); and, while a member is dragged
+ * within its group, where it would land (a tinted rect, red where it can't). DOM over the canvas,
+ * placed in the wall's tick from the same camera the canvas renders with.
  */
 export default class SelectionOverlay {
     /**
@@ -27,6 +30,11 @@ export default class SelectionOverlay {
         this._lasso.dataset.lasso = '';
         this._svg.appendChild(this._lasso);
         this._root.appendChild(this._svg);
+        this._drop = document.createElement('div');
+        this._drop.dataset.drop = '';
+        Object.assign(this._drop.style, { position: 'absolute', left: '0', top: '0', display: 'none', borderRadius: '3px', boxSizing: 'border-box', willChange: 'transform' });
+        this._root.appendChild(this._drop);
+        this._dropKey = '';
 
         this._bar = document.createElement('div');
         this._bar.dataset.selectionBar = '';
@@ -73,6 +81,27 @@ export default class SelectionOverlay {
 
     /** Whether a lasso is on screen (the test handle). */
     get lassoShown() { return !!this._lassoPts; }
+
+    /**
+     * Where a dragged member would land, or null for none.
+     * @param {{ box: { left: number, right: number, top: number, bottom: number }, ok: boolean }|null} drop
+     */
+    setDrop(drop) {
+        const key = drop ? `${drop.ok}|${drop.box.left.toFixed(1)}|${drop.box.top.toFixed(1)}|${(drop.box.right - drop.box.left).toFixed(1)}|${(drop.box.bottom - drop.box.top).toFixed(1)}` : '';
+        if (key === this._dropKey) return;
+        this._dropKey = key;
+        const el = this._drop;
+        if (!drop) { el.style.display = 'none'; return; }
+        const { box, ok } = drop, c = ok ? ACCENT : REFUSED;
+        Object.assign(el.style, {
+            display: '', transform: `translate(${box.left}px, ${box.top}px)`,
+            width: `${box.right - box.left}px`, height: `${box.bottom - box.top}px`,
+            border: `2px ${ok ? 'solid' : 'dashed'} ${c}`, background: ok ? 'rgba(138, 180, 248, 0.14)' : 'rgba(240, 128, 112, 0.08)',
+        });
+    }
+
+    /** Whether a drop target is on screen (the test handle). */
+    get dropShown() { return this._dropKey !== ''; }
 
     /**
      * Per frame: outline each selected terminal and set the group button by the selection.

@@ -14,6 +14,12 @@ import { ALT_LABEL, SNAP_INVERT_LABEL, COPY_LABEL, BLOCK_SELECT_LABEL, FOCUS_HIS
  *             section: string, run: ((wall: any, e: KeyboardEvent) => void)|null }} WallChord
  */
 
+/** Move the focused terminal a place within its group, when it's in a split or a tiling (else the key does nothing). */
+function movePane(w, dir) {
+    const id = w.focusedId;
+    if (id && (w.groups.splits(id) || w.groups.tiles(id))) w.run(['wall.pane.move', dir]);
+}
+
 /** @type {readonly WallChord[]} */
 export const KEYMAP = Object.freeze([
     { section: 'terminals', code: 'BracketRight', shift: false, key: ']', does: 'focus the next pane (reading order)', run: (w) => w.cycleFocus(+1) },
@@ -36,10 +42,14 @@ export const KEYMAP = Object.freeze([
     { section: 'terminals', code: 'KeyK', key: 'K', does: 'find a terminal by name, or run a verb', run: null },
     { section: 'splits', code: 'KeyD', shift: false, key: 'D', does: 'split the focused terminal: a new one to its right', run: (w) => w.run(['wall.split', 'right']) },
     { section: 'splits', code: 'KeyD', shift: true, key: 'D', does: 'split the focused terminal: a new one below it', run: (w) => w.run(['wall.split', 'down']) },
-    { section: 'splits', code: 'ArrowLeft', key: '←', does: 'focus the pane (or window) to the left', run: (w) => w.run(['wall.pane', 'left']) },
-    { section: 'splits', code: 'ArrowRight', key: '→', does: 'focus the pane (or window) to the right', run: (w) => w.run(['wall.pane', 'right']) },
-    { section: 'splits', code: 'ArrowUp', key: '↑', does: 'focus the pane (or window) above', run: (w) => w.run(['wall.pane', 'up']) },
-    { section: 'splits', code: 'ArrowDown', key: '↓', does: 'focus the pane (or window) below', run: (w) => w.run(['wall.pane', 'down']) },
+    { section: 'splits', code: 'ArrowLeft', shift: false, key: '←', does: 'focus the pane (or window) to the left', run: (w) => w.run(['wall.pane', 'left']) },
+    { section: 'splits', code: 'ArrowRight', shift: false, key: '→', does: 'focus the pane (or window) to the right', run: (w) => w.run(['wall.pane', 'right']) },
+    { section: 'splits', code: 'ArrowUp', shift: false, key: '↑', does: 'focus the pane (or window) above', run: (w) => w.run(['wall.pane', 'up']) },
+    { section: 'splits', code: 'ArrowDown', shift: false, key: '↓', does: 'focus the pane (or window) below', run: (w) => w.run(['wall.pane', 'down']) },
+    { section: 'splits', code: 'ArrowLeft', shift: true, key: '←', does: 'move the focused pane (or tile) a place left in its group', run: (w) => movePane(w, 'left') },
+    { section: 'splits', code: 'ArrowRight', shift: true, key: '→', does: 'move the focused pane (or tile) a place right', run: (w) => movePane(w, 'right') },
+    { section: 'splits', code: 'ArrowUp', shift: true, key: '↑', does: 'move the focused pane (or tile) a place up', run: (w) => movePane(w, 'up') },
+    { section: 'splits', code: 'ArrowDown', shift: true, key: '↓', does: 'move the focused pane (or tile) a place down', run: (w) => movePane(w, 'down') },
     { section: 'groups', code: 'KeyG', shift: false, key: 'G', does: 'group the selection (or the focused terminal)', run: (w) => w.run(w.selection.size || !w.focusedId ? ['wall.group'] : ['wall.group', w.focusedId]) },
     {
         section: 'groups', code: 'KeyG', shift: true, key: 'G', does: "ungroup the focused terminal's group",
@@ -99,7 +109,9 @@ export function gestures(config) {
         { section: 'groups', how: 'drag a group header', does: 'move every member' },
         { section: 'splits', how: 'drag the gap between panes', does: 'move the cut; both sides re-wrap' },
         { section: 'splits', how: "drag a split's outer border", does: 'resize the whole split; every pane re-wraps' },
-        { section: 'splits', how: "drag a pane's title bar", does: 'move the whole split' },
+        { section: 'splits', how: "drag a pane's title bar", does: 'rearrange: drop it on a pane to trade places, near its edge to dock beside it' },
+        { section: 'splits', how: `${ALT_LABEL}-drag a pane`, does: 'move the whole split' },
+        { section: 'groups', how: "drag a tiled member's title bar", does: 'move it to another tile (the others shift along)' },
         { section: 'canvas', how: 'drag empty canvas · wheel', does: 'pan (a wheel over the focused terminal scrolls its history)' },
         { section: 'canvas', how: `${zoomWheelLabel(config.zoomKeys)}+wheel · pinch`, does: 'zoom about the pointer' },
         { section: 'canvas', how: `hold ${SNAP_INVERT_LABEL} mid-drag`, does: 'move or resize free of the grid (or onto it, with snap off)' },

@@ -2,7 +2,8 @@
  * splitTree — a split group's panes as a binary tree, as a terminal app's splits are: each node cuts
  * its rect in two, side by side (`row`: a left of b) or stacked (`col`: a above b), `ratio` being a's
  * share of the room left after the gap; each leaf is one terminal. No THREE, no DOM: WallGroups lays
- * the panes out, the pointer drags the dividers, the store collapses the tree when a pane goes.
+ * the panes out, the pointer drags the dividers and the panes (a pane dropped on another swaps with it,
+ * or docks beside it near an edge), the store collapses the tree when a pane goes.
  * Trees are values: every change returns a new tree.
  *
  * Rects are the wall's world rects (wallLayout): y up, so a node's `a` of a `col` is its upper half.
@@ -49,6 +50,53 @@ export function remove(t, id) {
     if (!a) return b;
     if (!b) return a;
     return a === t.a && b === t.b ? t : { ...t, a, b };
+}
+
+/**
+ * The tree with the leaves `a` and `b` trading places (each takes the other's pane; the cuts stay).
+ * @param {SplitNode} t @param {string} a @param {string} b @returns {SplitNode}
+ */
+export function swap(t, a, b) {
+    if (isLeaf(t)) return t.id === a ? { id: b } : t.id === b ? { id: a } : t;
+    return { ...t, a: swap(t.a, a, b), b: swap(t.b, a, b) };
+}
+
+/** Which side of a pane a dock puts the docked one, as a cut and the side of it. */
+const DOCK = /** @type {const} */ ({
+    left: { dir: 'row', side: 'before' }, right: { dir: 'row', side: 'after' },
+    up: { dir: 'col', side: 'before' }, down: { dir: 'col', side: 'after' },
+});
+
+/**
+ * The tree with the leaf `id` taken from its pane (its sibling takes the room) and docked beside the
+ * leaf `at`: `at`'s pane cut in two, `id` in the half on `side`.
+ * @param {SplitNode} t @param {string} id @param {string} at @param {'left'|'right'|'up'|'down'} side
+ * @returns {SplitNode}
+ */
+export function dock(t, id, at, side) {
+    const d = DOCK[side];
+    if (!d) throw new Error(`a pane docks left, right, up or down, not '${side}'`);
+    if (id === at) throw new Error('a pane cannot dock beside itself');
+    const rest = remove(t, id);
+    if (!rest || !leaves(rest).includes(at)) throw new Error(`no panes '${id}' and '${at}' to dock`);
+    return insert(rest, at, id, d.dir, d.side);
+}
+
+/** How near a pane's edge (a share of its width or height) a drop docks beside it rather than swapping. */
+export const DOCK_EDGE = 0.25;
+
+/**
+ * Where a drop at `p` over the pane `r` lands: beside it on the nearest side when within DOCK_EDGE of
+ * that edge, else `center` (the two trade places).
+ * @param {Rect} r @param {{ x: number, y: number }} p @returns {'left'|'right'|'up'|'down'|'center'}
+ */
+export function dropZone(r, p) {
+    const fx = (p.x - r.minX) / Math.max(1e-9, r.maxX - r.minX), fy = (r.maxY - p.y) / Math.max(1e-9, r.maxY - r.minY);
+    /** @type {['left'|'right'|'up'|'down', number][]} */
+    const near = [['left', fx], ['right', 1 - fx], ['up', fy], ['down', 1 - fy]];
+    let best = near[0];
+    for (const n of near) if (n[1] < best[1]) best = n;
+    return best[1] < DOCK_EDGE ? best[0] : 'center';
 }
 
 /**

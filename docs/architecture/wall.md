@@ -14,7 +14,10 @@ hide (a click: off the canvas, still running) and close (HELD for `closeHoldMs`,
 kills it); chord+- hides, chord+X held closes. ⇧-drag on empty canvas lassoes terminals into the
 selection (⇧-click toggles one); its button or chord+G makes a group (`WallGroups`): named, `tile`
 (N columns packed `gap` apart, `wallLayout.tileLayout`) or `freeform` (members keep their spots),
-drawn as a quiet backdrop + header; drag the header to move every member. The palette (chord+K)
+drawn as a quiet backdrop + header; drag the header to move every member. A tiled member's title-bar
+drag takes it to the tile nearest where it's let go (the others shift along; the tile it would take is
+outlined as it goes — `WallGroups.tileDrop`), and chord+⇧+arrows (`wall.pane.move <dir> [id]`) trade
+the focused member with the next tile in its row or column. The palette (chord+K)
 and the sidebar (chord+B) list every terminal, hidden ones marked, under its group (groups fold).
 The terminals live in `g3d-termd` (below), and termd's status rides along with no query of its
 own: the topbar's termd chip, a status window (chord+S: the daemon and its terminals; a row
@@ -190,8 +193,16 @@ bars (`splitBarRows` of its rows; the bar is capped to that room — `TitleBar.s
 label takes over), then the panel: its cols × rows are what fit (the panel's frame measured off the
 grid), its top-left at the pane's. Panes are `splitGap` apart. The gap (or a pane's inner border) is a
 divider: dragging it moves the cut, held so each side keeps its minimum; a pane's outer border resizes
-the whole split; a pane's title bar (or ⌥ anywhere on it) moves the whole split. chord+arrows
-(`wall.pane`) move focus to the pane — or, outside a split, the nearest window — that way. Any group
+the whole split; ⌥ anywhere on a pane (or the group's header) moves the whole split. A pane's title bar
+rearranges it (also while its group is fullscreen): let go over another pane's middle and the two trade
+places (`splitTree.swap`: the cuts stay, each re-wraps to the other's pane); let go within `DOCK_EDGE`
+(a quarter) of one of its edges and it docks beside that pane on that side (`splitTree.dock`: it leaves
+its own pane — its sibling takes the room — and the target's pane is cut in two for it). As it goes, the
+rect it would land in is outlined (`WallGroups.paneDrop`, drawn by `SelectionOverlay.setDrop`), red and
+dashed where a pane would fall under 20 × 5 — that drop, or one off the split's other panes, sends it
+back to its own pane. The members' order follows the tree's reading order. chord+arrows (`wall.pane`)
+move focus to the pane — or, outside a split, the nearest window — that way; chord+⇧+arrows
+(`wall.pane.move <dir> [id]`) trade the focused pane with the pane that way (focus stays with it). Any group
 turns into a split (`wall.group.layout <gid> split`: rows of `columns`, equal shares, the members'
 union as the rect) and back (sizes and spots kept); `wall.group.bars` (the group's menu) shows or
 hides one split's bars, `splitBars` is what a new split is born with. A split's panes have no size

@@ -6,7 +6,10 @@
 // as termd would): splitting re-wraps both halves in whole cells inside their panes, the title bar's
 // room kept above each; a split that wouldn't fit is refused; a pane leaving gives its room back;
 // a divider drag and an outer resize re-wrap; bars toggle; a tiled group becomes a split and back;
-// the store keeps the tree. Run: bun test tools/wall-split.test.mjs
+// the store keeps the tree. Rearranging: swap trades two leaves, dock moves one beside another, the drop
+// zone reads a pane's edges; a pane dropped on another trades places or docks (re-wrapping both), a drop
+// off the panes or one that wouldn't fit goes back; a pane steps to its neighbour's place.
+// Run: bun test tools/wall-split.test.mjs
 import { test, expect, beforeEach } from 'bun:test';
 
 const mem = new Map();
@@ -242,4 +245,87 @@ test('the store keeps a split whole across a reload', () => {
     const back = new WallStore(8099);
     expect(back.group(gid)).toEqual(wall.store.group(gid));
     expect(back.group(gid).split.tree).toEqual({ dir: 'col', ratio: 0.5, a: { id: 'a' }, b: { id: 'b' } });
+});
+
+// ── rearranging ───────────────────────────────────────────────────────────
+
+test('swap trades two panes; dock takes a pane out and cuts another in two for it; dropZone reads the edges', () => {
+    const t = { dir: 'row', ratio: 0.3, a: { id: 'a' }, b: { dir: 'col', ratio: 0.5, a: { id: 'b' }, b: { id: 'c' } } };
+    expect(T.swap(t, 'a', 'c')).toEqual({ dir: 'row', ratio: 0.3, a: { id: 'c' }, b: { dir: 'col', ratio: 0.5, a: { id: 'b' }, b: { id: 'a' } } });
+    // a docked below c: a's room goes to the column, c's pane is cut level.
+    expect(T.dock(t, 'a', 'c', 'down')).toEqual({ dir: 'col', ratio: 0.5, a: { id: 'b' }, b: { dir: 'col', ratio: 0.5, a: { id: 'c' }, b: { id: 'a' } } });
+    expect(T.dock(t, 'c', 'a', 'left')).toEqual({ dir: 'row', ratio: 0.3, a: { dir: 'row', ratio: 0.5, a: { id: 'c' }, b: { id: 'a' } }, b: { id: 'b' } });
+    expect(T.dock(t, 'b', 'a', 'up').a).toEqual({ dir: 'col', ratio: 0.5, a: { id: 'b' }, b: { id: 'a' } });
+    expect(() => T.dock(t, 'a', 'a', 'left')).toThrow(/itself/);
+    expect(() => T.dock(t, 'a', 'z', 'left')).toThrow(/no panes/);
+    const r = R(0, 100, -100, 0);
+    expect(T.dropZone(r, { x: 50, y: -50 })).toBe('center');
+    expect(T.dropZone(r, { x: 10, y: -50 })).toBe('left');
+    expect(T.dropZone(r, { x: 90, y: -40 })).toBe('right');
+    expect(T.dropZone(r, { x: 40, y: -5 })).toBe('up');
+    expect(T.dropZone(r, { x: 60, y: -95 })).toBe('down');
+});
+
+test('a pane dropped on another trades places; near its edge it docks beside it; both re-wrap to their new panes', () => {
+    const { wall, terminals } = fakeWall({ a: [120, 40] });
+    wall.add('b', 80, 24);
+    const gid = wall.groups.insertPane('a', 'b', 'right');
+    wall.add('c', 80, 24);
+    wall.groups.insertPane('b', 'c', 'down');
+    const ps = wall.groups.paneRects(gid);
+    const centre = (r) => ({ x: (r.minX + r.maxX) / 2, y: (r.minY + r.maxY) / 2 });
+    // c onto a's middle: they trade places.
+    const swapPlan = wall.groups.paneDrop('c', centre(ps.get('a')));
+    expect(swapPlan).toMatchObject({ gid, at: 'a', zone: 'center', fits: true });
+    expect(swapPlan.rect).toEqual(ps.get('a'));                       // the preview is the pane it takes
+    expect(wall.store.group(gid).split.tree).toEqual(T.insert(T.insert({ id: 'a' }, 'a', 'b', 'row'), 'b', 'c', 'col'));   // a plan changes nothing
+    wall.groups.dropPane('c', centre(ps.get('a')));
+    expect(wall.groups.get(gid).members).toEqual(['c', 'b', 'a']);
+    expect(wall.groups.paneRects(gid).get('c')).toEqual(ps.get('a'));
+    expectFilled(wall, gid);
+    expect(terminals.get('c').rows).toBeGreaterThan(terminals.get('a').rows);   // c re-wrapped to the tall pane
+    // a dropped near b's top edge: it leaves the column (b takes its room), then b's pane is cut level for it.
+    const pb = wall.groups.paneRects(gid).get('b');
+    const p = { x: (pb.minX + pb.maxX) / 2, y: pb.maxY - (pb.maxY - pb.minY) * 0.1 };
+    expect(wall.groups.paneDrop('a', p)).toMatchObject({ at: 'b', zone: 'up' });
+    wall.groups.dropPane('a', p);
+    expect(wall.groups.get(gid).split.tree).toEqual({ dir: 'row', ratio: 0.5, a: { id: 'c' }, b: { dir: 'col', ratio: 0.5, a: { id: 'a' }, b: { id: 'b' } } });
+    expect(wall.groups.get(gid).members).toEqual(['c', 'a', 'b']);
+    expect(T.neighbor(wall.groups.paneRects(gid), 'a', 'down')).toBe('b');
+    expect(T.neighbor(wall.groups.paneRects(gid), 'a', 'left')).toBe('c');
+    expectFilled(wall, gid);
+});
+
+test('a drop off the other panes, or one that would squeeze a pane under 20×5, sends the pane back', () => {
+    const { wall, terminals } = fakeWall({ a: [60, 30] });
+    wall.add('b', 60, 30);
+    const gid = wall.groups.insertPane('a', 'b', 'down');
+    const before = wall.store.group(gid);
+    const pa = wall.groups.paneRects(gid).get('a');
+    terminals.get('b').position.x += 500;                             // dragged far away
+    expect(wall.groups.paneDrop('b', { x: 999, y: 999 })).toBe(null);
+    expect(wall.groups.dropPane('b', { x: 999, y: 999 })).toBe(null);
+    expectFilled(wall, gid);                                         // back in its pane
+    // Narrowed to 30 cells, the split can't take two panes side by side: docking b left of a is refused.
+    wall.groups.resizeSplit(gid, { ...wall.groups.splitRect(gid), maxX: wall.groups.splitRect(gid).minX + 30 * SX });
+    const plan = wall.groups.paneDrop('b', { x: pa.minX + 1, y: (pa.minY + pa.maxY) / 2 });
+    expect(plan).toMatchObject({ at: 'a', zone: 'left', fits: false });
+    expect(wall.groups.dropPane('b', { x: pa.minX + 1, y: (pa.minY + pa.maxY) / 2 })).toBe(null);
+    expect(wall.store.group(gid).split.tree).toEqual(before.split.tree);
+    expectFilled(wall, gid);
+});
+
+test('a pane moves a step at a time: it trades places with its neighbour that way, none at the edge', () => {
+    const { wall } = fakeWall({ a: [120, 40] });
+    wall.add('b', 80, 24);
+    const gid = wall.groups.insertPane('a', 'b', 'right');
+    wall.add('c', 80, 24);
+    wall.groups.insertPane('b', 'c', 'down');
+    expect(wall.groups.movePane('a', 'left')).toBe(null);
+    expect(wall.groups.movePane('c', 'up')).toBe('b');
+    expect(wall.groups.get(gid).members).toEqual(['a', 'c', 'b']);
+    expect(wall.groups.movePane('c', 'left')).toBe('a');
+    expect(wall.groups.get(gid).members).toEqual(['c', 'a', 'b']);
+    expectFilled(wall, gid);
+    expect(() => wall.groups.movePane('a', 'sideways')).toThrow(/left, right, up or down/);
 });

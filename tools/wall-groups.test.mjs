@@ -1,6 +1,7 @@
 // wall-groups.test.mjs — the wall's groups, headless, on a stand-in wall (terminals are plain rects):
 // a group tiles its shown members from where they were gathered, re-tiles as members come, go, hide,
-// show and change columns, moves whole, takes a dropped member into the nearest tile, leaves a
+// show and change columns, moves whole, takes a dropped member into the nearest tile (and says which
+// tile while it's dragged), trades a member with the next tile in its row or column, leaves a
 // freeform group's members where they are, and refuses what it can't do.
 // Run: bun test tools/wall-groups.test.mjs
 import { test, expect, beforeEach } from 'bun:test';
@@ -83,9 +84,31 @@ test('a tiled member dropped elsewhere takes the nearest tile; the others shift 
     const gid = w.groups.create(['a', 'b', 'c'], { columns: 3 });
     const places = ['a', 'b', 'c'].map((id) => at(w, id));
     w.terminal('a').position = { x: places[2].x + 10, y: places[2].y - 5 };   // dragged over the third tile
+    expect(w.groups.tileDrop('a')).toEqual({ to: 2, rect: { minX: places[2].x, maxX: places[2].x + 100, minY: places[2].y - 50, maxY: places[2].y } });
     w.groups.dropMember('a');
     expect(w.groups.get(gid).members).toEqual(['b', 'c', 'a']);
     expect(['b', 'c', 'a'].map((id) => at(w, id))).toEqual(places);
+});
+
+test('a tiled member moves a step: it trades tiles with the next in its row or column, none past the edge; hidden members keep their places', () => {
+    const w = fakeWall({ a: [100, 50], b: [100, 50], c: [100, 50], d: [100, 50], e: [100, 50] });
+    const gid = w.groups.create(['a', 'b', 'c', 'd', 'e'], { columns: 2 });
+    const places = ['a', 'b', 'c', 'd', 'e'].map((id) => at(w, id));
+    expect(w.groups.movePane('a', 'left')).toBe(null);
+    expect(w.groups.movePane('b', 'right')).toBe(null);             // the end of its row
+    expect(w.groups.movePane('e', 'right')).toBe(null);             // the last tile: nothing beside it
+    expect(w.groups.movePane('d', 'up')).toBe('b');
+    expect(w.groups.get(gid).members).toEqual(['a', 'd', 'c', 'b', 'e']);
+    expect(at(w, 'd')).toEqual(places[1]);
+    expect(w.groups.movePane('c', 'down')).toBe('e');
+    expect(w.groups.movePane('a', 'right')).toBe('d');
+    expect(w.groups.get(gid).members).toEqual(['d', 'a', 'e', 'b', 'c']);
+    w.store.setHidden('e', true);
+    expect(w.groups.movePane('c', 'left')).toBe('b');                // shown: d a / b c — e sits out
+    expect(w.groups.get(gid).members).toEqual(['d', 'a', 'e', 'c', 'b']);
+    const f = w.groups.create(['a'], { layout: 'freeform' });
+    expect(() => w.groups.movePane('a', 'up')).toThrow(/freeform/);
+    expect(f).toBeTruthy();
 });
 
 test('removing, ungrouping and regrouping: members stay where they are; an emptied group goes', () => {

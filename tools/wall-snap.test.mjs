@@ -105,6 +105,7 @@ function standIn({ snap = true, tiled = false } = {}) {
         terminalRect: () => ({ minX: grid.position.x, maxX: grid.position.x + widthOf(grid.cols), maxY: grid.position.y, minY: grid.position.y - heightOf(grid.rows) }),
         groups: {
             tiles: () => tiled,
+            tileDrop: () => null,
             shownMembers: () => ['t'],
             dragTo: (_start, dx, dy) => groupMoves.push({ dx, dy }),
         },

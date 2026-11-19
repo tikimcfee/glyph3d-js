@@ -363,6 +363,8 @@ export default class TerminalWall {
         const items = [];
         for (const id of this.selection) if (this.onCanvas(id)) items.push({ id, box: v.toScreenBox(this.windowRect(id)) });
         this.selectionOverlay.update(items, v.view, this.pointer.lassoing);
+        const drop = this.pointer.drop;
+        this.selectionOverlay.setDrop(drop && { box: v.toScreenBox(drop.rect), ok: drop.ok });
         this.fullscreen.updateBackdrop(v, this.config.background);
         this.agents.updateScreenTransforms(v);
     }
