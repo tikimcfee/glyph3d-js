@@ -1,5 +1,9 @@
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
-import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import WebSocketBridge, {
+    normalizeRelayHost,
+    redactCommandArgs,
+    redactRelaySecrets,
+} from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import { installConsoleForwarder } from '@glyph3d/core/services/orchestration/consoleForwarder.js';
 import { installInputTrace } from './inputTrace.js';
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
@@ -88,6 +92,24 @@ function rectOf(grid) {
 /** A shell title, shortened for naming: drop the `user@host:` prefix prompts put in front. */
 function shortTitle(title) {
     return (title || '').replace(/^[^@\s]+@[^:\s]+:/, '').trim();
+}
+
+/** Format a command for warning/error logs with capability tokens redacted. */
+function formatRedactedCmd(cmd) {
+    const tokens = Array.isArray(cmd)
+        ? cmd.map((x) => String(x ?? ''))
+        : String(cmd ?? '').trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return '';
+    const t0 = tokens[0].toLowerCase();
+    const t1 = (tokens[1] || '').toLowerCase();
+    const splitVerb = (t0 === 'wall' || t0 === 'relay') && (t1 === 'token' || t1 === 'connect');
+    const verb = splitVerb ? `${t0}.${t1}` : t0;
+    const head = splitVerb
+        ? `${redactRelaySecrets(tokens[0])} ${redactRelaySecrets(tokens[1])}`
+        : redactRelaySecrets(tokens[0]);
+    const rawArgs = splitVerb ? tokens.slice(2) : tokens.slice(1);
+    const safeArgs = redactCommandArgs(verb, rawArgs);
+    return safeArgs.length ? `${head} ${safeArgs.join(' ')}` : head;
 }
 
 /**
@@ -233,8 +255,11 @@ export default class TerminalWall {
         this.menuInput.install();
 
         const port = this._relayPort;
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const normHost = normalizeRelayHost(location.hostname);
+        const urlHost = normHost.includes(':') ? `[${normHost}]` : normHost;
         this.bridge = new WebSocketBridge(this.router, {
-            url: `ws://${location.hostname}:${port}`, port, autoConnect: false, showStatus: false,
+            url: `${wsProto}//${urlHost}:${port}`, port, autoConnect: false, showStatus: false,
         });
         this.ctx.wsbridge = this.bridge;
         // The page's console and uncaught errors go to the relay's log store (log.query / log.search).
@@ -339,8 +364,17 @@ export default class TerminalWall {
      * @param {string|string[]} cmd @returns {Promise<{text: string, data: any}>}
      */
     async run(cmd) {
-        const r = await this.router.execute(cmd);
-        if (r.text.startsWith('ERR')) console.warn(`[wall] ${Array.isArray(cmd) ? cmd.join(' ') : cmd} → ${r.text}`);
+        let r;
+        try {
+            r = await this.router.execute(cmd);
+        } catch (e) {
+            const msg = redactRelaySecrets(e?.message || String(e));
+            console.warn(`[wall] ${formatRedactedCmd(cmd)} → ERR: ${msg}`);
+            throw e;
+        }
+        if (r.text.startsWith('ERR')) {
+            console.warn(`[wall] ${formatRedactedCmd(cmd)} → ${redactRelaySecrets(r.text)}`);
+        }
         return r;
     }
 
@@ -780,8 +814,9 @@ export default class TerminalWall {
      * @param {string} text
      */
     notify(text) {
-        console.warn(`[wall] ${text}`);
-        this.notice = text;
+        const safe = redactRelaySecrets(String(text ?? ''));
+        console.warn(`[wall] ${safe}`);
+        this.notice = safe;
         clearTimeout(this._noticeTimer);
         this._noticeTimer = setTimeout(() => { this.notice = null; this._emit(); }, this.config.noticeMs);
         this._emit();

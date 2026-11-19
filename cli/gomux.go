@@ -616,9 +616,25 @@ func (r *Relay) attachGomuxAgent(send func(any), name string) {
 		send(map[string]any{"event": "gomux.attaching", "name": name, "id": id, "existing": true})
 		return
 	}
+	tc, err := ensureTermd(termdNS)
+	if err != nil {
+		r.gxMu.Lock()
+		delete(r.gxForked, id)
+		r.gxMu.Unlock()
+		log.Printf("[gomux] %s: %v", name, err)
+		reply(err.Error())
+		return
+	}
+	tc.Close()
+	if r.termdStatus != nil {
+		r.termdStatus.Kick()
+	}
 	pid, err := r.startAdapter(id, cols, rows,
 		[]string{"sh", "-c", gomuxScreenScript, "gomux-screen", r.fs.gomux.tmuxBin, agent.Session, logPath})
 	if err != nil {
+		r.gxMu.Lock()
+		delete(r.gxForked, id)
+		r.gxMu.Unlock()
 		reply("spawn failed: " + err.Error())
 		return
 	}

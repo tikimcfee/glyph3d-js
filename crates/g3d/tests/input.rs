@@ -24,7 +24,10 @@ impl Daemon {
         let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("input-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
+        }
         let socket = dir.join("termd-input.sock");
         let child = Command::new(termd)
             .arg("--socket")

@@ -241,8 +241,12 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 
 `make build` produces the self-contained binary (and `g3d-termd` + `g3d` beside it, which it
 needs for terminals); `make all` cross-compiles
-linux/macOS × amd64/arm64 + windows-amd64 (no terminals on Windows: `attach_windows.go` is a stub;
-`g3d-termd` is built for Linux so far — amd64 natively, arm64 through cargo-zigbuild; macOS is TODO in `docs/termd/DESIGN.md`); `make release VERSION=vX.Y.Z` cuts a GitHub release
-(`RELEASE_NOTES.md`). The single binary is a single-operator tool — `serve` binds `127.0.0.1` by
-default and gates every WebSocket upgrade on a `Host` + `Origin` allowlist and a per-start `0600`
-capability token (`docs/architecture/auth.md`). The product/demo web page is a separate repo.
+linux/macOS × amd64/arm64 + windows-amd64 (the runtime is Unix-only — Linux and macOS build and run
+`g3d-termd` + the relay; `GOOS=windows` compiles for `make all` and fails loud immediately at
+runtime on relay auth, `termd`, and `tools/lib/relay.mjs`); `make release VERSION=vX.Y.Z` cuts a GitHub release
+(`RELEASE_NOTES.md`). The single binary is a single-operator Unix tool — `serve` binds `127.0.0.1` by
+default (non-loopback `--listen` requires a local Tailscale interface IP or `--tls-cert` + `--tls-key`,
+never plaintext LAN `ws://`) and gates every WebSocket upgrade on a strict `Host` + `Origin` allowlist
+and a per-start `0600` capability token in `/run/user/<uid>/g3d` or `<pw_dir>/.local/state/g3d/run`
+(retrieved on demand via `glyph3d-cli token` / `glyph3d-cli url`; `docs/architecture/auth.md`). The
+product/demo web page is a separate repo.

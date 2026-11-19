@@ -4,7 +4,11 @@ import * as THREE from 'three';
 import { useGridRegistry } from '@glyph3d/r3f';
 
 import CommandRouter from '@glyph3d/core/services/orchestration/CommandRouter.js';
-import WebSocketBridge from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import WebSocketBridge, {
+  normalizeRelayHost,
+  redactCommandArgs,
+  relayTokenStorageKey,
+} from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import SourceStream from '@glyph3d/core/services/orchestration/SourceStream.js';
 import HandPresence from '@glyph3d/core/hand/HandPresence.js';
 import HandCalib from './HandCalib.js';
@@ -374,13 +378,26 @@ export function useAppCommands() {
 // never cross-dial the visitor's OWN localhost. The connection chip can still
 // connect manually. ws for http, wss for https — same scheme as the page.
 function resolveRelay(loc, relayParam) {
-  const port = relayParam ? Number(relayParam) : null;
+  const parsedParam = relayParam != null && relayParam !== '' ? Number(relayParam) : NaN;
+  const explicitPort = Number.isInteger(parsedParam) && parsedParam >= 1 && parsedParam <= 65535 ? parsedParam : null;
+  const isVite = loc.port === '5173' || loc.port === '5180';
+  const locPortNum = loc.port ? Number(loc.port) : null;
+  const defaultProtoPort = loc.protocol === 'https:' ? 443 : (loc.protocol === 'http:' ? 80 : null);
+  const port = explicitPort
+    || (isVite ? 8080 : (Number.isInteger(locPortNum) && locPortNum >= 1 && locPortNum <= 65535 ? locPortNum : defaultProtoPort));
   const wsProto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = port ? `ws://${loc.hostname}:${port}` : `${wsProto}//${loc.host}`;
-  const h = loc.hostname;
-  const isLocal = h === 'localhost' || h === '127.0.0.1'
-    || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
-  return { url, port: port || Number(loc.port) || null, autoConnect: !!port || isLocal };
+  const normHost = normalizeRelayHost(loc.hostname);
+  const urlHost = normHost.includes(':') ? `[${normHost}]` : normHost;
+  const includePortInUrl = !!(explicitPort || isVite || loc.port);
+  const url = (port && includePortInUrl) ? `${wsProto}//${urlHost}:${port}` : `${wsProto}//${urlHost}`;
+  const isLocal = normHost === 'localhost' || normHost === '::1' || /^127\./.test(normHost)
+    || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(normHost)
+    || /^fd7a:115c:a1e0:/i.test(normHost);
+  let hasSavedToken = false;
+  if (typeof window !== 'undefined' && port) {
+    try { hasSavedToken = Boolean(window.sessionStorage?.getItem?.(relayTokenStorageKey(port, normHost))); } catch { /* ignore */ }
+  }
+  return { url, port, autoConnect: !!explicitPort || isLocal || hasSavedToken };
 }
 
 export default function CommandProvider({ atlas, relay = null, repo = null, cameraControllerRef, onReady, children }) {
@@ -400,7 +417,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // What the terminal verbs (core) defer to this app for: placement, the dock on spawn,
     // attention focus, holding, workspace persistence, agent-screen write-back.
     ctx.terminalHost = assertTerminalHost(createIdeTerminalHost(ctx, router), 'IDE');
-    router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? args : ''));
+    router.use((name, args) => console.debug(`[cmd] ${name}`, args.length ? redactCommandArgs(name, args) : ''));
     stateRef.current = { ctx, router, registry: ctx.registry, bridge: null };
   }
 
@@ -720,8 +737,8 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     // the user hasn't opted out (settings: relay.autoConnect, default on). Otherwise
     // stay client-only — the chip can connect on demand — so the hosted demo never
     // polls a dead socket.
+    const offConsoleForwarder = installConsoleForwarder(bridge);
     if (autoConnect && getSetting('relay.autoConnect')) bridge.connect();
-    installConsoleForwarder(bridge);
 
     // Devtools/agent handle, mirroring the vanilla IDE's window.viewer.
     window.__glyphClient = state;
@@ -877,6 +894,7 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
     return () => {
       offFrameWatch();
       offConn?.();
+      offConsoleForwarder?.();
       for (const [id, prev] of volumeEntries) {
         try { state.registry.unregister?.(id); } catch (_e) { /* best effort */ }
         if (prev.mesh) { try { state.ctx.pickingSystem?.unregister?.('group', prev.mesh); } catch (_e) { /* best effort */ } }
@@ -884,7 +902,9 @@ export default function CommandProvider({ atlas, relay = null, repo = null, came
       state.registry.removeChangeListener(reconcileWorkspace);
       session.dispose();
       keystrokes();   // installKeyboardRouter returns its uninstall fn
-      bridge.disconnect();
+      bridge.dispose();
+      if (state.bridge === bridge) state.bridge = null;
+      if (state.ctx.wsbridge === bridge) state.ctx.wsbridge = null;
       pickingSystem.dispose();
       state.ctx.pickingSystem = null;
       state.ctx.sceneSystems.dispose();   // hands scene hooks back — a second boot installs its own

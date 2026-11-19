@@ -4,31 +4,45 @@
 // that started a relay must stop the relay's daemon too — or its shells stay behind.
 //
 //   const t = privateTermd('ck-123');          // { dir, env } — pass t.env to the relay
-//   …serve --termd-ns <ns> …                   // the relay and its adapters use dir/termd-<ns>.sock
+//   …serve --termd-ns <ns> …                   // the relay and its adapters use dir/termd-<ns>.sock + dir/relay-<port>.token
 //   await stopTermd(t.dir, ns);                // SIGTERM: termd kills every terminal, then exits
 //
-// The socket lives in $G3D_TEST_RUN_DIR/<tag> (or out/termd/<tag>), never in a person's
-// runtime dir, so a test can't reach a live namespace even by name.
+// The socket and token file live in $G3D_TEST_RUN_DIR/<tag> (or out/termd/<tag>), never in a
+// person's runtime dir, so a test can't reach a live namespace or clobber a live relay token.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /**
- * A scratch directory for a tool's daemons (G3D_TERMD_DIR: sockets, locks, logs). A terminal whose
- * creator sends no environment takes the session's names from the tool's own start values
- * (G3D_TERMD_ENV_SOURCE=daemon), never the desktop session's; and no termd.toml but the
- * directory's own (G3D_TERMD_CONFIG, absent unless a tool writes it), never the person's.
+ * A scratch directory for a tool's daemons and relay tokens (G3D_TERMD_DIR, G3D_RELAY_TOKEN_DIR:
+ * sockets, locks, logs, relay-<port>.token). Any inherited G3D_RELAY_TOKEN is stripped so a test
+ * relay always uses its own isolated token file. A terminal whose creator sends no environment
+ * takes the session's names from the tool's own start values (G3D_TERMD_ENV_SOURCE=daemon), never
+ * the desktop session's; and no termd.toml but the directory's own (G3D_TERMD_CONFIG, absent
+ * unless a tool writes it), never the person's.
  * @param {string} tag @returns {{ dir: string, env: NodeJS.ProcessEnv }}
  */
 export function privateTermd(tag) {
     const base = process.env.G3D_TEST_RUN_DIR || path.join(ROOT, 'out', 'termd');
     const dir = path.join(base, tag);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    return { dir, env: { ...process.env, G3D_TERMD_DIR: dir, G3D_TERMD_ENV_SOURCE: 'daemon', G3D_TERMD_CONFIG: path.join(dir, 'termd.toml') } };
+    chmodSync(dir, 0o700);
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.G3D_RELAY_TOKEN;
+    return {
+        dir,
+        env: {
+            ...cleanEnv,
+            G3D_TERMD_DIR: dir,
+            G3D_RELAY_TOKEN_DIR: dir,
+            G3D_TERMD_ENV_SOURCE: 'daemon',
+            G3D_TERMD_CONFIG: path.join(dir, 'termd.toml'),
+        },
+    };
 }
 
 /** The g3d-termd built beside a relay binary. @param {string} cli */

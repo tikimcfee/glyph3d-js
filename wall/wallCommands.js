@@ -2,7 +2,11 @@ import { checkConfig } from './wallConfig.js';
 import { searchSettings, SECTIONS } from './wallSettings.js';
 import { AGENT_SIDES } from './wallAgentView.js';
 import { busStatus, busAttachable } from './WallBus.js';
-import { parseRelayTokenInput } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
+import {
+    normalizeRelayHost,
+    parseRelayEndpoint,
+    parseRelayTokenInput,
+} from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 
 /**
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
@@ -476,8 +480,25 @@ export default function registerWallCommands(router, wall) {
         return OK(`loaded ${r.loaded} earlier event(s) on ${id}`, r);
     });
     verb('wall.token', '<token | url#token=…>', 'Set the relay capability token and reconnect without reloading the page', (args) => {
-        const tok = parseRelayTokenInput(args[0]);
-        if (!tok) throw new Error('wall.token takes a token or a URL carrying #token=…');
+        const bridge = wall.bridge;
+        if (!bridge) throw new Error('the wall is not running');
+        const raw = typeof args[0] === 'string' ? args[0].trim() : '';
+        if (!raw) throw new Error('wall.token takes a token or a URL carrying #token=…');
+        let tok;
+        if (raw.includes('://')) {
+            const ep = parseRelayEndpoint(raw, { defaultHost: bridge.host });
+            if (!ep.ok || !ep.token) {
+                throw new Error('wall.token takes a token or a valid URL carrying #token=…');
+            }
+            const bridgeHost = normalizeRelayHost(bridge.host);
+            if (ep.host !== bridgeHost || ep.port !== bridge.port) {
+                throw new Error(`URL targets ${ep.host}:${ep.port}, but relay is ${bridgeHost}:${bridge.port}`);
+            }
+            tok = ep.token;
+        } else {
+            tok = parseRelayTokenInput(raw);
+            if (!tok) throw new Error('wall.token takes a token or a URL carrying #token=…');
+        }
         wall.setRelayToken(tok);
         return OK('relay token updated; reconnecting', { hasToken: true });
     });

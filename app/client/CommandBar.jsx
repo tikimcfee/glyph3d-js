@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { createLogger } from '@glyph3d/core/utils/Logger.js';
+import { isSecretCommand, redactRelaySecrets } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import { rank } from './palette/rank.js';
 import { verbEntries, nounEntries } from './palette/providers.js';
 /** @import { AppClient } from './CommandProvider.jsx' */
@@ -54,11 +55,20 @@ const KIND_BADGE = {
   history: ['hist', '#5b6675'],
 };
 
-function loadHistory() {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; }
-}
 function saveHistory(h) {
-  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-MAX_HISTORY))); } catch { /* quota / private mode */ }
+  const safe = h.filter((entry) => typeof entry === 'string' && !isSecretCommand(entry));
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(safe.slice(-MAX_HISTORY))); } catch { /* quota / private mode */ }
+}
+function loadHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    const safe = parsed.filter((entry) => typeof entry === 'string' && !isSecretCommand(entry));
+    if (safe.length !== parsed.length) saveHistory(safe);
+    return safe;
+  } catch {
+    return [];
+  }
 }
 
 /** entry.key with the fzf-matched characters highlighted. */
@@ -148,16 +158,20 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
     const tokens = Array.isArray(cmd) ? cmd : null;
     const text = tokens ? tokens.join(' ') : String(cmd).trim();
     if (!text || !client?.router) return;
+    const secret = isSecretCommand(tokens ?? text) || isSecretCommand(text);
     setRunning(true);
     let res;
     try { res = await client.router.execute(tokens ?? text); }
-    catch (e) { res = { text: `ERR: ${e?.message || e}` }; }
+    catch (e) { res = { text: `ERR: ${redactRelaySecrets(e?.message || String(e))}` }; }
     setRunning(false);
     const t = res?.text ?? '(no output)';
-    setResult({ ok: !/^ERR/i.test(t), text: t });
+    setResult({ ok: !/^ERR/i.test(t), text: secret ? redactRelaySecrets(t) : t });
     // Noun executions enter history as their verb line — re-running from history
-    // re-teaches the same incantation the subtitle showed.
-    setHistory((h) => { const nh = [...h.filter((x) => x !== text), text]; saveHistory(nh); return nh; });
+    // re-teaches the same incantation the subtitle showed. Secret-bearing commands
+    // (relay.token, wall.token, relay.connect with token) never enter history or localStorage.
+    if (!secret) {
+      setHistory((h) => { const nh = [...h.filter((x) => x !== text), text]; saveHistory(nh); return nh; });
+    }
     setHistIdx(-1);
     setValue('');
   }, [client]);
@@ -174,9 +188,13 @@ export default function CommandBar({ client, open, onClose, onHighlight }) {
   const activate = useCallback((row) => {
     const e = row?.entry;
     if (!e) return;
-    if (e.command) { plog.info(`${e.kind} ${e.key} → ${e.command.join(' ')}`); run(e.command); }
-    else if (e.kind === 'history') { plog.info(`history → ${e.key}`); run(e.key); }
-    else insert(e.insert ?? e.key);
+    if (e.command) {
+      if (!isSecretCommand(e.command)) plog.info(`${e.kind} ${e.key} → ${e.command.join(' ')}`);
+      run(e.command);
+    } else if (e.kind === 'history') {
+      if (!isSecretCommand(e.key)) plog.info(`history → ${e.key}`);
+      run(e.key);
+    } else insert(e.insert ?? e.key);
   }, [run, insert]);
 
   const onKeyDown = (e) => {

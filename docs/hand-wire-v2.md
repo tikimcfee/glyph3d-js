@@ -12,12 +12,15 @@ between the two sides and written into both.
 ## Transport
 
 WebSocket to the glyph3d relay, which authenticates every upgrade, a source's included
-(`docs/architecture/auth.md`): the relay binds loopback unless started with `--listen`, and the
-upgrade must carry the relay's capability token (`Authorization: Bearer <token>` or the
-subprotocols `glyph3d, g3d-token.<token>`); without it the relay answers `401`. How a capture
-device receives the token, and whether the link it crosses needs TLS, is not designed yet: the
-relay's security model is fixed, and the device's path to the token will be built around it. Until
-then a MotionSource build that dials without a token is refused.
+(`docs/architecture/auth.md`): the relay binds loopback (`127.0.0.1`) by default, refuses plaintext
+`ws://` on non-loopback network addresses unless on an `UP` local Tailscale WireGuard interface IP
+(`100.64.0.0/10` / `fd7a:115c:a1e0::/48`) or configured with TLS (`--tls-cert` + `--tls-key`,
+serving `wss://`), and requires every upgrade to carry the relay's capability token
+(`Authorization: Bearer <token>` or `Sec-WebSocket-Protocol: glyph3d, g3d-token.<token>`); without
+it the relay answers `401`. How a capture device pairs to receive the token (and trusts a local TLS
+certificate when not over Tailscale or USB/loopback) is not designed yet: the relay's
+secure-or-nothing model is fixed, and the device's provisioning flow will be built around it. Until
+then a MotionSource build that dials unencrypted LAN `ws://` or omits the token is refused.
 
 The first message is `SOURCE hand`; the relay acks
 `{"ok":true,"role":"source","sourceId":"src-hand-0",…}` and forwards each later text frame to

@@ -114,8 +114,10 @@ pub const SCRUB: &[&str] = &[
     "ATUIN_SESSION",
     "ATUIN_HISTORY_ID",
     "ATUIN_SHLVL",
-    // termd's own controls (G3D_TERMD_DIR, G3D_TERMD_ENV_SOURCE, G3D_TERMD_CONFIG, the test hooks).
+    // termd's own controls (G3D_TERMD_DIR, G3D_TERMD_ENV_SOURCE, G3D_TERMD_CONFIG, the test hooks)
+    // and the glyph3d relay's capability token / runtime controls.
     "G3D_TERMD_*",
+    "G3D_RELAY_*",
 ];
 
 /// The no-caller allowlist: what a terminal whose creator sends no environment (the wall, the
@@ -835,7 +837,13 @@ impl Policy {
             source,
             settings,
             start_env: std::env::vars_os()
-                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                .filter_map(|(k, v)| {
+                    let k = k.into_string().ok()?;
+                    if k.starts_with("G3D_RELAY_") {
+                        return None;
+                    }
+                    Some((k, v.into_string().ok()?))
+                })
                 .collect(),
             manager_timeout,
             #[cfg(feature = "test-hooks")]
@@ -1431,6 +1439,8 @@ mod tests {
             ("__CFBundleIdentifier", "com.apple.Terminal"),
             ("G3D_TERMD_DIR", "/scratch"),
             ("G3D_TERMD_TEST_HOOKS", "1"),
+            ("G3D_RELAY_TOKEN", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            ("G3D_RELAY_TOKEN_DIR", "/scratch/tokens"),
             ("LC_TERMINAL", "iTerm2"),
             ("TERMINFO", "/opt/kitty/terminfo"),
             ("TERMINFO_DIRS", "/usr/share/terminfo"),
@@ -1478,6 +1488,8 @@ mod tests {
             "__CFBundleIdentifier",
             "G3D_TERMD_DIR",
             "G3D_TERMD_TEST_HOOKS",
+            "G3D_RELAY_TOKEN",
+            "G3D_RELAY_TOKEN_DIR",
             "LC_TERMINAL",
             "TERMINFO",
             "GNOME_TERMINAL_SCREEN",
@@ -2005,6 +2017,21 @@ mod tests {
         assert!(parse_manager_env(r#"{"type":"s","data":"x"}"#).is_err());
         assert!(parse_manager_env(r#"{"type":"as","data":["NOEQUALS"]}"#).is_err());
         assert!(parse_manager_env("garbage").is_err());
+    }
+
+    #[test]
+    fn scrub_removes_g3d_relay_token_from_env_base() {
+        let base = caller(&[
+            ("G3D_RELAY_TOKEN", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+            ("G3D_RELAY_TOKEN_DIR", "/tmp/tok"),
+            ("PATH", "/usr/bin:/bin"),
+            ("KEEP_VAR", "1"),
+        ]);
+        let t = sleep();
+        let p = compose0(base, &req(Some(&t), None)).unwrap();
+        assert_eq!(get(&p, "G3D_RELAY_TOKEN"), None);
+        assert_eq!(get(&p, "G3D_RELAY_TOKEN_DIR"), None);
+        assert_eq!(get(&p, "KEEP_VAR"), Some("1"));
     }
 
     #[test]

@@ -266,7 +266,7 @@ async function startRelay(fixture, name, origins = []) {
         if (p.exitCode !== null) throw new Error(`relay exited ${p.exitCode}: ${log.join('').slice(-400)}`);
         return listening(port);
     }, 15_000, 'relay');
-    return { port, root, dir: join(root, 'src'), stop, log };
+    return { port, root, dir: join(root, 'src'), tokenDir: termd.dir, stop, log };
 }
 
 // ── running one check ────────────────────────────────────────────────────────────────────────
@@ -299,6 +299,10 @@ async function runOne(c, svc) {
         if (c.needs?.includes('own-relay')) vars.port = await freePort();
         const cmd = c.cmd.map((a) => fill(a, vars));
         const env = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' };
+        if (relay) {
+            env.G3D_RELAY_TOKEN_DIR = relay.tokenDir;
+            delete env.G3D_RELAY_TOKEN;
+        }
         for (const [k, v] of Object.entries(c.env ?? {})) env[k] = fill(v, vars);
         const timeout = c.timeoutMs ?? DEFAULT_TIMEOUT[c.tier];
         const r = await new Promise((res) => {

@@ -12,6 +12,7 @@
 // "OK: connected as ctrl-N" → "pong". A reply is the next frame that isn't a pushed event
 // ({"event": …} without "response").
 
+import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,15 +26,141 @@ import path from 'node:path';
  * }} RelayClient
  */
 
+// A token rides in a Sec-WebSocket-Protocol entry, so it must be an RFC 7230 token.
+const TOKEN_CHARS = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
 /**
- * Return the per-uid runtime directory holding `relay-<port>.token`, matching `cli/auth*.go`.
+ * True if a URL query string carries a `token` parameter (case-insensitive, `&` or `;` separated).
+ * @param {string} search
+ * @returns {boolean}
+ */
+function hasQueryToken(search) {
+  const q = search.startsWith('?') ? search.slice(1) : search;
+  if (!q) return false;
+  for (const seg of q.split(/[&;]/)) {
+    if (!seg) continue;
+    const eq = seg.indexOf('=');
+    const rawKey = eq >= 0 ? seg.slice(0, eq) : seg;
+    let key = rawKey;
+    try { key = decodeURIComponent(rawKey.replace(/\+/g, ' ')); } catch { /* keep rawKey */ }
+    if (key.trim().toLowerCase() === 'token') return true;
+  }
+  return false;
+}
+
+/**
+ * Parse a relay capability token from a raw token string or a `#token=<val>` URL/fragment.
+ * Throws on `?token=` query strings, tokenless URLs, or non-RFC-7230 characters (never echoes raw input).
+ * @param {string} raw
+ * @returns {string}
+ */
+function parseRelayTokenValue(raw) {
+  if (typeof raw !== 'string') throw new Error('invalid relay token');
+  const s = raw.trim();
+  if (!s) throw new Error('empty relay token');
+
+  const hashIdx = s.indexOf('#');
+  const beforeHash = hashIdx >= 0 ? s.slice(0, hashIdx) : s;
+  const qIdx = beforeHash.indexOf('?');
+  if (qIdx >= 0 && hasQueryToken(beforeHash.slice(qIdx))) {
+    throw new Error('relay token must not be passed in URL query string; use #token= fragment');
+  }
+
+  if (s.includes('://')) {
+    let u;
+    try {
+      u = new URL(s);
+    } catch {
+      throw new Error('invalid relay token URL');
+    }
+    if (hasQueryToken(u.search)) {
+      throw new Error('relay token must not be passed in URL query string; use #token= fragment');
+    }
+    const frag = u.hash.startsWith('#') ? u.hash.slice(1) : u.hash;
+    const tok = (new URLSearchParams(frag).get('token') || '').trim();
+    if (!tok) {
+      throw new Error('URL carries no #token= fragment');
+    }
+    if (!TOKEN_CHARS.test(tok)) {
+      throw new Error('invalid relay token characters');
+    }
+    return tok;
+  }
+
+  if (hashIdx >= 0) {
+    const params = new URLSearchParams(s.slice(hashIdx + 1));
+    if (!params.has('token')) {
+      throw new Error('fragment carries no #token= value');
+    }
+    const tok = (params.get('token') || '').trim();
+    if (!tok || !TOKEN_CHARS.test(tok)) {
+      throw new Error('invalid relay token characters');
+    }
+    return tok;
+  }
+
+  if (!TOKEN_CHARS.test(s)) {
+    throw new Error('invalid relay token characters');
+  }
+  return s;
+}
+
+/** @type {Map<number, string>} */
+const _pwDirCache = new Map();
+
+/**
+ * Resolve `<pw_dir>` for `uid` directly from the OS user database (ignoring `$HOME`, which Bun's
+ * `os.userInfo().homedir` consults before `getpwuid`), matching Go `user.LookupId` in `cli/auth_unix.go`.
+ * @param {number} uid
+ * @returns {string}
+ */
+function lookupPasswdHomeByUid(uid) {
+  const cached = _pwDirCache.get(uid);
+  if (cached !== undefined) return cached;
+  let found = '';
+  if (process.platform === 'darwin') {
+    try {
+      const line = execFileSync('/usr/bin/id', ['-P'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const parts = line.split(':');
+      if (parts.length >= 9 && Number(parts[2]) === uid && parts[8].trim()) {
+        found = parts[8].trim();
+      }
+    } catch { /* fall through */ }
+  }
+  if (!found) {
+    try {
+      for (const line of readFileSync('/etc/passwd', 'utf8').split('\n')) {
+        if (!line || line.startsWith('#')) continue;
+        const parts = line.split(':');
+        if (parts.length >= 6 && Number(parts[2]) === uid && parts[5].trim()) {
+          found = parts[5].trim();
+          break;
+        }
+      }
+    } catch { /* fall through */ }
+  }
+  if (!found && process.platform !== 'darwin') {
+    try {
+      const line = execFileSync('getent', ['passwd', String(uid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const parts = line.split(':');
+      if (parts.length >= 6 && Number(parts[2]) === uid && parts[5].trim()) {
+        found = parts[5].trim();
+      }
+    } catch { /* fall through */ }
+  }
+  _pwDirCache.set(uid, found);
+  return found;
+}
+
+/**
+ * Return the per-uid runtime directory holding `relay-<port>.token`, matching `cli/auth_unix.go`.
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {string}
  */
 export function relayTokenDir(env = process.env) {
+  if (process.platform === 'win32') throw new Error('glyph3d relay is unsupported on Windows');
   const override = (env.G3D_RELAY_TOKEN_DIR || '').trim();
   if (override) return override;
-  if (process.platform === 'win32') return path.join(os.tmpdir(), 'glyph3d-relay');
   const uid = process.getuid();
   if (process.platform === 'linux') {
     const runDir = `/run/user/${uid}`;
@@ -42,9 +169,23 @@ export function relayTokenDir(env = process.env) {
       if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o077) === 0) {
         return path.join(runDir, 'g3d');
       }
-    } catch { /* fall back to /tmp/g3d-<uid> */ }
+    } catch { /* fall back to ~/.local/state/g3d/run */ }
   }
-  return `/tmp/g3d-${uid}`;
+  let home = lookupPasswdHomeByUid(uid);
+  if (!home) {
+    try {
+      home = (os.userInfo().homedir || '').trim();
+    } catch {
+      home = '';
+    }
+  }
+  if (!home) {
+    home = (env.HOME || '').trim();
+  }
+  if (!home) {
+    throw new Error(`cannot resolve home directory for uid ${uid}`);
+  }
+  return path.join(home, '.local', 'state', 'g3d', 'run');
 }
 
 /**
@@ -58,17 +199,18 @@ export function relayTokenPath(port, env = process.env) {
 
 /**
  * Read the capability token for a local relay on `port` (or `$G3D_RELAY_TOKEN` when set).
- * Returns `null` when no token file exists yet; throws if permissions/ownership are unsafe.
+ * Returns `null` when no token file exists yet; throws if permissions/ownership/shape are unsafe.
  * @param {number} port
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {string|null}
  */
 export function readRelayToken(port, env = process.env) {
+  if (process.platform === 'win32') throw new Error('glyph3d relay is unsupported on Windows');
   const fromEnv = (env.G3D_RELAY_TOKEN || '').trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return parseRelayTokenValue(fromEnv);
   if (!Number.isInteger(Number(port)) || Number(port) <= 0) return null;
   const dir = relayTokenDir(env);
-  const file = relayTokenPath(Number(port), env);
+  const file = path.join(dir, `relay-${Number(port)}.token`);
   let dfi, ffi;
   try {
     dfi = lstatSync(dir);
@@ -77,17 +219,18 @@ export function readRelayToken(port, env = process.env) {
     if (e?.code === 'ENOENT') return null;
     throw e;
   }
-  if (process.platform !== 'win32') {
-    const uid = process.getuid();
-    if (!dfi.isDirectory() || dfi.isSymbolicLink() || dfi.uid !== uid || (dfi.mode & 0o077) !== 0) {
-      throw new Error(`unsafe relay runtime dir ${dir}`);
-    }
-    if (!ffi.isFile() || ffi.isSymbolicLink() || ffi.uid !== uid || (ffi.mode & 0o077) !== 0) {
-      throw new Error(`unsafe relay token file ${file}`);
-    }
+  const uid = process.getuid();
+  if (!dfi.isDirectory() || dfi.isSymbolicLink() || dfi.uid !== uid || (dfi.mode & 0o077) !== 0) {
+    throw new Error(`unsafe relay runtime dir ${dir}`);
+  }
+  if (!ffi.isFile() || ffi.isSymbolicLink() || ffi.uid !== uid || (ffi.mode & 0o077) !== 0) {
+    throw new Error(`unsafe relay token file ${file}`);
   }
   const tok = readFileSync(file, 'utf8').trim();
-  return tok || null;
+  if (!tok || !TOKEN_CHARS.test(tok)) {
+    throw new Error(`invalid relay token in ${file}`);
+  }
+  return tok;
 }
 
 /**
@@ -96,8 +239,12 @@ export function readRelayToken(port, env = process.env) {
  * @returns {string[]}
  */
 export function relayProtocols(token) {
-  const clean = typeof token === 'string' ? token.trim() : '';
-  return clean ? ['glyph3d', `g3d-token.${clean}`] : ['glyph3d'];
+  if (token == null) return ['glyph3d'];
+  if (typeof token !== 'string') throw new Error('invalid relay token');
+  const clean = token.trim();
+  if (!clean) return ['glyph3d'];
+  if (!TOKEN_CHARS.test(clean)) throw new Error('invalid relay token characters');
+  return ['glyph3d', `g3d-token.${clean}`];
 }
 
 /** @param {string} raw @returns {RelayReply|null} null for a pushed event */
@@ -119,6 +266,7 @@ function parseReply(raw) {
  * @returns {Promise<RelayClient>}
  */
 export function dialRelay(port, { handshakeMs = 5000, token = undefined } = {}) {
+  if (process.platform === 'win32') throw new Error('glyph3d relay is unsupported on Windows');
   const url = `ws://localhost:${port}`;
   const tok = token !== undefined ? token : readRelayToken(port);
   return new Promise((resolve, reject) => {

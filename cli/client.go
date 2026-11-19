@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -20,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -31,29 +31,70 @@ import (
 // --- Connection ---
 
 func portFromRelayURL(rawURL string) (int, error) {
-	u, err := url.Parse(rawURL)
+	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return 0, err
+		return 0, sanitizeURLError(err)
 	}
-	if p := u.Port(); p != "" {
-		return strconv.Atoi(p)
+	if u.Opaque != "" {
+		return 0, fmt.Errorf("missing scheme in relay URL %q", redactURLFragment(rawURL))
 	}
-	return 8080, nil
+	if u.Host != "" {
+		_, pStr, err := splitHostPortStrict(u.Host)
+		if err != nil {
+			return 0, err
+		}
+		if pStr != "" {
+			return parseStrictPort(pStr)
+		}
+	} else if pStr := u.Port(); pStr != "" {
+		return parseStrictPort(pStr)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+		return 443, nil
+	case "ws", "http":
+		return 80, nil
+	case "":
+		return 8080, nil
+	default:
+		return 0, fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
 }
 
 func resolveDialURLAndHeaders(rawURL string) (string, http.Header, error) {
+	return resolveDialURLAndHeadersWithPortPref(rawURL, *port > 0)
+}
+
+func resolveDialURLAndHeadersWithPortPref(rawURL string, preferPortFile bool) (string, http.Header, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", nil, fmt.Errorf("invalid relay URL %q: %w", rawURL, err)
+		return "", nil, fmt.Errorf("invalid relay URL %q: %w", redactURLFragment(rawURL), sanitizeURLError(err))
 	}
-	if u.Query().Has("token") {
-		return "", nil, fmt.Errorf("relay token in URL query string is forbidden; use #token= or G3D_RELAY_TOKEN")
+	if hasQueryToken(u.RawQuery) {
+		return "", nil, fmt.Errorf("relay token in URL query string is forbidden; set G3D_RELAY_TOKEN")
 	}
 	var tok string
 	if u.Fragment != "" {
 		frag, _ := url.ParseQuery(u.Fragment)
-		tok = strings.TrimSpace(frag.Get("token"))
+		for k, vals := range frag {
+			if strings.EqualFold(strings.TrimSpace(k), "token") && len(vals) > 0 {
+				tok = strings.TrimSpace(vals[0])
+				break
+			}
+		}
 		u.Fragment = ""
+	}
+	if tok == "" && preferPortFile && isLoopbackListenHost(u.Hostname()) {
+		if p, err := portFromRelayURL(u.String()); err == nil && p > 0 {
+			diskTok, err := readRelayTokenFile(p)
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return "", nil, err
+				}
+			} else {
+				tok = diskTok
+			}
+		}
 	}
 	if tok == "" {
 		if envTok := strings.TrimSpace(os.Getenv("G3D_RELAY_TOKEN")); envTok != "" {
@@ -62,9 +103,14 @@ func resolveDialURLAndHeaders(rawURL string) (string, http.Header, error) {
 				return "", nil, err
 			}
 			tok = parsed
-		} else if isLoopbackListenHost(u.Hostname()) {
+		} else if !preferPortFile && isLoopbackListenHost(u.Hostname()) {
 			if p, err := portFromRelayURL(u.String()); err == nil && p > 0 {
-				if diskTok, err := readRelayToken(p); err == nil {
+				diskTok, err := readRelayToken(p)
+				if err != nil {
+					if !errors.Is(err, os.ErrNotExist) {
+						return "", nil, err
+					}
+				} else {
 					tok = diskTok
 				}
 			}
@@ -84,13 +130,14 @@ func connect(rawURL string) (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	safeDial := redactURLFragment(dialURL)
 	conn, resp, err := websocket.DefaultDialer.Dial(dialURL, hdr)
 	if err != nil {
 		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			p, _ := portFromRelayURL(dialURL)
-			return nil, fmt.Errorf("dial %s: HTTP %d (%s — check %s or G3D_RELAY_TOKEN)", dialURL, resp.StatusCode, http.StatusText(resp.StatusCode), relayTokenPath(p))
+			return nil, fmt.Errorf("dial %s: HTTP %d (%s — check %s or G3D_RELAY_TOKEN)", safeDial, resp.StatusCode, http.StatusText(resp.StatusCode), relayTokenPath(p))
 		}
-		return nil, fmt.Errorf("dial %s: %w (is a relay up? glyph3d-cli serve)", dialURL, err)
+		return nil, fmt.Errorf("dial %s: %w (is a relay up? glyph3d-cli serve)", safeDial, sanitizeURLError(err))
 	}
 	if err := conn.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
 		conn.Close()
@@ -123,10 +170,10 @@ func tokenCmd(rawURL string, args []string) int {
 	}
 	p, err := portFromRelayURL(rawURL)
 	if err != nil || p <= 0 {
-		fmt.Fprintf(os.Stderr, "token: cannot determine relay port from %q\n", rawURL)
+		fmt.Fprintf(os.Stderr, "token: cannot determine relay port from %q\n", redactURLFragment(rawURL))
 		return 2
 	}
-	tok, err := readRelayToken(p)
+	tok, err := readRelayTokenWithPortPref(p, *port > 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "token: %v\n", err)
 		return 1
@@ -142,21 +189,27 @@ func urlCmd(rawURL string, args []string) int {
 	}
 	p, err := portFromRelayURL(rawURL)
 	if err != nil || p <= 0 {
-		fmt.Fprintf(os.Stderr, "url: cannot determine relay port from %q\n", rawURL)
+		fmt.Fprintf(os.Stderr, "url: cannot determine relay port from %q\n", redactURLFragment(rawURL))
 		return 2
 	}
-	tok, err := readRelayToken(p)
+	tok, err := readRelayTokenWithPortPref(p, *port > 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "url: %v\n", err)
 		return 1
 	}
-	base := fmt.Sprintf("http://localhost:%d/", p)
+	scheme := "http"
+	if u, uerr := url.Parse(strings.TrimSpace(rawURL)); uerr == nil {
+		if strings.EqualFold(u.Scheme, "wss") || strings.EqualFold(u.Scheme, "https") {
+			scheme = "https"
+		}
+	}
+	base := fmt.Sprintf("%s://localhost:%d/", scheme, p)
 	if len(args) == 1 {
 		base = args[0]
 	}
 	out, err := formatBrowserTokenURL(base, tok)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "url: %v\n", err)
+		fmt.Fprintf(os.Stderr, "url: %v\n", sanitizeURLError(err))
 		return 2
 	}
 	fmt.Println(out)
@@ -547,10 +600,10 @@ func screenshotCmd(url string, args []string) int {
 	for _, c := range cmds {
 		resp, err := s.send(c, cmdWithin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "screenshot: --cmd %q: %v\n", c, err)
+			fmt.Fprintf(os.Stderr, "screenshot: --cmd %q: %v\n", scrubLogSecrets(c, ""), err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "cmd: %s → %s\n", c, lastLine(resp.Text))
+		fmt.Fprintf(os.Stderr, "cmd: %s → %s\n", scrubLogSecrets(c, ""), lastLine(scrubLogSecrets(resp.Text, "")))
 		if resp.failed() {
 			return 1
 		}
@@ -698,7 +751,7 @@ func logFollowCmd(url string, args []string) int {
 				fmt.Fprintf(os.Stderr, "log.follow refused: %s\n", m.Error)
 				return 1
 			}
-			fmt.Fprintf(os.Stderr, "following %s (push feed)\n", url)
+			fmt.Fprintf(os.Stderr, "following %s (push feed)\n", redactURLFragment(url))
 		}
 	}
 }

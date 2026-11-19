@@ -18,6 +18,16 @@ function score(q, s) {
 /** A group's layout in a few words. */
 const layoutText = (g) => (g.layout === 'tile' ? `tile · ${g.columns} col${g.columns === 1 ? '' : 's'}` : 'freeform');
 
+/** Extract `<val>` when a user types `wall.token <val>` or pastes a `#token=…` URL/fragment in find mode. */
+function directTokenInput(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const cmdMatch = trimmed.match(/^wall(?:\.|\s+)token\s+(.+)$/i);
+  if (cmdMatch) return cmdMatch[1].trim();
+  if (/#(?:[^#\s]*[&;])?token=/i.test(trimmed)) return trimmed;
+  return null;
+}
+
 /**
  * The floating find-by-name palette — the omnibar. FIND mode lists every terminal, shown or hidden
  * (marked), under its group: with no query, as the tree (each group, then its members, then the
@@ -26,18 +36,22 @@ const layoutText = (g) => (g.layout === 'tile' ? `tile · ${g.columns} col${g.co
  * on another host), whose Enter attaches (wall.attach — the agent's terminal if one is attached, else
  * a new one running `agent attach`). ↑/↓ choose, Enter: a terminal is revealed (shown if hidden, focused,
  * framed), a group framed. Actions ride along — new terminal, fit all, the sidebar, the settings,
- * snapping and the grid, and for the focused terminal and the selection: hide, close, rename, group,
+ * snapping, the grid, setting the relay token, and for the focused terminal and the selection: hide, close, rename, group,
  * add to / take out of a group, ungroup, tile columns, layout. RENAME mode edits the name of the terminal or group that rename
  * began on (focus may move meanwhile) — Enter saves, an empty name goes back to the default; if it
- * goes away, rename mode ends. Every choice runs a wall verb.
+ * goes away, rename mode ends. TOKEN mode accepts a raw capability token or `#token=…` URL and connects.
+ * Every choice runs a wall verb.
  */
-export default function Palette({ wall, state, onClose }) {
-  const [mode, setMode] = useState('find');
+export default function Palette({ wall, state, onClose, initialMode = 'find' }) {
+  const relayPort = wall?.bridge?.port ?? wall?._relayPort
+    ?? (typeof location !== 'undefined' ? Number(new URLSearchParams(location.search).get('relay')) || 8080 : 8080);
+  const [mode, setMode] = useState(initialMode);
   const [query, setQuery] = useState('');
   const [index, setIndex] = useState(0);
   /** What rename edits: { kind: 'terminal'|'group', id }. */
   const [renameOf, setRenameOf] = useState(null);
   const inputRef = useRef(null);
+  useEffect(() => { setMode(initialMode); setQuery(''); setIndex(0); }, [initialMode]);
   useEffect(() => { inputRef.current?.focus(); }, [mode]);
 
   const termById = useMemo(() => new Map(state.terminals.map((t) => [t.id, t])), [state]);
@@ -108,6 +122,7 @@ export default function Palette({ wall, state, onClose }) {
       { id: 'settings', label: state.settingsPanel.open ? 'close the settings' : 'open the settings', detail: chordLabel([',']), run: run(['wall.settings', 'toggle']) },
       { id: 'snap', label: state.config.snap ? 'stop snapping to the grid' : 'snap to the grid', detail: chordLabel(["'"]), run: run(['wall.snap', 'toggle']) },
       { id: 'grid', label: state.config.gridShow ? 'hide the grid' : 'show the grid', detail: chordLabel(["'"], { shift: true }), run: run(['wall.grid', 'toggle']) },
+      { id: 'token', label: 'set relay token…', detail: `:${relayPort}`, run: () => { setMode('token'); setQuery(''); } },
       sel.length > 0 && { id: 'group-sel', label: `group the selection (${sel.length})`, detail: chordLabel(['G']), run: run(['wall.group']) },
       ...(sel.length > 0 ? state.groups.map((g) => ({ id: `add-sel:${g.id}`, label: `add the selection to "${g.name}"`, detail: g.id, run: run(['wall.group.add', g.id, ...sel]) })) : []),
       focused && {
@@ -129,9 +144,16 @@ export default function Palette({ wall, state, onClose }) {
       fg && { id: 'ungroup', label: `ungroup "${fg.name}"`, detail: chordLabel(['G'], { shift: true }), run: run(['wall.ungroup', fg.id]) },
     ].filter(Boolean).map((a) => ({ ...a, kind: 'action', depth: 0 })).filter((a) => score(query, a.label) != null);
     return [...listed, ...actions];
-  }, [mode, query, state, wall, focused, onClose, termById, groupById]);
+  }, [mode, query, state, wall, focused, onClose, termById, groupById, relayPort]);
 
   useEffect(() => { setIndex((i) => Math.min(i, Math.max(0, items.length - 1))); }, [items.length]);
+
+  const submitToken = (val) => {
+    Promise.resolve(wall.run(['wall.token', val])).then((r) => {
+      if (r?.text?.startsWith('ERR:')) wall.notify?.(r.text.replace(/^ERR:\s*/, ''));
+    });
+    onClose();
+  };
 
   const choose = (item) => {
     if (!item) return;
@@ -143,6 +165,13 @@ export default function Palette({ wall, state, onClose }) {
 
   const onKeyDown = (e) => {
     if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+    if (mode === 'token') {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitToken(query.trim());
+      }
+      return;
+    }
     if (mode === 'rename') {
       if (e.key === 'Enter' && target) {
         e.preventDefault();
@@ -153,20 +182,29 @@ export default function Palette({ wall, state, onClose }) {
     }
     if (e.key === 'ArrowDown') { e.preventDefault(); setIndex((i) => Math.min(items.length - 1, i + 1)); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setIndex((i) => Math.max(0, i - 1)); }
-    else if (e.key === 'Enter') { e.preventDefault(); choose(items[Math.min(index, items.length - 1)]); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const tokVal = directTokenInput(query);
+      if (tokVal) { submitToken(tokVal); return; }
+      if (/^wall(?:\.|\s+)token$/i.test(query.trim())) { setMode('token'); setQuery(''); return; }
+      choose(items[Math.min(index, items.length - 1)]);
+    }
   };
 
   const labelColor = (it) => (it.kind === 'agent' ? (it.dim ? '#6b7383' : busStatus(it.status).colour) : it.kind === 'action' ? '#8ab4f8' : it.kind === 'group' ? '#aeb7c6' : it.hidden ? '#6b7383' : '#e6e9ef');
   return (
     <div style={styles.scrim} onMouseDown={onClose}>
-      <div style={styles.box} onMouseDown={(e) => e.stopPropagation()} data-palette="">
+      <div style={styles.box} onMouseDown={(e) => e.stopPropagation()} data-palette="" data-palette-mode={mode}>
+        {mode === 'token' && <div style={styles.caption}>paste relay token or #token=… URL — Enter connects</div>}
         {target && <div style={styles.caption}>rename {target.id} — empty uses {renameOf.kind === 'group' ? `"group N"` : "the shell's title"}</div>}
         <input
           ref={inputRef}
           value={query}
           onChange={(e) => { setQuery(e.target.value); setIndex(0); }}
           onKeyDown={onKeyDown}
-          placeholder={target ? target.name : 'find a terminal, group or agent…'}
+          placeholder={mode === 'token' ? `token or http://localhost:${relayPort}/#token=…` : target ? target.name : 'find a terminal, group or agent…'}
+          spellCheck={false}
+          autoComplete="off"
           style={styles.input}
         />
         {mode === 'find' && (

@@ -13,6 +13,7 @@ import CommandBar from './client/CommandBar.jsx';
 import StatusBar from './StatusBar.jsx';
 import { getSetting } from './client/settings.js';
 import { stateController } from '@glyph3d/core/services/state';
+import { consumeRelayTokenFromLocation } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 // The font chain (fonts/families.js): the families a terminal can draw in, each with its four
 // faces — the first is the cell code, labels and books are laid out on — then the fallbacks that
 // cover what they lack (Nerd-Font icons/powerline/stars, then broad symbols), then "oh well" (a
@@ -20,6 +21,36 @@ import { stateController } from '@glyph3d/core/services/state';
 import { fontChain } from '@glyph3d/core/fonts/families.js';
 
 const FONT_CHAIN = fontChain();
+
+// ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
+// relay is on another port). Else if `#token=` arrived on a non-Vite port, bind to
+// `window.location.port` rather than a stale `relay.lastPort` in localStorage.
+// Scrub `#token=` from `window.location.hash` synchronously on tick 0 before async
+// WASM/font boot runs so the token never lingers in the address bar.
+const validRelayPort = (v) => {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+};
+const searchParams = new URLSearchParams(window.location.search);
+const queryRelay = searchParams.get('relay');
+const hasHashToken = /(?:^|[#&;])token=/i.test(window.location.hash || '');
+const locPort = window.location.port;
+const isVitePort = locPort === '5173' || locPort === '5180';
+const defaultProtoPort = window.location.protocol === 'https:'
+  ? 443
+  : (window.location.protocol === 'http:' ? 80 : null);
+const effectiveLocPort = locPort ? validRelayPort(locPort) : defaultProtoPort;
+const savedRelayPort = stateController.get('relay.lastPort', null);
+const initialRelay = validRelayPort(queryRelay)
+  ?? ((hasHashToken && !isVitePort)
+    ? (locPort ? validRelayPort(locPort) : null)
+    : (savedRelayPort != null ? validRelayPort(savedRelayPort) : null));
+const bootRelayPort = initialRelay
+  || (!isVitePort && effectiveLocPort ? effectiveLocPort : 8080);
+consumeRelayTokenFromLocation(bootRelayPort, window.location.hostname);
+
+// ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
+const repoParam = searchParams.get('repo');
 
 // Boot stamp — "what code am I running?", answered by the page itself and kept by the
 // relay's log store (so `log.search boot` answers page-less from the CLI). Dev fetches the
@@ -31,17 +62,6 @@ fetch('/__glyph-boot.json').then((r) => (r.ok ? r.json() : null)).catch(() => nu
     const s = live || (typeof __GLYPH_BOOT_BUILD__ !== 'undefined' ? __GLYPH_BOOT_BUILD__ : null);
     if (s) console.info(`[boot] glyph3d ${s.hash}${s.dirty ? '+dirty' : ''} (${s.branch}) — ${s.at}${live ? ' · live tree' : ' · baked'}`);
   });
-
-// ?relay=PORT pins the relay to a specific port (dev: vite serves the page, the Go
-// relay is on another port). Absent → fall back to the last port the connection chip
-// used (persisted in g3d.* localStorage), so a dev reload re-dials it without retyping;
-// absent + none saved → the relay (if any) is same-origin as the page (the binary
-// serves both). null lets CommandProvider gate auto-connect by host.
-const savedRelayPort = stateController.get('relay.lastPort', null);
-const relayParam = new URLSearchParams(location.search).get('relay')
-  ?? (savedRelayPort != null ? String(savedRelayPort) : null);
-// ?repo=owner/repo[/branch] → render that GitHub repo client-only (no relay needed).
-const repoParam = new URLSearchParams(location.search).get('repo');
 
 // Draggable splitter between the dock sidebar and the canvas. The sidebar width is
 // app state (not pinned), so panels are resizable; the r3f canvas auto-resizes to its
@@ -252,7 +272,7 @@ function App() {
                   Page served by Vite (:5173); relay is the Go server :8080. */}
               <CommandProvider
                 atlas={atlas}
-                relay={relayParam}
+                relay={initialRelay}
                 repo={repoParam}
                 cameraControllerRef={cameraRef}
                 onReady={setClient}

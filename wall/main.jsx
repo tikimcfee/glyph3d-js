@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useGlyphEngine, GlyphCanvas, useGridRegistry } from '@glyph3d/r3f';
 import { fontChain } from '@glyph3d/core/fonts/families.js';
+import { consumeRelayTokenFromLocation } from '@glyph3d/core/services/orchestration/WebSocketBridge.js';
 import TerminalWall from './TerminalWall.js';
 import Palette from './Palette.jsx';
 import Sidebar from './Sidebar.jsx';
@@ -21,7 +22,9 @@ const FONT_CHAIN = fontChain();
 // ?relay=PORT — where the Go relay is (it forks the terminals). Defaults to the dev relay's 8080,
 // which the IDE dials too — and a relay takes ONE display, so the second to connect is refused
 // (the chip says so). Run the wall beside the IDE on its own relay (serve --port N --termd-ns …).
+// Scrub `#token=` from `location.hash` on tick 0 before async WASM/font boot runs.
 const RELAY_PORT = Number(new URLSearchParams(location.search).get('relay')) || 8080;
+consumeRelayTokenFromLocation(RELAY_PORT, location.hostname);
 
 /** In-canvas bridge: builds the TerminalWall once and hands it up to the DOM chrome. */
 function Wall({ atlas, onReady }) {
@@ -63,13 +66,13 @@ function useWallState(wall) {
 
 function Chrome({ wall }) {
   const state = useWallState(wall);
-  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMode, setPaletteMode] = useState(null);
 
   // The chord + K opens the palette (the wall's other chords live in WallKeys; chord.js decides the
   // modifier: ⌘ on macOS, Ctrl+Alt elsewhere).
   useEffect(() => {
     const onKey = (e) => {
-      if (isChord(e) && e.code === 'KeyK') { e.preventDefault(); e.stopPropagation(); setPaletteOpen((o) => !o); }
+      if (isChord(e) && e.code === 'KeyK') { e.preventDefault(); e.stopPropagation(); setPaletteMode((m) => (m ? null : 'find')); }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -77,20 +80,29 @@ function Chrome({ wall }) {
 
   if (!wall || !state) return null;
   const relay = state.relay;
+  const relayClickable = !relay.hasToken || relay.state !== 'up';
   const inset = dockLayout(state).inset;
   return (
     <>
       {!state.fullscreen && <div style={{ ...styles.topbar, right: inset.right }}>
         <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
         <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
-        <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
+        <button style={styles.button} onClick={() => setPaletteMode('find')} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
         <button style={styles.button} data-action="sidebar" onClick={() => wall.run(['wall.sidebar', 'toggle'])} title={`Every terminal and group (${chordLabel(['B'])})`}>list {chordLabel(['B'])}</button>
         <button style={styles.button} data-action="settings" onClick={() => wall.run(['wall.settings', 'toggle'])} title={`Every knob, searchable (${chordLabel([','])})`}>settings</button>
         <button style={styles.button} data-action="help" onClick={() => wall.run(['wall.help', 'toggle'])} title={`Keys, gestures and verbs (${chordLabel(['/'])})`}>?</button>
-        <span data-relay={relay.state} title={relay.state === 'refused'
-          ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves`
-          : !relay.hasToken ? `open the URL from 'glyph3d-cli --port ${RELAY_PORT} url' or run 'wall.token <token>'` : ''}
-          style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b' }}>
+        <span
+          data-relay={relay.state}
+          onClick={relayClickable ? () => setPaletteMode('token') : undefined}
+          title={relay.state === 'refused'
+            ? `the relay on :${RELAY_PORT} takes one display; it reconnects when the other one leaves (click to set token)`
+            : !relay.hasToken
+              ? `click to paste relay token, or open the URL from 'glyph3d-cli --port ${RELAY_PORT} url'`
+              : relay.state !== 'up'
+                ? `relay :${RELAY_PORT} offline — click to paste relay token`
+                : ''}
+          style={{ ...styles.chip, color: relay.state === 'up' ? '#6ee7a0' : '#e5534b', ...(relayClickable ? { cursor: 'pointer' } : null) }}
+        >
           {relay.state === 'up' ? '● relay' : relay.state === 'refused' ? `○ relay :${RELAY_PORT} — ${relay.reason}` : !relay.hasToken ? `○ relay :${RELAY_PORT} — token needed` : '○ relay offline'}
         </span>
         <TermdChip wall={wall} />
@@ -102,7 +114,7 @@ function Chrome({ wall }) {
       <StatusWindow wall={wall} state={state} />
       <SettingsPanel wall={wall} state={state} />
       <HelpPanel wall={wall} state={state} />
-      {paletteOpen && <Palette wall={wall} state={state} onClose={() => setPaletteOpen(false)} />}
+      {paletteMode && <Palette wall={wall} state={state} initialMode={paletteMode} onClose={() => setPaletteMode(null)} />}
       <ContextMenu wall={wall} state={state} />
     </>
   );

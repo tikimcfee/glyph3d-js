@@ -231,6 +231,15 @@ func (f *termdStatusFollower) Run() {
 		case errors.Is(err, errTermdNotRunning):
 			f.set(f.lostOrAbsent(), false)
 			f.wait(f.redial)
+		case errors.Is(err, errUnsafeTermdSocket):
+			f.mu.Lock()
+			alreadyUnreachable := f.state == "unreachable"
+			f.mu.Unlock()
+			if !alreadyUnreachable {
+				log.Printf("[termd-status] namespace %q: %v", f.ns, err)
+			}
+			f.set("unreachable", false)
+			f.wait(f.redial)
 		case isTermdCode(err, "brain_failed"):
 			f.set("failed", true)
 			f.wait(f.redial)
@@ -260,7 +269,7 @@ func (f *termdStatusFollower) follow(c *termdClient) {
 	f.mu.Lock()
 	was, sameInstance := f.state, f.instance == c.Welcome.Instance
 	f.instance = c.Welcome.Instance
-	lacks := c.lacks(termdInputOps)
+	lacks := c.Lacks(termdInputOps)
 	f.lacks = lacks
 	f.mu.Unlock()
 	if len(lacks) > 0 {

@@ -8,7 +8,7 @@
 #
 #   Vite   :5273   (main: :5173)   green text-path  vs  packed cyan
 #   relay  :8180   (main: :8080)
-#   logs   /tmp/glyph3d-gpu        (main: /tmp/glyph3d)
+#   logs   ~/.local/state/g3d/logs-gpu   (main: ~/.local/state/g3d/logs)
 #
 # Usage (same verbs as tools/dev.sh): vite | relay | refresh | status | stop
 #   tools/dev-gpu.sh vite
@@ -20,5 +20,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export VITE_PORT="${VITE_PORT:-5273}"
 export RELAY_PORT="${RELAY_PORT:-8180}"
-export GLYPH_LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d-gpu}"
+PW_DIR=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  PW_DIR="$(/usr/bin/id -P 2>/dev/null | awk -F: -v u="$(id -u)" '$3 == u { print $9; exit }')"
+elif command -v getent >/dev/null 2>&1; then
+  PW_DIR="$(getent passwd "$(id -u)" 2>/dev/null | awk -F: -v u="$(id -u)" '$3 == u { print $6; exit }')"
+fi
+PW_DIR="${PW_DIR:-${HOME:-}}"
+export GLYPH_LOG_DIR="${GLYPH_LOG_DIR:-$PW_DIR/.local/state/g3d/logs-gpu}"
 exec bash "$ROOT/tools/dev.sh" "$@"

@@ -109,8 +109,8 @@ const terms = new Map();
 const term = (id) => { if (!terms.has(id)) terms.set(id, { owner: null, text: '', sizes: [], closes: 0 }); return terms.get(id); };
 let display = null;
 const events = [];
-async function connectDisplay(port = PORT) {
-    display = new WebSocket(`ws://127.0.0.1:${port}`, relayProtocols(readRelayToken(port)));
+async function connectDisplay(port = PORT, env = relayEnv) {
+    display = new WebSocket(`ws://127.0.0.1:${port}`, relayProtocols(readRelayToken(port, env)));
     display.binaryType = 'arraybuffer';
     await new Promise((res, rej) => { display.onopen = res; display.onerror = () => rej(new Error('display could not connect')); });
     display.onmessage = (e) => {
@@ -185,7 +185,7 @@ const ALT_MOUSE = ['sh', '-c', "stty raw -echo; printf '\\033[?1049h\\033[?1000h
 try {
     await startRelay();
     info(`private relay on :${PORT}, termd namespace "${NS}" in ${termd.dir}`);
-    const tok0 = readRelayToken(PORT);
+    const tok0 = readRelayToken(PORT, relayEnv);
     ok(typeof tok0 === 'string' && tok0.length === 64, 'relay published a 256-bit capability token in its 0600 runtime file');
     ok(!relayLog.includes(tok0), 'relay log never prints the capability token');
     {
@@ -242,7 +242,7 @@ try {
         await waitFor(() => (reply = events.find((e) => e.jsonrpc === '2.0' && e.id === id)), 3000, 'the termd/status reply').catch(() => {});
         ok(reply?.result?.relay?.state === 'ok' && reply.result.status?.terminals?.length >= 1, "the display's termd/status request answers with the last notification");
         let cli = '';
-        try { cli = execFileSync(BIN, ['--port', String(PORT), 'termd.status'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { cli = `${e.stdout ?? ''}${e.message}`; }
+        try { cli = execFileSync(BIN, ['--port', String(PORT), 'termd.status'], { env: relayEnv, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { cli = `${e.stdout ?? ''}${e.message}`; }
         ok(/termd ok · ns tr · g3d-termd\/\S+ · brain \d+ gen 1 · 1 terminal/.test(cli) && cli.includes(A), `the CLI's termd.status answers page-less (${cli.split('\n')[0]})`);
     }
 
@@ -278,7 +278,7 @@ try {
     if (!linux) info('the login shell\'s environment as `g3d env` reports it (macOS withholds a platform binary\'s; cargo test\'s tests/env.rs reads the kernel\'s)');
     ok(env.TERM_PROGRAM === 'g3d-termd' && env.TERM === 'xterm-256color' && env.PWD === root && env.G3D_TERMD_ID === sd.id,
         `...with termd's own variables (TERM_PROGRAM ${env.TERM_PROGRAM}, TERM ${env.TERM}, PWD ${env.PWD})`);
-    const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE'].filter((k) => k in env);
+    const leaked = ['TERM_SESSION_ID', 'SHLVL', 'COLUMNS', 'TMUX', 'G3D_TERMD_DIR', 'G3D_TERMD_ENV_SOURCE', 'G3D_RELAY_TOKEN_DIR'].filter((k) => k in env);
     ok(leaked.length === 0, `...and none of the relay's identity or shell state (leaked: ${leaked.join(' ') || 'none'})`);
     const callers = tags.filter((v) => v.source === 'caller').map((v) => v.name);
     ok(tags.length === Object.keys(env).length && callers.length === 0,
@@ -478,14 +478,14 @@ try {
     const PORT2 = await freePort();
     const strippedEnv = {
         PATH: process.env.PATH, HOME: process.env.HOME,
-        G3D_TERMD_DIR: autoTermd.dir, G3D_TERMD_CONFIG: path.join(autoTermd.dir, 'termd.toml'),
+        G3D_TERMD_DIR: autoTermd.dir, G3D_RELAY_TOKEN_DIR: autoTermd.dir, G3D_TERMD_CONFIG: path.join(autoTermd.dir, 'termd.toml'),
         DISPLAY: ':99', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/bus', XDG_RUNTIME_DIR: '/nonexistent',
         TERM_PROGRAM: 'Apple_Terminal', REX_SESSION: 'rex-tab-3', SECRET_LEAK: 'leak',
         XDG_CONFIG_HOME: path.join(autoTermd.dir, 'scratch-cfg'), TZ: 'UTC', LC_ALL: 'C',
         ...(process.platform === 'darwin' ? { SSH_AUTH_SOCK: '/nonexistent/stale-agent' } : {}),
     };
     await startRelay(strippedEnv, AUTO_NS, PORT2);
-    await connectDisplay(PORT2);
+    await connectDisplay(PORT2, strippedEnv);
     const sa = await relayEvent({ relay: 'terminal.spawn', cols: 80, rows: 24, argv: ['sleep', '300'] }, 'terminal.spawning');
     await waitFor(() => term(sa.id).owner, 8000, 'the stripped relay\'s terminal');
     const g3dAuto = (...args) => execFileSync(g3dBeside(BIN), ['--ns', AUTO_NS, ...args], { env: { ...process.env, G3D_TERMD_DIR: autoTermd.dir }, encoding: 'utf8' });

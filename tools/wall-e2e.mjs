@@ -99,7 +99,7 @@ const spawned = [];
 let reloads = 0, navigations = 0, crashed = false;
 try {
     browser = await launchGpuBrowser({});
-    app = await openApp(browser, { url: URL_, relayPort: RELAY, wait: 0, viewport: { width: 1400, height: 900 } });
+    app = await openApp(browser, { url: URL_, relayPort: RELAY, relayToken: relay.token(), wait: 0, viewport: { width: 1400, height: 900 } });
     const page = app.page;
     // The page loads once, and again only where a step reloads it (reload): a navigation of its own
     // (a dev server's hot reload of a saved file, a crash) would hand every later step a fresh wall.
@@ -774,7 +774,7 @@ try {
         // Take the new relay's first controller id before the adapters reconnect, so the old owner's
         // id now names a controller that isn't the terminal's adapter: input still addressed to the
         // old owner lands nowhere, as it does when a restarted relay hands the ids out in a new order.
-        const squatter = await dialRelay(RELAY);
+        const squatter = await dialRelay(RELAY, { token: tokAfter });
         info(`restarted the private relay on :${RELAY}; a bystander controller holds ${squatter.hello.replace('OK: connected as ', '')}`);
         await W((t) => window.__wall.run(['wall.token', t]), tokAfter);
         const readopted = await until((i) => window.__wall.snapshot().connected && typeof window.__wall.terminal(i)?.onInput === 'function' && window.__wall.terminal(i).onInput !== window.__inputBefore, A, 25000);

@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -55,10 +55,79 @@ pub struct Client {
     pub welcome: Welcome,
 }
 
+fn check_socket_parent(path: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    let clean: PathBuf = dir.components().collect();
+    let m = std::fs::symlink_metadata(&clean)?;
+    if !m.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("termd socket parent {} is not a real directory", clean.display()),
+        ));
+    }
+    if m.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("termd socket directory {} is owned by uid {}, want uid {uid}", clean.display(), m.uid()),
+        ));
+    }
+    if m.mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "termd socket directory {} has unsafe mode {:04o} (group/other access must be 0)",
+                clean.display(),
+                m.mode() & 0o7777
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn peer_uid(sock: &UnixStream) -> io::Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let cred = rustix::net::sockopt::socket_peercred(sock).map_err(io::Error::from)?;
+        Ok(cred.uid.as_raw())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::fd::AsRawFd;
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        // SAFETY: `sock` is a valid connected Unix stream fd, and `uid`/`gid` are valid out-pointers.
+        let rc = unsafe { libc::getpeereid(sock.as_raw_fd(), &mut uid, &mut gid) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+}
+
+fn verify_peer_uid(sock: &UnixStream, want_uid: u32) -> io::Result<()> {
+    let got = peer_uid(sock)?;
+    if got != want_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("termd socket peer is uid {got}, want uid {want_uid}"),
+        ));
+    }
+    Ok(())
+}
+
 impl Client {
-    /// Connects and says `HELLO` as `name`.
+    /// Connects and says `HELLO` as `name`, verifying the socket directory and peer UID first.
     pub fn connect(path: &Path, name: &str) -> Result<Self, ClientError> {
+        let uid = rustix::process::getuid().as_raw();
+        check_socket_parent(path, uid)?;
         let sock = UnixStream::connect(path)?;
+        if let Err(e) = verify_peer_uid(&sock, uid) {
+            drop(sock);
+            return Err(ClientError::Io(e));
+        }
         Self::handshake(sock, name)
     }
 
@@ -206,5 +275,96 @@ impl Client {
     /// Sends `INPUT` for `handle`.
     pub fn input(&mut self, handle: u32, bytes: &[u8]) -> io::Result<()> {
         self.sock.write_all(&frame::encode(ty::INPUT, handle, bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    fn short_tmp_dir(tag: &str) -> PathBuf {
+        let dir = PathBuf::from(format!("/tmp/g3d-cli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn connect_rejects_0755_and_symlink_socket_dirs_and_verifies_peer_uid() {
+        let dir755 = short_tmp_dir("755");
+        std::fs::set_permissions(&dir755, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sock755 = dir755.join("termd-test.sock");
+        let _ln755 = UnixListener::bind(&sock755).unwrap();
+        match Client::connect(&sock755, "test") {
+            Err(ClientError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}"),
+            other => panic!("expected PermissionDenied on 0755 dir, got {}", other.err().unwrap()),
+        }
+        let _ = std::fs::remove_dir_all(&dir755);
+
+        let real = short_tmp_dir("real");
+        let link_parent = short_tmp_dir("lnk");
+        let link = link_parent.join("sym");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real_sock = real.join("termd-ok.sock");
+        let ln = UnixListener::bind(&real_sock).unwrap();
+
+        match Client::connect(&link.join("termd-ok.sock"), "test") {
+            Err(ClientError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied, "{e}"),
+            other => panic!("expected PermissionDenied on symlink dir, got {}", other.err().unwrap()),
+        }
+
+        // Missing socket directory yields NotFound so connect_or_start knows no daemon runs yet.
+        let missing = real.join("nonexistent-subdir").join("termd-none.sock");
+        match Client::connect(&missing, "test") {
+            Err(ClientError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}"),
+            other => panic!("expected NotFound on missing dir, got {}", other.err().unwrap()),
+        }
+
+        // Valid 0700 dir + same-UID peer succeeds; verify_peer_uid rejects mismatched UID.
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = ln.accept().unwrap();
+            let mut dec = FrameDecoder::default();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "unexpected EOF before HELLO");
+                dec.feed(&buf[..n]);
+                if let Some(f) = dec.next_frame().unwrap() {
+                    assert_eq!(f.ty, ty::HELLO);
+                    tx.send(true).unwrap();
+                    break;
+                }
+            }
+            let welcome = Welcome {
+                proto: g3d_wire::PROTO,
+                daemon: "g3d-termd/test".into(),
+                engine: "mock".into(),
+                ns: Some("ok".into()),
+                pid: Some(std::process::id()),
+                features: vec![],
+                max_frame: 16 << 20,
+                instance: Some("inst-1".into()),
+                generation: Some(1),
+                holder: None,
+            };
+            s.write_all(&frame::encode_json(ty::WELCOME, 0, &welcome)).unwrap();
+        });
+
+        let c = Client::connect(&real_sock, "test").unwrap();
+        assert_eq!(c.welcome.daemon, "g3d-termd/test");
+        assert!(rx.recv().unwrap());
+        let uid = rustix::process::getuid().as_raw();
+        verify_peer_uid(c.stream(), uid).unwrap();
+        let mismatch = verify_peer_uid(c.stream(), uid.wrapping_add(1)).unwrap_err();
+        assert_eq!(mismatch.kind(), io::ErrorKind::PermissionDenied);
+        drop(c);
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&link_parent);
     }
 }

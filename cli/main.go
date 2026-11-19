@@ -2,7 +2,7 @@
 //
 // Server side:
 //
-//	glyph3d-cli serve [dir] [--port 8080] [--listen 127.0.0.1] [--origin url] [--termd-ns default] [--termd path]
+//	glyph3d-cli serve [dir] [--port 8080] [--listen 127.0.0.1] [--tls-cert cert.pem --tls-key key.pem] [--origin url] [--termd-ns default] [--termd path]
 //	glyph3d-cli attach / fullsnapshot       (terminal adapters the relay forks)
 //	glyph3d-cli version
 //
@@ -201,10 +201,12 @@ const defaultServeListen = "127.0.0.1"
 func serveCmd() {
 	flagSet := flag.NewFlagSet("serve", flag.ExitOnError)
 	p := flagSet.Int("port", 8080, "Port to listen on")
-	listen := flagSet.String("listen", defaultServeListen, "Address to listen on (non-loopback exposes the relay on the network; auth is always required)")
+	listen := flagSet.String("listen", defaultServeListen, "Address to listen on (non-loopback/non-Tailscale requires --tls-cert and --tls-key; auth is always required)")
+	tlsCert := flagSet.String("tls-cert", "", "TLS certificate PEM file (enables HTTPS + WSS; required for non-loopback/non-Tailscale --listen)")
+	tlsKey := flagSet.String("tls-key", "", "TLS private key PEM file (paired with --tls-cert)")
 	var origins stringListFlag
-	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 (repeatable). Its host:port also passes the Host check: the way to reach the relay through a port remap (ssh -L 9000:localhost:8080 → --origin http://localhost:9000) or by a LAN hostname")
-	keepToken := flagSet.Bool("keep-token", false, "Reuse this port's capability token across restarts and leave its 0600 file on exit, so open pages reconnect on their own (the dev loop). Default: a fresh token every start, removed on exit")
+	flagSet.Var(&origins, "origin", "Extra browser Origin allowed to upgrade to WebSocket, e.g. http://127.0.0.1:5280 or https://box.lan (repeatable; http:// is allowed only for loopback or Tailscale IPs)")
+	keepToken := flagSet.Bool("keep-token", false, "Reuse this port's capability token across restarts and leave its 0600 file on exit, so open pages reconnect on their own (loopback only). Default: a fresh token every start, removed on exit")
 	local := flagSet.Bool("local", false, "Serve IDE app from disk instead of embedded (dev mode)")
 	relayOnly := flagSet.Bool("relay-only", false, "WebSocket relay only, no static files")
 	var reach stringListFlag
@@ -247,7 +249,7 @@ func serveCmd() {
 			fsHandler.gomux = NewGomuxWatcher(gomuxDirs, *gomuxHosts)
 			fsHandler.agents = NewAgentEvents(*sessionsInterval, *maxFollowers)
 		}
-		if err := RunRelay(*listen, *p, origins, *keepToken, fsHandler); err != nil {
+		if err := RunRelay(*listen, *p, origins, *keepToken, *tlsCert, *tlsKey, fsHandler); err != nil {
 			log.Fatalf("[relay] %v", err)
 		}
 		return
@@ -268,6 +270,8 @@ func serveCmd() {
 		Port:      *p,
 		Origins:   origins,
 		KeepToken: *keepToken,
+		TLSCert:   *tlsCert,
+		TLSKey:    *tlsKey,
 		FSHandler: fsHandler,
 	}
 

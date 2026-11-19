@@ -28,13 +28,32 @@
 # The wall's page is http://localhost:5180/?relay=8180 (`tools/dev.sh wall status` prints it).
 #
 # Env overrides: VITE_PORT, RELAY_PORT, TERMD_NS (the profile's defaults above),
-#                GLYPH_SERVE_ROOT (the relay's served root; default the repo), GLYPH_LOG_DIR (/tmp/glyph3d).
+#                GLYPH_SERVE_ROOT (the relay's served root; default the repo),
+#                GLYPH_LOG_DIR (<pw_dir>/.local/state/g3d/logs).
 
 set -euo pipefail
+umask 0077
 
-# Is stdout a terminal? Asked ONCE, here: inside $(…) fd 1 is always a pipe, so a check in the
-# function that prints the URL would never see the terminal.
-STDOUT_TTY=0; [ -t 1 ] && STDOUT_TTY=1
+resolve_pw_dir() {
+  local uid pw=""
+  uid="$(id -u)"
+  if [ "$(uname -s)" = "Darwin" ] && command -v id >/dev/null 2>&1; then
+    pw="$(/usr/bin/id -P 2>/dev/null | awk -F: -v u="$uid" '$3 == u { print $9; exit }')"
+  elif command -v getent >/dev/null 2>&1; then
+    pw="$(getent passwd "$uid" 2>/dev/null | awk -F: -v u="$uid" '$3 == u { print $6; exit }')"
+  fi
+  if [ -z "$pw" ] && [ -r /etc/passwd ]; then
+    pw="$(awk -F: -v u="$uid" '$3 == u { print $6; exit }' /etc/passwd 2>/dev/null || true)"
+  fi
+  if [ -z "$pw" ]; then
+    pw="${HOME:-}"
+  fi
+  if [ -z "$pw" ]; then
+    echo "✗ cannot resolve home directory for uid $uid" >&2
+    exit 1
+  fi
+  printf '%s' "$pw"
+}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE=ide
@@ -49,8 +68,18 @@ VITE_PORT="${VITE_PORT:-$DEF_VITE}"
 RELAY_PORT="${RELAY_PORT:-$DEF_RELAY}"
 TERMD_NS="${TERMD_NS:-$DEF_NS}"
 SERVE_ROOT="${GLYPH_SERVE_ROOT:-$ROOT}"
-LOG_DIR="${GLYPH_LOG_DIR:-/tmp/glyph3d}"
-mkdir -p "$LOG_DIR"
+PW_DIR="$(resolve_pw_dir)"
+LOG_DIR="${GLYPH_LOG_DIR:-$PW_DIR/.local/state/g3d/logs}"
+if [ -L "$LOG_DIR" ]; then
+  echo "✗ refusing symlinked LOG_DIR: $LOG_DIR" >&2
+  exit 1
+fi
+mkdir -p -m 0700 "$LOG_DIR"
+if [ -L "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ] || [ ! -O "$LOG_DIR" ]; then
+  echo "✗ unsafe LOG_DIR (must be a real directory owned by uid $(id -u)): $LOG_DIR" >&2
+  exit 1
+fi
+chmod 0700 "$LOG_DIR"
 VITE_LOG="$LOG_DIR/$PROFILE-vite.log"
 RELAY_LOG="$LOG_DIR/$PROFILE-relay.log"
 
@@ -86,6 +115,11 @@ start_vite() {
   echo "→ vite: clear cache + (re)start on :$VITE_PORT"
   kill_port "$VITE_PORT" vite
   rm -rf "$APP_DIR/node_modules/.vite"
+  if [ -L "$VITE_LOG" ] || { [ -e "$VITE_LOG" ] && { [ ! -f "$VITE_LOG" ] || [ ! -O "$VITE_LOG" ]; }; }; then
+    echo "  ✗ refusing symlinked or unsafe log file: $VITE_LOG" >&2
+    return 1
+  fi
+  if [ -f "$VITE_LOG" ]; then chmod 0600 "$VITE_LOG"; fi
   # exec: the server replaces the subshell, so no wrapper shell lingers holding this script's
   # stdout (a caller piping dev.sh's output would otherwise wait on it forever).
   ( cd "$APP_DIR" && VITE_PORT="$VITE_PORT" exec nohup bun run dev >"$VITE_LOG" 2>&1 </dev/null ) & disown
@@ -93,7 +127,7 @@ start_vite() {
   # for several seconds.
   for _ in $(seq 1 60); do
     if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
-      echo "  vite up → $(tty_page_url)   (log: $VITE_LOG)"
+      echo "  vite up → $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (log: $VITE_LOG)"
       echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
       return 0
     fi
@@ -107,14 +141,19 @@ start_relay() {
   echo "→ relay: rebuild Go + termd, (re)start on 127.0.0.1:$RELAY_PORT, termd namespace $TERMD_NS   (terminals live in g3d-termd and survive)"
   ( cd "$ROOT" && make )
   kill_port "$RELAY_PORT" relay
+  if [ -L "$RELAY_LOG" ] || { [ -e "$RELAY_LOG" ] && { [ ! -f "$RELAY_LOG" ] || [ ! -O "$RELAY_LOG" ]; }; }; then
+    echo "  ✗ refusing symlinked or unsafe log file: $RELAY_LOG" >&2
+    return 1
+  fi
+  if [ -f "$RELAY_LOG" ]; then chmod 0600 "$RELAY_LOG"; fi
   # --keep-token: a rebuild's restart keeps the port's token, so an open page reconnects by itself.
-  ( cd "$ROOT" && exec nohup ./glyph3d-cli serve --port "$RELAY_PORT" --keep-token --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
+  ( cd "$ROOT" && exec nohup env -u G3D_RELAY_TOKEN ./glyph3d-cli serve --port "$RELAY_PORT" --keep-token --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServeRelay), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
   for _ in $(seq 1 14); do
     if [ -n "$(pid_on_port "$RELAY_PORT")" ]; then
-      echo "  relay up → $(tty_page_url)   (log: $RELAY_LOG)"
+      echo "  relay up → $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (log: $RELAY_LOG)"
       return 0
     fi
     sleep 0.5
@@ -123,20 +162,9 @@ start_relay() {
   return 1
 }
 
-# The base page URL (no token): safe to echo anywhere.
+# The base page URL (no token): safe to echo anywhere. Retrieve `#token=` explicitly via `glyph3d-cli url`.
 page_url() {
   echo "http://localhost:$VITE_PORT/?relay=$RELAY_PORT"
-}
-
-# Include `#token=<hex>` ONLY when stdout is an interactive terminal, keeping secrets out of logs.
-tty_page_url() {
-  local base
-  base="$(page_url)"
-  if [ "$STDOUT_TTY" = 1 ] && [ -x "$ROOT/glyph3d-cli" ]; then
-    "$ROOT/glyph3d-cli" --port "$RELAY_PORT" url "$base" 2>/dev/null || echo "$base"
-  else
-    echo "$base   (run: ./glyph3d-cli --port $RELAY_PORT url '$base')"
-  fi
 }
 
 status() {
@@ -145,7 +173,7 @@ status() {
   rp="$(pid_on_port "$RELAY_PORT")"
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
-  echo "page  $(tty_page_url)   (termd namespace $TERMD_NS)"
+  echo "page  $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (termd namespace $TERMD_NS)"
   echo "logs  $LOG_DIR/$PROFILE-{vite,relay}.log"
   echo "      structured app logs: ./glyph3d-cli log.follow  (and log.search / log.query / log.errors / log.stats)"
 }

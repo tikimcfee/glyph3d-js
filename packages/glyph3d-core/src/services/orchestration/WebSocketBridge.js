@@ -12,14 +12,81 @@
  * - Status bar UI element showing connection state and address
  */
 
+import { decodeBase64 } from '../../utils/encoding.js';
+
 const TOKEN_STORAGE_PREFIX = 'g3d.relayToken.';
 
 // A token rides in a Sec-WebSocket-Protocol entry, so it must be an RFC 7230 token.
-const TOKEN_CHARS = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+export const TOKEN_CHARS = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 /**
- * Extract a relay token from either a bare hex token string or a URL/fragment
- * carrying `#token=<hex>`. Query-string `?token=` is never accepted, and neither is
+ * Normalize a single host string: trim, lowercase, and strip at most one pair
+ * of outer `[` `]` brackets (so `'[::1]'` and `'::1'` both yield `'::1'`).
+ * @param {unknown} raw
+ * @returns {string}
+ */
+function cleanHostString(raw) {
+    if (typeof raw !== 'string') return '';
+    let h = raw.trim().toLowerCase();
+    if (h.startsWith('[') && h.endsWith(']')) {
+        h = h.slice(1, -1).trim();
+    }
+    return h;
+}
+
+/**
+ * Normalize a relay hostname for storage keying and comparisons.
+ * Falls back to normalized `window?.location?.hostname` or `'localhost'`.
+ * @param {string|null|undefined} host
+ * @returns {string}
+ */
+export function normalizeRelayHost(host) {
+    const direct = cleanHostString(host);
+    if (direct) return direct;
+    if (typeof window !== 'undefined') {
+        const fromLoc = cleanHostString(window.location?.hostname);
+        if (fromLoc) return fromLoc;
+    }
+    return 'localhost';
+}
+
+/**
+ * Build the `sessionStorage` key for a `(host, port)` relay endpoint.
+ * @param {number|string|null|undefined} port
+ * @param {string|null|undefined} [host]
+ * @returns {string}
+ */
+export function relayTokenStorageKey(port, host) {
+    return `${TOKEN_STORAGE_PREFIX}${normalizeRelayHost(host)}:${port || 'default'}`;
+}
+
+/**
+ * Return true if the query portion before `#` carries a `token` key
+ * (case-insensitive, `&` or `;` separated, including percent-encoded keys).
+ * @param {string} raw
+ * @returns {boolean}
+ */
+function hasQueryTokenParam(raw) {
+    if (typeof raw !== 'string') return false;
+    const hashIdx = raw.indexOf('#');
+    const beforeHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+    const qIdx = beforeHash.indexOf('?');
+    if (qIdx < 0) return false;
+    const query = beforeHash.slice(qIdx + 1);
+    for (const part of query.split(/[&;]/)) {
+        if (!part) continue;
+        const eq = part.indexOf('=');
+        const rawKey = (eq >= 0 ? part.slice(0, eq) : part).replace(/\+/g, ' ');
+        let key = rawKey;
+        try { key = decodeURIComponent(rawKey); } catch { /* keep rawKey on malformed escape */ }
+        if (key.trim().toLowerCase() === 'token') return true;
+    }
+    return false;
+}
+
+/**
+ * Extract a relay token from either a bare RFC-7230 token string or a URL/fragment
+ * carrying `#token=<tok>`. Query-string `?token=` is never accepted, and neither is
  * a URL with no `#token=` (a relay address is not a token: Go `parseRelayTokenValue`).
  * @param {string|null|undefined} input
  * @returns {string|null}
@@ -28,6 +95,7 @@ export function parseRelayTokenInput(input) {
     if (typeof input !== 'string') return null;
     const trimmed = input.trim();
     if (!trimmed) return null;
+    if (hasQueryTokenParam(trimmed)) return null;
     let tok = trimmed;
     const hashIdx = trimmed.indexOf('#');
     if (hashIdx >= 0) {
@@ -42,37 +110,374 @@ export function parseRelayTokenInput(input) {
 }
 
 /**
- * Read `#token=<hex>` from `window.location.hash` (scrubbing it from the address
- * bar via `history.replaceState` and caching it in tab-scoped `sessionStorage` for
- * same-tab reloads), or fall back to this tab's `sessionStorage` entry for `port`.
+ * Parse either a bare port (`"8080"` or `8080`) or a `ws:`/`wss:`/`http:`/`https:` URL
+ * into a canonical relay endpoint descriptor without ever throwing or echoing secrets.
+ * @param {string|number|null|undefined} input
+ * @param {{ defaultHost?: string, pageProtocol?: string }} [opts]
+ * @returns {{ ok: true, host: string, port: number, wsUrl: string, token: string|null, hadHashToken: boolean } | { ok: false, error: string }}
+ */
+export function parseRelayEndpoint(input, opts = {}) {
+    const { defaultHost = undefined, pageProtocol = undefined } = opts || {};
+
+    if (typeof input === 'number') {
+        if (!Number.isInteger(input) || input < 1 || input > 65535 || !/^\d+$/.test(String(input))) {
+            return { ok: false, error: 'invalid relay port (must be 1..65535)' };
+        }
+        const host = normalizeRelayHost(defaultHost);
+        const proto = (pageProtocol ?? (typeof window !== 'undefined' ? window.location?.protocol : 'http:')) === 'https:' ? 'wss:' : 'ws:';
+        const urlHost = host.includes(':') ? `[${host}]` : host;
+        return {
+            ok: true,
+            host,
+            port: input,
+            wsUrl: `${proto}//${urlHost}:${input}`,
+            token: null,
+            hadHashToken: false,
+        };
+    }
+
+    if (typeof input !== 'string') {
+        return { ok: false, error: 'invalid relay endpoint' };
+    }
+    const raw = input.trim();
+    if (!raw) {
+        return { ok: false, error: 'empty relay endpoint' };
+    }
+
+    if (/^\d+$/.test(raw)) {
+        const port = Number(raw);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            return { ok: false, error: 'invalid relay port (must be 1..65535)' };
+        }
+        const host = normalizeRelayHost(defaultHost);
+        const proto = (pageProtocol ?? (typeof window !== 'undefined' ? window.location?.protocol : 'http:')) === 'https:' ? 'wss:' : 'ws:';
+        const urlHost = host.includes(':') ? `[${host}]` : host;
+        return {
+            ok: true,
+            host,
+            port,
+            wsUrl: `${proto}//${urlHost}:${port}`,
+            token: null,
+            hadHashToken: false,
+        };
+    }
+
+    let u;
+    try {
+        u = new URL(raw);
+    } catch {
+        return { ok: false, error: 'invalid relay endpoint (expected port or ws/wss/http/https URL)' };
+    }
+
+    if (u.protocol !== 'ws:' && u.protocol !== 'wss:' && u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return { ok: false, error: 'unsupported relay URL scheme (expected ws, wss, http, or https)' };
+    }
+    if (!u.hostname) {
+        return { ok: false, error: 'missing host in relay URL' };
+    }
+    if (hasQueryTokenParam(raw) || hasQueryTokenParam(u.search)) {
+        return { ok: false, error: 'relay token must not be passed in URL query string' };
+    }
+
+    let token = null;
+    let hadHashToken = false;
+    const hashIdx = raw.indexOf('#');
+    if (hashIdx >= 0) {
+        const fragParams = new URLSearchParams(raw.slice(hashIdx + 1));
+        if (fragParams.has('token')) {
+            hadHashToken = true;
+            const tok = (fragParams.get('token') || '').trim();
+            if (!tok || !TOKEN_CHARS.test(tok)) {
+                return { ok: false, error: 'invalid #token= in URL' };
+            }
+            token = tok;
+        }
+    }
+
+    const secure = u.protocol === 'wss:' || u.protocol === 'https:';
+    const host = normalizeRelayHost(u.hostname);
+    const urlHost = host.includes(':') ? `[${host}]` : host;
+
+    if ((u.protocol === 'http:' || u.protocol === 'https:') && u.searchParams.has('relay')) {
+        const relayRaw = (u.searchParams.get('relay') || '').trim();
+        const port = /^\d+$/.test(relayRaw) ? Number(relayRaw) : NaN;
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            return { ok: false, error: 'invalid ?relay= port in URL' };
+        }
+        return {
+            ok: true,
+            host,
+            port,
+            wsUrl: `${secure ? 'wss:' : 'ws:'}//${urlHost}:${port}`,
+            token,
+            hadHashToken,
+        };
+    }
+
+    const port = u.port ? Number(u.port) : (secure ? 443 : 80);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return { ok: false, error: 'invalid port in relay URL' };
+    }
+    const path = (u.protocol === 'ws:' || u.protocol === 'wss:') && u.pathname && u.pathname !== '/' ? u.pathname : '';
+    const wsUrl = `${secure ? 'wss:' : 'ws:'}//${urlHost}${u.port ? `:${port}` : ''}${path}`;
+    return { ok: true, host, port, wsUrl, token, hadHashToken };
+}
+
+/**
+ * Scrub `token` from `window.location.hash` via `history.replaceState` if present.
+ * @returns {{ hadToken: boolean, tok: string }}
+ */
+function scrubTokenFromLocationHash() {
+    if (typeof window === 'undefined') return { hadToken: false, tok: '' };
+    const rawHash = typeof window.location?.hash === 'string' ? window.location.hash : '';
+    if (rawHash.length <= 1) return { hadToken: false, tok: '' };
+    const params = new URLSearchParams(rawHash.startsWith('#') ? rawHash.slice(1) : rawHash);
+    if (!params.has('token')) return { hadToken: false, tok: '' };
+    const tok = (params.get('token') || '').trim();
+    params.delete('token');
+    const rest = params.toString();
+    const clean = `${window.location.pathname || '/'}${window.location.search || ''}${rest ? `#${rest}` : ''}`;
+    try { window.history?.replaceState?.(window.history.state ?? null, '', clean); } catch { /* ignore */ }
+    return { hadToken: true, tok };
+}
+
+/**
+ * Read `#token=<tok>` from `window.location.hash` (always scrubbing `token` from the
+ * address bar via `history.replaceState`, and caching valid `TOKEN_CHARS` tokens in
+ * tab-scoped `sessionStorage` under `g3d.relayToken.<host>:<port>`), or fall back to
+ * this tab's `sessionStorage` entry for `(host, port)`.
  * Never touches `localStorage`, so closing the tab leaves no saved token state.
- * @param {number|string|null} port
+ * @param {number|string|null|undefined} port
+ * @param {string|null|undefined} [host]
  * @returns {string|null}
  */
-export function consumeRelayTokenFromLocation(port) {
+export function consumeRelayTokenFromLocation(port, host) {
     if (typeof window === 'undefined') return null;
-    const key = `${TOKEN_STORAGE_PREFIX}${port || 'default'}`;
-    const rawHash = typeof window.location?.hash === 'string' ? window.location.hash : '';
-    if (rawHash.length > 1) {
-        const params = new URLSearchParams(rawHash.startsWith('#') ? rawHash.slice(1) : rawHash);
-        if (params.has('token')) {
-            const tok = (params.get('token') || '').trim();
-            params.delete('token');
-            const rest = params.toString();
-            const clean = `${window.location.pathname || '/'}${window.location.search || ''}${rest ? `#${rest}` : ''}`;
-            try { window.history?.replaceState?.(window.history.state ?? null, '', clean); } catch { /* ignore */ }
-            if (tok) {
-                try { window.sessionStorage?.setItem?.(key, tok); } catch { /* ignore */ }
-                return tok;
-            }
-        }
+    const key = relayTokenStorageKey(port, host);
+    const { hadToken, tok } = scrubTokenFromLocationHash();
+    if (hadToken && tok && TOKEN_CHARS.test(tok)) {
+        try { window.sessionStorage?.setItem?.(key, tok); } catch { /* ignore */ }
+        return tok;
     }
     try {
         const saved = window.sessionStorage?.getItem?.(key);
-        return saved ? saved.trim() || null : null;
+        if (saved == null) return null;
+        const trimmed = saved.trim();
+        if (!trimmed) {
+            if (saved.length > 0) {
+                try { window.sessionStorage?.removeItem?.(key); } catch { /* ignore */ }
+            }
+            return null;
+        }
+        if (TOKEN_CHARS.test(trimmed)) return trimmed;
+        try { window.sessionStorage?.removeItem?.(key); } catch { /* ignore */ }
+        return null;
     } catch {
         return null;
     }
+}
+
+/**
+ * Scrub `#token=...` fragments, `?token=...` query leaks, and `g3d-token.<tok>`
+ * subprotocol strings from free-form log/error text. Idempotent on already-redacted text.
+ * @template T
+ * @param {T} text
+ * @returns {T|string}
+ */
+export function redactRelaySecrets(text) {
+    if (typeof text !== 'string') return text;
+    return text
+        .replace(/(#[^\s]*?\btoken=)[^&\s;"')\]}]*/gi, '$1[REDACTED]')
+        .replace(/([?&;]\btoken=)[^&\s;"')\]}]+/gi, '$1[REDACTED]')
+        .replace(/\bg3d-token\.(?:\[REDACTED\]|[!#$%&'*+.^_`|~0-9A-Za-z-]*)/g, 'g3d-token.[REDACTED]')
+        .replace(/(\bBearer\s+)[^\s"'\\,)\];}]+/gi, '$1[REDACTED]');
+}
+
+/**
+ * Tokenize a shell-like command line (mirroring `CommandRouter.parse`) without mutating state.
+ * @param {string} line
+ * @returns {string[]}
+ */
+function tokenizeCommandLine(line) {
+    const tokens = [];
+    let current = '';
+    let inQuote = false;
+    let escaped = false;
+    for (const ch of line) {
+        if (escaped) {
+            if (ch === 'n') current += '\n';
+            else if (ch === 't') current += '\t';
+            else current += ch;
+            escaped = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch === '"') {
+            inQuote = !inQuote;
+            continue;
+        }
+        if (/\s/.test(ch) && !inQuote) {
+            if (current.length > 0) {
+                tokens.push(current);
+                current = '';
+            }
+            continue;
+        }
+        current += ch;
+    }
+    if (current.length > 0) tokens.push(current);
+    return tokens;
+}
+
+/**
+ * Decode a `call <base64-json>` payload into an inner `[cmd, ...args]` vector if valid.
+ * @param {string|undefined} b64
+ * @returns {string[]|null}
+ */
+function decodeCallInvocation(b64) {
+    if (typeof b64 !== 'string' || !b64) return null;
+    try {
+        const spec = JSON.parse(decodeBase64(b64));
+        let inv = null;
+        if (Array.isArray(spec)) inv = spec;
+        else if (spec && typeof spec === 'object' && typeof spec.cmd === 'string') {
+            inv = [spec.cmd, ...(Array.isArray(spec.args) ? spec.args : [])];
+        }
+        if (!inv || !inv.length || typeof inv[0] !== 'string') return null;
+        return [inv[0], ...inv.slice(1).map((a) => (typeof a === 'string' ? a : String(a)))];
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Return true if `lineOrTokens` invokes a token-bearing command (`relay.token`,
+ * `wall.token`, `relay.connect` with >=2 args or a non-port token-like arg, or a
+ * `call` bundle wrapping one) or contains `#token=` / `?token=` / `g3d-token.`.
+ * @param {string|string[]|null|undefined} lineOrTokens
+ * @param {number} [_depth=0]
+ * @returns {boolean}
+ */
+export function isSecretCommand(lineOrTokens, _depth = 0) {
+    if (_depth > 3 || lineOrTokens == null) return false;
+    let rawText = '';
+    let tokens = [];
+    if (Array.isArray(lineOrTokens)) {
+        tokens = lineOrTokens.map((t) => String(t ?? ''));
+        rawText = tokens.join(' ');
+    } else if (typeof lineOrTokens === 'string') {
+        rawText = lineOrTokens;
+        tokens = tokenizeCommandLine(lineOrTokens.trim());
+    } else {
+        return false;
+    }
+
+    if (/(#[^\s]*?\btoken=|[?&;]\btoken=)/i.test(rawText) || /\bg3d-token\./.test(rawText)) {
+        return true;
+    }
+    if (!tokens.length) return false;
+
+    const t0 = tokens[0].toLowerCase();
+    const t1 = (tokens[1] || '').toLowerCase();
+
+    if (t0 === 'relay.token' || t0 === 'wall.token' || /^relay\.tok/.test(t0) || /^wall\.tok/.test(t0)) {
+        return true;
+    }
+    if ((t0 === 'relay' || t0 === 'wall') && (t1 === 'token' || /^tok/.test(t1))) {
+        return true;
+    }
+
+    let connectArgs = null;
+    if (t0 === 'relay.connect') {
+        connectArgs = tokens.slice(1);
+    } else if (t0 === 'relay' && t1 === 'connect') {
+        connectArgs = tokens.slice(2);
+    }
+    if (connectArgs !== null) {
+        if (connectArgs.length >= 2) return true;
+        if (connectArgs.length === 1) {
+            const a0 = connectArgs[0].trim();
+            if (a0 && !/^\d+$/.test(a0) && !a0.includes('://')) return true;
+        }
+        return false;
+    }
+
+    if (t0 === 'call' && tokens[1]) {
+        const inner = decodeCallInvocation(tokens[1]);
+        if (inner && isSecretCommand(inner, _depth + 1)) return true;
+    }
+
+    return false;
+}
+
+/**
+ * Return a copy of `args` safe for telemetry, console debug output, and ErrorTracker.
+ * @param {string} cmdName
+ * @param {any[]} args
+ * @returns {any[]}
+ */
+export function redactCommandArgs(cmdName, args) {
+    if (!Array.isArray(args)) return [];
+    const cmd = typeof cmdName === 'string' ? cmdName.trim().toLowerCase().replace(/\s+/g, '.') : '';
+    if (cmd === 'relay.token' || cmd === 'wall.token') {
+        return args.map(() => '[REDACTED]');
+    }
+    if (cmd === 'relay.connect') {
+        return args.map((arg, idx) => {
+            if (idx >= 1) return '[REDACTED]';
+            const s0 = String(arg ?? '').trim();
+            if (/^\d+$/.test(s0)) return typeof arg === 'string' ? redactRelaySecrets(arg) : arg;
+            if (s0.includes('://')) return redactRelaySecrets(String(arg));
+            return '[REDACTED]';
+        });
+    }
+    if (cmd === 'call' && args.length > 0 && typeof args[0] === 'string') {
+        const inner = decodeCallInvocation(args[0]);
+        if (inner && isSecretCommand(inner, 1)) {
+            return args.map((_, idx) => (idx === 0 ? '[REDACTED]' : '[REDACTED]'));
+        }
+    }
+    return args.map((arg) => (typeof arg === 'string' ? redactRelaySecrets(arg) : arg));
+}
+
+/**
+ * Scrub a full command/response text line for `_addLog`.
+ * @param {string} text
+ * @returns {string}
+ */
+function redactLogLine(text) {
+    if (typeof text !== 'string' || !text) return '';
+    const tokens = tokenizeCommandLine(text.trim());
+    if (tokens.length > 0) {
+        const t0 = tokens[0].toLowerCase();
+        const t1 = (tokens[1] || '').toLowerCase();
+        if (t0 === 'relay.token' || t0 === 'wall.token' || /^relay\.tok/.test(t0) || /^wall\.tok/.test(t0)) {
+            const safe = redactCommandArgs('relay.token', tokens.slice(1));
+            return [tokens[0], ...safe].join(' ');
+        }
+        if ((t0 === 'relay' || t0 === 'wall') && (t1 === 'token' || /^tok/.test(t1))) {
+            const safe = redactCommandArgs('relay.token', tokens.slice(2));
+            return [tokens[0], tokens[1], ...safe].join(' ');
+        }
+        if (t0 === 'relay.connect') {
+            const safe = redactCommandArgs('relay.connect', tokens.slice(1));
+            return [tokens[0], ...safe].join(' ');
+        }
+        if (t0 === 'relay' && t1 === 'connect') {
+            const safe = redactCommandArgs('relay.connect', tokens.slice(2));
+            return [tokens[0], tokens[1], ...safe].join(' ');
+        }
+        if (t0 === 'call' && tokens.length > 1) {
+            const safe = redactCommandArgs('call', tokens.slice(1));
+            if (safe[0] === '[REDACTED]') {
+                return [tokens[0], ...safe].join(' ');
+            }
+        }
+    }
+    return redactRelaySecrets(text);
 }
 
 export default class WebSocketBridge {
@@ -80,6 +485,7 @@ export default class WebSocketBridge {
      * @param {import('./CommandRouter.js').default} router
      * @param {Object} [options]
      * @param {string} [options.url] - override relay URL (default auto-detect)
+     * @param {string} [options.host] - override relay host (default derived from `options.url` or `window.location.hostname`)
      * @param {number} [options.port=8080] - relay server port
      * @param {string|null} [options.token] - override relay capability token (default: URL `#token=` / tab sessionStorage)
      * @param {boolean} [options.autoConnect=true] - connect on construction
@@ -87,16 +493,48 @@ export default class WebSocketBridge {
      */
     constructor(router, options = {}) {
         this.router = router;
-        this.port = options.port || 8080;
-        this.url = options.url || null;
-        this.token = options.token !== undefined
-            ? parseRelayTokenInput(options.token)
-            : consumeRelayTokenFromLocation(this.port);
-        if (this.url && this.url.includes('#')) {
-            const urlTok = parseRelayTokenInput(this.url);
-            if (urlTok) this.token = urlTok;
-            this.url = this.url.slice(0, this.url.indexOf('#'));
+
+        const rawUrl = typeof options.url === 'string' && options.url.trim() ? options.url.trim() : null;
+        const parsedInit = rawUrl ? parseRelayEndpoint(rawUrl) : null;
+        const optPort = Number(options.port);
+        const validOptPort = Number.isInteger(optPort) && optPort >= 1 && optPort <= 65535 ? optPort : null;
+
+        if (parsedInit && parsedInit.ok) {
+            this.host = parsedInit.host;
+            this.port = validOptPort ?? parsedInit.port;
+            this.url = parsedInit.wsUrl;
+        } else {
+            this.host = normalizeRelayHost(options.host);
+            const loc = typeof window !== 'undefined' ? window.location : null;
+            if (!validOptPort && !rawUrl && loc && loc.port && (loc.protocol === 'http:' || loc.protocol === 'https:')) {
+                const locPort = Number(loc.port);
+                this.port = Number.isInteger(locPort) && locPort >= 1 && locPort <= 65535 ? locPort : 8080;
+            } else {
+                this.port = validOptPort ?? 8080;
+            }
+            this.url = rawUrl ? (rawUrl.includes('#') ? rawUrl.slice(0, rawUrl.indexOf('#')) : rawUrl) : null;
         }
+
+        if (options.token !== undefined) {
+            scrubTokenFromLocationHash();
+            this.token = parseRelayTokenInput(options.token);
+        } else {
+            this.token = consumeRelayTokenFromLocation(this.port, this.host);
+        }
+
+        if (rawUrl && rawUrl.includes('#')) {
+            const urlTok = parseRelayTokenInput(rawUrl);
+            if (urlTok) {
+                this.token = urlTok;
+                if (typeof window !== 'undefined') {
+                    try { window.sessionStorage?.setItem?.(relayTokenStorageKey(this.port, this.host), urlTok); } catch { /* ignore */ }
+                }
+            }
+        }
+
+        this._bootHost = this.host;
+        this._bootPort = this.port;
+        this._bootUrl = this.url || this._resolveAutoUrl();
 
         this.ws = null;
         this.connected = false;
@@ -159,8 +597,17 @@ export default class WebSocketBridge {
 
         // Reconcile a fresh `#token=...` pasted into an already-open tab with zero page reload.
         this._onHashChange = () => {
-            const next = consumeRelayTokenFromLocation(this.port);
-            if (next && next !== this.token) this.setToken(next);
+            if (typeof window === 'undefined') return;
+            const rawHash = typeof window.location?.hash === 'string' ? window.location.hash : '';
+            if (rawHash.length <= 1) return;
+            const params = new URLSearchParams(rawHash.startsWith('#') ? rawHash.slice(1) : rawHash);
+            if (!params.has('token')) return;
+            const hashTok = (params.get('token') || '').trim();
+            const hashValid = Boolean(hashTok && TOKEN_CHARS.test(hashTok));
+            const next = consumeRelayTokenFromLocation(this.port, this.host);
+            if (hashValid && next && next !== this.token) {
+                this.setToken(next);
+            }
         };
         if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
             window.addEventListener('hashchange', this._onHashChange);
@@ -174,9 +621,28 @@ export default class WebSocketBridge {
     // ============ Connection ============
 
     /**
+     * Resolve the default WebSocket URL when `options.url` was not explicitly given.
+     * Supports both `http:` -> `ws:` and `https:` -> `wss:`.
+     * @private
+     * @returns {string}
+     */
+    _resolveAutoUrl() {
+        const loc = typeof window !== 'undefined' ? window.location : null;
+        if (loc && loc.port && (loc.protocol === 'http:' || loc.protocol === 'https:')) {
+            const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = normalizeRelayHost(loc.hostname);
+            const urlHost = host.includes(':') ? `[${host}]` : host;
+            return `${proto}//${urlHost}:${loc.port}`;
+        }
+        const proto = loc?.protocol === 'https:' ? 'wss:' : 'ws:';
+        const urlHost = this.host.includes(':') ? `[${this.host}]` : this.host;
+        return `${proto}//${urlHost}:${this.port}`;
+    }
+
+    /**
      * Set or replace the relay capability token (accepts either a raw token or a
-     * URL carrying `#token=...`), update this tab's sessionStorage, and optionally
-     * reconnect immediately so a restarted relay's new random token reconciles in place.
+     * URL carrying `#token=...`), update this tab's `sessionStorage` under
+     * `g3d.relayToken.<host>:<port>`, and optionally reconnect immediately.
      * @param {string|null} token
      * @param {{ reconnect?: boolean }} [opts]
      */
@@ -184,7 +650,7 @@ export default class WebSocketBridge {
         const parsed = parseRelayTokenInput(token);
         this.token = parsed;
         if (typeof window !== 'undefined') {
-            const key = `${TOKEN_STORAGE_PREFIX}${this.port || 'default'}`;
+            const key = relayTokenStorageKey(this.port, this.host);
             try {
                 if (parsed) window.sessionStorage?.setItem?.(key, parsed);
                 else window.sessionStorage?.removeItem?.(key);
@@ -201,57 +667,93 @@ export default class WebSocketBridge {
     }
 
     /**
-     * Point the bridge at another relay port. Each relay has its own token, so the token
-     * follows the port: this tab's saved token for the new port, or none. Call it before
-     * setToken for that relay, so the token is saved under the new port's key.
+     * Point the bridge at a `(host, port)` relay endpoint. Each `(host, port)` pair owns
+     * an isolated capability token in `sessionStorage`, so switching hosts or ports never
+     * transmits one relay's token to another.
+     * @param {string} host
      * @param {number} port
      */
-    usePort(port) {
-        const next = Number(port);
-        if (!Number.isInteger(next) || next <= 0 || next === this.port) return;
-        this.port = next;
-        this.token = consumeRelayTokenFromLocation(next);
+    useEndpoint(host, port) {
+        const nextPort = Number(port);
+        if (!Number.isInteger(nextPort) || nextPort < 1 || nextPort > 65535) return;
+        const normHost = normalizeRelayHost(host);
+        if (normHost === this.host && nextPort === this.port) return;
+        this.host = normHost;
+        this.port = nextPort;
+        this.token = consumeRelayTokenFromLocation(nextPort, normHost);
+    }
+
+    /**
+     * Point the bridge at another relay port (and optional host, defaulting to `this.host`).
+     * @param {number} port
+     * @param {string} [host=this.host]
+     */
+    usePort(port, host = this.host) {
+        this.useEndpoint(host, port);
+    }
+
+    /**
+     * Restore the boot-resolved `(host, port, url)` target and reload its saved token.
+     */
+    resetToBootEndpoint() {
+        this.host = this._bootHost;
+        this.port = this._bootPort;
+        this.url = this._bootUrl;
+        this.token = consumeRelayTokenFromLocation(this.port, this.host);
     }
 
     /**
      * Connect to the relay server.
-     * @param {string} [url] - override URL for this connection attempt
+     * @param {string} [url] - override URL (or port) for this connection attempt
      */
     connect(url) {
-        if (url) {
-            if (url.includes('#')) {
-                const urlTok = parseRelayTokenInput(url);
-                if (urlTok) this.setToken(urlTok, { reconnect: false });
-                url = url.slice(0, url.indexOf('#'));
+        if (url !== undefined && url !== null && url !== '') {
+            const parsed = parseRelayEndpoint(url, { defaultHost: this.host });
+            if (!parsed.ok) {
+                console.warn(`[ws-bridge] refusing invalid relay endpoint: ${parsed.error}`);
+                return;
             }
-            this.url = url;
+            this.useEndpoint(parsed.host, parsed.port);
+            if (parsed.token) {
+                this.setToken(parsed.token, { reconnect: false });
+            }
+            this.url = parsed.wsUrl;
         }
         if (!this.url) {
-            // Auto-detect: if served from glyph3d-cli (unified server),
-            // connect WebSocket to the same host:port as the page origin.
-            const loc = typeof window !== 'undefined' && window.location;
-            if (loc && loc.port && loc.protocol === 'http:') {
-                this.url = `ws://${loc.hostname}:${loc.port}`;
-            } else {
-                this.url = `ws://localhost:${this.port}`;
+            const loc = typeof window !== 'undefined' ? window.location : null;
+            if (loc && loc.port && (loc.protocol === 'http:' || loc.protocol === 'https:')) {
+                const locPort = Number(loc.port);
+                if (Number.isInteger(locPort) && locPort >= 1 && locPort <= 65535) {
+                    this.useEndpoint(loc.hostname, locPort);
+                }
             }
+            this.url = this._resolveAutoUrl();
+        } else if (this.url.includes('#')) {
+            this.url = this.url.slice(0, this.url.indexOf('#'));
         }
         if (!this.token) {
-            this.token = consumeRelayTokenFromLocation(this.port);
+            this.token = consumeRelayTokenFromLocation(this.port, this.host);
         }
         this._intentionalClose = false;
         this._doConnect();
     }
 
     /**
-     * Connect via LAN address (for phone/tablet control).
+     * Connect via LAN address (for phone/tablet control), isolating token lookup to
+     * `this._lanAddress` so `localhost`'s capability token is never transmitted over LAN.
      */
     connectLAN() {
         if (!this._lanAddress) {
             console.warn('[ws-bridge] LAN address not detected');
             return;
         }
-        this.url = `ws://${this._lanAddress}:${this.port}`;
+        this.useEndpoint(this._lanAddress, this.port);
+        const proto = (typeof window !== 'undefined' && window.location?.protocol === 'https:') ? 'wss:' : 'ws:';
+        const urlHost = this.host.includes(':') ? `[${this.host}]` : this.host;
+        this.url = `${proto}//${urlHost}:${this.port}`;
+        if (!this.token) {
+            this.token = consumeRelayTokenFromLocation(this.port, this.host);
+        }
         this._intentionalClose = false;
         this._doConnect();
     }
@@ -495,8 +997,8 @@ export default class WebSocketBridge {
      */
     _detectLanAddress() {
         // If the page was loaded via a LAN IP, use that
-        const hostname = typeof window !== 'undefined' ? window.location?.hostname : '';
-        if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' && !hostname.startsWith('[')) {
+        const hostname = typeof window !== 'undefined' ? cleanHostString(window.location?.hostname) : '';
+        if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
             this._lanAddress = hostname;
             return;
         }
@@ -534,11 +1036,13 @@ export default class WebSocketBridge {
 
     /**
      * Get the full connection URL for external controllers.
-     * @returns {string}
+     * @returns {{ localhost: string, lan: string|null, connected: boolean, url: string|null }}
      */
     getConnectionInfo() {
-        const localhost = `ws://localhost:${this.port}`;
-        const lan = this._lanAddress ? `ws://${this._lanAddress}:${this.port}` : null;
+        const proto = (typeof window !== 'undefined' && window.location?.protocol === 'https:') ? 'wss:' : 'ws:';
+        const localhost = `${proto}//localhost:${this.port}`;
+        const lanHost = this._lanAddress && this._lanAddress.includes(':') ? `[${this._lanAddress}]` : this._lanAddress;
+        const lan = lanHost ? `${proto}//${lanHost}:${this.port}` : null;
         return { localhost, lan, connected: this.connected, url: this.url };
     }
 
@@ -549,6 +1053,7 @@ export default class WebSocketBridge {
      * @private
      */
     _createStatusBar() {
+        if (typeof document === 'undefined' || !document.body) return;
         this._statusEl = document.createElement('div');
         this._statusEl.id = 'ws-status-bar';
         Object.assign(this._statusEl.style, {
@@ -634,11 +1139,16 @@ export default class WebSocketBridge {
         }
 
         try {
-            const protocols = this.token ? ['glyph3d', `g3d-token.${this.token}`] : ['glyph3d'];
+            const validToken = this.token && TOKEN_CHARS.test(this.token) ? this.token : null;
+            if (this.token && !validToken) {
+                console.warn('[ws-bridge] dropping malformed relay token (non-RFC-7230 characters)');
+                this.token = null;
+            }
+            const protocols = validToken ? ['glyph3d', `g3d-token.${validToken}`] : ['glyph3d'];
             this.ws = new WebSocket(this.url, protocols);
             this.ws.binaryType = 'arraybuffer'; // terminal OUTPUT frames arrive as ArrayBuffer
         } catch (err) {
-            console.warn(`[ws-bridge] failed to create WebSocket: ${err.message}`);
+            console.warn(`[ws-bridge] failed to create WebSocket: ${redactRelaySecrets(err?.message || String(err))}`);
             this._scheduleReconnect();
             return;
         }
@@ -709,7 +1219,7 @@ export default class WebSocketBridge {
         try {
             envelope = JSON.parse(raw);
         } catch {
-            console.log(`[ws-bridge] non-JSON message: ${raw}`);
+            console.log(`[ws-bridge] non-JSON message: ${redactRelaySecrets(String(raw ?? ''))}`);
             return;
         }
 
@@ -820,11 +1330,13 @@ export default class WebSocketBridge {
 
     /** @private */
     _addLog(direction, clientId, text) {
+        const raw = Array.isArray(text) ? text.map((t) => String(t ?? '')).join(' ') : String(text ?? '');
+        const safe = redactLogLine(raw);
         const entry = {
             time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
             dir: direction,    // 'in' or 'out'
             client: clientId,
-            text: text.length > 200 ? text.slice(0, 197) + '...' : text,
+            text: safe.length > 200 ? safe.slice(0, 197) + '...' : safe,
         };
         this._log.push(entry);
         if (this._log.length > this._logMax) this._log.shift();

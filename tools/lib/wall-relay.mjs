@@ -79,6 +79,16 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT, origi
     const originArgs = [...originSet].flatMap((o) => ['--origin', o]);
 
     const termd = privateTermd(`w${process.pid}`); // short: the socket path must fit a sockaddr
+    const prevTokenDir = process.env.G3D_RELAY_TOKEN_DIR;
+    const prevToken = process.env.G3D_RELAY_TOKEN;
+    process.env.G3D_RELAY_TOKEN_DIR = termd.dir;
+    delete process.env.G3D_RELAY_TOKEN;
+    const restoreTokenEnv = () => {
+        if (prevTokenDir === undefined) delete process.env.G3D_RELAY_TOKEN_DIR;
+        else process.env.G3D_RELAY_TOKEN_DIR = prevTokenDir;
+        if (prevToken === undefined) delete process.env.G3D_RELAY_TOKEN;
+        else process.env.G3D_RELAY_TOKEN = prevToken;
+    };
     let child = null;
     let log = '';
     /** Who waits for a line in the log (logged). @type {Set<{re: RegExp, done: (v: boolean) => void, bound: any}>} */
@@ -109,6 +119,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT, origi
         const alive = child.exitCode == null && child.signalCode == null;
         if (!(await listening(port)) || !alive || /in use/.test(log)) {
             child.kill('SIGKILL');
+            restoreTokenEnv();
             throw new Error(`[wall-relay] the relay started on :${port} isn't the one answering (${alive ? 'running' : await exited}${/in use/.test(log) ? ', port was taken' : ''}; is ./glyph3d-cli built?)\n${log.trim().split('\n').slice(-8).join('\n')}`);
         }
     };
@@ -154,6 +165,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT, origi
         async stop() {
             if (stopped) return;
             stopped = true;
+            restoreTokenEnv();
             await halt();
             await stopTermd(termd.dir, ns);
             process.off('exit', onExit);

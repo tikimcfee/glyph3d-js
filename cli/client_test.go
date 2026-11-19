@@ -114,3 +114,53 @@ func TestPrintResponseDataOnly(t *testing.T) {
 		t.Fatalf("printed %q", got)
 	}
 }
+
+func TestPortFromRelayURLAndFragmentRedaction(t *testing.T) {
+	good := map[string]int{
+		"":                      8080,
+		"ws://localhost":        80,
+		"http://localhost":      80,
+		"wss://box.lan":         443,
+		"https://box.lan":       443,
+		"ws://localhost:8180":   8180,
+		"wss://[::1]:9443":      9443,
+		"http://127.0.0.1:80":   80,
+		"https://127.0.0.1:443": 443,
+	}
+	for in, want := range good {
+		got, err := portFromRelayURL(in)
+		if err != nil || got != want {
+			t.Errorf("portFromRelayURL(%q) = (%d, %v), want (%d, nil)", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"ws://localhost:",
+		"ws://localhost:0",
+		"ws://localhost:65536",
+		"ws://[localhost]:8080",
+		"localhost:8080",
+		"ftp://localhost",
+	} {
+		if got, err := portFromRelayURL(bad); err == nil {
+			t.Errorf("portFromRelayURL(%q) = %d, want error", bad, got)
+		}
+	}
+
+	// tokenCmd and urlCmd must never echo #token= secrets to stderr on bad URLs (DEF-11).
+	rPipe, wPipe, _ := os.Pipe()
+	saved := os.Stderr
+	os.Stderr = wPipe
+	_ = tokenCmd("localhost:bad#token=SECRET_TOK_1", nil)
+	_ = urlCmd("localhost:bad#token=SECRET_TOK_2", nil)
+	t.Setenv("G3D_RELAY_TOKEN", "validtok")
+	_ = urlCmd("ws://localhost:8080", []string{"not-a-url#token=SECRET_TOK_3"})
+	os.Stderr = saved
+	wPipe.Close()
+	stderrOut, _ := io.ReadAll(rPipe)
+	rPipe.Close()
+	for _, s := range []string{"SECRET_TOK_1", "SECRET_TOK_2", "SECRET_TOK_3"} {
+		if strings.Contains(string(stderrOut), s) {
+			t.Fatalf("stderr leaked %q: %s", s, stderrOut)
+		}
+	}
+}

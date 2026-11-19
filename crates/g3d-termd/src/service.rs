@@ -64,6 +64,7 @@ pub fn start(args: &crate::Args, ns: Option<&str>, socket: &Path, log: &Path) ->
     for (k, _) in std::env::vars_os() {
         if let Some(k) = k.to_str()
             && !k.is_empty()
+            && !k.starts_with("G3D_RELAY_")
             && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             && !k.as_bytes()[0].is_ascii_digit()
         {

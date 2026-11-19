@@ -2,34 +2,30 @@
 
 package main
 
-import (
-	"fmt"
-	"os"
-	"path/filepath"
-)
-
 func relayRuntimeDir() string {
-	return filepath.Join(os.TempDir(), "glyph3d-relay")
+	return ""
 }
 
-func checkSecureRuntimeDir(dir string) error {
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("relay runtime dir %s is not a directory", dir)
-	}
-	return nil
+func defaultLogDir() string {
+	return ""
 }
 
-func checkSecureTokenFile(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("relay token file %s is not a regular file", path)
-	}
-	return nil
+func ensurePrivateDir(_ string) error {
+	return errWindowsUnsupported
+}
+
+func checkSecureRuntimeDir(_ string) error {
+	return errWindowsUnsupported
+}
+
+func checkSecureTokenFile(_ string) error {
+	return errWindowsUnsupported
+}
+
+func writeRelayTokenFileInDir(_ string, _ int, _ string) (string, func(), error) {
+	return "", nil, errWindowsUnsupported
+}
+
+func readRelayTokenFileInDir(_ string, _ int) (string, error) {
+	return "", errWindowsUnsupported
 }
