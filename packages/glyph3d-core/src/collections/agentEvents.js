@@ -15,12 +15,17 @@
  * `at`/`line`/`seq` of the add that introduced it. Identity is the `id`; the byte offset
  * `at` (the transcript line the event came from) is what a book pages back by, and what a
  * follow resumes from (`lastAt`: the newest line read that isn't a provisional reply).
+ * An event of a branch the person rewound (Claude: a prompt edited and re-sent, the old one and
+ * everything below it left behind in the transcript) carries `abandoned: true` — re-sent as an
+ * update when the replacing prompt is read, folded onto the add in a whole read; its record
+ * says so (`abandoned`), or is null when abandoned events are hidden (`showAbandoned: false`).
  *
  * Pure: no THREE, no DOM — the relay-side tooling and the tests import it.
  *
  *   AgentEventReader      push(bytes|text) → changes; the folded events by id (or, built
  *                         with retain:false, a framing-only reader for a live follow)
- *   eventRecord(ev, pos)  one event → the record a sheet renders (null: noise, when hidden)
+ *   eventRecord(ev, pos)  one event → the record a sheet renders (null: noise or an abandoned
+ *                         branch's event, when hidden)
  *   eventFacts(record)    the event's own facts as info rows (turn, status, final, …)
  *   sessionMeta(session)  a session line → the lane meta the nameplate reads
  *   eventLane(ev, …)      the book an event belongs in
@@ -63,6 +68,7 @@ function checkFrame(f, where) {
     if (!EVENT_KINDS.has(f.kind)) throw new Error(`[agentEvents] ${where}: event ${f.id} has kind ${JSON.stringify(f.kind)}`);
     if (!f[f.kind] || typeof f[f.kind] !== 'object') throw new Error(`[agentEvents] ${where}: event ${f.id} (${f.kind}) has no ${f.kind} body`);
     if (!Number.isFinite(f.at)) throw new Error(`[agentEvents] ${where}: event ${f.id} has no byte offset (at)`);
+    if (f.abandoned !== undefined && typeof f.abandoned !== 'boolean') throw new Error(`[agentEvents] ${where}: event ${f.id} has abandoned ${JSON.stringify(f.abandoned)} (a boolean, or omitted)`);
 }
 
 /**
@@ -71,6 +77,7 @@ function checkFrame(f, where) {
  * @property {number} at @property {number} line @property {string} ts
  * @property {{id:string, index:number, derived?:boolean}} turn
  * @property {string} [agent]   the subagent id, on a subagent's own events
+ * @property {boolean} [abandoned] the event is on a branch the person rewound (omitted otherwise)
  * @property {'prompt'|'think'|'say'|'tool'|'system'|'request'} kind
  */
 
@@ -197,8 +204,8 @@ export class AgentEventReader {
     get size() { return this.order.length; }
 
     /**
-     * The held events as book records, in position order (hidden noise dropped).
-     * @param {{showNoise?:boolean}} [opts] @returns {Object[]}
+     * The held events as book records, in position order (hidden noise and abandoned events dropped).
+     * @param {{showNoise?:boolean, showAbandoned?:boolean}} [opts] @returns {Object[]}
      */
     records(opts = {}) {
         const out = [];
@@ -242,14 +249,25 @@ export function sessionPath(target, cwd) {
  *   system  action 'system', detail = the subtype, result = the text (else the data as JSON)
  *   request action 'request', detail = the model (only a `--requests` stream has these)
  *
- * Every event is a record by default (1:1); `showNoise: false` makes a noise call null.
+ * An event on an abandoned branch (`ev.abandoned`) is the same record marked `abandoned: true`
+ * and tagged 'abandoned' (its headline reads `[abandoned]`; a book sets it in the noise hue).
+ *
+ * Every event is a record by default (1:1); `showNoise: false` makes a noise call null,
+ * `showAbandoned: false` an abandoned event.
  * @param {AgentEvent} ev
  * @param {{at:number, line?:number, seq?:number}|null} [pos] the event's position (its add);
  *        defaults to the event's own
- * @param {{showNoise?:boolean}} [opts]
+ * @param {{showNoise?:boolean, showAbandoned?:boolean}} [opts]
  * @returns {Object|null}
  */
-export function eventRecord(ev, pos = null, { showNoise = true } = {}) {
+export function eventRecord(ev, pos = null, { showNoise = true, showAbandoned = true } = {}) {
+    if (ev.abandoned && !showAbandoned) return null;
+    const rec = kindRecord(ev, pos, showNoise);
+    return rec && ev.abandoned ? { ...rec, abandoned: true, tag: 'abandoned' } : rec;
+}
+
+/** eventRecord's per-kind record (abandonment aside). @param {AgentEvent} ev @param {Object|null} pos @param {boolean} showNoise */
+function kindRecord(ev, pos, showNoise) {
     const at = pos?.at ?? ev.at;
     const base = {
         id: ev.id, eventKind: ev.kind, at, ts: ev.ts ?? null,
@@ -362,24 +380,24 @@ export function eventLane(ev, streamLane, streamIsSubagent) {
  * record of this window — it comes back in `orphans`, the event's state as of the window's
  * end, for the book to hold until that add pages in (AgentBooks adopts it then).
  * @param {Uint8Array|string|string[]} lines stream lines (an array: one line each, no newline)
- * @param {{cap?:number, showNoise?:boolean}} [opts] cap keeps the newest N records
+ * @param {{cap?:number, showNoise?:boolean, showAbandoned?:boolean}} [opts] cap keeps the newest N records
  * @returns {{records:Object[], count:number, total:number, session:Object|null, lastAt:number|null,
  *            orphans:Map<string, Object>}}
  *          total: the window's records before the cap; lastAt: where a follow resumes after
  *          this window (AgentEventReader.lastAt); orphans: id → the record of an update whose
- *          add isn't in the window (hidden noise left out)
+ *          add isn't in the window (hidden noise and abandoned events left out)
  */
-export function parseEventSlice(lines, { cap = Infinity, showNoise = true } = {}) {
+export function parseEventSlice(lines, { cap = Infinity, showNoise = true, showAbandoned = true } = {}) {
     const r = new AgentEventReader();
     const changes = r.push(Array.isArray(lines) ? (lines.length ? lines.join('\n') + '\n' : '') : lines);
     changes.push(...r.end());
     const orphans = new Map();
     for (const c of changes) {
         if (c.op !== 'update' || c.pos) continue;
-        const rec = eventRecord(c.event, null, { showNoise });
+        const rec = eventRecord(c.event, null, { showNoise, showAbandoned });
         if (rec) orphans.set(rec.id, rec);
     }
-    const all = r.records({ showNoise });
+    const all = r.records({ showNoise, showAbandoned });
     const total = all.length;
     const records = Number.isFinite(cap) && total > cap ? all.slice(-cap) : all;
     return { records, count: records.length, total, session: r.session, lastAt: r.lastAt, orphans };

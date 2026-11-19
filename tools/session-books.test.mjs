@@ -27,6 +27,8 @@
 //     tuned; capture saves them by session, never the hub's;
 //   - a team whose helpers' books all close folds its desk; a workgroup's subagent opened from
 //     history sits on its agent's team desk at the hub, never at the agents desk;
+//   - a REWIND (gomuxai's `abandoned`): an open reads the folded branch and never shows it; live, the
+//     branch's re-sent updates take its sheets out, and a call re-sent abandoned taps no delta book;
 //   - an agent's screen rides its book (the book's aside) whichever arrives first — a screen
 //     re-adopted on reload before its book opens included — and follows it as teams form and fold.
 
@@ -781,6 +783,38 @@ setSetting({}, 'gomux.hubBookForm', 'deck');
     ok(holderName(r, 'L1-aaaa') === 'depth-probe', 'its desk stands back up: Holding seats it there');
     r.relay.list([session('L1-aaaa', { status: 'processing', title: 'renamed' })]);
     ok(holderName(r, 'L1-aaaa') === 'depth-probe', 'and it stays through the next re-push');
+}
+
+// ── 12. a rewind: the dead branch never shows, live or read ──────────────────────────
+{
+    const prompt = (k, text, t, extra = {}) => ({ type: 'event', id: `prompt-${k}`, op: 'add', seq: k, at: k * LINE, line: k, ts: iso(k),
+        turn: { id: t, index: 2, derived: false }, kind: 'prompt', prompt: { text, origin: 'human' }, ...extra });
+    const dead = (e, at) => ({ ...e, op: 'update', at, abandoned: true });
+    // read: the transcript already holds the rewind (its updates folded onto the adds)
+    {
+        const w = makeWorld();
+        const p1 = prompt(1, 'Relaoded!', 't-a'), s2 = { ...say(2, 'on it'), turn: { id: 't-a', index: 2, derived: false } }, p3 = prompt(3, 'Reloaded!', 't-b');
+        w.relay.add(session('RW1'), [say(0, 'before'), p1, s2, p3, dead(p1, 3 * LINE), dead(s2, 3 * LINE)]);
+        await w.sb.open('RW1');
+        eq(ids(w.books.lanes.get('RW1')), ['say-0', 'prompt-3'], 'open: a rewound branch read whole is not in the book');
+    }
+    // live: the branch lands, then its abandoned updates take it out — and an edit re-sent abandoned taps nothing
+    {
+        const w = makeWorld();
+        const taps = [];
+        w.ctx.deltaBooks = { ingestTool: (lane, rec) => taps.push(rec) };
+        w.relay.add(session('RW2'), [say(0, 'before')]);
+        await w.sb.open('RW2');
+        const lane = w.books.lanes.get('RW2');
+        const p1 = prompt(1, 'Relaoded!', 't-a');
+        const e2 = { ...edit(2, 'f.js', [], 'update', 2 * LINE), op: 'add' };   // an edit that landed ok on the dead branch
+        w.relay.push('RW2', [p1, e2]);
+        eq(ids(lane), ['say-0', 'prompt-1', 'edit-2'], 'live: the branch lands as sheets');
+        const tapped = taps.length;
+        w.relay.push('RW2', [prompt(3, 'Reloaded!', 't-b'), dead(p1, 3 * LINE), dead(e2, 3 * LINE)]);
+        eq(ids(lane), ['say-0', 'prompt-3'], 'the rewind lands: the re-sent prompt in, the branch out');
+        ok(tapped === 1 && taps.length === tapped, `the edit tapped its delta book once, when it landed — not again when re-sent abandoned (${tapped} → ${taps.length})`);
+    }
 }
 
 console.log(`session-books: ${pass} passed, ${fail} failed`);

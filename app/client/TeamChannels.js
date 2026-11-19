@@ -18,6 +18,9 @@ import { getSetting } from './settings.js';
  * the sender is the text's `[from NAME@HOST]` prefix when it carries one, else the person for a
  * typed prompt, else (a subagent's task) the recipient's parent.
  *
+ * A message on a branch the person rewound (its record `abandoned`: a prompt edited and re-sent)
+ * isn't one — only the prompt that replaced it is shown.
+ *
  * Merged by time (then by event id). New messages later than the last shown are TAIL-APPENDED
  * (ScrollDocument.pushBlocks — only their rows are laid out); one that lands out of order re-lays
  * the document (the view stays on what it showed). The channel is a member of the team's desk
@@ -96,7 +99,7 @@ export default class TeamChannels {
             if (!lane) continue;
             const recs = [...(lane.older || []).map((x) => x.record), ...lane.entries.map((e) => e.record), ...(lane.newer || []).map((x) => x.record)];
             for (const rec of recs) {
-                if (rec?.action !== 'prompt' || !MESSAGE_ORIGINS.has(rec.origin)) continue;
+                if (rec?.action !== 'prompt' || !MESSAGE_ORIGINS.has(rec.origin) || rec.abandoned) continue;
                 const key = `${name}:${rec.id ?? rec.at}`;
                 if (seen.has(key)) continue;
                 seen.add(key);

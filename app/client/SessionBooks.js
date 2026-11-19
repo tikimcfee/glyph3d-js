@@ -231,7 +231,7 @@ export default class SessionBooks {
             for (;;) {
                 r = await this.provider.read(st.session, Number.isFinite(cap) ? { tail } : {});
                 reads++;
-                slice = parseEventSlice(r.lines, { showNoise: books.cfg.showNoise });
+                slice = parseEventSlice(r.lines, { showNoise: books.cfg.showNoise, showAbandoned: books.cfg.showAbandoned });
                 whole = !Number.isFinite(cap) || (r.size != null && tail >= r.size);
                 if (whole || slice.total >= cap || r.size == null || stale()) break;
                 tail *= 2;
@@ -348,7 +348,8 @@ export default class SessionBooks {
         const deltas = this.ctx.deltaBooks;
         const cwd = this.ctx.agentBooks?.lanes.get(st.lane)?.cwd || st.info?.cwd || '';
         for (const c of changes) {
-            if (c.event?.kind !== 'tool' || c.event.tool?.result?.status !== 'ok') continue;
+            // (an abandoned branch's call re-sent as abandoned is no new landing)
+            if (c.event?.kind !== 'tool' || c.event.tool?.result?.status !== 'ok' || c.event.abandoned) continue;
             const rec = eventRecord(c.event, c.pos);
             if (!rec) continue;
             deltas?.ingestTool?.(st.lane, rec, cwd);

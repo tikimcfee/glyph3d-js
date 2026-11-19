@@ -480,6 +480,9 @@ invariants headlessly — one relayout per bulk load, coalesced registry notific
   `[harness]` — in the prompt hue), bookkeeping tool calls are sheets too, set in a dim noise
   hue (`book.showNoise` off hides them), every sheet carries its turn id + index, and an event's
   update (a tool's result, a confirmed reply) rebuilds its sheet IN PLACE (`Book.replaceSheet`).
+  A rewound branch (a prompt edited and re-sent: gomuxai re-sends the old one and all below it
+  `abandoned`) leaves the book where it stands, and its prompt is no team-channel message
+  (`book.showAbandoned` keeps its sheets, in the noise hue tagged `[abandoned]`).
   An agent book is a fixed-size WINDOW (its cap of sheets) sliding over its whole run
   (`AgentBooks.setHistory` — SessionBooks gives it the session's `agentEvents/read`): pushing past its
   oldest sheet slides it one sheet back (the older one materializes at the front, the newest

@@ -10,7 +10,9 @@
 // parent for a subagent's task), the body == the record's text (rejoined from its wrapped rows; nothing
 // dropped), no row wider than the channel; merged chronologically; a live message later than the last
 // TAIL-APPENDS (only its rows laid out); one out of order re-lays with the view held; a held view survives a
-// rebuild (serialize → restore); registered channel:<team> and seated at gomux/<team>.
+// rebuild (serialize → restore); registered channel:<team> and seated at gomux/<team>; a REWOUND prompt
+// (gomuxai's `abandoned`: edited and re-sent) leaves the channel, and is never a message even when its book
+// keeps it (book.showAbandoned).
 
 process.env.TZ = 'America/Denver';   // the display's zone, not UTC — a header in UTC fails the clock check
 import * as THREE from 'three';
@@ -138,6 +140,7 @@ ok(ctx.registry.get(channelId('lead'))?.grid === doc && ctx.holding.holderOf(cha
 }
 
 // ── 4. a held view survives a rebuild ─────────────────────────────────────────────────────────
+let restored = null;   // the rebuilt channels (§6 goes on with them)
 {
     doc.scrollBy(-3);
     const want = doc.visibleText();
@@ -145,13 +148,34 @@ ok(ctx.registry.get(channelId('lead'))?.grid === doc && ctx.holding.holderOf(cha
     ok(saved.length === 1 && saved[0].team === 'lead' && saved[0].view.following === false, `serialize: the channel and its held view (${J(saved[0]?.view)})`);
     quiet(() => tc.hide('lead'));
     ok(!ctx.registry.get(channelId('lead')) && !ctx.holding.holderOf(channelId('lead')), 'hide: unregistered, off its desk');
-    const tc2 = new TeamChannels(ctx);
+    const tc2 = restored = new TeamChannels(ctx);
     const show = tc2.show.bind(tc2);
     tc2.show = (team) => { const d = show(team); d?.setFrame({ rows: 6 }); d?.flush(); return d; };   // the same frame as saved
     const n = await quiet(() => tc2.restore(saved, { waitMs: 500, everyMs: 20 }));
     ok(n === 1 && tc2.byTeam.get('lead')?.doc.following === false, 'restore stands it back up, held');
     eq(tc2.byTeam.get('lead').doc.visibleText(), want, 'on the same rows');
     ok(ctx.holding.holderOf(channelId('lead'))?.carrelName === 'gomux/lead', 'at its desk again');
+}
+
+// ── 6. a rewind: the edited-and-re-sent prompt is one message ─────────────────────────────────
+{
+    const r = new AgentEventReader();
+    const ev = (id, ts, text, extra = {}) => ({ type: 'event', id, op: 'add', seq: 9100, at: 950000 + id.length, ts, kind: 'prompt',
+        turn: { id: `t-${id}`, index: 149 }, prompt: { text, origin: 'human' }, ...extra });
+    const send = (...evs) => ctx.agentBooks.applyEvents('lead', r.push(evs.map((e) => J(e) + '\n').join('')), { agentType: 'claude' });
+    const tc2 = restored, doc = tc2.byTeam.get('lead').doc;
+    const has = (id) => doc.blocks.some((b) => b.id === `lead:${id}`);
+    const P1 = ev('rw-1', '2031-01-01T17:11:56Z', 'Relaoded!'), P2 = ev('rw-2', '2031-01-01T17:12:00Z', 'Reloaded!');
+    send(P1, P2);
+    ok(has('rw-1') && has('rw-2'), 'before the rewind lands: both prompts are messages');
+    send({ ...P1, op: 'update', abandoned: true });
+    ok(!has('rw-1') && has('rw-2') && !tc2.messages('lead').some((m) => m.key === 'lead:rw-1'), 'its abandoned update takes the old prompt out of the channel; the re-sent one stays');
+    ctx.agentBooks.cfg.showAbandoned = true;   // the book keeps rewound sheets — the channel still doesn't count them
+    const P3 = ev('rw-3', '2031-01-01T17:13:00Z', 'Relaoded again!'), P4 = ev('rw-4', '2031-01-01T17:13:04Z', 'Reloaded again!');
+    send(P3, P4, { ...P3, op: 'update', abandoned: true });
+    ok(ctx.agentBooks.lanes.get('lead').entries.some((e) => e.record.id === 'rw-3' && e.record.abandoned), 'book.showAbandoned: the book keeps it, marked');
+    ok(!has('rw-3') && has('rw-4'), 'and the channel shows only the re-sent prompt');
+    ctx.agentBooks.cfg.showAbandoned = false;
 }
 
 // ── 5. hues are an identity's, not an opening order's (a reload reshuffles the order) ────────────

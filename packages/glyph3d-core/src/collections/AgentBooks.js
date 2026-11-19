@@ -55,7 +55,10 @@
  * (`[you]`, `[you · queued]`, `[delivered]`, `[notification]`, `[peer]`, `[command]`,
  * `[harness]`), its words set in the prompt hue — beside `think` (a redacted block says
  * so), `say` (a final reply marked), tool and `system` sheets; a call the tool table calls
- * noise is a sheet too, set in a dim hue. Each sheet carries its event's TURN (the prompt
+ * noise is a sheet too, set in a dim hue. An event of a branch the person REWOUND (gomuxai's
+ * `abandoned`: a prompt edited and re-sent) leaves the book — an update that turns a sheet
+ * abandoned removes it where it stands (the deck closes up, a held head stays on its sheet) —
+ * unless cfg.showAbandoned, which sets it in the noise hue, tagged `[abandoned]`. Each sheet carries its event's TURN (the prompt
  * it belongs to: id + index; the HUD reads the open sheet's) so a later layer may group by
  * it. An event
  * that changes (a tool's result landing, a provisional reply confirmed) arrives again
@@ -124,6 +127,7 @@ export const AGENT_BOOKS_DEFAULTS = {
     tabLine: 0.018,             // tab text row height, × pageH
     promptTextLift: 0.6,        // a prompt's words: the prompt hue lifted toward white (0 = hue, 1 = white) — whose words they are reads at a glance
     showNoise: true,            // tool calls the tool table calls noise (ToolSearch, TodoWrite…): true gives each its sheet, set quietly (1:1 events); false hides them (new events)
+    showAbandoned: false,       // events of a branch the person rewound (an edited, re-sent prompt and all below it): false removes them (live, in place); true keeps each as a sheet in the noise hue, tagged [abandoned]
     noiseTextLift: 0.15,        // a noise sheet's headline + output: the dim noise hue lifted this far toward white (0 = hue) — kept low so it reads as background
     snapshotImageWidth: 120,    // world width of an image recto (height follows aspect; a tall one scales down to fit)
     highlightFillOpacity: 0.22, // decorate FILL bar opacity (0 falls back to additive tint)
@@ -231,6 +235,10 @@ export function actionCall(rec) {
  *  reasoning (say/think), the harness speaking (system): set at the recto text size (a file
  *  or an output rides its ratio of it), and named by their verb alone on the nameplate. */
 const PROSE_ACTIONS = new Set(['prompt', 'say', 'think', 'system']);
+
+/** The kind a record's sheet is hued (and quieted) as: its action's, except an abandoned
+ *  branch's event, which reads as noise. @param {{action?:string, abandoned?:boolean}} record */
+const sheetKind = (record) => (record.abandoned ? 'noise' : kindForAction(record.action));
 
 /** The page-text knobs ONE book may carry its own value for (tuneText) — the shelf's cfg
  *  holds the defaults. */
@@ -471,14 +479,14 @@ export default class AgentBooks {
      */
     _buildSheet(lane, record, seq, rev = 0) {
         const agentId = lane.agentId;
-        const hue = this.cfg.hues[kindForAction(record.action)] || this.cfg.hues.other;
+        const hue = this.cfg.hues[sheetKind(record)] || this.cfg.hues.other;
         const sheetId = rev ? `agent:${agentId}:${seq}~${rev}` : `agent:${agentId}:${seq}`;
         if (lane.book.form === 'scroll') {
             // The scroll form reads the RECORD (its document's block) — the sheet is a light
             // placeholder: no cards, no GPU objects, the window machinery unchanged.
             const meta = { agentId, seq, sheetId, record };
             return {
-                sides: { verso: null, recto: null, meta: { seq, kind: kindForAction(record.action) } },
+                sides: { verso: null, recto: null, meta: { seq, kind: sheetKind(record) } },
                 entry: {
                     sheetId, verso: null, action: null, body: null, info: null, snapshot: null,
                     rectoRole: null, rectoText: null, call: actionCall(record), infoText: infoOf(record), window: null,
@@ -501,7 +509,7 @@ export default class AgentBooks {
         const action = this._card(`[${call.verb}]`, setAs(call.head, sz.head.cols), {
             worldScale: CARD_WORLD_SCALE, gridScale: sz.head.gridScale,
             layout: { wrapWidth: sz.head.cols, zWrapSpacing: 0 },
-            filenameColor: hue, textColor: liftHue(hue, record.action === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
+            filenameColor: hue, textColor: liftHue(hue, sheetKind(record) === 'noise' ? this.cfg.noiseTextLift : this.cfg.callTextLift),
         }, { id: actionId, meta: { ...meta, kind: 'action' } }, lane, sheetId);
         let body = null;
         if (call.rest) {
@@ -547,7 +555,7 @@ export default class AgentBooks {
         }
 
         return {
-            sides: { verso, recto, meta: { seq, kind: kindForAction(record.action) } },
+            sides: { verso, recto, meta: { seq, kind: sheetKind(record) } },
             entry: {
                 sheetId, verso, action, body, info, snapshot: recto,
                 rectoRole,                      // 'prose' | 'output' | 'file' (a snapshot) | null (an image / none)
@@ -679,9 +687,14 @@ export default class AgentBooks {
                     touched.add(lane);
                     continue;
                 }
-                const rec = eventRecord(c.event, c.pos, { showNoise: this.cfg.showNoise });
-                if (!rec) continue;
+                const rec = eventRecord(c.event, c.pos, { showNoise: this.cfg.showNoise, showAbandoned: this.cfg.showAbandoned });
                 const id = eventLane(c.event, streamLane, !!this.lanes.get(streamLane)?.meta?.parentSession);
+                if (!rec) {
+                    // Hidden — an abandoned branch's event leaves wherever the book holds it.
+                    const lane = c.event.abandoned ? this.lanes.get(id) : null;
+                    if (lane && this._dropRecord(lane, c.event.id)) { updated++; touched.add(lane); }
+                    continue;
+                }
                 const held = this.lanes.get(id);
                 if (held && this._replaceRecord(held, rec)) { updated++; touched.add(held); continue; }
                 if (c.op !== 'add') {
@@ -736,6 +749,25 @@ export default class AgentBooks {
             if (item) { item.record = { ...rec, at: item.record.at }; return true; }
         }
         return false;
+    }
+
+    /**
+     * Take the record with `id` out of the lane wherever it holds it — a resident sheet leaves
+     * the deck in place (Book.removeSheet: the deck closes up behind it, a held head stays on
+     * its sheet; its scroll block leaves the document, the view kept), a buffered record leaves
+     * its buffer, a held orphan is forgotten. An abandoned branch's events go this way. @private
+     * @returns {boolean} whether the lane held it
+     */
+    _dropRecord(lane, id) {
+        let hit = !!lane.orphans?.delete(id);
+        const i = lane.entries.findIndex((e) => e.record.id === id);
+        if (i >= 0) { this._evict(lane, i); hit = true; }
+        for (const key of ['newer', 'older']) {
+            const buf = lane[key];
+            const k = buf?.findIndex((x) => x.record.id === id) ?? -1;
+            if (k >= 0) { buf.splice(k, 1); hit = true; }
+        }
+        return hit;
     }
 
     /**
@@ -1397,14 +1429,14 @@ export default class AgentBooks {
     /** The colours one record's block is set in. @private */
     _scrollHues(record) {
         const c = this.cfg;
-        const hue = c.hues[kindForAction(record.action)] || c.hues.other;
-        const noise = record.action === 'noise';
+        const hue = c.hues[sheetKind(record)] || c.hues.other;
+        const noise = sheetKind(record) === 'noise';
         const dim = (h, t) => ({ r: h.r * t, g: h.g * t, b: h.b * t });
         return {
             tag: hue,
             head: liftHue(hue, noise ? c.noiseTextLift : c.callTextLift),
             call: noise ? hue : dim(hue, c.scrollInfoDim),
-            prose: liftHue(hue, record.action === 'prompt' ? c.promptTextLift : noise ? c.noiseTextLift : c.scrollProseLift),
+            prose: liftHue(hue, !noise && record.action === 'prompt' ? c.promptTextLift : noise ? c.noiseTextLift : c.scrollProseLift),
             output: liftHue(hue, noise ? c.noiseTextLift : c.scrollOutputLift),
             summary: dim(hue, c.scrollInfoDim),
         };
@@ -2195,7 +2227,7 @@ export default class AgentBooks {
         let span = Math.max(1, c.historySliceBytes), out, recs, start;
         for (;;) {
             const r = await h.read({ until, tail: span });
-            out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise });
+            out = parseEventSlice(r?.lines || [], { showNoise: c.showNoise, showAbandoned: c.showAbandoned });
             const k = out.records.findIndex((x) => x.id === oldest.id);
             recs = k >= 0 ? out.records.slice(0, k) : out.records.filter((x) => Number.isFinite(x.at) && x.at < from);
             start = span >= until;
@@ -2265,9 +2297,10 @@ export default class AgentBooks {
         const text = String(record.result ?? '');
         const sz = this._rectoSize(lane, role, text);
         const opts = { worldScale: CARD_WORLD_SCALE, gridScale: sz.gridScale, layout: { wrapWidth: sz.cols, zWrapSpacing: 0 } };
-        if (record.action === 'prompt' || record.action === 'noise') {
-            const hue = this.cfg.hues[record.action] || this.cfg.hues.other;
-            opts.textColor = liftHue(hue, record.action === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
+        const kind = sheetKind(record);
+        if (kind === 'prompt' || kind === 'noise') {
+            const hue = this.cfg.hues[kind] || this.cfg.hues.other;
+            opts.textColor = liftHue(hue, kind === 'prompt' ? this.cfg.promptTextLift : this.cfg.noiseTextLift);
             opts.filenameColor = hue;
         }
         return this._card(name, setAs(text, sz.cols), opts, pick, lane, sheetId);
@@ -2337,7 +2370,7 @@ export default class AgentBooks {
         // The stack changed — the page re-fits whole (a taller info block can shrink the call).
         const sz = this._versoSizes(lane, e.call, e.infoText);
         this._resizeCallCards(lane, e, sz);
-        const hue = this.cfg.hues[kindForAction(e.record.action)] || this.cfg.hues.other;
+        const hue = this.cfg.hues[sheetKind(e.record)] || this.cfg.hues.other;
         if (e.info) {
             e.info.setScale(sz.info.gridScale);
             e.info.config.layout.wrapWidth = sz.info.cols;

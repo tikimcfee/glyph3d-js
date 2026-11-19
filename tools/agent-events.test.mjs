@@ -20,7 +20,12 @@
 //   - the sliding-window history pages back by `at` over `agentEvents/read` windows (the
 //     last ~historySliceBytes before each oldest record, past it by the overlap; exact numbers
 //     once the start is reached),
-//     and an update for a record waiting in a buffer replaces it there.
+//     and an update for a record waiting in a buffer replaces it there;
+//   - a REWIND (a prompt edited and re-sent: gomuxai re-sends the dead branch as updates marked
+//     `abandoned`): hidden by default, its sheets leave the book in place (a held head stays on its
+//     sheet; a following one rides the newest), its buffered records leave their buffer, the scroll
+//     form drops its blocks; a paged-back window's events that arrive already abandoned (as adds) never
+//     page in; book.showAbandoned keeps them in the noise hue tagged [abandoned].
 // (The open/follow path that feeds books from the relay is tools/session-books.test.mjs.)
 
 import * as THREE from 'three';
@@ -55,7 +60,7 @@ const name = (f) => relative(CORPUS, f).replace(/\.events\.jsonl$/, '');
 const CASES = new Map(FILES.map((f) => [name(f), readFileSync(f, 'utf8')]));
 for (const need of ['claude/basic-turn', 'claude/mid-turn-queued', 'claude/held-delivery', 'claude/notification-and-commands',
     'claude/subagent', 'claude/subagent/subagents/agent-a3f9c2e17b4d5e608', 'claude/tool-results', 'claude/derived-turns',
-    'claude/session-meta', 'claude/system-records', 'agy/conversation', 'kimi/interleaved']) {
+    'claude/session-meta', 'claude/system-records', 'claude/rewind', 'agy/conversation', 'kimi/interleaved']) {
     if (!CASES.has(need)) { console.error(`agent-events: FAIL — the corpus at ${CORPUS} has no ${need}.events.jsonl`); process.exit(1); }
 }
 const lines = (text) => text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
@@ -89,10 +94,14 @@ function live(books, lane, c, { each } = {}) {
     return r;
 }
 const ids = (lane) => lane.entries.map((e) => e.record.id);
-const visibleIds = (c, showNoise = true) => {
-    const seen = new Set(), out = [];
+/** The ids a book shows for a case: one per event, in add order — hidden noise left out, and
+ *  (book.showAbandoned off, as born) an event whose last word is `abandoned` (a rewound branch). */
+const visibleIds = (c, showNoise = true, showAbandoned = false) => {
+    const seen = new Set(), out = [], last = new Map();
+    for (const f of evs(c)) last.set(f.id, f);
     for (const f of evs(c)) {
         if (f.kind === 'tool' && f.tool.action === 'noise' && !showNoise) continue;
+        if (!showAbandoned && last.get(f.id).abandoned) continue;
         if (!seen.has(f.id)) { seen.add(f.id); out.push(f.id); }
     }
     return out;
@@ -154,7 +163,7 @@ for (const c of CASES.keys()) {
     ok(all.every((l) => l.book.sheets.length === l.entries.length && l.book.tabs.length === l.entries.length),
         `${c}: deck, entries and tabs stay parallel`);
     const h = newBooks();
-    const slice = parseEventSlice(CASES.get(c));
+    const slice = parseEventSlice(CASES.get(c), { showNoise: h.cfg.showNoise, showAbandoned: h.cfg.showAbandoned });
     const hl = [...books.lanes.keys()][0];
     await h.hydrate(hl, slice.records, { agentType: 'claude' });
     eq(h.lanes.get(hl).entries.map((e) => e.record), books.lanes.get(hl).entries.map((e) => e.record),
@@ -178,7 +187,11 @@ for (const c of CASES.keys()) {
     const origins = [...byOrigin.keys()].sort();
     eq(origins, ['command', 'delivered', 'human', 'peer', 'queued', 'task-notification'], 'the corpus\'s prompt origins all became sheets');
     const prompts = [...byOrigin.values()].flat();
-    const promptEvents = [...CASES.entries()].filter(([c]) => !c.endsWith('.requests')).flatMap(([c]) => evs(c).filter((f) => f.kind === 'prompt'));
+    // one per prompt EVENT (its add — an update re-sends it), less a rewound branch's (hidden as born)
+    const promptEvents = [...CASES.entries()].filter(([c]) => !c.endsWith('.requests')).flatMap(([c]) => {
+        const shown = new Set(visibleIds(c));
+        return evs(c).filter((f) => f.kind === 'prompt' && f.op === 'add' && shown.has(f.id));
+    });
     ok(prompts.length === promptEvents.length, `every prompt event is a sheet (${prompts.length}/${promptEvents.length})`);
     const lift = (h, t) => ({ r: h.r + (1 - h.r) * t, g: h.g + (1 - h.g) * t, b: h.b + (1 - h.b) * t });
     for (const { e, lane, i, c } of prompts) {
@@ -517,6 +530,131 @@ for (const c of CASES.keys()) {
     ok(sessionPath('src/a.go', '/p/proj/') === '/p/proj/src/a.go', 'a relative target joins the session cwd');
     ok(sessionPath('/abs/a.go', '/p/proj') === '/abs/a.go' && sessionPath('C:/x/a.go', '/p') === 'C:/x/a.go', 'an absolute target stays as it is');
     ok(sessionPath('a.go', null) === 'a.go', 'no cwd: the target as it is');
+}
+
+// ── a rewind: the dead branch's events, re-sent abandoned, leave the book ───────────────
+{
+    // add S0, P1 (the typo), T1 (below it); add P2 (the re-sent prompt); then P1 + T1 again as
+    // updates, whole, abandoned — the order gomuxai sends a rewind in.
+    const ev = (id, seq, kind, body, turn, extra = {}) => ({ type: 'event', id, op: 'add', seq, at: 1000 + seq * 100, line: seq,
+        ts: `2026-11-02T17:11:5${seq}.000Z`, turn: { id: turn, index: 149 }, kind, [kind]: body, ...extra });
+    const S0 = ev('s0', 0, 'say', { text: 'before the rewind' }, 't0');
+    const P1 = ev('p1', 1, 'prompt', { text: 'Relaoded!', origin: 'human' }, 't1');
+    const T1 = ev('t1', 2, 'think', { text: '', redacted: true }, 't1');
+    const P2 = ev('p2', 3, 'prompt', { text: 'Reloaded!', origin: 'human' }, 't2');
+    const dead = (e) => ({ ...e, op: 'update', abandoned: true });
+    const STREAM = [S0, P1, T1, P2, dead(P1), dead(T1)].map((e) => J(e)).join('\n') + '\n';
+
+    // the reader: the field, read once, on the record
+    eq(AGENT_BOOKS_DEFAULTS.showAbandoned, false, 'book.showAbandoned is born off');
+    const rec = eventRecord(dead(P1));
+    ok(rec.abandoned === true && rec.tag === 'abandoned' && rec.action === 'prompt' && rec.result === 'Relaoded!', `an abandoned event's record says so, tagged [abandoned] (${J({ a: rec.abandoned, tag: rec.tag })})`);
+    ok(eventRecord(dead(P1), null, { showAbandoned: false }) === null && eventRecord(P1, null, { showAbandoned: false })?.tag === 'you', 'hidden: an abandoned event is no record; the same event before the rewind is');
+    let threw = null; try { new AgentEventReader().push(J({ ...dead(P1), abandoned: 'yes' }) + '\n'); } catch (e) { threw = e.message; }
+    ok(/abandoned/.test(threw || ''), `an abandoned that isn't a boolean throws at the seam (${threw})`);
+    const whole = parseEventSlice(STREAM, { showAbandoned: false });
+    eq(whole.records.map((r) => r.id), ['s0', 'p2'], 'a whole read folds the rewind: the dead branch is gone');
+    eq(parseEventSlice(STREAM).records.filter((r) => r.abandoned).map((r) => r.id), ['p1', 't1'], 'shown, a whole read keeps them marked');
+
+    const feed = (books, lane, list) => { const r = new AgentEventReader(); for (const e of list) books.applyEvents(lane, r.push(J(e) + '\n'), { agentType: 'claude' }); };
+    // live, following: the dead sheets leave; the head rides the newest
+    {
+        const books = newBooks();
+        feed(books, 'rw', [S0, P1, T1, P2]);
+        const lane = books.lanes.get('rw');
+        eq(ids(lane), ['s0', 'p1', 't1', 'p2'], 'before the rewind lands: four sheets');
+        feed(books, 'rw', [dead(P1), dead(T1)]);
+        eq(ids(lane), ['s0', 'p2'], 'the abandoned updates take their sheets out');
+        ok(lane.book.sheets.length === 2 && lane.book.following && lane.book.head === 1, `the deck closes up, the following head on the newest (head ${lane.book.head} of ${lane.book.sheets.length})`);
+    }
+    // live, held on the sheet before the branch: no jump
+    {
+        const books = newBooks();
+        feed(books, 'rw', [S0, P1, T1, P2]);
+        const lane = books.lanes.get('rw');
+        lane.book.pageTo(0);
+        feed(books, 'rw', [dead(P1), dead(T1)]);
+        ok(lane.book.head === 0 && lane.entries[lane.book.head].record.id === 's0' && !lane.book.following, `a held reader stays on its sheet (head ${lane.book.head}: ${lane.entries[lane.book.head]?.record.id})`);
+    }
+    // a record waiting in the newer buffer leaves it
+    {
+        const books = newBooks({ maxSheets: 2 });
+        const lane = books.ensure('rw', 'claude');
+        books.setHistory('rw', { read: async () => ({ lines: [] }) });
+        feed(books, 'rw', [S0, { ...S0, id: 's1', seq: 0.5, at: 1050 }]);
+        lane.book.pageTo(0);
+        feed(books, 'rw', [P1, T1, P2]);
+        const waiting = () => (lane.newer || []).map((x) => x.record.id);
+        ok(waiting().includes('p1') && waiting().includes('t1'), `held: the branch waits beyond the window (${waiting()})`);
+        feed(books, 'rw', [dead(P1), dead(T1)]);
+        eq(waiting(), ['p2'], 'its abandoned updates take it out of the newer buffer');
+    }
+    // the scroll form: the blocks leave the document
+    {
+        const books = newBooks();
+        books.ensure('rw', 'claude').book.setForm('scroll');
+        feed(books, 'rw', [S0, P1, T1, P2]);
+        const lane = books.lanes.get('rw');
+        const n0 = lane.doc.blocks.length;
+        feed(books, 'rw', [dead(P1), dead(T1)]);
+        ok(lane.doc.blocks.length === n0 - 2 && lane.entries.length === 2, `scroll: the branch's blocks leave the document (${n0} → ${lane.doc.blocks.length})`);
+    }
+    // gomuxai's own rewind case (corpus claude/rewind): hidden by default, every event kept when shown
+    {
+        const shown = newBooks({ showAbandoned: true });
+        live(shown, 'L', 'claude/rewind');
+        const lane = shown.lanes.get('L');
+        const dead = new Set(evs('claude/rewind').filter((f) => f.abandoned).map((f) => f.id));
+        ok(dead.size > 0, `the corpus rewinds (${dead.size} abandoned events)`);
+        eq(ids(lane), visibleIds('claude/rewind', true, true), 'claude/rewind shown: one sheet per event');
+        ok(lane.entries.every((e) => !!e.record.abandoned === dead.has(e.record.id)), 'exactly the abandoned events are marked');
+        const hidden = newBooks();
+        live(hidden, 'L', 'claude/rewind');
+        ok(!ids(hidden.lanes.get('L')).some((id) => dead.has(id)), 'claude/rewind hidden: no abandoned event is a sheet');
+    }
+    // paging back: a window's own abandoned events arrive already marked — as ADDs (gomuxai reads on past
+    // `until`, unsent, to learn the branch) — and never page in
+    {
+        const evAt = (k, extra = {}) => ({ type: 'event', id: `e${k}`, op: 'add', seq: k, at: 100 * k, line: k, ts: `2026-11-02T17:00:${String(k).padStart(2, '0')}.000Z`,
+            turn: { id: k >= 5 && k <= 7 ? 't-dead' : `t${k}`, index: k }, ...(k === 5 || k === 8
+                ? { kind: 'prompt', prompt: { text: k === 5 ? 'Relaoded!' : 'Reloaded!', origin: 'human' } }
+                : { kind: 'say', say: { text: `say ${k}` } }), ...extra });
+        const DEAD = new Set(['e5', 'e6', 'e7']);
+        const stream = Array.from({ length: 30 }, (_, k) => evAt(k, DEAD.has(`e${k}`) ? { abandoned: true } : {}));
+        const end = 100 * 30;
+        const read = ({ until, tail } = {}) => {
+            const hi = until != null ? Math.min(end, until) : end;
+            const lo = tail > 0 ? Math.max(-1, hi - tail - 1) : -1;
+            return Promise.resolve({ lines: stream.filter((f) => f.at > lo && f.at < hi).map(J), size: end });
+        };
+        const pageAll = async (books) => {
+            const tail = await read({ tail: 800 });
+            const first = parseEventSlice(tail.lines, { cap: 6, showAbandoned: books.cfg.showAbandoned });
+            await books.hydrate('pb', first.records, { agentType: 'claude', seqBase: 24, seqExact: false });
+            books.setHistory('pb', { read });
+            const lane = books.lanes.get('pb');
+            for (let i = 0; i < 40; i++) { lane.book.scroll(-500); for (let j = 0; j < 400 && lane.history.loading; j++) await lane.history.loading; }
+            return lane;
+        };
+        const hid = await pageAll(newBooks({ maxSheets: 6, historySliceBytes: 600, historyOverlapBytes: 150, historyTurns: 3, historyLead: 2 }));
+        const seen = [...(hid.older || []).map((x) => x.record.id), ...ids(hid), ...(hid.newer || []).map((x) => x.record.id)];
+        ok(hid.entries[0]?.record.id === 'e0' && seen.includes('e4') && seen.includes('e8'), `paged back to the run's start through the branch (window ${ids(hid)})`);
+        ok(!seen.some((id) => DEAD.has(id)), `an abandoned ADD in a paged-back window never pages in (${seen.filter((id) => DEAD.has(id))})`);
+        const shown = await pageAll(newBooks({ maxSheets: 6, historySliceBytes: 600, historyOverlapBytes: 150, historyTurns: 3, historyLead: 2, showAbandoned: true }));
+        const all2 = [...(shown.older || []).map((x) => x.record), ...shown.entries.map((e) => e.record), ...(shown.newer || []).map((x) => x.record)];
+        ok(['e5', 'e6', 'e7'].every((id) => all2.find((r) => r.id === id)?.abandoned), 'shown, the same window pages them in marked');
+    }
+    // book.showAbandoned: kept, in the noise hue, tagged [abandoned]
+    {
+        const books = newBooks({ showAbandoned: true });
+        feed(books, 'rw', [S0, P1, T1, P2, dead(P1), dead(T1)]);
+        const lane = books.lanes.get('rw');
+        eq(ids(lane), ['s0', 'p1', 't1', 'p2'], 'shown: every sheet stays');
+        const i = ids(lane).indexOf('p1');
+        ok(lane.entries[i].record.abandoned && lane.entries[i].call.verb === 'abandoned' && lane.book.sheets[i].meta.kind === 'noise',
+            `the dead prompt reads [abandoned] in the noise hue (verb ${lane.entries[i].call.verb}, tab kind ${lane.book.sheets[i].meta.kind})`);
+        ok(lane.book.sheets[ids(lane).indexOf('p2')].meta.kind === 'prompt', 'the re-sent prompt stays a prompt');
+    }
 }
 
 console.log(`agent-events: ${pass} passed, ${fail} failed`);

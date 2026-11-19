@@ -16,7 +16,8 @@
 //      back in from the older buffer;
 //   5. one book id across the registry, attention and tuning: switching forms keeps the same
 //      registry entry and object, the pick token is the book;
-//   6. the cost: at the window cap, a live batch lays out and uploads only its new rows, and
+//   6. the cost: at the window cap, a live batch lays out and uploads only its new rows (a compaction —
+//      rare — re-sends the live body), and
 //      scrolling lays out nothing — budgets with teeth (the full re-lay path fails them).
 
 import * as THREE from 'three';
@@ -51,6 +52,14 @@ const walk = (d) => readdirSync(d).flatMap((n) => {
 });
 const CASES = walk(CORPUS).sort().map((f) => [f.slice(CORPUS.length + 1).replace(/\.events\.jsonl$/, ''), readFileSync(f, 'utf8')]);
 ok(CASES.length >= 13, `the corpus has its streams (${CASES.length})`);
+/** The streams the synthetic run (§3–§6) and the one-id book (§5) are built from: a FIXED, named list, in
+ *  this order — a case the corpus gains later adds §1–2's checks but never shifts the run (which record
+ *  sits where, what each batch lays). A missing one fails loudly. */
+const RUN_CASES = ['agy/conversation', 'claude/basic-turn', 'claude/derived-turns', 'claude/held-delivery', 'claude/mid-turn-queued',
+    'claude/notification-and-commands', 'claude/requests', 'claude/requests.requests', 'claude/session-meta', 'claude/subagent',
+    'claude/subagent/subagents/agent-a3f9c2e17b4d5e608', 'claude/system-records', 'claude/tool-results', 'kimi/interleaved'];
+const CASE = new Map(CASES);
+for (const c of RUN_CASES) if (!CASE.has(c)) { console.error(`scroll-form: FAIL — the corpus at ${CORPUS} has no ${c}.events.jsonl`); process.exit(1); }
 
 const { chain } = await bootHeadlessFontChain();
 const ATLAS = { getCharSize: () => deriveCharSize(chain, 48), _shaper: chain, _shapeCache: null, _slugData: null, _live: null };
@@ -145,11 +154,13 @@ function rejoin(block, part) {
 }
 
 // ── a long synthetic run: the corpus's events, again and again, at increasing offsets ──
+// (as a book shows them: a rewound branch's events — their last word `abandoned` — left out)
 const RUN = (() => {
     const out = [];
-    for (const [, text] of CASES) {
+    for (const c of RUN_CASES) {
         const r = new AgentEventReader();
-        for (const ch of r.push(text).concat(r.end())) if (ch.op === 'add') out.push(ch);
+        const changes = r.push(CASE.get(c)).concat(r.end());
+        for (const ch of changes) if (ch.op === 'add' && !r.get(ch.event.id).event.abandoned) out.push(ch);
     }
     return out;
 })();
@@ -278,7 +289,7 @@ const sealed = { read: async () => ({ lines: [] }), sealed: true };
     const h = host();
     const books = newBooks(h);
     const lane = books.ensure('one', 'claude');
-    feed(books, 'one', CASES[0][1]);
+    feed(books, 'one', CASE.get(RUN_CASES[0]));
     const gid = lane.groupId;
     eq(gid, 'agent:book:one', 'the registry id');
     const att = new AttentionManager();
@@ -403,6 +414,7 @@ const SCROLL_BUDGET_MS = 0.5;
         flushAll(books);
         const doc = books.lanes.get(id).doc;
         const times = [], uploads = [], laid = [];
+        let over = 0, compacts = 0;   // batches that uploaded more than they laid without compacting; compacting batches
         let k = books.cfg.scrollMaxRecords;
         for (let b = 0; b < 300; b++) {
             const batch = run(1 + (b % 3), k); k += batch.length;
@@ -412,10 +424,11 @@ const SCROLL_BUDGET_MS = 0.5;
             const r = doc.flush();
             times.push(performance.now() - t0);
             uploads.push(r.uploaded); laid.push(r.laidSlots);
+            if (r.compacted) compacts++; else if (r.uploaded > r.laidSlots) over++;
         }
         const p = (a, q) => [...a].sort((x, y) => x - y)[Math.floor(a.length * q)];
         return { p50: p(times, 0.5), p95: p(times, 0.95), max: Math.max(...times), up95: p(uploads, 0.95), laid95: p(laid, 0.95),
-            slots: doc.bodyField.slotBuffer.count, rows: doc.totalRows, full: doc.stats.fullPasses, doc, books, id };
+            slots: doc.bodyField.slotBuffer.count, rows: doc.totalRows, full: doc.stats.fullPasses, doc, books, id, over, compacts, batches: times.length };
     };
     measure(false);   // warm the JIT
     const tail = measure(false), full = measure(true);
@@ -423,7 +436,10 @@ const SCROLL_BUDGET_MS = 0.5;
     console.log(`    tail-append  p50 ${tail.p50.toFixed(3)} ms  p95 ${tail.p95.toFixed(3)} ms  max ${tail.max.toFixed(2)} ms  upload p95 ${tail.up95} slots  compactions ${tail.doc.stats.compactions || 0}`);
     console.log(`    full re-lay  p50 ${full.p50.toFixed(3)} ms  p95 ${full.p95.toFixed(3)} ms  max ${full.max.toFixed(2)} ms  upload p95 ${full.up95} slots`);
     ok(tail.p95 <= BUDGET_MS, `a live batch at the cap lays out within ${BUDGET_MS} ms p95 (${tail.p95.toFixed(3)})`);
-    ok(tail.up95 <= tail.laid95, `it uploads only its new rows (p95 ${tail.up95} ≤ laid ${tail.laid95})`);
+    // A compaction (the memmove that drops the dead head) re-sends the live body — its own, rare cost; every
+    // other batch uploads exactly the rows it laid.
+    ok(tail.over === 0 && tail.compacts <= tail.batches * 0.05,
+        `it uploads only its new rows: ${tail.batches - tail.compacts - tail.over}/${tail.batches - tail.compacts} non-compacting batches upload ≤ what they laid (${tail.over} more); ${tail.compacts} compaction(s) ≤ 5% of batches (upload p95 ${tail.up95}, laid p95 ${tail.laid95})`);
     ok(full.p95 > BUDGET_MS && full.p95 > 5 * tail.p95, `teeth: the full re-lay path fails the budget (${full.p95.toFixed(3)} ms)`);
     ok(full.up95 >= full.slots * 0.5, `teeth: the full path uploads the whole document (${full.up95})`);
     // Scrolling: no layout, no upload.
