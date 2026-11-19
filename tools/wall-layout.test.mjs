@@ -28,6 +28,22 @@ test('a terminal the person moved is flowed around, never overlapped', () => {
     expect(overlaps(rect(s.x, s.y, 100, 50), moved)).toBe(false);
 });
 
+test('freeFlowSlot scans from a custom viewport origin and keeps zero coordinates +0', () => {
+    const origin = { x: 800, y: -600 };
+    const taken = [rect(800, -600, 100, 50)];   // occupies slot 0 at the viewport origin
+    const s1 = freeFlowSlot(100, 50, taken, origin);
+    expect(s1).toEqual({ x: 800 + 100 + FLOW_GAP, y: -600 });
+    taken.push(rect(s1.x, s1.y, 100, 50));
+    const s2 = freeFlowSlot(100, 50, taken, origin);
+    taken.push(rect(s2.x, s2.y, 100, 50));
+    const s3 = freeFlowSlot(100, 50, taken, origin);
+    expect(s3).toEqual({ x: 800, y: -600 - (50 + FLOW_GAP) });
+    // Row 1 landing exactly at y = 0 produces +0, never -0.
+    const z = freeFlowSlot(100, 50, [rect(0, 50 + FLOW_GAP, 400, 50)], { x: -0, y: 50 + FLOW_GAP });
+    expect(Object.is(z.x, 0)).toBe(true);
+    expect(Object.is(z.y, 0)).toBe(true);
+});
+
 test('fitRect centers and fits the tighter axis', () => {
     const f = fitRect(rect(0, 0, 200, 100), 1000, 1000, 1);
     expect(f).toEqual({ x: 100, y: -50, zoom: 5 });

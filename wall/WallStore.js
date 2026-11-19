@@ -160,7 +160,18 @@ export default class WallStore {
         const gid = this.groupOf(id);
         if (gid) this._dropMembers(gid, [id]);
         this.setFullscreenText(id, null);
-        if (this._fullscreen?.id === id) this.setFullscreen(null);
+        if (this._fullscreen) {
+            if (this._fullscreen.id === id) this.setFullscreen(null);
+            else if (this._fullscreen.saved && id in this._fullscreen.saved) {
+                const nextSaved = { ...this._fullscreen.saved };
+                delete nextSaved[id];
+                const gid = this._fullscreen.groupId;
+                if (gid && !this._groups[gid]) this.setFullscreen(null);
+                else this.setFullscreen({ ...this._fullscreen, saved: nextSaved });
+            } else if (this._fullscreen.groupId && !this._groups[this._fullscreen.groupId]) {
+                this.setFullscreen(null);
+            }
+        }
         this.setAgentView(id, null);
     }
 
@@ -178,7 +189,10 @@ export default class WallStore {
             ...Object.keys(this._fullscreenText),
             ...Object.keys(this._agentViews),
         ]);
-        if (this._fullscreen) known.add(this._fullscreen.id);
+        if (this._fullscreen) {
+            if (this._fullscreen.id) known.add(this._fullscreen.id);
+            if (this._fullscreen.saved) for (const id of Object.keys(this._fullscreen.saved)) known.add(id);
+        }
         for (const g of Object.values(this._groups)) for (const id of g.members) known.add(id);
         const gone = [...known].filter((id) => !live.has(id));
         for (const id of gone) this.forget(id);
@@ -313,7 +327,7 @@ export default class WallStore {
 
     /** @param {import('./WallFullscreen.js').FullscreenState|null} s */
     setFullscreen(s) {
-        this._fullscreen = s ? { ...s, canvas: { ...s.canvas }, camera: { ...s.camera } } : null;
+        this._fullscreen = s ? structuredClone(s) : null;
         write(this.keys.fullscreen, this._fullscreen);
     }
 

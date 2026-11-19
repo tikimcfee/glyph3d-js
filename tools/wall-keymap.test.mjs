@@ -34,9 +34,11 @@ test('no two chords can both answer one key', () => {
 
 test('chordFor matches Shift and the mode as each entry says', () => {
     const at = (code, mode, shiftKey = false) => chordFor({ code, shiftKey }, mode);
-    expect(at('Enter', 'canvas').does).toMatch(/fullscreen/);
+    expect(at('Enter', 'canvas').does).toMatch(/fullscreen the focused group/);
     expect(at('Enter', 'fullscreen')).toBe(at('Enter', 'canvas'));
-    expect(at('Enter', 'canvas', true).does).toMatch(/new terminal/);
+    expect(at('Enter', 'canvas', true).does).toMatch(/focused pane alone/);
+    expect(at('Enter', 'fullscreen', true)).toBe(at('Enter', 'canvas', true));
+    expect(at('Backslash', 'canvas', false).does).toMatch(/new terminal/);
     expect(at('BracketRight', 'canvas', false).does).toMatch(/next pane/);
     expect(at('BracketRight', 'canvas', true)).toBe(null);
     expect(at('BracketLeft', 'canvas', false).does).toMatch(/previous pane/);
@@ -88,11 +90,12 @@ test('WallKeys dispatches from the table: pane bracket chords and Ctrl+Shift+[ /
     keys._key(ctrlPrevGroup);
     keys._key(ctrlNextGroup);
     keys._key(chordKey('Comma'));          // platform chord + Comma still toggles settings
-    keys._key(chordKey('Enter', { shift: true }));
+    keys._key(chordKey('Backslash'));      // ⌘\ opens a new terminal
     keys._key(chordKey('Slash'));
     keys._key(chordKey('Enter'));          // nothing focused, nothing fullscreen: fit them all
     keys._key(chordKey('Minus'));          // the canvas's: hide — nothing focused, so nothing
     wall.fullscreen.id = 't1';
+    keys._key(chordKey('Enter', { shift: true }));   // ⌘⇧↵ toggles single-pane fullscreen
     keys._key(chordKey('Minus'));          // fullscreen's: smaller text
     keys._key(chordKey('Enter'));          // leave
     const k = chordKey('KeyK');
@@ -102,7 +105,7 @@ test('WallKeys dispatches from the table: pane bracket chords and Ctrl+Shift+[ /
         ['history', -1], ['history', 1], ['cycleGroup', -1], ['cycleGroup', 1],
         ['wall.settings', 'toggle'],
         ['spawn'], ['wall.help', 'toggle'], ['fit'],
-        ['wall.fullscreen.text', 'smaller'], ['wall.fullscreen', 'toggle'],
+        ['wall.fullscreen.pane', 'toggle'], ['wall.fullscreen.text', 'smaller'], ['wall.fullscreen', 'toggle'],
     ]);
     expect(next.claimed).toBe(true);
     expect(prevPane.claimed).toBe(true);

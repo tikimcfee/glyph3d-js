@@ -191,10 +191,11 @@ export default class WallGroups {
         return gid;
     }
 
-    /** The divider under `p` inside split group `gid` on the canvas, `tol` world units either side. */
+    /** The divider under `p` inside split group `gid` on the canvas (or while `gid` is fullscreen), `tol` world units either side. */
     groupDividerAt(gid, p, tol) {
         const g = this._store.group(gid);
-        if (!g || g.layout !== 'split' || !g.members.some((id) => this.wall.onCanvas(id))) return null;
+        const fsGroup = this.wall.fullscreen?.groupId === gid;
+        if (!g || g.layout !== 'split' || !g.members.some((id) => (fsGroup ? this.wall.isShown(id) : this.wall.onCanvas(id)))) return null;
         return dividerAt(g.split.tree, this._splitRect(g), this.wall.config.splitGap, p, tol);
     }
 
@@ -354,11 +355,12 @@ export default class WallGroups {
     /** Re-tile a tiled group over its shown members (a member came, went, hid, showed or resized). */
     relayout(gid) {
         const g = this.get(gid);
+        const fs = this.wall.fullscreen;
+        if (fs?.groupId === gid) { fs.refit(); return; }
         if (g.layout === 'split') { this._layoutSplit(g); return; }
         if (g.layout !== 'tile') return;
         // A member fullscreen re-wraps to the screen, not to its tile: the tiling waits for it to come back.
-        const fs = this.wall.fullscreen?.id;
-        if (fs && g.members.includes(fs)) return;
+        if (fs?.id && g.members.includes(fs.id)) return;
         const shown = this.shownMembers(gid);
         if (!shown.length) return;
         const origin = g.origin ?? this._originOf(shown);
@@ -431,7 +433,7 @@ export default class WallGroups {
             let frame = this._frames.get(gid);
             if (!frame) { frame = new GroupFrame({ atlas: this._atlas }); this._scene.add(frame); this._frames.set(gid, frame); }
             frame.position.z = this.depthOf(gid);
-            const rect = hidden ? null : this.frameRect(gid, zoom);
+            const rect = hidden || this.wall.fullscreen?.groupId === gid ? null : this.frameRect(gid, zoom);
             frame.visible = !!rect;
             if (rect) frame.layout(rect, zoom, this.nameOf(gid), !!focusedId && this.groupOf(focusedId) === gid);
         }
@@ -508,8 +510,10 @@ export default class WallGroups {
 
     // ── split internals ──────────────────────────────────────────────────────
 
-    /** A split's rect: its origin is the top-left. */
+    /** A split's rect: its fullscreen rect while in Group Fullscreen, else its canvas origin + w × h. */
     _splitRect(g) {
+        const fsRect = this.wall.fullscreen?.splitRectForGroup?.(g);
+        if (fsRect) return fsRect;
         return { minX: g.origin.x, maxX: g.origin.x + g.split.w, minY: g.origin.y - g.split.h, maxY: g.origin.y };
     }
 

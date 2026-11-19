@@ -682,12 +682,12 @@ export default class WallAgentViews {
      */
     updateScreenTransforms(viewport) {
         if (!this._dom.size) return;
-        const fsId = this.wall.fullscreen?.id;
+        const fsActive = !!(this.wall.fullscreen?.active ?? this.wall.fullscreen?.id);
         const zoom = viewport.zoom;
         const view = viewport.view;
 
         for (const [id, dom] of this._dom) {
-            if (fsId || !this.wall.onCanvas(id) || !this.isOpen(id)) {
+            if (fsActive || !this.wall.onCanvas(id) || !this.isOpen(id)) {
                 if (dom.lastKey !== 'hidden') {
                     dom.lastKey = 'hidden';
                     dom.rootEl.style.display = 'none';

@@ -25,6 +25,7 @@ import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
 import { freeFlowSlot, unionRect, hitTest, cycle, zStackLayout, readingOrder } from './wallLayout.js';
+import { dockLayout } from './dockLayout.js';
 import { neighbor } from './splitTree.js';
 import { snapStep, snapTo } from './wallSnap.js';
 
@@ -171,6 +172,9 @@ export default class TerminalWall {
         this.viewport = new WallCamera(camera, gl.domElement);
         /** A split waiting for its new terminal to land (wall.split): which pane it cuts, and which way. */
         this._splitLanding = null;
+        /** Active viewport-anchored flow grid for unpositioned spawns: reused while the camera stays on the flow, reset once the person pans elsewhere.
+         *  @type {{ origin: { x: number, y: number }, camera: { x: number, y: number }, anchorId: string|null, spot: { x: number, y: number } }|null} */
+        this._flow = null;
         /** One terminal fullscreen (WallFullscreen) — its state lives as long as the wall, as the store does. */
         this.fullscreen = new WallFullscreen(this);
 
@@ -303,7 +307,7 @@ export default class TerminalWall {
         this.fullscreen.tick(performance.now());
         this.names.update({
             order: this.shownOrder(), terminals: this.ctx.terminals, focusedId: this.focusedId, hoveredId: this.hoveredId,
-            fullscreenId: this.fullscreen.id,
+            fullscreenSoloId: this.fullscreen.soloId, fullscreenActive: this.fullscreen.active,
             nameOf: (id) => this.titleOf(id), windowRect: (id) => this.windowRect(id),
         });
         this.groups.update(this.viewport.zoom, this.focusedId, false);
@@ -326,7 +330,8 @@ export default class TerminalWall {
     _tickChrome() {
         const v = this.viewport;
         const bid = this.barButtons.holdTarget ?? (this.pointer.busy ? null : this.hoveredId);
-        if (bid && this.onCanvas(bid)) {
+        const showButtons = bid && (this.onCanvas(bid) || (this.fullscreen.mode === 'group' && this.fullscreen.has(bid)));
+        if (showButtons) {
             const win = v.toScreenBox(this.windowRect(bid)), body = v.toScreenBox(this.terminalRect(bid));
             this.barButtons.update(bid, win, body.top - win.top);
         } else this.barButtons.update(null, null, 0);
@@ -432,9 +437,9 @@ export default class TerminalWall {
     /** A terminal's world rect (the grid alone). */
     terminalRect(id) { return rectOf(this.ctx.terminals.get(id)); }
 
-    /** A terminal's body rect on the canvas — its pre-fullscreen rect while fullscreen, else `terminalRect`. */
+    /** A terminal's body rect on the canvas — its pre-fullscreen rect while re-wrapped by fullscreen, else `terminalRect`. */
     canvasTerminalRect(id) {
-        if (this.fullscreen.id === id) return this.fullscreen.canvasBodyRect() ?? this.terminalRect(id);
+        if (this.fullscreen.hasSaved(id)) return this.fullscreen.canvasBodyRect(id) ?? this.terminalRect(id);
         return this.terminalRect(id);
     }
 
@@ -480,11 +485,32 @@ export default class TerminalWall {
      *   |{ group: string, part: 'divider', divider: { path: string[], axis: 'x'|'y' } }|null}
      */
     hit(p) {
-        if (this.fullscreen.id) {
-            const id = this.fullscreen.id, r = this.terminalRect(id);
-            return p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY ? { id, part: 'body' } : null;
-        }
         const zoom = this.viewport.zoom, tol = EDGE_GRAB_PX / zoom;
+        if (this.fullscreen.active) {
+            if (this.fullscreen.mode === 'single') {
+                const id = this.fullscreen.id, r = this.terminalRect(id);
+                return p.x >= r.minX && p.x <= r.maxX && p.y >= r.minY && p.y <= r.maxY ? { id, part: 'body' } : null;
+            }
+            const gid = this.fullscreen.groupId, layout = this.fullscreen.groupLayout;
+            if (layout === 'split') {
+                const d = this.groups.groupDividerAt(gid, p, tol);
+                if (d) return { group: gid, part: 'divider', divider: d };
+            }
+            for (let i = this.zOrder.length - 1; i >= 0; i--) {
+                const id = this.zOrder[i];
+                if (!this.isShown(id) || !this.fullscreen.has(id)) continue;
+                if (layout === 'freeform') {
+                    const t = hitTest([{ id, window: this.windowRect(id), body: this.terminalRect(id) }], p.x, p.y, tol);
+                    if (t) return t;
+                } else {
+                    const w = this.windowRect(id), b = this.terminalRect(id);
+                    if (p.x >= w.minX && p.x <= w.maxX && p.y >= w.minY && p.y <= w.maxY) {
+                        return { id, part: p.y > b.maxY ? 'title' : 'body' };
+                    }
+                }
+            }
+            return null;
+        }
         const shownIds = [];
         for (let i = this.zOrder.length - 1; i >= 0; i--) {
             const id = this.zOrder[i];
@@ -525,10 +551,10 @@ export default class TerminalWall {
     shownOrder() { return this.order.filter((id) => !this.store.hidden(id)); }
 
     /** On the open canvas (not hidden, and not veiled behind fullscreen): what canvas DOM chrome tracks. @param {string} id */
-    onCanvas(id) { return this.isShown(id) && !this.fullscreen.id; }
+    onCanvas(id) { return this.isShown(id) && !this.fullscreen.active; }
 
     /** The terminals on the open canvas now, in arrival order. */
-    canvasOrder() { return this.fullscreen.id ? [] : this.shownOrder(); }
+    canvasOrder() { return this.fullscreen.active ? [] : this.shownOrder(); }
 
     /** Sync shown terminals' visibility and Z-stacking (a fullscreen began or ended: other terminals stay
      *  drawn on the canvas plane below while the fullscreen one rises to FULLSCREEN_Z). */
@@ -561,7 +587,7 @@ export default class TerminalWall {
         const scaleOf = (id) => this.ctx.terminals.get(id)?.scale?.z ?? 2;
         const groupOf = (id) => this.store.groupOf(id);
         const { order, terminals, groups } = zStackLayout(this.zOrder, {
-            fullscreenId: this.fullscreen.id, scaleOf, groupOf,
+            fullscreenIds: this.fullscreen.elevatedIds(), scaleOf, groupOf,
         });
         this.zOrder = order;
         for (const [id, z] of terminals) {
@@ -621,11 +647,13 @@ export default class TerminalWall {
         if (!grid || this.store.hidden(id)) return;
         const wasFocused = this.focusedId === id;
         const prevGroup = this.groups.groupOf(id);
-        if (this.fullscreen.id === id) this.fullscreen.exit();   // it hides at its canvas size
+        const wasFsGroup = this.fullscreen.mode === 'group' && this.fullscreen.has(id);
+        if (this.fullscreen.has(id)) this.fullscreen.onHide(id);   // restore canvas size before hiding
         if (this.groups.splits(id)) this.groups.remove([id]);   // a hidden pane leaves its split: its sibling takes the room
         this.store.setHidden(id, true);
         grid.visible = false;
         this._pruneFocusHistory();
+        if (wasFsGroup) this.fullscreen.afterMemberLeft();
         if (wasFocused) this._restoreFocusAfter(id, prevGroup);
         if (this.hoveredId === id) this.setHovered(null);
         this.selection.delete(id);
@@ -801,7 +829,7 @@ export default class TerminalWall {
             statusWindow: this.store.statusWindow(),
             settingsPanel: this.store.settingsPanel(),
             helpPanel: this.store.helpPanel(),
-            fullscreen: this.fullscreen.id,
+            fullscreen: this.fullscreen.target,
             config: { ...this.config },
             dialled: Object.keys(this.store.config()),
             menu: this.menu,
@@ -894,9 +922,10 @@ export default class TerminalWall {
             grid.setCursorFocused(true);
             if (!this._steppingHistory) this._recordFocus(id);
             this.bringToFront(id);
-            // While a terminal is fullscreen, focusing another moves fullscreen to it (never typing blindly behind it).
-            if (this.fullscreen.id && this.fullscreen.id !== id) this.fullscreen.enter(id);
-            else if (frame) { if (this.fullscreen.id) this.fullscreen.enter(id); else this.frame(id); }
+            // While fullscreen is active, focusing inside the fullscreen group stays in place; focusing outside
+            // transitions fullscreen to the newly focused group or terminal (never typing blindly behind it).
+            if (this.fullscreen.active) this.fullscreen.onFocus(id);
+            else if (frame) this.frame(id);
         }
         this._emit();
         return true;
@@ -963,7 +992,7 @@ export default class TerminalWall {
 
     /** Focus `id`, framing it only when its window isn't already in view (or transferring fullscreen). */
     _focusInView(id) {
-        if (this.fullscreen.id) { this.focus(id, { frame: true }); return; }
+        if (this.fullscreen.active) { this.focus(id, { frame: true }); return; }
         const b = this.viewport.toScreenBox(this.windowRect(id)), v = this.viewport.view;
         this.focus(id, { frame: b.left < 0 || b.top < 0 || b.right > v.w || b.bottom > v.h });
     }
@@ -1001,7 +1030,7 @@ export default class TerminalWall {
         if (!id) throw new Error('no terminal to split: focus one, or name it');
         if (!this.isShown(id)) throw new Error(this.ctx.terminals.has(id) ? `terminal '${id}' is hidden` : `no terminal '${id}'`);
         this.groups.canSplit(id, dir);
-        if (this.fullscreen.id) this.fullscreen.exit();   // the split lands on the canvas
+        if (this.fullscreen.active) this.fullscreen.exit();   // the split lands on the canvas
         this._splitLanding = { at: id, dir };
         try {
             const r = await this.spawn();
@@ -1094,7 +1123,7 @@ export default class TerminalWall {
                 if (unit.members.includes(this._focusHistory[i])) { target = this._focusHistory[i]; break; }
             }
         }
-        if (this.fullscreen.id) {
+        if (this.fullscreen.active) {
             this.focus(target, { frame: true });
         } else if (unit.kind === 'group') {
             const b = this.viewport.toScreenBox(unit.rect), v = this.viewport.view;
@@ -1125,7 +1154,7 @@ export default class TerminalWall {
 
     /** Ease the camera to fit every shown terminal (bars and open Agent Views included). */
     fitAll() {
-        if (this.fullscreen.id) this.fullscreen.exit();
+        if (this.fullscreen.active) this.fullscreen.exit();
         const shown = this.shownOrder();
         const all = unionRect(shown.map((id) => this.footprintRect(id, this.viewport.zoom)));
         if (!all) return;
@@ -1136,7 +1165,7 @@ export default class TerminalWall {
 
     /** Ease the camera to fit a group's shown members, its header included. @returns {boolean} */
     frameGroup(gid) {
-        if (this.fullscreen.id) this.fullscreen.exit();
+        if (this.fullscreen.active) this.fullscreen.exit();
         const groupRect = (zoom) => {
             const f = this.groups.frameRect(gid, zoom), h = this.groups.headerRect(gid, zoom);
             return f && h ? unionRect([f, h]) : f;
@@ -1168,6 +1197,7 @@ export default class TerminalWall {
         if (at && this.ctx.terminals.has(id)) {
             // Landing framed it at its free slot (nothing has drawn since): move it, then frame it here.
             // With snap on, its body's top-left takes the nearest crossing, as a move's does (wallSnap).
+            this._flow = null;
             const body = { x: at.x, y: at.y - (this.names?.barHeight(id, zoom) ?? 0) };
             const step = this.config.snap ? snapStep(this.config, zoom) : 0;
             this.placeBody(id, step ? { x: snapTo(body.x, step), y: snapTo(body.y, step) } : body);
@@ -1248,7 +1278,7 @@ export default class TerminalWall {
             this.order = this.order.filter((id) => live.has(id));
             this.zOrder = this.zOrder.filter((id) => live.has(id));
             this._pruneFocusHistory();
-            if (this.fullscreen.id && left.includes(this.fullscreen.id)) this.fullscreen.gone(this.fullscreen.id);
+            if (this.fullscreen.active) for (const id of left) this.fullscreen.gone(id);
             for (const id of left) this.groups?.relayoutOf(id);   // a tiling closes over a grid that went
             changed = true;
         }
@@ -1299,24 +1329,74 @@ export default class TerminalWall {
         };
     }
 
-    /** Land a new grid at its remembered spot, else the first free flow slot (a hidden terminal's
-     *  spot stays taken: it comes back there). */
+    /** Current canvas camera pose: the pre-fullscreen camera while fullscreen, any framing target in flight, else the live camera. */
+    _canvasCameraPose() {
+        if (this.fullscreen.state?.camera) return this.fullscreen.state.camera;
+        if (this.viewport.target) return this.viewport.target;
+        const c = this.viewport.camera;
+        return { x: c.position.x, y: c.position.y, zoom: c.zoom };
+    }
+
+    /** Whether the canvas camera is still sitting on the active spawn flow (either unmoved or framed on its last terminal). */
+    _keepFlow(pose, zoom) {
+        const f = this._flow;
+        if (!f) return false;
+        if (f.anchorId) {
+            if (!this.ctx.terminals.has(f.anchorId)) return Math.hypot(pose.x - f.camera.x, pose.y - f.camera.y) * zoom < 4;
+            const saved = this.store.position(f.anchorId);
+            if (saved && (Math.abs(saved.x - f.spot.x) > 1e-3 || Math.abs(saved.y - f.spot.y) > 1e-3)) return false;
+            if (!this.fullscreen.active) {
+                const ft = this.frameTarget(f.anchorId);
+                if (Math.hypot(pose.x - ft.x, pose.y - ft.y) * zoom < 4) return true;
+            }
+        }
+        return Math.hypot(pose.x - f.camera.x, pose.y - f.camera.y) * zoom < 4;
+    }
+
+    /** Land a new grid at its remembered spot, else the first free flow slot in the current canvas viewport
+     *  (a hidden terminal's spot stays taken: it comes back there). */
     _place(grid) {
         const saved = this.store.position(grid.terminalId);
         if (saved) { grid.position.set(saved.x, saved.y, 0); return; }
         grid.position.set(0, 0, 0);
         const r = rectOf(grid);
+        const w = r.maxX - r.minX, h = r.maxY - r.minY;
         // Offset from the grid's origin to its bounds' top-left, so the slot math works on rects.
         const offX = -r.minX, offY = -r.maxY;
         const taken = [];
         for (const [tid, g] of this.ctx.terminals) {
             if (g === grid) continue;
-            const tr = rectOf(g);
+            const tr = this.canvasTerminalRect(tid);
             const ar = this.agents.rect(tid);
             taken.push(ar ? unionRect([tr, ar]) : tr);
         }
-        const slot = freeFlowSlot(r.maxX - r.minX, r.maxY - r.minY, taken);
+        const pose = this._canvasCameraPose();
+        const zoom = pose.zoom || 1;
+        let origin;
+        if (!this._splitLanding && this._keepFlow(pose, zoom)) {
+            origin = this._flow.origin;
+        } else {
+            const s = this.store;
+            const { edges } = dockLayout({
+                sidebar: s.sidebar(), statusWindow: s.statusWindow(),
+                settingsPanel: s.settingsPanel(), helpPanel: s.helpPanel(),
+            });
+            const dxPx = this.viewport.view.w > edges.left + edges.right ? (edges.left - edges.right) / 2 : 0;
+            const cx = pose.x + dxPx / zoom, cy = pose.y;
+            const step = this.config.snap ? snapStep(this.config, zoom) : 0;
+            const rawX = cx - w / 2, rawY = cy + h / 2;
+            origin = step ? { x: snapTo(rawX, step), y: snapTo(rawY, step) } : { x: rawX, y: rawY };
+        }
+        const slot = freeFlowSlot(w, h, taken, origin);
         grid.position.set(slot.x + offX, slot.y + offY, 0);
         if (grid.terminalId) this.store.setPosition(grid.terminalId, grid.position);
+        if (!this._splitLanding) {
+            this._flow = {
+                origin,
+                camera: { x: pose.x, y: pose.y },
+                anchorId: grid.terminalId ?? null,
+                spot: { x: grid.position.x, y: grid.position.y },
+            };
+        }
     }
 }

@@ -68,12 +68,16 @@ export default class WallKeys {
         document.removeEventListener('paste', this._onPaste);
     }
 
+    _mode() {
+        return (this.wall.fullscreen?.active ?? !!this.wall.fullscreen?.id) ? 'fullscreen' : 'canvas';
+    }
+
     /** True when `e` matches an active wall chord with its own handler, a focus-history key, or Ctrl+Shift+[ / ]. */
     _claimsShortcut(e) {
         if (this.wall.menu) return false;
         if (focusHistoryDir(e) || groupCycleDir(e)) return true;
         if (!isChord(e)) return false;
-        const chord = chordFor(e, this.wall.fullscreen?.id ? 'fullscreen' : 'canvas');
+        const chord = chordFor(e, this._mode());
         return !!chord?.run;
     }
 
@@ -112,7 +116,7 @@ export default class WallKeys {
                 return;
             }
             if (isChord(e) && GLOBAL_NAV_CODES.has(e.code)) {
-                const chord = chordFor(e, wall.fullscreen?.id ? 'fullscreen' : 'canvas');
+                const chord = chordFor(e, this._mode());
                 if (chord?.run) {
                     claim(e);
                     if (t.closest?.('[data-help], [data-settings]')) t.blur?.();
@@ -144,7 +148,7 @@ export default class WallKeys {
             return;
         }
         if (isChord(e)) {
-            const chord = chordFor(e, wall.fullscreen?.id ? 'fullscreen' : 'canvas');
+            const chord = chordFor(e, this._mode());
             if (chord) {
                 if (chord.run) { claim(e); chord.run(wall, e); }
                 return;   // a chord with no run is another part's (K: the palette, main.jsx)

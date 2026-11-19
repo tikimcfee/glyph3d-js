@@ -191,11 +191,12 @@ export default class WallPointer {
 
     _onDown(e) {
         if (this._drag?.kind === 'program') return;   // another button joining the program's gesture comes as a move
-        const fsId = this.wall.fullscreen?.id;
+        const fs = this.wall.fullscreen;
+        const fsActive = !!(fs?.active ?? fs?.id);
         const at = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         if (this.mouse.down(e, at)) {
             e.preventDefault();   // the program's: no middle-click autoscroll, no back/forward navigation
-            if (!fsId) this.camera.target = null;
+            if (!fsActive) this.camera.target = null;
             this._start(e, { kind: 'program' });
             this.canvas.setPointerCapture(e.pointerId);
             this._drag.captured = true;
@@ -203,19 +204,58 @@ export default class WallPointer {
         }
         if (e.button !== 0 && e.button !== 1) return;
         if (IS_MAC && e.ctrlKey && e.button === 0) return;   // macOS: Ctrl+click is the secondary click (the menu's)
-        if (fsId) {
-            // Fullscreen locks the camera and window pose: clicks in the outer bezel keep focus on the
-            // fullscreen terminal without panning, blurring or lassoing; Alt-drag never moves it.
-            if (this.wall.focusedId !== fsId) this.wall.focus(fsId);
-            if (!at || at.id !== fsId) return;
+        if (fsActive) {
+            // Single-pane fullscreen: bezel clicks keep focus on `fsId`, no move/resize/pan.
+            if (fs?.mode !== 'group') {
+                const fsId = fs.id;
+                if (this.wall.focusedId !== fsId) this.wall.focus(fsId);
+                if (!at || at.id !== fsId) return;
+                if (e.button === 1) this._start(e, { kind: 'fsPaste', id: fsId });
+                else if (e.shiftKey) this._start(e, { kind: 'text', id: fsId, block: false, mode: 'cell', selecting: false, ...this._anchor(fsId, e) });
+                else if (e.altKey && !blockSelects(e)) return;
+                else this._startText(e, fsId, blockSelects(e));
+                this.canvas.setPointerCapture(e.pointerId);
+                this._drag.captured = true;
+                return;
+            }
+            // Group fullscreen: bezel clicks never blur or pan; split dividers drag; freeform panes move & resize.
+            if (!at) return;
             if (e.button === 1) {
-                this._start(e, { kind: 'fsPaste', id: fsId });
+                if (at.id && at.part === 'body') {
+                    this._start(e, { kind: 'fsPaste', id: at.id });
+                    this.canvas.setPointerCapture(e.pointerId);
+                    this._drag.captured = true;
+                }
+                return;
+            }
+            if (at.part === 'divider') {
+                this._start(e, { kind: 'divider', group: at.group, path: at.divider.path, axis: at.divider.axis });
+                this.canvas.setPointerCapture(e.pointerId);
+                this._drag.captured = true;
+                return;
+            }
+            if (!at.id) return;
+            const freeform = fs.groupLayout === 'freeform';
+            if (freeform && at.part === 'edge') {
+                const grid = this.wall.terminal(at.id);
+                this._start(e, {
+                    kind: 'resize', id: at.id, edges: at.edges, stride: grid.cellStride,
+                    start: { cols: grid.cols, rows: grid.rows }, last: { cols: grid.cols, rows: grid.rows },
+                });
+                this.wall.focus(at.id);
+            } else if (freeform && (at.part === 'title' || (e.altKey && !blockSelects(e)))) {
+                this._start(e, { kind: 'press', id: at.id });
+            } else if (at.part === 'title') {
+                if (this.wall.focusedId !== at.id) this.wall.focus(at.id);
+                return;
             } else if (e.shiftKey) {
-                this._start(e, { kind: 'text', id: fsId, block: false, mode: 'cell', selecting: false, ...this._anchor(fsId, e) });
+                if (this.wall.focusedId !== at.id) this.wall.focus(at.id);
+                this._start(e, { kind: 'text', id: at.id, block: false, mode: 'cell', selecting: false, ...this._anchor(at.id, e) });
             } else if (e.altKey && !blockSelects(e)) {
+                if (this.wall.focusedId !== at.id) this.wall.focus(at.id);
                 return;
             } else {
-                this._startText(e, fsId, blockSelects(e));
+                this._startText(e, at.id, blockSelects(e));
             }
             this.canvas.setPointerCapture(e.pointerId);
             this._drag.captured = true;
@@ -455,7 +495,7 @@ export default class WallPointer {
     }
 
     _onDouble(e) {
-        if (this.wall.fullscreen?.id) return;
+        if (this.wall.fullscreen?.active ?? this.wall.fullscreen?.id) return;
         if (e.shiftKey) return;   // ⇧-clicks are selection
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
         if (this.mouse.claims(e, hit)) return;   // the program's double-click (its two presses went to it)
@@ -476,11 +516,16 @@ export default class WallPointer {
         if (!gate.ok) return;
         const zoom = gate.zoom;
 
-        const fsId = this.wall.fullscreen?.id;
-        if (fsId) {
-            // Fullscreen disallows camera zoom and pan: plain wheels scroll the fullscreen terminal.
+        const fs = this.wall.fullscreen;
+        if (fs?.active ?? fs?.id) {
+            // Fullscreen disallows camera zoom and pan: plain wheels scroll the hovered fullscreen pane (else focused).
             if (zoom) return;
-            this._scrollTerminal(fsId, rawY, e.deltaMode, e, now);
+            let scrollId = fs.mode === 'group' ? null : fs.id;
+            if (!scrollId) {
+                const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
+                scrollId = hit?.id ?? (this.wall.focusedId && fs.has?.(this.wall.focusedId) ? this.wall.focusedId : fs.elevatedIds?.()[0]);
+            }
+            if (scrollId) this._scrollTerminal(scrollId, rawY, e.deltaMode, e, now);
             return;
         }
         if (!zoom) {
@@ -522,7 +567,19 @@ export default class WallPointer {
 
     _hover(e) {
         const hit = this.wall.hit(this.camera.toWorld(e.clientX, e.clientY));
-        if (this.wall.fullscreen?.id) {
+        const fs = this.wall.fullscreen;
+        if (fs?.active ?? fs?.id) {
+            if (fs.mode === 'group') {
+                this.wall.setHovered(hit?.id ?? null);
+                this.mouse.hover(e, hit);
+                const freeform = fs.groupLayout === 'freeform';
+                this.canvas.style.cursor = !hit || this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default'
+                    : hit.part === 'divider' ? (hit.divider.axis === 'x' ? 'col-resize' : 'row-resize')
+                    : freeform && ((e.altKey && !blockSelects(e)) || hit.part === 'title') ? 'move'
+                    : freeform && hit.part === 'edge' ? edgeCursor(hit.edges)
+                    : hit.part === 'title' ? 'pointer' : 'text';
+                return;
+            }
             this.wall.setHovered(null);
             this.mouse.hover(e, hit);
             this.canvas.style.cursor = !hit || this.mouse.claims({ button: 0, shiftKey: !!e.shiftKey, altKey: !!e.altKey }, hit) ? 'default' : 'text';

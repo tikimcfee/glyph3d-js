@@ -76,15 +76,17 @@ export default class WallNames {
      * the labels. `order` is the SHOWN terminals (a hidden one's grid, bar included, isn't drawn); a
      * fullscreen terminal hides its own bar and suppresses DOM map labels over it.
      * @param {{ order: string[], terminals: Map<string, any>, focusedId: string|null, hoveredId: string|null,
-     *           fullscreenId?: string|null, nameOf: (id: string) => string, windowRect: (id: string) => object }} s
+     *           fullscreenId?: string|null, fullscreenSoloId?: string|null, fullscreenActive?: boolean,
+     *           nameOf: (id: string) => string, windowRect: (id: string) => object }} s
      */
     update(s) {
         const zoom = this._camera.zoom;
-        const fsId = s.fullscreenId ?? null;
+        const fsSoloId = s.fullscreenSoloId !== undefined ? s.fullscreenSoloId : (s.fullscreenId ?? null);
+        const fsActive = s.fullscreenActive ?? !!fsSoloId;
         for (const id of s.order) {
             const bar = this._bars.get(id), grid = s.terminals.get(id);
             if (!bar || !grid) continue;
-            if (id === fsId || this._room.get(id) === 0) {
+            if (id === fsSoloId || this._room.get(id) === 0) {
                 bar.visible = false;
                 continue;
             }
@@ -96,8 +98,8 @@ export default class WallNames {
         }
 
         const view = { w: this._camera.view.w, h: this._camera.view.h, margin: 4, gap: 4 };
-        if (fsId) {
-            for (const id of s.order) if (id !== fsId) this._bars.get(id)?.setNameVisible(true);
+        if (fsActive) {
+            for (const id of s.order) if (id !== fsSoloId) this._bars.get(id)?.setNameVisible(true);
             this.mapLabels.update([], view, []);
             return;
         }

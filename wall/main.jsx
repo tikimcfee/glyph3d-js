@@ -81,7 +81,7 @@ function Chrome({ wall }) {
   return (
     <>
       {!state.fullscreen && <div style={{ ...styles.topbar, right: inset.right }}>
-        <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['↵'], { shift: true })})`}>+ terminal</button>
+        <button style={styles.button} onClick={() => wall.spawn()} title={`New terminal (${chordLabel(['\\'])})`}>+ terminal</button>
         <button style={styles.button} onClick={() => wall.fitAll()} title={`Fit all (${chordLabel(['0'])})`}>fit all</button>
         <button style={styles.button} onClick={() => setPaletteOpen(true)} title={`Find by name (${chordLabel(['K'])})`}>find {chordLabel(['K'])}</button>
         <button style={styles.button} data-action="sidebar" onClick={() => wall.run(['wall.sidebar', 'toggle'])} title={`Every terminal and group (${chordLabel(['B'])})`}>list {chordLabel(['B'])}</button>

@@ -287,9 +287,10 @@ test('TerminalWall Z-stacking, Z-elevated fullscreen directional moves, group/pa
     });
 
     const mkGrid = (id, cols, rows, x, y) => ({
-        terminalId: id, cols, rows, visible: true,
+        terminalId: id, cols, rows, visible: true, hasSelection: false,
         position: { x, y, z: 0 }, scale: { x: 2, y: 2, z: 2 },
         cellStride: { x: 1.2, y: 2.4 },
+        readText: () => [],
         getLocalBounds() { return { min: { x: 0, y: -(this.rows * 1.2 + 0.6) }, max: { x: this.cols * 0.6 + 0.6, y: 0 } }; },
         setBorder() {}, setBorderFlag() {}, setControlVisible() {}, setCursorFocused() {},
         onResize() {}, onWindowTitle() {},
@@ -415,4 +416,213 @@ test('TerminalWall Z-stacking, Z-elevated fullscreen directional moves, group/pa
     expect(w.terminal('d').position.z - 1.0).toBeGreaterThan(w.terminal('c').position.z + 0.1);
     expect(w.hit({ x: hMidX, y: hMidY })).toEqual({ id: 'd', part: 'body' });
     expect(w.hit(divPt)).toEqual({ id: 'd', part: 'body' });
+});
+
+test('Group Fullscreen (split, proportional tile, movable freeform) and ⌘⇧↵ single-pane zoom/unzoom', async () => {
+    const cam = { isOrthographicCamera: true, zoom: 6, position: { x: 40, y: -20, z: 500 }, updateProjectionMatrix() {} };
+    const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1200, height: 800 }) };
+    const w = new TerminalWall({ scene: {}, camera: /** @type {any} */ (cam), gl: { domElement: canvas }, atlas: null, registry: {}, relayPort: 8097 });
+    w.viewport.setView(1200, 800);
+    w.names = /** @type {any} */ ({ attach() {}, prune() {}, barHeight: () => 2, setBarRoom() {} });
+    w.groups = new WallGroups(w, { atlas: null, scene: /** @type {any} */ ({ add() {} }) });
+    w.router.register('terminal.resize', ([id, c, r]) => {
+        const g = w.terminal(id);
+        g.cols = +c; g.rows = +r;
+        return { text: 'OK', data: null };
+    });
+
+    const mkGrid = (id, cols, rows, x, y) => ({
+        terminalId: id, cols, rows, visible: true, hasSelection: false,
+        position: { x, y, z: 0 }, scale: { x: 2, y: 2, z: 2 },
+        cellStride: { x: 1.2, y: 2.4 },
+        readText: () => [],
+        getLocalBounds() { return { min: { x: 0, y: -(this.rows * 1.2 + 0.6) }, max: { x: this.cols * 0.6 + 0.6, y: 0 } }; },
+        setBorder() {}, setBorderFlag() {}, setControlVisible() {}, setCursorFocused() {},
+        onResize() {}, onWindowTitle() {},
+    });
+
+    // ── 1. Split Group Fullscreen + ⌘⇧↵ single-pane zoom/unzoom + live divider drag ──
+    w.ctx.terminals.set('a', /** @type {any} */ (mkGrid('a', 60, 20, 0, 0)));
+    w.ctx.terminals.set('b', /** @type {any} */ (mkGrid('b', 60, 20, 80, 0)));
+    w.ctx.terminals.set('loose', /** @type {any} */ (mkGrid('loose', 60, 20, 300, 0)));
+    w._syncTerminals();
+
+    const gSplit = w.groups.create(['a', 'b'], { layout: 'split', columns: 2 });
+    const aCanvasCols = w.terminal('a').cols, bCanvasCols = w.terminal('b').cols;
+    w.focus('a');
+
+    // ⌘↵ (`wall.fullscreen toggle`) fullscreens the whole split group because 'a' is in a 2-pane group!
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect(w.fullscreen.mode).toBe('group');
+    expect(w.fullscreen.groupId).toBe(gSplit);
+    expect(w.snapshot().fullscreen).toBe(gSplit);
+    expect(w.terminal('a').position.z).toBeGreaterThanOrEqual(FULLSCREEN_Z);
+    expect(w.terminal('b').position.z).toBeGreaterThanOrEqual(FULLSCREEN_Z);
+    expect(w.terminal('loose').position.z).toBeLessThan(FULLSCREEN_Z);
+    expect(w.terminal('a').cols).toBeGreaterThan(aCanvasCols);
+    expect(w.terminal('b').cols).toBeGreaterThan(bCanvasCols);
+
+    // ⌘] (`cycleFocus`) and `focusPane('right')` switch focus between 'a' and 'b' IN PLACE without leaving Group Fullscreen!
+    expect(w.focusPane('right')).toBe('b');
+    expect(w.focusedId).toBe('b');
+    expect(w.fullscreen.mode).toBe('group');
+    expect(w.fullscreen.groupId).toBe(gSplit);
+    expect(w.cycleFocus(+1)).toBe('a');
+    expect(w.fullscreen.groupId).toBe(gSplit);
+
+    // Dragging the split divider inside Group Fullscreen re-wraps both panes live AND keeps the ratio!
+    const fsSplitRect = w.groups.splitRect(gSplit);
+    w.groups.dragDivider(gSplit, [], fsSplitRect.minX + (fsSplitRect.maxX - fsSplitRect.minX) * 0.35);
+    expect(w.terminal('a').cols).toBeLessThan(w.terminal('b').cols);
+
+    // ⌘⇧↵ (`wall.fullscreen.pane toggle`) zooms 'a' solo (remembering returnGroup = gSplit)!
+    await w.run(['wall.fullscreen.pane', 'toggle']);
+    expect(w.fullscreen.mode).toBe('single');
+    expect(w.fullscreen.id).toBe('a');
+    expect(w.fullscreen.state.returnGroup).toBe(gSplit);
+    expect(w.terminal('a').position.z).toBe(FULLSCREEN_Z);
+    expect(w.terminal('b').position.z).toBeLessThan(FULLSCREEN_Z);   // 'b' dropped back to the veiled canvas
+    expect(w.terminal('a').cols).toBeGreaterThan(w.terminal('b').cols * 2);
+
+    // ⌘⇧↵ again unzooms right back into Group Fullscreen on gSplit!
+    await w.run(['wall.fullscreen.pane', 'toggle']);
+    expect(w.fullscreen.mode).toBe('group');
+    expect(w.fullscreen.groupId).toBe(gSplit);
+    expect(w.terminal('b').position.z).toBeGreaterThanOrEqual(FULLSCREEN_Z);
+
+    // Stepping outside gSplit via cycleGroupFocus transitions fullscreen onto 'loose' (solo), then back to gSplit!
+    expect(w.cycleGroupFocus(+1)).toBe('loose');
+    expect(w.fullscreen.mode).toBe('single');
+    expect(w.fullscreen.id).toBe('loose');
+    expect(w.cycleGroupFocus(+1)).toBe('a');
+    expect(w.fullscreen.mode).toBe('group');
+    expect(w.fullscreen.groupId).toBe(gSplit);
+
+    // ⌘↵ (`wall.fullscreen toggle`) exits all the way back to the canvas, keeping the updated 0.35 split ratio!
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect(w.fullscreen.active).toBe(false);
+    expect(w.terminal('a').cols).toBeLessThan(w.terminal('b').cols);
+
+    // ── 2. Tile Group Fullscreen preserves custom 2 : 3 : 2 proportions while showing more text ──
+    w.ctx.terminals.set('t1', /** @type {any} */ (mkGrid('t1', 40, 20, 0, -120)));
+    w.ctx.terminals.set('t2', /** @type {any} */ (mkGrid('t2', 60, 20, 60, -120)));
+    w.ctx.terminals.set('t3', /** @type {any} */ (mkGrid('t3', 40, 20, 140, -120)));
+    w._syncTerminals();
+    const gTile = w.groups.create(['t1', 't2', 't3'], { layout: 'tile', columns: 3 });
+    w.focus('t2');
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect(w.fullscreen.groupId).toBe(gTile);
+    // More text in every pane, and 2 : 3 : 2 column proportions preserved!
+    expect(w.terminal('t1').cols).toBeGreaterThan(40);
+    expect(w.terminal('t1').rows).toBeGreaterThan(20);
+    expect(w.terminal('t1').cols).toBe(w.terminal('t3').cols);
+    const ratio = w.terminal('t2').cols / w.terminal('t1').cols;
+    expect(ratio).toBeGreaterThan(1.4);
+    expect(ratio).toBeLessThan(1.6);
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect([w.terminal('t1').cols, w.terminal('t2').cols, w.terminal('t3').cols]).toEqual([40, 60, 40]);
+
+    // ── 3. Freeform Group Fullscreen leaves sizes & spots untouched so panes move freely and keep their new spots ──
+    w.ctx.terminals.set('f1', /** @type {any} */ (mkGrid('f1', 50, 16, 10, -260)));
+    w.ctx.terminals.set('f2', /** @type {any} */ (mkGrid('f2', 50, 16, 40, -270)));   // overlapping f1!
+    w._syncTerminals();
+    const gFree = w.groups.create(['f1', 'f2'], { layout: 'freeform' });
+    w.focus('f1');
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect(w.fullscreen.groupId).toBe(gFree);
+    expect(w.terminal('f1').cols).toBe(50);
+    expect(w.terminal('f2').cols).toBe(50);
+    // Both elevated into FULLSCREEN_Z band, with focused 'f1' stacked cleanly above 'f2' so overlaps never Z-fight!
+    expect(w.terminal('f2').position.z).toBeGreaterThanOrEqual(FULLSCREEN_Z);
+    expect(w.terminal('f1').position.z - 1.0).toBeGreaterThan(w.terminal('f2').position.z + 0.1);
+    // Multi-box backdropClipPath merges overlapping boxes into clean disjoint strips.
+    const multiClip = backdropClipPath([
+        { left: 100, right: 500, top: 50, bottom: 350 },
+        { left: 300, right: 700, top: 200, bottom: 500 },
+    ], { w: 1200, h: 800 });
+    expect(multiClip.startsWith('polygon(')).toBe(true);
+    expect(multiClip).toContain('100.0px 200.0px, 100.0px 350.0px, 700.0px 350.0px, 700.0px 200.0px');
+    // Move f2 inside fullscreen and remember its position: exit keeps f2's new spot!
+    w.placeBody('f2', { x: 180, y: -260 });
+    w.rememberPosition('f2');
+    const movedX = w.terminal('f2').position.x;
+    await w.run(['wall.fullscreen', 'toggle']);
+    expect(w.terminal('f2').position.x).toBe(movedX);
+});
+
+test('spawning lands new terminals in the current canvas viewport instead of the (0, 0) starting grid', () => {
+    const cam = { isOrthographicCamera: true, zoom: 6, position: { x: 1200, y: -800, z: 500 }, updateProjectionMatrix() {} };
+    const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1200, height: 800 }) };
+    const w = new TerminalWall({ scene: {}, camera: /** @type {any} */ (cam), gl: { domElement: canvas }, atlas: null, registry: {}, relayPort: 8096 });
+    w.viewport.setView(1200, 800);
+    w.names = /** @type {any} */ ({ attach() {}, prune() {}, barHeight: () => 2, setBarRoom() {} });
+    w.groups = new WallGroups(w, { atlas: null, scene: /** @type {any} */ ({ add() {} }) });
+    w.router.register('terminal.resize', ([id, c, r]) => {
+        const g = w.terminal(id);
+        g.cols = +c; g.rows = +r;
+        return { text: 'OK', data: null };
+    });
+
+    const mkGrid = (id, cols = 80, rows = 24) => ({
+        terminalId: id, cols, rows, visible: true, hasSelection: false,
+        position: { x: 0, y: 0, z: 0, set(x, y, z) { this.x = x; this.y = y; this.z = z; } },
+        scale: { x: 2, y: 2, z: 2 },
+        cellStride: { x: 1.2, y: 2.4 },
+        readText: () => [],
+        getLocalBounds() { return { min: { x: 0, y: -(this.rows * 1.2 + 0.6) }, max: { x: this.cols * 0.6 + 0.6, y: 0 } }; },
+        setBorder() {}, setBorderFlag() {}, setControlVisible() {}, setCursorFocused() {},
+        onResize() {}, onWindowTitle() {},
+    });
+
+    const host = w.ctx.terminalHost;
+    const land = (id) => {
+        const g = mkGrid(id);
+        host.place(/** @type {any} */ (g));
+        w.ctx.terminals.set(id, /** @type {any} */ (g));
+        w._syncTerminals();
+        host.landed(id);
+        return g;
+    };
+
+    // 1. Panned out to (1200, -800): first spawn lands centered on (1200, -800) (snapped), nowhere near (0, 0).
+    const s1 = land('s1');
+    const r1 = w.terminalRect('s1');
+    expect(Math.abs((r1.minX + r1.maxX) / 2 - 1200)).toBeLessThanOrEqual(w.config.gridMinor);
+    expect(Math.abs((r1.minY + r1.maxY) / 2 - -800)).toBeLessThanOrEqual(w.config.gridMinor);
+
+    // 2. Subsequent spawns (both mid-ease via viewport.target and once settled) flow cleanly in 3 columns with zero vertical drift.
+    const s2 = land('s2');
+    w.viewport.step(10);   // settle camera ease onto s2
+    const s3 = land('s3');
+    const s4 = land('s4');
+    expect(s2.position.y).toBe(s1.position.y);
+    expect(s3.position.y).toBe(s1.position.y);
+    expect(s2.position.x).toBeGreaterThan(s1.position.x);
+    expect(s3.position.x).toBeGreaterThan(s2.position.x);
+    // 4th terminal wraps to column 0 on the next row down.
+    expect(s4.position.x).toBe(s1.position.x);
+    expect(s4.position.y).toBeLessThan(s1.position.y);
+
+    // 3. Panning to a new viewport (-900, 600) starts a fresh flow centered at (-900, 600) (accounting for a docked sidebar).
+    w.setSidebar({ open: true, side: 'left' });
+    w.viewport.moveTo(-900, 600);
+    land('s5');
+    const r5 = w.terminalRect('s5');
+    const expectedCenterX = -900 + (DOCK_WIDTHS.sidebar / 2) / cam.zoom;
+    expect(Math.abs((r5.minX + r5.maxX) / 2 - expectedCenterX)).toBeLessThanOrEqual(w.config.gridMinor);
+    expect(Math.abs((r5.minY + r5.maxY) / 2 - 600)).toBeLessThanOrEqual(w.config.gridMinor);
+    w.setSidebar({ open: false, side: 'left' });
+
+    // 4. Spawning while fullscreen is active places the underlying canvas slot in the saved pre-fullscreen canvas viewport.
+    w.viewport.moveTo(2400, -1400);
+    land('fsBase');
+    w.viewport.step(10);
+    expect(w.fullscreen.enter('fsBase')).toBe(true);
+    // While fullscreen, camera moved to fit fullscreen, but saved canvas camera is near (2400, -1400).
+    land('fsSpawned');
+    expect(w.fullscreen.id).toBe('fsSpawned');
+    w.fullscreen.exit();
+    const rBase = w.terminalRect('fsBase'), rSpawned = w.terminalRect('fsSpawned');
+    expect(rSpawned.minX).toBeGreaterThan(rBase.maxX);
+    expect(Math.abs(rSpawned.maxY - rBase.maxY)).toBeLessThanOrEqual(w.config.gridMinor);
 });

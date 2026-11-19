@@ -151,7 +151,9 @@ function terminalItems(id, state, config) {
     const selected = state.selection.includes(id);
     const others = state.selection.filter((x) => x !== id);
     const agentSide = t.agentView?.open ? t.agentView.side : 'off';
-    const isFs = state.fullscreen === id;
+    const isSoloFs = state.fullscreen === id;
+    const isGroupFs = !!g && state.fullscreen === g.id;
+    const isFs = isSoloFs || isGroupFs;
     /** @type {MenuItem[]} */
     const items = [
         t.selected && { kind: 'action', id: 'copy', label: 'copy', detail: COPY_LABEL, verb: ['wall.copy', id] },
@@ -160,6 +162,7 @@ function terminalItems(id, state, config) {
         isFs
             ? { kind: 'action', id: 'fullscreen-off', label: 'exit fullscreen', detail: chordLabel(['↵']), verb: ['wall.fullscreen', 'off'] }
             : { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.reveal', id] },
+        isGroupFs && { kind: 'action', id: 'fullscreen-pane', label: 'fullscreen pane', detail: chordLabel(['↵'], { shift: true }), verb: ['wall.fullscreen.pane', 'on', id] },
         state.focusedId !== id && { kind: 'action', id: 'focus', label: 'focus', verb: ['terminal.focus', id] },
         { kind: 'rename', id: 'rename', label: 'rename…', verb: ['wall.rename', id], value: t.named ? t.name : '', placeholder: t.name },
         {
@@ -183,7 +186,10 @@ function terminalItems(id, state, config) {
         { kind: 'action', id: 'split-right', label: 'split right', detail: chordLabel(['D']), verb: ['wall.split', 'right', id] },
         { kind: 'action', id: 'split-down', label: 'split down', detail: chordLabel(['D'], { shift: true }), verb: ['wall.split', 'down', id] },
     ];
-    if (g?.layout === 'split' || isFs) { items.push(...tail(id, config)); return items.filter(Boolean); }
+    if (g?.layout === 'split' || isSoloFs || (isGroupFs && g?.layout !== 'freeform')) {
+        items.push(...tail(id, config));
+        return items.filter(Boolean);
+    }
     const sizes = parseSizes(config.menuSizes).map((z) => ({
         id: `${z.cols}x${z.rows}`, label: `${z.cols}×${z.rows}`, verb: ['terminal.resize', id, String(z.cols), String(z.rows)], on: z.cols === t.cols && z.rows === t.rows,
     }));
@@ -217,9 +223,12 @@ function groupItems(gid, state) {
     if (!g) return [];
     const shown = g.members.filter((id) => state.terminals.find((t) => t.id === id && !t.hidden));
     const tile = g.layout === 'tile', split = g.layout === 'split';
+    const isFs = state.fullscreen === gid;
     /** @type {MenuItem[]} */
     const items = [
-        { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.group.frame', gid] },
+        isFs
+            ? { kind: 'action', id: 'fullscreen-off', label: 'exit fullscreen', detail: chordLabel(['↵']), verb: ['wall.fullscreen', 'off'] }
+            : { kind: 'action', id: 'frame', label: 'frame', verb: ['wall.group.frame', gid] },
         { kind: 'rename', id: 'rename', label: 'rename…', verb: ['wall.group.rename', gid], value: g.named ? g.name : '', placeholder: g.name },
         { kind: 'sep', id: 's1' },
         {

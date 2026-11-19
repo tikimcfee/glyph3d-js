@@ -102,7 +102,7 @@ export default function Palette({ wall, state, onClose }) {
     const sel = state.selection;
     const fg = focused?.group ? groupById.get(focused.group) : null;
     const actions = [
-      { id: 'spawn', label: '+ new terminal', detail: chordLabel(['↵'], { shift: true }), run: () => { wall.spawn(); onClose(); } },
+      { id: 'spawn', label: '+ new terminal', detail: chordLabel(['\\']), run: () => { wall.spawn(); onClose(); } },
       { id: 'fit', label: 'fit all', detail: chordLabel(['0']), run: () => { wall.fitAll(); onClose(); } },
       { id: 'sidebar', label: state.sidebar.open ? 'close the sidebar' : 'open the sidebar', detail: chordLabel(['B']), run: run(['wall.sidebar', 'toggle']) },
       { id: 'settings', label: state.settingsPanel.open ? 'close the settings' : 'open the settings', detail: chordLabel([',']), run: run(['wall.settings', 'toggle']) },

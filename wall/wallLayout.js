@@ -30,18 +30,20 @@ export function overlaps(a, b) {
 
 /**
  * The first free flow slot for a new terminal of size (w, h): slots are a FLOW_COLUMNS-wide grid
- * of (w + gap) × (h + gap) cells, top-left at the origin, scanned row-major. A slot is free when it
- * overlaps no existing terminal — so terminals the person moved stay put and new ones flow around
- * them. Returns the slot's top-left corner.
+ * of (w + gap) × (h + gap) cells, top-left at `origin` (defaults to `{ x: 0, y: 0 }`), scanned
+ * row-major. A slot is free when it overlaps no existing terminal — so terminals the person moved
+ * stay put and new ones flow around them. Returns the slot's top-left corner.
  * @param {number} w @param {number} h @param {Rect[]} taken
+ * @param {{ x: number, y: number }} [origin={ x: 0, y: 0 }]
  * @returns {{ x: number, y: number }}
  */
-export function freeFlowSlot(w, h, taken) {
+export function freeFlowSlot(w, h, taken, origin = { x: 0, y: 0 }) {
+    const ox = origin.x, oy = origin.y;
     for (let i = 0; i < 10_000; i++) {
         const col = i % FLOW_COLUMNS;
         const row = Math.floor(i / FLOW_COLUMNS);
-        const x = col * (w + FLOW_GAP);
-        const y = 0 - row * (h + FLOW_GAP);   // 0 − …, not −…: row 0 must be +0, not −0
+        const x = (ox + col * (w + FLOW_GAP)) || 0;
+        const y = (oy - row * (h + FLOW_GAP)) || 0;   // || 0: zero coordinates stay +0, never −0
         const slot = { minX: x, maxX: x + w, minY: y - h, maxY: y };
         if (!taken.some((t) => overlaps(slot, t))) return { x, y };
     }
@@ -174,17 +176,22 @@ export function normalizeZOrder(zOrder, groupOf = null) {
  * Unified Z-stack layout for terminals AND group frames (`backdrop` at `groupZ`, `header` at
  * `groupZ + 0.2..0.22`): each group's frame sits immediately behind its own backmost member and
  * strictly in front of any older terminal or group beneath it, while each terminal clears its own
- * `-0.5 * scaleZ` background and `+0.05 * scaleZ` cursor/label sandwich.
+ * `-0.5 * scaleZ` background and `+0.05 * scaleZ` cursor/label sandwich. Fullscreen terminals rise
+ * into their own Z-band starting at `FULLSCREEN_Z`, preserving relative stacking among fullscreen
+ * panes (so overlapping freeform windows in Group Fullscreen still occlude each other cleanly).
  * @param {string[]} zOrder - back to front
- * @param {{ fullscreenId?: string|null, scaleOf?: ((id: string) => number)|null, groupOf?: ((id: string) => string|null)|null }} [o]
+ * @param {{ fullscreenId?: string|null, fullscreenIds?: Iterable<string>|null, scaleOf?: ((id: string) => number)|null, groupOf?: ((id: string) => string|null)|null }} [o]
  * @returns {{ order: string[], terminals: Map<string, number>, groups: Map<string, number> }}
  */
-export function zStackLayout(zOrder, { fullscreenId = null, scaleOf = null, groupOf = null } = {}) {
+export function zStackLayout(zOrder, { fullscreenId = null, fullscreenIds = null, scaleOf = null, groupOf = null } = {}) {
     const order = normalizeZOrder(zOrder, groupOf);
+    const fsSet = new Set(fullscreenIds ?? (fullscreenId ? [fullscreenId] : []));
     const terminals = new Map();
     const groups = new Map();
     /** @type {{ kind: 'group'|'terminal', id: string, back: number, front: number }[]} */
     const slices = [];
+    /** @type {{ id: string, back: number, front: number }[]} */
+    const fsSlices = [];
     const seenGroups = new Set();
     for (const id of order) {
         const gid = groupOf ? groupOf(id) : null;
@@ -192,11 +199,22 @@ export function zStackLayout(zOrder, { fullscreenId = null, scaleOf = null, grou
             seenGroups.add(gid);
             slices.push({ kind: 'group', id: gid, back: 0, front: 0.25 });
         }
-        if (id === fullscreenId) {
-            terminals.set(id, FULLSCREEN_Z);
+        const sz = Math.max(1, Math.abs(scaleOf ? scaleOf(id) : 2) || 2);
+        if (fsSet.has(id)) {
+            fsSlices.push({ id, back: 0.5 * sz, front: 0.05 * sz });
         } else {
-            const sz = Math.max(1, Math.abs(scaleOf ? scaleOf(id) : 2) || 2);
             slices.push({ kind: 'terminal', id, back: 0.5 * sz, front: 0.05 * sz });
+        }
+    }
+    if (fsSlices.length === 1) {
+        terminals.set(fsSlices[0].id, FULLSCREEN_Z);
+    } else if (fsSlices.length > 1) {
+        let fz = FULLSCREEN_Z;
+        for (let i = 0; i < fsSlices.length; i++) {
+            const s = fsSlices[i];
+            const z = i === 0 ? FULLSCREEN_Z : fz + s.back;
+            terminals.set(s.id, z);
+            fz = z + s.front + 0.5;
         }
     }
     if (!slices.length) return { order, terminals, groups };

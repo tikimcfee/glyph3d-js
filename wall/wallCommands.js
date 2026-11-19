@@ -110,17 +110,51 @@ export default function registerWallCommands(router, wall) {
         if (!r.ok) throw new Error(r.reason || 'the spawn did not land');
         return OK(`spawned ${r.id}${at ? ` at (${at.x}, ${at.y})` : ''}`, { id: r.id, at });
     });
-    verb('wall.fullscreen', '[toggle|on|off] [id]', 'Put a terminal fullscreen — it re-wraps to fill the canvas — or back on the canvas', (args) => {
+    verb('wall.fullscreen', '[toggle|on|off] [id|gid]', 'Put a group (when focused in one with 2+ panes) or terminal fullscreen, or back on the canvas', (args) => {
+        const [what = 'toggle', named] = args;
+        const fs = wall.fullscreen;
+        if (what === 'off') {
+            fs.exit();
+        } else if (what === 'on' || what === 'toggle') {
+            if (!named) {
+                if (what === 'toggle' && fs.active) fs.exit();
+                else {
+                    if (!wall.focusedId) throw new Error('nothing focused to put fullscreen: focus one, or name a terminal or group');
+                    if (!fs.enterDefault(wall.focusedId)) throw new Error(`'${wall.focusedId}' is hidden`);
+                }
+            } else if (wall.store.group(named)) {
+                if (what === 'toggle' && fs.groupId === named) fs.exit();
+                else if (!fs.enterGroup(named)) throw new Error(`group '${named}' has no shown member to put fullscreen`);
+            } else {
+                const [id] = terminalIds([named]);
+                if (what === 'toggle' && fs.id === id) fs.exit();
+                else if (!fs.enter(id)) throw new Error(`terminal '${id}' is hidden`);
+            }
+        } else throw new Error(`fullscreen takes toggle|on|off, not '${what}'`);
+        return OK(fs.active ? `fullscreen ${fs.target}: ${fs.state.linePx.toFixed(1)} px a row` : 'fullscreen off', { fullscreen: fs.state });
+    });
+    verb('wall.fullscreen.pane', '[toggle|on|off] [id]', 'Fullscreen a single pane alone (zooming out of Group Fullscreen and back on toggle)', (args) => {
         const [what = 'toggle', named] = args;
         const id = named ? terminalIds([named])[0] : null;
         const fs = wall.fullscreen;
-        if (what === 'off' || (what === 'toggle' && fs.id && (!id || id === fs.id))) fs.exit();
-        else if (what === 'on' || what === 'toggle') {
+        if (what === 'off') {
+            if (fs.mode === 'single' && fs.state?.returnGroup && wall.store.group(fs.state.returnGroup)) fs.togglePane();
+            else fs.exit();
+        } else if (what === 'toggle') {
+            if (!fs.active && !id && !wall.focusedId) throw new Error('no terminal to put fullscreen: focus one, or name it');
+            if (!fs.active) {
+                const target = id ?? wall.focusedId;
+                if (!fs.enter(target)) throw new Error(`terminal '${target}' is hidden`);
+            } else fs.togglePane(id);
+        } else if (what === 'on') {
             const target = id ?? wall.focusedId;
             if (!target) throw new Error('no terminal to put fullscreen: focus one, or name it');
-            if (!fs.enter(target)) throw new Error(`terminal '${target}' is hidden`);
-        } else throw new Error(`fullscreen takes toggle|on|off, not '${what}'`);
-        return OK(fs.id ? `fullscreen ${fs.id}: ${fs.state.linePx.toFixed(1)} px a row` : 'fullscreen off', { fullscreen: fs.state });
+            const rg = fs.mode === 'group' ? fs.groupId : (fs.state?.returnGroup ?? null);
+            if (!fs.enter(target, { returnGroup: rg && wall.store.groupOf(target) === rg ? rg : null })) {
+                throw new Error(`terminal '${target}' is hidden`);
+            }
+        } else throw new Error(`fullscreen.pane takes toggle|on|off, not '${what}'`);
+        return OK(fs.active ? `fullscreen ${fs.target}: ${fs.state.linePx.toFixed(1)} px a row` : 'fullscreen off', { fullscreen: fs.state });
     });
     verb('wall.fullscreen.text', '<bigger|smaller|reset>', "The fullscreen terminal's text size: it re-wraps, and the size is remembered for it (reset: the canvas's size)", (args) => {
         const dir = { bigger: 1, smaller: -1, reset: 0 }[args[0]];
