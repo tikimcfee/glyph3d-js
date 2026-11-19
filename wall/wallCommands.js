@@ -1,7 +1,7 @@
 import { checkConfig } from './wallConfig.js';
 import { searchSettings, SECTIONS } from './wallSettings.js';
 import { AGENT_SIDES } from './wallAgentView.js';
-import { busStatus, busAttachable } from './WallBus.js';
+import { busStatus, busAttachable, gomuxScreenId } from './WallBus.js';
 import {
     normalizeRelayHost,
     parseRelayEndpoint,
@@ -429,28 +429,42 @@ export default function registerWallCommands(router, wall) {
     });
 
     // ── the gomuxai agents (WallBus.js) ──────────────────────────────────────
+    const attachedTerms = (a, isLocal) => {
+        const ids = new Set(wall.store.attachedTo(a.target).filter((id) => wall.terminal(id)));
+        if (isLocal) {
+            for (const id of wall.store.attachedTo(a.name)) if (wall.terminal(id)) ids.add(id);
+            const gx = gomuxScreenId(a.name);
+            if (wall.terminal(gx)) ids.add(gx);
+        }
+        return [...ids];
+    };
     verb('wall.bus', '', 'The gomuxai agents the relay sees, by host, with their status and the terminal attached to each', () => {
         const hosts = wall.bus.hosts();
         if (!wall.bus.snapshot) throw new Error(`no gomuxai agents: ${wall.bus.reason}`);
+        const localHost = wall.bus.snapshot.host || '';
         const out = [];
         for (const h of hosts) {
+            const isLocal = h.host === '' || h.host === localHost;
             out.push(h.host || 'this host');
             for (const a of h.agents) {
-                const on = wall.store.attachedTo(a.target).filter((id) => wall.terminal(id));
+                const on = attachedTerms(a, isLocal);
                 const status = busStatus(a.status).word + (a.endReason ? ` (${a.endReason})` : '');
-                const notes = [a.detail, !busAttachable(a) ? 'no tmux session' : null, on.length ? `on ${on.join(', ')}` : null].filter(Boolean);
+                const notes = [a.detail, !busAttachable(a) ? 'no live session' : null, on.length ? `on ${on.join(', ')}` : null].filter(Boolean);
                 out.push(`  ${a.target} ${status}${notes.length ? ` · ${notes.join(' · ')}` : ''}`);
             }
         }
         return {
             text: out.join('\n') || '(no live agents)',
-            data: { hosts: hosts.map((h) => ({ host: h.host, agents: h.agents.map((a) => ({ target: a.target, status: a.status ?? null, attachable: busAttachable(a), terminals: wall.store.attachedTo(a.target).filter((id) => wall.terminal(id)) })) })) },
+            data: { hosts: hosts.map((h) => {
+                const isLocal = h.host === '' || h.host === localHost;
+                return { host: h.host, agents: h.agents.map((a) => ({ target: a.target, status: a.status ?? null, attachable: busAttachable(a), terminals: attachedTerms(a, isLocal) })) };
+            }) },
         };
     });
-    verb('wall.attach', '<name[@host]>', "Attach to a gomuxai agent: reveal the terminal attached to it, else open one running `agent attach`", async (args) => {
+    verb('wall.attach', '<name[@host]>', "Attach to a gomuxai agent: reveal its terminal, else attach directly to its local termd session (or ssh on another host)", async (args) => {
         if (!args[0]) throw new Error('name an agent: name, or name@host for one on another host');
         let r;
-        // A refusal (no tmux session, a spawn that didn't land) shows on the wall: the sidebar's and
+        // A refusal (no live session, an attach that didn't land) shows on the wall: the sidebar's and
         // the palette's clicks have nowhere else to say it.
         try { r = await wall.attach(args[0]); } catch (e) { wall.notify(`attach: ${e.message}`); throw e; }
         return OK(r.existing ? `revealed ${r.id}, attached to ${args[0]}` : `${r.id} attaches to ${args[0]}`, { id: r.id, target: args[0], existing: r.existing });

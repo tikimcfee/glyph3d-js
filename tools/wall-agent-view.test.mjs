@@ -318,8 +318,10 @@ test('matchTerminalSession pairs by pin, gx-<name> workgroup, then pwd/cwd prefe
 
     // Auto-match ignores subagents (`parent_session`) and prefers live over ended, newest mtime first.
     expect(matchTerminalSession({ id: 't1', pwd: '/repo/app/', cwd: '/home/me' }, sessions)?.session_id).toBe('live-newer');
-    // Workgroup terminal convention `gx-<name>`.
+    // Workgroup terminal convention `gx-<name>`, plus `attached` / exact `sessionId` from WallBus when multiple agents share one cwd.
     expect(matchTerminalSession({ id: 'gx-alpha', cwd: '/tmp' }, sessions)?.session_id).toBe('wg-sess');
+    expect(matchTerminalSession({ id: 'term-9', attached: 'alpha@IL-Air-M2', cwd: '/repo/app' }, sessions)?.session_id).toBe('wg-sess');
+    expect(matchTerminalSession({ id: 'gx-alpha', sessionId: 'live-older', cwd: '/repo/app' }, sessions)?.session_id).toBe('live-older');
     // Explicit pin can select a subagent or exact session id / prefix.
     expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'sub-child')?.session_id).toBe('sub-child');
     expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'ended')?.session_id).toBe('ended-1');

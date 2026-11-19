@@ -749,10 +749,14 @@ export default class WallAgentViews {
     _termMeta(id) {
         const row = this.wall.termd.terminal(id);
         const grid = this.wall.terminal(id);
+        const attached = this.wall.store.attached?.(id) || '';
+        const busAgent = attached ? this.wall.bus?.find?.(attached) : null;
         return {
             id,
+            attached,
+            sessionId: busAgent?.sessionId || '',
             pwd: row?.pwd || '',
-            cwd: row?.cwd || '',
+            cwd: row?.cwd || busAgent?.cwd || '',
             title: this.wall.store.name(id) || row?.title || grid?.windowTitle || '',
         };
     }

@@ -4,7 +4,7 @@ import { holdPress } from './holdPress.js';
 import FitText from './FitText.jsx';
 import { Btn, DockButtons, useHeadDrag } from './Panel.jsx';
 import { dockLayout, DOCK_WIDTHS } from './dockLayout.js';
-import { busStatus, busAttachable } from './WallBus.js';
+import { busStatus, busAttachable, gomuxScreenId } from './WallBus.js';
 
 /** The close button: held over closeHoldMs (its ring fills), then the terminal is killed. */
 function HoldClose({ wall, id }) {
@@ -68,7 +68,7 @@ function GroupRow({ wall, g, collapsed }) {
 function AgentRow({ wall, a, on, focused }) {
   const st = busStatus(a.status);
   const can = busAttachable(a);
-  const title = [a.target, st.word + (a.endReason ? ` (${a.endReason})` : ''), a.detail, a.cwd, on ? `attached in ${on}` : can ? 'click to attach' : 'no tmux session to attach to']
+  const title = [a.target, st.word + (a.endReason ? ` (${a.endReason})` : ''), a.detail, a.cwd, on ? `attached in ${on}` : can ? 'click to attach' : 'no live session to attach to']
     .filter(Boolean).join('\n');
   return (
     <div data-row={`agent:${a.target}`} data-status={a.status || 'unknown'} title={title} className="wall-sidebar-row"
@@ -86,18 +86,23 @@ function AgentRow({ wall, a, on, focused }) {
 function AgentsSection({ wall, state }) {
   const { hosts, reason } = state.bus;
   const attachedTo = new Map();
-  for (const t of state.terminals) if (t.attached) attachedTo.set(t.attached, t.id);
+  const byId = new Set();
+  for (const t of state.terminals) {
+    byId.add(t.id);
+    if (t.attached) attachedTo.set(t.attached, t.id);
+  }
   return (
     <div data-agents="">
       <div style={{ ...styles.section }}>agents</div>
-      {hosts.map((h) => (
+      {hosts.map((h, hi) => (
         <div key={h.host} data-host={h.host || 'local'}>
           <div style={{ ...styles.row, paddingLeft: 8, cursor: 'default', color: '#aeb7c6' }}>
             <FitText text={h.host || 'this host'} maxPx={12.5} />
             <span style={styles.count}>{h.agents.length}</span>
           </div>
           {h.agents.map((a) => {
-            const on = attachedTo.get(a.target);
+            const gx = hi === 0 ? gomuxScreenId(a.name) : null;
+            const on = attachedTo.get(a.target) ?? (hi === 0 ? (attachedTo.get(a.name) ?? (gx && byId.has(gx) ? gx : undefined)) : undefined);
             return <AgentRow key={a.target} wall={wall} a={a} on={on} focused={!!on && on === state.focusedId} />;
           })}
         </div>

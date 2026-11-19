@@ -10,7 +10,7 @@ import { getSetting } from './settings.js';
 /**
  * GomuxHub — the gomuxai agent tree, as books at desks.
  *
- * gomuxai (the `agent` CLI) runs agents in tmux sessions and records who spawned whom; the
+ * gomuxai (the `agent` CLI) runs agents in g3d-termd sessions and records who spawned whom; the
  * relay watches its stores (cli/gomux.go) and pushes the tree. The hub is THIS machine's agents
  * (localTree): a relay following the bus also lists other hosts' agents, which have no
  * transcript or screen here and may share a name with one of ours. Here each agent becomes an
@@ -54,15 +54,14 @@ import { getSetting } from './settings.js';
  * `waiting` (blocked on a person) raises the book's hand.
  * The agent's own status wins over what a live batch did to the book.
  *
- * SCREENS: with `gomux.autoScreens` on, every live agent with a tmux session gets its screen
+ * SCREENS: with `gomux.autoScreens` on, every live agent with a termd session gets its screen
  * (gomux.attach) riding beside its book — the book's aside, height-fit to the spread — as
  * soon as the book is open. Seating CONVERGES: whenever the tree is applied, a book opens or a
  * terminal registers, every shown agent's screen that is up but not riding its book is given
  * to it — so a screen re-adopted on reload before its book exists, one whose adapter connected
  * after gomux.attach stopped waiting, and one whose book was rebuilt all find their book.
- * A screen READS its agent's pane size (the relay pushes
- * `gomux/paneSize` when it moves) and a resize WRITES back (terminal.resize → the relay
- * resizes the agent's tmux window, and its CLI reflows).
+ * The adapter subscribes directly to the agent's termd session, so size changes flow both ways
+ * through the ordinary terminal stream.
  * Detaching one (gomux.detach) is remembered: the hub won't reopen it.
  *
  * Read-only by construction: nothing here types into, starts, or stops an agent.
@@ -114,7 +113,6 @@ export default class GomuxHub {
         /** @type {Map<string, HubLane>} */
         this.lanes = new Map();
         this._off = provider.onChange((snap) => this.apply(snap));
-        this._offPane = provider.onPaneSize((e) => this._paneSize(e));
         this._offStream = sessionBooks.onStream((event, st) => this._stream(event, st));
         this._offCloses = this.tree.watchCloses(() => this._layout());
         this._onRegistry = () => this._seatScreens();   // a screen (re-)adopted: seat it
@@ -394,21 +392,6 @@ export default class GomuxHub {
         return 'gx-' + String(name).replace(/[^A-Za-z0-9_-]/g, '_');
     }
 
-    /** An agent's pane changed size elsewhere: its screen follows (terminal.resize — whose
-     *  write-back to the agent is then a no-op at the same size). @private */
-    _paneSize({ id, cols, rows } = {}) {
-        const grid = this.ctx.terminals?.get(id);
-        if (!grid || !this._exec || (grid.cols === cols && grid.rows === rows)) return;
-        Promise.resolve(this._exec(['terminal.resize', id, String(cols), String(rows)]))
-            .catch((e) => console.warn(`[gomux] ${id}: following the agent's pane size failed —`, e?.message || e));
-    }
-
-    /** The agent whose screen terminal `id` is, or null — a lookup over the tree. */
-    screenAgent(id) {
-        for (const a of this.snapshot?.agents || []) if (this.screenId(a.name) === id) return a.name;
-        return null;
-    }
-
     /**
      * Give an agent's screen terminal to its book as the book's ASIDE — parked right of
      * the spread, its height fit to the book's (Book.setAside), riding the book wherever
@@ -452,7 +435,6 @@ export default class GomuxHub {
 
     dispose() {
         this._disposed = true;
-        this._offPane?.();
         this._off?.();
         this._offStream?.();
         this._offCloses?.();

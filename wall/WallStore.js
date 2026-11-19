@@ -141,6 +141,9 @@ export default class WallStore {
     /** @param {string} target - `name` or `name@host` @returns {string[]} the terminals attached to it */
     attachedTo(target) { return Object.keys(this._attached).filter((id) => this._attached[id] === target); }
 
+    /** @returns {[string, string][]} every `[terminalId, target]` attachment pair */
+    attachedEntries() { return Object.entries(this._attached); }
+
     /** @param {string} id @returns {boolean} */
     hidden(id) { return this._hidden.has(id); }
 

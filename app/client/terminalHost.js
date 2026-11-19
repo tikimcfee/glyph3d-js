@@ -12,9 +12,8 @@
  *   focus      attention primary (sticky/UI focus) AND key (keystroke target), with the registry
  *              entry as the entity so the keyboard router (keyed on entity.type) can route to it
  *   release    a held terminal (docked tile, carrel seat) lifts out where it hangs
- *   resizing   an agent's screen shows the agent's OWN pane: a resize writes back — the relay
- *              resizes the agent's tmux window (gomuxai's, no client), its CLI reflows, the redraw streams in at
- *              the new size. The note is where the terminal sits in the dock.
+ *   resizing   the note is where the terminal sits in the dock (agent screens subscribe directly
+ *              to the agent's termd session, so their attach adapter carries resizes natively).
  *   surfaces   the WorkspaceModel's surface records — the one decider of a terminal's size and
  *              position across reloads (SessionStore re-pushes them as grids re-adopt)
  */
@@ -54,11 +53,7 @@ export default function createIdeTerminalHost(ctx, router) {
             if (ctx.holding.holderOf(id)) ctx.holding.lift(id, { inPlace: true });
         },
 
-        resizing(id, cols, rows) {
-            const screenOf = ctx.gomuxHub?.screenAgent(id);
-            if (screenOf && ctx.wsbridge?.connected) {
-                ctx.wsbridge.send(JSON.stringify({ relay: 'gomux.resize', name: screenOf, cols, rows }));
-            }
+        resizing(id) {
             const dock = ctx.cameraDock;
             if (!dock?.has(id)) return '';
             return dock.focusedPane === id ? '[focus]' : (dock.isFramed(id) ? '[pane]' : '[docked]');

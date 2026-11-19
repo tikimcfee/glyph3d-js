@@ -109,7 +109,7 @@ function makeWorld() {
     const run = (name, ...args) => verbs.get(name)(args.map(String), ctx);
     const execs = [];
     const exec = async (cmd) => { execs.push(cmd); if (cmd[0] === 'terminal.kill') registry.unregister(cmd[1]); return { text: 'OK' }; };
-    const gomux = { onChange: () => () => {}, onPaneSize: () => () => {} };
+    const gomux = { onChange: () => () => {} };
     ctx.gomuxHub = new GomuxHub(ctx, gomux, ctx.sessionBooks, { exec });
     ctx.sessionDesk = new SessionDesk(ctx, ctx.sessionProvider, ctx.sessionBooks);
     const store = new SessionStore({ ctx, router: { execute: async () => ({ text: 'OK' }) }, bridge: { rpcRequest: async () => ({}) } });

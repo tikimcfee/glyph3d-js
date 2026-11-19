@@ -5,12 +5,11 @@
  *   gomux.list               the tree, depth-first in spawn order: status · detail · book
  *   gomux.status <name>      one agent's node (status, the tool in flight, a pending prompt)
  *   gomux.refresh            pull the tree from the relay now (pushes keep it current)
- *   gomux.attach <name>      the agent's live tmux screen as a terminal, seated beside its book
+ *   gomux.attach <name>      the agent's live termd screen as a terminal, seated beside its book
  *   gomux.detach <name>      close that terminal (the agent's session is untouched)
  *
- * Read-only: these verbs never type into, start, or stop an agent. The screen is a
- * read-only tmux client on the agent's session (cli/gomux.go attachGomuxAgent): keys typed
- * at it go nowhere, and it never resizes the agent's window. Dock it like any terminal
+ * The screen attaches directly to the agent's g3d-termd session (`cli/gomux.go` `attachGomuxAgent`,
+ * `--detach-on-kill`). Dock it like any terminal
  * (`dock.lock gx-<name>`); releasing it returns it to its seat by the book. Framing an agent's book
  * is the ordinary camera verb on its lane: `camera.focus agent:book:<name>`.
  */
@@ -47,7 +46,7 @@ export default function registerGomuxCommands(router) {
             const status = statusWords(a);
             const bits = [status.padEnd(16), (a.detail || '').slice(0, 72)];
             // past: outside the history window (the hub doesn't show it); hidden: agent.hide / its group's rule
-            const tags = [!shown && 'past', hidden && 'hidden', book && `book:${book}`, a.attached && 'tmux'].filter(Boolean).join(' ');
+            const tags = [!shown && 'past', hidden && 'hidden', book && `book:${book}`, a.attached && 'termd'].filter(Boolean).join(' ');
             return `${'  '.repeat(depth)}${a.name.padEnd(Math.max(1, 22 - depth * 2))} ${bits.join(' ')}${tags ? `  [${tags}]` : ''}  ${ago(a.statusAt || a.createdAt)}`;
         });
         return {
@@ -65,7 +64,7 @@ export default function registerGomuxCommands(router) {
         const a = hub.snapshot?.agents.find((x) => x.name === name);
         if (!a) return { text: `ERR: no gomuxai agent '${name}'`, data: null };
         const lines = [
-            `${a.name}  ${statusWords(a)}${a.attached ? '  (tmux ' + a.session + ')' : ''}`,
+            `${a.name}  ${statusWords(a)}${a.attached ? '  (termd ' + a.session + ')' : ''}`,
             a.parent ? `parent   ${a.parent}` : 'parent   (a person)',
             `backend  ${a.backend}${a.harness ? ' · ' + a.harness : ''}`,
             a.cwd && `cwd      ${a.cwd}`,
@@ -86,7 +85,7 @@ export default function registerGomuxCommands(router) {
         if (!bridge?.connected) return { text: 'ERR: not connected to the relay', data: null };
         const a = hub.snapshot?.agents.find((x) => x.name === name);
         if (!a) return { text: `ERR: no gomuxai agent '${name}'`, data: null };
-        if (!a.attached) return { text: `ERR: '${name}' has no live tmux session (${a.live ? a.status : 'cleaned up'})`, data: null };
+        if (!a.attached) return { text: `ERR: '${name}' has no live session (${a.live ? a.status : 'cleaned up'})`, data: null };
 
         let id = hub.screenId(name);
         if (!ctx.registry?.get(id)) {
@@ -102,10 +101,10 @@ export default function registerGomuxCommands(router) {
         }
         const seated = hub.seatScreen(name, id);
         return {
-            text: `OK: ${name}'s screen is terminal '${id}' (read-only)${seated === 'book' ? ', riding beside its book' : seated ? ` (held at '${seated}')` : ''}`,
+            text: `OK: ${name}'s screen is terminal '${id}'${seated === 'book' ? ', riding beside its book' : seated ? ` (held at '${seated}')` : ''}`,
             data: { id, seated: seated || null },
         };
-    }, { description: "The agent's live tmux screen as a read-only terminal, seated beside its book", usage: '<name>', returns: '{ id, seated }' });
+    }, { description: "The agent's live termd screen as a terminal, seated beside its book", usage: '<name>', returns: '{ id, seated }' });
 
     router.register('gomux.detach', async (args, ctx) => {
         const hub = ctx.gomuxHub;

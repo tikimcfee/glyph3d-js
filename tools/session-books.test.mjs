@@ -172,7 +172,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
     for (let k = 0; k < 10; k++) evs.push(k === 7 ? bash(k, 'make') : say(k, `s${k}`));
     evs.push(bash(7, 'make', { status: 'ok', output: 'built' }, 'update', 10 * LINE));
     w.relay.add(session('S1', { workgroup: { name: 'coord' }, status: 'processing' }), evs);
-    const gomux = { onChange: () => () => {}, onPaneSize: () => () => {} };
+    const gomux = { onChange: () => () => {} };
     const hub = new GomuxHub(w.ctx, gomux, w.sb);
     const node = { name: 'coord', parent: '', backend: 'claude', harness: 'claude', sessionId: 'S1', live: true, status: 'processing',
                    createdAt: new Date().toISOString(), transcriptSize: 2200 };
@@ -645,7 +645,7 @@ const holderName = (w, lane) => w.ctx.holding.holderOf(w.books.lanes.get(lane).g
                 acks.shift()?.({ id });
             },
         };
-        w.hub = new GomuxHub(w.ctx, { onChange: () => () => {}, onPaneSize: () => () => {} }, w.sb,
+        w.hub = new GomuxHub(w.ctx, { onChange: () => () => {} }, w.sb,
             { exec: (c) => verbs.get(c[0])(c.slice(1), w.ctx) });
         w.ctx.gomuxHub = w.hub;
         return w;

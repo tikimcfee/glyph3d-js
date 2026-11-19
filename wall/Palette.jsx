@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { chordLabel } from './chord.js';
 import FitText from './FitText.jsx';
-import { busStatus, busAttachable } from './WallBus.js';
+import { busStatus, busAttachable, gomuxScreenId } from './WallBus.js';
 
 /** Subsequence match score: lower is better, null when `q` isn't a subsequence of `s`. */
 function score(q, s) {
@@ -73,11 +73,16 @@ export default function Palette({ wall, state, onClose, initialMode = 'find' }) 
     const groupItem = (g) => ({ kind: 'group', id: g.id, label: g.name, depth: 0, detail: `${g.members.length} · ${layoutText(g)}` });
 
     const attachedTo = new Map();
-    for (const t of state.terminals) if (t.attached) attachedTo.set(t.attached, t.id);
+    const byId = new Set();
+    for (const t of state.terminals) {
+      byId.add(t.id);
+      if (t.attached) attachedTo.set(t.attached, t.id);
+    }
     const agentItems = [];
-    for (const h of state.bus.hosts) {
+    for (const [hi, h] of state.bus.hosts.entries()) {
       for (const a of h.agents) {
-        const on = attachedTo.get(a.target);
+        const gx = hi === 0 ? gomuxScreenId(a.name) : null;
+        const on = attachedTo.get(a.target) ?? (hi === 0 ? (attachedTo.get(a.name) ?? (gx && byId.has(gx) ? gx : undefined)) : undefined);
         agentItems.push({
           kind: 'agent', id: a.target, label: a.target, depth: 0, status: a.status, dim: !busAttachable(a),
           detail: [busStatus(a.status).word, on ? `on ${on}` : !busAttachable(a) ? 'no session' : null, a.detail].filter(Boolean).join(' · '),

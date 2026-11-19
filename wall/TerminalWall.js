@@ -9,7 +9,7 @@ import { installInputTrace } from './inputTrace.js';
 import TerminalGrid from '@glyph3d/core/collections/TerminalGrid.js';
 import SceneSystems from '@glyph3d/core/collections/SceneSystems.js';
 import { BORDER_FLAGS } from '@glyph3d/core/collections/panelMaterial.js';
-import registerTerminalCommands, { routeTerminalOutput } from '@glyph3d/core/services/terminal/terminalCommands.js';
+import registerTerminalCommands, { routeTerminalOutput, waitForTerminal } from '@glyph3d/core/services/terminal/terminalCommands.js';
 import { assertTerminalHost } from '@glyph3d/core/services/terminal/TerminalHost.js';
 import TermdStatus from '@glyph3d/core/services/terminal/TermdStatus.js';
 import WallCamera from './WallCamera.js';
@@ -24,7 +24,7 @@ import SelectionOverlay from './SelectionOverlay.js';
 import WallPaper from './WallPaper.js';
 import WallFullscreen from './WallFullscreen.js';
 import WallAgentViews from './WallAgentViews.js';
-import WallBus, { attachArgv, busAttachable, busStatus, isBusTarget } from './WallBus.js';
+import WallBus, { attachArgv, busAttachable, busStatus, gomuxScreenId, isBusTarget, localBusName } from './WallBus.js';
 import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
@@ -215,7 +215,7 @@ export default class TerminalWall {
         /** Per-terminal Agent Views: categorized gomuxai event streams attached alongside terminals. */
         this.agents = new WallAgentViews(this);
         /** The gomuxai agents the relay sees, to attach to (wall.attach, wall.bus). */
-        this.bus = new WallBus(() => this._emit());
+        this.bus = new WallBus(() => { this.agents?._rebindAll?.(); this._emit(); });
         registerWallCommands(this.router, this);
         this._relayPort = relayPort;
         /** The relay link — this page is its DISPLAY. Built by start(), disposed by stop(). @type {WebSocketBridge|null} */
@@ -424,8 +424,7 @@ export default class TerminalWall {
                 this._setRelay('up', '');
                 this.termd.request(this.bridge);
                 this.agents.onRelayUp();
-                this.bus.refresh();
-                this._recover();
+                this._recover(this.bus.refresh());
             } else {
                 const why = String(m.error || 'refused');
                 console.warn(`[wall] the relay on :${this._relayPort} refused this display: ${why}`);
@@ -455,22 +454,38 @@ export default class TerminalWall {
 
     /**
      * Registered: re-adopt the relay's orphaned sessions (their adapters died with a relay restart),
-     * then forget the names and spots of terminals whose sessions are gone — the reply lists every
-     * live terminal (`live`), and an id whose session is gone will be minted again for a stranger.
+     * re-subscribe remembered local `gx-<name>` agent terminals whose `termd` sessions are still live,
+     * and forget the names and spots of terminals whose sessions are gone.
+     * @param {Promise<void>} [busReady]
      */
-    async _recover() {
+    async _recover(busReady = Promise.resolve()) {
         const bridge = this.bridge;
         const reply = bridge.waitForEvent('terminal.recovered', RECOVER_REPLY_MS);
         bridge.send(JSON.stringify({ relay: 'terminal.recover' }));
-        const r = await reply;
+        const [r] = await Promise.all([reply, busReady.catch(() => {})]);
         if (!r) { console.warn(`[wall] no terminal.recovered reply in ${RECOVER_REPLY_MS} ms — names and spots kept as they were`); return; }
         if (!Array.isArray(r.live)) { console.warn(`[wall] the relay couldn't list its terminals (${r.error ?? 'no live list'}) — names and spots kept as they were`); return; }
-        const gone = this.store.prune(new Set([...r.live, ...this.ctx.terminals.keys()]));
+        const keep = new Set([...r.live, ...this.ctx.terminals.keys()]);
+        const reattach = [];
+        for (const [id, target] of this.store.attachedEntries()) {
+            if (!id.startsWith('gx-')) continue;
+            if (!this.bus.snapshot) { keep.add(id); continue; }
+            const localName = localBusName(target, this.bus.snapshot);
+            const a = this.bus.find(target);
+            if (localName && a && busAttachable(a)) {
+                keep.add(id);
+                if (!r.live.includes(id) && !this.ctx.terminals.has(id)) reattach.push(localName);
+            }
+        }
+        const gone = this.store.prune(keep);
         if (gone.length) {
             this.agents.prune((id) => !gone.includes(id));
             console.info(`[wall] forgot ${gone.length} terminal(s) whose sessions are gone: ${gone.join(', ')}`);
             this.groups?.relayoutAll();
             this._emit();
+        }
+        if (reattach.length && this.bridge === bridge && bridge.connected) {
+            for (const name of reattach) bridge.send(JSON.stringify({ relay: 'gomux.attach', name }));
         }
     }
 
@@ -1256,15 +1271,24 @@ export default class TerminalWall {
 
     /**
      * Attach to a gomuxai agent: the terminal already attached to it, revealed (shown, focused,
-     * framed); else a new terminal running `agent attach <target>` (attachArgv), remembered as that
-     * agent's. An agent the bus lists without a tmux session is refused, with its status; one it
-     * doesn't list (another host's, before the relay follows the bus) is tried as named.
+     * framed); else for a local agent (`localBusName`), subscribe `gx-<name>` directly to its
+     * `g3d-termd` session (`gomux.attach`), or for a remote host (`name@host`) open a `wall`
+     * terminal running `agent attach <target>` (`attachArgv`, hopping over `ssh -t`). An agent the
+     * bus lists without a live session is refused with its status.
      * @param {string} target - `name` or `name@host`
      * @returns {Promise<{ id: string, existing: boolean }>}
      */
     async attach(target) {
         if (!isBusTarget(target)) throw new Error(`'${target ?? ''}' isn't an agent name (name or name@host)`);
-        const open = this.store.attachedTo(target).find((id) => this.ctx.terminals.has(id));
+        const snap = this.bus.snapshot;
+        const localName = localBusName(target, snap);
+        const aliases = new Set([target]);
+        if (localName) {
+            aliases.add(localName);
+            if (snap?.host) aliases.add(`${localName}@${snap.host}`);
+        }
+        const open = [...aliases].flatMap((t) => this.store.attachedTo(t)).find((id) => this.ctx.terminals.has(id))
+            ?? (localName && this.ctx.terminals.has(gomuxScreenId(localName)) ? gomuxScreenId(localName) : null);
         if (open) {
             this.show(open);
             this.focus(open, { frame: true });
@@ -1273,11 +1297,27 @@ export default class TerminalWall {
         const a = this.bus.find(target);
         if (a && !busAttachable(a)) {
             const why = a.status === 'ended' ? `ended${a.endReason ? ` (${a.endReason})` : ''}` : a.status || 'unknown';
-            throw new Error(`${target} has no tmux session to attach to (${why})`);
+            throw new Error(`${target} has no live session to attach to (${why})`);
+        }
+        if (localName && this.bridge?.connected) {
+            const ackPromise = this.bridge.waitForEvent('gomux.attaching', 5000);
+            this.bridge.send(JSON.stringify({ relay: 'gomux.attach', name: localName }));
+            const ack = await ackPromise;
+            if (!ack) throw new Error(`no answer from the relay for '${target}'`);
+            if (ack.error) throw new Error(ack.error);
+            const id = ack.id;
+            if (!this.ctx.terminals.has(id) && !(await waitForTerminal(this.ctx.registry, id))) {
+                throw new Error(`the adapter for '${target}' did not connect in time`);
+            }
+            this.store.setAttached(id, a?.target ?? target);
+            this.ctx.terminalHost.landed(id);
+            this.termd.dismissLost();
+            this._emit();
+            return { id, existing: !!ack.existing };
         }
         const r = await this.router.execute(['terminal.spawn', '--', ...attachArgv(target)]);
         if (!r.data?.id) throw new Error(r.text.replace(/^(OK|ERR): /, '') || 'the spawn did not land');
-        this.store.setAttached(r.data.id, target);
+        this.store.setAttached(r.data.id, a?.target ?? target);
         this.termd.dismissLost();
         this._emit();
         return { id: r.data.id, existing: false };

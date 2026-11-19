@@ -640,11 +640,12 @@ function mtimeMs(s) {
  *
  * Priority:
  *   1. `pinned`: exact `session_id`, workgroup `name`, or unique `session_id` prefix (`pinned !== 'auto'`)
- *   2. Workgroup match: terminal id or name `gx-<name>` ↔ `session.workgroup?.name === <name>`
- *   3. Directory match: normalized `pwd` (OSC 7) or `cwd` matching `session.cwd` on a top-level
+ *   2. Exact `sessionId` reported by `WallBus` for an attached gomuxai agent (`termMeta.sessionId`)
+ *   3. Workgroup match: `termMeta.attached` (`<name>[@<host>]`) or terminal id/title `gx-<name>` ↔ `session.workgroup?.name === <name>`
+ *   4. Directory match: normalized `pwd` (OSC 7) or `cwd` matching `session.cwd` on a top-level
  *      session (`!session.parent_session`), preferring live (`status !== 'ended'`) then newest `mtime`
  *
- * @param {{ id?: string, pwd?: string, cwd?: string, title?: string }} termMeta
+ * @param {{ id?: string, attached?: string, sessionId?: string, pwd?: string, cwd?: string, title?: string }} termMeta
  * @param {import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession[]} sessions
  * @param {string|null} [pinned] - `'auto'` or null uses automatic matching
  * @returns {import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession|null}
@@ -666,6 +667,18 @@ export function matchTerminalSession(termMeta, sessions, pinned = null) {
         if (aLive !== bLive) return bLive - aLive;
         return mtimeMs(b) - mtimeMs(a);
     });
+
+    if (termMeta?.sessionId) {
+        const bySid = candidates.find((s) => s.session_id === termMeta.sessionId);
+        if (bySid) return bySid;
+    }
+
+    if (typeof termMeta?.attached === 'string' && termMeta.attached.trim()) {
+        const raw = termMeta.attached.trim();
+        const bare = raw.includes('@') ? raw.slice(0, raw.indexOf('@')) : raw;
+        const wg = candidates.find((s) => !s.parent_session && s.workgroup?.name === bare);
+        if (wg) return wg;
+    }
 
     // Workgroup terminal convention (`gx-<name>`).
     for (const label of [termMeta?.id, termMeta?.title]) {

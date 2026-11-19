@@ -2,20 +2,24 @@ import GomuxProvider from '@glyph3d/core/services/data/GomuxProvider.js';
 
 /**
  * WallBus — the gomuxai agents the wall can attach to, as the relay sees them: the tree the relay
- * keeps from `agent export` (cli/gomux.go; `gomux/list`, pushed whole as `gomux/changed`). The wall
- * opens an agent as an ordinary terminal running `agent attach <name>[@<host>]` (wall.attach):
- * gomuxai's own way in — tmux on this host, ssh to the far one's `agent attach` for another host on
- * the bus (`agent bus ssh` says where). Nothing here types into, starts or stops an agent; the
- * terminal is the person's, as if they had typed the attach themselves.
+ * keeps from `agent export` (cli/gomux.go; `gomux/list`, pushed whole as `gomux/changed`).
+ *
+ *   - On THIS host (`localBusName`), `wall.attach` asks the relay (`gomux.attach`) to subscribe a
+ *     Wall terminal (`gx-<name>`) directly to the agent's `g3d-termd` session (`--ns agents`,
+ *     `--detach-on-kill`, `--flow lossy`) — zero wrapper shell, native 10k-line scrollback, and
+ *     closing the Wall pane only detaches the viewer.
+ *   - On ANOTHER host (`name@host`), `wall.attach` opens a terminal in `wall`'s own `termd`
+ *     namespace running `agent attach <name>@<host>` (`attachArgv`, which hops over `ssh -t` to the
+ *     remote host's `g3d attach --take`; `Ctrl-\` twice detaches).
  *
  * An agent's `host` is the bus's name for the machine it runs on (the relay names this one's too, so
- * a target here reads `name@<this host>`, which `agent attach` keeps local; the snapshot's `host` is
- * this machine's name); absent means this machine. The relay's export lists only its own host's
- * agents until it follows the bus (`serve --gomuxai-hosts`, export's `--hosts`); then one node per
- * (host, name), and a far host that couldn't say whether a session exists leaves `attached` out.
+ * a target here reads `name@<this host>`; the snapshot's `host` is this machine's name); absent
+ * means this machine. The relay's export lists only its own host's agents until it follows the bus
+ * (`serve --gomuxai-hosts`, export's `--hosts`); then one node per (host, name), and a far host that
+ * couldn't say whether a session exists leaves `attached` out.
  *
- * The pure helpers (busTarget, busHosts, attachArgv, …) take no wall and touch no DOM, so the unit
- * test imports them as they are.
+ * The pure helpers (busTarget, localBusName, gomuxScreenId, busHosts, attachArgv, …) take no wall and
+ * touch no DOM, so the unit test imports them as they are.
  */
 
 /** gomuxai's name pattern, for agents and hosts alike (ARCHITECTURE.md, "Subjects"). */
@@ -48,8 +52,31 @@ export const isBusTarget = (s) => typeof s === 'string' && TARGET.test(s);
 export const busTarget = (a) => (a.host ? `${a.name}@${a.host}` : a.name);
 
 /**
- * Whether the agent has a tmux session to attach to. A host that couldn't say leaves `attached` out:
- * unknown is not "no", so only a stated `false` refuses.
+ * If `target` (`name` or `name@host`) names an agent on THIS machine (no `@host`, or `@<snap.host>`
+ * when `snap.host` is known), returns its bare local `name`; otherwise `null` (a remote host, or an
+ * `@host` before `snap` has named this machine).
+ * @param {string} target
+ * @param {{ host?: string }|null|undefined} [snap]
+ * @returns {string|null}
+ */
+export function localBusName(target, snap = null) {
+    if (!isBusTarget(target)) return null;
+    const at = target.indexOf('@');
+    if (at < 0) return target;
+    return snap?.host && target.slice(at + 1) === snap.host ? target.slice(0, at) : null;
+}
+
+/**
+ * Display terminal id for a local gomuxai agent's direct `termd` subscription (`cli/gomux.go` `gomuxTerminalID`).
+ * @param {string} name
+ */
+export function gomuxScreenId(name) {
+    return 'gx-' + String(name).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 61);
+}
+
+/**
+ * Whether the agent has a live `termd` session to attach to. A host that couldn't say leaves
+ * `attached` out: unknown is not "no", so only a stated `false` refuses.
  * @param {{ attached?: boolean }} a
  */
 export const busAttachable = (a) => a.attached !== false;
@@ -85,15 +112,16 @@ export function busHosts(snap) {
 const ATTACH_RESET = ['?1000l', '?1002l', '?1003l', '?1006l', '?1015l', '?1004l', '?2004l', '?1049l', '?25h', '0m'].map((m) => `\\033[${m}`).join('');
 
 /**
- * The program a wall.attach terminal runs: `agent attach <target>` (with the login shell's PATH
- * when termd's lacks `agent`), and — when the attach fails or dies (no session, ssh refused or
- * dropped, no `agent` on PATH) — its reason held on screen, rather than a terminal that closes
- * before anyone reads why: Enter attaches again, `q` then Enter (or end of input) closes. A client
- * that died (a dropped ssh, a killed tmux) never gave the terminal back, so the script takes it back
- * first — mouse reporting, focus events and bracketed paste off, the main screen, a shown cursor, a
- * sane tty — else the wall's wheel and clicks arrive as text over the reason, and a raw tty never
- * hears the Enter. A clean detach (tmux's prefix d) or the agent's session ending exits 0 and closes
- * the terminal, as any program's end does. The target rides as `$1`, never inside the script.
+ * The program a remote `wall.attach <name>@<host>` terminal runs: `agent attach <target>` (with the
+ * login shell's PATH when termd's lacks `agent`), and — when the attach fails or dies (no session,
+ * ssh refused or dropped, no `agent` on PATH) — its reason held on screen, rather than a terminal
+ * that closes before anyone reads why: Enter attaches again, `q` then Enter (or end of input)
+ * closes. A client that died (a dropped ssh) never gave the terminal back, so the script takes it
+ * back first — mouse reporting, focus events and bracketed paste off, the main screen, a shown
+ * cursor, a sane tty — else the wall's wheel and clicks arrive as text over the reason, and a raw
+ * tty never hears the Enter. A clean detach (`Ctrl-\` twice in `g3d attach`) or the agent's session
+ * ending exits 0 and closes the terminal, as any program's end does. The target rides as `$1`,
+ * never inside the script.
  * @param {string} target - `name` or `name@host` (isBusTarget)
  * @returns {string[]}
  */
@@ -166,10 +194,18 @@ export default class WallBus {
 
     /**
      * The live agent `target` names (`name` or `name@host`), or null when the tree doesn't list it.
+     * A bare `name` also matches this machine's `name@<snapshot.host>` when the relay names its host.
      * @param {string} target
      */
     find(target) {
-        for (const h of this.hosts()) for (const a of h.agents) if (a.target === target) return a;
+        const hs = this.hosts();
+        for (const h of hs) for (const a of h.agents) if (a.target === target) return a;
+        if (target && !target.includes('@') && this.snapshot?.host) {
+            for (const h of hs) {
+                if (h.host !== this.snapshot.host) continue;
+                for (const a of h.agents) if (a.name === target) return a;
+            }
+        }
         return null;
     }
 }
