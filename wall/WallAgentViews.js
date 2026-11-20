@@ -14,6 +14,7 @@ import {
     formatExpandedEvent,
     agentViewRect,
     footprintTileMetrics,
+    agentInset,
     resolveTerminalSession,
     formatSessionLabel,
     extractProtocolTerminalLine,
@@ -247,6 +248,11 @@ export default class WallAgentViews {
         return footprintTileMetrics(body, this.sideOf(id), this.dims());
     }
 
+    /** The room `id`'s open Agent View takes beside its body, per edge (zeros when closed) — a split pane's share for it. @param {string} id */
+    inset(id) {
+        return agentInset(this.sideOf(id), this.dims());
+    }
+
     /** Current estimated primary-screen `scrollback_rows` for terminal `id`. @param {string} id */
     scrollbackNow(id) {
         const sync = this._termSync.get(id);
@@ -298,7 +304,7 @@ export default class WallAgentViews {
         this._persist(id);
         this._rebindOne(id);
         this._gcStreams();
-        this.wall.groups?.relayoutOf(id);
+        this.wall.footprintChanged(id);
         this.wall._emit();
         return { open: v.open, side: v.side, session: v.resolvedSessionId, missing: v.open ? v.missing : null };
     }

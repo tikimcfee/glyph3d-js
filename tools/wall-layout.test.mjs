@@ -1,10 +1,10 @@
 // wall-layout.test.mjs — the wall's pure geometry: flow placement, framing, border grabs, cycling,
-// border-drag resize, group tiling, tile drops and lasso hit-testing. Run: bun test tools/wall-layout.test.mjs
+// border-drag resize, group tiling, tile drops, lasso hit-testing and shoving aside for a claim. Run: bun test tools/wall-layout.test.mjs
 import { test, expect } from 'bun:test';
 import {
     freeFlowSlot, fitRect, unionRect, edgesAt, hitTest, cycle, resizeFromDrag, overlaps, FLOW_GAP, FLOW_COLUMNS,
     tileLayout, nearestPlace, lassoTouches, pointInPolygon, padRect, BAR_ROOM, FULLSCREEN_Z,
-    normalizeZOrder, zStackLayout, zPositions, readingOrder,
+    normalizeZOrder, zStackLayout, zPositions, readingOrder, shoveAside,
 } from '../wall/wallLayout.js';
 
 const rect = (x, y, w, h) => ({ minX: x, maxX: x + w, maxY: y, minY: y - h });
@@ -225,4 +225,34 @@ test('normalizeZOrder and zStackLayout keep group members contiguous and sandwic
     expect(g1Back).toBeGreaterThan(eFront);     // g1's backdrop & header occlude all of g2 (members + title)
     expect(aBack).toBeGreaterThan(g1Front);     // g1's backmost member clears g1's header
     expect(bBack).toBeGreaterThan(aFront);      // g1's frontmost member clears its sibling
+});
+
+test('shoveAside moves what a claim covers just past it along its side, cascading, snapped, leaving the rest', () => {
+    const claim = rect(100, 0, 50, 40);                       // x 100..150
+    const items = [
+        { key: 'hit', rect: rect(140, -5, 60, 30) },          // under the claim's right part
+        { key: 'next', rect: rect(205, -10, 40, 20) },        // ahead of 'hit': shoved on by it
+        { key: 'clear', rect: rect(100, -100, 40, 20) },      // below the claim: untouched
+        { key: 'edge', rect: rect(150 + 2, -60, 10, 10) },    // ahead but not across: untouched
+        { key: 'behind', rect: rect(20, 0, 50, 40) },         // behind the claim: untouched
+    ];
+    const m = shoveAside(claim, 'right', items, 2);
+    expect([...m.keys()].sort()).toEqual(['hit', 'next']);
+    expect(m.get('hit')).toEqual({ dx: 12, dy: 0 });          // 140 → 152 (150 + gap 2)
+    expect(m.get('next')).toEqual({ dx: 9, dy: 0 });          // 205 → 214 (hit's new right 212 + 2)
+    // No two moved rects overlap the claim or each other afterwards.
+    const after = items.map((it) => {
+        const d = m.get(it.key) ?? { dx: 0, dy: 0 };
+        return { minX: it.rect.minX + d.dx, maxX: it.rect.maxX + d.dx, minY: it.rect.minY + d.dy, maxY: it.rect.maxY + d.dy };
+    });
+    for (const r of after) expect(overlaps(r, claim)).toBe(false);
+    for (let i = 0; i < after.length; i++) for (let j = i + 1; j < after.length; j++) {
+        if (m.has(items[i].key) || m.has(items[j].key)) expect(overlaps(after[i], after[j])).toBe(false);
+    }
+    // Each side; a snap step rounds the shove up to whole steps.
+    expect(shoveAside(claim, 'left', [{ key: 'a', rect: rect(80, 0, 30, 10) }], 2).get('a')).toEqual({ dx: -12, dy: 0 });
+    expect(shoveAside(claim, 'top', [{ key: 'a', rect: rect(110, 10, 10, 20) }], 2).get('a')).toEqual({ dx: 0, dy: 12 });
+    expect(shoveAside(claim, 'bottom', [{ key: 'a', rect: rect(110, -30, 10, 20) }], 2).get('a')).toEqual({ dx: 0, dy: -12 });
+    expect(shoveAside(claim, 'right', [{ key: 'a', rect: rect(140, 0, 10, 10) }], 2, 5).get('a')).toEqual({ dx: 15, dy: 0 });
+    expect(() => shoveAside(claim, 'up', [], 2)).toThrow(/right, left, top or bottom/);
 });
