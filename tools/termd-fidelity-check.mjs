@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { Terminal as XTerm } from '@xterm/headless';
 import { privateTermd, stopTermd } from './lib/termd.mjs';
 import { bin } from './lib/bins.mjs';
+import { EMULATOR_SCROLLBACK } from '../packages/glyph3d-core/src/collections/TerminalEmulator.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -110,7 +111,7 @@ const pal256 = (i) => {
 };
 const hex = ([r, g, b]) => '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
 async function xterm(bytes) {
-    const t = new XTerm({ cols: COLS, rows: ROWS, scrollback: 0, allowProposedApi: true });
+    const t = new XTerm({ cols: COLS, rows: ROWS, scrollback: EMULATOR_SCROLLBACK, allowProposedApi: true });
     let title = '';
     t.onTitleChange((s) => { title = s; });
     await new Promise((r) => t.write(bytes, r));

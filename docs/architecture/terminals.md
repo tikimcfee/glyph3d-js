@@ -52,7 +52,10 @@ grid's cells are a ring of `rows + depthMax` physical rows, each posed by its ow
 row: a detected scroll moves the ring's head (scrolled-off rows become history without a
 rewrite), and only the cells that differ from the slots are written and uploaded
 (`InstancedField.markSlotsDirty` / `markHighlightDirty`: pooled ranges). No allocation per
-update. Gate: `tools/terminal-text-path.test.mjs`.
+update. Gate: `tools/terminal-text-path.test.mjs`. The emulator's xterm keeps one line of scrollback
+(`EMULATOR_SCROLLBACK`, never none): xterm's reflow on a column shrink assumes room above the screen,
+and without it a later line feed throws and stops xterm's write loop for good. Gate:
+`tools/terminal-emulator-reflow.test.mjs`.
 
 ## Cells
 

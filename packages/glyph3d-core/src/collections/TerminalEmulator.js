@@ -82,6 +82,18 @@ const RESET = pack(RESET_FG.r, RESET_FG.g, RESET_FG.b);
  */
 export const BOLD_IS_BRIGHT_DEFAULT = false;
 
+/**
+ * The scrollback lines an xterm mirroring a termd screen keeps: one, never none. termd owns the
+ * scrollback (a scrolled-back view comes as a repaint), so the screen is the buffer's last `rows`
+ * lines and the extra line is never read. It exists because xterm reflows the normal buffer on any
+ * column change and its reflow assumes room above the screen: with none, a shrink over
+ * soft-wrapped lines puts the screen's base past the buffer's end, the next row grow leaves a
+ * screen row with no line, and a line feed onto it throws inside xterm's parse — which stops its
+ * write loop for good (every later write only queues), freezing the terminal while its program
+ * runs on.
+ */
+export const EMULATOR_SCROLLBACK = 1;
+
 /** The packed default foreground — what a blank cell (and a padded one) carries. */
 export const DEFAULT_FG = RESET;
 
@@ -132,10 +144,8 @@ export default class TerminalEmulator {
         /** @private bold text in a standard colour draws in its bright twin (setBoldIsBright) */
         this._boldIsBright = BOLD_IS_BRIGHT_DEFAULT;
 
-        // scrollback 0: we mirror the visible screen only (termd owns scrollback and sends a
-        // scrolled-back view as a repaint), so the active buffer == the viewport.
         // allowProposedApi: the buffer API (buffer.active, its cursor and type) is gated behind it.
-        this._term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
+        this._term = new Terminal({ cols, rows, scrollback: EMULATOR_SCROLLBACK, allowProposedApi: true });
         this._useWideWidths();
 
         // The write callback, made once (a closure per write is garbage per write).
@@ -366,7 +376,7 @@ export default class TerminalEmulator {
         const term = this._term;
         const view = term.buffer.active;
         const lines = view._buffer.lines;
-        const base = view.baseY;          // 0 with scrollback off; general either way
+        const base = view.baseY;          // the screen is the buffer's last `rows` lines
         const termRows = term.rows;
         const cell = this._cell;
         const CP = s.cp, FG = s.fg, BG = s.bg, AT = s.at, UL = s.ul;
