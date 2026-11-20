@@ -12,7 +12,7 @@ import {
  * The wall's own verbs — hide, show, close, select, group, the sidebar, the termd status window, the
  * knobs. The title-bar buttons, the sidebar, the status window and the topbar's termd chip, the
  * palette, the selection button and the chords all run these (through
- * `wall.run`), and the CLI reaches them over the relay like any verb (`./glyph3d-cli --port N
+ * `wall.run`), and the CLI reaches them over the relay like any verb (`glyph3d-cli --port N
  * wall.list`). A handler that's refused (an unknown terminal or group, a bad number) answers ERR with
  * why; nothing is half-done.
  *
@@ -51,7 +51,7 @@ import {
  *   wall.attach <name[@host]>                  attach to an agent: reveal its terminal, else open one
  *                                              running `agent attach` (WallBus.js)
  *
- * termd's state itself comes from the relay (`./glyph3d-cli termd.status` answers page-less); the
+ * termd's state itself comes from the relay (`glyph3d-cli termd.status` answers page-less); the
  * status verbs only show it.
  *
  * @param {import('@glyph3d/core/services/orchestration/CommandRouter.js').default} router

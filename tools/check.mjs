@@ -12,7 +12,7 @@
  *   bun tools/check.mjs --list [--tier T]      what would run, with what each compares / can't see
  *   bun tools/check.mjs -j 8                   concurrency (default: every core)
  *   bun tools/check.mjs --ratchet              raise this tier's floor to what ran (never lowers)
- *   bun tools/check.mjs --cli PATH             the relay binary (default ./glyph3d-cli)
+ *   bun tools/check.mjs --cli PATH             the relay binary (default the installed one, tools/lib/bins.mjs)
  *
  * Output: a PASS / FAIL / KNOWN / SKIP line per check as it finishes, NOTE lines (report-only
  * checks, what was skipped and why), a TIME line, and ONE verdict line, last:
@@ -39,6 +39,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECKS, SCOPES, TIERS } from './check-manifest.mjs';
 import { privateTermd, stopTermd, termdBeside } from './lib/termd.mjs';
+import { bin } from './lib/bins.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'out/check');
@@ -58,7 +59,7 @@ const valueFlags = new Set(['--tier', '-j', '--cli']);
 const flag = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const TIER = flag('--tier', 'full');
 const JOBS = Math.max(1, Number(flag('-j', availableParallelism())) || 1);
-const CLI = resolve(ROOT, flag('--cli', 'glyph3d-cli'));
+const CLI = resolve(ROOT, flag('--cli', bin('glyph3d-cli')));
 const LIST = argv.includes('--list');
 const RATCHET = argv.includes('--ratchet');
 const positional = argv.filter((a, i) => !a.startsWith('-') && !valueFlags.has(argv[i - 1]));
@@ -173,7 +174,7 @@ const probes = {
         }
         return `no GPU probe for ${process.platform}`;
     },
-    termd: async () => (existsSync(termdBeside(CLI)) ? null : `no g3d-termd beside ${relative(ROOT, CLI) || CLI} (make build)`),
+    termd: async () => (existsSync(termdBeside(CLI)) ? null : `no g3d-termd beside ${CLI} (make build)`),
     network: async () => {
         try {
             const r = await fetch('https://api.github.com/', { method: 'HEAD', signal: AbortSignal.timeout(4000) });
@@ -181,7 +182,7 @@ const probes = {
         } catch (e) { return `no network to github (${e.message})`; }
     },
     relay: async () => {
-        if (!existsSync(CLI)) return `no relay binary at ${relative(ROOT, CLI) || CLI} (make build, or --cli PATH)`;
+        if (!existsSync(CLI)) return `no relay binary at ${CLI} (make build, or --cli PATH)`;
         return probes.termd();
     },
     // A check that starts its own relay (tools/lib/wall-relay.mjs) needs the same binary and termd.

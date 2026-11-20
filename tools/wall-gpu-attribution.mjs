@@ -8,7 +8,7 @@
  *                                                        default `ls -la /usr/bin | head -60`. For cell
  *                                                        fills and styles: --fill 'sh tools/term-test-pattern.sh')
  *
- * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
+ * Needs the wall's Vite and a built glyph3d-cli. Starts its own PRIVATE relay on --relay
  * (tools/lib/wall-relay.mjs: termd namespace `glyph-wall-gpu`, no gomuxai; stopped with its termd daemon at the
  * end) and refuses a port something already listens on, unless --reuse-relay names a relay you
  * started. Spawns --terminals of its own and fills only those with text (a reused relay's other

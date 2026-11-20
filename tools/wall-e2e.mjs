@@ -9,7 +9,7 @@
  * window docked on one edge, and the right-click menu on a terminal, on the canvas and on a group
  * header (and its close being held) (for a person to judge the look; the checks never read them).
  *
- * Needs the wall's Vite (`cd wall && bunx vite`) and a built ./glyph3d-cli. Starts its own relay on
+ * Needs the wall's Vite (`cd wall && bunx vite`) and a built glyph3d-cli. Starts its own relay on
  * --relay (tools/lib/wall-relay.mjs: `serve --relay-only` in the termd namespace `glyph-wall-e2e`, no
  * gomuxai), so it can neither adopt nor kill a person's terminals, and refuses a port something
  * already listens on — the relay takes one display, and a person's may be on it — unless

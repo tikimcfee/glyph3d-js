@@ -12,7 +12,7 @@
 //   --joints                 print each joint's still-jitter p95
 //   --json                   the full reports as JSON
 //
-// Recordings come from the relay: `./glyph3d-cli source.record start <name>` … `stop` (files land
+// Recordings come from the relay: `glyph3d-cli source.record start <name>` … `stop` (files land
 // in the user cache dir's glyph3d/recordings unless serve --record-dir). Each frame goes, by its
 // device time, through SourceStream → the app's HandCalib (decode → HandModel → the cloud
 // tracker's fit for that frame → merge → HandStabilizer → HandMetrics → HandSpace) — the same code

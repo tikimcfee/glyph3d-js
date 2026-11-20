@@ -14,7 +14,7 @@ found beside `glyph3d-cli`, on PATH, or `serve --termd`) and never kills it. Its
 public, versioned protocol (`docs/termd/PROTOCOL.md`; `g3d-wire`) any client can use: the relay's
 forked adapters (`glyph3d-cli attach <id>`) subscribe raw as the size's owner (the display owns
 the size) and turn termd's OUTPUT/REPAINT/size events into the same 0x01 frames, each byte
-stamped with the size it was written at; `./g3d attach <id> [--take]` / `./g3d watch <id>` attach
+stamped with the size it was written at; `g3d attach <id> [--take]` / `g3d watch <id>` attach
 from a real terminal (Ghostty), Ctrl-\ twice to detach. termd answers the program's terminal
 queries once; clients never forward their own replies (`g3d` filters them out of what it prints).
 Scrollback is termd's per-subscriber `view` (`terminal.scroll`); the wheel goes to an
@@ -23,16 +23,16 @@ every one with no owner and the adoption repaint redraws it; an adapter that die
 relay (a signal, a crash) is replaced by the relay on its own. termd is a holder (`g3d-hold`: the
 shells' parent, their PTY fds, the snapshot store) and a brain it restarts: a brain crash keeps
 every shell (screens come back from 2 s snapshots, the unseen bytes are logged) and each adapter
-rides it (reconnect, re-subscribe, repaint; `serve --termd-reconnect`); `./g3d upgrade` replaces
+rides it (reconnect, re-subscribe, repaint; `serve --termd-reconnect`); `g3d upgrade` replaces
 the brain losing no byte. The holder's death kills every shell in the namespace (adapters log
 `LOST termd` and close their grids). termd publishes ONE status document (protocol 1.1:
 `status`, `status_follow` — the daemon, holder and brain, every terminal and its subscribers,
 recent errors; pushed on change, no sooner than the follower's interval, a 30 s keepalive):
-`./g3d status [--json] [--follow]` renders it in a terminal; the relay follows it on one
+`g3d status [--json] [--follow]` renders it in a terminal; the relay follows it on one
 connection of its own (`cli/termdstatus.go`: ok · absent · restarting · unreachable · failed ·
 lost, from its side of the socket) and pushes `termd/status` to the display on its own plane
 (one slot, latest wins), answers the display's `termd/status` request and the CLI's page-less
-`./glyph3d-cli termd.status`, and re-adopts orphaned terminals when a brain answers again after
+`glyph3d-cli termd.status`, and re-adopts orphaned terminals when a brain answers again after
 being unreachable or failed; the core model `services/terminal/TermdStatus.js` holds it for any
 app. A status-only connection never keeps an idle daemon up. `terminal.spawn [cols] [rows]
 [-- cmd…]` starts any program; with none, termd starts the account's shell (passwd) as a login

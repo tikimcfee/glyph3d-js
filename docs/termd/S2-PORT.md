@@ -286,8 +286,8 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
   - every scenario;
   - the fake `agent` and `tmux` scripts;
   - the golden tapes, recorded from the Go relay at the S2 base commit;
-  - `--cli` honoured by `tools/lib/wall-relay.mjs` and `tools/termd-relay-check.mjs`. Both hardcode
-    `./glyph3d-cli`; they take `G3D_CLI`, which `tools/check.mjs` sets from `--cli`;
+  - `--cli` honoured by `tools/lib/wall-relay.mjs` and `tools/termd-relay-check.mjs`. Both run the
+    installed one (`tools/lib/bins.mjs`); they take `G3D_CLI`, which `tools/check.mjs` sets from `--cli`;
   - a `relay-tape` entry in `tools/check-manifest.mjs`: tier full, scope relay, needs
     `own-relay` + `termd`.
 - **Size:** ~1.2k JS plus fixtures.
@@ -295,7 +295,7 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
   - every scenario recorded **twice** against Go normalizes to identical tapes (the harness is
     deterministic before it judges Rust);
   - a lint: no tracked tape holds a home path, username or hostname;
-  - `check --cli ./glyph3d-cli` (Go) passes;
+  - `check` on the installed Go `glyph3d-cli` passes;
   - pointed at a Rust binary, it lists the scenarios in `PENDING`.
 
 ### S2-A `relay-core`
@@ -491,7 +491,7 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
 - **Go files:** all remaining. `cli/` is deleted.
 - **Does:**
   - **Makefile:** `make build` = `prep` (app/dist → `crates/glyph3d-cli/web/`) + termd +
-    `cargo build --release -p glyph3d-cli`, copied to `./glyph3d-cli`. The version is stamped
+    `cargo build --release -p glyph3d-cli`, installed into `G3D_BIN_DIR`. The version is stamped
     through env (`G3D_VERSION`, `G3D_BUILD_DATE`, `G3D_PLATFORM` via `option_env!`).
   - **`make all`:**
     - linux amd64 natively, linux arm64 via cargo-zigbuild (rusqlite's C included, proven in S1);
@@ -505,7 +505,7 @@ Build with `CARGO_BUILD_JOBS=8`, with target dirs in scratch. Heavy runs follow 
   - the whole tape suite at zero diffs, with `PENDING` empty;
   - `cargo test --workspace --features g3d-termd/test-hooks`;
   - `bun tools/check.mjs --tier full`, then `--tier browser`, then `--tier gpu` (memory rule,
-    flock, one at a time), all on `./glyph3d-cli`;
+    flock, one at a time), all on the installed `glyph3d-cli`;
   - `make all` artifacts build;
   - `grep -r` finds no `cli/` path or `go test` left in tracked docs or tools;
   - finally the operator's own look at the live display on the Rust relay (they judge; the checks only

@@ -4,7 +4,7 @@
  *
  *   bun tools/wall-cells-check.mjs [--url http://localhost:5180/] [--relay 8099] [--shots DIR]
  *
- * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own relay on --relay
+ * Needs the wall's Vite and a built glyph3d-cli. Starts its own relay on --relay
  * (tools/lib/wall-relay.mjs: termd namespace `glyph-cells-check`, no gomuxai; refuses a port
  * something already listens on) and ONE terminal of its own, which prints the cases below and then
  * sleeps (no prompt, no typing). The camera is put at FRACTIONAL sizes on purpose (lines 17.37 px

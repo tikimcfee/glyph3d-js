@@ -1,7 +1,7 @@
 // hand-source-check.mjs — the sensor plane end-to-end, from the relay wire to
 // rendered geometry:
 //
-//   ./glyph3d-cli serve --local --port 8099 .        (a scratch relay, any project)
+//   glyph3d-cli serve --local --port 8099 .        (a scratch relay, any project)
 //   bun tools/hand-source-check.mjs [--relay 8099]
 //
 // The unit tests (source-stream.test.mjs, hand-presence.test.mjs) stub the bridge.
@@ -32,7 +32,7 @@ const URL_ = `ws://localhost:${PORT}`;
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); } else { fail++; console.error(`  FAIL ${m}`); } };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-const open = (ws) => new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error(`cannot reach relay at ${URL_} — start one: ./glyph3d-cli serve --local --port ${PORT} .`)); });
+const open = (ws) => new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error(`cannot reach relay at ${URL_} — start one: glyph3d-cli serve --local --port ${PORT} .`)); });
 
 /** Ask a relay-resident verb (source.list) over a throwaway controller socket. */
 async function relayVerb(cmd) {

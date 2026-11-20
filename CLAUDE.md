@@ -111,22 +111,25 @@ namespace `wall` (page `http://localhost:5180/?relay=8180`); both can run at onc
   core/handlers — the watcher can serve stale transforms; verify with
   `curl http://localhost:5173/@fs/<abspath> | rg <token>`).
 - `tools/dev.sh relay` rebuilds (Go + termd) + restarts the Go relay. Terminals live in
-  `g3d-termd` and survive it; `./g3d upgrade` hands every terminal to the rebuilt `g3d-termd`
-  without ending a shell (`./g3d stop` ends the namespace: every shell in it dies).
+  `g3d-termd` and survive it; `g3d upgrade` hands every terminal to the rebuilt `g3d-termd`
+  without ending a shell (`g3d stop` ends the namespace: every shell in it dies).
 
 **Build / serve**: `make build` runs the app's Vite production build, stages
 `app/dist/` into `cli/web/`, and bakes it into the binary; `make termd` (part of it) builds
-`g3d-termd` and `g3d` beside it (Linux and macOS). It fills `vendor/` (gitignored, the
+`g3d-termd` and `g3d` (Linux and macOS). All three install into ONE place, `G3D_BIN_DIR`
+(`~/.local/bin`): `tools/dev.sh` and the tools (`tools/lib/bins.mjs`) run them from there, the
+checkout keeps no copy, and a worktree that must not replace them sets its own
+(`G3D_BIN_DIR=$PWD/bin make`). It fills `vendor/` (gitignored, the
 checkout's own) first through `tools/termd-vendor.sh`: libghostty-vt's release tarballs and the
 host's Zig, kept once per user in `${XDG_CACHE_HOME:-~/.cache}/glyph3d/termd-vendor/`
 (`~/Library/Caches/…` on macOS) and checked on every unpack against pinned SHA-256s and their
 minisign signatures (`crates/g3d-vendor`) — no setup step; the network only on a user's first
-build. `./glyph3d-cli serve
+build. `glyph3d-cli serve
 ~/project` then serves the built IDE + relay + fs-RPC from one binary at `/`. The app
 bundles its deps at build (no importmap). `make all` cross-compiles all platforms.
 
 **Drive it from the CLI** — the same command bus the UI uses:
-`./glyph3d-cli grid.list`, `./glyph3d-cli file.open path/to/file.js`. Global flags go
+`glyph3d-cli grid.list`, `glyph3d-cli file.open path/to/file.js`. Global flags go
 *before* the subcommand (e.g. `--port 8099`). It is the ONE relay client: a one-shot goes
 as a typed line when its args are plain tokens (or the verb arg is itself a quoted line)
 and as a `call` bundle when an arg carries spaces/quotes/newlines (`call` is every router's own
@@ -147,7 +150,7 @@ truth). The `terminal.*` verbs live in core (`services/terminal/terminalCommands
 differs per app is its `TerminalHost` (`ctx.terminalHost`; IDE `app/client/terminalHost.js`,
 wall `TerminalWall._terminalHost`). The relay forwards CLI commands to the browser display over
 WebSocket and keeps an in-memory SQLite store of every browser log record (`log.query` /
-`log.search` / `log.errors` / `log.stats` / `log.dump`, page-less; `./glyph3d-cli log.follow`
+`log.search` / `log.errors` / `log.stats` / `log.dump`, page-less; `glyph3d-cli log.follow`
 live). Loads self-report (`[load]` lines, `load.stats`). Terminal re-adoption, the log storm
 brake, device-loss recovery and the load trace: `docs/architecture/command-bus.md`.
 
@@ -240,8 +243,8 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 
 ## Deployment
 
-`make build` produces the self-contained binary (and `g3d-termd` + `g3d` beside it, which it
-needs for terminals); `make all` cross-compiles
+`make build` produces the self-contained binary and installs it (with `g3d-termd` + `g3d` beside
+it, which it needs for terminals) into `G3D_BIN_DIR`; `make all` cross-compiles
 linux/macOS × amd64/arm64 + windows-amd64 (the runtime is Unix-only — Linux and macOS build and run
 `g3d-termd` + the relay; `GOOS=windows` compiles for `make all` and fails loud immediately at
 runtime on relay auth, `termd`, and `tools/lib/relay.mjs`); `make release VERSION=vX.Y.Z` cuts a GitHub release

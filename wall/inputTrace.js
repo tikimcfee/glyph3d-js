@@ -3,7 +3,7 @@
  * receives is logged as one `[input]` line. It listens on the window in the capture phase, so it
  * sees each event before anything acts on it, whatever element it lands on (named as `on=`). The
  * wall forwards its console to its relay, so the lines land in the relay's log store
- * (`./glyph3d-cli --port <relay> log.search '[input]'`): what a remote-desktop client, a trackpad or
+ * (`glyph3d-cli --port <relay> log.search '[input]'`): what a remote-desktop client, a trackpad or
  * a keyboard layout actually delivers, read from the other machine.
  */
 

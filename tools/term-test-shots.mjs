@@ -4,7 +4,7 @@
  *
  *   bun tools/term-test-shots.mjs --url http://localhost:5180/ --relay 8099 --out DIR
  *
- * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own relay on --relay
+ * Needs the wall's Vite and a built glyph3d-cli. Starts its own relay on --relay
  * (tools/lib/wall-relay.mjs: its own termd namespace, no gomuxai; refuses a port something already
  * listens on), spawns ONE 80 × 24 terminal that runs the pattern and then sleeps (no prompt under
  * it), and saves, into DIR:

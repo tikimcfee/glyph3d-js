@@ -17,9 +17,10 @@
 #
 # Usage:  tools/dev.sh [wall] {vite|relay|refresh|status|stop}     (no profile word = ide)
 #   tools/dev.sh vite      clear .vite cache + (re)start Vite     [after editing JS/JSX]
-#   tools/dev.sh relay     rebuild Go + termd (make) + (re)start relay    [after editing cli/*.go]
+#   tools/dev.sh relay     rebuild Go + termd (make, into $G3D_BIN_DIR) + (re)start relay from there
+#                          [after editing cli/*.go]
 #                          (terminals live in g3d-termd and survive; a NEW g3d-termd binary takes
-#                          effect only once the running daemon stops: `./g3d stop` kills every shell)
+#                          effect only once the running daemon stops: `g3d stop` kills every shell)
 #   tools/dev.sh refresh   relay then vite (the whole loop)
 #   tools/dev.sh status    what's listening, with pids
 #   tools/dev.sh stop      stop both
@@ -29,7 +30,8 @@
 #
 # Env overrides: VITE_PORT, RELAY_PORT, TERMD_NS (the profile's defaults above),
 #                GLYPH_SERVE_ROOT (the relay's served root; default the repo),
-#                GLYPH_LOG_DIR (<pw_dir>/.local/state/g3d/logs).
+#                GLYPH_LOG_DIR (<pw_dir>/.local/state/g3d/logs),
+#                G3D_BIN_DIR (where make installs and the relay runs from; ~/.local/bin).
 
 set -euo pipefail
 umask 0077
@@ -68,6 +70,10 @@ VITE_PORT="${VITE_PORT:-$DEF_VITE}"
 RELAY_PORT="${RELAY_PORT:-$DEF_RELAY}"
 TERMD_NS="${TERMD_NS:-$DEF_NS}"
 SERVE_ROOT="${GLYPH_SERVE_ROOT:-$ROOT}"
+# Where `make` installs glyph3d-cli, g3d-termd and g3d, and where the relay runs from (the Makefile's
+# G3D_BIN_DIR; exported so the `make` below installs to the same place).
+export G3D_BIN_DIR="${G3D_BIN_DIR:-$HOME/.local/bin}"
+CLI="$G3D_BIN_DIR/glyph3d-cli"
 PW_DIR="$(resolve_pw_dir)"
 LOG_DIR="${GLYPH_LOG_DIR:-$PW_DIR/.local/state/g3d/logs}"
 if [ -L "$LOG_DIR" ]; then
@@ -127,7 +133,7 @@ start_vite() {
   # for several seconds.
   for _ in $(seq 1 60); do
     if [ -n "$(pid_on_port "$VITE_PORT")" ]; then
-      echo "  vite up → $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (log: $VITE_LOG)"
+      echo "  vite up → $(page_url)   (url: $CLI --port $RELAY_PORT url '$(page_url)')   (log: $VITE_LOG)"
       echo "  ⤷ HARD-RELOAD the browser now (Ctrl+Shift+R)"
       return 0
     fi
@@ -147,13 +153,13 @@ start_relay() {
   fi
   if [ -f "$RELAY_LOG" ]; then chmod 0600 "$RELAY_LOG"; fi
   # --keep-token: a rebuild's restart keeps the port's token, so an open page reconnects by itself.
-  ( cd "$ROOT" && exec nohup env -u G3D_RELAY_TOKEN ./glyph3d-cli serve --port "$RELAY_PORT" --keep-token --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
+  ( cd "$ROOT" && exec nohup env -u G3D_RELAY_TOKEN "$CLI" serve --port "$RELAY_PORT" --keep-token --origin "http://localhost:$VITE_PORT" --origin "http://127.0.0.1:$VITE_PORT" --termd-ns "$TERMD_NS" ${RELAY_FLAGS[@]+"${RELAY_FLAGS[@]}"} "$SERVE_ROOT" >"$RELAY_LOG" 2>&1 </dev/null ) & disown
   # The relay retries the bind for ~5s if a just-killed predecessor still holds the
   # port (relay.go listenAndServeRelay), so poll the window before declaring failure —
   # otherwise a relay that's simply waiting reads as a false "✗ failed to start".
   for _ in $(seq 1 14); do
     if [ -n "$(pid_on_port "$RELAY_PORT")" ]; then
-      echo "  relay up → $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (log: $RELAY_LOG)"
+      echo "  relay up → $(page_url)   (url: $CLI --port $RELAY_PORT url '$(page_url)')   (log: $RELAY_LOG)"
       return 0
     fi
     sleep 0.5
@@ -173,9 +179,9 @@ status() {
   rp="$(pid_on_port "$RELAY_PORT")"
   [ -n "$vp" ] && echo "vite  :$VITE_PORT  up (pid $vp)" || echo "vite  :$VITE_PORT  down"
   [ -n "$rp" ] && echo "relay :$RELAY_PORT  up (pid $rp)" || echo "relay :$RELAY_PORT  down"
-  echo "page  $(page_url)   (url: ./glyph3d-cli --port $RELAY_PORT url '$(page_url)')   (termd namespace $TERMD_NS)"
+  echo "page  $(page_url)   (url: $CLI --port $RELAY_PORT url '$(page_url)')   (termd namespace $TERMD_NS)"
   echo "logs  $LOG_DIR/$PROFILE-{vite,relay}.log"
-  echo "      structured app logs: ./glyph3d-cli log.follow  (and log.search / log.query / log.errors / log.stats)"
+  echo "      structured app logs: $CLI log.follow  (and log.search / log.query / log.errors / log.stats)"
 }
 
 case "${1:-refresh}" in

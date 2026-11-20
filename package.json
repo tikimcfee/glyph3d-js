@@ -10,7 +10,7 @@
     "wall"
   ],
   "scripts": {
-    "serve": "./glyph3d-cli serve --port 8000"
+    "serve": "glyph3d-cli serve --port 8000"
   },
   "license": "MIT",
   "author": "tikimcfee (https://github.com/tikimcfee)",

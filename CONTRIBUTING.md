@@ -42,19 +42,19 @@ are thin aliases over the same script. Open `http://localhost:5173`, and
 Drive the running app from the CLI — the same command bus the UI uses:
 
 ```bash
-./glyph3d-cli grid.list
-./glyph3d-cli file.open path/to/file.js
+glyph3d-cli grid.list
+glyph3d-cli file.open path/to/file.js
 ```
 
 ## Building
 
 ```bash
-make build      # build the app (Vite) + bake it into the cli binary (~13M)
+make build      # build the app (Vite) + bake it into the cli binary (~13M), installed in ~/.local/bin
 make all        # cross-compile linux/macOS/windows × amd64/arm64
 cd app && bun run build    # just the app's production bundle (→ app/dist)
 ```
 
-`./glyph3d-cli serve ~/your-project` then serves the built IDE + relay from the
+`glyph3d-cli serve ~/your-project` then serves the built IDE + relay from the
 single binary at `http://localhost:8080/`.
 
 ## Conventions

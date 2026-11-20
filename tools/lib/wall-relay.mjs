@@ -6,7 +6,7 @@
 //   await relay.restart();   // kill + start again on the same port and namespace (its adapters die; terminals live)
 //   await relay.stop();      // kill it and its termd daemon (a no-op for a reused relay)
 //
-// It starts `./glyph3d-cli serve --relay-only` on `port`, in its own termd namespace (in a scratch
+// It starts `glyph3d-cli serve --relay-only` on `port`, in its own termd namespace (in a scratch
 // G3D_TERMD_DIR, tools/lib/termd.mjs) and without gomuxai, and verifies the listener it then finds
 // is the one it started. Something already listening on `port` is refused — a relay takes one
 // display, and a person's may be on it — unless `reuse` (the tool's --reuse-relay): then it says
@@ -20,9 +20,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { privateTermd, stopTermd, stopTermdSync } from './termd.mjs';
 import { readRelayToken } from './relay.mjs';
+import { bin } from './bins.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const BIN = path.join(ROOT, 'glyph3d-cli');
+const BIN = bin('glyph3d-cli');
 
 /** @param {number} port @param {string} host @returns {Promise<boolean>} */
 function accepts(port, host) {
@@ -120,7 +121,7 @@ export async function privateRelay({ port, ns, reuse = false, root = ROOT, origi
         if (!(await listening(port)) || !alive || /in use/.test(log)) {
             child.kill('SIGKILL');
             restoreTokenEnv();
-            throw new Error(`[wall-relay] the relay started on :${port} isn't the one answering (${alive ? 'running' : await exited}${/in use/.test(log) ? ', port was taken' : ''}; is ./glyph3d-cli built?)\n${log.trim().split('\n').slice(-8).join('\n')}`);
+            throw new Error(`[wall-relay] the relay started on :${port} isn't the one answering (${alive ? 'running' : await exited}${/in use/.test(log) ? ', port was taken' : ''}; is glyph3d-cli built?)\n${log.trim().split('\n').slice(-8).join('\n')}`);
         }
     };
     const halt = async () => {

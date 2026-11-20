@@ -80,8 +80,8 @@ import { ... } from '@glyph3d/core/services/...';    // interaction, camera, dat
 ## Run the app (single binary)
 
 ```bash
-make build                       # build the app + bake it into the binary (~27M)
-./glyph3d-cli serve ~/your-project
+make build                       # build the app + bake it into the binary (~27M), installed in ~/.local/bin
+glyph3d-cli serve ~/your-project
 # open http://localhost:8080/
 ```
 
@@ -101,10 +101,10 @@ files, camera, dock, and terminals come back after a reload.
 The binary speaks the same command bus as the UI — any verb, from the shell:
 
 ```bash
-./glyph3d-cli grid.list                  # what's in the field
-./glyph3d-cli file.open src/main.js      # open a file into 3D
-./glyph3d-cli layout.scheme jellyfish    # repack the whole field
-./glyph3d-cli log.errors                 # query the relay-side log store
+glyph3d-cli grid.list                  # what's in the field
+glyph3d-cli file.open src/main.js      # open a file into 3D
+glyph3d-cli layout.scheme jellyfish    # repack the whole field
+glyph3d-cli log.errors                 # query the relay-side log store
 ```
 
 Global flags go *before* the subcommand (e.g. `--port 8099 grid.list`), and

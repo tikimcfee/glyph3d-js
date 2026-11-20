@@ -14,7 +14,7 @@
  *                                [--seq 300000] [--source-bytes 2000000] [--top 25]
  *                                [--config knob=value,…]       (wall knobs set on every page: fontFamily=cousine)
  *
- * Needs the wall's Vite (:5180) and a built ./glyph3d-cli. Starts its own PRIVATE relay on --relay
+ * Needs the wall's Vite (:5180) and a built glyph3d-cli. Starts its own PRIVATE relay on --relay
  * (tools/lib/wall-relay.mjs: termd namespace `glyph-wall-text-perf`, no gomuxai; stopped with its termd
  * at the end) and refuses a port something already listens on, unless --reuse-relay names a relay
  * you started. Spawns max(--scale) terminals of its own and writes only to those (a reused relay's

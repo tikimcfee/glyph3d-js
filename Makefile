@@ -1,24 +1,31 @@
 # glyph3d-cli — single-binary build
 #
 # Build:
-#   make              Build for current platform (+ g3d-termd and g3d beside it, on Linux and macOS)
-#   make termd        Build only the terminal daemon and its client (crates/, Rust)
+#   make              Build for current platform and install into $(G3D_BIN_DIR): glyph3d-cli, plus
+#                     g3d-termd and g3d beside it on Linux and macOS
+#   make termd        Build and install only the terminal daemon and its client (crates/, Rust)
 #   make all          Build for Linux, macOS, Windows (amd64 + arm64)
 #   make deploy       Build linux-amd64 + show scp command
 #   make release      Publish dist/ as a GitHub release (build first: make all)
 #   make publish      Publish @glyph3d/core + @glyph3d/r3f to npm (key-touch auth)
-#   make clean        Remove build artifacts
+#   make clean        Remove build artifacts (not the installed binaries)
 #
 # Run:
-#   ./glyph3d-cli serve                    Browse current directory
-#   ./glyph3d-cli serve ~/project          Browse a project
-#   ./glyph3d-cli serve --local            IDE dev (app from disk)
+#   glyph3d-cli serve                      Browse current directory
+#   glyph3d-cli serve ~/project            Browse a project
+#   glyph3d-cli serve --local              IDE dev (app from disk)
 
 BINARY   := glyph3d-cli
 CLI_DIR  := cli
 WEB_DIR  := $(CLI_DIR)/web
 OUT_DIR  := dist
 APP_DIR  := app
+
+# The ONE place the binaries live: `make` installs glyph3d-cli, g3d-termd and g3d here; tools/dev.sh
+# and the tools (tools/lib/bins.mjs) run them from here, and the checkout keeps no copy. A worktree
+# that must not replace the installed build sets its own: G3D_BIN_DIR=$PWD/bin make.
+G3D_BIN_DIR ?= $(HOME)/.local/bin
+BIN_DIR     := $(abspath $(G3D_BIN_DIR))
 
 # Version info — override with: make VERSION=v1.2.3
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -39,10 +46,12 @@ GOFLAGS := -trimpath -ldflags='$(LDFLAGS)'
 # --- Default: build for current platform ---
 
 build: prep termd
-	cd $(CLI_DIR) && go build $(GOFLAGS) -o ../$(BINARY) .
-	@echo "Built ./$(BINARY) ($$(du -h $(BINARY) | cut -f1)) — $(VERSION)"
+	@mkdir -p $(BIN_DIR)
+	# Build beside, then rename over: a running relay keeps its inode, the next start gets the new.
+	cd $(CLI_DIR) && go build $(GOFLAGS) -o $(BIN_DIR)/$(BINARY).new . && mv -f $(BIN_DIR)/$(BINARY).new $(BIN_DIR)/$(BINARY)
+	@echo "Installed $(BIN_DIR)/$(BINARY) ($$(du -h $(BIN_DIR)/$(BINARY) | cut -f1)) — $(VERSION)"
 
-# --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, beside the Go binary ---
+# --- The terminal daemon (Rust workspace, crates/): g3d-termd + g3d, installed beside the Go binary ---
 # The relay finds g3d-termd next to its own executable. Release builds have no test hooks (the
 # `test-hooks` feature is the tests' alone). libghostty-vt builds from vendor/ (gitignored), which
 # tools/termd-vendor.sh fills before every build: the first fetches and verifies libghostty-vt's
@@ -57,11 +66,12 @@ termd:
 ifneq ($(filter linux darwin,$(HOST_OS)),)
 	@tools/termd-vendor.sh
 	CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-8} cargo build --release -p g3d-termd -p g3d
-	# Copy, then rename over: a running daemon holds ./g3d-termd ("text file busy" for a cp onto
-	# it), and a rename leaves its inode running while the next start (or `g3d upgrade`) gets the new.
-	cp $(CARGO_OUT)/release/g3d-termd ./g3d-termd.new && mv -f ./g3d-termd.new ./g3d-termd
-	cp $(CARGO_OUT)/release/g3d ./g3d.new && mv -f ./g3d.new ./g3d
-	@echo "Built ./g3d-termd ./g3d"
+	# Copy, then rename over: a running daemon holds g3d-termd ("text file busy" for a cp onto it),
+	# and a rename leaves its inode running while the next start (or `g3d upgrade`) gets the new.
+	@mkdir -p $(BIN_DIR)
+	cp $(CARGO_OUT)/release/g3d-termd $(BIN_DIR)/g3d-termd.new && mv -f $(BIN_DIR)/g3d-termd.new $(BIN_DIR)/g3d-termd
+	cp $(CARGO_OUT)/release/g3d $(BIN_DIR)/g3d.new && mv -f $(BIN_DIR)/g3d.new $(BIN_DIR)/g3d
+	@echo "Installed $(BIN_DIR)/g3d-termd $(BIN_DIR)/g3d"
 else
 	@echo "g3d-termd: not built on $(HOST_OS) (no PTYs; see docs/termd/DESIGN.md) — this relay will have no terminals"
 endif
@@ -156,8 +166,8 @@ linux-amd64: prep
 	@echo "  → $(OUT_DIR)/$(BINARY)-linux-amd64"
 ifeq ($(HOST_PLATFORM),linux-amd64)
 	$(MAKE) termd
-	cp ./g3d-termd $(OUT_DIR)/g3d-termd-linux-amd64
-	cp ./g3d $(OUT_DIR)/g3d-linux-amd64
+	cp $(CARGO_OUT)/release/g3d-termd $(OUT_DIR)/g3d-termd-linux-amd64
+	cp $(CARGO_OUT)/release/g3d $(OUT_DIR)/g3d-linux-amd64
 	@echo "  → $(OUT_DIR)/g3d-termd-linux-amd64 $(OUT_DIR)/g3d-linux-amd64"
 endif
 
@@ -189,8 +199,8 @@ darwin-amd64: prep
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-amd64"
 ifeq ($(HOST_PLATFORM),darwin-amd64)
 	$(MAKE) termd
-	cp ./g3d-termd $(OUT_DIR)/g3d-termd-darwin-amd64
-	cp ./g3d $(OUT_DIR)/g3d-darwin-amd64
+	cp $(CARGO_OUT)/release/g3d-termd $(OUT_DIR)/g3d-termd-darwin-amd64
+	cp $(CARGO_OUT)/release/g3d $(OUT_DIR)/g3d-darwin-amd64
 	@echo "  → $(OUT_DIR)/g3d-termd-darwin-amd64 $(OUT_DIR)/g3d-darwin-amd64"
 endif
 
@@ -202,8 +212,8 @@ darwin-arm64: prep
 	@echo "  → $(OUT_DIR)/$(BINARY)-darwin-arm64"
 ifeq ($(HOST_PLATFORM),darwin-arm64)
 	$(MAKE) termd
-	cp ./g3d-termd $(OUT_DIR)/g3d-termd-darwin-arm64
-	cp ./g3d $(OUT_DIR)/g3d-darwin-arm64
+	cp $(CARGO_OUT)/release/g3d-termd $(OUT_DIR)/g3d-termd-darwin-arm64
+	cp $(CARGO_OUT)/release/g3d $(OUT_DIR)/g3d-darwin-arm64
 	@echo "  → $(OUT_DIR)/g3d-termd-darwin-arm64 $(OUT_DIR)/g3d-darwin-arm64"
 endif
 
@@ -298,9 +308,8 @@ deploy-ide: bake-core strip-runtime-wasm
 # --- Cleanup ---
 
 clean:
-	rm -rf $(WEB_DIR) $(OUT_DIR) $(BINARY)
-	rm -f ./g3d-termd ./g3d
-	@echo "Cleaned build artifacts"
+	rm -rf $(WEB_DIR) $(OUT_DIR)
+	@echo "Cleaned build artifacts (the installed binaries in $(BIN_DIR) stay)"
 
 # --- Dev loop: thin aliases over tools/dev.sh (manages Vite :5173 + relay :8080) ---
 # `make dev` = rebuild relay + clear Vite cache + restart both, then hard-reload

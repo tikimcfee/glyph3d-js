@@ -1699,7 +1699,7 @@ notification on the control plane:
 - A state change is pushed at once. Status documents pass through at the daemon's own cadence.
 - The relay keeps the last notification and answers the display's `termd/status` request with it
   (a reloaded page renders at once), and the relay-resident verb `termd.status` answers the CLI
-  and agents page-less (`./glyph3d-cli termd.status`), as `log.query` does.
+  and agents page-less (`glyph3d-cli termd.status`), as `log.query` does.
 - `relay.bundled` is the termd the relay ships with. When it differs from the running daemon's
   version, the window says so and names `g3d upgrade`; the relay never upgrades a daemon itself.
 - `relay.lacks` lists the input ops (`key`, `paste`) the brain answering now doesn't offer (its

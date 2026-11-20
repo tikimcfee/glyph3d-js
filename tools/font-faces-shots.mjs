@@ -6,7 +6,7 @@
  *
  *   bun tools/font-faces-shots.mjs --url http://localhost:5180/ --relay 8099 --out DIR [--families a,b]
  *
- * Needs the wall's Vite and a built ./glyph3d-cli. Starts its own relay on --relay
+ * Needs the wall's Vite and a built glyph3d-cli. Starts its own relay on --relay
  * (tools/lib/wall-relay.mjs: its own termd namespace, no gomuxai; refuses a port something already
  * listens on) and two 80 × 24 terminals — one runs the pattern, one the sample, both then sleep —
  * and moves them from family to family with `wall.config fontFamily` (the knob a person turns:

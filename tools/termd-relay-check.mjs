@@ -40,9 +40,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brainPid, g3dBeside, privateTermd, stopTermd, stopTermdSync, termdBeside, termdPid } from './lib/termd.mjs';
 import { readRelayToken, relayProtocols } from './lib/relay.mjs';
+import { bin } from './lib/bins.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BIN = path.join(ROOT, 'glyph3d-cli');
+const BIN = bin('glyph3d-cli');
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const NS = 'tr';
 

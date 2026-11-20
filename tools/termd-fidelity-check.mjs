@@ -23,10 +23,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Terminal as XTerm } from '@xterm/headless';
 import { privateTermd, stopTermd } from './lib/termd.mjs';
+import { bin } from './lib/bins.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
-const BIN = arg('--termd', path.join(ROOT, 'g3d-termd'));
+const BIN = arg('--termd', bin('g3d-termd'));
 const CONF = arg('--conf', path.join(ROOT, 'tools/fixtures/vt-conf'));
 const VERBOSE = process.argv.includes('-v');
 const COLS = 40, ROWS = 10, NS = 'fid';

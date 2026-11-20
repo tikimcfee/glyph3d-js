@@ -19,7 +19,7 @@ all (`live`); an adapter answers `terminal.refresh` with the pane's title (OSC 2
 The relay forwards CLI commands to the browser display over WebSocket, and
 keeps a structured in-memory SQLite store of every browser log record — `log.query` /
 `log.search` / `log.errors` / `log.stats` / `log.dump` answer relay-side (page-less),
-with live follow via `./glyph3d-cli log.follow` (the CLI renders log replies as records). Page-side, `emitLogRecord` runs a storm
+with live follow via `glyph3d-cli log.follow` (the CLI renders log replies as records). Page-side, `emitLogRecord` runs a storm
 brake: an identical error/warn signature past 5 is dropped + counted, with a
 `log-brake` summary warn every 500 (locked by `tools/log-storm-brake.test.mjs`).
 Device loss itself (VRAM exhaustion — a bulk load + resize churn can OOM the device)

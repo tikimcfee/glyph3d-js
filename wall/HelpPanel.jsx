@@ -22,7 +22,7 @@ export function helpSections(wall) {
     const verbs = wall.router.listCommands().map((c) => ({ how: c.usage ? `${c.name} ${c.usage}` : c.name, does: c.description }));
     return [
         ...HELP_SECTIONS.map((s) => ({ id: s.id, title: s.title, rows: rows(s.id) })),
-        { id: 'verbs', title: 'Verbs (palette or ./glyph3d-cli)', rows: verbs },
+        { id: 'verbs', title: 'Verbs (palette or glyph3d-cli)', rows: verbs },
     ];
 }
 

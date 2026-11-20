@@ -60,7 +60,7 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   generated `mixed/emoji_tabs_wide.txt`), killed with its termd daemon (and every shell in it)
   when the check ends. It never takes 5173/5174/5180/8080/8099, a person's termd namespace, or
   gomuxai. What it can't start
-  (no `./glyph3d-cli` — `make build` or `--cli PATH`; no `./g3d-termd` beside it; no chromium; no GPU render
+  (no `glyph3d-cli` — `make build` or `--cli PATH`; no `g3d-termd` beside it; no chromium; no GPU render
   node; no network for the GitHub-loading itests) is a `NOTE` and those checks `SKIP`.
 - **Waits.** A browser check waits for the state or the event its next step reads, never a
   guessed delay: a predicate checked once a frame (`page.waitForFunction(…, { polling: 'raf' })`),
@@ -108,9 +108,9 @@ bun tools/check.mjs --list [--tier T]      each check: command, needs, compares,
   human. One-shot by design (connect → command(s) → capture → exit) so the harness can't
   reap it mid-run. Global flags (`--port`, `--json`, `--timeout`) go before `screenshot`.
   ```
-  ./glyph3d-cli screenshot -o /tmp/shot.png                          # capture current scene
-  ./glyph3d-cli screenshot --cmd 'dock.list' -o /tmp/shot.png        # run a verb, then capture
-  ./glyph3d-cli --port 8199 --json screenshot --cmd 'camera.fitall' --wait 500ms -o /tmp/x.png
+  glyph3d-cli screenshot -o /tmp/shot.png                          # capture current scene
+  glyph3d-cli screenshot --cmd 'dock.list' -o /tmp/shot.png        # run a verb, then capture
+  glyph3d-cli --port 8199 --json screenshot --cmd 'camera.fitall' --wait 500ms -o /tmp/x.png
   ```
   Contrast `smoke.mjs`, which launches its OWN headless browser (an empty display) — use
   `glyph3d-cli screenshot` when you need to see what's actually on screen right now.
@@ -412,7 +412,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   isShown follow visible flips (ancestor, root, an own `visible` converted at join) and the tree's
   shape, while poses and walks leave the show generation alone; force,
   serialization, dispose. Each hook was removed in turn and the test failed. In the app,
-  `./glyph3d-cli --port 8099 scene.transforms` verifies the live scene the same way.
+  `glyph3d-cli --port 8099 scene.transforms` verifies the live scene the same way.
 - **`panel-batch.test.mjs`** (headless) — PanelBatch: enrollPanel refuses what it can't batch,
   membership follows add/remove/material dispose, the refresh runs for view cameras and never
   pick passes, an instance carries the panel's uniforms + eye-relative world matrix, hidden
@@ -442,7 +442,7 @@ everywhere: they assert behavior, not speed, and SwiftShader is fine for that.
   load, aggregated self-time by function and module. `load-profile` is the whole-repo
   one-shot; `profile-bulkload` takes `--relay/--dir/--top/--out`. Pair with the app's
   own staged trace: every load prints `[load]` stage lines + `[frames]` long-task
-  attribution into the relay log store — `./glyph3d-cli load.stats` aggregates them.
+  attribution into the relay log store — `glyph3d-cli load.stats` aggregates them.
   ```
   bun tools/load-profile.mjs                     # STORM_DIR / STORM_RELAY to redirect
   bun tools/profile-bulkload.mjs --relay 8099 --dir packages --top 30
@@ -491,9 +491,9 @@ that — prefer it for deterministic CI once wired.
 Global flags (`--port N` / `--host url`, `--json`, `--timeout`) go before the verb. A
 one-shot whose args are all plain tokens goes as the typed line (`whoami`, `ping` and
 `call <b64>` reach whoever answers them as typed), and so does one whose verb arg is
-itself a quoted line (`./glyph3d-cli "camera.move 0 0 300"`). When an arg carries
+itself a quoted line (`glyph3d-cli "camera.move 0 0 300"`). When an arg carries
 spaces, quotes, backslashes, newlines or is empty, the argv rides the `call` bundle
-byte-identical — `./glyph3d-cli grid.create "two words" notes.txt` needs no quoting
+byte-identical — `glyph3d-cli grid.create "two words" notes.txt` needs no quoting
 discipline or base64. REPL and piped lines go as typed. A request that outlives
 `--timeout` costs only itself: the client redials for the next one. Client commands beside the verbs:
 `screenshot` (above), `log.follow` (below), and `seed-history [--lines 300] [id ...]` —
@@ -532,7 +532,7 @@ follower, started as the relay starts them) SIGKILLed takes its `agent` children
 `killChildren` stops and forgets them.
 
 Live, against the real `agent`: a scratch relay (`CLAUDE_CONFIG_DIR=<scratch>/claude
-./glyph3d-cli serve --relay-only --port 8199 --termd-ns scratch-cutover <dir>`,
+glyph3d-cli serve --relay-only --port 8199 --termd-ns scratch-cutover <dir>`,
 killed by PID after) with a real transcript copied under `<scratch>/claude/projects/<p>/`,
 a bun DISPLAY that follows it while the rest of the original is appended (lines split
 across writes): the pushed event lines equal `agent transcript <copy>`'s; `read {tail}` then
@@ -551,22 +551,22 @@ verbs answer **page-less** — only the relay needs to be up — while `log.tail
 
 Three-command smoke (relay on :8080):
 ```
-./glyph3d-cli log.errors --since 10m                   # recent error/warn records
-./glyph3d-cli log.search <expr> --since 5m             # FTS5 (LIKE under 3 chars); --level --scope --page --limit
-./glyph3d-cli log.query "SELECT level, count(*) FROM logs GROUP BY level"
+glyph3d-cli log.errors --since 10m                   # recent error/warn records
+glyph3d-cli log.search <expr> --since 5m             # FTS5 (LIKE under 3 chars); --level --scope --page --limit
+glyph3d-cli log.query "SELECT level, count(*) FROM logs GROUP BY level"
 ```
 
 Live follow — a push subscription (lossless, no polling), "tail -f for the app":
 ```
-./glyph3d-cli log.follow                               # everything, rendered
-./glyph3d-cli log.follow --filter attention --level debug,trace
-./glyph3d-cli log.follow --level-set DEBUG             # also raise the page's verbosity once
-./glyph3d-cli --json log.follow                        # raw records as JSONL
+glyph3d-cli log.follow                               # everything, rendered
+glyph3d-cli log.follow --filter attention --level debug,trace
+glyph3d-cli log.follow --level-set DEBUG             # also raise the page's verbosity once
+glyph3d-cli --json log.follow                        # raw records as JSONL
 ```
 
 Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, default
 `/tmp/glyph3d/logs-<ts>.db`). Fuzzy-rank a wide search by piping the rendered lines:
-`./glyph3d-cli log.search <expr> --limit 500 | fzf -f <query>`.
+`glyph3d-cli log.search <expr> --limit 500 | fzf -f <query>`.
 `tools/itests/logstore.itest.mjs` locks in ingest + search/query/stats end-to-end
 (skips loudly when no relay answers on :8080).
 
@@ -673,7 +673,7 @@ Also: `log.stats` (store shape), `log.dump [path]` (VACUUM INTO snapshot, defaul
   real `SOURCE hand` handshake, real ARKit-shaped frames on the wire, feeding the
   real SourceStream → HandPresence → HandRenderer chain. No browser (the render path
   is CPU-side three), so it runs in bun in a few seconds. Needs a relay up:
-  `./glyph3d-cli serve --local --port 8099 .`
+  `glyph3d-cli serve --local --port 8099 .`
   ```
   bun tools/hand-source-check.mjs [--relay 8099]
   ```
@@ -1090,7 +1090,7 @@ detects the platform) · `g3d-termd` for terminals (built on Linux by `make term
 
 Boot: `bun install` at the repo root, then `tools/dev.sh` (Vite :5173 + relay :8080 —
 `pid_on_port` uses `lsof` where `ss` doesn't exist). For measurement runs prefer the
-BUILT app on a scratch relay: `make build && ./glyph3d-cli serve --local --port 8099 .`
+BUILT app on a scratch relay: `make build && glyph3d-cli serve --local --port 8099 .`
 (dev mode retains ~17x more heap and reloads on Vite restarts).
 
 Platform notes:
