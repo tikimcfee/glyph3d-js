@@ -6,7 +6,8 @@
 // as termd would): splitting re-wraps both halves in whole cells inside their panes, the title bar's
 // room kept above each; a split that wouldn't fit is refused; a pane leaving gives its room back;
 // a divider drag and an outer resize re-wrap; bars toggle; a tiled group becomes a split and back;
-// the store keeps the tree. Rearranging: swap trades two leaves, dock moves one beside another, the drop
+// the store keeps the tree; an open Agent View takes its share of its pane (growing the split when it
+// must). Rearranging: swap trades two leaves, dock moves one beside another, the drop
 // zone reads a pane's edges; a pane dropped on another trades places or docks (re-wrapping both), a drop
 // off the panes or one that wouldn't fit goes back; a pane steps to its neighbour's place.
 // Run: bun test tools/wall-split.test.mjs
@@ -22,6 +23,8 @@ const T = await import('../wall/splitTree.js');
 const { default: WallStore } = await import('../wall/WallStore.js');
 const { default: WallGroups } = await import('../wall/WallGroups.js');
 const { WALL_CONFIG } = await import('../wall/wallConfig.js');
+const AV = await import('../wall/wallAgentView.js');
+const { overlaps } = await import('../wall/wallLayout.js');
 
 beforeEach(() => mem.clear());
 
@@ -328,4 +331,60 @@ test('a pane moves a step at a time: it trades places with its neighbour that wa
     expect(wall.groups.get(gid).members).toEqual(['c', 'a', 'b']);
     expectFilled(wall, gid);
     expect(() => wall.groups.movePane('a', 'sideways')).toThrow(/left, right, up or down/);
+});
+
+test('an Agent View open on a pane takes its share of that pane: the terminal re-wraps beside it, no neighbour under it; closing gives it back', () => {
+    const { wall, terminals } = fakeWall({ a: [80, 24] });
+    wall.add('b', 80, 24);
+    wall.add('c', 80, 24);
+    const gid = wall.groups.insertPane('a', 'b', 'right');
+    wall.groups.insertPane('a', 'c', 'down');
+    const dims = { width: 12, height: 8, gap: 0.5 };
+    const open = new Map();
+    const { agentInset, agentViewRect } = AV;
+    wall.agents = { inset: (id) => agentInset(open.get(id) ?? null, dims) };
+    const room = wall.config.splitBarRows * SY;
+    const before = { cols: terminals.get('a').cols, rows: terminals.get('a').rows };
+    for (const side of AV.AGENT_SIDES) {
+        open.set('a', side);
+        wall.groups.relayout(gid);
+        const pr = wall.groups.paneRects(gid).get('a'), body = wall.terminalRect('a');
+        const view = agentViewRect(body, room, side, dims);
+        // The view and the terminal's window both sit inside a's pane …
+        for (const r of [view, { ...body, maxY: body.maxY + room }]) {
+            expect(r.minX).toBeGreaterThanOrEqual(pr.minX - 1e-9);
+            expect(r.maxX).toBeLessThanOrEqual(pr.maxX + 1e-9);
+            expect(r.minY).toBeGreaterThanOrEqual(pr.minY - 1e-9);
+            expect(r.maxY).toBeLessThanOrEqual(pr.maxY + 1e-9);
+        }
+        // … so it covers no other pane's terminal.
+        for (const other of ['b', 'c']) expect(overlaps(view, wall.windowRect(other))).toBe(false);
+    }
+    open.delete('a');
+    wall.groups.relayout(gid);
+    expect({ cols: terminals.get('a').cols, rows: terminals.get('a').rows }).toEqual(before);
+    expectFilled(wall, gid);
+});
+
+test('a pane too small for its Agent View grows the split to fit, as a resize to the minimum does, and closing gives it back', () => {
+    const { wall } = fakeWall({ a: [44, 24] });
+    wall.add('b', 44, 24);
+    const gid = wall.groups.insertPane('a', 'b', 'right');
+    const w0 = wall.groups.get(gid).split.w;
+    const dims = { width: 30, height: 8, gap: 0.5 };
+    wall.agents = { inset: (id) => AV.agentInset(id === 'a' ? 'left' : null, dims) };
+    wall.groups.relayout(gid);
+    const g = wall.groups.get(gid);
+    expect(g.split.w).toBeGreaterThan(w0);
+    const pa = wall.groups.paneRects(gid).get('a'), body = wall.terminalRect('a');
+    expect(body.minX - pa.minX).toBeCloseTo(30.5);                         // the view's room on the left
+    expect(wall.terminal('a').cols).toBeGreaterThanOrEqual(20);
+    expect(body.maxX).toBeLessThanOrEqual(pa.maxX + 1e-9);
+    // Closing it gives the split back its old shape (size and divider), and both halves their old sizes.
+    wall.agents = { inset: () => AV.agentInset(null, dims) };
+    wall.groups.relayout(gid);
+    expect(wall.groups.get(gid).split.w).toBe(w0);
+    expect(wall.groups.get(gid).split.tree.ratio).toBe(0.5);
+    expect(wall.terminal('a').cols).toBe(wall.terminal('b').cols);
+    expectFilled(wall, gid);
 });

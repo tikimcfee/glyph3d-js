@@ -491,17 +491,13 @@ export default function registerWallCommands(router, wall) {
         }
         if (!id) throw new Error('no terminal named, and none is focused');
         const r = wall.agents.setOpen(id, /** @type {any} */ (how));
-        return OK(`agent view on ${id}: ${r.open ? `open (${r.side})` : 'closed'}`, { id, ...r });
+        const pair = r.session ? ` · session ${r.session}` : r.missing ? ` · no agent found: ${r.missing}` : '';
+        return OK(`agent view on ${id}: ${r.open ? `open (${r.side})${pair}` : 'closed'}`, { id, ...r });
     });
     verb('wall.agent.side', '<id> <right|left|top|bottom>', "Attach a terminal's Agent View to right, left, top or bottom", (args) => {
         const [id] = terminalIds(args.slice(0, 1));
         const r = wall.agents.setSide(id, /** @type {any} */ (args[1]));
         return OK(`agent view on ${id}: ${r.side}`, { id, ...r });
-    });
-    verb('wall.agent.session', '<id> [auto|<session>]', "Pair a terminal's Agent View with an agent session (or auto-match its directory)", (args) => {
-        const [id] = terminalIds(args.slice(0, 1));
-        const r = wall.agents.setSession(id, args[1] ?? 'auto');
-        return OK(`agent view on ${id}: session ${r.resolved ?? r.pinned}`, r);
     });
     verb('wall.agent.filter', '<id> <reset|all|only|on|off|toggle> [category…]', "Filter visible event categories in a terminal's Agent View (e.g. only tools, only read image, reset)", (args) => {
         const [id] = terminalIds(args.slice(0, 1));

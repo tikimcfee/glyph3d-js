@@ -558,7 +558,7 @@ function AgentViewCard({ wall, view, focused, fontFamily, onPreviewSide }) {
   // Header drag → live preview of right / left / top / bottom around the attached terminal.
   const onHeaderDown = (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('button, select, input')) return;
+    if (e.target.closest('button, input')) return;
     e.preventDefault();
     e.stopPropagation();
     if (wall.focusedId !== view.id) wall.focus(view.id);
@@ -643,27 +643,23 @@ function AgentViewCard({ wall, view, focused, fontFamily, onPreviewSide }) {
           title="Drag header to move Agent View to right, left, top or bottom of its terminal"
         >
           <span style={{ color: dot.color, flex: '0 0 auto' }} title={`session status: ${dot.label}`}>{dot.char}</span>
-          <select
-            data-action="session-select"
-            value={view.sessionPinned === 'auto' ? 'auto' : (view.sessionId || view.sessionPinned)}
-            onChange={(e) => wall.run(['wall.agent.session', view.id, e.target.value])}
-            style={{
-              ...styles.sessionSelect,
-              color: focused ? '#b8f7d2' : '#d4d9e4',
-            }}
-            title="Paired agent session (auto-matches terminal directory, or pick any session / subagent)"
-          >
-            <option value="auto" style={styles.selectOption}>
-              {view.sessionPinned === 'auto' && view.session
-                ? `auto · ${view.sessionLabel}`
-                : 'auto (match terminal cwd)'}
-            </option>
-            {view.sessions.map((s) => (
-              <option key={s.session_id} value={s.session_id} style={styles.selectOption}>
-                {s.status !== 'ended' ? '● ' : '○ '}{s.label}
-              </option>
-            ))}
-          </select>
+          {view.sessionId ? (
+            <span
+              data-agent-session={view.sessionId}
+              style={{ ...styles.sessionLabel, color: focused ? '#b8f7d2' : '#d4d9e4' }}
+              title={`${view.sessionLabel} · ${view.sessionId}${view.sessionVia === 'directory' ? ' (the only live agent in this terminal\'s directory)' : ''}`}
+            >
+              {view.sessionLabel}
+            </span>
+          ) : (
+            <span
+              data-agent-session=""
+              style={{ ...styles.sessionLabel, color: '#f0b089' }}
+              title={view.missing || 'no agent session for this terminal'}
+            >
+              ⚠ no agent found
+            </span>
+          )}
 
           {view.viewOffset > 0 && (
             <ActionBtn
@@ -765,9 +761,9 @@ function AgentViewCard({ wall, view, focused, fontFamily, onPreviewSide }) {
 
             {!view.error && !view.sessionId && (
               <div style={styles.emptyState}>
-                <div>no matching agent session for this terminal&apos;s directory yet</div>
-                <div style={{ color: '#6b7383', marginTop: 3 }}>
-                  start an agent in this terminal, or pick any session in the header above
+                <div style={{ color: '#f0b089' }}>no agent found for this terminal</div>
+                <div style={{ color: '#7c8596', marginTop: 3 }}>
+                  {view.missing || 'waiting for the agent session list…'}
                 </div>
               </div>
             )}
@@ -920,21 +916,13 @@ const styles = {
     flex: '0 0 auto',
     boxSizing: 'border-box',
   },
-  sessionSelect: {
+  sessionLabel: {
     flex: '1 1 auto',
     minWidth: 0,
-    background: 'transparent',
-    ...boxBorder('transparent', '0px'),
-    font: 'inherit',
     fontSize: 10.5,
-    padding: 0,
-    cursor: 'pointer',
-    outline: 'none',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
     textOverflow: 'ellipsis',
-  },
-  selectOption: {
-    backgroundColor: '#13182a',
-    color: '#d4d9e4',
   },
   liveChip: {
     flex: '0 0 auto',

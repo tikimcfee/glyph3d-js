@@ -38,7 +38,7 @@ const {
     agentViewRect,
     footprintTileMetrics,
     pickAgentSide,
-    matchTerminalSession,
+    resolveTerminalSession,
     computeJumpOffset,
 } = await import('../wall/wallAgentView.js');
 const { overlaps, unionRect, BAR_ROOM } = await import('../wall/wallLayout.js');
@@ -305,26 +305,121 @@ test('agentViewRect, pickAgentSide and WallGroups tile footprints across all 4 s
     expect(frame.maxY).toBeGreaterThanOrEqual(allUnion.maxY + WALL_CONFIG.groupPad - 1e-6);
 });
 
+test('an ungrouped Agent View shoves what it covers aside (a group as one), and closing gives the room back', () => {
+    // a's view opens on its right, over b (alone) and the group {c, d}; e sits clear below.
+    const { wall } = makeHeadlessWall({
+        terminals: {
+            a: [100, 50, 0, 0],
+            b: [60, 40, 120, 0],
+            c: [40, 20, 150, -20],
+            d: [40, 20, 195, -20],
+            e: [60, 40, 0, -200],
+        },
+    });
+    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM, setBarRoom: () => {} });
+    wall.config.snap = false;
+    const gid = wall.groups.create(['c', 'd'], { layout: 'freeform' });
+    const at = (id) => ({ x: wall.terminal(id).position.x, y: wall.terminal(id).position.y });
+    const start = Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((id) => [id, at(id)]));
+
+    wall.agents.setOpen('a', 'open', 'right');
+    const view = wall.agentRect('a');
+    expect(at('a')).toEqual(start.a);                               // the terminal itself stays put
+    expect(at('e')).toEqual(start.e);                               // clear of the view: untouched
+    for (const id of ['b', 'c', 'd']) {
+        expect(overlaps(view, wall.footprintRect(id))).toBe(false);
+        expect(at(id).y).toBe(start[id].y);                         // shoved along the view's side only
+        expect(at(id).x).toBeGreaterThan(start[id].x);
+    }
+    expect(at('d').x - at('c').x).toBeCloseTo(start.d.x - start.c.x, 9);   // the group moved as one
+    expect(overlaps(wall.footprintRect('b'), wall.groups.frameRect(gid, wall.viewport.zoom))).toBe(false);
+
+    // Moving the view to the bottom gives the right-hand room back first; nothing sits under it there.
+    wall.agents.setSide('a', 'bottom');
+    for (const id of ['b', 'c', 'd']) expect(at(id)).toEqual(start[id]);
+    for (const id of ['b', 'c', 'd', 'e']) expect(overlaps(wall.agentRect('a'), wall.footprintRect(id))).toBe(false);
+
+    // Closing gives back what it shoved; one the person moved since stays where they put it.
+    wall.agents.setSide('a', 'right');
+    const shoved = at('b');
+    wall.agents.setOpen('a', 'close');
+    for (const id of ['b', 'c', 'd']) expect(at(id)).toEqual(start[id]);
+    wall.agents.setOpen('a', 'open');
+    wall.terminal('b').position.x += 7;                             // the person moves b
+    const moved = at('b');
+    wall.agents.setOpen('a', 'close');
+    expect(at('b')).toEqual(moved);
+    expect(shoved.x).toBeGreaterThan(start.b.x);
+    expect(at('c')).toEqual(start.c);
+});
+
+test('a tiled group that grows for an Agent View makes room round it on the canvas, and gives it back on close', () => {
+    const { wall } = makeHeadlessWall({
+        terminals: {
+            a: [100, 50, 0, 0],
+            b: [100, 50, 110, 0],
+            c: [60, 40, 260, 0],      // clear of the group now; under it once b's view widens it
+            far: [60, 40, 0, -300],   // below: untouched either way
+        },
+    });
+    wall.names = /** @type {any} */ ({ barHeight: () => BAR_ROOM, setBarRoom: () => {} });
+    wall.config.snap = false;
+    const gid = wall.groups.create(['a', 'b'], { layout: 'tile', columns: 2, gap: 4 });
+    const at = (id) => ({ x: wall.terminal(id).position.x, y: wall.terminal(id).position.y });
+    const zoom = wall.viewport.zoom;
+    expect(overlaps(wall.groups.boxRect(gid, zoom), wall.footprintRect('c'))).toBe(false);
+    const c0 = at('c'), far0 = at('far');
+
+    wall.run(['wall.agent', 'b', 'right']);
+    const box = wall.groups.boxRect(gid, zoom);
+    expect(overlaps(box, wall.footprintRect('c'))).toBe(false);
+    expect(at('c').x).toBeGreaterThan(c0.x);
+    expect(at('c').y).toBe(c0.y);
+    expect(at('far')).toEqual(far0);
+
+    wall.run(['wall.agent', 'b', 'close']);
+    expect(at('c')).toEqual(c0);
+});
+
 // ── 3. session pairing ───────────────────────────────────────────────────────
 
-test('matchTerminalSession pairs by pin, gx-<name> workgroup, then pwd/cwd preferring live & newest', () => {
+test("resolveTerminalSession finds the terminal's own agent, or says why it can't", () => {
     const sessions = [
         { session_id: 'ended-1', harness: 'claude', cwd: '/repo/app', status: 'ended', mtime: '2026-11-14T22:50:00Z' },
         { session_id: 'live-older', harness: 'claude', cwd: '/repo/app', status: 'idle', mtime: '2026-11-14T21:00:00Z' },
         { session_id: 'live-newer', harness: 'claude', cwd: '/repo/app', status: 'processing', mtime: '2026-11-14T22:10:00Z' },
-        { session_id: 'sub-child', harness: 'claude', cwd: '/repo/app', status: 'processing', mtime: '2026-11-14T22:55:00Z', parent_session: { session_id: 'live-newer' } },
+        { session_id: 'sub-child', harness: 'claude', cwd: '/repo/solo', status: 'processing', mtime: '2026-11-14T22:55:00Z', parent_session: { session_id: 'live-newer' } },
+        { session_id: 'solo', harness: 'claude', cwd: '/repo/solo', status: 'idle', mtime: '2026-11-14T22:00:00Z' },
+        { session_id: 'only-ended', harness: 'claude', cwd: '/repo/old', status: 'ended', mtime: '2026-11-14T20:00:00Z' },
+        { session_id: 'wg-old', harness: 'claude', cwd: '/workgroups/alpha', status: 'ended', mtime: '2026-11-14T19:00:00Z', workgroup: { name: 'alpha' } },
         { session_id: 'wg-sess', harness: 'claude', cwd: '/workgroups/alpha', status: 'idle', mtime: '2026-11-14T20:00:00Z', workgroup: { name: 'alpha' } },
     ];
+    const sid = (meta) => resolveTerminalSession(meta, sessions).session?.session_id ?? null;
 
-    // Auto-match ignores subagents (`parent_session`) and prefers live over ended, newest mtime first.
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app/', cwd: '/home/me' }, sessions)?.session_id).toBe('live-newer');
-    // Workgroup terminal convention `gx-<name>`, plus `attached` / exact `sessionId` from WallBus when multiple agents share one cwd.
-    expect(matchTerminalSession({ id: 'gx-alpha', cwd: '/tmp' }, sessions)?.session_id).toBe('wg-sess');
-    expect(matchTerminalSession({ id: 'term-9', attached: 'alpha@IL-Air-M2', cwd: '/repo/app' }, sessions)?.session_id).toBe('wg-sess');
-    expect(matchTerminalSession({ id: 'gx-alpha', sessionId: 'live-older', cwd: '/repo/app' }, sessions)?.session_id).toBe('live-older');
-    // Explicit pin can select a subagent or exact session id / prefix.
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'sub-child')?.session_id).toBe('sub-child');
-    expect(matchTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions, 'ended')?.session_id).toBe('ended-1');
+    // The attached agent's exact session (WallBus) wins, even over its workgroup's newest.
+    expect(resolveTerminalSession({ id: 'gx-alpha', sessionId: 'live-older', cwd: '/repo/app' }, sessions))
+        .toEqual({ session: sessions[1], via: 'session', missing: null });
+    // Then its workgroup, live first: `attached` (any host), or the `gx-<name>` terminal convention.
+    expect(sid({ id: 'term-9', attached: 'alpha@far-host', cwd: '/repo/app' })).toBe('wg-sess');
+    expect(sid({ id: 'gx-alpha', cwd: '/tmp' })).toBe('wg-sess');
+    // An attached agent with no listed session is flagged, never swapped for its directory's agent.
+    const gone = resolveTerminalSession({ id: 'gx-beta', pwd: '/repo/solo' }, sessions);
+    expect(gone.session).toBeNull();
+    expect(gone.missing).toContain("'beta'");
+
+    // A plain terminal: the one live top-level agent in its directory (pwd over cwd, slashes normalized).
+    expect(resolveTerminalSession({ id: 't1', pwd: '/repo/solo/', cwd: '/home/me' }, sessions).via).toBe('directory');
+    expect(sid({ id: 't1', pwd: '/repo/solo/', cwd: '/home/me' })).toBe('solo');
+    // OSC 7 reports `pwd` as a file URL with the host in it.
+    expect(sid({ id: 't1', pwd: 'file://some-host/repo/so%6Co', cwd: '/home/me' })).toBe('solo');
+    // Two live agents in one directory can't be told apart: flagged, not guessed.
+    const two = resolveTerminalSession({ id: 't1', pwd: '/repo/app' }, sessions);
+    expect(two.session).toBeNull();
+    expect(two.missing).toContain('2 live agents');
+    // Ended sessions don't stand in for a running agent; nor does a missing directory.
+    expect(sid({ id: 't1', pwd: '/repo/old' })).toBeNull();
+    expect(resolveTerminalSession({ id: 't1' }, sessions).missing).toContain('directory');
+    expect(resolveTerminalSession({ id: 't1', pwd: '/repo/solo' }, []).missing).toContain('no live agent');
 });
 
 // ── 4. end-to-end stream folding, live scrollback anchors & router verbs ─────
@@ -376,7 +471,7 @@ test('live event folding, write-time scrollback anchors, jump-to-terminal and wa
     wall.focus('t1');
     const chordA = chordFor({ code: 'KeyA', shiftKey: false }, 'canvas');
     expect(chordA).not.toBeNull();
-    expect((await wall.router.execute(['wall.agent'])).text).toBe('OK: agent view on t1: open (right)');
+    expect((await wall.router.execute(['wall.agent'])).text).toBe('OK: agent view on t1: open (right) · session sess-1');
 
     // Let async stream hydration + follow complete.
     await new Promise((r) => setTimeout(r, 10));

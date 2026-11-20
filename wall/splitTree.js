@@ -232,6 +232,27 @@ export function ratioFor(t, rect, gap, path, coord, minPane) {
 }
 
 /**
+ * The tree with every divider held so each side keeps its minSize in `rect` (a pane whose minimum
+ * grew — an Agent View opened in it — takes the room from its sibling). A node that can't hold both
+ * keeps its ratio. Returns `t` itself when nothing moves.
+ * @param {SplitNode} t @param {Rect} rect @param {number} gap
+ * @param {(id: string) => { w: number, h: number }} minPane
+ * @returns {SplitNode}
+ */
+export function fitRatios(t, rect, gap, minPane) {
+    if (isLeaf(t)) return t;
+    const row = t.dir === 'row';
+    const room = Math.max(1e-9, row ? rect.maxX - rect.minX - gap : rect.maxY - rect.minY - gap);
+    const a = minSize(t.a, minPane, gap), b = minSize(t.b, minPane, gap);
+    const lo = (row ? a.w : a.h) / room, hi = 1 - (row ? b.w : b.h) / room;
+    const ratio = lo > hi ? t.ratio : Math.min(hi, Math.max(lo, t.ratio));
+    const n = ratio === t.ratio ? t : { ...t, ratio };
+    const [ra, rb] = halves(n, rect, gap);
+    const fa = fitRatios(t.a, ra, gap, minPane), fb = fitRatios(t.b, rb, gap, minPane);
+    return n === t && fa === t.a && fb === t.b ? t : { ...n, a: fa, b: fb };
+}
+
+/**
  * The pane next to `id` in a direction: the nearest one beyond that edge that overlaps it across,
  * the most overlap breaking a tie. Null at the split's edge.
  * @param {Map<string, Rect>} ps @param {string} id @param {'left'|'right'|'up'|'down'} dir

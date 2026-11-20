@@ -28,7 +28,7 @@ import WallBus, { attachArgv, busAttachable, busStatus, gomuxScreenId, isBusTarg
 import registerWallCommands from './wallCommands.js';
 import { setGlyphLineStyle } from '@glyph3d/core/core/glyphMaterial.js';
 import { WALL_CONFIG, LINE_STYLE_KNOBS, checkConfig } from './wallConfig.js';
-import { freeFlowSlot, unionRect, hitTest, cycle, zStackLayout, readingOrder } from './wallLayout.js';
+import { freeFlowSlot, unionRect, hitTest, cycle, zStackLayout, readingOrder, shoveAside, overlaps } from './wallLayout.js';
 import { dockLayout } from './dockLayout.js';
 import { neighbor } from './splitTree.js';
 import { snapStep, snapTo } from './wallSnap.js';
@@ -197,6 +197,10 @@ export default class TerminalWall {
         /** Active viewport-anchored flow grid for unpositioned spawns: reused while the camera stays on the flow, reset once the person pans elsewhere.
          *  @type {{ origin: { x: number, y: number }, camera: { x: number, y: number }, anchorId: string|null, spot: { x: number, y: number } }|null} */
         this._flow = null;
+        /** What each terminal's open Agent View shoved aside on the canvas (footprintChanged), to give back when it closes or moves:
+         *  per shoved item, how far, and where its anchor terminal stood after (a moved one stays where the person put it).
+         *  @type {Map<string, { at: { x: number, y: number }, shoves: { id?: string, gid?: string, anchor: string, dx: number, dy: number, at: { x: number, y: number } }[] }>} */
+        this._shoves = new Map();
         /** One terminal fullscreen (WallFullscreen) — its state lives as long as the wall, as the store does. */
         this.fullscreen = new WallFullscreen(this);
 
@@ -531,6 +535,92 @@ export default class TerminalWall {
         return ag ? unionRect([win, ag]) : win;
     }
 
+    /**
+     * `id`'s footprint changed — its Agent View opened, closed or moved side (or the view's size knobs
+     * changed): the room the view takes is claimed as a new item's would be. In a tiled or split group,
+     * the group lays out again (the tile, or the pane, holds the view); should the group grow for it,
+     * the canvas round the group makes room as below, along the way it grew (right for a view at a
+     * side, down for one above or below). On the canvas — no group, or a freeform one — whatever the
+     * view now covers is shoved out of its way along its side. A shove (`shoveAside`) moves another
+     * group as one and anything else on its own, `groupGap` beyond, snapped when snap is on; what
+     * already overlapped the group before is left as it was. What an earlier view of `id` shoved comes
+     * back first (`_giveRoomBack`). While fullscreen nothing is on the canvas, so nothing is shoved.
+     * @param {string} id
+     */
+    footprintChanged(id) {
+        const zoom = this.viewport.zoom, own = this.store.groupOf(id);
+        const laid = !!own && (this.groups.tiles(id) || this.groups.splits(id));
+        const before = laid && this.onCanvas(id) ? this.groups.boxRect(own, zoom, id) : null;
+        if (laid) this.groups.relayout(own);
+        const side = this.agents.sideOf(id);
+        const room = !this.onCanvas(id) ? null : laid ? this.groups.boxRect(own, zoom) : this.canvasFootprintRect(id, zoom);
+        this._giveRoomBack(id, room);
+        if (!side || !room) return;
+        const claim = laid ? room : this.agents.rect(id, zoom);
+        const dir = !laid ? side : side === 'left' || side === 'right' ? 'right' : 'bottom';
+        const units = new Map();
+        for (const t of this.order) {
+            if (t === id || !this.onCanvas(t)) continue;
+            const gid = this.store.groupOf(t);
+            if (laid && gid === own) continue;   // the group's own members: its layout placed them
+            if (gid && gid !== own) {
+                if (!units.has(`g:${gid}`)) units.set(`g:${gid}`, { gid, anchor: t, rect: this.groups.boxRect(gid, zoom) });
+            } else {
+                units.set(`t:${t}`, { id: t, anchor: t, rect: this.canvasFootprintRect(t, zoom) });
+            }
+        }
+        const items = [...units].filter(([, u]) => u.rect && !(before && overlaps(u.rect, before))).map(([key, u]) => ({ key, rect: u.rect }));
+        const step = this.config.snap ? snapStep(this.config, zoom) : 0;
+        const shoves = [];
+        for (const [key, { dx, dy }] of shoveAside(claim, dir, items, this.config.groupGap, step)) {
+            const u = units.get(key);
+            if (u.gid) this.groups.move(u.gid, dx, dy);
+            else {
+                const grid = this.ctx.terminals.get(u.id);
+                grid.position.x += dx; grid.position.y += dy;
+                this.rememberPosition(u.id);
+            }
+            const a = this.ctx.terminals.get(u.anchor).position;
+            shoves.push({ id: u.id, gid: u.gid, anchor: u.anchor, dx, dy, at: { x: a.x, y: a.y } });
+        }
+        if (shoves.length) this._shoves.set(id, { at: this._standOf(id), shoves });
+    }
+
+    /** Where `id`'s room is anchored: its group's origin when its group lays it out, else its own spot. */
+    _standOf(id) {
+        const g = this.store.group(this.store.groupOf(id) ?? '');
+        const p = g && g.layout !== 'freeform' && g.origin ? g.origin : this.ctx.terminals.get(id)?.position;
+        return p ? { x: p.x, y: p.y } : null;
+    }
+
+    /**
+     * Put back what `id`'s Agent View shoved aside: each item still where the shove left it (one moved
+     * since stays put) and whose old spot `room` (what `id` takes now) leaves free — and only while
+     * `id`'s room stands where it did (moved, its old room isn't free to give back).
+     * @param {string} id @param {import('./wallLayout.js').Rect|null} room
+     */
+    _giveRoomBack(id, room) {
+        const rec = this._shoves.get(id);
+        if (!rec) return;
+        this._shoves.delete(id);
+        const at = this._standOf(id);
+        if (!at || !rec.at || Math.abs(at.x - rec.at.x) > 1e-6 || Math.abs(at.y - rec.at.y) > 1e-6) return;
+        const zoom = this.viewport.zoom;
+        for (const s of rec.shoves) {
+            const a = this.ctx.terminals.get(s.anchor)?.position;
+            if (!a || Math.abs(a.x - s.at.x) > 1e-6 || Math.abs(a.y - s.at.y) > 1e-6) continue;
+            if (s.gid && !this.store.group(s.gid)?.members.includes(s.anchor)) continue;
+            const r = s.gid ? this.groups.boxRect(s.gid, zoom) : this.canvasFootprintRect(s.id, zoom);
+            const back = r && { minX: r.minX - s.dx, maxX: r.maxX - s.dx, minY: r.minY - s.dy, maxY: r.maxY - s.dy };
+            if (room && back && overlaps(back, room)) continue;   // its old spot is still taken: it stays
+            if (s.gid) this.groups.move(s.gid, -s.dx, -s.dy);
+            else {
+                a.x -= s.dx; a.y -= s.dy;
+                this.rememberPosition(s.id);
+            }
+        }
+    }
+
     /** Pre-fullscreen canvas footprint of `id` at `zoom`. */
     canvasFootprintRect(id, zoom = this.viewport.zoom) {
         const win = this.canvasWindowRect(id, zoom);
@@ -785,7 +875,7 @@ export default class TerminalWall {
         else if (key === 'fontFamily') for (const grid of this.ctx.terminals.values()) grid.setFontFamily(value);
         else if (key === 'boldIsBright') for (const grid of this.ctx.terminals.values()) grid.setBoldIsBright(value);
         else if (key in SELECTION_STYLE_KNOBS) for (const grid of this.ctx.terminals.values()) grid.setSelectionStyle(SELECTION_STYLE_KNOBS[key](value));
-        else if (key === 'agentViewWidth' || key === 'agentViewHeight' || key === 'agentViewGap') this.groups?.relayoutAll();
+        else if (key === 'agentViewWidth' || key === 'agentViewHeight' || key === 'agentViewGap') for (const id of this.order) if (this.agents.isOpen(id)) this.footprintChanged(id);
     }
 
     /**
@@ -1332,6 +1422,7 @@ export default class TerminalWall {
         this._closingGroup = this.focusedId === id ? gid : null;
         this.store.forget(id);
         this.agents.prune((tid) => tid !== id);
+        this._shoves.delete(id);
         this.selection.delete(id);
         const r = this.router.execute(['terminal.kill', id]);
         this._closingGroup = null;

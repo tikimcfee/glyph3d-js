@@ -601,6 +601,23 @@ export function footprintTileMetrics(bodyRect, side, dims) {
 }
 
 /**
+ * The room an Agent View on `side` takes beside its terminal's body, world units per edge (all zero
+ * when `side` is null: no view open). A split pane holding the terminal keeps this much of itself for
+ * the view, so the terminal re-wraps to what's left and the view sits inside the pane.
+ * @param {'right'|'left'|'top'|'bottom'|null} side
+ * @param {{ width: number, height: number, gap: number }} dims
+ * @returns {{ left: number, right: number, top: number, bottom: number }}
+ */
+export function agentInset(side, { width, height, gap }) {
+    return {
+        left: side === 'left' ? width + gap : 0,
+        right: side === 'right' ? width + gap : 0,
+        top: side === 'top' ? height + gap : 0,
+        bottom: side === 'bottom' ? height + gap : 0,
+    };
+}
+
+/**
  * Pick which side of `windowRect` a dragged world point `pt` is aiming for, using aspect-normalized
  * quadrants around the terminal window's center.
  * @param {import('./wallLayout.js').Rect} windowRect
@@ -620,10 +637,17 @@ export function pickAgentSide(windowRect, pt) {
 
 // ── session discovery & pairing ──────────────────────────────────────────────
 
-/** Normalize a filesystem path for comparison (strip trailing slashes except root `/`). */
+/**
+ * Normalize a filesystem path for comparison: an OSC 7 `file://host/path` URL becomes its decoded
+ * path, and trailing slashes go (except root `/`).
+ */
 export function normPath(p) {
     if (!p || typeof p !== 'string') return '';
-    const trimmed = p.trim();
+    let trimmed = p.trim();
+    const url = /^file:\/\/[^/]*(\/.*)$/.exec(trimmed);
+    if (url) {
+        try { trimmed = decodeURIComponent(url[1]); } catch { trimmed = url[1]; }
+    }
     if (trimmed === '/') return '/';
     return trimmed.replace(/\/+$/, '');
 }
@@ -635,33 +659,32 @@ function mtimeMs(s) {
 }
 
 /**
- * Match a terminal (`termd/status` row + terminal id/title) to the best `AgentSession` from
- * `agentSessions/list`.
+ * The agent session running in a terminal, or why there isn't one. There is no picking: a view
+ * shows its own terminal's agent, and when it can't tell which that is it says so.
  *
- * Priority:
- *   1. `pinned`: exact `session_id`, workgroup `name`, or unique `session_id` prefix (`pinned !== 'auto'`)
- *   2. Exact `sessionId` reported by `WallBus` for an attached gomuxai agent (`termMeta.sessionId`)
- *   3. Workgroup match: `termMeta.attached` (`<name>[@<host>]`) or terminal id/title `gx-<name>` ↔ `session.workgroup?.name === <name>`
- *   4. Directory match: normalized `pwd` (OSC 7) or `cwd` matching `session.cwd` on a top-level
- *      session (`!session.parent_session`), preferring live (`status !== 'ended'`) then newest `mtime`
+ * In order, the first that names a session wins:
+ *   1. `termMeta.sessionId`: the session `WallBus` reports for the agent this terminal attaches to
+ *   2. the attached agent's workgroup: `termMeta.attached` (`<name>[@<host>]`) or a `gx-<name>`
+ *      terminal id/title ↔ a top-level `session.workgroup.name`
+ *   3. the terminal's directory: OSC 7 `pwd`, else its starting `cwd`, ↔ a LIVE top-level session's
+ *      `cwd`, but only when exactly one live session sits there (two agents in one directory are
+ *      indistinguishable, so that is reported, not guessed)
+ *
+ * An attached terminal whose agent's session isn't listed reports that rather than falling through
+ * to its directory: the directory could name some other agent.
  *
  * @param {{ id?: string, attached?: string, sessionId?: string, pwd?: string, cwd?: string, title?: string }} termMeta
  * @param {import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession[]} sessions
- * @param {string|null} [pinned] - `'auto'` or null uses automatic matching
- * @returns {import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession|null}
+ * @returns {{ session: import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession|null,
+ *             via: 'session'|'workgroup'|'directory'|null, missing: string|null }}
  */
-export function matchTerminalSession(termMeta, sessions, pinned = null) {
-    if (!Array.isArray(sessions) || !sessions.length) return null;
+export function resolveTerminalSession(termMeta, sessions) {
+    const list = Array.isArray(sessions) ? sessions : [];
+    const found = (session, via) => ({ session, via, missing: null });
+    const none = (missing) => ({ session: null, via: null, missing });
 
-    if (pinned && pinned !== 'auto') {
-        const exact = sessions.find((s) => s.session_id === pinned || s.workgroup?.name === pinned);
-        if (exact) return exact;
-        const pref = sessions.filter((s) => s.session_id?.startsWith(pinned));
-        if (pref.length === 1) return pref[0];
-        return null;
-    }
-
-    const candidates = [...sessions].sort((a, b) => {
+    // Live first, newest first: when a workgroup has run more than one session, the current one.
+    const candidates = [...list].sort((a, b) => {
         const aLive = a.status !== 'ended' ? 1 : 0;
         const bLive = b.status !== 'ended' ? 1 : 0;
         if (aLive !== bLive) return bLive - aLive;
@@ -670,36 +693,35 @@ export function matchTerminalSession(termMeta, sessions, pinned = null) {
 
     if (termMeta?.sessionId) {
         const bySid = candidates.find((s) => s.session_id === termMeta.sessionId);
-        if (bySid) return bySid;
+        if (bySid) return found(bySid, 'session');
     }
 
+    let agentName = '';
     if (typeof termMeta?.attached === 'string' && termMeta.attached.trim()) {
         const raw = termMeta.attached.trim();
-        const bare = raw.includes('@') ? raw.slice(0, raw.indexOf('@')) : raw;
-        const wg = candidates.find((s) => !s.parent_session && s.workgroup?.name === bare);
-        if (wg) return wg;
-    }
-
-    // Workgroup terminal convention (`gx-<name>`).
-    for (const label of [termMeta?.id, termMeta?.title]) {
-        const m = typeof label === 'string' && /^gx-([A-Za-z0-9_.-]+)$/.exec(label.trim());
-        if (m) {
-            const wg = candidates.find((s) => !s.parent_session && s.workgroup?.name === m[1]);
-            if (wg) return wg;
+        agentName = raw.includes('@') ? raw.slice(0, raw.indexOf('@')) : raw;
+    } else {
+        for (const label of [termMeta?.id, termMeta?.title]) {
+            const m = typeof label === 'string' && /^gx-([A-Za-z0-9_.-]+)$/.exec(label.trim());
+            if (m) { agentName = m[1]; break; }
         }
     }
-
-    // Exact directory match (`pwd` from OSC 7 wins over initial `cwd`).
-    const dirs = [normPath(termMeta?.pwd), normPath(termMeta?.cwd)].filter(Boolean);
-    for (const dir of dirs) {
-        const top = candidates.find((s) => !s.parent_session && normPath(s.cwd) === dir);
-        if (top) return top;
+    if (agentName) {
+        const wg = candidates.find((s) => !s.parent_session && s.workgroup?.name === agentName);
+        if (wg) return found(wg, 'workgroup');
+        return none(`attached to agent '${agentName}', but no session of it is listed`);
     }
-    return null;
+
+    const dir = normPath(termMeta?.pwd) || normPath(termMeta?.cwd);
+    if (!dir) return none("this terminal hasn't reported its directory");
+    const here = candidates.filter((s) => !s.parent_session && s.status !== 'ended' && normPath(s.cwd) === dir);
+    if (here.length === 1) return found(here[0], 'directory');
+    if (here.length > 1) return none(`${here.length} live agents in ${dir}; can't tell which runs here`);
+    return none(`no live agent in ${dir}`);
 }
 
 /**
- * Format a concise human-readable label for a session in the Agent View header / session picker.
+ * Format a concise human-readable label for a session in the Agent View header.
  * @param {import('@glyph3d/core/services/data/AgentSessionProvider.js').AgentSession|null} s
  * @returns {string}
  */

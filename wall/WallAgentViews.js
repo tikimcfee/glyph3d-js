@@ -14,7 +14,8 @@ import {
     formatExpandedEvent,
     agentViewRect,
     footprintTileMetrics,
-    matchTerminalSession,
+    agentInset,
+    resolveTerminalSession,
     formatSessionLabel,
     extractProtocolTerminalLine,
     computeJumpOffset,
@@ -34,12 +35,13 @@ const BASE_FONT_PX = 11;
  * @typedef {Object} AgentViewEntry
  * @property {boolean} open
  * @property {'right'|'left'|'top'|'bottom'} side
- * @property {string} sessionPinned - `'auto'` or an explicit `session_id` / workgroup name
  * @property {Record<string, boolean>} filters
  * @property {Set<string>} expandedIds
  * @property {Set<string>} fullBodyIds - events whose truncated file/output body was expanded in full
  * @property {Map<string, import('./wallAgentView.js').LineAnchor>} anchors
- * @property {string|null} resolvedSessionId
+ * @property {string|null} resolvedSessionId - the terminal's own agent session (resolveTerminalSession)
+ * @property {'session'|'workgroup'|'directory'|null} resolvedVia - how that session was found
+ * @property {string|null} missing - why no session was found, when none was
  * @property {string|null} jumpedEventId
  */
 
@@ -153,7 +155,6 @@ export default class WallAgentViews {
             const entry = this._ensureEntry(id);
             entry.open = !!raw.open;
             entry.side = AGENT_SIDES.includes(raw.side) ? raw.side : this.wall.config.agentViewSide;
-            entry.sessionPinned = typeof raw.session === 'string' && raw.session ? raw.session : 'auto';
             entry.filters = normalizeFilters(raw.filters);
         }
     }
@@ -164,7 +165,6 @@ export default class WallAgentViews {
         this.wall.store.setAgentView(id, {
             open: v.open,
             side: v.side,
-            session: v.sessionPinned,
             filters: v.filters,
         });
     }
@@ -176,12 +176,13 @@ export default class WallAgentViews {
             v = {
                 open: false,
                 side: this.wall.config.agentViewSide || 'right',
-                sessionPinned: 'auto',
                 filters: { ...DEFAULT_FILTERS },
                 expandedIds: new Set(),
                 fullBodyIds: new Set(),
                 anchors: new Map(),
                 resolvedSessionId: null,
+                resolvedVia: null,
+                missing: null,
                 jumpedEventId: null,
             };
             this._views.set(id, v);
@@ -247,6 +248,11 @@ export default class WallAgentViews {
         return footprintTileMetrics(body, this.sideOf(id), this.dims());
     }
 
+    /** The room `id`'s open Agent View takes beside its body, per edge (zeros when closed) — a split pane's share for it. @param {string} id */
+    inset(id) {
+        return agentInset(this.sideOf(id), this.dims());
+    }
+
     /** Current estimated primary-screen `scrollback_rows` for terminal `id`. @param {string} id */
     scrollbackNow(id) {
         const sync = this._termSync.get(id);
@@ -298,9 +304,9 @@ export default class WallAgentViews {
         this._persist(id);
         this._rebindOne(id);
         this._gcStreams();
-        this.wall.groups?.relayoutOf(id);
+        this.wall.footprintChanged(id);
         this.wall._emit();
-        return { open: v.open, side: v.side, session: v.resolvedSessionId };
+        return { open: v.open, side: v.side, session: v.resolvedSessionId, missing: v.open ? v.missing : null };
     }
 
     /**
@@ -311,32 +317,6 @@ export default class WallAgentViews {
     setSide(id, side) {
         if (!AGENT_SIDES.includes(side)) throw new Error(`side is right|left|top|bottom, not '${side}'`);
         return this.setOpen(id, 'open', side);
-    }
-
-    /**
-     * Pin `id`'s Agent View to a specific session (`session_id`, workgroup name, or `'auto'`).
-     * @param {string} id
-     * @param {string} [session='auto']
-     */
-    setSession(id, session = 'auto') {
-        this._requireTerminal(id);
-        const v = this._ensureEntry(id);
-        const target = (session || 'auto').trim() || 'auto';
-        if (target !== 'auto' && this.provider?.sessions.length) {
-            const found = matchTerminalSession({}, this.provider.sessions, target);
-            if (!found) throw new Error(`no agent session matching '${target}'`);
-            v.sessionPinned = found.session_id;
-        } else {
-            v.sessionPinned = target;
-        }
-        v.expandedIds.clear();
-        v.fullBodyIds.clear();
-        v.jumpedEventId = null;
-        this._persist(id);
-        this._rebindOne(id);
-        this._gcStreams();
-        this.wall._emit();
-        return { id, pinned: v.sessionPinned, resolved: v.resolvedSessionId };
     }
 
     /**
@@ -577,11 +557,11 @@ export default class WallAgentViews {
             id,
             open: true,
             side: v.side,
-            sessionPinned: v.sessionPinned,
             sessionId: v.resolvedSessionId,
+            sessionVia: v.resolvedVia,
+            missing: v.missing,
             session: activeSession,
             sessionLabel: formatSessionLabel(activeSession ?? stream?.sessionLine),
-            sessions: this._candidateSessions(id, sessions, activeSession),
             filters: { ...v.filters },
             filterLabel: describeActiveFilter(v.filters),
             categoryCounts,
@@ -598,29 +578,6 @@ export default class WallAgentViews {
             altScreen: this.isAltScreen(id),
             rows,
         };
-    }
-
-    /** Candidate sessions shown in `id`'s header picker: matching sessions first, subagents grouped under parent, then recent others. */
-    _candidateSessions(id, sessions, active) {
-        const meta = this._termMeta(id);
-        const dirPwd = meta.pwd || meta.cwd || '';
-        const scored = sessions.map((s) => {
-            const sameDir = dirPwd && s.cwd && s.cwd.replace(/\/+$/, '') === dirPwd.replace(/\/+$/, '');
-            const isSubOfActive = active && s.parent_session?.session_id === active.session_id;
-            const isActive = active && s.session_id === active.session_id;
-            const live = s.status !== 'ended';
-            const rank = (isActive ? 100 : 0) + (isSubOfActive ? 60 : 0) + (sameDir ? 40 : 0) + (live ? 10 : 0);
-            return { s, rank };
-        });
-        scored.sort((a, b) => b.rank - a.rank);
-        return scored.slice(0, 24).map(({ s }) => ({
-            session_id: s.session_id,
-            label: formatSessionLabel(s),
-            status: s.status || 'unknown',
-            harness: s.harness || '',
-            cwd: s.cwd || '',
-            isSubagent: !!s.parent_session,
-        }));
     }
 
     /** Visible records for `v` in arrival order after applying `v.filters`. */
@@ -802,8 +759,10 @@ export default class WallAgentViews {
             return;
         }
         const sessions = this.provider?.sessions ?? [];
-        const matched = matchTerminalSession(this._termMeta(id), sessions, v.sessionPinned);
-        const nextSid = matched?.session_id ?? (v.sessionPinned !== 'auto' ? v.sessionPinned : null);
+        const { session: matched, via, missing } = resolveTerminalSession(this._termMeta(id), sessions);
+        const nextSid = matched?.session_id ?? null;
+        v.resolvedVia = via;
+        v.missing = matched ? null : (this.provider ? missing : null);
         if (nextSid !== v.resolvedSessionId) {
             v.resolvedSessionId = nextSid;
             v.anchors.clear();
